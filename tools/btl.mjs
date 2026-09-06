@@ -45,7 +45,7 @@ import { open, stat, readdir, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import zlib from 'node:zlib';
-import { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec }
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec }
     from '../modules/core/src/layers/filesystem/internal/bundle/format.js';
 import { crc32 }
     from '../modules/core/src/layers/filesystem/internal/bundle/crc32.js';
@@ -59,7 +59,7 @@ import { crc32 }
 // is free and the two disagree often enough to matter. A reader must be able to
 // decode whatever it finds; the manifest names the set a bundle actually used,
 // so one that only has deflate can be told before it fetches anything.
-export { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec };
+export { MAGIC, HEADER_SIZE, FORMAT_VERSION, READABLE_VERSIONS, Codec };
 
 /**
  * A quarter of a mebibyte.
@@ -364,10 +364,11 @@ export async function openBundle(path){
         throw new Error(`${path} is not a .btl bundle`);
     }
     const version = header.readUInt32LE(4);
-    if (version !== FORMAT_VERSION)
+    if (!READABLE_VERSIONS.includes(version))
     {
         await handle.close();
-        throw new Error(`${path} is format version ${version}, not ${FORMAT_VERSION}`);
+        throw new Error(`${path} is format version ${version}; this reader knows `
+            + READABLE_VERSIONS.join(' and '));
     }
 
     const blockSize = header.readUInt32LE(8);
