@@ -137,13 +137,15 @@ test('a run of blocks is one request, not one request each', ()=>{
 });
 
 test('a request does not grow past what a failed one would cost', ()=>{
-    // 8 MiB in blocks of 256 KiB: the cap has to fall between blocks, never
-    // through one, or the split would ask for part of a block.
-    const groups = groupBlocks(run(0, 64, 1 << 18));
+    // Eight blocks at the default size are two requests. The cap has to fall
+    // between blocks and never through one: half a block in a request could not
+    // be checked against its checksum, since the checksum covers the whole.
+    const groups = groupBlocks(run(0, 8, 1 << 22));
 
     assert.equal(groups.length, 2);
-    assert.equal(groups[0].end - groups[0].start, 8 << 20);
-    assert.equal(groups[0].blocks.length + groups[1].blocks.length, 64);
+    assert.equal(groups[0].end - groups[0].start, 16 << 20);
+    assert.equal(groups[0].blocks.length, 4, 'four whole blocks, not three and a half');
+    assert.equal(groups[1].blocks.length, 4);
 });
 
 test('a small gap is downloaded again rather than paid for in a round trip', ()=>{

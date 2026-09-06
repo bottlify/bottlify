@@ -62,26 +62,25 @@ import { crc32 }
 export { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec };
 
 /**
- * A quarter of a mebibyte.
+ * Four mebibytes.
  *
- * The block is the granularity of a random read, of an HTTP range fetch, and of
- * one decompression, so the instinct is that a bigger one compresses better and
- * seeks worse. Measured across both games at 256 KiB, 1, 4 and 16 MiB, the first
- * half of that is false here: 256 KiB gives the *best* ratio of the four, and
- * 16 MiB loses 4.9 MiB on one game and 25.5 MiB on the other.
+ * The block is the granularity of a random read, of one decompression, and of
+ * what a parked guest thread waits for. It is no longer the granularity of a
+ * request -- runs of blocks are coalesced up to a cap, and the rest of the
+ * bundle is filled in while nothing is being read -- so the argument that used
+ * to push this number down, one round trip per block, is gone.
  *
- * The reason is the probe below rather than the compressor's window. A fixed
- * 96 KiB probe is a third of a 256 KiB block and a hundredth of a 16 MiB one, so
- * a compressible region diluted into a large block stops clearing the threshold
- * and the whole block is stored. If a larger block is ever wanted, the probe has
- * to grow with it.
+ * What is left is the wait. A thread that reads a byte nobody has fetched is
+ * parked for one whole block: about a third of a second here on a domestic
+ * connection, against five seconds at 64 MiB. That is the ceiling this number
+ * is chosen against, and it is why it is not larger.
  *
- * The index argument for large blocks is real and worthless in absolute terms:
- * the whole index of the five-gigabyte bundle is 113 KiB at this size and 3.4 KiB
- * at 16 MiB. Saving 110 KiB once is not worth making every random read fetch and
- * inflate sixty-four times as much.
+ * An earlier measurement had 256 KiB beating 1, 4 and 16 MiB on ratio. That was
+ * an artefact of the probe below, which was then a fixed size and so judged a
+ * large block on an ever smaller fraction of itself; the probe is a fraction
+ * now, and the measurement has to be taken again before it means anything.
  */
-export const DEFAULT_BLOCK_SIZE = 1 << 18;
+export const DEFAULT_BLOCK_SIZE = 1 << 22;
 
 /**
  * A block is stored uncompressed unless compression saves at least this much.
@@ -99,12 +98,13 @@ const MIN_SAVING = 0.04;
  * discover that is most of the build time. A cheap look at part of a block
  * predicts the rest well enough, because a block is one kind of data.
  *
- * A fraction rather than a fixed size, because a fixed one silently becomes a
- * worse and worse predictor as the block grows -- which is exactly what made
- * large blocks compress badly when this was 96 KiB regardless.
+ * A fraction and nothing else. A fixed size silently becomes a worse predictor
+ * as the block grows -- a compressible region diluted into a large block stops
+ * clearing the threshold, and the block is stored whole. That is what made large
+ * blocks look bad when this was 96 KiB regardless, and a cap does the same thing
+ * one block size later, which is why there is no longer one.
  */
 const PROBE_FRACTION = 0.4;
-const PROBE_CAP = 256 * 1024;
 const PROBE_LEVEL = 1;
 
 const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
@@ -132,7 +132,7 @@ const zstdUnpack = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.zstdDecompre
  * @returns {{ codec: number, bytes: Buffer }}
  */
 export function packBlock(block, level = 9){
-    const probeBytes = Math.min(PROBE_CAP, Math.ceil(block.length * PROBE_FRACTION));
+    const probeBytes = Math.ceil(block.length * PROBE_FRACTION);
     const probe = block.length > probeBytes ? block.subarray(0, probeBytes) : block;
     const sample = deflate(probe, PROBE_LEVEL);
     if (sample.length > probe.length * (1 - MIN_SAVING))

@@ -136,11 +136,13 @@ export function retryingFetch({ fetch, events, retry }){
  * How much one range request may ask for.
  *
  * The bound is not bandwidth but what a failure costs: a request that dies at
- * 95% is refetched whole, and the thread waiting on it is parked for the whole
- * of it. Eight mebibytes is around a second on a domestic connection, which is
- * a stall a player would notice once and not twice.
+ * 95% is refetched whole, and a thread waiting on it is parked for all of it.
+ *
+ * It has to stay above one block, or a block would be split across two requests
+ * and neither could be checked against its checksum. At the default block size
+ * this coalesces four blocks into one request.
  */
-const MAX_REQUEST_BYTES = 8 << 20;
+const MAX_REQUEST_BYTES = 16 << 20;
 
 /**
  * Blocks that are already here, between two that are not, are downloaded again

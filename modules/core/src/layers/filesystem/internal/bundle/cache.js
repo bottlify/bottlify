@@ -171,7 +171,13 @@ function createMemoryCache(maxBytes){
  * @returns {Promise<any>}
  */
 export async function createBlockCache(options){
-    const { store, name, blockSize, blockCount, maxHeapBytes = 64 << 20 } = options;
+    const { store, name, blockSize, blockCount } = options;
+    // Counted in blocks rather than bytes, because what the bound has to hold is
+    // the blocks of one read: too few of them and every read evicts the one
+    // before it. Sixty-four mebibytes is the floor for a small block size, not
+    // the answer for every one.
+    const maxHeapBytes = options.maxHeapBytes
+        ?? Math.max(64 << 20, 32 * blockSize);
     if (!store)
     {
         return createMemoryCache(maxHeapBytes);
