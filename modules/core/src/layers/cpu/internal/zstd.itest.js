@@ -51,7 +51,8 @@ test('a zstd frame decodes through the emulator, byte for byte', async()=>{
     const decoded = cpu.decompressZstd(zstd(original), original.length);
     assert.equal(decoded.length, original.length);
     assert.deepEqual([...decoded.subarray(0, 64)], [...original.subarray(0, 64)]);
-    assert.ok(decoded.every((byte, at)=>byte === original[at]), 'every byte survived');
+    assert.ok(decoded.every((/** @type {number} */ byte, /** @type {number} */ at)=>
+        byte === original[at]), 'every byte survived');
 
     await core.dispose();
 });
