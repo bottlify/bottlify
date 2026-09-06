@@ -1,6 +1,11 @@
 node_modules/**
 roadmap/**
+CLAUDE.md
 .ghidra/**
 .ghidra-home/**
 .claude/**
 .certs/**
+
+dist/
+tools/cdp_test/reports/
+*.log

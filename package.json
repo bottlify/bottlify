@@ -1,0 +1,29 @@
+{
+  "name": "bottlify",
+  "private": true,
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "modules/*"
+  ],
+  "scripts": {
+    "build": "npm run build -w @bottlify/core",
+    "build:v86": "npm run build:v86 -w @bottlify/core",
+    "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
+    "typecheck": "npm run typecheck -w @bottlify/core",
+    "lint": "eslint .",
+    "test": "npm run test -w @bottlify/core",
+    "check:boundaries": "npm run check:boundaries -w @bottlify/core",
+    "cdp:probe": "node tools/cdp_test/cli.mjs probe"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^10.10.0",
+    "typescript": "^5.7.2"
+  }
+}

@@ -1,0 +1,14 @@
+/*
+ * Copyright Bottlify Project 2026
+ * Licenses and contributions: THIRD-PARTY-NOTICES.md
+ */
+
+/**
+ * kernel layer — guest execution: threads, scheduler, time, synchronization, handles.
+ *
+ * Responsibilities (master plan §8.3): one context switch point, quantum measured
+ * in executed instructions, preservation of all shared CPU state.
+ * Requires: cpu, memory, log. Phase 0: stub.
+ *
+ * @typedef {import("../../system/contract.js").ModuleConfig} Config
+ */

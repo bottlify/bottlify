@@ -1,0 +1,24 @@
+# Copyright Bottlify Project 2026
+# Licenses and contributions: THIRD-PARTY-NOTICES.md
+
+# Pinned build image for the vendored v86. Version pins are what make the
+# make-all output reproducible; bump them only together with manifest.json.
+#
+# Toolchain required by vendor/v86's own Makefile (not just "rustc"):
+#   - node    → gen/generate_{jit,interpreter,analyzer}.js (shebang #!/usr/bin/env node)
+#   - default-jre-headless + wget → java -jar closure-compiler, fetched by the
+#     Makefile's own `$(CLOSURE):` rule on first use
+#   - clang   → build/{softfloat,zstddeclib}.o (compiled with --target=wasm32)
+#   - python3 → tools/rust-lld-wrapper
+#   - wasm32-unknown-unknown rust target → cargo rustc --target wasm32-unknown-unknown
+FROM rust:1.80-bookworm
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make clang python3 nodejs wget default-jre-headless \
+ && rm -rf /var/lib/apt/lists/* \
+ && rustup target add wasm32-unknown-unknown
+
+COPY v86-make-and-hash.sh /usr/local/bin/v86-make-and-hash.sh
+RUN chmod +x /usr/local/bin/v86-make-and-hash.sh
+
+ENTRYPOINT ["v86-make-and-hash.sh"]

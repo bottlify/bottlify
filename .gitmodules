@@ -1,0 +1,3 @@
+[submodule "modules/core/vendor/v86"]
+	path = modules/core/vendor/v86
+	url = https://github.com/mrwayer/v86

@@ -1,0 +1,24 @@
+{
+  "name": "@bottlify/core",
+  "version": "0.0.0",
+  "description": "Bottlify Project: core module",
+  "type": "module",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./dist/core.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:v86": "node scripts/build-v86.mjs",
+    "verify:reproducibility": "node scripts/verify-reproducibility.mjs",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "typecheck": "tsc --project jsconfig.json",
+    "test": "node --test \"src/**/*.test.js\""
+  }
+}

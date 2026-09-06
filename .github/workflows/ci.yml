@@ -1,0 +1,58 @@
+# Copyright Bottlify Project 2026
+# Licenses and contributions: THIRD-PARTY-NOTICES.md
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    name: core (typecheck, tests, boundaries, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run test
+      - run: npm run check:boundaries
+      - run: npm run build
+
+  probe:
+    name: probe (browser → worker ping → screenshot)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: browser-actions/setup-chrome@v1
+      - run: npm ci
+      - run: npm run cdp:probe
+        env:
+          CDP_TEST_CHROME: /usr/bin/google-chrome
+
+  vendor:
+    name: vendor (v86 build in container + reproducibility)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:v86 -- --docker
+      - run: npm run verify:reproducibility
