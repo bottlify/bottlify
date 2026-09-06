@@ -7,10 +7,10 @@ import { createStubModule } from "../../system/stub.js";
 
 /** @type {import("../../system/contract.js").BottlifyModule} */
 export const win32Module = createStubModule("win32", "0.0.0", [
-  "bridge",
-  "kernel",
-  "memory",
-  "loader",
-  "filesystem",
-  "log",
+    "bridge",
+    "kernel",
+    "memory",
+    "loader",
+    "filesystem",
+    "log",
 ]);

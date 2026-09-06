@@ -38,80 +38,80 @@ const REGISTERS = ["eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi"];
  * @param {V86HostConfig} config
  */
 export async function createV86Host(config) {
-  const { V86 } = await import(config.moduleUrl);
+    const { V86 } = await import(config.moduleUrl);
 
-  const rom = buildBootRom({
-    entryVector: config.entryVector,
-    initialStack: config.initialStack,
-  });
+    const rom = buildBootRom({
+        entryVector: config.entryVector,
+        initialStack: config.initialStack,
+    });
 
-  const emulator = new V86({
-    wasm_fn: (/** @type {WebAssembly.Imports} */ imports) =>
-      WebAssembly.instantiate(config.wasmBytes, imports).then((result) => result.instance.exports),
-    memory_size: config.memorySize,
-    vga_memory_size: 1024 * 1024,
-    // Our ROM, not SeaBIOS: 64 KiB placed at ROM_BASE, entered at its reset vector.
-    bios: { buffer: rom.buffer },
-    autostart: false,
-    disable_keyboard: true,
-    disable_speaker: true,
-  });
+    const emulator = new V86({
+        wasm_fn: (/** @type {WebAssembly.Imports} */ imports) =>
+            WebAssembly.instantiate(config.wasmBytes, imports).then((result) => result.instance.exports),
+        memory_size: config.memorySize,
+        vga_memory_size: 1024 * 1024,
+        // Our ROM, not SeaBIOS: 64 KiB placed at ROM_BASE, entered at its reset vector.
+        bios: { buffer: rom.buffer },
+        autostart: false,
+        disable_keyboard: true,
+        disable_speaker: true,
+    });
 
-  await new Promise((resolve) => emulator.add_listener("emulator-ready", resolve));
+    await new Promise((resolve) => emulator.add_listener("emulator-ready", resolve));
 
-  const cpu = emulator.v86.cpu;
-  /** @type {((value: number) => void) | null} */
-  let trapHandler = null;
+    const cpu = emulator.v86.cpu;
+    /** @type {((value: number) => void) | null} */
+    let trapHandler = null;
 
-  cpu.io.register_write(
-    config.trapPort,
-    { name: "bottlify-trap" },
-    undefined,
-    undefined,
-    (/** @type {number} */ value) => {
-      if (trapHandler) trapHandler(value >>> 0);
-    },
-  );
+    cpu.io.register_write(
+        config.trapPort,
+        { name: "bottlify-trap" },
+        undefined,
+        undefined,
+        (/** @type {number} */ value) => {
+            if (trapHandler) trapHandler(value >>> 0);
+        },
+    );
 
-  return {
-    /** Starts execution at the reset vector; the ROM transitions to protected mode. */
-    run: () => emulator.run(),
-    stop: () => emulator.stop(),
+    return {
+        /** Starts execution at the reset vector; the ROM transitions to protected mode. */
+        run: () => emulator.run(),
+        stop: () => emulator.stop(),
 
-    /** @param {(value: number) => void} handler */
-    onTrap(handler) {
-      trapHandler = handler;
-    },
+        /** @param {(value: number) => void} handler */
+        onTrap(handler) {
+            trapHandler = handler;
+        },
 
-    /** @param {number} address @param {number} length @returns {Uint8Array} */
-    readPhysical: (address, length) => emulator.read_memory(address, length),
+        /** @param {number} address @param {number} length @returns {Uint8Array} */
+        readPhysical: (address, length) => emulator.read_memory(address, length),
 
-    /** @param {number} address @param {Uint8Array} bytes */
-    writePhysical: (address, bytes) => emulator.write_memory(bytes, address),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writePhysical: (address, bytes) => emulator.write_memory(bytes, address),
 
-    /** @param {string} name @returns {number} */
-    readReg32(name) {
-      const index = REGISTERS.indexOf(name);
-      if (index === -1) throw new Error(`Unknown register "${name}"`);
-      return cpu.reg32[index] >>> 0;
-    },
+        /** @param {string} name @returns {number} */
+        readReg32(name) {
+            const index = REGISTERS.indexOf(name);
+            if (index === -1) throw new Error(`Unknown register "${name}"`);
+            return cpu.reg32[index] >>> 0;
+        },
 
-    /** @param {string} name @param {number} value */
-    writeReg32(name, value) {
-      const index = REGISTERS.indexOf(name);
-      if (index === -1) throw new Error(`Unknown register "${name}"`);
-      cpu.reg32[index] = value | 0;
-    },
+        /** @param {string} name @param {number} value */
+        writeReg32(name, value) {
+            const index = REGISTERS.indexOf(name);
+            if (index === -1) throw new Error(`Unknown register "${name}"`);
+            cpu.reg32[index] = value | 0;
+        },
 
-    /** @returns {number} guest EIP */
-    eip: () => cpu.instruction_pointer[0] >>> 0,
+        /** @returns {number} guest EIP */
+        eip: () => cpu.instruction_pointer[0] >>> 0,
 
-    /** @returns {boolean} whether the guest is in protected mode */
-    inProtectedMode: () => (cpu.cr[0] & 1) === 1,
+        /** @returns {boolean} whether the guest is in protected mode */
+        inProtectedMode: () => (cpu.cr[0] & 1) === 1,
 
-    /** @returns {number} instructions retired since boot (exact; Phase 2 quantum builds on this) */
-    instructionCount: () => emulator.get_instruction_counter() >>> 0,
+        /** @returns {number} instructions retired since boot (exact; Phase 2 quantum builds on this) */
+        instructionCount: () => emulator.get_instruction_counter() >>> 0,
 
-    romBase: ROM_BASE,
-  };
+        romBase: ROM_BASE,
+    };
 }

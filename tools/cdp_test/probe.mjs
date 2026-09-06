@@ -34,16 +34,16 @@ const REPORTS_DIR = join(TOOL_ROOT, "reports");
  * @returns {Promise<ProbeResult>}
  */
 export async function probe({ attempts = 3 } = {}) {
-  let lastError;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
-    try {
-      return await singleProbe(attempt);
-    } catch (error) {
-      lastError = error;
-      console.error(`probe attempt ${attempt}/${attempts} failed: ${error.message}`);
+    let lastError;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+        try {
+            return await singleProbe(attempt);
+        } catch (error) {
+            lastError = error;
+            console.error(`probe attempt ${attempt}/${attempts} failed: ${error.message}`);
+        }
     }
-  }
-  throw lastError;
+    throw lastError;
 }
 
 /**
@@ -51,90 +51,90 @@ export async function probe({ attempts = 3 } = {}) {
  * @returns {Promise<ProbeResult>}
  */
 async function singleProbe(attempt) {
-  const server = await serveStatic({ sandboxDir: SANDBOX_DIR, srcDir: SRC_DIR });
-  const browser = await launch();
+    const server = await serveStatic({ sandboxDir: SANDBOX_DIR, srcDir: SRC_DIR });
+    const browser = await launch();
 
-  mkdirSync(REPORTS_DIR, { recursive: true });
-  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const pageUrl = `http://127.0.0.1:${server.port}/sandbox/index.html`;
-  const screenshotPath = join(REPORTS_DIR, `probe-${stamp}-a${attempt}.png`);
+    mkdirSync(REPORTS_DIR, { recursive: true });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const pageUrl = `http://127.0.0.1:${server.port}/sandbox/index.html`;
+    const screenshotPath = join(REPORTS_DIR, `probe-${stamp}-a${attempt}.png`);
 
-  let cdp = null;
-  try {
-    cdp = new CdpEndpoint(browser.browserWs);
-    await cdp.open();
+    let cdp = null;
+    try {
+        cdp = new CdpEndpoint(browser.browserWs);
+        await cdp.open();
 
-    const { targetId } = await cdp.send("Target.createTarget", { url: pageUrl });
-    const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
-    await cdp.send("Runtime.enable", {}, sessionId);
-    await cdp.send("Page.enable", {}, sessionId);
+        const { targetId } = await cdp.send("Target.createTarget", { url: pageUrl });
+        const { sessionId } = await cdp.send("Target.attachToTarget", { targetId, flatten: true });
+        await cdp.send("Runtime.enable", {}, sessionId);
+        await cdp.send("Page.enable", {}, sessionId);
 
-    /** @type {string[]} */
-    const pageEvents = [];
-    cdp.on("Runtime.exceptionThrown", (params) => {
-      pageEvents.push(`exception: ${params.exceptionDetails?.exception?.description ?? JSON.stringify(params)}`);
-    });
-    cdp.on("Runtime.consoleAPICalled", (params) => {
-      const text = (params.args ?? []).map((arg) => arg.value ?? arg.description ?? "").join(" ");
-      pageEvents.push(`console: ${text}`);
-    });
+        /** @type {string[]} */
+        const pageEvents = [];
+        cdp.on("Runtime.exceptionThrown", (params) => {
+            pageEvents.push(`exception: ${params.exceptionDetails?.exception?.description ?? JSON.stringify(params)}`);
+        });
+        cdp.on("Runtime.consoleAPICalled", (params) => {
+            const text = (params.args ?? []).map((arg) => arg.value ?? arg.description ?? "").join(" ");
+            pageEvents.push(`console: ${text}`);
+        });
 
-    /** @type {any} */
-    let report = null;
-    const expression = `window.__bottlify__ && window.__bottlify__.probe
+        /** @type {any} */
+        let report = null;
+        const expression = `window.__bottlify__ && window.__bottlify__.probe
       ? window.__bottlify__.probe.then((r) => JSON.stringify({ pending: false, value: r }))
       : Promise.resolve(JSON.stringify({ pending: true }))`;
 
-    for (let tick = 0; tick < 200; tick++) {
-      const result = await cdp.send(
-        "Runtime.evaluate",
-        { expression, awaitPromise: true, returnByValue: true },
-        sessionId,
-      );
-      if (result.exceptionDetails) {
-        throw new Error(`page probe rejected: ${JSON.stringify(result.exceptionDetails.exception?.description || result.exceptionDetails)}`);
-      }
-      const parsed = JSON.parse(result.result.value);
-      if (!parsed.pending) {
-        report = parsed.value;
-        break;
-      }
-      await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
-    }
-    if (!report) {
-      let debugText = "n/a";
-      try {
-        const debug = await cdp.send(
-          "Runtime.evaluate",
-          {
-            expression: `JSON.stringify({ href: location.href, title: document.title, out: (document.querySelector("#out") || {}).textContent, errors: (window.__bottlify__ && window.__bottlify__.errors) || [] })`,
-            returnByValue: true,
-          },
-          sessionId,
-        );
-        debugText = debug.result?.value ?? JSON.stringify(debug);
-      } catch (error) {
-        debugText = `debug-eval failed: ${error.message}`;
-      }
-      throw new Error(`worker did not answer ping within 10s; page: ${debugText}; events: ${pageEvents.join(" | ")}`);
-    }
+        for (let tick = 0; tick < 200; tick++) {
+            const result = await cdp.send(
+                "Runtime.evaluate",
+                { expression, awaitPromise: true, returnByValue: true },
+                sessionId,
+            );
+            if (result.exceptionDetails) {
+                throw new Error(`page probe rejected: ${JSON.stringify(result.exceptionDetails.exception?.description || result.exceptionDetails)}`);
+            }
+            const parsed = JSON.parse(result.result.value);
+            if (!parsed.pending) {
+                report = parsed.value;
+                break;
+            }
+            await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+        }
+        if (!report) {
+            let debugText = "n/a";
+            try {
+                const debug = await cdp.send(
+                    "Runtime.evaluate",
+                    {
+                        expression: `JSON.stringify({ href: location.href, title: document.title, out: (document.querySelector("#out") || {}).textContent, errors: (window.__bottlify__ && window.__bottlify__.errors) || [] })`,
+                        returnByValue: true,
+                    },
+                    sessionId,
+                );
+                debugText = debug.result?.value ?? JSON.stringify(debug);
+            } catch (error) {
+                debugText = `debug-eval failed: ${error.message}`;
+            }
+            throw new Error(`worker did not answer ping within 10s; page: ${debugText}; events: ${pageEvents.join(" | ")}`);
+        }
 
-    const shot = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
-    writeFileSync(screenshotPath, Buffer.from(shot.data, "base64"));
+        const shot = await cdp.send("Page.captureScreenshot", { format: "png" }, sessionId);
+        writeFileSync(screenshotPath, Buffer.from(shot.data, "base64"));
 
-    return {
-      attempt,
-      ok: report.ok === true,
-      pingMs: report.pingMs,
-      modules: report.modules,
-      screenshot: `tools/cdp_test/reports/${screenshotPath.split(/[\\/]/).pop()}`,
-      pageUrl,
-    };
-  } finally {
-    cdp?.close();
-    await shutdown(browser);
-    await server.close();
-  }
+        return {
+            attempt,
+            ok: report.ok === true,
+            pingMs: report.pingMs,
+            modules: report.modules,
+            screenshot: `tools/cdp_test/reports/${screenshotPath.split(/[\\/]/).pop()}`,
+            pageUrl,
+        };
+    } finally {
+        cdp?.close();
+        await shutdown(browser);
+        await server.close();
+    }
 }
 
 /**
@@ -143,12 +143,12 @@ async function singleProbe(attempt) {
  * @returns {Promise<number>} process exit code
  */
 export async function runProbeAndExit() {
-  try {
-    const result = await probe();
-    console.log(JSON.stringify(result, null, 2));
-    return result.ok ? 0 : 1;
-  } catch (error) {
-    console.error(`probe failed: ${error.message}`);
-    return 1;
-  }
+    try {
+        const result = await probe();
+        console.log(JSON.stringify(result, null, 2));
+        return result.ok ? 0 : 1;
+    } catch (error) {
+        console.error(`probe failed: ${error.message}`);
+        return 1;
+    }
 }

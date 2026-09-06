@@ -64,46 +64,46 @@ const u16 = (value) => [value & 0xff, (value >>> 8) & 0xff];
  * @returns {Uint8Array} a ROM_SIZE image, ready to pass to v86 as its bios
  */
 export function buildBootRom({ entryVector, initialStack }) {
-  const rom = new Uint8Array(ROM_SIZE);
-  const put = (/** @type {number} */ offset, /** @type {number[]} */ bytes) => rom.set(bytes, offset);
+    const rom = new Uint8Array(ROM_SIZE);
+    const put = (/** @type {number} */ offset, /** @type {number[]} */ bytes) => rom.set(bytes, offset);
 
-  // GDT: null, flat 32-bit code, flat 32-bit data.
-  put(OFF_GDT, [
-    ...[0, 0, 0, 0, 0, 0, 0, 0],
-    ...flatDescriptor(0x9a),
-    ...flatDescriptor(0x92),
-  ]);
+    // GDT: null, flat 32-bit code, flat 32-bit data.
+    put(OFF_GDT, [
+        ...[0, 0, 0, 0, 0, 0, 0, 0],
+        ...flatDescriptor(0x9a),
+        ...flatDescriptor(0x92),
+    ]);
 
-  // GDT pointer: limit (3 descriptors - 1), then the GDT's linear base.
-  put(OFF_GDT_PTR, [...u16(3 * 8 - 1), ...u32(ROM_BASE + OFF_GDT)]);
+    // GDT pointer: limit (3 descriptors - 1), then the GDT's linear base.
+    put(OFF_GDT_PTR, [...u16(3 * 8 - 1), ...u32(ROM_BASE + OFF_GDT)]);
 
-  // 16-bit init. DS is pointed at the ROM segment so `lgdt` can reach the
-  // pointer above with a 16-bit displacement.
-  put(OFF_INIT16, [
-    0xfa,                                            // cli
-    0xb8, ...u16(ROM_BASE >>> 4),                    // mov ax, 0xF000
-    0x8e, 0xd8,                                      // mov ds, ax
-    0x66, 0x0f, 0x01, 0x16, ...u16(OFF_GDT_PTR),     // lgdt [OFF_GDT_PTR]
-    0x0f, 0x20, 0xc0,                                // mov eax, cr0
-    0x66, 0x83, 0xc8, 0x01,                          // or eax, 1
-    0x0f, 0x22, 0xc0,                                // mov cr0, eax
-    0x66, 0xea, ...u32(ROM_BASE + OFF_PM_ENTRY), ...u16(SEL_CODE32), // jmp far SEL_CODE32:PM_ENTRY
-  ]);
+    // 16-bit init. DS is pointed at the ROM segment so `lgdt` can reach the
+    // pointer above with a 16-bit displacement.
+    put(OFF_INIT16, [
+        0xfa,                                            // cli
+        0xb8, ...u16(ROM_BASE >>> 4),                    // mov ax, 0xF000
+        0x8e, 0xd8,                                      // mov ds, ax
+        0x66, 0x0f, 0x01, 0x16, ...u16(OFF_GDT_PTR),     // lgdt [OFF_GDT_PTR]
+        0x0f, 0x20, 0xc0,                                // mov eax, cr0
+        0x66, 0x83, 0xc8, 0x01,                          // or eax, 1
+        0x0f, 0x22, 0xc0,                                // mov cr0, eax
+        0x66, 0xea, ...u32(ROM_BASE + OFF_PM_ENTRY), ...u16(SEL_CODE32), // jmp far SEL_CODE32:PM_ENTRY
+    ]);
 
-  // 32-bit entry: flat data segments, a stack, then indirect jump to the guest.
-  put(OFF_PM_ENTRY, [
-    0xb8, ...u32(SEL_DATA32),  // mov eax, SEL_DATA32
-    0x8e, 0xd8,                // mov ds, ax
-    0x8e, 0xc0,                // mov es, ax
-    0x8e, 0xd0,                // mov ss, ax
-    0x8e, 0xe0,                // mov fs, ax
-    0x8e, 0xe8,                // mov gs, ax
-    0xbc, ...u32(initialStack),// mov esp, initialStack
-    0xff, 0x25, ...u32(entryVector), // jmp dword [entryVector]
-  ]);
+    // 32-bit entry: flat data segments, a stack, then indirect jump to the guest.
+    put(OFF_PM_ENTRY, [
+        0xb8, ...u32(SEL_DATA32),  // mov eax, SEL_DATA32
+        0x8e, 0xd8,                // mov ds, ax
+        0x8e, 0xc0,                // mov es, ax
+        0x8e, 0xd0,                // mov ss, ax
+        0x8e, 0xe0,                // mov fs, ax
+        0x8e, 0xe8,                // mov gs, ax
+        0xbc, ...u32(initialStack),// mov esp, initialStack
+        0xff, 0x25, ...u32(entryVector), // jmp dword [entryVector]
+    ]);
 
-  // Reset vector: the CPU starts at F000:FFF0, which is this far jump.
-  put(OFF_RESET, [0xea, ...u16(OFF_INIT16), ...u16(ROM_BASE >>> 4)]); // jmp far F000:OFF_INIT16
+    // Reset vector: the CPU starts at F000:FFF0, which is this far jump.
+    put(OFF_RESET, [0xea, ...u16(OFF_INIT16), ...u16(ROM_BASE >>> 4)]); // jmp far F000:OFF_INIT16
 
-  return rom;
+    return rom;
 }

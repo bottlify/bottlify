@@ -27,22 +27,22 @@
  * @returns {import("./contract.js").ScopedModuleHost}
  */
 export function makeScopedHost(owner, allowedNames, apis) {
-  return {
-    requireApi(name) {
-      if (!allowedNames.has(name)) {
-        throw new Error(`Module "${owner}" did not declare dependency on "${name}"`);
-      }
-      const api = apis.get(name);
-      if (api === undefined) {
-        throw new Error(`Interface "${name}" is not created yet for module "${owner}" (order or dependency cycle)`);
-      }
-      return api;
-    },
-    provide(name, api) {
-      if (name !== owner) {
-        throw new Error(`Module "${owner}" cannot register foreign interface "${name}"`);
-      }
-      apis.set(name, api);
-    },
-  };
+    return {
+        requireApi(name) {
+            if (!allowedNames.has(name)) {
+                throw new Error(`Module "${owner}" did not declare dependency on "${name}"`);
+            }
+            const api = apis.get(name);
+            if (api === undefined) {
+                throw new Error(`Interface "${name}" is not created yet for module "${owner}" (order or dependency cycle)`);
+            }
+            return api;
+        },
+        provide(name, api) {
+            if (name !== owner) {
+                throw new Error(`Module "${owner}" cannot register foreign interface "${name}"`);
+            }
+            apis.set(name, api);
+        },
+    };
 }

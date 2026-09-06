@@ -31,54 +31,54 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from "./pe.js
  * @returns {LoadedImage}
  */
 export function buildImage(file, { resolveImport, base }) {
-  const image = parsePe(file);
-  const loadBase = base ?? image.imageBase;
+    const image = parsePe(file);
+    const loadBase = base ?? image.imageBase;
 
-  if (loadBase !== image.imageBase && !image.relocatable) {
-    throw new Error(
-      `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,
-    );
-  }
-
-  // Allocated zeroed: everything not backed by file bytes — BSS tails, gaps
-  // between sections, the slack inside the header page — must read as zero,
-  // exactly as a fresh mapping would.
-  const bytes = new Uint8Array(image.sizeOfImage);
-
-  bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
-
-  for (const section of image.sections) {
-    if (section.rawSize === 0) continue; // pure BSS: already zero
-    const source = file.subarray(section.rawOffset, section.rawOffset + section.rawSize);
-    // A section's raw data can exceed its virtual size when the linker padded to
-    // file alignment; only what fits in the mapping is copied.
-    const span = Math.min(source.length, Math.max(section.virtualSize, section.rawSize));
-    bytes.set(source.subarray(0, span), section.virtualAddress);
-  }
-
-  applyRelocations(bytes, image, loadBase - image.imageBase);
-
-  /** @type {string[]} */
-  const unresolved = [];
-  const view = new DataView(bytes.buffer);
-
-  for (const { dll, entries } of readImports(file, image)) {
-    for (const entry of entries) {
-      const address = resolveImport(dll, entry.name, entry.ordinal);
-      if (address === null) {
-        unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
-        continue;
-      }
-      view.setUint32(entry.iatRva, address >>> 0, true);
+    if (loadBase !== image.imageBase && !image.relocatable) {
+        throw new Error(
+            `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,
+        );
     }
-  }
 
-  return {
-    base: loadBase,
-    entryPoint: loadBase + image.entryPointRva,
-    bytes,
-    unresolved,
-  };
+    // Allocated zeroed: everything not backed by file bytes — BSS tails, gaps
+    // between sections, the slack inside the header page — must read as zero,
+    // exactly as a fresh mapping would.
+    const bytes = new Uint8Array(image.sizeOfImage);
+
+    bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
+
+    for (const section of image.sections) {
+        if (section.rawSize === 0) continue; // pure BSS: already zero
+        const source = file.subarray(section.rawOffset, section.rawOffset + section.rawSize);
+        // A section's raw data can exceed its virtual size when the linker padded to
+        // file alignment; only what fits in the mapping is copied.
+        const span = Math.min(source.length, Math.max(section.virtualSize, section.rawSize));
+        bytes.set(source.subarray(0, span), section.virtualAddress);
+    }
+
+    applyRelocations(bytes, image, loadBase - image.imageBase);
+
+    /** @type {string[]} */
+    const unresolved = [];
+    const view = new DataView(bytes.buffer);
+
+    for (const { dll, entries } of readImports(file, image)) {
+        for (const entry of entries) {
+            const address = resolveImport(dll, entry.name, entry.ordinal);
+            if (address === null) {
+                unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
+                continue;
+            }
+            view.setUint32(entry.iatRva, address >>> 0, true);
+        }
+    }
+
+    return {
+        base: loadBase,
+        entryPoint: loadBase + image.entryPointRva,
+        bytes,
+        unresolved,
+    };
 }
 
 export { parsePe, readImports, rvaToFileOffset };

@@ -37,53 +37,53 @@ const sha256 = (bytes) => `sha256:${createHash("sha256").update(bytes).digest("h
  * @returns {Promise<Uint8Array>}
  */
 async function download(repo, tag, name) {
-  const url = `https://github.com/${repo}/releases/download/${tag}/${name}`;
-  const response = await fetch(url, { redirect: "follow" });
-  if (!response.ok) {
-    throw new Error(`${url}: HTTP ${response.status}`);
-  }
-  return new Uint8Array(await response.arrayBuffer());
+    const url = `https://github.com/${repo}/releases/download/${tag}/${name}`;
+    const response = await fetch(url, { redirect: "follow" });
+    if (!response.ok) {
+        throw new Error(`${url}: HTTP ${response.status}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
 }
 
 /** Re-pins vendor-lock.json to a release, using that release's SHA256SUMS. */
 async function update(/** @type {string} */ repo, /** @type {string} */ tag) {
-  const sums = new TextDecoder().decode(await download(repo, tag, "SHA256SUMS"));
-  /** @type {Record<string, string>} */
-  const artifacts = {};
-  for (const line of sums.split("\n")) {
-    const match = line.trim().match(/^([0-9a-f]{64})\s+\*?(\S+)$/);
-    if (match && match[2] !== "SHA256SUMS") artifacts[match[2]] = `sha256:${match[1]}`;
-  }
-  if (Object.keys(artifacts).length === 0) {
-    throw new Error(`no artifacts parsed out of ${tag}'s SHA256SUMS`);
-  }
-  const lock = { repo, tag, artifacts };
-  await writeFile(LOCK_FILE, `${JSON.stringify(lock, null, 2)}\n`);
-  console.log(`vendor-lock.json pinned to ${repo}@${tag} (${Object.keys(artifacts).length} artifacts)`);
+    const sums = new TextDecoder().decode(await download(repo, tag, "SHA256SUMS"));
+    /** @type {Record<string, string>} */
+    const artifacts = {};
+    for (const line of sums.split("\n")) {
+        const match = line.trim().match(/^([0-9a-f]{64})\s+\*?(\S+)$/);
+        if (match && match[2] !== "SHA256SUMS") artifacts[match[2]] = `sha256:${match[1]}`;
+    }
+    if (Object.keys(artifacts).length === 0) {
+        throw new Error(`no artifacts parsed out of ${tag}'s SHA256SUMS`);
+    }
+    const lock = { repo, tag, artifacts };
+    await writeFile(LOCK_FILE, `${JSON.stringify(lock, null, 2)}\n`);
+    console.log(`vendor-lock.json pinned to ${repo}@${tag} (${Object.keys(artifacts).length} artifacts)`);
 }
 
 async function fetchPinned() {
-  const lock = JSON.parse(await readFile(LOCK_FILE, "utf8"));
-  await mkdir(OUT, { recursive: true });
+    const lock = JSON.parse(await readFile(LOCK_FILE, "utf8"));
+    await mkdir(OUT, { recursive: true });
 
-  for (const [name, expected] of Object.entries(lock.artifacts)) {
-    const bytes = await download(lock.repo, lock.tag, name);
-    const actual = sha256(bytes);
-    if (actual !== expected) {
-      throw new Error(`${name}: checksum mismatch\n  expected ${expected}\n  got      ${actual}`);
+    for (const [name, expected] of Object.entries(lock.artifacts)) {
+        const bytes = await download(lock.repo, lock.tag, name);
+        const actual = sha256(bytes);
+        if (actual !== expected) {
+            throw new Error(`${name}: checksum mismatch\n  expected ${expected}\n  got      ${actual}`);
+        }
+        await writeFile(join(OUT, name), bytes);
+        console.log(`${name}: ${bytes.length} bytes, ${actual.slice(0, 19)}… OK`);
     }
-    await writeFile(join(OUT, name), bytes);
-    console.log(`${name}: ${bytes.length} bytes, ${actual.slice(0, 19)}… OK`);
-  }
-  console.log(`vendor/prebuilt: ${Object.keys(lock.artifacts).length} artifacts from ${lock.repo}@${lock.tag}`);
+    console.log(`vendor/prebuilt: ${Object.keys(lock.artifacts).length} artifacts from ${lock.repo}@${lock.tag}`);
 }
 
 const updateIndex = process.argv.indexOf("--update");
 if (updateIndex !== -1) {
-  const tag = process.argv[updateIndex + 1];
-  if (!tag) throw new Error("usage: fetch-v86.mjs --update <release-tag>");
-  const repo = process.env.V86_REPO ?? "mrwayer/v86";
-  await update(repo, tag);
+    const tag = process.argv[updateIndex + 1];
+    if (!tag) throw new Error("usage: fetch-v86.mjs --update <release-tag>");
+    const repo = process.env.V86_REPO ?? "mrwayer/v86";
+    await update(repo, tag);
 } else {
-  await fetchPinned();
+    await fetchPinned();
 }

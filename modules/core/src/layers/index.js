@@ -21,17 +21,17 @@ import { win32Module } from "./win32/module.js";
  * @returns {import("../system/contract.js").BottlifyModule[]}
  */
 export function defaultModules() {
-  return [
-    logModule,
-    cpuModule,
-    memoryModule,
-    kernelModule,
-    bridgeModule,
-    loaderModule,
-    filesystemModule,
-    win32Module,
-    graphicsModule,
-    audioModule,
-    inputModule,
-  ];
+    return [
+        logModule,
+        cpuModule,
+        memoryModule,
+        kernelModule,
+        bridgeModule,
+        loaderModule,
+        filesystemModule,
+        win32Module,
+        graphicsModule,
+        audioModule,
+        inputModule,
+    ];
 }

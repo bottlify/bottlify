@@ -14,36 +14,36 @@ import { defaultModules } from "./layers/index.js";
  * @returns {Promise<import("./system/contract.js").CoreInstance>}
  */
 export async function createBottlify(config = {}) {
-  const registry = new ModuleRegistry(defaultModules());
-  const plan = registry.resolve(config);
+    const registry = new ModuleRegistry(defaultModules());
+    const plan = registry.resolve(config);
 
-  /** @type {Map<string, import("./system/contract.js").ModuleApi>} */
-  const apis = new Map();
+    /** @type {Map<string, import("./system/contract.js").ModuleApi>} */
+    const apis = new Map();
 
-  for (const entry of plan) {
-    const allowedNames = new Set([entry.name, ...entry.module.requires]);
-    const host = makeScopedHost(entry.name, allowedNames, apis);
-    const api = await entry.module.create(entry.config, host);
-    host.provide(entry.name, api);
-  }
+    for (const entry of plan) {
+        const allowedNames = new Set([entry.name, ...entry.module.requires]);
+        const host = makeScopedHost(entry.name, allowedNames, apis);
+        const api = await entry.module.create(entry.config, host);
+        host.provide(entry.name, api);
+    }
 
-  /** @type {import("./system/contract.js").CoreInstance} */
-  return {
-    modules: plan.map((entry) => entry.module),
-    api(name) {
-      const api = apis.get(name);
-      if (api === undefined) {
-        throw new Error(`Module "${name}" is not part of this build`);
-      }
-      return api;
-    },
-    diagnostics() {
-      return plan.map((entry) => entry.module.diagnostics());
-    },
-    async dispose() {
-      for (const entry of [...plan].reverse()) {
-        await entry.module.dispose();
-      }
-    },
-  };
+    /** @type {import("./system/contract.js").CoreInstance} */
+    return {
+        modules: plan.map((entry) => entry.module),
+        api(name) {
+            const api = apis.get(name);
+            if (api === undefined) {
+                throw new Error(`Module "${name}" is not part of this build`);
+            }
+            return api;
+        },
+        diagnostics() {
+            return plan.map((entry) => entry.module.diagnostics());
+        },
+        async dispose() {
+            for (const entry of [...plan].reverse()) {
+                await entry.module.dispose();
+            }
+        },
+    };
 }
