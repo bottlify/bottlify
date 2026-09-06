@@ -63,6 +63,18 @@ async function recode(bytes, format, compress){
 }
 
 /**
+ * Inflates a raw deflate stream, wherever this is running.
+ *
+ * Exported because a bundle block written with deflate needs it, and there is
+ * no synchronous way to do this in a browser -- so such a block is decoded when
+ * it is fetched rather than when it is read.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Promise<Uint8Array>}
+ */
+export const inflateRaw = bytes=>recode(bytes, 'deflate-raw', false);
+
+/**
  * Packs a session into one stream.
  *
  * Framed rather than indexed: a session is read from the front every time, so

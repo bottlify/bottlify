@@ -197,6 +197,13 @@ export const bridgeModule = {
             },
 
             /**
+             * How many host calls are suspended, waiting on something. A driver
+             * loop that sees this above zero has to let the host run, not merely
+             * flush microtasks.
+             */
+            suspended: ()=>callbacks.pendingCalls(),
+
+            /**
              * An error thrown by a suspended handler, which nothing above was
              * waiting on. Null unless one happened.
              */

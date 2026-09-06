@@ -91,7 +91,9 @@ export const win32Module = {
             memory.readCString(address, maxLength);
 
         const { setError } = createThreadState(()=>kernel.currentThread());
-        const volume = createVolume(filesystem);
+        // Absent unless a bundle is mounted, in which case a read of a block
+        // that is not here yet becomes a wait rather than a fault.
+        const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
         hive = createHive();
         queue = createMessageQueue();
         com = createComRegistry();

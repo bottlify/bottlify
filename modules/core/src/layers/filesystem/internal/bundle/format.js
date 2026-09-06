@@ -126,7 +126,10 @@ export async function openBundle(fetchRange, decode){
     const indexCodec = view.getUint32(0x20, true);
 
     const stored = await fetchRange(indexOffset, indexLength);
-    const text = new TextDecoder().decode(decode(indexCodec, stored, null));
+    // Awaited: opening is already asynchronous, and the index may be written
+    // with a codec that has no synchronous decoder here. Only the blocks a guest
+    // read touches must be decodable without waiting.
+    const text = new TextDecoder().decode(await decode(indexCodec, stored, null));
     const index = JSON.parse(text);
 
     if (index.blockSize !== blockSize)

@@ -148,8 +148,9 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @typedef {Object} FileSystem
  * @property {(path: string) => FileStat | null} stat
  * @property {(path: string, mode: OpenMode) => any} open   Opaque node, or null.
- * @property {(node: any, offset: number, length: number) => Uint8Array} read
+ * @property {(node: any, offset: number, length: number) => Uint8Array | Promise<Uint8Array>} read
  *           Short at the end of the file; empty past it, which is not an error.
+ *           A promise when the bytes are not resident yet -- see ReadFile.
  * @property {(node: any, offset: number, bytes: Uint8Array) => number} write
  * @property {(node: any, size: number) => void} truncate
  * @property {(node: any) => void} close
@@ -539,16 +540,27 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
+                    if (bytes.length > 0)
+                    {
+                        host.writeMemory(buffer >>> 0, bytes);
+                    }
+                    file.position += bytes.length;
+                    // Written even when nothing was read: a program that checks
+                    // it is exactly the one that has reached the end of a file.
+                    writeDwordIf(read >>> 0, bytes.length);
+                    return 1;
+                };
+
                 const bytes = files.read(file.node, file.position, length >>> 0);
-                if (bytes.length > 0)
-                {
-                    host.writeMemory(buffer >>> 0, bytes);
-                }
-                file.position += bytes.length;
-                // Written even when nothing was read: a program that checks it
-                // is exactly the program that has reached the end of the file.
-                writeDwordIf(read >>> 0, bytes.length);
-                return 1;
+                // A volume backed by a bundle answers with a promise when the
+                // bytes are not here yet. The guest cannot wait, so the bridge
+                // parks it -- the same way it does for any call that has no
+                // answer at the moment it is asked.
+                return typeof (/** @type {any} */ (bytes))?.then === 'function'
+                    ? /** @type {any} */ (bytes).then(deliver)
+                    : deliver(/** @type {any} */ (bytes));
             },
         },
 
@@ -859,7 +871,19 @@ export function createFileFunctions(host){
                 // in a test and runs out of memory on a real install.
                 for (let at = 0; at < entry.size; at += COPY_CHUNK)
                 {
-                    files.write(output, at, files.read(input, at, COPY_CHUNK));
+                    const chunk = files.read(input, at, COPY_CHUNK);
+                    if (typeof (/** @type {any} */ (chunk))?.then === 'function')
+                    {
+                        // A copy that would have to wait is not expressible
+                        // here: the call is one operation to the guest and has
+                        // no partial answer. Copying from a bundle-backed file
+                        // needs the same treatment ReadFile got, and until then
+                        // failing is better than silently truncating.
+                        files.close(input);
+                        files.close(output);
+                        return fail(ERROR_ACCESS_DENIED);
+                    }
+                    files.write(output, at, /** @type {any} */ (chunk));
                 }
                 files.close(input);
                 files.close(output);

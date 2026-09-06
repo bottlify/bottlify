@@ -7,7 +7,9 @@
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
-import { resolveStorage } from './storage.js';
+import { inflateRaw, resolveStorage } from './storage.js';
+import { openBundle } from './layers/filesystem/internal/bundle/format.js';
+import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -32,7 +34,85 @@ import { resolveStorage } from './storage.js';
  *           Where the session comes from and goes: a provider with `load` and
  *           `save`, a function that only loads, or the string `local`.
  * @property {string} [id]           Names the session when storage does not.
+ * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
+ * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
+ *           Brings a byte range of the bundle in, from wherever it is kept.
  */
+
+/**
+ * Mounts a bundle as the read-only half of the volume.
+ *
+ * The blocks that have been brought in live in a map here rather than inside
+ * the source, because what fetches them is the caller's business -- a file, a
+ * range request, a cache -- and the source only has to know whether a block is
+ * resident. A read of an absent block reports which ones it needs; this is what
+ * goes and gets them.
+ *
+ * @param {any} deps
+ * @returns {Promise<((needed: any[]) => Promise<void>) | null>}
+ */
+async function mountBundle({ options, cpu, filesystem, events }){
+    if (!options.bundle?.fetch)
+    {
+        return null;
+    }
+    const fetchRange = options.bundle.fetch;
+
+    /**
+     * A block, turned back into bytes, without awaiting anything.
+     *
+     * zstd is decoded here because the emulator carries a decoder that answers
+     * synchronously. Deflate has no synchronous decoder in a browser at all, so
+     * a deflate block is inflated when it is *fetched* -- which is already an
+     * asynchronous step -- and by the time a read reaches it, it is plain. That
+     * is why codec 1 is passed through rather than refused.
+     *
+     * @param {number} codec
+     * @param {Uint8Array} bytes
+     * @param {number | null} expectedLength
+     */
+    const decode = (codec, bytes, expectedLength)=>{
+        if (codec === 2)
+        {
+            return cpu.decompressZstd(bytes, expectedLength ?? 0);
+        }
+        return bytes;
+    };
+
+    // The index is deflated, and opening is asynchronous anyway, so it may use
+    // the decoder a guest read cannot.
+    const bundle = await openBundle(fetchRange, (codec, bytes)=>
+        codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null));
+
+    /** @type {Map<number, Uint8Array>} */
+    const resident = new Map();
+    const source = createBundleSource({
+        bundle,
+        /** @param {number} index */
+        readBlock: index=>resident.get(index) ?? null,
+        decode,
+    });
+
+    filesystem.mount('C', { source });
+    events.emit('bundle', { files: bundle.files.length, blockSize: bundle.blockSize });
+
+    /** @param {any[]} needed */
+    return async needed=>{
+        for (const block of needed)
+        {
+            if (resident.has(block.index))
+            {
+                continue;
+            }
+            const raw = await fetchRange(block.offset, block.packed);
+            // Inflated here, once, rather than on every read: this is the only
+            // place a deflate block can be decoded at all, since the read side
+            // is synchronous and the browser's inflate is not.
+            resident.set(block.index,
+                bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
+        }
+    };
+}
 
 /**
  * @param {AppOptions} options
@@ -80,6 +160,11 @@ export async function createApp(options){
     // window, which is what a person would be looking at.
     let foreground = 0;
 
+    // Filled in once the emulator is up and a bundle, if any, is mounted. win32
+    // is built before that and is handed the lookup rather than the answer.
+    /** @type {((needed: any[]) => Promise<void>) | null} */
+    let blocks = null;
+
     // A call that is waiting -- a message loop with an empty queue -- is let go
     // once per scheduler turn to look again.
     /** @type {(() => void)[]} */
@@ -100,6 +185,8 @@ export async function createApp(options){
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
+            /** @param {any[]} needed */
+            fetchBlocks: needed=>blocks ? blocks(needed) : Promise.resolve(),
             /** @param {number} hwnd */
             created: hwnd=>{
                 foreground = hwnd;
@@ -140,6 +227,11 @@ export async function createApp(options){
     const bridge = core.api('bridge');
 
     await cpu.boot(options.v86);
+
+    // Mounted after the emulator is up, because the decoder for a compressed
+    // block is inside it: zstd is the only decompressor available here that
+    // answers a guest's read without a promise.
+    blocks = await mountBundle({ options, cpu, filesystem, events });
 
     const { entryVector, initialStack, thunkBase } = cpu.layout;
     const stackSize = options.stackSize ?? 0x10000;
@@ -306,13 +398,13 @@ export async function createApp(options){
                     await Promise.resolve();
                 }
 
-                // Still waiting after being let look means the machine has
-                // nothing to do until something arrives from outside -- a
-                // keystroke, a timer, a message from the page. A microtask does
-                // not let any of that happen, so this is the one place the loop
-                // hands the host back its turn, and it costs nothing precisely
-                // because the guest is idle.
-                if (idlers.length > 0)
+                // Still waiting after being let look, or a host call suspended
+                // on something outside the microtask queue -- a fetch, a file
+                // read -- means the machine has nothing to do until the host
+                // gets a turn. A microtask does not give it one, so this is the
+                // one place the loop hands it back, and it costs nothing
+                // precisely because the guest is not running.
+                if (idlers.length > 0 || bridge.suspended() > 0)
                 {
                     await new Promise(resolve=>setTimeout(resolve, 0));
                 }

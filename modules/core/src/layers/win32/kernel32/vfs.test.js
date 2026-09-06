@@ -17,7 +17,9 @@ import { createVolume } from './vfs.js';
 
 async function volume(){
     const fs = await filesystemModule.create({});
-    return { fs, volume: createVolume(fs) };
+    // No bundle is mounted in these tests, so a read always answers with bytes;
+    // the cast says so once rather than at every call site.
+    return { fs, volume: /** @type {any} */ (createVolume(fs)) };
 }
 
 test('a missing file is an answer, not an exception', async()=>{
@@ -94,7 +96,7 @@ test('directories: made, listed, removed, and refused when not empty', async()=>
     const node = vol.open('C:\\Saves\\one.sav', { write: true, create: true });
     vol.close(node);
 
-    assert.deepEqual(vol.list('C:\\Saves').map(entry=>entry.name), ['one.sav']);
+    assert.deepEqual(vol.list('C:\\Saves').map((/** @type {any} */ entry)=>entry.name), ['one.sav']);
     assert.equal(vol.stat('C:\\Saves')?.isDirectory, true);
     assert.equal(vol.remove('C:\\Saves'), false, 'a directory with something in it stays');
 
@@ -109,7 +111,7 @@ test('a wildcard filters an enumeration and never opens anything', async()=>{
         vol.close(vol.open(`C:\\${name}`, { write: true, create: true }));
     }
 
-    assert.deepEqual(vol.list('C:\\*.sav').map(entry=>entry.name).sort(), ['a.sav', 'b.sav']);
+    assert.deepEqual(vol.list('C:\\*.sav').map((/** @type {any} */ entry)=>entry.name).sort(), ['a.sav', 'b.sav']);
     assert.equal(vol.open('C:\\*.sav', { read: true }), null, 'a pattern is not a file name');
 });
 

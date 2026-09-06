@@ -28,8 +28,11 @@
 
 /**
  * @param {any} fs  The filesystem layer's API.
+ * @param {((blocks: any[]) => Promise<void>) | null} [fetchBlocks]
+ *        Brings absent bundle blocks in. Absent itself when nothing is mounted
+ *        from a bundle, in which case a miss is a fault rather than a wait.
  */
-export function createVolume(fs){
+export function createVolume(fs, fetchBlocks = null){
     const { ErrorCode, Disposition, SeekFrom } = fs;
 
     /**
@@ -112,11 +115,37 @@ export function createVolume(fs){
          * position is the surface's to move. Seeking first is how that maps
          * onto a handle that keeps its own.
          *
+         * The answer is bytes when the data is here and a promise when it is
+         * not. That is the whole of how an asynchronous fetch lives underneath
+         * a synchronous guest call: the volume reports which blocks are absent
+         * rather than awaiting anything, whoever is assembling the process
+         * fetches them, and the guest thread is parked in the meantime by the
+         * same machinery that parks it on any other call that cannot answer yet.
+         *
          * @param {any} node @param {number} offset @param {number} length
+         * @returns {Uint8Array | Promise<Uint8Array>}
          */
         read(node, offset, length){
             fs.seek(node, offset, SeekFrom.BEGIN);
-            return fs.read(node, length);
+            try
+            {
+                return fs.read(node, length);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !fetchBlocks)
+                {
+                    throw miss;
+                }
+                return (async()=>{
+                    await fetchBlocks(miss.blocks);
+                    fs.seek(node, offset, SeekFrom.BEGIN);
+                    // One retry, not a loop: the miss named every absent block,
+                    // so a second miss means the fetch did not deliver and
+                    // looping would only hide that.
+                    return fs.read(node, length);
+                })();
+            }
         },
 
         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */

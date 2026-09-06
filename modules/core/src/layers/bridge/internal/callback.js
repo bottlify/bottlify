@@ -39,6 +39,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     let sentinelAddress = 0;
     let calls = 0;
     let deepest = 0;
+    let pending = 0;
 
     /** @param {any} thread */
     const callbackFrames = thread=>(thread.callbackFrames ??= []);
@@ -100,6 +101,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {number} call.hostReturn
          */
         suspended(thread, call){
+            pending++;
             hostCalls(thread).push(call);
         },
 
@@ -190,6 +192,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             {
                 throw new Error('bridge: a host call finished that was never suspended');
             }
+            pending--;
             kernel.scheduleResume(thread, {
                 eip: call.hostReturn,
                 esp: call.restingStack,
@@ -197,6 +200,16 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             });
         },
 
-        diagnostics: ()=>({ callbacks: calls, deepestCallback: deepest }),
+        /**
+         * How many host calls are suspended right now.
+         *
+         * Whoever drives the machine needs this: a suspended call may be waiting
+         * on something outside the event loop's microtask queue -- a fetch, a
+         * file read -- and a loop that only flushes microtasks between turns
+         * would spin until it gave up.
+         */
+        pendingCalls: ()=>pending,
+
+        diagnostics: ()=>({ callbacks: calls, deepestCallback: deepest, suspended: pending }),
     };
 }
