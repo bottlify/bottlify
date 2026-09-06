@@ -8,12 +8,17 @@ import { ModuleRegistry } from './system/registry.js';
 import { defaultModules } from './layers/index.js';
 
 /**
- * Builds a @bottlify/core instance from a configuration.
+ * Assembles the engine's module graph from a configuration.
+ *
+ * This is internal machinery, not the package's product API: it decides which
+ * layers exist in this build and in what order they come up. What a consumer
+ * eventually holds is an application controller built on top of this — run,
+ * pause, attach a log sink — and that surface lands with the delivery phase.
  *
  * @param {Record<string, unknown>} [config] Map `module name → boolean | object`. See system/config.js.
  * @returns {Promise<import("./system/contract.js").CoreInstance>}
  */
-export async function createBottlify(config = {}){
+export async function assembleModules(config = {}){
     const registry = new ModuleRegistry(defaultModules());
     const plan = registry.resolve(config);
 

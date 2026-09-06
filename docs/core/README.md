@@ -25,7 +25,9 @@ A module is a plain object matching this shape (`modules/core/src/system/contrac
  */
 ```
 
-`createBottlify(config)` (`src/core.js`) is the only entry point: it builds a `ModuleRegistry` from
+`assembleModules(config)` (`src/core.js`) is the entry point into the module system — internal
+machinery rather than the package's product API (see "Public surface" below). It builds a
+`ModuleRegistry` from
 the package's default module list (`src/layers/index.js`), resolves a build plan from `config`, then
 creates each module in topological order, handing each one a `ScopedModuleHost`
 (`src/system/host.js`) that only exposes the APIs it declared in `requires`. The returned
@@ -40,7 +42,7 @@ another layer's internals directly instead of going through its declared depende
 
 ## Configuration
 
-`createBottlify` takes `{ [moduleName]: boolean | object | undefined }` (`src/system/config.js`):
+`assembleModules` takes `{ [moduleName]: boolean | object | undefined }` (`src/system/config.js`):
 
 | value                | meaning                                                              |
 |-----------------------|-----------------------------------------------------------------------|
@@ -52,6 +54,38 @@ another layer's internals directly instead of going through its declared depende
 A disabled module that another active module `requires` is not silently omitted: it's installed as
 a stub (see below) so the interface stays bound and the requiring module never has to special-case
 "my dependency doesn't exist". An unknown module name anywhere in the configuration is an error.
+
+## Public surface (agreed, not yet built)
+
+What a consumer imports is deliberately not the module machinery above. The agreed shape:
+
+```js
+// the runtime itself — no framework, runs in a worker
+import { createApp } from '@bottlify/core';
+
+// optional React binding; React is a dependency of this entry point only
+import { AppProvider, Viewport, useApp } from '@bottlify/core/react';
+```
+
+`createApp` returns an `AppController` — `run()`, `pause()`, `attachLog()`/`detachLog()` and the
+rest of the lifecycle. `AppProvider` calls it and puts the controller in context, `Viewport` owns
+the canvas and hands it to the runtime, `useApp` reaches the controller.
+
+The controller is not React-specific and carries no framework types: it is the runtime's own handle,
+which is why the React entry point can be a thin wrapper rather than a parallel implementation.
+
+Two rules behind this shape:
+
+- **The core package stays framework-agnostic.** It has zero runtime dependencies and executes in a
+  worker; exporting React components from its main entry would put React inside the engine. A
+  first-party UI is a separate concern, and embedding is otherwise the consumer's own business.
+- **Nothing in the core's vocabulary is named after games.** This is a Win32 runtime — "web-wine",
+  in the owner's words — and games are the target use case, not the subject. Hence `createApp` and
+  not `createGame`.
+
+Still open: whether the React binding ships as the `@bottlify/core/react` subpath shown here or as a
+separate `@bottlify/react` package. A subpath keeps one version and one release; a separate package
+keeps the dependency graph cleaner for non-React consumers.
 
 ## Current limitations (Phase 0)
 

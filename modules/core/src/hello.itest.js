@@ -18,6 +18,8 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from './layers/cpu/internal/v86-host.js';
 import { createThunkTable, STUB_SIZE } from './layers/cpu/internal/thunks.js';
+import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
+import { createAccessors } from './layers/memory/internal/accessors.js';
 import { buildImage } from './layers/loader/internal/image.js';
 import { createConsoleFunctions } from './layers/win32/kernel32/console.js';
 
@@ -28,6 +30,7 @@ const TRAP_PORT = 0xb077;
 const ENTRY_VECTOR = 0x7000;
 const THUNK_BASE = 0x200000;
 const INITIAL_STACK = 0x300000;
+const STACK_SIZE = 0x10000;
 
 /** What the same binary prints when Windows runs it. */
 const EXPECTED_OUTPUT = 'Hello from Bottlify\r\n';
@@ -53,9 +56,15 @@ async function runFixture(){
     let exitCode = null;
     let exiting = false;
 
+    // Everything the host reads or writes in the guest goes through the region
+    // map: an address the layout never claimed, or one whose region forbids the
+    // access, is an error here rather than a silent poke into whatever is there.
+    const regions = createRegionMap();
+    const memory = createAccessors({ raw: host, regions });
+
     const functions = createConsoleFunctions({
-        readMemory: (address, length)=>host.readPhysical(address, length),
-        writeMemory: (address, bytes)=>host.writePhysical(address, bytes),
+        readMemory: (address, length)=>memory.readBytes(address, length),
+        writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
         write: (_handle, text)=>output.push(text),
         // kernel32 says the process is over; how the guest is brought to a halt is
         // the cpu layer's business, handled in the trap dispatcher below.
@@ -78,14 +87,32 @@ async function runFixture(){
     });
     assert.deepEqual(image.unresolved, [], 'every import the fixture needs is implemented');
 
-    host.writePhysical(image.base, image.bytes);
-    host.writePhysical(THUNK_BASE, thunks.image());
-    host.writePhysical(ENTRY_VECTOR, new Uint8Array([
-        image.entryPoint & 0xff,
-        image.entryPoint >>> 8 & 0xff,
-        image.entryPoint >>> 16 & 0xff,
-        image.entryPoint >>> 24 & 0xff,
-    ]));
+    const stubs = thunks.image();
+    regions.register({
+        name: 'entry-vector', base: ENTRY_VECTOR, size: 4,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'thunks', base: THUNK_BASE, size: stubs.length,
+        kind: RegionKind.THUNK_CODE, access: Access.READ_WRITE_EXECUTE,
+    });
+    regions.register({
+        name: 'stack', base: INITIAL_STACK - STACK_SIZE, size: STACK_SIZE,
+        kind: RegionKind.STACK, access: Access.READ_WRITE,
+    });
+    regions.register({
+        // The fixture's only section is marked read/write/execute, and the image
+        // is registered as what its own headers ask for.
+        name: 'image', base: image.base, size: image.bytes.length,
+        kind: RegionKind.IMAGE, access: Access.READ_WRITE_EXECUTE,
+    });
+
+    memory.writeBytes(image.base, image.bytes);
+    memory.writeBytes(THUNK_BASE, stubs);
+    memory.writeU32(ENTRY_VECTOR, image.entryPoint);
+
+    // The stubs are in place; from here a write into them would be corruption.
+    regions.protect('thunks', Access.READ_EXECUTE);
 
     host.onTrap(trapId=>{
         const entry = thunks.lookup(trapId);
@@ -97,21 +124,19 @@ async function runFixture(){
         const esp = host.readReg32('esp');
         const argCount = entry.argBytes / 4;
         const args = [];
-        for (let i = 0; i < argCount; i++){
-            const raw = host.readPhysical(esp + 4 + i * 4, 4);
-            args.push(raw[0] | raw[1] << 8 | raw[2] << 16 | raw[3] << 24 | 0);
+        for (let i = 0; i < argCount; i++)
+        {
+            args.push(memory.readU32(esp + 4 + i * 4) | 0);
         }
 
         host.writeReg32('eax', entry.handler(args) >>> 0);
 
-        if (exiting){
+        if (exiting)
+        {
             // The stub still has a `ret` to execute. Send it to the park loop instead
             // of back into the caller, then stop the machine from outside this
             // callback — stopping here would leave that `ret` to run regardless.
-            const park = thunks.parkAddress;
-            host.writePhysical(esp, new Uint8Array([
-                park & 0xff, park >>> 8 & 0xff, park >>> 16 & 0xff, park >>> 24 & 0xff,
-            ]));
+            memory.writeU32(esp, thunks.parkAddress);
             setTimeout(()=>host.stop(), 0);
         }
     });

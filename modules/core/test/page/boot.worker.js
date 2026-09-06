@@ -3,9 +3,9 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { createBottlify } from '../../src/core.js';
+import { assembleModules } from '../../src/core.js';
 
-const core = await createBottlify({});
+const core = await assembleModules({});
 const modules = core.diagnostics().map(entry=>`${entry.name}[${entry.status}]`);
 
 self.onmessage = event=>{
