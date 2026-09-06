@@ -5,6 +5,10 @@ configuration, and current limitations. `roadmap/` (the phase-by-phase plan) is 
 out of git as local working notes — this file is what survives a fresh clone, and it's updated as
 each phase lands rather than written once and left stale.
 
+See [`infrastructure.md`](./infrastructure.md) for how the module graph below maps onto actual
+directories inside `modules/core/src/layers/` (per-DLL/per-backend layout, naming conventions,
+cross-cutting DLL splits).
+
 ## Interface
 
 A module is a plain object matching this shape (`modules/core/src/system/contract.js`):

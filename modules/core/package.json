@@ -16,9 +16,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:v86": "node scripts/build-v86.mjs",
+    "fetch:v86": "node scripts/fetch-v86.mjs",
     "verify:reproducibility": "node scripts/verify-reproducibility.mjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "typecheck": "tsc --project jsconfig.json",
-    "test": "node --test \"src/**/*.test.js\""
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:integration": "node --test \"src/**/*.itest.js\""
   }
 }

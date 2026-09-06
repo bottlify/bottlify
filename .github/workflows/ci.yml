@@ -23,6 +23,9 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run check:boundaries
+      # Integration tests drive a real v86 build, fetched from our fork's release.
+      - run: npm run fetch:v86
+      - run: npm run test:integration
       - run: npm run build
 
   probe:

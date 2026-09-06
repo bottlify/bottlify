@@ -19,7 +19,7 @@ import { fileURLToPath } from "node:url";
  *  - no file may import from outside src/ (except vendor through the cpu layer);
  *  - the import graph over src/ must be acyclic.
  *
- * Test files (`.test.js`) are skipped: they are bundled separately in CI.
+ * Test files (`.test.js`, `.itest.js`) are skipped: they are bundled separately in CI.
  */
 
 const SRC = resolve(fileURLToPath(new URL("..", import.meta.url)), "src");
@@ -85,7 +85,7 @@ function specifiersOf(file) {
     .filter(Boolean);
 }
 
-const files = walk(SRC).filter((file) => !file.endsWith(".test.js"));
+const files = walk(SRC).filter((file) => !file.endsWith(".test.js") && !file.endsWith(".itest.js"));
 const requireMap = await layerRequires();
 const issues = [];
 
