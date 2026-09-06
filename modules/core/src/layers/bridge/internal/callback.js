@@ -42,7 +42,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
 
     /** @param {any} thread */
     const callbackFrames = thread=>(thread.callbackFrames ??= []);
-    /** @param {any} thread */
+    /**
+     * @param {any} thread
+     * @returns {{ name: string, restingStack: number, hostReturn: number }[]}
+     */
     const hostCalls = thread=>(thread.hostCalls ??= []);
 
     /**
@@ -92,12 +95,23 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          *
          * @param {any} thread
          * @param {Object} call
+         * @param {string} call.name
          * @param {number} call.restingStack
          * @param {number} call.hostReturn
          */
         suspended(thread, call){
             hostCalls(thread).push(call);
         },
+
+        /**
+         * Which host calls this thread is in the middle of but not running --
+         * suspended on a callback. A failure report wants these as much as the
+         * one on the stack right now: they are why the guest is where it is.
+         *
+         * @param {any} thread
+         * @returns {string[]}
+         */
+        waiting: thread=>thread ? hostCalls(thread).map(call=>call.name) : [],
 
         /**
          * Starts a call into guest code and returns its result.

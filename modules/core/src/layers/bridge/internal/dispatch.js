@@ -38,6 +38,9 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
     const functions = new Map();
     /** @type {string[]} */
     const called = [];
+    /** Guest address of each stub, so a return address can be given a name. */
+    /** @type {Map<number, string>} */
+    const byAddress = new Map();
     let calls = 0;
 
     return {
@@ -55,6 +58,22 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
 
         /** @param {number} id */
         lookup: id=>functions.get(id) ?? null,
+
+        /**
+         * What lives at a guest address, when it is one of our stubs.
+         *
+         * @param {number} address
+         * @returns {string | null}
+         */
+        symbolize: address=>byAddress.get(address >>> 0) ?? null,
+
+        /**
+         * @param {number} address
+         * @param {string} name
+         */
+        placed(address, name){
+            byAddress.set(address >>> 0, name);
+        },
 
         /**
          * Handles one trap: marshal, invoke, place the result.
@@ -129,5 +148,8 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
 
         /** Which imports the guest has actually called, in order. */
         calls: ()=>[...called],
+
+        /** @param {number} count @returns {string[]} the last few, oldest first */
+        recent: count=>called.slice(-count),
     };
 }

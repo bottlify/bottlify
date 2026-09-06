@@ -64,6 +64,9 @@ export function createParking({ kernel }){
         /** @returns {CallFrame | null} the call being handled right now */
         current: ()=>inFlight.length > 0 ? inFlight[inFlight.length - 1] : null,
 
+        /** @returns {string[]} every call being handled, outermost first */
+        chain: ()=>inFlight.map(frame=>frame.name),
+
         /**
          * Parks a thread and returns the token that says so.
          *

@@ -73,6 +73,7 @@ export const bridgeModule = {
             // the stack, so reading it now would find an argument.
             kernel.holdThread();
             callbacks.suspended(thread, {
+                name: frame.name,
                 restingStack: frame.restingStack,
                 hostReturn: frame.hostReturn,
             });
@@ -123,6 +124,7 @@ export const bridgeModule = {
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes));
                 dispatcher.register(id, { name, convention, argBytes, handler });
+                dispatcher.placed(address, name);
                 return address;
             },
 
@@ -162,6 +164,22 @@ export const bridgeModule = {
              * waiting on. Null unless one happened.
              */
             failure: ()=>failure,
+
+            /**
+             * What is on our side of the boundary right now, for a failure
+             * report: which host calls are in flight, what the guest has been
+             * calling, and what name -- if any -- a guest address belongs to.
+             */
+            chain: ()=>[
+                // Suspended first: a call waiting on a callback is the reason
+                // the one running right now is running at all.
+                ...callbacks.waiting(kernel.currentThread()),
+                ...parking.chain(),
+            ],
+            /** @param {number} [count] */
+            recent: (count = 12)=>dispatcher.recent(count),
+            /** @param {number} address */
+            symbolize: address=>dispatcher.symbolize(address),
 
             /** @param {number} id */
             dispatch: id=>dispatcher.dispatch(id),

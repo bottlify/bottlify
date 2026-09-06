@@ -6,6 +6,7 @@
 
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
+import { captureTrace, formatTrace } from './trace.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -111,11 +112,22 @@ export async function createApp(options){
      * Announces a failure the program itself cannot see, and hands back what to
      * throw. A handler may answer with an error of its own to throw instead.
      *
+     * The trace is taken here rather than by whoever catches it: by then the
+     * machine has moved on, and the registers that say where it went wrong are
+     * gone. It is attached to the error too, so a caller that only catches the
+     * throw still has it.
+     *
      * @param {string} reason
-     * @param {Error} error
-     * @returns {Error}
+     * @param {any} error
+     * @returns {any}
      */
-    const fail = (reason, error)=>events.emit('error', { reason, error }) ?? error;
+    const fail = (reason, error)=>{
+        const trace = captureTrace({ cpu, memory, kernel, bridge });
+        const text = formatTrace(trace);
+        const thrown = error instanceof Error ? error : new Error(String(error));
+        Object.assign(thrown, { reason, trace, traceText: text });
+        return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
+    };
 
     return {
         /** Where the program was mapped and where it starts. */
@@ -159,7 +171,19 @@ export async function createApp(options){
                     return code;
                 }
 
-                const step = kernel.runOnce();
+                let step;
+                try
+                {
+                    step = kernel.runOnce();
+                }
+                catch (error)
+                {
+                    // A fault inside the guest, or inside a host function
+                    // answering it. Either way the program cannot be told, and
+                    // the state that explains it is about to be lost.
+                    throw fail('guest', error);
+                }
+
                 if (!step.ran)
                 {
                     // Nobody is ready. Either everything finished without the
