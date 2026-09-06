@@ -131,3 +131,84 @@ test('what the bundle holds is visible to the program, and stays read-only', asy
     await app.dispose();
     await source.cleanup();
 });
+
+/**
+ * Somewhere to keep blocks, over ordinary buffers. Node has no OPFS, so without
+ * this the cache falls back to the heap and the background filler stays off --
+ * which is right, and would leave it untested.
+ */
+function fakeStore(){
+    /** @type {Map<string, Uint8Array>} */
+    const files = new Map();
+    /** @param {string} path @returns {Uint8Array} */
+    const bytesOf = path=>files.get(path) ?? new Uint8Array(0);
+
+    return {
+        /** @param {string} path */
+        async open(path){
+            if (!files.has(path))
+            {
+                files.set(path, new Uint8Array(0));
+            }
+        },
+        /** @param {string} path */
+        stat: path=>files.has(path) ? { size: bytesOf(path).length } : null,
+        /** @param {string} path @param {number} at @param {number} length */
+        read: (path, at, length)=>bytesOf(path).slice(at, at + length),
+        /** @param {string} path @param {number} at @param {Uint8Array} bytes */
+        write(path, at, bytes){
+            const held = bytesOf(path);
+            if (held.length >= at + bytes.length)
+            {
+                held.set(bytes, at);
+                return;
+            }
+            const grown = new Uint8Array(at + bytes.length);
+            grown.set(held);
+            grown.set(bytes, at);
+            files.set(path, grown);
+        },
+        /** @param {string} path @param {number} size */
+        truncate(path, size){
+            files.set(path, new Uint8Array(size));
+        },
+    };
+}
+
+test('what the program never read is fetched anyway, in the gaps', async()=>{
+    // The fixture reads save.dat and nothing else. Data\big.bin is 300 KiB of
+    // incompressible filler it never opens, so if those blocks arrive, they
+    // arrived because nothing was being read rather than because something
+    // asked for them.
+    const source = await bundleWith(PLANTED);
+    const [wasm, exe] = await Promise.all([
+        readFile(new URL('v86.wasm', PREBUILT)),
+        readFile(FIXTURE),
+    ]);
+
+    const app = await createApp({
+        executable: new Uint8Array(exe),
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+        bundle: { fetch: source.fetch, store: fakeStore(), id: 'filled' },
+    });
+
+    /** @type {any} */
+    let filled = null;
+    app.on('bundle-prefetch', (/** @type {any} */ payload)=>{
+        filled = payload;
+    });
+
+    assert.equal(await app.run({ maxTurns: 20000 }), 0);
+
+    // The run ends when the program does, and the filler only moves in the gaps,
+    // so what matters is that it moved at all and never got ahead of the reads.
+    assert.ok(filled, 'the filler reported progress');
+    assert.ok(filled.resident > 1, `only ${filled.resident} block(s) ever arrived`);
+    assert.ok(filled.resident <= filled.blocks);
+
+    await app.dispose();
+    await source.cleanup();
+});

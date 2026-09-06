@@ -46,6 +46,9 @@ import { createBlockCache, resolveBlockStore }
  *           reader has let go is then fetched again.
  * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
  *           a name would read each other's blocks, so it has to be the bundle's.
+ * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
+ *           when nothing is being read. On by default, and inert when there is
+ *           nowhere durable to keep the blocks.
  * @property {string} [bundle.indexSha256]  From the manifest. Checked against
  *           the index this bundle actually carries, which is what makes the
  *           per-block checksums inside it worth trusting.
@@ -154,6 +157,13 @@ const MAX_BRIDGED_GAP = 128 << 10;
 const MAX_CONCURRENT_REQUESTS = 6;
 
 /**
+ * How often the background filler looks up to see whether a read is parked.
+ * Short enough that a demand fetch is never held up by much, long enough that
+ * an idle session is not a timer running hot.
+ */
+const IDLE_CHECK_MS = 50;
+
+/**
  * Turns blocks into range requests.
  *
  * This is what decides how many times the network is asked, and it matters far
@@ -260,7 +270,8 @@ function expectIndex(expected){
  * of this, which is what a repeated read actually hits.
  *
  * @param {any} deps
- * @returns {Promise<((needed: any[]) => Promise<void>) | null>}
+ * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
+ *                     stop: () => void } | null>}
  */
 async function mountBundle({ options, cpu, filesystem, events }){
     if (!options.bundle?.fetch)
@@ -382,19 +393,109 @@ async function mountBundle({ options, cpu, filesystem, events }){
         }
     };
 
+    // What a read is waiting on right now. The background filler stands aside
+    // whenever this is above zero: a block a parked thread wants is worth more
+    // than any block nobody has asked for.
+    let waiting = 0;
+    let stopped = false;
+
     /** @param {any[]} needed */
-    return async needed=>{
+    const demand = async needed=>{
         const absent = [...new Map(needed
             .filter(block=>!cache.has(block.index))
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
-        await inParallel(groupBlocks(absent), MAX_CONCURRENT_REQUESTS, fetchGroup);
+        waiting++;
+        try
+        {
+            await inParallel(groupBlocks(absent), MAX_CONCURRENT_REQUESTS, fetchGroup);
+        }
+        finally
+        {
+            waiting--;
+        }
 
         // Once per batch, not once per block: losing the record of a block that
         // is already on disk costs one refetch, and writing it every time would
         // cost far more than that.
         await cache.persist();
+    };
+
+    /**
+     * Fills the rest of the cache while the game is not asking for anything.
+     *
+     * Not a guess about what will be read next -- it is the whole bundle, in
+     * container order, taken one request at a time out of the gaps. That makes
+     * it the opposite of a heuristic: nothing about it can be wrong about the
+     * game's access pattern, it can only be early or late.
+     *
+     * One request at a time, and only while no read is parked. Both follow from
+     * what this is for: it exists to use idle time, so the moment the time stops
+     * being idle it has to give the connections back to the read that a player
+     * is actually waiting on.
+     *
+     * Off when the blocks have nowhere to go. Filling a bounded heap cache with
+     * a whole bundle would evict as fast as it fills, and pay for every byte of
+     * it twice.
+     */
+    const fill = async()=>{
+        if (!cache.backed || options.bundle.prefetch === false)
+        {
+            return;
+        }
+
+        const all = Array.from({ length: bundle.blockCount },
+            (unused, index)=>bundle.block(index));
+
+        for (const group of groupBlocks(all))
+        {
+            while (true)
+            {
+                if (stopped)
+                {
+                    return;
+                }
+                if (waiting === 0)
+                {
+                    break;
+                }
+                await new Promise(resolve=>setTimeout(resolve, IDLE_CHECK_MS));
+            }
+            const missing = group.blocks.filter(block=>!cache.has(block.index));
+            if (missing.length === 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                await fetchGroup(group);
+                await cache.persist();
+            }
+            catch (e){
+                // A run that cannot be filled in the background is still a run.
+                // The blocks it failed on will be asked for again, in front of a
+                // parked thread, where the failure belongs.
+                events.emit('bundle-prefetch-failed',
+                    { start: group.start, reason: /** @type {any} */ (e).message });
+                return;
+            }
+            events.emit('bundle-prefetch', {
+                resident: cache.diagnostics().resident,
+                blocks: bundle.blockCount,
+            });
+        }
+    };
+
+    // Deliberately not awaited: it runs for as long as the bundle has blocks
+    // left, which is the whole session.
+    fill();
+    return {
+        fetch: demand,
+        stop(){
+            stopped = true;
+        },
     };
 }
 
@@ -446,7 +547,7 @@ export async function createApp(options){
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
-    /** @type {((needed: any[]) => Promise<void>) | null} */
+    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void } | null} */
     let blocks = null;
 
     // A call that is waiting -- a message loop with an empty queue -- is let go
@@ -470,7 +571,7 @@ export async function createApp(options){
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
-            fetchBlocks: needed=>blocks ? blocks(needed) : Promise.resolve(),
+            fetchBlocks: needed=>blocks ? blocks.fetch(needed) : Promise.resolve(),
             /** @param {number} hwnd */
             created: hwnd=>{
                 foreground = hwnd;
@@ -840,6 +941,11 @@ export async function createApp(options){
             ...core.diagnostics(),
             { name: 'app', version: '0.1.0', status: 'ready', metrics: events.diagnostics() },
         ],
-        dispose: ()=>core.dispose(),
+        dispose(){
+            // Before the graph goes: the background filler would otherwise go
+            // on asking for blocks nobody can put anywhere.
+            blocks?.stop();
+            return core.dispose();
+        },
     };
 }
