@@ -62,7 +62,8 @@ modules/core/src/layers/
 │   ├── dsound/
 │   ├── dshow/               # video playback
 │   ├── winmm/               # waveOut/waveIn/MCI-audio — the audio half of winmm.dll
-│   └── msacm/               # e.g. acmStreamOpen — the real FMOD-loading case
+│   └── msacm/               # audio compression manager; some titles' own audio
+│                            #   libraries import it and will not load without it
 │
 └── input/                   # ✦ sibling of win32
     ├── keyboard/
