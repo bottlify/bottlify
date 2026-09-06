@@ -32,6 +32,9 @@ import { buildBootRom, ROM_BASE } from './boot-rom.js';
 /** Register names in v86's reg32 view, in index order. */
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
+/** How much to pull out of a zstd frame at a time. */
+const ZSTD_CHUNK = 1 << 16;
+
 /**
  * Boots an emulator instance with our own ROM and returns the cpu layer's
  * internal handle to it.
@@ -122,5 +125,51 @@ export async function createV86Host(config){
         instructionCount: ()=>emulator.get_instruction_counter() >>> 0,
 
         romBase: ROM_BASE,
+
+        /**
+         * Decompresses a zstd frame, synchronously.
+         *
+         * The emulator's own wasm carries a zstd decoder -- it reads compressed
+         * disk images with one -- and exports it. That makes it the only
+         * decompressor available to us that answers without a promise, which is
+         * what a guest read needs: the CPU is mid-instruction and cannot await.
+         *
+         * The scratch it uses is the emulator's own linear memory, which is also
+         * where guest RAM lives, so everything taken is given back before this
+         * returns.
+         *
+         * @param {Uint8Array} packed
+         * @param {number} expectedLength
+         * @returns {Uint8Array}
+         */
+        decompressZstd(packed, expectedLength){
+            const wasm = cpu.wm.exports;
+            const context = wasm.zstd_create_ctx(packed.length);
+            try
+            {
+                const source = wasm.zstd_get_src_ptr(context);
+                new Uint8Array(cpu.wasm_memory.buffer, source, packed.length).set(packed);
+
+                const out = new Uint8Array(expectedLength);
+                let at = 0;
+                while (at < expectedLength)
+                {
+                    const want = Math.min(ZSTD_CHUNK, expectedLength - at);
+                    const pointer = wasm.zstd_read(context, want);
+                    if (pointer === 0)
+                    {
+                        throw new Error('cpu: zstd frame ended before it was supposed to');
+                    }
+                    out.set(new Uint8Array(cpu.wasm_memory.buffer, pointer, want), at);
+                    wasm.zstd_read_free(pointer, want);
+                    at += want;
+                }
+                return out;
+            }
+            finally
+            {
+                wasm.zstd_free_ctx(context);
+            }
+        },
     };
 }

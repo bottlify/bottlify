@@ -222,6 +222,19 @@ export const cpuModule = {
                 return context;
             },
 
+            /**
+             * Decompresses a zstd frame without awaiting anything.
+             *
+             * Here because the decoder is inside the emulator's wasm and this is
+             * the layer allowed to know that. What uses it is the bundle reader,
+             * which has to answer a guest's read while the CPU is stopped inside
+             * one instruction -- so a promise is not an option.
+             *
+             * @param {Uint8Array} packed @param {number} expectedLength
+             */
+            decompressZstd: (packed, expectedLength)=>
+                started().decompressZstd(packed, expectedLength),
+
             instructionCount: ()=>started().instructionCount(),
             inProtectedMode: ()=>started().inProtectedMode(),
             eip: ()=>started().eip(),
