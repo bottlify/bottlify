@@ -176,12 +176,11 @@ export async function createApp(options){
                 {
                     step = kernel.runOnce();
                 }
-                catch (error)
-                {
+                catch (e){
                     // A fault inside the guest, or inside a host function
                     // answering it. Either way the program cannot be told, and
                     // the state that explains it is about to be lost.
-                    throw fail('guest', error);
+                    throw fail('guest', e);
                 }
 
                 if (!step.ran)

@@ -132,7 +132,8 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             {
                 if (!suspend)
                 {
-                    throw new Error(`bridge: ${fn.name} answered asynchronously with nowhere to wait`);
+                    throw new Error(
+                        `bridge: ${fn.name} answered asynchronously with nowhere to wait`);
                 }
                 suspend(result, frame);
                 return;

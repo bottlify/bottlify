@@ -76,7 +76,8 @@ export function createParking({ kernel }){
         park(thread){
             if (inFlight.length === 0)
             {
-                throw new Error('bridge: park() is only meaningful while a guest call is in flight');
+                throw new Error(
+                    'bridge: park() is only meaningful while a guest call is in flight');
             }
             kernel.parkThread(thread ?? kernel.currentThread());
             parked++;
