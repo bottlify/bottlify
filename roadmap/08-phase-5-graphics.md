@@ -39,9 +39,13 @@ the emulator arrives injected, the way the filesystem's stores do.
 
 Two structural facts, both learned from how the same problem was solved elsewhere:
 
-- **The backend has no tests of its own.** Its contract is only observable through the guest-facing
-  facades, and that is where it is checked. A separate "backend test" tests our idea of the backend
-  rather than what a program sees.
+- **The backend has no *contract* tests of its own — but it does have invariant tests.** The
+  distinction matters and was nearly lost. What a program observes is only observable through the
+  guest-facing facades, so that is where the contract is checked; a separate suite asserting our
+  idea of the backend tests the wrong thing. The §14 register is different in kind: those are
+  internal invariants — an upload that renames without resending, a bind-group key that omits buffer
+  identity — which a facade test catches only by accident, and only sometimes. Those get direct
+  tests, and they belong to the backend because that is where they can be violated.
 - **The same scenario is tested once per interface version.** DirectDraw's four interface
   generations are not one API with a version field; their expectations genuinely differ, and the
   differences *are* the version semantics. Four near-parallel suites is the right shape, not
