@@ -87,23 +87,75 @@ const set = (bitmap, index)=>{
 };
 
 /**
- * A cache with nowhere to put anything.
+ * The fallback: blocks in the heap, bounded, forgotten when the tab closes.
  *
  * A build outside a worker cannot take a synchronous handle on OPFS at all, and
- * a test has no reason to want one. Such a build still runs: it simply fetches
- * a block again when the source's own decoded cache has let it go, which is
- * slower over the network and bounded in memory, rather than fast and not.
+ * a test has no reason to want one. Such a build still runs -- more slowly, and
+ * paying the network again for anything it has let go.
  *
+ * It cannot simply hold nothing. A read of an absent block reports which blocks
+ * it needs and is retried once they are here, so a cache that never becomes
+ * resident does not make the run slower, it makes it never finish.
+ *
+ * Which is why blocks brought in for the read now being served are pinned until
+ * that read has had its turn. A single read can want more blocks than the
+ * bound, and evicting one of them to make room for the next would be the same
+ * deadlock arriving by a longer route.
+ *
+ * @param {number} maxBytes
  * @returns {any}
  */
-function createAbsentCache(){
+function createMemoryCache(maxBytes){
+    /** Insertion order is least-recently-used order. @type {Map<number, Uint8Array>} */
+    const held = new Map();
+    /** Brought in for the read currently being served. @type {Set<number>} */
+    const pinned = new Set();
+    let bytes = 0;
+
     return {
         backed: false,
-        has: ()=>false,
-        read: ()=>null,
-        put: ()=>{},
-        async persist(){},
-        diagnostics: ()=>({ backed: false, resident: 0, blocks: 0 }),
+
+        /** @param {number} index */
+        has: index=>held.has(index),
+
+        /** @param {number} index */
+        read(index){
+            const found = held.get(index);
+            if (!found)
+            {
+                return null;
+            }
+            held.delete(index);
+            held.set(index, found);
+            return found;
+        },
+
+        /** @param {number} index @param {Uint8Array} value */
+        put(index, value){
+            held.set(index, value);
+            pinned.add(index);
+            bytes += value.length;
+            for (const [at, stored] of held)
+            {
+                if (bytes <= maxBytes)
+                {
+                    break;
+                }
+                if (pinned.has(at))
+                {
+                    continue;
+                }
+                held.delete(at);
+                bytes -= stored.length;
+            }
+        },
+
+        /** Not persistence here, but the end of a read: what it needed is free. */
+        async persist(){
+            pinned.clear();
+        },
+
+        diagnostics: ()=>({ backed: false, resident: held.size, bytes }),
     };
 }
 
@@ -114,12 +166,15 @@ function createAbsentCache(){
  *                                    not share one, so this is its identity.
  * @param {number} options.blockSize
  * @param {number} options.blockCount
+ * @param {number} [options.maxHeapBytes]  Bound on the fallback, when there is
+ *                                         nowhere to put blocks but the heap.
  * @returns {Promise<any>}
  */
-export async function createBlockCache({ store, name, blockSize, blockCount }){
+export async function createBlockCache(options){
+    const { store, name, blockSize, blockCount, maxHeapBytes = 64 << 20 } = options;
     if (!store)
     {
-        return createAbsentCache();
+        return createMemoryCache(maxHeapBytes);
     }
 
     const dataPath = `/${name}.blocks`;
@@ -135,7 +190,7 @@ export async function createBlockCache({ store, name, blockSize, blockCount }){
         // A store that will not open is a slower run, not a failed one. The
         // ordinary reason is a build outside a worker, where no synchronous
         // handle on OPFS exists to be had.
-        return createAbsentCache();
+        return createMemoryCache(maxHeapBytes);
     }
 
     // A bitmap of the wrong size belongs to a different bundle, or to a version

@@ -135,13 +135,25 @@ test('asking for local storage where there is none is not an error', async()=>{
     assert.equal(await resolveBlockStore(mine), mine, 'a store of your own is used as given');
 });
 
-test('without storage the cache holds nothing and says so', async()=>{
+test('without storage the blocks are held in the heap, and bounded', async()=>{
     // A build outside a worker cannot take a synchronous OPFS handle at all. It
-    // still runs -- it just fetches a block again rather than keeping it.
-    const cache = await createBlockCache({ store: null, ...OPTIONS });
+    // still runs, keeping blocks in memory and paying the network again for
+    // whatever it has had to let go.
+    const cache = await createBlockCache({ store: null, ...OPTIONS, maxHeapBytes: 32 });
 
-    cache.put(1, new Uint8Array(16));
+    cache.put(1, new Uint8Array(16).fill(0xaa));
     assert.equal(cache.backed, false);
-    assert.equal(cache.has(1), false);
-    assert.equal(cache.read(1, 16), null);
+    assert.equal(cache.has(1), true, 'a read that needed this block can now be served');
+    assert.deepEqual(cache.read(1), new Uint8Array(16).fill(0xaa));
+
+    // Two blocks fit; the third pushes the bound. Nothing is dropped while the
+    // read that asked for them is still being served.
+    cache.put(2, new Uint8Array(16));
+    cache.put(3, new Uint8Array(16));
+    assert.equal(cache.diagnostics().resident, 3, 'a read may need more than fits');
+
+    await cache.persist();
+    cache.put(4, new Uint8Array(16));
+    assert.equal(cache.has(1), false, 'and once it is served, the oldest goes');
+    assert.equal(cache.has(4), true);
 });
