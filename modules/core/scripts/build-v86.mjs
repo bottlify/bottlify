@@ -108,7 +108,13 @@ async function runDocker(){
     }
 }
 
-const mode = process.argv.includes('--docker') ? 'docker' : 'native';
+// The environment variable is not a convenience: `npm run build:v86 -- --docker`
+// has to survive being forwarded through a workspace script, and an npm that
+// swallows the flag turns the reproducible build into a native one silently --
+// which is how this ran for weeks in CI on a machine with no Rust target.
+const wantsDocker = process.argv.includes('--docker')
+    || process.env.BOTTLIFY_V86_DOCKER === '1';
+const mode = wantsDocker ? 'docker' : 'native';
 await mkdir(OUT, { recursive: true });
 if (mode === 'docker')
 {
