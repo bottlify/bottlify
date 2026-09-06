@@ -69,9 +69,11 @@ export function createConsoleFunctions(host){
                 // lpNumberOfBytesWritten is optional, but when it is supplied the guest
                 // reads it back: a program that checks it and sees zero concludes the
                 // write failed.
-                if (written !== 0){
+                if (written !== 0)
+                {
                     host.writeMemory(written, new Uint8Array([
-                        length & 0xff, length >>> 8 & 0xff, length >>> 16 & 0xff, length >>> 24 & 0xff,
+                        length & 0xff, (length >>> 8) & 0xff,
+                        (length >>> 16) & 0xff, (length >>> 24) & 0xff,
                     ]));
                 }
                 return 1; // TRUE
