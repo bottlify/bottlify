@@ -75,6 +75,28 @@ test('a range that comes back short is a glitch, not an answer', async()=>{
     assert.equal(calls, 2, 'the truncated answer was refused and asked for again');
 });
 
+test('bytes that arrive damaged are asked for again, not handed on', async()=>{
+    // The checksum is checked inside the retry rather than by the caller,
+    // because damage is exactly what a retry is for. Checked outside, a bad
+    // block could only become an error -- and a bad block that got through
+    // would go into the guest's files and stay in the cache after a reload.
+    const { events, seen } = recording();
+    let calls = 0;
+    const fetch = retryingFetch({
+        events,
+        retry: QUICK,
+        fetch: async()=>{
+            calls++;
+            return new Uint8Array(4).fill(calls < 3 ? 0xff : 0x01);
+        },
+    });
+
+    const bytes = await fetch(0, 4, sample=>sample[0] === 0x01 ? null : 'checksum');
+    assert.deepEqual(bytes, new Uint8Array(4).fill(0x01));
+    assert.equal(calls, 3);
+    assert.deepEqual(seen.map(e=>e[2]), ['checksum', 'checksum']);
+});
+
 test('giving up says how many times it tried and why it stopped', async()=>{
     const { events, seen } = recording();
     const fetch = retryingFetch({

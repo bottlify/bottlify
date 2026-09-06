@@ -132,6 +132,11 @@ async function pack(root, id, flags){
         uncompressedBytes: summary.uncompressedBytes,
         files: summary.files,
         sha256: summary.sha256,
+        // The chain that makes a block's checksum worth anything: this digest
+        // is checked against the index the reader fetched, and the index then
+        // vouches for every block. Only this link has to come from outside the
+        // container, and only this one is small enough to check every launch.
+        indexSha256: summary.indexSha256,
     };
 
     await writeFile(manifestPath, `${JSON.stringify(manifest, null, 4)}\n`);

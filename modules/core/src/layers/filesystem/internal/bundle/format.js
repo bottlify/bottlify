@@ -33,7 +33,15 @@
 
 export const MAGIC = 'BTL1';
 export const HEADER_SIZE = 0x28;
-export const FORMAT_VERSION = 1;
+export const FORMAT_VERSION = 2;
+
+/**
+ * Versions this reader accepts. Version 2 added a checksum to each block's
+ * index record; a version 1 bundle is still readable, and its blocks simply
+ * arrive unchecked. Refusing them would have made a repack the price of an
+ * engine update, which is not a price a container format should charge.
+ */
+export const READABLE_VERSIONS = Object.freeze([1, 2]);
 
 /** What a block was written with. A reader must handle all three. */
 export const Codec = {
@@ -74,6 +82,8 @@ export const Codec = {
  * @property {number} packed   How many stored bytes.
  * @property {number} codec
  * @property {number} length   How many bytes it decodes to.
+ * @property {number | null} crc  CRC-32 of the stored bytes, or null in a
+ *                                version 1 bundle, which recorded none.
  */
 
 /**
@@ -101,9 +111,14 @@ export const Codec = {
  *
  * @param {FetchRange} fetchRange
  * @param {Decode} decode
+ * @param {Object} [options]
+ * @param {(stored: Uint8Array) => Promise<string | null>} [options.verifyIndex]
+ *        Given the index exactly as stored, answers with what is wrong with it
+ *        or null. The index carries every block's checksum, so it is the one
+ *        part of the container that cannot vouch for itself.
  * @returns {Promise<Bundle>}
  */
-export async function openBundle(fetchRange, decode){
+export async function openBundle(fetchRange, decode, options = {}){
     const header = await fetchRange(0, HEADER_SIZE);
     if (header.length < HEADER_SIZE)
     {
@@ -116,9 +131,10 @@ export async function openBundle(fetchRange, decode){
 
     const view = new DataView(header.buffer, header.byteOffset, HEADER_SIZE);
     const version = view.getUint32(4, true);
-    if (version !== FORMAT_VERSION)
+    if (!READABLE_VERSIONS.includes(version))
     {
-        throw new Error(`This bundle is format version ${version}, not ${FORMAT_VERSION}`);
+        throw new Error(`This bundle is format version ${version}; this reader `
+            + `knows ${READABLE_VERSIONS.join(' and ')}`);
     }
 
     const blockSize = view.getUint32(8, true);
@@ -127,6 +143,11 @@ export async function openBundle(fetchRange, decode){
     const indexCodec = view.getUint32(0x20, true);
 
     const stored = await fetchRange(indexOffset, indexLength);
+    const wrong = await options.verifyIndex?.(stored);
+    if (wrong)
+    {
+        throw new Error(`This bundle's index is not the one expected: ${wrong}`);
+    }
     // Awaited: opening is already asynchronous, and the index may be written
     // with a codec that has no synchronous decoder here. Only the blocks a guest
     // read touches must be decodable without waiting.
@@ -146,6 +167,7 @@ export async function openBundle(fetchRange, decode){
         offset: block.offset,
         packed: block.packed,
         codec: block.codec,
+        crc: typeof block.crc === 'number' ? block.crc : null,
         length: blockSize,
     }));
     // Only the file a block belongs to knows how long it decodes to, because the

@@ -10,6 +10,7 @@ import { captureTrace, formatTrace } from './trace.js';
 import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
 
@@ -45,6 +46,9 @@ import { createBlockCache, resolveBlockStore }
  *           reader has let go is then fetched again.
  * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
  *           a name would read each other's blocks, so it has to be the bundle's.
+ * @property {string} [bundle.indexSha256]  From the manifest. Checked against
+ *           the index this bundle actually carries, which is what makes the
+ *           per-block checksums inside it worth trusting.
  * @property {Object} [bundle.retry] How hard to try when that fetch fails.
  * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
  * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
@@ -69,14 +73,15 @@ import { createBlockCache, resolveBlockStore }
  * server that just failed.
  *
  * @param {any} deps
- * @returns {(offset: number, length: number) => Promise<Uint8Array>}
+ * @returns {(offset: number, length: number,
+ *            verify?: (bytes: Uint8Array) => string | null) => Promise<Uint8Array>}
  */
 export function retryingFetch({ fetch, events, retry }){
     const attempts = retry?.attempts ?? 6;
     const baseDelayMs = retry?.baseDelayMs ?? 250;
     const maxDelayMs = retry?.maxDelayMs ?? 10000;
 
-    return async(offset, length)=>{
+    return async(offset, length, verify)=>{
         /** @type {any} */
         let failure = null;
         for (let attempt = 1; attempt <= attempts; attempt++)
@@ -88,6 +93,15 @@ export function retryingFetch({ fetch, events, retry }){
                 {
                     throw new Error(
                         `short read: ${bytes.length} of ${length} bytes`);
+                }
+                // Checked here rather than by the caller so that bytes which
+                // arrived damaged are asked for again, like any other failure.
+                // Damage is what a retry is for; a caller outside this loop
+                // could only turn it into an error.
+                const wrong = verify?.(bytes);
+                if (wrong)
+                {
+                    throw new Error(wrong);
                 }
                 return bytes;
             }
@@ -112,6 +126,37 @@ export function retryingFetch({ fetch, events, retry }){
         throw new Error(
             `bundle: ${length} bytes at ${offset} did not arrive in ${attempts} `
             + `attempts: ${reason}`);
+    };
+}
+
+/**
+ * The check that makes every block's checksum worth something.
+ *
+ * The index carries them, so nothing inside the container can vouch for the
+ * index itself: a bundle replaced wholesale would arrive with an index that
+ * agrees with its own blocks perfectly. The digest that settles it has to come
+ * from somewhere else, and the manifest -- fetched to decide whether to
+ * download at all -- is that somewhere.
+ *
+ * The whole-bundle digest in the manifest answers the same question, but over
+ * gigabytes. This one is over the index alone, which is already being fetched,
+ * so it is affordable on every launch rather than on request.
+ *
+ * @param {string | undefined} expected
+ * @returns {((stored: Uint8Array) => Promise<string | null>) | undefined}
+ */
+function expectIndex(expected){
+    if (!expected)
+    {
+        return undefined;
+    }
+    return async stored=>{
+        const digest = await crypto.subtle.digest('SHA-256', stored.slice());
+        const found = [...new Uint8Array(digest)]
+            .map(byte=>byte.toString(16).padStart(2, '0')).join('');
+        return found === expected.toLowerCase()
+            ? null
+            : `its digest is ${found}, not ${expected}`;
     };
 }
 
@@ -170,8 +215,10 @@ async function mountBundle({ options, cpu, filesystem, events }){
 
     // The index is deflated, and opening is asynchronous anyway, so it may use
     // the decoder a guest read cannot.
-    const bundle = await openBundle(fetchRange, (codec, bytes)=>
-        codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null));
+    const bundle = await openBundle(
+        fetchRange,
+        (codec, bytes)=>codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null),
+        { verifyIndex: expectIndex(options.bundle.indexSha256) });
 
     // How much of a block its slot holds: a zstd block is kept packed, because
     // the decoder that answers a guest read runs synchronously, and everything
@@ -213,7 +260,18 @@ async function mountBundle({ options, cpu, filesystem, events }){
             {
                 continue;
             }
-            const raw = await fetchRange(block.offset, block.packed);
+            const expected = bundle.block(block.index).crc;
+            const raw = await fetchRange(block.offset, block.packed, bytes=>{
+                if (expected === null)
+                {
+                    return null;
+                }
+                const found = crc32(bytes);
+                return found === expected
+                    ? null
+                    : `block ${block.index} arrived damaged (checksum ${found}, `
+                        + `expected ${expected})`;
+            });
             // Inflated here, once, rather than on every read: this is the only
             // place a deflate block can be decoded at all, since the read side
             // is synchronous and the browser's inflate is not.

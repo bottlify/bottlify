@@ -45,24 +45,21 @@ import { open, stat, readdir, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { join, relative, sep } from 'node:path';
 import zlib from 'node:zlib';
+import { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec }
+    from '../modules/core/src/layers/filesystem/internal/bundle/format.js';
+import { crc32 }
+    from '../modules/core/src/layers/filesystem/internal/bundle/crc32.js';
 
-export const MAGIC = 'BTL1';
-export const HEADER_SIZE = 0x28;
-export const FORMAT_VERSION = 1;
-
-/**
- * What a block was written with.
- *
- * Two compressors rather than one, chosen per block, because pack time is free
- * and the two disagree often enough to matter. A reader must be able to decode
- * whatever it finds; the manifest names the set a bundle actually used, so one
- * that only has deflate can still be told before it fetches anything.
- */
-export const Codec = {
-    STORED: 0,
-    DEFLATE_RAW: 1,
-    ZSTD: 2,
-};
+// Re-exported from the reader rather than restated here. A writer and a reader
+// that each carry their own copy of a magic number, a header size or a version
+// are two programs that can disagree about a file neither of them is wrong
+// about -- and the version had already begun to.
+//
+// Codec: two compressors rather than one, chosen per block, because pack time
+// is free and the two disagree often enough to matter. A reader must be able to
+// decode whatever it finds; the manifest names the set a bundle actually used,
+// so one that only has deflate can be told before it fetches anything.
+export { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec };
 
 /**
  * A quarter of a mebibyte.
@@ -251,7 +248,7 @@ export async function writeBundle(options){
     header.writeUInt32LE(blockSize, 8);
     await handle.write(header, 0, HEADER_SIZE, 0);
 
-    /** @type {{ offset: number, packed: number, codec: number }[]} */
+    /** @type {{ offset: number, packed: number, codec: number, crc: number }[]} */
     const blocks = [];
     /** @type {any[]} */
     const index = [];
@@ -281,7 +278,10 @@ export async function writeBundle(options){
                 : packBlock(block, level);
             await handle.write(bytes, 0, bytes.length, cursor);
             digest.update(bytes);
-            blocks.push({ offset: cursor, packed: bytes.length, codec });
+            // Over the stored bytes, not the block's contents: this is checked
+            // when a block arrives, before anything decodes it, so it has to be
+            // a checksum of what actually travels.
+            blocks.push({ offset: cursor, packed: bytes.length, codec, crc: crc32(bytes) });
             cursor += bytes.length;
             rawTotal += block.length;
             packedTotal += bytes.length;
@@ -336,6 +336,12 @@ export async function writeBundle(options){
         totalBlocks: blocks.length,
         indexBytes: indexBytes.length,
         sha256: digest.digest('hex'),
+        // The index carries every block's checksum, so it is the one part of
+        // the container whose own integrity cannot be established from inside
+        // it. This digest belongs in the manifest, which comes from somewhere
+        // other than the bytes it describes -- and unlike the whole-bundle
+        // digest it is cheap enough to check on every launch.
+        indexSha256: createHash('sha256').update(indexBytes).digest('hex'),
     };
 }
 
