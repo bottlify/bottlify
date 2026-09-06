@@ -3,7 +3,139 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { createStubModule } from '../../system/stub.js';
+import { createHandleTable } from './internal/handles.js';
+import { createSwitcher } from './internal/switch.js';
+import { ThreadState, createScheduler } from './internal/threads.js';
+import { WaitResult, createSyncObjects } from './internal/sync.js';
+import { createClock } from './internal/time.js';
 
-/** @type {import("../../system/contract.js").BottlifyModule} */
-export const kernelModule = createStubModule('kernel', '0.0.0', ['cpu', 'memory', 'log']);
+/**
+ * kernel — the execution core: threads, the scheduler, synchronisation, handles
+ * and the guest's clock.
+ *
+ * This is our own engine, not the guest-facing API. What a guest calls to make
+ * a thread is `win32/kernel32`'s business; what happens as a result is here.
+ */
+
+/** @type {any} */
+let scheduler = null;
+/** @type {any} */
+let sync = null;
+/** @type {any} */
+let handles = null;
+/** @type {any} */
+let clock = null;
+/** @type {any} */
+let switcher = null;
+
+export const kernelModule = {
+    name: 'kernel',
+    version: '0.1.0',
+    requires: /** @type {readonly string[]} */ (['cpu', 'memory', 'log']),
+
+    /**
+     * @param {any} config
+     * @param {import('../../system/contract.js').ScopedModuleHost} host
+     * @returns {Promise<any>}
+     */
+    async create(config, host){
+        const cpu = host.requireApi('cpu');
+
+        switcher = createSwitcher({ cpu });
+        scheduler = createScheduler({
+            cpu,
+            switcher,
+            // Below a page the emulator cannot honour a smaller quantum anyway,
+            // so asking for one would only be a lie in the configuration.
+            quantum: config?.quantum ?? 100_000,
+        });
+        sync = createSyncObjects({ scheduler });
+        handles = createHandleTable();
+        clock = createClock(config?.clock);
+
+        return {
+            ThreadState,
+            WaitResult,
+
+            /** @param {any} options */
+            createThread(options){
+                const thread = scheduler.create(options);
+                thread.handle = handles.open('thread', thread);
+                return thread;
+            },
+            currentThread: ()=>scheduler.current(),
+            threads: ()=>scheduler.all(),
+
+            /**
+             * Runs one turn. Returns what happened rather than a count, so a
+             * caller can tell progress from an idle system from a finished one.
+             */
+            runOnce: ()=>scheduler.runOnce(),
+
+            /** @param {any} thread @param {number} exitCode */
+            exitThread(thread, exitCode){
+                // A thread that dies holding a mutex leaves whatever it protected
+                // half-written; the next owner has to be told (§ abandoned mutex).
+                sync.abandonMutexesOwnedBy(thread);
+                scheduler.terminate(thread, exitCode);
+            },
+
+            /** @param {any} thread @param {string} [reason] */
+            block: (thread, reason)=>scheduler.block(thread, reason),
+            /** @param {any} thread */
+            wake: thread=>scheduler.wake(thread),
+
+            createEvent: (/** @type {any} */ options)=>sync.createEvent(options),
+            createMutex: (/** @type {any} */ options)=>sync.createMutex(options),
+            createSemaphore: (/** @type {any} */ options)=>sync.createSemaphore(options),
+            wait: (/** @type {any} */ object, /** @type {any} */ thread)=>sync.wait(object, thread),
+            waitAll: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>
+                sync.waitAll(objects, thread),
+            waitAny: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>
+                sync.waitAny(objects, thread),
+            setEvent: (/** @type {any} */ object)=>sync.setEvent(object),
+            resetEvent: (/** @type {any} */ object)=>sync.resetEvent(object),
+            releaseMutex: (/** @type {any} */ object, /** @type {any} */ thread)=>
+                sync.releaseMutex(object, thread),
+            releaseSemaphore: (/** @type {any} */ object, /** @type {number} */ count)=>
+                sync.releaseSemaphore(object, count),
+
+            handles: {
+                /** @param {string} type @param {any} object */
+                open: (type, object)=>handles.open(type, object),
+                /** @param {number} handle @param {string} [type] */
+                resolve: (handle, type)=>handles.resolve(handle, type),
+                /** @param {number} handle */
+                close: handle=>handles.close(handle),
+            },
+
+            clock,
+        };
+    },
+
+    /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
+    diagnostics(){
+        return {
+            name: 'kernel',
+            version: '0.1.0',
+            status: scheduler ? 'ready' : 'created',
+            metrics: scheduler
+                ? {
+                    ...scheduler.diagnostics(),
+                    ...switcher.diagnostics(),
+                    handles: handles.diagnostics(),
+                    sync: sync.diagnostics(),
+                    time: clock.diagnostics(),
+                }
+                : {},
+        };
+    },
+
+    async dispose(){
+        scheduler = null;
+        sync = null;
+        handles = null;
+        clock = null;
+        switcher = null;
+    },
+};
