@@ -10,6 +10,8 @@ import { captureTrace, formatTrace } from './trace.js';
 import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { createBlockCache, resolveBlockStore }
+    from './layers/filesystem/internal/bundle/cache.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -37,6 +39,12 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
+ * @property {any} [bundle.store]  Where fetched blocks are kept. `'local'` is
+ *           the default and means this machine; a synchronous store of your own
+ *           is used as given; anything falsy keeps nothing, and a block the
+ *           reader has let go is then fetched again.
+ * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
+ *           a name would read each other's blocks, so it has to be the bundle's.
  * @property {Object} [bundle.retry] How hard to try when that fetch fails.
  * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
  * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
@@ -110,11 +118,18 @@ export function retryingFetch({ fetch, events, retry }){
 /**
  * Mounts a bundle as the read-only half of the volume.
  *
- * The blocks that have been brought in live in a map here rather than inside
- * the source, because what fetches them is the caller's business -- a file, a
- * range request, a cache -- and the source only has to know whether a block is
+ * The blocks that have been brought in are held here rather than inside the
+ * source, because what fetches them is the caller's business -- a file, a range
+ * request, a cache -- and the source only has to know whether a block is
  * resident. A read of an absent block reports which ones it needs; this is what
  * goes and gets them.
+ *
+ * They are held in storage rather than in the heap. A bundle can be larger than
+ * any single buffer a browser will hand out, and a program that plays a lot of
+ * a large game eventually touches nearly all of it, so blocks accumulating in
+ * memory is not a cost that levels off -- it is the run failing later instead
+ * of sooner. The source keeps its own bounded cache of decoded blocks in front
+ * of this, which is what a repeated read actually hits.
  *
  * @param {any} deps
  * @returns {Promise<((needed: any[]) => Promise<void>) | null>}
@@ -158,23 +173,43 @@ async function mountBundle({ options, cpu, filesystem, events }){
     const bundle = await openBundle(fetchRange, (codec, bytes)=>
         codec === 1 ? inflateRaw(bytes) : decode(codec, bytes, null));
 
-    /** @type {Map<number, Uint8Array>} */
-    const resident = new Map();
+    // How much of a block its slot holds: a zstd block is kept packed, because
+    // the decoder that answers a guest read runs synchronously, and everything
+    // else is kept in the form a read can use as it stands.
+    /** @param {any} block */
+    const storedLength = block=>block.codec === 2 ? block.packed : block.length;
+
+    const cache = await createBlockCache({
+        // Absent means local, and only an explicit falsy value turns it off --
+        // so `??` will not do here: `store: null` has to mean no cache.
+        store: await resolveBlockStore(
+            options.bundle.store === undefined ? 'local' : options.bundle.store),
+        name: options.bundle.id ?? options.id ?? 'bundle',
+        blockSize: bundle.blockSize,
+        blockCount: bundle.blockCount,
+    });
+
     const source = createBundleSource({
         bundle,
         /** @param {number} index */
-        readBlock: index=>resident.get(index) ?? null,
+        readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
         decode,
     });
 
     filesystem.mount('C', { source });
-    events.emit('bundle', { files: bundle.files.length, blockSize: bundle.blockSize });
+    events.emit('bundle', {
+        files: bundle.files.length,
+        blockSize: bundle.blockSize,
+        blocks: bundle.blockCount,
+        cached: cache.diagnostics().resident,
+        backed: cache.backed,
+    });
 
     /** @param {any[]} needed */
     return async needed=>{
         for (const block of needed)
         {
-            if (resident.has(block.index))
+            if (cache.has(block.index))
             {
                 continue;
             }
@@ -182,9 +217,13 @@ async function mountBundle({ options, cpu, filesystem, events }){
             // Inflated here, once, rather than on every read: this is the only
             // place a deflate block can be decoded at all, since the read side
             // is synchronous and the browser's inflate is not.
-            resident.set(block.index,
+            cache.put(block.index,
                 bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
         }
+        // Once per batch, not once per block: losing the record of a block that
+        // is already on disk costs one refetch, and writing it every time would
+        // cost far more than that.
+        await cache.persist();
     };
 }
 

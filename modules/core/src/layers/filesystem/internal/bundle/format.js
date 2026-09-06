@@ -88,6 +88,7 @@ export const Codec = {
 /**
  * @typedef {Object} Bundle
  * @property {number} blockSize
+ * @property {number} blockCount  How many blocks the container holds.
  * @property {readonly BundleFile[]} files
  * @property {readonly string[]} directories    Recorded empty ones only.
  * @property {(path: string) => BundleFile | null} find   Case-insensitive.
@@ -162,6 +163,7 @@ export async function openBundle(fetchRange, decode){
 
     return {
         blockSize,
+        blockCount: blocks.length,
         files,
         directories: index.directories,
 
