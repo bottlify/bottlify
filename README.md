@@ -4,11 +4,14 @@ Bottlify runs original Win32 x86 games in the browser: a forked [v86](https://gi
 for x86 emulation in a Web Worker, plus a from-scratch Win32/DirectX HLE layer targeting
 WebGPU/WebAudio/OPFS. No plugins, no install, no server in the render path.
 
-**Status: Phase 0 — Skeleton.** The module system, dependency graph, and vendored v86 are in place;
-every engine layer (cpu, memory, kernel, bridge, loader, win32, graphics, audio, input) exists as a
-`NOT_IMPLEMENTED` stub with its real `requires` wired up. No x86 instruction executes yet — that's
-Phase 1. See `CLAUDE.md` for the architecture, principles, and workflow, and `docs/core/` for
-`@bottlify/core`'s module contract and current limitations.
+**Status: Phase 1 — a 32-bit Windows executable runs.** No BIOS is involved: a 64 KiB ROM of our own
+takes the CPU straight into protected mode, a PE32 image is mapped and its imports bound to stubs
+that trap into the host, and a minimal kernel32 lets the program write to stdout and exit. The same
+binary produces the same output under real Windows, which is how the runtime is checked.
+
+Still stubs: threads and scheduling, the full call bridge, filesystem, graphics, audio, input. See
+`docs/core/` for what each layer does and does not do, and `CLAUDE.md` for the architecture and
+workflow.
 
 ## Quick start
 

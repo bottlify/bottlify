@@ -87,15 +87,35 @@ Still open: whether the React binding ships as the `@bottlify/core/react` subpat
 separate `@bottlify/react` package. A subpath keeps one version and one release; a separate package
 keeps the dependency graph cleaner for non-React consumers.
 
-## Current limitations (Phase 0)
+## What is built, and what is not
 
-Every layer — `cpu`, `memory`, `kernel`, `bridge`, `loader`, `log`, `filesystem`, `win32`,
-`graphics`, `audio`, `input` — is a stub (`src/system/stub.js`): calling any method on it throws
-`NOT_IMPLEMENTED`. `diagnostics()` reports `status: "stub"` for all of them. This is intentional and
-matches the Phase 0 scope: no x86 instruction has executed, no PE has been parsed, nothing has touched
-`vendor/v86` as an emulator (it's built and vendored, not yet run). Implementing a layer means
-replacing its `module.js`/`api.js` behind the same `name`/`requires` contract — the registry, host
-scoping, and boundary checker do not change.
+| layer | state |
+|---|---|
+| `cpu` | real. Boots the guest with our own ROM instead of a BIOS, straight into 32-bit protected mode; runs, stops, registers, physical memory, and the I/O-port trap channel the guest calls out through. |
+| `memory` | real. Region map (overlap-checked, permissioned, `protect()`) plus typed accessors; every host access to guest memory goes through it. |
+| `loader` | real. Maps a PE32 image, applies relocations, binds imports, registers the region it occupies. |
+| `win32` | minimal. `GetStdHandle`, `WriteFile`, `ExitProcess` — enough for a console program to say something and exit. |
+| `log`, `kernel`, `bridge`, `filesystem`, `graphics`, `audio`, `input` | still stubs: every method throws `NOT_IMPLEMENTED` and `diagnostics()` reports `status: "stub"`. |
+
+A stub is a valid state, not a gap to route around: a build without a layer comes up and reports
+itself. Implementing one means replacing its `module.js` behind the same `name`/`requires` contract —
+the registry, host scoping and boundary checker do not change.
+
+Known limitations worth stating plainly:
+
+- **Single-threaded.** No scheduler, no preemption, no context switching. The instruction-counted
+  quantum that the design calls for belongs to the `kernel` layer and is not here yet.
+- **One call shape.** A guest call traps, is handled synchronously, and returns. Callbacks into the
+  guest and asynchronous parking are the `bridge` layer's job and are deliberately absent rather than
+  half-built.
+- **Relocations are untested against a real image.** The code path exists and is covered for the
+  refusal case, but the current fixture has no `.reloc`, so the `delta != 0` path has never run on a
+  real binary.
+- **The image is mapped as one span** with the widest access its sections ask for; per-section
+  permissions wait until something other than the loader writes there.
+- **Module state is per-process, not per-build.** `diagnostics()` is part of the module contract and
+  has to answer after `create`, so a module keeps its instance state on itself; a second concurrent
+  build in one process would collide.
 
 The only concrete engine dependency wired in is the vendored v86 submodule
 (`modules/core/vendor/v86`, pinned by commit) — reachable, by construction (`check:boundaries`),

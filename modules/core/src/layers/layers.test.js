@@ -21,17 +21,41 @@ const ALL_LAYERS = [
     'input',
 ];
 
-test('default build includes every layer as a stub', async()=>{
+/** Layers with a real implementation; the rest are still stubs. */
+const IMPLEMENTED = ['cpu', 'memory', 'loader', 'win32'];
+
+test('a default build contains every layer, in dependency order', async()=>{
     const core = await assembleModules({});
     const diag = core.diagnostics();
     assert.deepEqual(diag.map(d=>d.name), ALL_LAYERS);
-    for (const d of diag) assert.equal(d.status, 'stub');
+
+    for (const entry of diag)
+    {
+        if (IMPLEMENTED.includes(entry.name))
+        {
+            assert.notEqual(entry.status, 'stub', `${entry.name} is implemented`);
+        }
+        else
+        {
+            assert.equal(entry.status, 'stub', `${entry.name} is not built yet`);
+        }
+    }
 });
 
-test('every stub method throws NOT_IMPLEMENTED', async()=>{
+test('building the graph costs nothing: the emulator is not started', async()=>{
     const core = await assembleModules({});
-    assert.throws(()=>core.api('cpu').runQuantum(1), { code: 'NOT_IMPLEMENTED' });
-    assert.throws(()=>core.api('win32').anyCallback(), { code: 'NOT_IMPLEMENTED' });
+    const cpu = core.api('cpu');
+
+    assert.equal(cpu.booted(), false);
+    // Anything needing a running guest says so plainly instead of failing deeper.
+    assert.throws(()=>cpu.run(), /boot\(\) must be called/);
+    assert.throws(()=>cpu.readReg32('eax'), /boot\(\) must be called/);
+});
+
+test('a layer that is still a stub throws NOT_IMPLEMENTED', async()=>{
+    const core = await assembleModules({});
+    assert.throws(()=>core.api('kernel').createThread(), { code: 'NOT_IMPLEMENTED' });
+    assert.throws(()=>core.api('bridge').anyCallback(), { code: 'NOT_IMPLEMENTED' });
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{
