@@ -128,9 +128,21 @@ export function launch({ browser = findBrowser() } = {}){
 export async function shutdown(handle){
     handle.proc.kill();
     await new Promise(resolve=>handle.proc.once('exit', resolve));
+
     // The parent exiting is not the browser being gone: its renderer and zygote
-    // children are still flushing the profile, so a plain recursive remove loses
-    // the race and reports ENOTEMPTY on a directory that is about to be empty.
-    rmSync(handle.profileRoot,
-        { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    // children outlive it and go on writing the profile, so a recursive remove
+    // can lose the race however long it retries.
+    //
+    // Which is why this cannot throw. What the harness answers is whether the
+    // worker came up and replied; a temporary directory that outlives the run
+    // is not part of that answer, and letting its removal fail turned three
+    // successful probes into a red build.
+    try
+    {
+        rmSync(handle.profileRoot,
+            { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+    catch (e){
+        console.error(`left ${handle.profileRoot} behind: ${e.message}`);
+    }
 }
