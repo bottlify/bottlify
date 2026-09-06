@@ -18,7 +18,7 @@ import { mkdtemp, mkdir, writeFile, rm, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { Codec, openBundle, packBlock, verifyBundle, writeBundle } from './btl.mjs';
+import { Codec, openBundle, packBlock, unpackBlock, verifyBundle, writeBundle } from './btl.mjs';
 
 /** Compresses well: what an executable or a text file looks like to a compressor. */
 const compressible = (/** @type {number} */ size)=>Buffer.alloc(size, 0x41);
@@ -65,7 +65,8 @@ async function bundleOf(files, emptyDirectories = [], options = {}){
 
 test('a block is compressed only when that is worth doing', ()=>{
     const packed = packBlock(compressible(1 << 16));
-    assert.equal(packed.codec, Codec.DEFLATE_RAW);
+    assert.ok(packed.codec === Codec.DEFLATE_RAW || packed.codec === Codec.ZSTD,
+        'both are tried and the smaller is kept');
     assert.ok(packed.bytes.length < 1000, 'a run of one byte should collapse');
 
     // Random data cannot be compressed, and deflate makes it very slightly
@@ -73,6 +74,19 @@ test('a block is compressed only when that is worth doing', ()=>{
     const stored = packBlock(incompressible(1 << 16));
     assert.equal(stored.codec, Codec.STORED);
     assert.equal(stored.bytes.length, 1 << 16);
+});
+
+test('both compressors are used, and the smaller wins each block', ()=>{
+    // Text-shaped and executable-shaped data do not agree on which compressor
+    // is better, which is the whole reason the choice is per block.
+    const text = Buffer.from('the quick brown fox '.repeat(4000));
+    const chosen = packBlock(text);
+    assert.notEqual(chosen.codec, Codec.STORED);
+
+    // Whichever won, decoding it has to give the original back.
+    const back = Buffer.from(unpackBlock(chosen.codec, chosen.bytes));
+    assert.equal(back.length, text.length);
+    assert.ok(back.equals(text));
 });
 
 test('every file comes back byte for byte', async()=>{

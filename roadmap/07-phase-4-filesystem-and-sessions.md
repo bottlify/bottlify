@@ -181,6 +181,54 @@ it trades download once for decompression on every read, so the right point depe
 at 160 MiB/s a marginal block is not worth compressing, at 1700 MiB/s it plainly is. It stays at 4%
 while the codec stays deflate.
 
+### 1.2b. The decoder was already in the box
+
+The argument that survived every measurement was "a second third-party dependency". It turns out
+there is no second dependency to take on: **the emulator we already ship contains a zstd decoder**,
+and exports it.
+
+`lib/zstd/zstddeclib.c` is part of v86's own build — our Docker pipeline has always compiled it,
+and the wasm we ship exports `zstd_create_ctx`, `zstd_get_src_ptr`, `zstd_read`, `zstd_read_free`
+and `zstd_free_ctx` alongside the CPU. v86 uses it to read compressed disk images; nothing stops us
+reading compressed blocks with it.
+
+Checked rather than assumed: a 256 KiB block of a real executable, compressed with zstd at level 19
+and decoded through the shipped wasm, comes back byte-identical. On this machine that naive path —
+a fresh context and a copy per call — runs at 299 MiB/s, against 392 for Node's native deflate and
+the 160-200 the browser's own `DecompressionStream` was measured at. It is already faster than the
+only decoder a browser gives us, before any effort is spent on reusing the context.
+
+So the codec is decided, and by removal rather than by a new trade: **both compressors are tried on
+every candidate block and the smaller is kept.** Pack time is free — it is spent once, by us — and a
+byte saved is paid for by every download.
+
+What that produces on the real games says how one-sided it is:
+
+| bundle | stored | deflate | zstd |
+|---|---|---|---|
+| Warcraft III | 3853 | 4 | 685 |
+| World of Warcraft | 19981 | 5 | 595 |
+
+zstd wins essentially every block it is offered. Deflate stays because it costs nothing to keep — a
+browser has it natively — and because a block where it wins is a block where it wins. The manifest
+records `deflate-raw+zstd`, so a reader knows before it fetches anything that it needs both.
+
+| bundle | first version | now | total saved |
+|---|---|---|---|
+| `warcraft-iii-frozen-throne` | 1086.9 MiB | **1078.9 MiB** (97.0%) | 8.0 MiB |
+| `world-of-warcraft-classic` | 5120.7 MiB | **5102.2 MiB** (99.3%) | 18.5 MiB |
+
+Both verified by reading every file back against the digest written with it: 0 corrupt.
+
+Two things this does not settle. Every number is Node on one machine; the browser is still
+unmeasured. And the decoder lives inside the emulator's own wasm memory, which is also where guest
+RAM lives, so a decode allocates against the guest's space — fine for a quarter-megabyte block that
+is freed immediately, and something to watch rather than assume.
+
+The predecessor had this listed as an open question ("бенчмарк компрессии бандла
+(store/deflate/LZMA/Brotli/Zstd) → выбор") and never got to it; its bundles stayed store-only ZIP,
+which is why it then needed ZIP64 to pass four gigabytes at all.
+
 ### 1.3. Why not ZIP64
 
 ZIP64 is the obvious candidate and deserves a straight answer: it is universal, every operating

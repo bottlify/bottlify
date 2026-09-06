@@ -50,10 +50,18 @@ export const MAGIC = 'BTL1';
 export const HEADER_SIZE = 0x28;
 export const FORMAT_VERSION = 1;
 
-/** What a block was written with. */
+/**
+ * What a block was written with.
+ *
+ * Two compressors rather than one, chosen per block, because pack time is free
+ * and the two disagree often enough to matter. A reader must be able to decode
+ * whatever it finds; the manifest names the set a bundle actually used, so one
+ * that only has deflate can still be told before it fetches anything.
+ */
 export const Codec = {
     STORED: 0,
     DEFLATE_RAW: 1,
+    ZSTD: 2,
 };
 
 /**
@@ -107,6 +115,19 @@ const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
 const inflate = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.inflateRawSync(bytes);
 
 /**
+ * zstd at its slowest and densest setting.
+ *
+ * Affordable because a bundle is packed once, offline, and because the probe
+ * below means only the blocks that will actually compress are ever handed to
+ * it -- three per cent of a large game.
+ */
+const ZSTD_LEVEL = 19;
+const zstdPack = (/** @type {Buffer} */ bytes)=>zlib.zstdCompressSync(bytes, {
+    params: { [zlib.constants.ZSTD_c_compressionLevel]: ZSTD_LEVEL },
+});
+const zstdUnpack = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.zstdDecompressSync(bytes);
+
+/**
  * Chooses how to store one block, and returns it stored that way.
  *
  * @param {Buffer} block
@@ -122,9 +143,16 @@ export function packBlock(block, level = 9){
         return { codec: Codec.STORED, bytes: block };
     }
 
-    const packed = deflate(block, level);
-    return packed.length <= block.length * (1 - MIN_SAVING)
-        ? { codec: Codec.DEFLATE_RAW, bytes: packed }
+    // Both, and keep the smaller. Packing twice costs build time, which is
+    // spent once and by us; a byte saved is paid for by every download.
+    const candidates = [
+        { codec: Codec.DEFLATE_RAW, bytes: deflate(block, level) },
+        { codec: Codec.ZSTD, bytes: zstdPack(block) },
+    ].sort((a, b)=>a.bytes.length - b.bytes.length);
+
+    const best = candidates[0];
+    return best.bytes.length <= block.length * (1 - MIN_SAVING)
+        ? best
         : { codec: Codec.STORED, bytes: block };
 }
 
@@ -139,6 +167,8 @@ export function unpackBlock(codec, bytes){
             return bytes;
         case Codec.DEFLATE_RAW:
             return inflate(bytes);
+        case Codec.ZSTD:
+            return zstdUnpack(bytes);
         default:
             throw new Error(`btl: unknown block codec ${codec}`);
     }
