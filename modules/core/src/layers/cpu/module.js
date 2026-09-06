@@ -5,6 +5,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createThunkTable } from './internal/thunks.js';
+import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
@@ -132,6 +133,59 @@ export const cpuModule = {
             /** @param {(id: number) => void} handler */
             onTrap(handler){
                 dispatch = handler;
+            },
+
+            /**
+             * Runs at most `maxInstructions` and reports how many were retired.
+             *
+             * This is the scheduler's unit of progress. It is bounded by guest
+             * instructions rather than wall clock, so the preemption point does
+             * not move with host speed. Granularity is one page: the JIT compiles
+             * per 4 KiB page and a slice runs to the end of the page it is in.
+             *
+             * @param {number} maxInstructions
+             * @returns {number}
+             */
+            runSlice(maxInstructions){
+                running = true;
+                return started().cpu().run_slice(maxInstructions) >>> 0;
+            },
+
+            /** @returns {any} the running thread's full CPU state */
+            captureContext: ()=>captureContext(started().cpu()),
+
+            /**
+             * Restores a thread, including the base of its TEB.
+             *
+             * The TEB address is a parameter rather than something the caller sets
+             * beforehand, so that resuming a thread without moving FS to that
+             * thread's TEB is not expressible (§12.5).
+             *
+             * @param {any} context
+             * @param {number} threadBase
+             */
+            restoreContext(context, threadBase){
+                setThreadBase(context, threadBase);
+                restoreContext(started().cpu(), context);
+            },
+
+            /**
+             * A context for a thread that has not run yet: the current CPU state
+             * as a template -- segments, control words and the rest of the process
+             * environment -- positioned at its own entry point and stack.
+             *
+             * @param {Object} options
+             * @param {number} options.entry
+             * @param {number} options.stackTop
+             * @returns {any}
+             */
+            newContext({ entry, stackTop }){
+                const context = captureContext(started().cpu());
+                context.eip = entry;
+                context.reg32[4] = stackTop; // ESP
+                context.reg32[5] = stackTop; // EBP
+                context.inHlt = 0;
+                return context;
             },
 
             instructionCount: ()=>started().instructionCount(),
