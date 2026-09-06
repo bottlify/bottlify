@@ -110,24 +110,25 @@ export const cpuModule = {
             writeReg32: (name, value)=>started().writeReg32(name, value),
 
             /**
-             * Registers a host implementation and returns the guest address that
-             * reaches it. Stubs are laid out contiguously, so the table has to be
-             * written into guest memory once every function is registered.
+             * Takes a stub slot and returns the trap id it raises together with
+             * the guest address that raises it. Stubs are laid out contiguously,
+             * so the table has to be written into guest memory once every
+             * function is registered.
+             *
+             * What the id means is not this layer's business -- it emits the
+             * stub and reports the number.
              *
              * @param {string} name
-             * @param {number} argBytes
-             * @param {Function} handler
-             * @returns {number}
+             * @param {number} popBytes
+             * @returns {{ id: number, address: number }}
              */
-            registerTrap(name, argBytes, handler){
+            registerTrap(name, popBytes){
                 started();
-                return thunks.register(name, argBytes, handler);
+                return thunks.register(name, popBytes);
             },
 
             /** @returns {Uint8Array} the stub table, to be written at layout.thunkBase */
             thunkImage: ()=>started() && thunks.image(),
-            /** @param {number} id */
-            lookupTrap: id=>thunks.lookup(id),
             /** Where a terminating call returns to instead of into its caller. */
             parkAddress: ()=>thunks.parkAddress,
 

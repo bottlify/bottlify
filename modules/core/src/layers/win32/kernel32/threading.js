@@ -28,14 +28,14 @@ const WAIT_FAILED = 0xffffffff;
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {() => any} currentThread
- * @property {(thread: any) => void} park       Stops a thread where it stands.
+ * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
  */
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
  *
- * `argBytes` is what the stub pops on return; every one of these is stdcall, so
- * the callee cleans up and a wrong count corrupts the guest's stack silently.
+ * `argBytes` is the size of the argument list the guest compiled against; every
+ * one of these is stdcall, the bridge's default, so none of them says so.
  *
  * @param {ThreadingHost} host
  */
@@ -62,20 +62,14 @@ export function createThreadingFunctions(host){
     };
 
     /**
-     * Applies a wait's outcome. When the object was not available the thread is
-     * parked and the result is delivered on its next turn instead.
+     * Applies a wait's outcome. When the object was not available there is no
+     * outcome yet, so the caller is parked and the token that says so is what
+     * goes back -- the real result reaches the thread when it next runs.
      *
      * @param {number | null} result
-     * @returns {number}
+     * @returns {number | any}
      */
-    const settle = result=>{
-        if (result === null)
-        {
-            host.park(host.currentThread());
-            return 0; // ignored: the thread is not going to read EAX yet
-        }
-        return result;
-    };
+    const settle = result=>result === null ? host.park() : result;
 
     return {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
@@ -199,8 +193,7 @@ export function createThreadingFunctions(host){
                 // follows still has to happen to the thread that called.
                 const thread = host.currentThread();
                 kernel.exitThread(thread, code >>> 0);
-                host.park(thread);
-                return 0;
+                return host.park(thread);
             },
         },
 

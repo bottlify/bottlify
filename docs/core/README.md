@@ -94,8 +94,10 @@ keeps the dependency graph cleaner for non-React consumers.
 | `cpu` | real. Boots the guest with our own ROM instead of a BIOS, straight into 32-bit protected mode; runs, stops, registers, physical memory, and the I/O-port trap channel the guest calls out through. |
 | `memory` | real. Region map (overlap-checked, permissioned, `protect()`) plus typed accessors; every host access to guest memory goes through it. |
 | `loader` | real. Maps a PE32 image, applies relocations, binds imports, registers the region it occupies. |
-| `win32` | minimal. `GetStdHandle`, `WriteFile`, `ExitProcess` — enough for a console program to say something and exit. |
-| `log`, `kernel`, `bridge`, `filesystem`, `graphics`, `audio`, `input` | still stubs: every method throws `NOT_IMPLEMENTED` and `diagnostics()` reports `status: "stub"`. |
+| `kernel` | real. Threads with a stack and a context each, a round-robin scheduler whose quantum is counted in retired guest instructions, one context-switch primitive, events/mutexes/semaphores, the handle table, and a virtual clock. |
+| `bridge` | real. The trap channel's host half: a call is marshalled by its calling convention (stdcall, cdecl, thiscall), invoked, and its result placed — or the caller is parked and says so with a token nothing else can produce. |
+| `win32` | minimal. `GetStdHandle`, `WriteFile`, `ExitProcess`, and the threading and synchronisation entry points a multithreaded program calls. |
+| `log`, `filesystem`, `graphics`, `audio`, `input` | still stubs: every method throws `NOT_IMPLEMENTED` and `diagnostics()` reports `status: "stub"`. |
 
 A stub is a valid state, not a gap to route around: a build without a layer comes up and reports
 itself. Implementing one means replacing its `module.js` behind the same `name`/`requires` contract —
@@ -103,11 +105,15 @@ the registry, host scoping and boundary checker do not change.
 
 Known limitations worth stating plainly:
 
-- **Single-threaded.** No scheduler, no preemption, no context switching. The instruction-counted
-  quantum that the design calls for belongs to the `kernel` layer and is not here yet.
-- **One call shape.** A guest call traps, is handled synchronously, and returns. Callbacks into the
-  guest and asynchronous parking are the `bridge` layer's job and are deliberately absent rather than
-  half-built.
+- **No callbacks into the guest.** A guest call traps, is handled, and either returns or parks the
+  caller. The other direction — host code calling a guest routine and waiting for its result — is
+  the next step in the `bridge` layer and is deliberately absent rather than half-built.
+- **Waits are untimed.** `WaitForSingleObject` implements `INFINITE` and a zero timeout; anything
+  else is refused loudly, because a timeout that never expires produces a program that looks fine
+  until it hangs. Timed waits need the clock to drive expiry.
+- **The preemption point is one page wide.** A slice is bounded by retired instructions, but the
+  emulator compiles per 4 KiB page and a hot loop inside one compiled block runs to the end of that
+  block regardless of the quantum asked for.
 - **Relocations are untested against a real image.** The code path exists and is covered for the
   refusal case, but the current fixture has no `.reloc`, so the `delta != 0` path has never run on a
   real binary.

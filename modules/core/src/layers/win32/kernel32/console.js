@@ -29,13 +29,15 @@ export const HANDLE_STDERR = 3;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(handle: number, text: string) => void} write   Where guest output goes.
  * @property {(code: number) => void} exit                    Ends the process.
+ * @property {() => any} park                 Stops the caller; returns the parked token.
  */
 
 /**
  * Builds the function table: name → { argBytes, handler }.
  *
- * `argBytes` is what the stub pops on return. All three are stdcall, so the
- * callee cleans up: one argument is 4 bytes, five are 20.
+ * `argBytes` is the size of the argument list the guest compiled against: one
+ * argument is 4 bytes, five are 20. All three are stdcall, which is the bridge's
+ * default, so none of them says so.
  *
  * @param {ConsoleHost} host
  */
@@ -87,7 +89,9 @@ export function createConsoleFunctions(host){
             /** @param {number[]} args */
             handler: ([code])=>{
                 host.exit(code >>> 0);
-                return 0;
+                // It does not return, so there is no value to return: the stub's
+                // own `ret` is redirected to the park loop instead.
+                return host.park();
             },
         },
     };

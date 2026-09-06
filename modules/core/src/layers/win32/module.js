@@ -17,13 +17,11 @@ import { createThreadingFunctions } from './kernel32/threading.js';
  * The module exposes a table of `name -> { argBytes, handler }` rather than
  * registering anything itself: it does not know how a guest call reaches the
  * host, and should not. Whoever assembles the process binds this table to the
- * cpu layer's trap channel.
+ * bridge.
  */
 
 /** @type {Record<string, { argBytes: number, handler: Function }>} */
 let functions = {};
-/** @type {string[]} */
-let called = [];
 /** @type {number | null} */
 let exitCode = null;
 
@@ -47,8 +45,8 @@ export const win32Module = {
     async create(config, host){
         const memory = host.requireApi('memory');
         const kernel = host.requireApi('kernel');
+        const bridge = host.requireApi('bridge');
         exitCode = null;
-        called = [];
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
@@ -61,12 +59,13 @@ export const win32Module = {
                 exit: code=>{
                     exitCode = code;
                 },
+                park: ()=>bridge.park(),
             }),
             ...createThreadingFunctions({
                 kernel,
                 readMemory: (address, length)=>memory.readBytes(address, length),
                 currentThread: ()=>kernel.currentThread(),
-                park: thread=>kernel.parkThread(thread),
+                park: thread=>bridge.park(thread),
             }),
         };
 
@@ -82,25 +81,10 @@ export const win32Module = {
              * @param {string} name
              * @returns {{ argBytes: number, handler: Function } | null}
              */
-            resolve(name){
-                const fn = functions[name];
-                if (!fn)
-                {
-                    return null;
-                }
-                return {
-                    argBytes: fn.argBytes,
-                    /** @param {number[]} args */
-                    handler: args=>{
-                        called.push(name);
-                        return fn.handler(args);
-                    },
-                };
-            },
+            resolve: name=>functions[name] ?? null,
 
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,
-            calls: ()=>[...called],
         };
     },
 
@@ -112,7 +96,6 @@ export const win32Module = {
             status: Object.keys(functions).length > 0 ? 'ready' : 'created',
             metrics: {
                 implemented: Object.keys(functions),
-                calls: called.length,
                 exitCode,
             },
         };
@@ -120,7 +103,6 @@ export const win32Module = {
 
     async dispose(){
         functions = {};
-        called = [];
         exitCode = null;
     },
 };

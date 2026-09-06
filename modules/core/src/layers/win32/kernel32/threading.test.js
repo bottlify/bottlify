@@ -92,6 +92,9 @@ function fakeKernel(){
     return kernel;
 }
 
+/** Stands in for the bridge's parked token: identity is all that matters. */
+const PARKED = Object.freeze({ parked: true });
+
 function setup(){
     const kernel = fakeKernel();
     const current = { name: 'caller' };
@@ -101,7 +104,10 @@ function setup(){
         kernel,
         readMemory: ()=>new Uint8Array(0),
         currentThread: ()=>current,
-        park: thread=>parked.push(thread),
+        park: thread=>{
+            parked.push(thread ?? current);
+            return PARKED;
+        },
     });
     return { kernel, fns, parked, current };
 }
@@ -142,10 +148,12 @@ test('a wait that blocks parks the thread instead of returning', ()=>{
     kernel.state.waitBlocks = true;
     const handle = fns.CreateEventA.handler([0, 0, 0, 0]);
 
-    fns.WaitForSingleObject.handler([handle, 0xffffffff]);
+    const result = fns.WaitForSingleObject.handler([handle, 0xffffffff]);
 
     assert.deepEqual(parked, [current],
         'the thread stops where it stands; its result arrives on its next turn');
+    assert.equal(result, PARKED,
+        'what comes back is the token parking produced, not a stand-in value');
 });
 
 test('a bad handle is a return code, not a crash', ()=>{
@@ -180,10 +188,11 @@ test('a mutex created with initial ownership is taken by its creator', ()=>{
 test('ExitThread ends the thread and parks it', ()=>{
     const { kernel, fns, parked, current } = setup();
 
-    fns.ExitThread.handler([7]);
+    const result = fns.ExitThread.handler([7]);
 
     assert.deepEqual(kernel.state.exited, [{ thread: current, code: 7 }]);
     assert.deepEqual(parked, [current], 'it must not run on after ending');
+    assert.equal(result, PARKED, 'a call that does not return has no value to return');
 });
 
 test('every function declares the stack it pops', ()=>{

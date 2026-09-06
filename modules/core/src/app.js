@@ -11,8 +11,8 @@ import { assembleModules } from './core.js';
  *
  * Everything below it is the module graph; this is the one place that wires the
  * cross-cutting step the graph deliberately does not express. An executable's
- * imports have to become guest addresses that trap into win32, but win32 does
- * not know how a guest call reaches the host and cpu does not know what win32
+ * imports have to become guest addresses that call into win32, but win32 does
+ * not know what a guest call looks like and the bridge does not know what win32
  * implements. Neither should. Assembling a process is what knows both.
  */
 
@@ -50,6 +50,7 @@ export async function createApp(options){
     const kernel = core.api('kernel');
     const loader = core.api('loader');
     const win32 = core.api('win32');
+    const bridge = core.api('bridge');
 
     await cpu.boot(options.v86);
 
@@ -73,7 +74,7 @@ export async function createApp(options){
             {
                 return null;
             }
-            return cpu.registerTrap(`${dll}!${name}`, fn.argBytes, fn.handler);
+            return bridge.register(`${dll}!${name}`, fn);
         },
     });
 
@@ -103,33 +104,6 @@ export async function createApp(options){
      * @type {{ gate: Promise<void>, open: () => void } | null}
      */
     let paused = null;
-
-    cpu.onTrap((/** @type {number} */ id)=>{
-        const entry = cpu.lookupTrap(id);
-        if (!entry)
-        {
-            throw new Error(`trap ${id} has no handler`);
-        }
-
-        // At the OUT, ESP still points at the return address the CALL pushed, so
-        // argument N sits just above it.
-        const esp = cpu.readReg32('esp');
-        const args = [];
-        for (let i = 0; i < entry.argBytes / 4; i++)
-        {
-            args.push(memory.readU32(esp + 4 + i * 4) | 0);
-        }
-
-        cpu.writeReg32('eax', entry.handler(args) >>> 0);
-
-        // A handler that ended the process parks the calling thread too: its
-        // stub still has a `ret` to execute, and there is nothing left to
-        // return to.
-        if (win32.exitCode() !== null)
-        {
-            kernel.parkThread(kernel.currentThread());
-        }
-    });
 
     return {
         /** Where the program was mapped and where it starts. */
