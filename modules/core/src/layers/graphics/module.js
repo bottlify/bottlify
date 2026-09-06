@@ -6,6 +6,7 @@
 
 import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
+import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
 
 /**
@@ -75,6 +76,8 @@ export const graphicsModule = {
                 screenHeight: services.screen.height,
                 ...options,
             }),
+            /** @returns {any} */
+            d3d8: (/** @type {any} */ caps)=>createDirect3D8(caps),
             /** @returns {any} */
             d3d9: (/** @type {any} */ caps)=>createDirect3D9(caps),
         };

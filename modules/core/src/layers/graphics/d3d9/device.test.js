@@ -404,11 +404,14 @@ test('the automatic depth stencil counts like the other implicit surfaces', ()=>
 
 test('a device created without one has no depth stencil to hand back', ()=>{
     const device = createDevice({ parameters: { enableAutoDepthStencil: false } });
+    // Seeded with something live, because that is the case the behaviour is
+    // about: a program reuses the variable it last got a surface in, and tests
+    // the pointer rather than the HRESULT.
     /** @type {{ surface?: any }} */
     const out = { surface: UNTOUCHED };
 
     assert.notEqual(device.GetDepthStencilSurface(out), D3D_OK);
-    assert.equal(out.surface, UNTOUCHED);
+    assert.equal(out.surface, null, 'the failure clears the caller\'s pointer');
 
     assertFullyReleased(device);
 });

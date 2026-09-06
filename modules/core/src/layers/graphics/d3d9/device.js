@@ -613,6 +613,11 @@ function createDeviceObject(parameters, caps){
         GetDepthStencilSurface(out){
             if (!depthStencil)
             {
+                // The caller's pointer is cleared, not left alone. Programs pass
+                // a variable that already holds a live surface and then test it
+                // rather than the HRESULT, so leaving it stale hands them a
+                // pointer they go on to release.
+                out.surface = null;
                 return D3DERR_NOTFOUND;
             }
             depthStencil.addRef();
