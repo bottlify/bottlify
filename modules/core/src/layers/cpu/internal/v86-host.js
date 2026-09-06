@@ -103,6 +103,14 @@ export async function createV86Host(config){
             cpu.reg32[index] = value | 0;
         },
 
+        /**
+         * The emulator's CPU object, for code inside this layer that works with
+         * the raw state -- context capture and restore. It must not travel any
+         * further: the layer boundary exists so that only this directory knows
+         * what the emulator underneath is.
+         */
+        cpu: ()=>cpu,
+
         /** @returns {number} guest EIP */
         eip: ()=>cpu.instruction_pointer[0] >>> 0,
 

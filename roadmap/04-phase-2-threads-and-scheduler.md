@@ -28,7 +28,8 @@ Grounded in the vendored v86 rather than recalled: every field named here was lo
 | x87 tag word | is `fpu_stack_empty` — there is no separate field | `fpu_set_tag_word` writes nothing else: it decodes the tag word into one bit per register in `fpu_stack_empty`, and `fpu_load_tag_word` reconstructs it. Saving the eight registers without it saves half the state |
 | MMX aliases x87 | the same storage, and MMX rewrites the tag state constantly | MMX registers live in `fpu_st[r].mantissa`, and every MMX instruction calls `transition_fpu_to_mmx()` = `fpu_set_tag_word(0)` + `fpu_stack_ptr = 0` — 65 call sites in `instructions_0f.rs`. So a preempted MMX thread has already zeroed exactly what an x87 thread needs back |
 | EFLAGS | saved through `get_eflags()`, restored with the lazy-flag machinery reset | v86 computes arithmetic flags lazily: `flags_changed` plus `last_op1`/`last_result`/`last_op_size`. The raw flags word is stale while `flags_changed` is non-zero, so saving it directly saves garbage |
-| quantum | measured in **retired instructions**, never wall-clock | `instruction_counter` is exact and already used in Phase 1 assertions. A wall-clock quantum makes the preemption point a function of host speed, and the same program then breaks on one machine and works on another |
+| quantum | measured in **retired instructions**, never wall-clock — **and the mechanism has to be built first** | Measured, not assumed: today JS has one entry point, `main_loop()`, whose slice is bounded by wall clock (`TIME_PER_FRAME = 1.0 ms`) and quantised by `LOOP_COUNTER = 100_003`, both compile-time constants. Delivered per call: median 200 004 for a loop, 411 822 for straight-line code, one call at 16.8 ms. That is exactly the shape §12.2 forbids, so the fork patch is a prerequisite for the scheduler rather than a contingency (§3, P2.3) |
+| blocking | park on `hlt`, never a bare `JMP $` | Measured: a guest parked on `hlt; jmp back` retires 18 instructions in a second of wall clock, because `do_many_cycles_native` exits on `in_hlt` and `main_loop` returns early. A bare jump is ordinary code and would burn the whole slice |
 | switch points | exactly **one** primitive; every path routes through it | Two switch primitives drift apart, and then the FS base follows the thread on one path and not the other. Updating `segment_offsets[4]` is part of the primitive, not a duty of its callers (§12.5) |
 | thread creation | never switches to the new thread | §12.4: the creator has not finished setting up shared state yet. The new thread is scheduled at the next quantum or an explicit yield |
 | blocked threads | park on the existing park loop (`hlt`, jump back) | Phase 1 already writes that stub and uses it for process exit. A blocked thread must not be handed the CPU only to spin |
@@ -80,18 +81,37 @@ than by check.
 **Done when:** a test asserts the FS base follows the resumed thread, and a switch to the current
 thread leaves the CPU untouched.
 
-### P2.3 — the instruction-counted quantum
+### P2.3 — the instruction-counted quantum (fork patch first)
 
-The scheduler preempts on retired instructions. Two tests, and the second is the one that matters:
-one that the declared quantum is used, and one that **measures the quantum actually delivered** and
-fails if it exceeds its budget by more than the agreed factor.
+Measured before planning: the mechanism does not exist yet. `main_loop()` is the only way into
+execution from JS, and it runs chunks until either `LOOP_COUNTER` (100 003) instructions or
+`TIME_PER_FRAME` (1.0 ms) of wall clock — both compile-time constants. Delivered per call: median
+200 004 for a tight loop, 411 822 for straight-line code, with one call observed at 16.8 ms because
+the wall-clock check happens only between chunks. Disabling the JIT moved the median to 400 008, so
+the figure tracks execution characteristics rather than any instruction budget.
 
-A declared quantum is not a delivered one: if the preemption check cannot fire inside a long compiled
-block, the real interval can be many times the requested one, and it gets *worse* on a faster host,
-because a faster host executes more of that block per unit of time. A thread that has to run often —
-an audio mixer is the obvious case — then runs too rarely, and the symptom appears on the more
-powerful machine. Whether v86 can interrupt inside a compiled block is an open question (§6) and may
-need a patch to our fork.
+So the patch is a prerequisite, in two parts, and the second is the one that is easy to skip:
+
+1. **A runtime slice bound and a way to drive one slice.** `do_many_cycles_native` compares against
+   the `LOOP_COUNTER` constant; make the bound a runtime value and export a slice runner that takes
+   a maximum and returns the instructions actually retired. That gives the scheduler an
+   instruction-counted quantum without `main_loop`'s wall-clock loop.
+2. **The in-block check is compiled in.** The JIT emits the loop-safety comparison against the same
+   constant, so a block containing a hot inner loop still runs up to 100 003 iterations regardless of
+   any runtime limit. Making a small quantum real means emitting a load from a global instead, and
+   flushing the code cache when that global changes.
+
+After part 1 alone the residual overshoot is one block execution — bounded for straight-line code,
+but up to the old constant for any block with an internal loop.
+
+Two tests, and the second is the one that matters: that the declared quantum is used, and that the
+quantum **actually delivered** stays within its budget. Write the second one first and expect it to
+fail, since today it measures 200k-400k against whatever is requested.
+
+`JIT_USE_LOOP_SAFETY` can be turned off entirely through the existing JIT config; that removes the
+in-block check and makes overshoot unbounded, so it is a knob pointing the wrong way.
+`MAX_EXTRA_BASIC_BLOCKS` bounds block merging and is worth measuring alongside the patch as a way to
+shrink straight-line blocks without touching codegen.
 
 **Done when:** actual quantum is measured in CI, not assumed, and a regression fails the build.
 
@@ -164,11 +184,9 @@ code — not adapted from anyone else's tree.
 
 ## 6. Open questions
 
-- **Can v86 be preempted inside a compiled block?** This decides whether an instruction-counted
-  quantum is honoured or merely declared, and it is the single highest-risk unknown in the phase.
-  Answer it with a spike before P2.3: run a long block and measure the delivered quantum against the
-  requested one. If the answer is no, the fix is a patch to our fork — a candidate to upstream, and
-  exactly the kind of change §8.1 of the Master Plan anticipates living in the cpu layer.
+- ~~Can v86 be preempted inside a compiled block?~~ **Answered by measurement** (see P2.3): not from
+  JS today, and not inside a block at all without changing what the JIT emits. The work is now a
+  planned step rather than an unknown.
 - **Where does the TEB live?** It needs an address-space home and a region kind; the memory layer's
   map should describe it like everything else rather than it being a magic address.
 - **Does the scheduler own virtual time, or does the cpu layer?** Time is credited during traps,

@@ -19,7 +19,8 @@
     "test": "npm run test -w @bottlify/core",
     "test:integration": "npm run test:integration -w @bottlify/core",
     "check:boundaries": "npm run check:boundaries -w @bottlify/core",
-    "cdp:probe": "node tools/cdp_test/cli.mjs probe"
+    "cdp:probe": "node tools/cdp_test/cli.mjs probe",
+    "ui": "node ui/server.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
