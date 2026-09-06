@@ -191,6 +191,33 @@ The WGL↔GDI seam is the interesting part; the rest is a well-trodden API.
 
 Only if something needs it.
 
+### P5.8 — Direct3D 10, after the engine works
+
+Not on the critical path, and deliberately last. The two target titles are Direct3D 8 and 9 titles
+with OpenGL alternatives; neither calls this API, so implementing it ahead of them would be tidiness
+rather than progress.
+
+Its specification and its contract tests are written early anyway, because that work is cheap, it
+does not rot, and it means the implementation later starts from a settled contract instead of a
+blank page.
+
+Worth recording why this API is the odd one out, since it changes what the work will be. Everything
+before it is a fixed-function pipeline: hundreds of individually settable render states, and the
+difficulty is mapping that onto a modern backend at all. Direct3D 10 removed the fixed function
+entirely — shaders are mandatory, and those hundreds of states became four immutable state objects
+created up front and bound as units, with resources described once and views as separate objects.
+That is the shape WebGPU already has. So this is expected to be the *easiest* of the graphics APIs
+to implement well, and several entries in the pitfall register stop applying to it outright.
+
+## 4a. What decides the order
+
+The order above is not by API age or by tidiness. It is by what the two target titles call:
+Warcraft III and World of Warcraft 1.12.1. An API neither of them uses waits until they run.
+
+That is not a per-game crutch and does not weaken rule 4. Which generic layers to build first is a
+question the targets are entitled to answer; branching on a game's name *inside* a layer remains
+forbidden, and nothing here licenses it.
+
 ## 5. What each stream is given, and what it may not touch
 
 - One directory. Nothing outside it, ever — the assembling stream wires the backend, the module
