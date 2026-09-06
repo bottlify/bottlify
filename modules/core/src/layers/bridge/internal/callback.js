@@ -1,0 +1,188 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * Calling the guest back.
+ *
+ * A host function that takes a function pointer -- a comparator, a window
+ * procedure, an enumeration callback -- has to run guest code and use its
+ * answer. It cannot simply call it: the handler runs inside the emulator's own
+ * loop, and the emulator cannot be re-entered from within it.
+ *
+ * So the call happens the way §12.3 describes, pointed the other way. The
+ * calling thread is stopped where it stands, a frame for the callback is built
+ * below where its stack comes to rest, and the thread is sent to the callback
+ * with a return address that traps. When that trap fires the answer is in EAX,
+ * the thread is stopped again, and the host function -- suspended on a promise
+ * all this while -- carries on.
+ *
+ * Both stacks here are per thread and both are stacks rather than single slots,
+ * because either kind of call can nest: a callback may trap into another host
+ * function, and that one may call the guest back in turn.
+ */
+
+/**
+ * @param {Object} deps
+ * @param {any} deps.cpu
+ * @param {any} deps.kernel
+ * @param {any} deps.memory
+ * @param {(name: string, popBytes: number, options?: object) => { id: number, address: number }}
+ *        deps.reserveTrap
+ */
+export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
+    /** The stub every guest callback returns to. Taken on first use, once. */
+    /** @type {number | null} */
+    let sentinelId = null;
+    let sentinelAddress = 0;
+    let calls = 0;
+    let deepest = 0;
+
+    /** @param {any} thread */
+    const callbackFrames = thread=>(thread.callbackFrames ??= []);
+    /** @param {any} thread */
+    const hostCalls = thread=>(thread.hostCalls ??= []);
+
+    /**
+     * Where a thread's stack is while it is stopped: inside the innermost
+     * callback frame if it is in one, otherwise where the host call that
+     * suspended it left the stack.
+     *
+     * @param {any} thread
+     * @returns {number | undefined}
+     */
+    function restingStack(thread){
+        const frames = callbackFrames(thread);
+        if (frames.length > 0)
+        {
+            return frames[frames.length - 1].frameBase;
+        }
+        const suspended = hostCalls(thread);
+        return suspended.length > 0 ? suspended[suspended.length - 1].restingStack : undefined;
+    }
+
+    return {
+        /**
+         * Takes the sentinel's slot in the stub table.
+         *
+         * Called before the first ordinary registration rather than on first
+         * use: the table is written into guest memory once, after everything is
+         * registered, so a slot taken later exists only on the host side and the
+         * address a callback returns to holds no code at all.
+         */
+        reserve(){
+            if (sentinelId === null)
+            {
+                // Reached by the callback's own `ret`, so the answer is in EAX
+                // and the stub has to put it somewhere before using EAX itself.
+                const taken = reserveTrap('<callback-return>', 0, { preserveResult: true });
+                sentinelId = taken.id;
+                sentinelAddress = taken.address;
+            }
+        },
+
+        /** @returns {number | null} the trap id the sentinel raises, once taken */
+        sentinel: ()=>sentinelId,
+
+        /**
+         * Records that a host call has suspended, and where the thread it
+         * suspended will pick up its own code again.
+         *
+         * @param {any} thread
+         * @param {Object} call
+         * @param {number} call.restingStack
+         * @param {number} call.hostReturn
+         */
+        suspended(thread, call){
+            hostCalls(thread).push(call);
+        },
+
+        /**
+         * Starts a call into guest code and returns its result.
+         *
+         * @param {Object} call
+         * @param {any} call.thread
+         * @param {number} call.entry            Guest address of the routine.
+         * @param {number[]} [call.args]
+         * @param {number} [call.stackAtRest]    Where the stack is, when nothing else knows.
+         * @returns {Promise<number>}
+         */
+        call({ thread, entry, args = [], stackAtRest }){
+            if (!thread)
+            {
+                throw new Error('bridge: a guest callback needs a thread to run on');
+            }
+            if (sentinelId === null)
+            {
+                throw new Error('bridge: the callback sentinel was never reserved');
+            }
+
+            const resting = restingStack(thread) ?? stackAtRest;
+            if (resting === undefined)
+            {
+                throw new Error('bridge: a guest callback must know where the thread\'s stack is');
+            }
+
+            // The frame the callback will find: its return address at the top,
+            // its arguments above that. Built below everything already in use,
+            // so an outer frame is still intact when this one unwinds.
+            const frameBase = resting - 4 * (args.length + 1);
+            memory.writeU32(frameBase, sentinelAddress);
+            args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
+
+            const frames = callbackFrames(thread);
+            calls++;
+            deepest = Math.max(deepest, frames.length + 1);
+
+            /** @type {(value: number) => void} */
+            let settle = ()=>{};
+            const answer = new Promise(resolve=>{
+                settle = resolve;
+            });
+            frames.push({ frameBase, settle });
+
+            kernel.scheduleResume(thread, { eip: entry, esp: frameBase });
+            return answer;
+        },
+
+        /**
+         * A callback has just returned; the stub moved its answer to ECX.
+         *
+         * @param {any} thread
+         * @returns {boolean} whether this thread was in a callback at all
+         */
+        returned(thread){
+            const frame = callbackFrames(thread).pop();
+            if (!frame)
+            {
+                return false;
+            }
+            frame.settle(cpu.readReg32('ecx') | 0);
+            return true;
+        },
+
+        /**
+         * A host call has produced its answer: the thread goes back to its own
+         * code, with the stack it had before any of this started.
+         *
+         * @param {any} thread
+         * @param {number} returnValue
+         */
+        finish(thread, returnValue){
+            const call = hostCalls(thread).pop();
+            if (!call)
+            {
+                throw new Error('bridge: a host call finished that was never suspended');
+            }
+            kernel.scheduleResume(thread, {
+                eip: call.hostReturn,
+                esp: call.restingStack,
+                returnValue,
+            });
+        },
+
+        diagnostics: ()=>({ callbacks: calls, deepestCallback: deepest }),
+    };
+}

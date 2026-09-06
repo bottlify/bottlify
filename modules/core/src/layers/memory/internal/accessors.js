@@ -34,7 +34,13 @@ export function createAccessors({ raw, regions }){
      */
     const read = (address, length)=>{
         regions.assert(address, length, 'read');
-        return raw.readPhysical(address, length);
+        // A copy, not a window. The emulator hands back a subarray of its own
+        // memory, and a caller that holds one has a value that changes under it
+        // -- read two ranges, write one, and the other has silently moved. The
+        // shape of that bug is a wrong result with nothing to point at. A hot
+        // path that genuinely wants the window can ask for one explicitly, once
+        // there is a measurement saying the copy costs something.
+        return raw.readPhysical(address, length).slice();
     };
 
     /**

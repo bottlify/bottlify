@@ -77,7 +77,7 @@ const u32 = value=>[
  * address resolved.
  *
  * @param {Object} options
- * @param {string[]} options.imports  KERNEL32 functions the program calls.
+ * @param {Record<string, string[]>} options.imports  Functions called, by DLL.
  * @param {Record<string, number[]>} [options.data]  Named blobs placed after the code.
  * @param {number} [options.codeSize]  Bytes reserved for the code.
  * @param {(ctx: {
@@ -91,6 +91,11 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     const text = new Buf();
     const rva = (/** @type {number} */ offset)=>SECTION_RVA + offset;
     const va = (/** @type {number} */ offset)=>IMAGE_BASE + rva(offset);
+
+    // One descriptor per DLL, each with its own lookup and address tables --
+    // which is how a real program imports, and the only way to say that two
+    // functions come from different libraries.
+    const modules = Object.entries(imports).map(([dll, names])=>({ dll, names }));
 
     let cursor = codeSize;
 
@@ -106,34 +111,44 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
     /** @type {Record<string, number>} */
     const nameOffsets = {};
-    for (const name of imports)
+    for (const module of modules)
     {
+        for (const name of module.names)
+        {
+            cursor = (cursor + 1) & ~1;
+            nameOffsets[name] = cursor;
+            cursor += 2 + name.length + 1;
+        }
         cursor = (cursor + 1) & ~1;
-        nameOffsets[name] = cursor;
-        cursor += 2 + name.length + 1;
+        module.dllNameOffset = cursor;
+        cursor += module.dll.length + 1;
     }
-    cursor = (cursor + 1) & ~1;
-    const dllNameOffset = cursor;
-    cursor += 'KERNEL32.dll'.length + 1;
 
     // Import lookup table and import address table: parallel arrays of RVAs.
+    for (const module of modules)
+    {
+        cursor = (cursor + 3) & ~3;
+        module.iltOffset = cursor;
+        cursor += (module.names.length + 1) * 4;
+        module.iatOffset = cursor;
+        cursor += (module.names.length + 1) * 4;
+    }
     cursor = (cursor + 3) & ~3;
-    const iltOffset = cursor;
-    cursor += (imports.length + 1) * 4;
-    const iatOffset = cursor;
-    cursor += (imports.length + 1) * 4;
     const descriptorOffset = cursor;
-    cursor += 2 * 20; // one descriptor plus the null terminator
+    cursor += (modules.length + 1) * 20; // one per DLL plus the null terminator
     const sectionSize = cursor;
 
     /** @param {string} name */
     const iatEntryVa = name=>{
-        const index = imports.indexOf(name);
-        if (index === -1)
+        for (const module of modules)
         {
-            throw new Error(`${name} is called but not imported`);
+            const index = module.names.indexOf(name);
+            if (index !== -1)
+            {
+                return va(module.iatOffset + index * 4);
+            }
         }
-        return va(iatOffset + index * 4);
+        throw new Error(`${name} is called but not imported`);
     };
 
     // --- code ---
@@ -159,26 +174,37 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     {
         text.pad(dataOffsets[name]).push(...bytes);
     }
-    for (const name of imports)
+    for (const module of modules)
     {
-        text.pad(nameOffsets[name]).u16(0).ascii(name).u8(0);
+        for (const name of module.names)
+        {
+            text.pad(nameOffsets[name]).u16(0).ascii(name).u8(0);
+        }
+        text.pad(module.dllNameOffset).ascii(module.dll).u8(0);
     }
-    text.pad(dllNameOffset).ascii('KERNEL32.dll').u8(0);
 
-    text.pad(iltOffset);
-    for (const name of imports)
+    for (const module of modules)
     {
-        text.u32(rva(nameOffsets[name]));
+        // The two tables are identical on disk; the loader overwrites the
+        // address table in place while the lookup table keeps the names.
+        for (const offset of [module.iltOffset, module.iatOffset])
+        {
+            text.pad(offset);
+            for (const name of module.names)
+            {
+                text.u32(rva(nameOffsets[name]));
+            }
+            text.u32(0);
+        }
     }
-    text.u32(0);
-    for (const name of imports)
-    {
-        text.u32(rva(nameOffsets[name]));
-    }
-    text.u32(0);
 
     text.pad(descriptorOffset);
-    text.u32(rva(iltOffset)).u32(0).u32(0).u32(rva(dllNameOffset)).u32(rva(iatOffset));
+    for (const module of modules)
+    {
+        text.u32(rva(module.iltOffset)).u32(0).u32(0)
+            .u32(rva(module.dllNameOffset)).u32(rva(module.iatOffset));
+    }
+    text.u32(0).u32(0).u32(0).u32(0).u32(0);
     text.pad(sectionSize);
 
     const rawSize = Math.ceil(sectionSize / FILE_ALIGNMENT) * FILE_ALIGNMENT;
@@ -219,8 +245,14 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     head.u32(0).u32(16); // loader flags, number of data directories
 
     const directories = new Array(16).fill(null).map(()=>[0, 0]);
-    directories[1] = [rva(descriptorOffset), 40]; // import table
-    directories[12] = [rva(iatOffset), (imports.length + 1) * 4]; // IAT
+    directories[1] = [rva(descriptorOffset), (modules.length + 1) * 20]; // import table
+    // The IAT directory spans every module's address table; they were laid out
+    // consecutively, so the first one's start and the last one's end bound it.
+    const last = modules[modules.length - 1];
+    directories[12] = [
+        rva(modules[0].iatOffset),
+        last.iatOffset + (last.names.length + 1) * 4 - modules[0].iatOffset,
+    ];
     for (const [address, size] of directories)
     {
         head.u32(address).u32(size);
@@ -246,7 +278,7 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
  */
 export function buildHelloExe(message = 'Hello from Bottlify\r\n'){
     return buildExe({
-        imports: ['GetStdHandle', 'WriteFile', 'ExitProcess'],
+        imports: { 'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'] },
         data: {
             message: [...message].map(c=>c.charCodeAt(0)),
             written: [0, 0, 0, 0], // WriteFile's out-parameter
@@ -263,6 +295,81 @@ export function buildHelloExe(message = 'Hello from Bottlify\r\n'){
             0x6a, 0x00, //                       push 0            (uExitCode)
             0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
+    });
+}
+
+/** The array the callback fixture sorts, and what it must become. */
+export const QSORT_INPUT = [7, 3, 9, 1, 8, 2];
+
+/**
+ * A program that hands the C runtime a comparator of its own and lets it be
+ * called back.
+ *
+ * `qsort` is the smallest honest test of a call in the other direction: the
+ * ordering is decided by guest code, the host cannot proceed without it, and
+ * it happens many times for one host call. The comparator is compiled as cdecl
+ * -- it subtracts the two integers it is pointed at -- so a bridge that gets
+ * the convention or the frame wrong sorts by nonsense rather than failing.
+ *
+ * @returns {Uint8Array}
+ */
+export function buildQsortExe(){
+    // The comparator sits at a fixed offset inside the code budget, so its
+    // address is known before the body that passes it is emitted.
+    const COMPARE_OFFSET = 0x80;
+
+    return buildExe({
+        imports: {
+            'msvcrt.dll': ['qsort'],
+            'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'],
+        },
+        codeSize: 0x100,
+        data: {
+            values: QSORT_INPUT.flatMap(value=>[value, 0, 0, 0]),
+            written: [0, 0, 0, 0],
+        },
+        code: ({ iat, at, code })=>{
+            const main = [
+                // qsort(values, 6, 4, compare) -- cdecl, so the caller cleans up
+                0x68, ...u32(code(COMPARE_OFFSET)), //   push compare
+                0x6a, 0x04, //                           push 4  (element width)
+                0x6a, QSORT_INPUT.length, //             push 6  (element count)
+                0x68, ...u32(at('values')), //           push values
+                0xff, 0x15, ...u32(iat('qsort')),
+                0x83, 0xc4, 0x10, //                     add esp, 16
+
+                // WriteFile(GetStdHandle(-11), values, 24, &written, NULL)
+                0x6a, 0xf5,
+                0xff, 0x15, ...u32(iat('GetStdHandle')),
+                0x6a, 0x00,
+                0x68, ...u32(at('written')),
+                0x6a, QSORT_INPUT.length * 4,
+                0x68, ...u32(at('values')),
+                0x50,
+                0xff, 0x15, ...u32(iat('WriteFile')),
+
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+
+            const compare = [
+                0x8b, 0x44, 0x24, 0x04, //               mov eax, [esp+4]   (a)
+                0x8b, 0x4c, 0x24, 0x08, //               mov ecx, [esp+8]   (b)
+                0x8b, 0x00, //                           mov eax, [eax]
+                0x2b, 0x01, //                           sub eax, [ecx]
+                0xc3, //                                 ret
+            ];
+
+            if (main.length > COMPARE_OFFSET)
+            {
+                throw new Error('the body runs into the comparator');
+            }
+            return [
+                ...main,
+                ...new Array(COMPARE_OFFSET - main.length).fill(0xcc),
+                ...compare,
+            ];
+        },
     });
 }
 
@@ -285,10 +392,12 @@ export const THREAD_WORKERS = 2;
  * @returns {Uint8Array}
  */
 export function buildThreadsExe(){
-    const imports = [
-        'CreateMutexA', 'CreateEventA', 'CreateThread', 'WaitForSingleObject',
-        'ReleaseMutex', 'SetEvent', 'ExitThread', 'GetStdHandle', 'WriteFile', 'ExitProcess',
-    ];
+    const imports = {
+        'KERNEL32.dll': [
+            'CreateMutexA', 'CreateEventA', 'CreateThread', 'WaitForSingleObject',
+            'ReleaseMutex', 'SetEvent', 'ExitThread', 'GetStdHandle', 'WriteFile', 'ExitProcess',
+        ],
+    };
 
     // The worker body sits at a fixed offset inside the code budget, so its
     // address is known before the main body that starts it is emitted.
@@ -413,7 +522,13 @@ export function buildThreadsExe(){
 const [, , output, kind = 'hello'] = process.argv;
 if (output)
 {
-    const image = kind === 'threads' ? buildThreadsExe() : buildHelloExe();
+    /** @type {Record<string, () => Uint8Array>} */
+    const kinds = { hello: buildHelloExe, threads: buildThreadsExe, qsort: buildQsortExe };
+    if (!(kind in kinds))
+    {
+        throw new Error(`unknown fixture "${kind}"; know ${Object.keys(kinds).join(', ')}`);
+    }
+    const image = kinds[kind]();
     await writeFile(output, image);
     console.log(`${output}: ${image.length} bytes (${kind})`);
 }

@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { readArguments } from './conventions.js';
+import { calleeCleanup, readArguments } from './conventions.js';
 import { isParkedCall } from './parking.js';
 
 /**
@@ -30,8 +30,10 @@ import { isParkedCall } from './parking.js';
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
+ * @param {(answer: Promise<number>, frame: any) => void} [deps.suspend]
+ *        What to do with a handler that has not finished; wired by the module.
  */
-export function createDispatcher({ cpu, memory, parking }){
+export function createDispatcher({ cpu, memory, parking, suspend }){
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /** @type {string[]} */
@@ -66,8 +68,9 @@ export function createDispatcher({ cpu, memory, parking }){
                 throw new Error(`bridge: trap ${id} has no implementation`);
             }
 
+            const esp = cpu.readReg32('esp');
             const args = readArguments(fn.convention, fn.argBytes, {
-                esp: cpu.readReg32('esp'),
+                esp,
                 ecx: cpu.readReg32('ecx'),
                 read32: (/** @type {number} */ address)=>memory.readU32(address),
             });
@@ -75,7 +78,20 @@ export function createDispatcher({ cpu, memory, parking }){
             calls++;
             called.push(fn.name);
 
-            parking.beginCall();
+            // Everything the handler might need about where it was called from,
+            // read before it runs: a handler that calls the guest back writes
+            // into the stack, and by then some of this is no longer there to
+            // read. `freeStack` is what is safe to write below *now*, while the
+            // return address at ESP is still live; `restingStack` is where the
+            // stack will be once the stub has returned.
+            const frame = {
+                name: fn.name,
+                freeStack: esp,
+                restingStack: esp + 4 + calleeCleanup(fn.convention, fn.argBytes),
+                hostReturn: memory.readU32(esp),
+            };
+
+            parking.beginCall(frame);
             let result;
             try
             {
@@ -89,10 +105,20 @@ export function createDispatcher({ cpu, memory, parking }){
             // A parked call's EAX belongs to whatever wakes the thread, and it
             // carries the wait's own result. Writing a placeholder here would
             // overwrite the answer before the guest ever sees it.
-            if (!isParkedCall(result))
+            if (isParkedCall(result))
             {
-                cpu.writeReg32('eax', result >>> 0);
+                return;
             }
+            if (typeof result?.then === 'function')
+            {
+                if (!suspend)
+                {
+                    throw new Error(`bridge: ${fn.name} answered asynchronously with nowhere to wait`);
+                }
+                suspend(result, frame);
+                return;
+            }
+            cpu.writeReg32('eax', result >>> 0);
         },
 
         diagnostics: ()=>({

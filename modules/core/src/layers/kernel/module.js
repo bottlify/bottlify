@@ -113,12 +113,27 @@ export const kernelModule = {
             },
 
             /**
-             * Stops the running thread where it stands.
+             * Stops the running thread where it stands, and says where its stub
+             * would have returned to.
              *
-             * Its stub is about to execute a `ret`, so the return address on the
-             * stack is put aside and replaced with the park loop: the loop is a
-             * parking slot, not code to resume into. The saved address is where
-             * the thread continues when it next gets a turn.
+             * The stub is about to execute a `ret`, so the return address on the
+             * stack is replaced with the park loop: the loop is a parking slot,
+             * not code to resume into. Where the thread goes instead is the
+             * caller's decision, and this returns what it needs to make it.
+             *
+             * @returns {number} the address the stub was going to return to
+             */
+            holdThread(){
+                const esp = cpu.readReg32('esp');
+                const returnAddress = memory.readU32(esp);
+                memory.writeU32(esp, cpu.parkAddress());
+                return returnAddress;
+            },
+
+            /**
+             * Stops the running thread and arranges for it to carry on exactly
+             * where it left off -- what a blocking wait and a terminating call
+             * both want.
              *
              * @param {any} thread
              */
@@ -126,6 +141,25 @@ export const kernelModule = {
                 const esp = cpu.readReg32('esp');
                 thread.parkedReturn = memory.readU32(esp);
                 memory.writeU32(esp, cpu.parkAddress());
+            },
+
+            /**
+             * Says where a stopped thread continues when it next gets a turn.
+             *
+             * Applied inside the switch rather than here (§12.5): a saved
+             * context rewritten anywhere else would be ignored for the thread
+             * that is still on the CPU.
+             *
+             * @param {any} thread
+             * @param {Object} where
+             * @param {number} where.eip
+             * @param {number} [where.esp]           For a thread being sent somewhere new.
+             * @param {number} [where.returnValue]
+             */
+            scheduleResume(thread, { eip, esp, returnValue = 0 }){
+                thread.parkedReturn = eip;
+                thread.resumeStack = esp ?? null;
+                thread.waitResult = returnValue;
             },
             currentThread: ()=>scheduler.current(),
             threads: ()=>scheduler.all(),

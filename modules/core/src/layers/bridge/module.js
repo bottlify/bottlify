@@ -7,6 +7,7 @@
 import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
 import { createDispatcher } from './internal/dispatch.js';
+import { createCallbacks } from './internal/callback.js';
 
 /**
  * bridge — the boundary a call crosses in either direction.
@@ -22,6 +23,10 @@ import { createDispatcher } from './internal/dispatch.js';
 let dispatcher = null;
 /** @type {any} */
 let parking = null;
+/** @type {any} */
+let callbacks = null;
+/** @type {Error | null} */
+let failure = null;
 
 export const bridgeModule = {
     name: 'bridge',
@@ -41,12 +46,62 @@ export const bridgeModule = {
         const kernel = host.requireApi('kernel');
         const memory = host.requireApi('memory');
 
+        failure = null;
         parking = createParking({ kernel });
-        dispatcher = createDispatcher({ cpu, memory, parking });
+
+        /**
+         * @param {string} name
+         * @param {number} popBytes
+         * @param {object} [options]
+         */
+        const reserveTrap = (name, popBytes, options)=>
+            cpu.registerTrap(name, popBytes, options);
+
+        callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
+
+        /**
+         * A handler that has not finished: the thread is stopped, and told where
+         * to pick up its own code once the answer arrives.
+         *
+         * @param {Promise<number>} answer
+         * @param {any} frame
+         */
+        const suspend = (answer, frame)=>{
+            const thread = kernel.currentThread();
+            // Where it returns to was read before the handler ran: a handler
+            // that called the guest back has since written over that part of
+            // the stack, so reading it now would find an argument.
+            kernel.holdThread();
+            callbacks.suspended(thread, {
+                restingStack: frame.restingStack,
+                hostReturn: frame.hostReturn,
+            });
+            answer.then(
+                value=>callbacks.finish(thread, value | 0),
+                // Nothing above is waiting on this promise, so a handler that
+                // throws would otherwise vanish and leave the guest parked
+                // forever. Whoever is driving the machine asks for this.
+                (/** @type {Error} */ error)=>{
+                    failure ??= error;
+                });
+        };
+
+        dispatcher = createDispatcher({ cpu, memory, parking, suspend });
 
         // Claimed here rather than by whoever assembles the process: a trap that
         // reached anything but the bridge would be a call nobody marshalled.
-        cpu.onTrap((/** @type {number} */ id)=>dispatcher.dispatch(id));
+        cpu.onTrap((/** @type {number} */ id)=>{
+            if (id === callbacks.sentinel())
+            {
+                // A guest callback has returned. Stop the thread before reading
+                // its answer: the sentinel stub is about to `ret` into whatever
+                // the callback left on the stack, which is not code.
+                kernel.holdThread();
+                callbacks.returned(kernel.currentThread());
+                return;
+            }
+            dispatcher.dispatch(id);
+        });
 
         return {
             Convention,
@@ -62,6 +117,9 @@ export const bridgeModule = {
              * @returns {number} the guest address that calls it
              */
             register(name, { convention = Convention.STDCALL, argBytes, handler }){
+                // Before the first import, so the slot a callback returns to is
+                // in the table that gets written into guest memory.
+                callbacks.reserve();
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes));
                 dispatcher.register(id, { name, convention, argBytes, handler });
@@ -76,6 +134,35 @@ export const bridgeModule = {
              */
             park: thread=>parking.park(thread),
 
+            /**
+             * Calls a guest routine and resolves with what it returned.
+             *
+             * Only legal while a guest call is in flight: a thread has to be
+             * stopped somewhere known before a frame can be built below it.
+             * A handler that awaits this must return the promise, so the
+             * dispatcher knows there is no answer yet.
+             *
+             * @param {Object} call
+             * @param {number} call.entry
+             * @param {number[]} [call.args]
+             * @returns {Promise<number>}
+             */
+            callGuest({ entry, args = [] }){
+                const frame = parking.current();
+                return callbacks.call({
+                    thread: kernel.currentThread(),
+                    entry,
+                    args,
+                    stackAtRest: frame ? frame.freeStack : undefined,
+                });
+            },
+
+            /**
+             * An error thrown by a suspended handler, which nothing above was
+             * waiting on. Null unless one happened.
+             */
+            failure: ()=>failure,
+
             /** @param {number} id */
             dispatch: id=>dispatcher.dispatch(id),
             calls: ()=>dispatcher.calls(),
@@ -89,7 +176,12 @@ export const bridgeModule = {
             version: '0.1.0',
             status: dispatcher ? 'ready' : 'created',
             metrics: dispatcher
-                ? { ...dispatcher.diagnostics(), ...parking.diagnostics() }
+                ? {
+                    ...dispatcher.diagnostics(),
+                    ...parking.diagnostics(),
+                    ...callbacks.diagnostics(),
+                    failure: failure ? failure.message : null,
+                }
                 : {},
         };
     },
@@ -97,5 +189,7 @@ export const bridgeModule = {
     async dispose(){
         dispatcher = null;
         parking = null;
+        callbacks = null;
+        failure = null;
     },
 };

@@ -30,13 +30,19 @@ export const STUB_SIZE = 16;
  * @param {number} options.trapId
  * @param {number} options.port      I/O port the host listens on.
  * @param {number} options.popBytes  Stack bytes the callee pops; 0 when the caller cleans up.
+ * @param {boolean} [options.preserveResult]  Keep whatever EAX held on entry, in ECX.
  * @returns {Uint8Array}
  */
-export function buildStub({ trapId, port, popBytes }){
+export function buildStub({ trapId, port, popBytes, preserveResult = false }){
     const u16 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff];
     const u32 = (/** @type {number} */ v)=>[...u16(v), v >>> 16 & 0xff, v >>> 24 & 0xff];
 
     const bytes = [
+        // A stub reached by a `ret` is being handed a return value, and EAX is
+        // both where that value is and where the trap id has to go. Moving it
+        // aside first costs two bytes; ECX is caller-saved under every
+        // convention here, so nothing was counting on it either.
+        ...preserveResult ? [0x89, 0xc1] : [], // mov ecx, eax
         0x66, 0xba, ...u16(port), // mov dx, port
         0xb8, ...u32(trapId), //     mov eax, trapId
         0xef, //                     out dx, eax   -> host handles it, leaves the result in EAX
@@ -54,7 +60,12 @@ export function buildStub({ trapId, port, popBytes }){
  * @param {number} options.port
  */
 export function createThunkTable({ base, port }){
-    /** @type {{ id: number, name: string, popBytes: number, address: number }[]} */
+    /**
+     * @type {{
+     *   id: number, name: string, popBytes: number,
+     *   address: number, preserveResult?: boolean,
+     * }[]}
+     */
     const entries = [];
 
     // Slot 0 is never dispatched: it holds the park loop. A handler that ends the
@@ -77,12 +88,14 @@ export function createThunkTable({ base, port }){
          *
          * @param {string} name       For diagnostics: which import this is.
          * @param {number} popBytes   Stack bytes the callee pops.
+         * @param {Object} [options]
+         * @param {boolean} [options.preserveResult]
          * @returns {{ id: number, address: number }}
          */
-        register(name, popBytes){
+        register(name, popBytes, { preserveResult = false } = {}){
             const id = entries.length;
             const address = base + id * STUB_SIZE;
-            entries.push({ id, name, popBytes, address });
+            entries.push({ id, name, popBytes, address, preserveResult });
             return { id, address };
         },
 
@@ -93,7 +106,12 @@ export function createThunkTable({ base, port }){
             bytes.set([0xf4, 0xeb, 0xfd], 0);
             for (const entry of entries.slice(1)){
                 bytes.set(
-                    buildStub({ trapId: entry.id, port, popBytes: entry.popBytes }),
+                    buildStub({
+                        trapId: entry.id,
+                        port,
+                        popBytes: entry.popBytes,
+                        preserveResult: entry.preserveResult,
+                    }),
                     entry.id * STUB_SIZE);
             }
             return bytes;

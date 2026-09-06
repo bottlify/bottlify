@@ -40,6 +40,8 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
+ * @property {(entry: number, args: number[]) => Promise<number>} callGuest
+ *            Runs a guest routine and resolves with what it returned.
  */
 
 /**
@@ -351,6 +353,48 @@ export function createMsvcrtFunctions(host){
                 const text = render(args, 1);
                 host.write(HANDLE_STDOUT, text);
                 return text.length;
+            },
+        },
+
+        /**
+         * void qsort(void *base, size_t num, size_t width, int (*cmp)(const void*, const void*))
+         *
+         * The first function here that runs guest code: the comparator belongs
+         * to the program, and every ordering decision is its to make. So the
+         * handler is asynchronous, and each comparison suspends it while the
+         * guest runs -- which is exactly what the bridge's callbacks are for.
+         *
+         * Insertion sort, and deliberately so. The elements are swapped in guest
+         * memory as they move, so the comparator always sees the array as it
+         * actually is at that moment, and the addresses it is handed are the
+         * real ones. Sorting a copy and writing it back would be quicker and
+         * would lie to any comparator that looks at anything but its two
+         * arguments. It is quadratic in comparisons, which is worth revisiting
+         * when something sorts more than a screenful.
+         */
+        qsort: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: async([base, num, width, comparator])=>{
+                const count = num >>> 0;
+                const size = width >>> 0;
+                for (let index = 1; index < count; index++)
+                {
+                    for (let at = index; at > 0; at--)
+                    {
+                        const left = base + (at - 1) * size;
+                        const right = base + at * size;
+                        if (await host.callGuest(comparator, [left, right]) <= 0)
+                        {
+                            break;
+                        }
+                        const first = host.readMemory(left, size);
+                        host.writeMemory(left, host.readMemory(right, size));
+                        host.writeMemory(right, first);
+                    }
+                }
+                return 0; // void: the guest reads nothing back
             },
         },
 

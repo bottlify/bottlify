@@ -11,12 +11,15 @@ import { createMsvcrtFunctions } from './functions.js';
 /**
  * A stand-in for guest memory, with the same contract as the real one.
  *
- * `readMemory` hands back a view rather than a copy on purpose: that is the
- * harsher of the two contracts a memory layer may offer, and an implementation
- * that is correct against it is correct against a copying one too.
+ * `readMemory` hands back a copy, which is the contract the memory layer
+ * actually offers: a read is a snapshot, so a caller that reads two ranges and
+ * then writes one still holds what the other said. A fake that is harsher than
+ * the real thing invents bugs instead of finding them.
  */
 function fakeHost(size = 0x1000){
     const bytes = new Uint8Array(size);
+    /** @type {Map<number, (args: number[]) => number>} */
+    const guests = new Map();
     /** @type {{ handle: number, text: string }[]} */
     const output = [];
 
@@ -24,7 +27,7 @@ function fakeHost(size = 0x1000){
         bytes,
         output,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /**
          * Written a byte at a time, ascending, which is what a store into guest
          * memory amounts to: a caller that hands over a view of the range it is
@@ -53,6 +56,15 @@ function fakeHost(size = 0x1000){
         },
         /** @param {number} handle @param {string} text */
         write: (handle, text)=>output.push({ handle, text }),
+
+        /**
+         * Stands in for the bridge: the guest routine is a host function here,
+         * so a test can say what the program's own code would have decided.
+         *
+         * @param {number} entry @param {number[]} args
+         */
+        callGuest: (entry, args)=>Promise.resolve(guests.get(entry)?.(args) ?? 0),
+        guests,
     };
 }
 
@@ -335,4 +347,46 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
     // it arrives as the tail of the marshalled arguments.
     assert.equal(fns.printf.argBytes, 4);
     assert.equal(fns.sprintf.argBytes, 8);
+});
+
+test('qsort orders through the comparator the program brought', async()=>{
+    const { host, fns } = setup();
+    const base = 0x100;
+    const values = [7, 3, 9, 1, 8, 2];
+    values.forEach((value, index)=>host.writeMemory(base + index * 4, new Uint8Array([
+        value, 0, 0, 0,
+    ])));
+
+    // The comparator is the program's, so the ordering is its decision and not
+    // ours: this one sorts descending, and the result has to follow it rather
+    // than what a sort would "normally" do.
+    /** @type {number[][]} */
+    const asked = [];
+    const read = (/** @type {number} */ at)=>host.bytes[at];
+    host.guests.set(0x9000, ([left, right])=>{
+        asked.push([left, right]);
+        return read(right) - read(left);
+    });
+
+    await fns.qsort.handler([base, values.length, 4, 0x9000]);
+
+    const sorted = values.map((_, index)=>read(base + index * 4));
+    assert.deepEqual(sorted, [9, 8, 7, 3, 2, 1]);
+    assert.ok(asked.length >= values.length - 1, 'it really asked, repeatedly');
+    // Every comparison is handed real addresses inside the array, not indices.
+    for (const [left, right] of asked)
+    {
+        assert.ok(left >= base && left < base + values.length * 4);
+        assert.equal(right - left, 4, 'adjacent elements, one width apart');
+    }
+});
+
+test('qsort of nothing asks nothing', async()=>{
+    const { host, fns } = setup();
+    host.guests.set(0x9000, ()=>{
+        throw new Error('a comparator was called for an empty array');
+    });
+
+    assert.equal(await fns.qsort.handler([0x100, 0, 4, 0x9000]), 0);
+    assert.equal(await fns.qsort.handler([0x100, 1, 4, 0x9000]), 0);
 });

@@ -120,11 +120,13 @@ export const cpuModule = {
              *
              * @param {string} name
              * @param {number} popBytes
+             * @param {Object} [options]
+             * @param {boolean} [options.preserveResult]  For a stub reached by a `ret`.
              * @returns {{ id: number, address: number }}
              */
-            registerTrap(name, popBytes){
+            registerTrap(name, popBytes, options){
                 started();
-                return thunks.register(name, popBytes);
+                return thunks.register(name, popBytes, options);
             },
 
             /** @returns {Uint8Array} the stub table, to be written at layout.thunkBase */
@@ -165,14 +167,24 @@ export const cpuModule = {
              * because the loop is a parking slot, not code the thread should
              * resume into. This puts it back on the road.
              *
+             * A stack pointer comes with it when the thread is being sent
+             * somewhere it has not been -- into a guest callback, whose frame the
+             * host built below where the thread stopped. A wait resumes on its
+             * own stack and leaves it alone.
+             *
              * @param {any} context
              * @param {Object} options
              * @param {number} options.eip
              * @param {number} options.returnValue
+             * @param {number | null} [options.esp]
              */
-            resumeContextAt(context, { eip, returnValue }){
+            resumeContextAt(context, { eip, returnValue, esp = null }){
                 context.eip = eip;
                 context.reg32[0] = returnValue | 0; // EAX
+                if (esp !== null)
+                {
+                    context.reg32[4] = esp | 0; // ESP
+                }
                 context.inHlt = 0;
             },
 

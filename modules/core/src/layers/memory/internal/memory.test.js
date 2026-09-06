@@ -131,6 +131,20 @@ test('accessors refuse what the region map refuses', ()=>{
     assert.deepEqual([...raw.bytes.slice(0x1000, 0x1004)], [0, 0, 0, 0]);
 });
 
+test('a read is a snapshot, not a window onto guest memory', ()=>{
+    const raw = fakeMemory();
+    const accessors = createAccessors({ raw, regions: mapWithCode() });
+    accessors.writeBytes(0x2000, new Uint8Array([1, 2, 3, 4]));
+
+    const before = accessors.readBytes(0x2000, 4);
+    accessors.writeBytes(0x2000, new Uint8Array([9, 9, 9, 9]));
+
+    // The emulator hands back a subarray of its own memory. A caller holding
+    // one has a value that changes under it -- read two ranges, write one, and
+    // the other has silently moved, which is how a swap turns into a copy.
+    assert.deepEqual([...before], [1, 2, 3, 4]);
+});
+
 test('C strings are read up to the NUL, and a missing one is an error', ()=>{
     const raw = fakeMemory();
     const accessors = createAccessors({ raw, regions: mapWithCode() });

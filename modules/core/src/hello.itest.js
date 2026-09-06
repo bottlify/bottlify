@@ -70,7 +70,8 @@ test('diagnostics describe the run afterwards', async()=>{
 
     assert.equal(byName.cpu.metrics.protectedMode, true, 'the ROM switched the CPU over');
     assert.ok(byName.cpu.metrics.instructions > 0);
-    assert.equal(byName.cpu.metrics.traps, 4, 'park slot plus the three imports');
+    assert.equal(byName.cpu.metrics.traps, 5,
+        'the park slot, the callback sentinel, and the three imports');
 
     for (const fn of ['GetStdHandle', 'WriteFile', 'ExitProcess'])
     {

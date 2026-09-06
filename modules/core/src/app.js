@@ -128,6 +128,18 @@ export async function createApp(options){
                     await paused.gate;
                 }
 
+                // One yield per turn, so a host function suspended on a guest
+                // callback can make progress between them. Without it the loop
+                // never returns to the event loop on its normal path and such a
+                // handler would be resumed exactly never.
+                await Promise.resolve();
+
+                const failure = bridge.failure();
+                if (failure)
+                {
+                    throw failure;
+                }
+
                 const code = win32.exitCode();
                 if (code !== null)
                 {

@@ -73,6 +73,7 @@ export const win32Module = {
                 writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
                 readCString: (address, maxLength)=>memory.readCString(address, maxLength),
                 write: (handle, text)=>sink(handle, text),
+                callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
             }),
         };
 

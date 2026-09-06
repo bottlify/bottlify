@@ -16,6 +16,10 @@
  * hands one out is `park()`, which parks for real before it does. So "returned
  * an asynchronous result without parking" is not something a handler can say --
  * not because a rule forbids it, but because there is no value to say it with.
+ *
+ * The same object also holds what is known about the call currently in flight,
+ * because both parking and calling the guest back need it and neither should
+ * have to be told twice.
  */
 
 /** The one instance. Compared by identity, never by shape. */
@@ -30,23 +34,35 @@ export function isParkedCall(value){
 }
 
 /**
+ * @typedef {Object} CallFrame
+ * @property {string} name
+ * @property {number} freeStack     Below this is free to write while the stub still holds ESP.
+ * @property {number} restingStack  Where the stack will be once the stub has returned.
+ * @property {number} hostReturn    Where the stub was going to return to.
+ */
+
+/**
  * @param {Object} deps
  * @param {any} deps.kernel  The kernel layer's API.
  */
 export function createParking({ kernel }){
-    // Parking rewrites the return address on the stack, which is only where the
-    // parker thinks it is while a stub's trap is being handled. Depth rather
-    // than a flag, because a handler may end up dispatching another call.
-    let depth = 0;
+    // Depth rather than a flag: a guest callback can trap into another host
+    // function, and that one is as much in flight as its caller.
+    /** @type {CallFrame[]} */
+    const inFlight = [];
     let parked = 0;
 
     return {
-        beginCall(){
-            depth++;
+        /** @param {CallFrame} frame */
+        beginCall(frame){
+            inFlight.push(frame);
         },
         endCall(){
-            depth--;
+            inFlight.pop();
         },
+
+        /** @returns {CallFrame | null} the call being handled right now */
+        current: ()=>inFlight.length > 0 ? inFlight[inFlight.length - 1] : null,
 
         /**
          * Parks a thread and returns the token that says so.
@@ -55,7 +71,7 @@ export function createParking({ kernel }){
          * @returns {Readonly<{ parked: true }>}
          */
         park(thread){
-            if (depth === 0)
+            if (inFlight.length === 0)
             {
                 throw new Error('bridge: park() is only meaningful while a guest call is in flight');
             }
