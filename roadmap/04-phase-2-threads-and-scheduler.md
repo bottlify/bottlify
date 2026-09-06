@@ -101,8 +101,23 @@ So the patch is a prerequisite, in two parts, and the second is the one that is 
    any runtime limit. Making a small quantum real means emitting a load from a global instead, and
    flushing the code cache when that global changes.
 
-After part 1 alone the residual overshoot is one block execution — bounded for straight-line code,
-but up to the old constant for any block with an internal loop.
+**Part 1 is done and measured.** `run_slice(max)` is exported by our fork: it runs at most `max`
+instructions and returns how many it retired, driving guest instructions only and ending early on
+`in_hlt`. Against a real build:
+
+| guest shape | requested | delivered |
+|---|---|---|
+| straight-line | 100 / 1 000 / 5 000 / 20 000 | 4 096 / 4 096 / 8 192 / 20 480 |
+| tight loop in one block | any of the above | 100 002 |
+
+So the achievable granularity today is **one page**: the JIT compiles per 4 KiB page, and a slice
+rounds up to the end of the page it is in. A quantum below that is not obtainable, and a quantum
+above it is honoured to within one page — for straight-line code.
+
+A hot loop that fits in a single compiled block still runs to the in-block ceiling regardless, which
+is what part 2 is for. Both numbers are asserted in `cpu/internal/quantum.itest.js`, the second one
+deliberately encoding the current limitation so that fixing it makes the test fail and demand
+tightening.
 
 Two tests, and the second is the one that matters: that the declared quantum is used, and that the
 quantum **actually delivered** stays within its budget. Write the second one first and expect it to
