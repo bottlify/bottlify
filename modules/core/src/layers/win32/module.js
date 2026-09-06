@@ -6,6 +6,7 @@
 
 import { createConsoleFunctions } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
+import { createMsvcrtFunctions } from './msvcrt/functions.js';
 
 /**
  * win32 — the API surface the guest was compiled against.
@@ -66,6 +67,12 @@ export const win32Module = {
                 readMemory: (address, length)=>memory.readBytes(address, length),
                 currentThread: ()=>kernel.currentThread(),
                 park: thread=>bridge.park(thread),
+            }),
+            ...createMsvcrtFunctions({
+                readMemory: (address, length)=>memory.readBytes(address, length),
+                writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+                write: (handle, text)=>sink(handle, text),
             }),
         };
 
