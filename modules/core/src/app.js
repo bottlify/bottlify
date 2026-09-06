@@ -37,7 +37,75 @@ import { createBundleSource } from './layers/filesystem/internal/bundle/source.j
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
+ * @property {Object} [bundle.retry] How hard to try when that fetch fails.
+ * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
+ * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
+ * @property {number} [bundle.retry.maxDelayMs]   Ceiling for that. Default 10000.
  */
+
+/**
+ * A range fetch that survives the network going away for a moment.
+ *
+ * This belongs to the engine rather than to whoever supplies `fetch`, and the
+ * reason is a property of the format rather than a preference: a range of a
+ * bundle is immutable, so asking for it again is always safe and always yields
+ * the same bytes. Nothing else in the system can say that about a retry.
+ *
+ * A short read counts as a failure. A truncated range is the ordinary shape of
+ * a glitch -- a proxy closing a connection early answers with fewer bytes and
+ * no error at all -- and accepting it would put wrong bytes into a guest's file
+ * with nothing downstream in a position to notice.
+ *
+ * Each wait is jittered downwards. A stall usually strands many blocks at once,
+ * and an unjittered backoff would march them all at the same instant into the
+ * server that just failed.
+ *
+ * @param {any} deps
+ * @returns {(offset: number, length: number) => Promise<Uint8Array>}
+ */
+export function retryingFetch({ fetch, events, retry }){
+    const attempts = retry?.attempts ?? 6;
+    const baseDelayMs = retry?.baseDelayMs ?? 250;
+    const maxDelayMs = retry?.maxDelayMs ?? 10000;
+
+    return async(offset, length)=>{
+        /** @type {any} */
+        let failure = null;
+        for (let attempt = 1; attempt <= attempts; attempt++)
+        {
+            try
+            {
+                const bytes = await fetch(offset, length);
+                if (bytes.length !== length)
+                {
+                    throw new Error(
+                        `short read: ${bytes.length} of ${length} bytes`);
+                }
+                return bytes;
+            }
+            catch (e){
+                failure = e;
+                if (attempt === attempts)
+                {
+                    break;
+                }
+                const ceiling = Math.min(maxDelayMs, baseDelayMs * 2 ** (attempt - 1));
+                const delayMs = Math.round(ceiling * (0.5 + Math.random() * 0.5));
+                events.emit('bundle-retry', {
+                    offset, length, attempt, attempts, delayMs,
+                    reason: failure?.message ?? String(failure),
+                });
+                await new Promise(resolve=>setTimeout(resolve, delayMs));
+            }
+        }
+
+        const reason = failure?.message ?? String(failure);
+        events.emit('bundle-unavailable', { offset, length, attempts, reason });
+        throw new Error(
+            `bundle: ${length} bytes at ${offset} did not arrive in ${attempts} `
+            + `attempts: ${reason}`);
+    };
+}
 
 /**
  * Mounts a bundle as the read-only half of the volume.
@@ -56,7 +124,13 @@ async function mountBundle({ options, cpu, filesystem, events }){
     {
         return null;
     }
-    const fetchRange = options.bundle.fetch;
+    // Everything below fetches through this, the index included: the first
+    // range of the run is as exposed to a dropped connection as the last.
+    const fetchRange = retryingFetch({
+        fetch: options.bundle.fetch,
+        events,
+        retry: options.bundle.retry,
+    });
 
     /**
      * A block, turned back into bytes, without awaiting anything.
