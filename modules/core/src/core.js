@@ -3,9 +3,9 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { makeScopedHost } from "./system/host.js";
-import { ModuleRegistry } from "./system/registry.js";
-import { defaultModules } from "./layers/index.js";
+import { makeScopedHost } from './system/host.js';
+import { ModuleRegistry } from './system/registry.js';
+import { defaultModules } from './layers/index.js';
 
 /**
  * Builds a @bottlify/core instance from a configuration.
@@ -13,14 +13,14 @@ import { defaultModules } from "./layers/index.js";
  * @param {Record<string, unknown>} [config] Map `module name → boolean | object`. See system/config.js.
  * @returns {Promise<import("./system/contract.js").CoreInstance>}
  */
-export async function createBottlify(config = {}) {
+export async function createBottlify(config = {}){
     const registry = new ModuleRegistry(defaultModules());
     const plan = registry.resolve(config);
 
     /** @type {Map<string, import("./system/contract.js").ModuleApi>} */
     const apis = new Map();
 
-    for (const entry of plan) {
+    for (const entry of plan){
         const allowedNames = new Set([entry.name, ...entry.module.requires]);
         const host = makeScopedHost(entry.name, allowedNames, apis);
         const api = await entry.module.create(entry.config, host);
@@ -29,19 +29,19 @@ export async function createBottlify(config = {}) {
 
     /** @type {import("./system/contract.js").CoreInstance} */
     return {
-        modules: plan.map((entry) => entry.module),
-        api(name) {
+        modules: plan.map(entry=>entry.module),
+        api(name){
             const api = apis.get(name);
-            if (api === undefined) {
+            if (api === undefined){
                 throw new Error(`Module "${name}" is not part of this build`);
             }
             return api;
         },
-        diagnostics() {
-            return plan.map((entry) => entry.module.diagnostics());
+        diagnostics(){
+            return plan.map(entry=>entry.module.diagnostics());
         },
-        async dispose() {
-            for (const entry of [...plan].reverse()) {
+        async dispose(){
+            for (const entry of [...plan].reverse()){
                 await entry.module.dispose();
             }
         },

@@ -47,13 +47,13 @@ export const SEL_DATA32 = 0x10;
  * @param {number} access
  * @returns {number[]}
  */
-const flatDescriptor = (access) => [0xff, 0xff, 0x00, 0x00, 0x00, access, 0xcf, 0x00];
+const flatDescriptor = access=>[0xff, 0xff, 0x00, 0x00, 0x00, access, 0xcf, 0x00];
 
 /** @param {number} value @returns {number[]} little-endian dword */
-const u32 = (value) => [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff];
+const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
 
 /** @param {number} value @returns {number[]} little-endian word */
-const u16 = (value) => [value & 0xff, (value >>> 8) & 0xff];
+const u16 = value=>[value & 0xff, value >>> 8 & 0xff];
 
 /**
  * Builds the boot ROM image.
@@ -63,9 +63,9 @@ const u16 = (value) => [value & 0xff, (value >>> 8) & 0xff];
  * @param {number} options.initialStack Initial ESP for the guest.
  * @returns {Uint8Array} a ROM_SIZE image, ready to pass to v86 as its bios
  */
-export function buildBootRom({ entryVector, initialStack }) {
+export function buildBootRom({ entryVector, initialStack }){
     const rom = new Uint8Array(ROM_SIZE);
-    const put = (/** @type {number} */ offset, /** @type {number[]} */ bytes) => rom.set(bytes, offset);
+    const put = (/** @type {number} */ offset, /** @type {number[]} */ bytes)=>rom.set(bytes, offset);
 
     // GDT: null, flat 32-bit code, flat 32-bit data.
     put(OFF_GDT, [
@@ -98,7 +98,7 @@ export function buildBootRom({ entryVector, initialStack }) {
         0x8e, 0xd0,                // mov ss, ax
         0x8e, 0xe0,                // mov fs, ax
         0x8e, 0xe8,                // mov gs, ax
-        0xbc, ...u32(initialStack),// mov esp, initialStack
+        0xbc, ...u32(initialStack), // mov esp, initialStack
         0xff, 0x25, ...u32(entryVector), // jmp dword [entryVector]
     ]);
 

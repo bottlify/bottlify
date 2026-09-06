@@ -14,19 +14,20 @@
  * @param {string} moduleName
  * @returns {any}
  */
-export function createStubApi(moduleName) {
+export function createStubApi(moduleName){
     const marker = `[stub:${moduleName}]`;
     const proxy = new Proxy({ marker }, {
-        get(target, prop) {
-            if (prop === "marker") return target.marker;
-            if (prop === "then") return undefined; // keep the stub a non-thenable
-            if (typeof prop === "symbol") return undefined;
-            const method = () => {
-                const error = /** @type {Error & { code: string }} */ (new Error(`NOT_IMPLEMENTED: ${moduleName}.${String(prop)}`));
-                error.code = "NOT_IMPLEMENTED";
+        get(target, prop){
+            if (prop === 'marker') return target.marker;
+            if (prop === 'then') return undefined; // keep the stub a non-thenable
+            if (typeof prop === 'symbol') return undefined;
+            const method = ()=>{
+                const error = /** @type {Error & { code: string }} */ (
+                    new Error(`NOT_IMPLEMENTED: ${moduleName}.${String(prop)}`));
+                error.code = 'NOT_IMPLEMENTED';
                 throw error;
             };
-            Object.defineProperty(method, "name", { value: `${moduleName}:${String(prop)}`, configurable: true });
+            Object.defineProperty(method, 'name', { value: `${moduleName}:${String(prop)}`, configurable: true });
             return method;
         },
     });
@@ -41,17 +42,17 @@ export function createStubApi(moduleName) {
  * @param {readonly string[]} [requires]
  * @returns {import("./contract.js").BottlifyModule}
  */
-export function createStubModule(name, version, requires = []) {
+export function createStubModule(name, version, requires = []){
     return Object.freeze({
         name,
         version,
         requires: Object.freeze([...requires]),
-        async create() {
+        async create(){
             return createStubApi(name);
         },
-        diagnostics() {
-            return { name, version, status: "stub", metrics: { methods: "any", code: "NOT_IMPLEMENTED" } };
+        diagnostics(){
+            return { name, version, status: 'stub', metrics: { methods: 'any', code: 'NOT_IMPLEMENTED' } };
         },
-        async dispose() {},
+        async dispose(){},
     });
 }

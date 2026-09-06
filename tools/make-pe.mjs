@@ -15,7 +15,7 @@
  * Usage: node tools/make-pe.mjs <output.exe> [message]
  */
 
-import { writeFile } from "node:fs/promises";
+import { writeFile } from 'node:fs/promises';
 
 const IMAGE_BASE = 0x400000;
 const SECTION_RVA = 0x1000;
@@ -24,39 +24,39 @@ const SECTION_ALIGNMENT = 0x1000;
 const HEADERS_SIZE = 0x200;
 
 /** Imports the fixture needs: just enough to write a line and exit. */
-const IMPORTS = ["GetStdHandle", "WriteFile", "ExitProcess"];
+const IMPORTS = ['GetStdHandle', 'WriteFile', 'ExitProcess'];
 
 class Buf {
-    constructor() {
+    constructor(){
         /** @type {number[]} */
         this.bytes = [];
     }
-    get length() {
+    get length(){
         return this.bytes.length;
     }
     /** @param {number[]} values */
-    push(...values) {
+    push(...values){
         this.bytes.push(...values);
         return this;
     }
     /** @param {number} value */
-    u8(value) {
+    u8(value){
         return this.push(value & 0xff);
     }
     /** @param {number} value */
-    u16(value) {
+    u16(value){
         return this.push(value & 0xff, (value >>> 8) & 0xff);
     }
     /** @param {number} value */
-    u32(value) {
+    u32(value){
         return this.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
     }
     /** @param {string} text */
-    ascii(text) {
-        return this.push(...[...text].map((c) => c.charCodeAt(0)));
+    ascii(text){
+        return this.push(...[...text].map(c=>c.charCodeAt(0)));
     }
     /** @param {number} size */
-    pad(size) {
+    pad(size){
         while (this.bytes.length < size) this.bytes.push(0);
         return this;
     }
@@ -68,15 +68,15 @@ class Buf {
  * @param {string} message text the program writes to stdout
  * @returns {Uint8Array}
  */
-export function buildHelloExe(message = "Hello from Bottlify\r\n") {
+export function buildHelloExe(message = 'Hello from Bottlify\r\n'){
     const text = new Buf();
 
     // Section layout is computed in two passes: reserve space for the code, lay
     // out the data that follows it, then emit the code now that the data's
     // addresses are known.
     const CODE_SIZE = 0x40;
-    const rva = (/** @type {number} */ offset) => SECTION_RVA + offset;
-    const va = (/** @type {number} */ offset) => IMAGE_BASE + rva(offset);
+    const rva = (/** @type {number} */ offset)=>SECTION_RVA + offset;
+    const va = (/** @type {number} */ offset)=>IMAGE_BASE + rva(offset);
 
     let cursor = CODE_SIZE;
     const msgOffset = cursor;
@@ -87,14 +87,14 @@ export function buildHelloExe(message = "Hello from Bottlify\r\n") {
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
     /** @type {Record<string, number>} */
     const nameOffsets = {};
-    for (const name of IMPORTS) {
+    for (const name of IMPORTS){
         cursor = (cursor + 1) & ~1;
         nameOffsets[name] = cursor;
         cursor += 2 + name.length + 1;
     }
     cursor = (cursor + 1) & ~1;
     const dllNameOffset = cursor;
-    cursor += "KERNEL32.dll".length + 1;
+    cursor += 'KERNEL32.dll'.length + 1;
 
     // Import lookup table and import address table: parallel arrays of RVAs.
     cursor = (cursor + 3) & ~3;
@@ -106,28 +106,28 @@ export function buildHelloExe(message = "Hello from Bottlify\r\n") {
     cursor += 2 * 20; // one descriptor plus the null terminator
     const sectionSize = cursor;
 
-    const iatEntryVa = (/** @type {string} */ name) => va(iatOffset + IMPORTS.indexOf(name) * 4);
+    const iatEntryVa = (/** @type {string} */ name)=>va(iatOffset + IMPORTS.indexOf(name) * 4);
 
     // --- code ---
     text.push(0x6a, 0xf5); // push -11 (STD_OUTPUT_HANDLE)
-    text.push(0xff, 0x15).u32(iatEntryVa("GetStdHandle")); // call [GetStdHandle]
+    text.push(0xff, 0x15).u32(iatEntryVa('GetStdHandle')); // call [GetStdHandle]
     text.push(0x6a, 0x00); // push 0                      (lpOverlapped)
     text.push(0x68).u32(va(writtenOffset)); // push &written (lpNumberOfBytesWritten)
     text.push(0x6a, message.length & 0xff); // push len    (nNumberOfBytesToWrite)
     text.push(0x68).u32(va(msgOffset)); // push message    (lpBuffer)
     text.push(0x50); // push eax                           (hFile, from GetStdHandle)
-    text.push(0xff, 0x15).u32(iatEntryVa("WriteFile")); // call [WriteFile]
+    text.push(0xff, 0x15).u32(iatEntryVa('WriteFile')); // call [WriteFile]
     text.push(0x6a, 0x00); // push 0                       (uExitCode)
-    text.push(0xff, 0x15).u32(iatEntryVa("ExitProcess")); // call [ExitProcess]
+    text.push(0xff, 0x15).u32(iatEntryVa('ExitProcess')); // call [ExitProcess]
     if (text.length > CODE_SIZE) throw new Error(`code overflowed its ${CODE_SIZE}-byte budget`);
     text.pad(CODE_SIZE);
 
     // --- data ---
     text.ascii(message).pad(writtenOffset).u32(0);
-    for (const name of IMPORTS) {
+    for (const name of IMPORTS){
         text.pad(nameOffsets[name]).u16(0).ascii(name).u8(0);
     }
-    text.pad(dllNameOffset).ascii("KERNEL32.dll").u8(0);
+    text.pad(dllNameOffset).ascii('KERNEL32.dll').u8(0);
 
     text.pad(iltOffset);
     for (const name of IMPORTS) text.u32(rva(nameOffsets[name]));
@@ -144,8 +144,8 @@ export function buildHelloExe(message = "Hello from Bottlify\r\n") {
 
     // --- headers ---
     const head = new Buf();
-    head.ascii("MZ").pad(0x3c).u32(0x40); // DOS header; e_lfanew -> PE header at 0x40
-    head.pad(0x40).ascii("PE").u8(0).u8(0);
+    head.ascii('MZ').pad(0x3c).u32(0x40); // DOS header; e_lfanew -> PE header at 0x40
+    head.pad(0x40).ascii('PE').u8(0).u8(0);
 
     // COFF header
     head.u16(0x014c); // i386
@@ -175,13 +175,13 @@ export function buildHelloExe(message = "Hello from Bottlify\r\n") {
     head.u32(0x100000).u32(0x1000); // heap reserve / commit
     head.u32(0).u32(16); // loader flags, number of data directories
 
-    const directories = new Array(16).fill(null).map(() => [0, 0]);
+    const directories = new Array(16).fill(null).map(()=>[0, 0]);
     directories[1] = [rva(descriptorOffset), 40]; // import table
     directories[12] = [rva(iatOffset), (IMPORTS.length + 1) * 4]; // IAT
     for (const [address, size] of directories) head.u32(address).u32(size);
 
     // Section header: one section holding code, data and the import tables.
-    head.ascii(".text").pad(head.length + 3); // name padded to 8 bytes
+    head.ascii('.text').pad(head.length + 3); // name padded to 8 bytes
     head.u32(sectionSize).u32(SECTION_RVA).u32(rawSize).u32(HEADERS_SIZE);
     head.u32(0).u32(0).u16(0).u16(0);
     head.u32(0xe0000020); // CODE | EXECUTE | READ | WRITE
@@ -191,7 +191,7 @@ export function buildHelloExe(message = "Hello from Bottlify\r\n") {
 }
 
 const [, , output, message] = process.argv;
-if (output) {
+if (output){
     const image = buildHelloExe(message ? `${message}\r\n` : undefined);
     await writeFile(output, image);
     console.log(`${output}: ${image.length} bytes`);

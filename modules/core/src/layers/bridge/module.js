@@ -3,7 +3,7 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { createStubModule } from "../../system/stub.js";
+import { createStubModule } from '../../system/stub.js';
 
 /** @type {import("../../system/contract.js").BottlifyModule} */
-export const bridgeModule = createStubModule("bridge", "0.0.0", ["cpu", "kernel", "log"]);
+export const bridgeModule = createStubModule('bridge', '0.0.0', ['cpu', 'kernel', 'log']);

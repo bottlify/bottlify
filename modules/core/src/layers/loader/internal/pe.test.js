@@ -8,76 +8,76 @@
  * assertions describe a genuine executable rather than our own idea of one.
  */
 
-import { test } from "node:test";
-import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { parsePe, readImports, rvaToFileOffset, applyRelocations } from "./pe.js";
-import { buildImage } from "./image.js";
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { parsePe, readImports, rvaToFileOffset, applyRelocations } from './pe.js';
+import { buildImage } from './image.js';
 
-const FIXTURE = new URL("../../../../test/fixtures/hello.exe", import.meta.url);
+const FIXTURE = new URL('../../../../test/fixtures/hello.exe', import.meta.url);
 const file = new Uint8Array(readFileSync(FIXTURE));
 
-test("headers of a real 32-bit console executable", () => {
+test('headers of a real 32-bit console executable', ()=>{
     const image = parsePe(file);
     assert.equal(image.imageBase, 0x400000);
-    assert.equal(image.subsystem, 3, "console subsystem");
+    assert.equal(image.subsystem, 3, 'console subsystem');
     assert.equal(image.sectionAlignment, 0x1000);
     assert.ok(image.entryPointRva > 0);
     assert.ok(image.sizeOfImage >= 0x2000);
     assert.equal(image.sections.length, 1);
-    assert.equal(image.sections[0].name, ".text");
-    assert.ok(image.sections[0].executable, "code section is executable");
+    assert.equal(image.sections[0].name, '.text');
+    assert.ok(image.sections[0].executable, 'code section is executable');
 });
 
-test("rejects images it cannot honestly load", () => {
-    assert.throws(() => parsePe(new Uint8Array(64)), /missing MZ/);
+test('rejects images it cannot honestly load', ()=>{
+    assert.throws(()=>parsePe(new Uint8Array(64)), /missing MZ/);
 
     const truncated = file.slice(0, 0x40);
-    assert.throws(() => parsePe(truncated), /missing PE signature/);
+    assert.throws(()=>parsePe(truncated), /missing PE signature/);
 
     const wrongMachine = file.slice();
     const peOffset = new DataView(wrongMachine.buffer).getUint32(0x3c, true);
     new DataView(wrongMachine.buffer).setUint16(peOffset + 4, 0x8664, true); // x86-64
-    assert.throws(() => parsePe(wrongMachine), /only i386/);
+    assert.throws(()=>parsePe(wrongMachine), /only i386/);
 });
 
-test("imports name the functions the program actually calls", () => {
+test('imports name the functions the program actually calls', ()=>{
     const image = parsePe(file);
     const imports = readImports(file, image);
 
     assert.equal(imports.length, 1);
-    assert.equal(imports[0].dll.toLowerCase(), "kernel32.dll");
+    assert.equal(imports[0].dll.toLowerCase(), 'kernel32.dll');
     assert.deepEqual(
-        imports[0].entries.map((entry) => entry.name),
-        ["GetStdHandle", "WriteFile", "ExitProcess"],
+        imports[0].entries.map(entry=>entry.name),
+        ['GetStdHandle', 'WriteFile', 'ExitProcess'],
     );
-    for (const entry of imports[0].entries) {
-        assert.equal(entry.ordinal, null, "imported by name, not ordinal");
-        assert.ok(entry.iatRva > 0, "each import has a slot to write into");
+    for (const entry of imports[0].entries){
+        assert.equal(entry.ordinal, null, 'imported by name, not ordinal');
+        assert.ok(entry.iatRva > 0, 'each import has a slot to write into');
     }
 });
 
-test("RVA translation accounts for the zero-filled tail past raw data", () => {
+test('RVA translation accounts for the zero-filled tail past raw data', ()=>{
     const image = parsePe(file);
     const section = image.sections[0];
     assert.equal(rvaToFileOffset(image, section.virtualAddress), section.rawOffset);
-    assert.throws(() => rvaToFileOffset(image, 0x7fffffff), /outside every section/);
+    assert.throws(()=>rvaToFileOffset(image, 0x7fffffff), /outside every section/);
 });
 
-test("an image without relocations refuses to move", () => {
+test('an image without relocations refuses to move', ()=>{
     const image = parsePe(file);
-    assert.equal(image.relocatable, false, "the fixture has no .reloc, like many pre-2000 binaries");
-    assert.throws(() => applyRelocations(new Uint8Array(image.sizeOfImage), image, 0x1000), /no relocation directory/);
-    assert.throws(() => buildImage(file, { resolveImport: () => 0, base: 0x800000 }), /carries no relocations/);
+    assert.equal(image.relocatable, false, 'the fixture has no .reloc, like many pre-2000 binaries');
+    assert.throws(()=>applyRelocations(new Uint8Array(image.sizeOfImage), image, 0x1000), /no relocation directory/);
+    assert.throws(()=>buildImage(file, { resolveImport: ()=>0, base: 0x800000 }), /carries no relocations/);
 });
 
-test("building the image binds every import into the IAT", () => {
+test('building the image binds every import into the IAT', ()=>{
     /** @type {string[]} */
     const asked = [];
     const stubs = { GetStdHandle: 0x00200000, WriteFile: 0x0020000c, ExitProcess: 0x00200018 };
 
     const loaded = buildImage(file, {
-        resolveImport: (dll, name) => {
+        resolveImport: (dll, name)=>{
             asked.push(`${dll}!${name}`);
             return stubs[/** @type {keyof typeof stubs} */ (name)] ?? null;
         },
@@ -87,9 +87,9 @@ test("building the image binds every import into the IAT", () => {
     assert.equal(loaded.entryPoint, 0x401000);
     assert.deepEqual(loaded.unresolved, []);
     assert.deepEqual(asked, [
-        "KERNEL32.dll!GetStdHandle",
-        "KERNEL32.dll!WriteFile",
-        "KERNEL32.dll!ExitProcess",
+        'KERNEL32.dll!GetStdHandle',
+        'KERNEL32.dll!WriteFile',
+        'KERNEL32.dll!ExitProcess',
     ]);
 
     // The entry point's first instruction is `push -11` (STD_OUTPUT_HANDLE), and
@@ -100,12 +100,12 @@ test("building the image binds every import into the IAT", () => {
 
     const view = new DataView(loaded.bytes.buffer);
     const iatSlot = view.getUint32(entryOffset + 4, true) - loaded.base; // operand of call [abs]
-    assert.equal(view.getUint32(iatSlot, true), stubs.GetStdHandle, "IAT slot holds the bound address");
+    assert.equal(view.getUint32(iatSlot, true), stubs.GetStdHandle, 'IAT slot holds the bound address');
 });
 
-test("an import nobody claims is reported, not fatal", () => {
+test('an import nobody claims is reported, not fatal', ()=>{
     const loaded = buildImage(file, {
-        resolveImport: (_dll, name) => (name === "WriteFile" ? null : 0x00200000),
+        resolveImport: (_dll, name)=>name === 'WriteFile' ? null : 0x00200000,
     });
-    assert.deepEqual(loaded.unresolved, ["KERNEL32.dll!WriteFile"]);
+    assert.deepEqual(loaded.unresolved, ['KERNEL32.dll!WriteFile']);
 });

@@ -38,14 +38,14 @@ export const HANDLE_STDERR = 3;
  *
  * @param {ConsoleHost} host
  */
-export function createConsoleFunctions(host) {
+export function createConsoleFunctions(host){
     return {
         /** HANDLE GetStdHandle(DWORD nStdHandle) */
         GetStdHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([nStdHandle]) => {
-                switch (nStdHandle | 0) {
+            handler: ([nStdHandle])=>{
+                switch (nStdHandle | 0){
                     case STD_INPUT_HANDLE:
                         return HANDLE_STDIN;
                     case STD_OUTPUT_HANDLE:
@@ -62,16 +62,16 @@ export function createConsoleFunctions(host) {
         WriteFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, buffer, length, written]) => {
+            handler: ([handle, buffer, length, written])=>{
                 const bytes = host.readMemory(buffer, length);
-                host.write(handle, new TextDecoder("latin1").decode(bytes));
+                host.write(handle, new TextDecoder('latin1').decode(bytes));
 
                 // lpNumberOfBytesWritten is optional, but when it is supplied the guest
                 // reads it back: a program that checks it and sees zero concludes the
                 // write failed.
-                if (written !== 0) {
+                if (written !== 0){
                     host.writeMemory(written, new Uint8Array([
-                        length & 0xff, (length >>> 8) & 0xff, (length >>> 16) & 0xff, (length >>> 24) & 0xff,
+                        length & 0xff, length >>> 8 & 0xff, length >>> 16 & 0xff, length >>> 24 & 0xff,
                     ]));
                 }
                 return 1; // TRUE
@@ -82,7 +82,7 @@ export function createConsoleFunctions(host) {
         ExitProcess: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code]) => {
+            handler: ([code])=>{
                 host.exit(code >>> 0);
                 return 0;
             },

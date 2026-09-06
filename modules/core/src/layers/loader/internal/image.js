@@ -3,7 +3,7 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { applyRelocations, parsePe, readImports, rvaToFileOffset } from "./pe.js";
+import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js';
 
 /**
  * Turning a parsed PE into a laid-out image.
@@ -30,11 +30,11 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from "./pe.js
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
  * @returns {LoadedImage}
  */
-export function buildImage(file, { resolveImport, base }) {
+export function buildImage(file, { resolveImport, base }){
     const image = parsePe(file);
     const loadBase = base ?? image.imageBase;
 
-    if (loadBase !== image.imageBase && !image.relocatable) {
+    if (loadBase !== image.imageBase && !image.relocatable){
         throw new Error(
             `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,
         );
@@ -47,7 +47,7 @@ export function buildImage(file, { resolveImport, base }) {
 
     bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
 
-    for (const section of image.sections) {
+    for (const section of image.sections){
         if (section.rawSize === 0) continue; // pure BSS: already zero
         const source = file.subarray(section.rawOffset, section.rawOffset + section.rawSize);
         // A section's raw data can exceed its virtual size when the linker padded to
@@ -62,10 +62,10 @@ export function buildImage(file, { resolveImport, base }) {
     const unresolved = [];
     const view = new DataView(bytes.buffer);
 
-    for (const { dll, entries } of readImports(file, image)) {
-        for (const entry of entries) {
+    for (const { dll, entries } of readImports(file, image)){
+        for (const entry of entries){
             const address = resolveImport(dll, entry.name, entry.ordinal);
-            if (address === null) {
+            if (address === null){
                 unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
                 continue;
             }

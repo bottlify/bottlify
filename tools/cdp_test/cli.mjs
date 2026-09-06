@@ -3,12 +3,12 @@
  * Licenses and contributions: THIRD-PARTY-NOTICES.md
  */
 
-import { runProbeAndExit } from "./probe.mjs";
+import { runProbeAndExit } from './probe.mjs';
 
 const [, , command] = process.argv;
 
-switch (command) {
-    case "probe": {
+switch (command){
+    case 'probe': {
         const code = await runProbeAndExit();
         process.exit(code);
         break;

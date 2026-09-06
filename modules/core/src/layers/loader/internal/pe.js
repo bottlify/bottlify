@@ -56,34 +56,34 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @param {Uint8Array} bytes
  * @returns {PeImage}
  */
-export function parsePe(bytes) {
+export function parsePe(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
-    if (bytes.length < 0x40 || view.getUint16(0, true) !== DOS_MAGIC) {
-        throw new Error("not a PE image: missing MZ signature");
+    if (bytes.length < 0x40 || view.getUint16(0, true) !== DOS_MAGIC){
+        throw new Error('not a PE image: missing MZ signature');
     }
     const peOffset = view.getUint32(0x3c, true);
-    if (peOffset + 0xf8 > bytes.length || view.getUint32(peOffset, true) !== PE_SIGNATURE) {
-        throw new Error("not a PE image: missing PE signature");
+    if (peOffset + 0xf8 > bytes.length || view.getUint32(peOffset, true) !== PE_SIGNATURE){
+        throw new Error('not a PE image: missing PE signature');
     }
 
     const coff = peOffset + 4;
     const machine = view.getUint16(coff, true);
-    if (machine !== MACHINE_I386) {
+    if (machine !== MACHINE_I386){
         throw new Error(`unsupported machine 0x${machine.toString(16)}: only i386 is supported`);
     }
     const sectionCount = view.getUint16(coff + 2, true);
     const optionalSize = view.getUint16(coff + 16, true);
 
     const optional = coff + 20;
-    if (view.getUint16(optional, true) !== PE32_MAGIC) {
-        throw new Error("unsupported image: only PE32 (32-bit) is supported");
+    if (view.getUint16(optional, true) !== PE32_MAGIC){
+        throw new Error('unsupported image: only PE32 (32-bit) is supported');
     }
 
     const directoryCount = view.getUint32(optional + 92, true);
     /** @type {{ address: number, size: number }[]} */
     const directories = [];
-    for (let i = 0; i < directoryCount; i++) {
+    for (let i = 0; i < directoryCount; i++){
         const at = optional + 96 + i * 8;
         directories.push({ address: view.getUint32(at, true), size: view.getUint32(at + 4, true) });
     }
@@ -91,11 +91,11 @@ export function parsePe(bytes) {
     /** @type {PeSection[]} */
     const sections = [];
     const sectionTable = optional + optionalSize;
-    for (let i = 0; i < sectionCount; i++) {
+    for (let i = 0; i < sectionCount; i++){
         const at = sectionTable + i * 40;
         const characteristics = view.getUint32(at + 36, true);
         sections.push({
-            name: new TextDecoder().decode(bytes.subarray(at, at + 8)).replace(/\0+$/, ""),
+            name: new TextDecoder().decode(bytes.subarray(at, at + 8)).replace(/\0+$/, ''),
             virtualSize: view.getUint32(at + 8, true),
             virtualAddress: view.getUint32(at + 12, true),
             rawSize: view.getUint32(at + 16, true),
@@ -147,16 +147,16 @@ export function parsePe(bytes) {
  * @param {PeImage} image
  * @returns {ImportedDll[]}
  */
-export function readImports(bytes, image) {
+export function readImports(bytes, image){
     const directory = image.directories[DIR_IMPORT];
     if (!directory || directory.size === 0) return [];
 
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const fileOffset = (/** @type {number} */ rva) => rvaToFileOffset(image, rva);
+    const fileOffset = (/** @type {number} */ rva)=>rvaToFileOffset(image, rva);
 
     /** @type {ImportedDll[]} */
     const result = [];
-    for (let descriptor = fileOffset(directory.address); ; descriptor += 20) {
+    for (let descriptor = fileOffset(directory.address); ; descriptor += 20){
         const iltRva = view.getUint32(descriptor, true);
         const nameRva = view.getUint32(descriptor + 12, true);
         const iatRva = view.getUint32(descriptor + 16, true);
@@ -165,10 +165,10 @@ export function readImports(bytes, image) {
         /** @type {ImportEntry[]} */
         const entries = [];
         const thunkRva = iltRva !== 0 ? iltRva : iatRva;
-        for (let i = 0; ; i++) {
+        for (let i = 0; ; i++){
             const thunk = view.getUint32(fileOffset(thunkRva + i * 4), true);
             if (thunk === 0) break;
-            if ((thunk & 0x80000000) !== 0) {
+            if ((thunk & 0x80000000) !== 0){
                 entries.push({ name: null, ordinal: thunk & 0xffff, iatRva: iatRva + i * 4 });
             } else {
                 // IMAGE_IMPORT_BY_NAME: a hint word followed by a zero-terminated name.
@@ -192,11 +192,11 @@ export function readImports(bytes, image) {
  * @param {number} delta        actualBase - image.imageBase
  * @returns {number} how many fixups were applied
  */
-export function applyRelocations(mapped, image, delta) {
+export function applyRelocations(mapped, image, delta){
     if (delta === 0) return 0;
     const directory = image.directories[DIR_BASERELOC];
-    if (!directory || directory.size === 0) {
-        throw new Error("image has no relocation directory and cannot be loaded away from its ImageBase");
+    if (!directory || directory.size === 0){
+        throw new Error('image has no relocation directory and cannot be loaded away from its ImageBase');
     }
 
     const view = new DataView(mapped.buffer, mapped.byteOffset, mapped.byteLength);
@@ -204,21 +204,21 @@ export function applyRelocations(mapped, image, delta) {
     let block = directory.address;
     const end = directory.address + directory.size;
 
-    while (block < end) {
+    while (block < end){
         const pageRva = view.getUint32(block, true);
         const blockSize = view.getUint32(block + 4, true);
         if (blockSize === 0) break;
 
-        for (let at = block + 8; at < block + blockSize; at += 2) {
+        for (let at = block + 8; at < block + blockSize; at += 2){
             const entry = view.getUint16(at, true);
             const type = entry >> 12;
             const offset = entry & 0x0fff;
             if (type === 0) continue; // IMAGE_REL_BASED_ABSOLUTE: padding, skip
-            if (type !== 3) {
+            if (type !== 3){
                 throw new Error(`unsupported relocation type ${type}`); // only HIGHLOW on i386
             }
             const target = pageRva + offset;
-            view.setUint32(target, (view.getUint32(target, true) + delta) >>> 0, true);
+            view.setUint32(target, view.getUint32(target, true) + delta >>> 0, true);
             applied++;
         }
         block += blockSize;
@@ -233,12 +233,12 @@ export function applyRelocations(mapped, image, delta) {
  * @param {number} rva
  * @returns {number}
  */
-export function rvaToFileOffset(image, rva) {
-    for (const section of image.sections) {
+export function rvaToFileOffset(image, rva){
+    for (const section of image.sections){
         // A section occupies the larger of its two sizes: the tail past rawSize is
         // valid mapped memory (zero-filled), even though no bytes back it in the file.
         const span = Math.max(section.virtualSize, section.rawSize);
-        if (rva >= section.virtualAddress && rva < section.virtualAddress + span) {
+        if (rva >= section.virtualAddress && rva < section.virtualAddress + span){
             return section.rawOffset + (rva - section.virtualAddress);
         }
     }
@@ -251,7 +251,7 @@ export function rvaToFileOffset(image, rva) {
  * @param {number} offset
  * @returns {string}
  */
-function readCString(bytes, offset) {
+function readCString(bytes, offset){
     let end = offset;
     while (end < bytes.length && bytes[end] !== 0) end++;
     return new TextDecoder().decode(bytes.subarray(offset, end));
