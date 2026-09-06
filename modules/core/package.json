@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Bottlify Project: core module",
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "BSD-2-Clause",
   "engines": {
     "node": ">=22"
   },

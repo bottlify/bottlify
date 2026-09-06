@@ -1,6 +1,7 @@
 /*
- * Copyright Bottlify Project 2026
- * Licenses and contributions: THIRD-PARTY-NOTICES.md
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
  */
 
 import { buildBootRom, ROM_BASE } from './boot-rom.js';

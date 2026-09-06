@@ -1,5 +1,6 @@
-# Copyright Bottlify Project 2026
-# Licenses and contributions: THIRD-PARTY-NOTICES.md
+# Copyright © 2026 Bottlify Project
+# Licensed under BSD-2-Clause License
+# See LICENSE for details
 
 # Pinned build image for the vendored v86. Version pins are what make the
 # make-all output reproducible; bump them only together with manifest.json.

@@ -2,7 +2,7 @@
   "name": "bottlify",
   "private": true,
   "type": "module",
-  "license": "UNLICENSED",
+  "license": "BSD-2-Clause",
   "engines": {
     "node": ">=22"
   },

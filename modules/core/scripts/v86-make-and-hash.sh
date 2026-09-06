@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Copyright Bottlify Project 2026
-# Licenses and contributions: THIRD-PARTY-NOTICES.md
+# Copyright © 2026 Bottlify Project
+# Licensed under BSD-2-Clause License
+# See LICENSE for details
 #
 # Builds v86 from a checked-out submodule and copies the distributable
 # artifacts into the output directory.
