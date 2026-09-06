@@ -95,8 +95,9 @@ keeps the dependency graph cleaner for non-React consumers.
 | `memory` | real. Region map (overlap-checked, permissioned, `protect()`) plus typed accessors; every host access to guest memory goes through it. |
 | `loader` | real. Maps a PE32 image, applies relocations, binds imports, registers the region it occupies. |
 | `kernel` | real. Threads with a stack and a context each, a round-robin scheduler whose quantum is counted in retired guest instructions, one context-switch primitive, events/mutexes/semaphores, the handle table, and a virtual clock. |
-| `bridge` | real. The trap channel's host half: a call is marshalled by its calling convention (stdcall, cdecl, thiscall), invoked, and its result placed — or the caller is parked and says so with a token nothing else can produce. |
-| `win32` | minimal. `GetStdHandle`, `WriteFile`, `ExitProcess`, and the threading and synchronisation entry points a multithreaded program calls. |
+| `bridge` | real. The trap channel's host half: a call is marshalled by its calling convention (stdcall, cdecl, thiscall), invoked, and its result placed — or the caller is parked and says so with a token nothing else can produce. It also calls the other way, into guest code, and puts COM interfaces into guest memory. |
+| `loader` (synthesis) | real. A system library is a genuine PE image in guest memory with an export directory and JMP trampolines, so a program that resolves a name at runtime or walks exports itself finds our implementations. |
+| `win32` | kernel32 (console, threads and synchronisation, heap, TLS, last error, modules, tracing), msvcrt (cdecl, including `qsort` through a guest comparator), user32 (window classes, windows, the message queue), gdi32's bookkeeping half (device contexts, GDI objects, metrics), advapi32 with the registry, ole32 (GUIDs, apartments, class registry, task memory). |
 | `log`, `filesystem`, `graphics`, `audio`, `input` | still stubs: every method throws `NOT_IMPLEMENTED` and `diagnostics()` reports `status: "stub"`. |
 
 A stub is a valid state, not a gap to route around: a build without a layer comes up and reports
@@ -105,9 +106,10 @@ the registry, host scoping and boundary checker do not change.
 
 Known limitations worth stating plainly:
 
-- **No callbacks into the guest.** A guest call traps, is handled, and either returns or parks the
-  caller. The other direction — host code calling a guest routine and waiting for its result — is
-  the next step in the `bridge` layer and is deliberately absent rather than half-built.
+- **Nothing draws.** `gdi32`'s drawing half and every DirectX interface belong to the graphics
+  layer; what exists here is the state they will draw from.
+- **No files.** The filesystem layer is a stub, so anything file-shaped in the API surface has no
+  backing store yet.
 - **Waits are untimed.** `WaitForSingleObject` implements `INFINITE` and a zero timeout; anything
   else is refused loudly, because a timeout that never expires produces a program that looks fine
   until it hangs. Timed waits need the clock to drive expiry.

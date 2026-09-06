@@ -116,6 +116,41 @@ and with which error code.
 Order is by what the acceptance fixture needs, not by DLL: a window that receives messages before a
 dialog that owns controls.
 
+## 3a. What actually landed
+
+Every step above is in, and the acceptance is a windowed program that answers messages with its own
+window procedure -- the same fixture running the same way ten times. What the Master Plan's wording
+also asks for, a rendered frame compared against a reference, is not here and is not this phase's to
+give: the drawing half of `gdi32` lives in `graphics/gdi/` and belongs to the graphics phase. This
+phase provides the device contexts, the GDI objects and the metrics it will draw from.
+
+Three defects found by running rather than reading, each of which produced a plausible wrong answer:
+
+- A callback returned to a stub taken after the stub table had already been written into guest
+  memory, so the address it returned to held no code.
+- A callback frame was built below where the stack *will* be, which is still the live return address;
+  the host then read one of its own arguments as the address to return to.
+- A read of guest memory handed back a window onto the emulator's own memory rather than a copy, so
+  a swap through it became a copy. Fixed in the memory layer, where every caller routes through.
+
+Two more found by the fixture: a string at the end of a region could not be read, because the scan
+demanded its whole limit be mapped; and the guest's wall clock was read from the host, so a program
+timing an interval with one clock and reading it with another disagreed with itself.
+
+## 3b. Known gaps carried forward
+
+- **Timed waits.** `WaitForSingleObject` implements `INFINITE` and zero; anything else is refused
+  loudly rather than faked. Expiry needs the clock to drive it.
+- **`CoUninitialize` releases nothing.** No per-apartment ownership is tracked, so an object
+  outliving its apartment stays alive.
+- **No `IClassFactory` reaches the guest**, and no aggregation. `CoCreateInstance` goes through our
+  own registry.
+- **Font metrics are estimates** from the requested height, self-consistent but not measured; a real
+  font engine replaces them.
+- **The map mode is remembered, not applied** -- nothing here consumes a coordinate yet.
+- **Input goes to the most recently created window.** Focus, activation and z-order are user32 work
+  that nothing needs yet.
+
 ## 4. What this phase deliberately does not do
 
 - **No rendering.** `gdi32`'s drawing half lives in `graphics/gdi/` and belongs to the graphics
