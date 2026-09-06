@@ -34,5 +34,21 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## Wine conformance expectations — used as a specification
+
 Wine and the Win32 specifications are used only as a source of knowledge about API behavior;
 no code from them is carried into this repository.
+
+The graphics layer states this more precisely, because it leans on that knowledge hardest.
+Wine's conformance tests for DirectDraw, Direct3D and OpenGL (`dlls/*/tests`, LGPL-2.1-or-later)
+establish what these APIs do: which argument combinations fail and with which result code, what
+state a freshly created device holds, which calls are legal in which order. Those behaviours are
+facts about a Microsoft product, established by measurement, and belong to nobody.
+
+What is derived from them here: the boundary-case sets and the validity tables — which lock
+rectangles are malformed, which pool and usage combinations are accepted, which capability bits a
+surface may be created with. The selection of cases to cover is Wine's editorial work over
+twenty-five years, and this entry records that debt.
+
+What is not taken: no code, no test structure, no helper, no assertion text, no ordering. Every
+test in this repository is written independently, against this project's own conventions.
