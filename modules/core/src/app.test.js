@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { retryingFetch } from './app.js';
+import { groupBlocks, inParallel, retryingFetch } from './app.js';
 import { createEvents } from './events.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
@@ -112,4 +112,68 @@ test('giving up says how many times it tried and why it stopped', async()=>{
         'the last thing reported is the one a caller would act on');
     assert.equal(seen.filter(e=>e[0] === 'retry').length, 3,
         'three waits between four attempts, not four');
+});
+
+/**
+ * Blocks laid out back to back from `at`, as the container lays them out.
+ *
+ * @param {number} at @param {number} count @param {number} [packed]
+ */
+function run(at, count, packed = 1000){
+    return Array.from({ length: count }, (unused, step)=>({
+        index: step, offset: at + step * packed, packed,
+    }));
+}
+
+test('a run of blocks is one request, not one request each', ()=>{
+    // The number that decides how long a large read takes, and the reason the
+    // block size is not that number: blocks sit back to back in file order.
+    const groups = groupBlocks(run(0, 400));
+
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].start, 0);
+    assert.equal(groups[0].end, 400 * 1000);
+    assert.equal(groups[0].blocks.length, 400);
+});
+
+test('a request does not grow past what a failed one would cost', ()=>{
+    // 8 MiB in blocks of 256 KiB: the cap has to fall between blocks, never
+    // through one, or the split would ask for part of a block.
+    const groups = groupBlocks(run(0, 64, 1 << 18));
+
+    assert.equal(groups.length, 2);
+    assert.equal(groups[0].end - groups[0].start, 8 << 20);
+    assert.equal(groups[0].blocks.length + groups[1].blocks.length, 64);
+});
+
+test('a small gap is downloaded again rather than paid for in a round trip', ()=>{
+    const near = [
+        { index: 0, offset: 0, packed: 1000 },
+        { index: 2, offset: 1000 + (64 << 10), packed: 1000 },
+    ];
+    assert.equal(groupBlocks(near).length, 1, 'a 64 KiB gap is bridged');
+
+    const far = [
+        { index: 0, offset: 0, packed: 1000 },
+        { index: 9, offset: 1000 + (512 << 10), packed: 1000 },
+    ];
+    assert.equal(groupBlocks(far).length, 2, 'half a mebibyte is not');
+});
+
+test('requests overlap, but only so many at a time', async()=>{
+    let running = 0;
+    let peak = 0;
+    /** @type {number[]} */
+    const done = [];
+
+    await inParallel([1, 2, 3, 4, 5, 6, 7, 8], 3, async item=>{
+        running++;
+        peak = Math.max(peak, running);
+        await new Promise(resolve=>setTimeout(resolve, 5));
+        running--;
+        done.push(item);
+    });
+
+    assert.equal(peak, 3, 'three at once, not eight and not one');
+    assert.deepEqual(done.sort((a, b)=>a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
 });

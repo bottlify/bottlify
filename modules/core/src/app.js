@@ -130,6 +130,89 @@ export function retryingFetch({ fetch, events, retry }){
 }
 
 /**
+ * How much one range request may ask for.
+ *
+ * The bound is not bandwidth but what a failure costs: a request that dies at
+ * 95% is refetched whole, and the thread waiting on it is parked for the whole
+ * of it. Eight mebibytes is around a second on a domestic connection, which is
+ * a stall a player would notice once and not twice.
+ */
+const MAX_REQUEST_BYTES = 8 << 20;
+
+/**
+ * Blocks that are already here, between two that are not, are downloaded again
+ * rather than split the request in two. A round trip costs more than this many
+ * bytes on any connection worth having.
+ */
+const MAX_BRIDGED_GAP = 128 << 10;
+
+/**
+ * Requests in flight at once. Six is what a browser will open to one host over
+ * HTTP/1.1; over HTTP/2 it is one connection and the limit stops mattering, but
+ * asking for more would only queue behind this on the worse of the two.
+ */
+const MAX_CONCURRENT_REQUESTS = 6;
+
+/**
+ * Turns blocks into range requests.
+ *
+ * This is what decides how many times the network is asked, and it matters far
+ * more than the block size does: blocks sit in the container back to back in
+ * file order, so a read that spans a run of them is one request rather than one
+ * per block. A game reading a hundred megabytes of an archive asks perhaps
+ * thirteen times, not four hundred.
+ *
+ * @param {any[]} blocks  Absent, in ascending offset order.
+ * @returns {{ start: number, end: number, blocks: any[] }[]}
+ */
+export function groupBlocks(blocks){
+    /** @type {{ start: number, end: number, blocks: any[] }[]} */
+    const groups = [];
+    for (const block of blocks)
+    {
+        const open = groups.at(-1);
+        const grown = block.offset + block.packed - (open?.start ?? 0);
+        if (open
+            && block.offset - open.end <= MAX_BRIDGED_GAP
+            && grown <= MAX_REQUEST_BYTES)
+        {
+            open.end = block.offset + block.packed;
+            open.blocks.push(block);
+            continue;
+        }
+        groups.push({
+            start: block.offset,
+            end: block.offset + block.packed,
+            blocks: [block],
+        });
+    }
+    return groups;
+}
+
+/**
+ * Runs `work` over `items`, at most `limit` at a time.
+ *
+ * Bounded rather than all at once: the point of issuing requests together is to
+ * overlap their latency, and past the connection limit they queue anyway, with
+ * the ones that queue holding their errors until the end.
+ *
+ * @template T
+ * @param {T[]} items
+ * @param {number} limit
+ * @param {(item: T) => Promise<void>} work
+ */
+export async function inParallel(items, limit, work){
+    let next = 0;
+    const runners = Array.from({ length: Math.min(limit, items.length) }, async()=>{
+        while (next < items.length)
+        {
+            await work(items[next++]);
+        }
+    });
+    await Promise.all(runners);
+}
+
+/**
  * The check that makes every block's checksum worth something.
  *
  * The index carries them, so nothing inside the container can vouch for the
@@ -252,32 +335,62 @@ async function mountBundle({ options, cpu, filesystem, events }){
         backed: cache.backed,
     });
 
-    /** @param {any[]} needed */
-    return async needed=>{
-        for (const block of needed)
-        {
-            if (cache.has(block.index))
+    /**
+     * Brings in one run of blocks: one request, then split and checked.
+     *
+     * The checksums are per block, so a group is verified block by block and a
+     * group with one bad block is asked for again whole. Damage is rare enough
+     * that paying for the neighbours beats tracking which part to re-ask for.
+     *
+     * Each block is copied out with `slice`, not viewed with `subarray`: a view
+     * would keep the entire request's buffer alive for as long as any one block
+     * of it is held, which for a 8 MiB request holding one 256 KiB block is
+     * thirty-one blocks of the group nobody wanted.
+     *
+     * @param {{ start: number, end: number, blocks: any[] }} group
+     */
+    const fetchGroup = async group=>{
+        const span = group.end - group.start;
+        const whole = await fetchRange(group.start, span, bytes=>{
+            for (const block of group.blocks)
             {
-                continue;
-            }
-            const expected = bundle.block(block.index).crc;
-            const raw = await fetchRange(block.offset, block.packed, bytes=>{
+                const expected = bundle.block(block.index).crc;
                 if (expected === null)
                 {
-                    return null;
+                    continue;
                 }
-                const found = crc32(bytes);
-                return found === expected
-                    ? null
-                    : `block ${block.index} arrived damaged (checksum ${found}, `
-                        + `expected ${expected})`;
-            });
+                const at = block.offset - group.start;
+                const found = crc32(bytes.subarray(at, at + block.packed));
+                if (found !== expected)
+                {
+                    return `block ${block.index} arrived damaged `
+                        + `(checksum ${found}, expected ${expected})`;
+                }
+            }
+            return null;
+        });
+
+        for (const block of group.blocks)
+        {
+            const at = block.offset - group.start;
+            const raw = whole.slice(at, at + block.packed);
             // Inflated here, once, rather than on every read: this is the only
             // place a deflate block can be decoded at all, since the read side
             // is synchronous and the browser's inflate is not.
             cache.put(block.index,
                 bundle.block(block.index).codec === 1 ? await inflateRaw(raw) : raw);
         }
+    };
+
+    /** @param {any[]} needed */
+    return async needed=>{
+        const absent = [...new Map(needed
+            .filter(block=>!cache.has(block.index))
+            .map(block=>[block.index, block])).values()]
+            .sort((left, right)=>left.offset - right.offset);
+
+        await inParallel(groupBlocks(absent), MAX_CONCURRENT_REQUESTS, fetchGroup);
+
         // Once per batch, not once per block: losing the record of a block that
         // is already on disk costs one refetch, and writing it every time would
         // cost far more than that.
