@@ -118,6 +118,36 @@ is the same and the *outcome* differs — Warcraft III compresses 13% of its blo
 2% — and the manifest records what each one ended up being. A game that is mostly loose data would
 compress most of its blocks under exactly the same rule.
 
+### 1.3. Why not ZIP64
+
+ZIP64 is the obvious candidate and deserves a straight answer: it is universal, every operating
+system opens it, it handles files past 4 GiB, it stores or deflates per entry, and a reader can work
+over HTTP range requests. A bundler that emitted it would let anyone inspect or repack a bundle with
+tools they already have.
+
+It is the wrong *runtime* format for one structural reason: **ZIP compresses per entry, not per
+block.** A compressed entry is a single deflate stream, and there is no way into the middle of one
+except from its beginning. Measured on the largest file in the World of Warcraft bundle, a 1821 MiB
+archive, reading 64 KiB at 60% of the way in:
+
+| | to read 64 KiB at 60% |
+|---|---|
+| `.btl`, per-block | **2.97 ms** — one block fetched and inflated |
+| one deflate stream per entry | **4567 ms** — 1093 MiB inflated to get there |
+
+Three orders of magnitude, on the access pattern a game does constantly: seeking into a big archive
+to pull one asset out of it.
+
+That is not a defect of ZIP; it is what a single stream means. The escape is to store the entry
+uncompressed, which is exactly what a Store-only ZIP does — and then the format buys nothing over
+a plain directory while giving up the 25 MiB and 17 MiB that per-block compression saves on these
+two games at no read cost at all. The other way out — one ZIP entry per megabyte of every file —
+is `.btl` reinvented inside a container, with the central directory paying for the privilege.
+
+The interchange argument is real and is answered separately: the bundler can learn to **read** a zip
+so a game that arrives as one can be packed without unzipping it first. That belongs with the
+bundler phase. Nothing about it makes ZIP the shape the engine reads at runtime.
+
 ## 2. Steps
 
 ### P4.1 — the bundle format ✅
