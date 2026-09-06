@@ -11,7 +11,8 @@ const modules = core.diagnostics().map(entry=>`${entry.name}[${entry.status}]`);
 
 self.onmessage = event=>{
     const message = event.data;
-    if (message && message.peer === 'bottlify-probe' && message.verb === 'ping'){
+    if (message && message.peer === 'bottlify-probe' && message.verb === 'ping')
+    {
         self.postMessage({
             peer: 'bottlify-probe',
             verb: 'pong',

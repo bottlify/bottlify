@@ -17,7 +17,8 @@ window.addEventListener('error', event=>{
 });
 window.addEventListener('unhandledrejection', event=>{
     const reason = event.reason;
-    window.__bottlify__.errors.push(`unhandled:${reason && reason.message ? reason.message : String(reason)}`);
+    window.__bottlify__.errors.push(
+        `unhandled:${reason && reason.message ? reason.message : String(reason)}`);
 });
 
 /**
@@ -28,9 +29,9 @@ const probe = new Promise((resolve, reject)=>{
     let worker;
     try {
         worker = new Worker(new URL('./boot.worker.js', import.meta.url), { type: 'module' });
-    } catch (error){
-        window.__bottlify__.errors.push(`worker-creation:${error.message}`);
-        reject(new Error(`worker creation failed: ${error.message}`));
+    } catch (e){
+        window.__bottlify__.errors.push(`worker-creation:${e.message}`);
+        reject(new Error(`worker creation failed: ${e.message}`));
         return;
     }
 
@@ -42,7 +43,8 @@ const probe = new Promise((resolve, reject)=>{
 
     worker.onmessage = event=>{
         const message = event.data;
-        if (message && message.peer === 'bottlify-probe' && message.verb === 'pong'){
+        if (message && message.peer === 'bottlify-probe' && message.verb === 'pong')
+        {
             clearTimeout(timer);
             resolve({
                 ok: true,
@@ -54,7 +56,8 @@ const probe = new Promise((resolve, reject)=>{
     };
     worker.onerror = event=>{
         clearTimeout(timer);
-        window.__bottlify__.errors.push(`worker:${event.message} (${event.filename}:${event.lineno})`);
+        window.__bottlify__.errors.push(
+            `worker:${event.message} (${event.filename}:${event.lineno})`);
         reject(new Error(`worker error: ${event.message} (${event.filename}:${event.lineno})`));
     };
 

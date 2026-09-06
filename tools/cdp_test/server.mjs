@@ -46,21 +46,27 @@ export async function serveStatic({ sandboxDir, srcDir }){
     const server = createServer(async(req, res)=>{
         const url = new URL(req.url ?? '/', 'http://localhost');
         const route = routes.find(entry=>url.pathname.startsWith(entry.prefix));
-        if (!route){
+        if (!route)
+        {
             res.writeHead(404).end();
             return;
         }
         let rel = url.pathname.slice(route.prefix.length);
-        if (!rel || rel.endsWith('/')) rel += 'index.html';
+        if (!rel || rel.endsWith('/'))
+        {
+            rel += 'index.html';
+        }
 
         const abs = resolve(route.root, '.', rel);
-        if (!abs.startsWith(resolve(route.root))){
+        if (!abs.startsWith(resolve(route.root)))
+        {
             res.writeHead(403).end();
             return;
         }
         try {
             const data = await readFile(abs);
-            res.writeHead(200, { 'Content-Type': MIME[extname(abs)] ?? 'application/octet-stream' });
+            res.writeHead(200,
+                { 'Content-Type': MIME[extname(abs)] ?? 'application/octet-stream' });
             res.end(data);
         } catch {
             res.writeHead(404).end();

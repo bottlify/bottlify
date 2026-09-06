@@ -21,9 +21,13 @@ const DIST = join(ROOT, 'dist');
  * @returns {Promise<string[]>}
  */
 async function walk(dir, acc = []){
-    for (const entry of await readdir(dir, { withFileTypes: true })){
+    for (const entry of await readdir(dir, { withFileTypes: true }))
+    {
         const path = join(dir, entry.name);
-        if (entry.isDirectory()) await walk(path, acc);
+        if (entry.isDirectory())
+        {
+            await walk(path, acc);
+        }
         else acc.push(path);
     }
     return acc;
@@ -43,7 +47,8 @@ async function writeChecksums(){
     const files = (await walk(DIST)).sort();
     /** @type {Record<string, string>} */
     const entries = {};
-    for (const file of files){
+    for (const file of files)
+    {
         const rel = relative(DIST, file).replaceAll('\\', '/');
         entries[`./${rel}`] = await sha256File(file);
     }

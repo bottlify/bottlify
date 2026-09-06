@@ -13,7 +13,8 @@ const KNOWN = ['alpha', 'beta'];
 test('defaults enable every module with null config', ()=>{
     const out = normalizeConfig(undefined, KNOWN);
     assert.deepEqual([...out.keys()], KNOWN);
-    for (const name of KNOWN){
+    for (const name of KNOWN)
+    {
         assert.deepEqual(out.get(name), { enabled: true, config: null });
     }
 });

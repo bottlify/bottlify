@@ -16,7 +16,8 @@ import { defaultModules } from './layers/index.js';
  * eventually holds is an application controller built on top of this — run,
  * pause, attach a log sink — and that surface lands with the delivery phase.
  *
- * @param {Record<string, unknown>} [config] Map `module name → boolean | object`. See system/config.js.
+ * @param {Record<string, unknown>} [config] Map `module name → boolean | object`.
+ *        See system/config.js.
  * @returns {Promise<import("./system/contract.js").CoreInstance>}
  */
 export async function assembleModules(config = {}){
@@ -26,7 +27,8 @@ export async function assembleModules(config = {}){
     /** @type {Map<string, import("./system/contract.js").ModuleApi>} */
     const apis = new Map();
 
-    for (const entry of plan){
+    for (const entry of plan)
+    {
         const allowedNames = new Set([entry.name, ...entry.module.requires]);
         const host = makeScopedHost(entry.name, allowedNames, apis);
         const api = await entry.module.create(entry.config, host);
@@ -38,7 +40,8 @@ export async function assembleModules(config = {}){
         modules: plan.map(entry=>entry.module),
         api(name){
             const api = apis.get(name);
-            if (api === undefined){
+            if (api === undefined)
+            {
                 throw new Error(`Module "${name}" is not part of this build`);
             }
             return api;
@@ -47,7 +50,8 @@ export async function assembleModules(config = {}){
             return plan.map(entry=>entry.module.diagnostics());
         },
         async dispose(){
-            for (const entry of [...plan].reverse()){
+            for (const entry of [...plan].reverse())
+            {
                 await entry.module.dispose();
             }
         },

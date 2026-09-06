@@ -30,8 +30,12 @@ const CANDIDATES = [
  * @returns {string} path to a usable browser executable
  */
 export function findBrowser(){
-    for (const candidate of CANDIDATES){
-        if (candidate && existsSync(candidate)) return candidate;
+    for (const candidate of CANDIDATES)
+    {
+        if (candidate && existsSync(candidate))
+        {
+            return candidate;
+        }
     }
     throw new Error(
         'No Chromium-based browser found. Set CDP_TEST_CHROME to the executable path.',
@@ -76,26 +80,34 @@ export function launch({ browser = findBrowser() } = {}){
     proc.stderr.on('data', chunk=>{
         stderr += chunk.toString();
         const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-        if (match) browserWs = match[1];
+        if (match)
+        {
+            browserWs = match[1];
+        }
     });
 
     const waitForEndpoint = ()=>
         new Promise((resolve, reject)=>{
             const started = Date.now();
             const timer = setInterval(()=>{
-                if (browserWs){
+                if (browserWs)
+                {
                     clearInterval(timer);
                     resolve(browserWs);
                     return;
                 }
-                if (proc.exitCode != null){
+                if (proc.exitCode != null)
+                {
                     clearInterval(timer);
-                    reject(new Error(`browser exited early (${proc.exitCode}): ${stderr.slice(0, 400)}`));
+                    reject(new Error(
+                        `browser exited early (${proc.exitCode}): ${stderr.slice(0, 400)}`));
                     return;
                 }
-                if (Date.now() - started > 15000){
+                if (Date.now() - started > 15000)
+                {
                     clearInterval(timer);
-                    reject(new Error(`timed out waiting for the CDP endpoint: ${stderr.slice(0, 400)}`));
+                    reject(new Error(
+                        `timed out waiting for the CDP endpoint: ${stderr.slice(0, 400)}`));
                 }
             }, 50);
         });

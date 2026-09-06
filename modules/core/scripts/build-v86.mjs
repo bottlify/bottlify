@@ -47,25 +47,32 @@ function commitOf(){
     const { status, stdout } = spawnSync('git', ['-C', VENDOR, 'rev-parse', 'HEAD'], {
         encoding: 'utf8',
     });
-    if (status !== 0) throw new Error('cannot read the v86 submodule HEAD');
+    if (status !== 0)
+    {
+        throw new Error('cannot read the v86 submodule HEAD');
+    }
     return stdout.trim();
 }
 
 async function runNative(){
     const result = spawnSync('make', ['all'], { cwd: VENDOR, shell: true, stdio: 'inherit' });
-    if (result.status !== 0){
+    if (result.status !== 0)
+    {
         throw new Error(
             'native v86 build failed. Install rust + wasm32-unknown-unknown, a C compiler ' +
         'and java (closure), or run `npm run build:v86 -- --docker`.',
         );
     }
-    for (const artifact of ARTIFACTS){
+    for (const artifact of ARTIFACTS)
+    {
         await copyFile(join(VENDOR, artifact.src), join(OUT, artifact.out));
     }
 }
 
 function dockerAvailable(){
-    return spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], { stdio: 'ignore' }).status === 0;
+    const probe = spawnSync(
+        'docker', ['version', '--format', '{{.Server.Version}}'], { stdio: 'ignore' });
+    return probe.status === 0;
 }
 
 function dockerImageExists(){
@@ -73,33 +80,46 @@ function dockerImageExists(){
 }
 
 async function runDocker(){
-    if (!dockerAvailable()){
+    if (!dockerAvailable())
+    {
         throw new Error('docker is required for the reproducible v86 build and is not available');
     }
-    if (!dockerImageExists()){
+    if (!dockerImageExists())
+    {
         const build = spawnSync(
             'docker',
-            ['build', '-t', IMAGE, '-f', join(ROOT, 'scripts', 'Dockerfile.v86'), join(ROOT, 'scripts')],
+            ['build', '-t', IMAGE, '-f',
+                join(ROOT, 'scripts', 'Dockerfile.v86'), join(ROOT, 'scripts')],
             { stdio: 'inherit' },
         );
-        if (build.status !== 0) throw new Error('failed to build the v86 builder image');
+        if (build.status !== 0)
+        {
+            throw new Error('failed to build the v86 builder image');
+        }
     }
     const run = spawnSync(
         'docker',
         ['run', '--rm', '-v', `${VENDOR}:/src`, '-v', `${OUT}:/out`, IMAGE, '/src', '/out'],
         { stdio: 'inherit' },
     );
-    if (run.status !== 0) throw new Error('containerized v86 build failed');
+    if (run.status !== 0)
+    {
+        throw new Error('containerized v86 build failed');
+    }
 }
 
 const mode = process.argv.includes('--docker') ? 'docker' : 'native';
 await mkdir(OUT, { recursive: true });
-if (mode === 'docker') await runDocker();
+if (mode === 'docker')
+{
+    await runDocker();
+}
 else await runNative();
 
 const manifest = {
     v86: { commit: commitOf() },
-    artifacts: Object.fromEntries(ARTIFACTS.map(artifact=>[`./${artifact.out}`, `sha256:${sha256Hex(join(OUT, artifact.out))}`])),
+    artifacts: Object.fromEntries(ARTIFACTS.map(artifact=>
+        [`./${artifact.out}`, `sha256:${sha256Hex(join(OUT, artifact.out))}`])),
     toolchain: { mode },
     reproducedAt: new Date().toISOString(),
 };

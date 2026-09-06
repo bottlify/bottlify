@@ -15,7 +15,8 @@ const rom = ()=>buildBootRom({ entryVector: ENTRY_VECTOR, initialStack: INITIAL_
 
 /** @param {Uint8Array} image @param {number} offset @returns {number} */
 const readU32 = (image, offset)=>
-    (image[offset] | image[offset + 1] << 8 | image[offset + 2] << 16 | image[offset + 3] << 24) >>> 0;
+    (image[offset] | image[offset + 1] << 8
+        | image[offset + 2] << 16 | image[offset + 3] << 24) >>> 0;
 
 test('image is exactly the size v86 maps at 0xF0000', ()=>{
     assert.equal(rom().length, ROM_SIZE);
@@ -34,12 +35,15 @@ test('GDT holds a null descriptor plus flat 4 GiB code and data segments', ()=>{
     const image = rom();
     const gdt = 0x100;
 
-    assert.deepEqual([...image.subarray(gdt, gdt + 8)], [0, 0, 0, 0, 0, 0, 0, 0], 'null descriptor');
+    assert.deepEqual([...image.subarray(gdt, gdt + 8)],
+        [0, 0, 0, 0, 0, 0, 0, 0], 'null descriptor');
 
-    for (const [selector, access] of [[SEL_CODE32, 0x9a], [SEL_DATA32, 0x92]]){
+    for (const [selector, access] of [[SEL_CODE32, 0x9a], [SEL_DATA32, 0x92]])
+    {
         const at = gdt + selector;
         assert.equal(image[at] | image[at + 1] << 8, 0xffff, 'limit low');
-        assert.equal(image[at + 2] | image[at + 3] << 8 | image[at + 4] << 16, 0, 'base is 0 (flat)');
+        assert.equal(image[at + 2] | image[at + 3] << 8 | image[at + 4] << 16, 0,
+            'base is 0 (flat)');
         assert.equal(image[at + 5], access, 'access byte');
         assert.equal(image[at + 6], 0xcf, 'granularity 4 KiB, 32-bit, limit high nibble');
         assert.equal(image[at + 7], 0, 'base high');

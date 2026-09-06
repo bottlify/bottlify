@@ -51,7 +51,8 @@ export async function createV86Host(config){
 
     const emulator = new V86({
         wasm_fn: (/** @type {WebAssembly.Imports} */ imports)=>
-            WebAssembly.instantiate(config.wasmBytes, imports).then(result=>result.instance.exports),
+            WebAssembly.instantiate(config.wasmBytes, imports)
+                .then(result=>result.instance.exports),
         memory_size: config.memorySize,
         vga_memory_size: 1024 * 1024,
         // Our ROM, not SeaBIOS: 64 KiB placed at ROM_BASE, entered at its reset vector.
@@ -73,7 +74,10 @@ export async function createV86Host(config){
         undefined,
         undefined,
         (/** @type {number} */ value)=>{
-            if (trapHandler) trapHandler(value >>> 0);
+            if (trapHandler)
+            {
+                trapHandler(value >>> 0);
+            }
         },
     );
 
@@ -96,14 +100,20 @@ export async function createV86Host(config){
         /** @param {string} name @returns {number} */
         readReg32(name){
             const index = REGISTERS.indexOf(name);
-            if (index === -1) throw new Error(`Unknown register "${name}"`);
+            if (index === -1)
+            {
+                throw new Error(`Unknown register "${name}"`);
+            }
             return cpu.reg32[index] >>> 0;
         },
 
         /** @param {string} name @param {number} value */
         writeReg32(name, value){
             const index = REGISTERS.indexOf(name);
-            if (index === -1) throw new Error(`Unknown register "${name}"`);
+            if (index === -1)
+            {
+                throw new Error(`Unknown register "${name}"`);
+            }
             cpu.reg32[index] = value | 0;
         },
 

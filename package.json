@@ -15,7 +15,7 @@
     "fetch:v86": "npm run fetch:v86 -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
     "typecheck": "npm run typecheck -w @bottlify/core",
-    "lint": "eslint . --max-warnings 225",
+    "lint": "eslint . --max-warnings 0",
     "test": "npm run test -w @bottlify/core",
     "test:integration": "npm run test:integration -w @bottlify/core",
     "test:tools": "node --test \"tools/*.test.js\"",

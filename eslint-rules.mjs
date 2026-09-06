@@ -21,29 +21,39 @@ const bracketPlacement = context=>{
 
     const checkBlock = (newline, props = ['body'])=>node=>props.forEach(prop=>{
         const block = node[prop];
-        if (!isBlock(block)){
+        if (!isBlock(block))
+        {
             return;
         }
         const prev = src.getTokenBefore(block);
         const open = src.getFirstToken(block);
         const close = src.getLastToken(block);
 
-        if (!newline && !sameLine(prev, open)){
-            context.report(node, 'Opening curly brace does not appear on the same line as controlling statement.');
+        if (!newline && !sameLine(prev, open))
+        {
+            context.report(node,
+                'Opening curly brace does not appear on the same line as controlling statement.');
         }
-        if (!newline){
+        if (!newline)
+        {
             return;
         }
-        if (sameLine(prev, open)){
-            context.report(node, 'Opening curly brace appears on the same line as controlling statement.');
+        if (sameLine(prev, open))
+        {
+            context.report(node,
+                'Opening curly brace appears on the same line as controlling statement.');
         }
-        if (!block.body.length){
+        if (!block.body.length)
+        {
             return;
         }
-        if (sameLine(open, block.body[0])){
-            context.report(block.body[0], 'Statement inside of curly braces should be on next line.');
+        if (sameLine(open, block.body[0]))
+        {
+            context.report(block.body[0],
+                'Statement inside of curly braces should be on next line.');
         }
-        if (sameLine(close, block.body[block.body.length - 1])){
+        if (sameLine(close, block.body[block.body.length - 1]))
+        {
             context.report(block.body[block.body.length - 1],
                 'Closing curly brace appears on the same line as the subsequent block.');
         }
@@ -51,7 +61,8 @@ const bracketPlacement = context=>{
 
     const getClosingParen = body=>{
         let token = src.getFirstToken(body);
-        while (token && token.value !== ')'){
+        while (token && token.value !== ')')
+        {
             token = src.getTokenBefore(token);
         }
         return token;
@@ -59,7 +70,8 @@ const bracketPlacement = context=>{
 
     /** True when the head of the statement (its condition or signature) spans lines. */
     const isHeadMultiline = (body, node)=>{
-        if (node.type === 'ArrowFunctionExpression' && node.params.length === 1){
+        if (node.type === 'ArrowFunctionExpression' && node.params.length === 1)
+        {
             return false;
         }
         const closing = getClosingParen(body);
@@ -68,10 +80,12 @@ const bracketPlacement = context=>{
 
     /** Braces are required as soon as the body spans more than one line. */
     const requireBracesWhenMultiline = (body, node)=>{
-        if (isBlock(body)){
+        if (isBlock(body))
+        {
             return;
         }
-        if (body.loc.end.line > body.loc.start.line || isHeadMultiline(body, node)){
+        if (body.loc.end.line > body.loc.start.line || isHeadMultiline(body, node))
+        {
             context.report(body,
                 'Should always have braces in if, while, for statements when '
                 + 'condition/then/else/loop part is more than one line.');
@@ -81,11 +95,13 @@ const bracketPlacement = context=>{
     const checkIf = node=>{
         checkBlock(true, ['consequent', 'alternate'])(node);
         requireBracesWhenMultiline(node.consequent, node);
-        if (!node.alternate){
+        if (!node.alternate)
+        {
             return;
         }
         const tokens = src.getTokensBefore(node.alternate, 2);
-        if (sameLine(tokens[0], tokens[1])){
+        if (sameLine(tokens[0], tokens[1]))
+        {
             context.report(node.alternate,
                 'Closing curly brace appears on the same line as the subsequent block.');
         }
@@ -99,8 +115,10 @@ const bracketPlacement = context=>{
     const checkFunction = node=>{
         const call = (()=>{
             let parent = node.parent;
-            while (parent){
-                if (parent.type === 'CallExpression'){
+            while (parent)
+            {
+                if (parent.type === 'CallExpression')
+                {
                     return parent;
                 }
                 parent = parent.parent;
@@ -109,11 +127,14 @@ const bracketPlacement = context=>{
         })();
         // A callback passed inline sits on its caller's line; its brace follows
         // the argument list, not the statement that opened the call.
-        if (call && call.loc.start.line !== node.loc.start.line){
-            if (!node.params.length){
+        if (call && call.loc.start.line !== node.loc.start.line)
+        {
+            if (!node.params.length)
+            {
                 return;
             }
-            if (node.params[node.params.length - 1].loc.end.line === node.loc.start.line){
+            if (node.params[node.params.length - 1].loc.end.line === node.loc.start.line)
+            {
                 return;
             }
         }
@@ -137,7 +158,8 @@ const bracketPlacement = context=>{
 /** The body of an `if` belongs on its own line. */
 const onelineIfs = context =>({
     IfStatement: node=>{
-        if (node.loc.start.line === node.loc.end.line){
+        if (node.loc.start.line === node.loc.end.line)
+        {
             context.report(node, 'Body of an IF statement has to be on the next line');
         }
     },
@@ -151,12 +173,15 @@ const errorNames = context=>{
     };
     return {
         Identifier: node=>{
-            if (node.parent.type !== 'CatchClause' || node.name === 'e'){
+            if (node.parent.type !== 'CatchClause' || node.name === 'e')
+            {
                 return;
             }
             const nested = ancestors(node.parent.parent).some(a=>a.type === 'CatchClause');
-            if (nested){
-                if (node.name !== '_e'){
+            if (nested)
+            {
+                if (node.name !== '_e')
+                {
                     context.report(node, 'Nested error variable should be named "_e".');
                 }
                 return;
@@ -174,14 +199,16 @@ const arrowSpaces = context=>{
             const arrow = src.getTokenBefore(node.body);
             const before = src.getTokenBefore(arrow);
             const after = src.getTokenAfter(arrow);
-            if (arrow.range[0] - before.range[1] > 0){
+            if (arrow.range[0] - before.range[1] > 0)
+            {
                 context.report({
                     node: before,
                     message: 'Unexpected space before =>',
                     fix: fixer=>fixer.removeRange([before.range[1], arrow.range[0]]),
                 });
             }
-            if (arrow.loc.end.line === after.loc.start.line && after.range[0] - arrow.range[1] > 0){
+            if (arrow.loc.end.line === after.loc.start.line && after.range[0] - arrow.range[1] > 0)
+            {
                 context.report({
                     node: after,
                     message: 'Unexpected space after =>',
@@ -197,16 +224,20 @@ const nonAscii = context =>({
     Program: ()=>{
         const src = context.sourceCode;
         const text = src.getText();
-        for (let i = 0; i < text.length; i++){
-            if (text.charCodeAt(i) < 127){
+        for (let i = 0; i < text.length; i++)
+        {
+            if (text.charCodeAt(i) < 127)
+            {
                 continue;
             }
             const node = src.getNodeByRangeIndex(i) || src.getTokenByRangeStart(i);
-            if (!node || node.type === 'Literal' || node.type === 'TemplateElement'){
+            if (!node || node.type === 'Literal' || node.type === 'TemplateElement')
+            {
                 continue;
             }
             const comment = src.getAllComments().some(c=>i >= c.range[0] && i < c.range[1]);
-            if (comment){
+            if (comment)
+            {
                 continue;
             }
             context.report(node,
@@ -222,20 +253,24 @@ const spacesAroundAssignment = context=>{
         AssignmentExpression: node=>{
             const parent = node.parent;
             // `for (let i=0; i<n; i+=2)` is idiomatic and stays exempt.
-            if (parent.type === 'ForStatement' && (parent.init === node || parent.update === node)){
+            if (parent.type === 'ForStatement' && (parent.init === node || parent.update === node))
+            {
                 return;
             }
             if (parent.type === 'SequenceExpression' && parent.parent?.type === 'ForStatement'
-                && parent.parent.update === parent){
+                && parent.parent.update === parent)
+            {
                 return;
             }
             const op = src.getFirstTokenBetween(node.left, node.right);
-            if (op.value !== '='){
+            if (op.value !== '=')
+            {
                 return;
             }
             const before = src.getTokenBefore(op);
             const after = src.getTokenAfter(op);
-            if (src.isSpaceBetween(before, op) && src.isSpaceBetween(op, after)){
+            if (src.isSpaceBetween(before, op) && src.isSpaceBetween(op, after))
+            {
                 return;
             }
             context.report({ node, message: `Assignment needs a space around the '${op.value}'` });

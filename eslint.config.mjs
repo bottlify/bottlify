@@ -48,7 +48,8 @@ export default [
             'no-useless-call': 'error',
             'no-useless-concat': 'error',
             'no-else-return': 'error',
-            'no-use-before-define': ['error', { functions: false, classes: false, variables: false }],
+            'no-use-before-define': [
+                'error', { functions: false, classes: false, variables: false }],
             'block-scoped-var': 'error',
             'no-extra-bind': 'error',
             'no-extra-label': 'error',
@@ -82,7 +83,8 @@ export default [
             'spaced-comment': ['error', 'always'],
             quotes: ['error', 'single', { avoidEscape: true, allowTemplateLiterals: true }],
             'space-before-function-paren': ['error', 'never'],
-            'space-before-blocks': ['error', { functions: 'never', keywords: 'never', classes: 'always' }],
+            'space-before-blocks': [
+                'error', { functions: 'never', keywords: 'never', classes: 'always' }],
             'arrow-parens': ['error', 'as-needed'],
             // `no-extra-parens` is deliberately absent: a JSDoc cast is written
             // `/** @type {T} */ (expr)`, and those parentheses are syntactically

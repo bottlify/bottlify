@@ -31,10 +31,12 @@ function readManifest(){
     const raw = JSON.parse(readFileSync(MANIFEST_FILE, 'utf8'));
     /** @type {Record<string, string>} */
     const expected = {};
-    for (const [rel, hash] of Object.entries(raw.artifacts)){
+    for (const [rel, hash] of Object.entries(raw.artifacts))
+    {
         const name = rel.replace(/^\.\//, '');
         const prefix = 'sha256:';
-        if (!hash.startsWith(prefix)){
+        if (!hash.startsWith(prefix))
+        {
             throw new Error(`manifest artifact "${rel}" must look like "sha256:<hex>"`);
         }
         expected[name] = hash.slice(prefix.length);
@@ -46,7 +48,8 @@ async function check(){
     const docker = spawnSync('docker', ['version', '--format', '{{.Server.Version}}'], {
         stdio: 'ignore',
     });
-    if (docker.status !== 0){
+    if (docker.status !== 0)
+    {
         console.error('verify:reproducibility requires a running docker daemon');
         process.exit(2);
     }
@@ -54,8 +57,8 @@ async function check(){
     let manifest;
     try {
         manifest = readManifest();
-    } catch (error){
-        console.error(`no valid dist/vendor/manifest.json yet: ${error.message}`);
+    } catch (e){
+        console.e(`no valid dist/vendor/manifest.json yet: ${e.message}`);
         process.exit(1);
     }
 
@@ -66,18 +69,22 @@ async function check(){
             ['run', '--rm', '-v', `${VENDOR}:/src`, '-v', `${tempOut}:/out`, IMAGE, '/src', '/out'],
             { stdio: 'pipe', encoding: 'utf8' },
         );
-        if (run.status !== 0){
+        if (run.status !== 0)
+        {
             console.error(`containerized build failed:\n${run.stderr}`);
             process.exit(1);
         }
 
         const names = Object.keys(manifest);
-        for (const name of names){
+        for (const name of names)
+        {
             const rebuilt = join(tempOut, name);
             const bytes = await readFile(rebuilt);
             const actual = createHash('sha256').update(bytes).digest('hex');
-            if (actual !== manifest[name]){
-                console.error(`Reproduction mismatch: ${name}: expected ${manifest[name]}, got ${actual}`);
+            if (actual !== manifest[name])
+            {
+                console.error(
+                    `Reproduction mismatch: ${name}: expected ${manifest[name]}, got ${actual}`);
                 process.exit(1);
             }
         }

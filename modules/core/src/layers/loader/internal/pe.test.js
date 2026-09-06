@@ -52,7 +52,8 @@ test('imports name the functions the program actually calls', ()=>{
         imports[0].entries.map(entry=>entry.name),
         ['GetStdHandle', 'WriteFile', 'ExitProcess'],
     );
-    for (const entry of imports[0].entries){
+    for (const entry of imports[0].entries)
+    {
         assert.equal(entry.ordinal, null, 'imported by name, not ordinal');
         assert.ok(entry.iatRva > 0, 'each import has a slot to write into');
     }
@@ -67,7 +68,8 @@ test('RVA translation accounts for the zero-filled tail past raw data', ()=>{
 
 test('an image without relocations refuses to move', ()=>{
     const image = parsePe(file);
-    assert.equal(image.relocatable, false, 'the fixture has no .reloc, like many pre-2000 binaries');
+    assert.equal(image.relocatable, false,
+        'the fixture has no .reloc, like many pre-2000 binaries');
     assert.throws(()=>applyRelocations(new Uint8Array(image.sizeOfImage), image, 0x1000), /no relocation directory/);
     assert.throws(()=>buildImage(file, { resolveImport: ()=>0, base: 0x800000 }), /carries no relocations/);
 });
@@ -101,7 +103,8 @@ test('building the image binds every import into the IAT', ()=>{
 
     const view = new DataView(loaded.bytes.buffer);
     const iatSlot = view.getUint32(entryOffset + 4, true) - loaded.base; // operand of call [abs]
-    assert.equal(view.getUint32(iatSlot, true), stubs.GetStdHandle, 'IAT slot holds the bound address');
+    assert.equal(view.getUint32(iatSlot, true), stubs.GetStdHandle,
+        'IAT slot holds the bound address');
 });
 
 test('an import nobody claims is reported, not fatal', ()=>{

@@ -41,7 +41,10 @@ const u32 = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value
 /** Runs until the guest traps, or the deadline passes. @param {any} host */
 function runUntilTrap(host, timeoutMs = 4000){
     return new Promise((resolve, reject)=>{
-        const timer = setTimeout(()=>{ host.stop(); reject(new Error('guest never trapped')); }, timeoutMs);
+        const timer = setTimeout(()=>{
+            host.stop();
+            reject(new Error('guest never trapped'));
+        }, timeoutMs);
         host.onTrap((/** @type {number} */ value)=>{
             clearTimeout(timer);
             host.stop();
@@ -77,7 +80,8 @@ test('boots without a BIOS and reaches guest code in protected mode', async()=>{
     );
 
     // The whole point of shipping our own ROM: nothing but our stub runs first.
-    assert.ok(host.instructionCount() < 40, `only the ROM stub ran first (${host.instructionCount()} instructions)`);
+    assert.ok(host.instructionCount() < 40,
+        `only the ROM stub ran first (${host.instructionCount()} instructions)`);
 });
 
 test('the guest stack is the one the ROM set up', async()=>{

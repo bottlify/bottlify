@@ -28,25 +28,36 @@
  */
 export function normalizeConfig(desired, known){
     const knownSet = new Set(known);
-    for (const key of Object.keys(desired ?? {})){
-        if (!knownSet.has(key)){
-            throw new Error(`Unknown module in configuration: "${key}". Known: ${known.join(', ')}`);
+    for (const key of Object.keys(desired ?? {}))
+    {
+        if (!knownSet.has(key))
+        {
+            throw new Error(
+                `Unknown module in configuration: "${key}". Known: ${known.join(', ')}`);
         }
     }
 
     const out = new Map();
-    for (const name of known){
+    for (const name of known)
+    {
         const raw = desired ? desired[name] : undefined;
         let enabled;
         let config = null;
-        if (raw === false || raw === null){
+        if (raw === false || raw === null)
+        {
             enabled = false;
-        } else if (raw === true || raw === undefined){
+        }
+        else if (raw === true || raw === undefined)
+        {
             enabled = true;
-        } else if (typeof raw === 'object'){
+        }
+        else if (typeof raw === 'object')
+        {
             enabled = true;
             config = /** @type {import("./contract.js").ModuleConfig} */ raw;
-        } else {
+        }
+        else
+        {
             throw new Error(`Configuration of module "${name}": expected boolean/null/object, got ${typeof raw}`);
         }
         out.set(name, { enabled, config });

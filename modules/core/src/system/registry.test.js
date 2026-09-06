@@ -31,7 +31,8 @@ function defn(name, requires = []){
 }
 
 test('creation order is topological with dependencies first', ()=>{
-    const registry = new ModuleRegistry([defn('top', ['mid']), defn('mid', ['base']), defn('base')]);
+    const registry = new ModuleRegistry(
+        [defn('top', ['mid']), defn('mid', ['base']), defn('base')]);
     const plan = registry.resolve({});
     assert.deepEqual(plan.map(entry=>entry.name), ['base', 'mid', 'top']);
 });

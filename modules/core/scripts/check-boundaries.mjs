@@ -35,10 +35,17 @@ const IMPORT_RE =
  */
 function walk(dir){
     const out = [];
-    for (const entry of readdirSync(dir, { withFileTypes: true })){
+    for (const entry of readdirSync(dir, { withFileTypes: true }))
+    {
         const abs = join(dir, entry.name);
-        if (entry.isDirectory()) out.push(...walk(abs));
-        else if (entry.isFile() && abs.endsWith('.js')) out.push(abs);
+        if (entry.isDirectory())
+        {
+            out.push(...walk(abs));
+        }
+        else if (entry.isFile() && abs.endsWith('.js'))
+        {
+            out.push(abs);
+        }
     }
     return out;
 }
@@ -49,9 +56,16 @@ function walk(dir){
  */
 function classify(file){
     const rel = normalize(file).slice(SRC.length + 1).split(sep);
-    if (rel[0] === 'system') return { kind: 'system', layer: null };
-    if (rel[0] === 'layers'){
-        if (rel[1] === 'index.js') return { kind: 'layers-index', layer: null };
+    if (rel[0] === 'system')
+    {
+        return { kind: 'system', layer: null };
+    }
+    if (rel[0] === 'layers')
+    {
+        if (rel[1] === 'index.js')
+        {
+            return { kind: 'layers-index', layer: null };
+        }
         return { kind: 'layer', layer: rel[1] };
     }
     return { kind: 'root', layer: null };
@@ -64,10 +78,12 @@ function classify(file){
 async function layerRequires(){
     const layersDir = join(SRC, 'layers');
     const map = new Map();
-    for (const name of readdirSync(layersDir).filter(n=>statSync(join(layersDir, n)).isDirectory())){
+    for (const name of readdirSync(layersDir).filter(n=>statSync(join(layersDir, n)).isDirectory()))
+    {
         const mod = await import(pathToFileURL(join(layersDir, name, 'module.js')).href);
         const exportName = `${name}Module`;
-        if (!(exportName in mod)){
+        if (!(exportName in mod))
+        {
             throw new Error(`Missing export "${exportName}" in layers/${name}/module.js`);
         }
         map.set(name, new Set(mod[exportName].requires));
@@ -90,43 +106,60 @@ const files = walk(SRC).filter(file=>!file.endsWith('.test.js') && !file.endsWit
 const requireMap = await layerRequires();
 const issues = [];
 
-for (const file of files){
+for (const file of files)
+{
     const { kind, layer } = classify(file);
-    for (const spec of specifiersOf(file)){
-        if (!spec.startsWith('.')) continue;
+    for (const spec of specifiersOf(file))
+    {
+        if (!spec.startsWith('.'))
+        {
+            continue;
+        }
 
         const target = resolve(dirname(file), spec);
 
-        if (target.startsWith(VENDOR + sep)){
-            if (layer !== 'cpu'){
-                issues.push(`${file} imports vendor (${spec}): vendor is reachable only from layers/cpu`);
+        if (target.startsWith(VENDOR + sep))
+        {
+            if (layer !== 'cpu')
+            {
+                issues.push(
+                    `${file} imports vendor (${spec}): vendor is reachable only from layers/cpu`);
             }
             continue;
         }
 
-        if (!target.startsWith(SRC + sep)){
+        if (!target.startsWith(SRC + sep))
+        {
             issues.push(`${file} imports outside src (${spec})`);
             continue;
         }
 
         const t = classify(target);
 
-        if (kind === 'system' && (t.kind === 'layer' || t.kind === 'layers-index')){
+        if (kind === 'system' && (t.kind === 'layer' || t.kind === 'layers-index'))
+        {
             issues.push(`${file} (system) imports a layer (${spec}): system must not know layers`);
             continue;
         }
 
-        if (kind === 'layer'){
-            if (t.kind === 'layers-index'){
-                issues.push(`${file} imports the layer aggregator (${spec}): import the layer module directly`);
+        if (kind === 'layer')
+        {
+            if (t.kind === 'layers-index')
+            {
+                issues.push(`${file} imports the layer aggregator (${spec}): `
+                    + 'import the layer module directly');
             }
-            if (t.kind === 'layer' && t.layer !== layer && !requireMap.get(layer).has(t.layer)){
+            if (t.kind === 'layer' && t.layer !== layer && !requireMap.get(layer).has(t.layer))
+            {
                 issues.push(
-                    `${file} imports layer "${t.layer}" (${spec}) but it is not declared in requires`,
+                    `${file} imports layer "${t.layer}" (${spec}) `
+                        + 'but it is not declared in requires',
                 );
             }
-            if (t.kind === 'root'){
-                issues.push(`${file} imports core.js (${spec}): the facade is a consumer, not a dependency`);
+            if (t.kind === 'root')
+            {
+                issues.push(`${file} imports core.js (${spec}): `
+                    + 'the facade is a consumer, not a dependency');
             }
         }
     }
@@ -134,35 +167,56 @@ for (const file of files){
 
 // Cycle detection over the src import graph.
 const graph = new Map(files.map(file=>[file, []]));
-for (const file of files){
-    for (const spec of specifiersOf(file)){
-        if (!spec.startsWith('.')) continue;
+for (const file of files)
+{
+    for (const spec of specifiersOf(file))
+    {
+        if (!spec.startsWith('.'))
+        {
+            continue;
+        }
         const target = resolve(dirname(file), spec);
-        if (target.startsWith(SRC + sep)) graph.get(file).push(target);
+        if (target.startsWith(SRC + sep))
+        {
+            graph.get(file).push(target);
+        }
     }
 }
 const state = new Map();
 const visit = file=>{
     const seen = state.get(file);
-    if (seen === 1) return null;
-    if (seen === 0) return file;
+    if (seen === 1)
+    {
+        return null;
+    }
+    if (seen === 0)
+    {
+        return file;
+    }
     state.set(file, 0);
-    for (const next of graph.get(file)){
+    for (const next of graph.get(file))
+    {
         const hit = visit(next);
-        if (hit) return hit;
+        if (hit)
+        {
+            return hit;
+        }
     }
     state.set(file, 1);
     return null;
 };
-for (const file of files){
+for (const file of files)
+{
     const hit = visit(file);
-    if (hit){
+    if (hit)
+    {
         issues.push(`Import cycle detected involving: ${hit}`);
         break;
     }
 }
 
-if (issues.length > 0){
+if (issues.length > 0)
+{
     console.error(`Boundary violations:\n  - ${issues.join('\n  - ')}`);
     process.exit(1);
 }

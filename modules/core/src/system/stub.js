@@ -19,16 +19,26 @@ export function createStubApi(moduleName){
     const marker = `[stub:${moduleName}]`;
     const proxy = new Proxy({ marker }, {
         get(target, prop){
-            if (prop === 'marker') return target.marker;
-            if (prop === 'then') return undefined; // keep the stub a non-thenable
-            if (typeof prop === 'symbol') return undefined;
+            if (prop === 'marker')
+            {
+                return target.marker;
+            }
+            if (prop === 'then')
+            {
+                return undefined; // keep the stub a non-thenable
+            }
+            if (typeof prop === 'symbol')
+            {
+                return undefined;
+            }
             const method = ()=>{
                 const error = /** @type {Error & { code: string }} */ (
                     new Error(`NOT_IMPLEMENTED: ${moduleName}.${String(prop)}`));
                 error.code = 'NOT_IMPLEMENTED';
                 throw error;
             };
-            Object.defineProperty(method, 'name', { value: `${moduleName}:${String(prop)}`, configurable: true });
+            Object.defineProperty(method, 'name',
+                { value: `${moduleName}:${String(prop)}`, configurable: true });
             return method;
         },
     });
@@ -52,7 +62,10 @@ export function createStubModule(name, version, requires = []){
             return createStubApi(name);
         },
         diagnostics(){
-            return { name, version, status: 'stub', metrics: { methods: 'any', code: 'NOT_IMPLEMENTED' } };
+            return {
+                name, version, status: 'stub',
+                metrics: { methods: 'any', code: 'NOT_IMPLEMENTED' },
+            };
         },
         async dispose(){},
     });

@@ -26,7 +26,8 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
 /**
  * @param {Uint8Array} file  Raw executable bytes.
  * @param {Object} options
- * @param {(dll: string, name: string | null, ordinal: number | null) => number | null} options.resolveImport
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        options.resolveImport
  *   Returns the guest address to write into the IAT, or null if unavailable.
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
  * @returns {LoadedImage}
@@ -35,7 +36,8 @@ export function buildImage(file, { resolveImport, base }){
     const image = parsePe(file);
     const loadBase = base ?? image.imageBase;
 
-    if (loadBase !== image.imageBase && !image.relocatable){
+    if (loadBase !== image.imageBase && !image.relocatable)
+    {
         throw new Error(
             `image must load at 0x${image.imageBase.toString(16)}: it carries no relocations`,
         );
@@ -48,8 +50,12 @@ export function buildImage(file, { resolveImport, base }){
 
     bytes.set(file.subarray(0, Math.min(image.sizeOfHeaders, file.length)), 0);
 
-    for (const section of image.sections){
-        if (section.rawSize === 0) continue; // pure BSS: already zero
+    for (const section of image.sections)
+    {
+        if (section.rawSize === 0)
+        {
+            continue; // pure BSS: already zero
+        }
         const source = file.subarray(section.rawOffset, section.rawOffset + section.rawSize);
         // A section's raw data can exceed its virtual size when the linker padded to
         // file alignment; only what fits in the mapping is copied.
@@ -63,10 +69,13 @@ export function buildImage(file, { resolveImport, base }){
     const unresolved = [];
     const view = new DataView(bytes.buffer);
 
-    for (const { dll, entries } of readImports(file, image)){
-        for (const entry of entries){
+    for (const { dll, entries } of readImports(file, image))
+    {
+        for (const entry of entries)
+        {
             const address = resolveImport(dll, entry.name, entry.ordinal);
-            if (address === null){
+            if (address === null)
+            {
                 unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
                 continue;
             }

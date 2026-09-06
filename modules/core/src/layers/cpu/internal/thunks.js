@@ -48,7 +48,10 @@ export function buildStub({ trapId, port, popBytes, preserveResult = false }){
         0xef, //                     out dx, eax   -> host handles it, leaves the result in EAX
         ...popBytes > 0 ? [0xc2, ...u16(popBytes)] : [0xc3], // ret popBytes / ret
     ];
-    if (bytes.length > STUB_SIZE) throw new Error('stub does not fit its slot');
+    if (bytes.length > STUB_SIZE)
+    {
+        throw new Error('stub does not fit its slot');
+    }
     return new Uint8Array([...bytes, ...new Array(STUB_SIZE - bytes.length).fill(0xcc)]);
 }
 
@@ -104,7 +107,8 @@ export function createThunkTable({ base, port }){
             const bytes = new Uint8Array(entries.length * STUB_SIZE);
             // hlt; jmp back to the hlt — the park loop in slot 0.
             bytes.set([0xf4, 0xeb, 0xfd], 0);
-            for (const entry of entries.slice(1)){
+            for (const entry of entries.slice(1))
+            {
                 bytes.set(
                     buildStub({
                         trapId: entry.id,

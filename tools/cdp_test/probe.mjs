@@ -36,12 +36,13 @@ const REPORTS_DIR = join(TOOL_ROOT, 'reports');
  */
 export async function probe({ attempts = 3 } = {}){
     let lastError;
-    for (let attempt = 1; attempt <= attempts; attempt++){
+    for (let attempt = 1; attempt <= attempts; attempt++)
+    {
         try {
             return await singleProbe(attempt);
-        } catch (error){
-            lastError = error;
-            console.error(`probe attempt ${attempt}/${attempts} failed: ${error.message}`);
+        } catch (e){
+            lastError = e;
+            console.e(`probe attempt ${attempt}/${attempts} failed: ${e.message}`);
         }
     }
     throw lastError;
@@ -73,7 +74,8 @@ async function singleProbe(attempt){
         /** @type {string[]} */
         const pageEvents = [];
         cdp.on('Runtime.exceptionThrown', params=>{
-            pageEvents.push(`exception: ${params.exceptionDetails?.exception?.description ?? JSON.stringify(params)}`);
+            pageEvents.push('exception: '
+                + `${params.exceptionDetails?.exception?.description ?? JSON.stringify(params)}`);
         });
         cdp.on('Runtime.consoleAPICalled', params=>{
             const text = (params.args ?? []).map(arg=>arg.value ?? arg.description ?? '').join(' ');
@@ -86,38 +88,49 @@ async function singleProbe(attempt){
       ? window.__bottlify__.probe.then((r) => JSON.stringify({ pending: false, value: r }))
       : Promise.resolve(JSON.stringify({ pending: true }))`;
 
-        for (let tick = 0; tick < 200; tick++){
+        for (let tick = 0; tick < 200; tick++)
+        {
             const result = await cdp.send(
                 'Runtime.evaluate',
                 { expression, awaitPromise: true, returnByValue: true },
                 sessionId,
             );
-            if (result.exceptionDetails){
-                throw new Error(`page probe rejected: ${JSON.stringify(result.exceptionDetails.exception?.description || result.exceptionDetails)}`);
+            if (result.exceptionDetails)
+            {
+                throw new Error('page probe rejected: '
+                    + JSON.stringify(result.exceptionDetails.exception?.description
+                        || result.exceptionDetails));
             }
             const parsed = JSON.parse(result.result.value);
-            if (!parsed.pending){
+            if (!parsed.pending)
+            {
                 report = parsed.value;
                 break;
             }
             await new Promise(resolveDelay=>setTimeout(resolveDelay, 50));
         }
-        if (!report){
+        if (!report)
+        {
             let debugText = 'n/a';
             try {
                 const debug = await cdp.send(
                     'Runtime.evaluate',
                     {
-                        expression: `JSON.stringify({ href: location.href, title: document.title, out: (document.querySelector("#out") || {}).textContent, errors: (window.__bottlify__ && window.__bottlify__.errors) || [] })`,
+                        expression: `JSON.stringify({`
+                            + ` href: location.href, title: document.title,`
+                            + ` out: (document.querySelector("#out") || {}).textContent,`
+                            + ` errors: (window.__bottlify__ && window.__bottlify__.errors) || []`
+                            + `})`,
                         returnByValue: true,
                     },
                     sessionId,
                 );
                 debugText = debug.result?.value ?? JSON.stringify(debug);
-            } catch (error){
-                debugText = `debug-eval failed: ${error.message}`;
+            } catch (e){
+                debugText = `debug-eval failed: ${e.message}`;
             }
-            throw new Error(`worker did not answer ping within 10s; page: ${debugText}; events: ${pageEvents.join(' | ')}`);
+            throw new Error(`worker did not answer ping within 10s; page: ${debugText}; `
+                + `events: ${pageEvents.join(' | ')}`);
         }
 
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
@@ -148,8 +161,8 @@ export async function runProbeAndExit(){
         const result = await probe();
         console.log(JSON.stringify(result, null, 2));
         return result.ok ? 0 : 1;
-    } catch (error){
-        console.error(`probe failed: ${error.message}`);
+    } catch (e){
+        console.e(`probe failed: ${e.message}`);
         return 1;
     }
 }

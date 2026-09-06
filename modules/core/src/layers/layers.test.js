@@ -70,7 +70,8 @@ test('disabling a required module installs a stub in its place', async()=>{
     const win32 = core.diagnostics().find(d=>d.name === 'win32');
     assert.ok(win32);
     assert.equal(win32.status, 'stub');
-    assert.ok(core.diagnostics().some(d=>d.name === 'graphics'), 'win32 stays because graphics requires it');
+    assert.ok(core.diagnostics().some(d=>d.name === 'graphics'),
+        'win32 stays because graphics requires it');
 });
 
 test('configuration errors propagate', async()=>{

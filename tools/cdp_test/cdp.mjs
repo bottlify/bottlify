@@ -46,10 +46,15 @@ export class CdpEndpoint {
         });
         await new Promise((resolve, reject)=>{
             this.ws.addEventListener('open', resolve, { once: true });
-            this.ws.addEventListener('error', ()=>reject(new Error('WebSocket error while connecting to CDP')), { once: true });
+            this.ws.addEventListener('error',
+                ()=>reject(new Error('WebSocket error while connecting to CDP')),
+                { once: true });
         });
         this.ws.addEventListener('close', ()=>{
-            for (const { reject } of this.pending.values()) reject(new Error('CDP connection closed'));
+            for (const { reject } of this.pending.values())
+            {
+                reject(new Error('CDP connection closed'));
+            }
             this.pending.clear();
         });
     }
@@ -58,17 +63,31 @@ export class CdpEndpoint {
      * @param {CdpMessage} message
      */
     dispatch(message){
-        if (message.id != null){
+        if (message.id != null)
+        {
             const pending = this.pending.get(message.id);
-            if (!pending) return;
+            if (!pending)
+            {
+                return;
+            }
             this.pending.delete(message.id);
-            if (message.error) pending.reject(new Error(`${message.error.message}`));
+            if (message.error)
+            {
+                pending.reject(new Error(`${message.error.message}`));
+            }
             else pending.resolve(message.result);
             return;
         }
-        if (message.method){
+        if (message.method)
+        {
             const listeners = this.listeners.get(message.method);
-            if (listeners) for (const listener of listeners) listener(message.params ?? {});
+            if (listeners)
+            {
+                for (const listener of listeners)
+                {
+                    listener(message.params ?? {});
+                }
+            }
         }
     }
 
@@ -83,12 +102,16 @@ export class CdpEndpoint {
     send(method, params = {}, sessionId = null){
         /** @type {CdpMessage} */
         const message = { id: this.nextId++, method, params };
-        if (sessionId) message.sessionId = sessionId;
+        if (sessionId)
+        {
+            message.sessionId = sessionId;
+        }
         return new Promise((resolve, reject)=>{
             this.pending.set(message.id, { resolve, reject });
             this.ws.send(JSON.stringify(message));
             setTimeout(()=>{
-                if (this.pending.has(message.id)){
+                if (this.pending.has(message.id))
+                {
                     this.pending.delete(message.id);
                     reject(new Error(`CDP command timed out: ${method}`));
                 }
@@ -104,7 +127,10 @@ export class CdpEndpoint {
      * @returns {() => void} unsubscribe
      */
     on(method, listener){
-        if (!this.listeners.has(method)) this.listeners.set(method, new Set());
+        if (!this.listeners.has(method))
+        {
+            this.listeners.set(method, new Set());
+        }
         this.listeners.get(method).add(listener);
         return ()=>this.listeners.get(method)?.delete(listener);
     }

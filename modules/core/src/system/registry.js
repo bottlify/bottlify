@@ -33,8 +33,10 @@ export class ModuleRegistry {
      * @param {readonly import("./contract.js").BottlifyModule[]} definitions
      */
     constructor(definitions){
-        for (const module of definitions){
-            if (this.#definitions.has(module.name)){
+        for (const module of definitions)
+        {
+            if (this.#definitions.has(module.name))
+            {
                 throw new Error(`Duplicate module definition: "${module.name}"`);
             }
             this.#definitions.set(module.name, module);
@@ -44,10 +46,14 @@ export class ModuleRegistry {
 
     /** Every name in `requires` must exist among the definitions. */
     #assertRequiresKnown(){
-        for (const module of this.#definitions.values()){
-            for (const required of module.requires){
-                if (!this.#definitions.has(required)){
-                    throw new Error(`Module "${module.name}" requires unknown interface "${required}"`);
+        for (const module of this.#definitions.values())
+        {
+            for (const required of module.requires)
+            {
+                if (!this.#definitions.has(required))
+                {
+                    throw new Error(
+                        `Module "${module.name}" requires unknown interface "${required}"`);
                 }
             }
         }
@@ -66,25 +72,44 @@ export class ModuleRegistry {
         // module must be present (disabled ones become stubs in that case).
         const active = new Set();
         const activate = (/** @type {string} */ name)=>{
-            if (active.has(name)) return;
+            if (active.has(name))
+            {
+                return;
+            }
             active.add(name);
             const definition = this.#definitions.get(name);
-            if (!definition) throw new Error(`Unknown module "${name}"`);
+            if (!definition)
+            {
+                throw new Error(`Unknown module "${name}"`);
+            }
             for (const required of definition.requires) activate(required);
         };
-        for (const [name, toggle] of selection){
-            if (toggle.enabled) activate(name);
+        for (const [name, toggle] of selection)
+        {
+            if (toggle.enabled)
+            {
+                activate(name);
+            }
         }
 
         const order = this.#topoOrder(active);
         /** @type {PlanEntry[]} */
         const plan = [];
-        for (const name of order){
+        for (const name of order)
+        {
             const toggle = selection.get(name);
-            if (!toggle) throw new Error(`Unresolved toggle for "${name}"`);
+            if (!toggle)
+            {
+                throw new Error(`Unresolved toggle for "${name}"`);
+            }
             const definition = this.#definitions.get(name);
-            if (!definition) throw new Error(`Unknown module "${name}"`);
-            const module = toggle.enabled ? definition : createStubModule(name, definition.version, []);
+            if (!definition)
+            {
+                throw new Error(`Unknown module "${name}"`);
+            }
+            const module = toggle.enabled
+                ? definition
+                : createStubModule(name, definition.version, []);
             plan.push({ name, module, config: toggle.enabled ? toggle.config : null });
         }
         return plan;
@@ -103,13 +128,20 @@ export class ModuleRegistry {
         const out = [];
         const visit = (/** @type {string} */ name)=>{
             const seen = state.get(name);
-            if (seen === 1) return;
-            if (seen === 0){
+            if (seen === 1)
+            {
+                return;
+            }
+            if (seen === 0)
+            {
                 throw new Error(`Dependency cycle involving module "${name}"`);
             }
             state.set(name, 0);
             const definition = this.#definitions.get(name);
-            if (!definition) throw new Error(`Unknown module "${name}"`);
+            if (!definition)
+            {
+                throw new Error(`Unknown module "${name}"`);
+            }
             for (const required of definition.requires) visit(required);
             state.set(name, 1);
             out.push(name);

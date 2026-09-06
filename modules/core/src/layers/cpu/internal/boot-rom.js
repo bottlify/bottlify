@@ -88,7 +88,8 @@ export function buildBootRom({ entryVector, initialStack }){
         0x0f, 0x20, 0xc0,                                // mov eax, cr0
         0x66, 0x83, 0xc8, 0x01,                          // or eax, 1
         0x0f, 0x22, 0xc0,                                // mov cr0, eax
-        0x66, 0xea, ...u32(ROM_BASE + OFF_PM_ENTRY), ...u16(SEL_CODE32), // jmp far SEL_CODE32:PM_ENTRY
+        // jmp far SEL_CODE32:PM_ENTRY
+        0x66, 0xea, ...u32(ROM_BASE + OFF_PM_ENTRY), ...u16(SEL_CODE32),
     ]);
 
     // 32-bit entry: flat data segments, a stack, then indirect jump to the guest.
