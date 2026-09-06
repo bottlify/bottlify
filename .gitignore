@@ -1,0 +1,6 @@
+node_modules/**
+roadmap/**
+.ghidra/**
+.ghidra-home/**
+.claude/**
+.certs/**
