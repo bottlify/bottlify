@@ -13,7 +13,7 @@
  * runs them -- so they serve as contract tests rather than mocks: the same
  * binary must behave the same way under Windows and under Bottlify.
  *
- * Usage: node tools/make-pe.mjs <output.exe> [hello|threads|qsort|window]
+ * Usage: node tools/make-pe.mjs <output.exe> [hello|threads|qsort|window|session]
  */
 
 import { writeFile } from 'node:fs/promises';
@@ -295,6 +295,109 @@ export function buildHelloExe(message = 'Hello from Bottlify\r\n'){
             0x6a, 0x00, //                       push 0            (uExitCode)
             0xff, 0x15, ...u32(iat('ExitProcess')),
         ],
+    });
+}
+
+/** What the session fixture writes, and therefore what a second run must read. */
+export const SESSION_PAYLOAD = 'SAVED-01';
+
+/**
+ * A program that reads its save if there is one, then writes it.
+ *
+ * Run once against an empty volume it prints nothing and leaves a file behind.
+ * Run again against a volume carrying that file, it prints what it wrote last
+ * time. That difference is the whole of what a session has to preserve, and it
+ * is produced by the program rather than asserted about it.
+ *
+ * @returns {Uint8Array}
+ */
+export function buildSessionExe(){
+    const GENERIC_READ = 0x80000000;
+    const GENERIC_WRITE = 0x40000000;
+    const CREATE_ALWAYS = 2;
+    const OPEN_EXISTING = 3;
+    const INVALID_HANDLE = 0xffffffff;
+    const LENGTH = SESSION_PAYLOAD.length;
+
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': [
+                'CreateFileA', 'ReadFile', 'WriteFile', 'CloseHandle',
+                'GetStdHandle', 'ExitProcess',
+            ],
+        },
+        codeSize: 0x200,
+        data: {
+            path: [...'C:\\save.dat'].map(c=>c.charCodeAt(0)).concat(0),
+            payload: [...SESSION_PAYLOAD].map(c=>c.charCodeAt(0)),
+            buffer: new Array(LENGTH).fill(0),
+            counted: [0, 0, 0, 0],
+        },
+        code: ({ iat, at })=>{
+            // CreateFileA(path, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL)
+            const openForRead = [
+                0x6a, 0x00, 0x6a, 0x00,
+                0x6a, OPEN_EXISTING,
+                0x6a, 0x00, 0x6a, 0x00,
+                0x68, ...u32(GENERIC_READ),
+                0x68, ...u32(at('path')),
+                0xff, 0x15, ...u32(iat('CreateFileA')),
+            ];
+
+            // Reached only when the file was there: read it and say so.
+            const readAndReport = [
+                0x89, 0xc3, //                       mov ebx, eax      (the handle)
+                0x6a, 0x00,
+                0x68, ...u32(at('counted')),
+                0x6a, LENGTH,
+                0x68, ...u32(at('buffer')),
+                0x53, //                             push ebx
+                0xff, 0x15, ...u32(iat('ReadFile')),
+                0x53,
+                0xff, 0x15, ...u32(iat('CloseHandle')),
+
+                // WriteFile(GetStdHandle(-11), buffer, LENGTH, &counted, NULL)
+                0x6a, 0xf5,
+                0xff, 0x15, ...u32(iat('GetStdHandle')),
+                0x6a, 0x00,
+                0x68, ...u32(at('counted')),
+                0x6a, LENGTH,
+                0x68, ...u32(at('buffer')),
+                0x50,
+                0xff, 0x15, ...u32(iat('WriteFile')),
+            ];
+
+            const write = [
+                // CreateFileA(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL)
+                0x6a, 0x00, 0x6a, 0x00,
+                0x6a, CREATE_ALWAYS,
+                0x6a, 0x00, 0x6a, 0x00,
+                0x68, ...u32(GENERIC_WRITE),
+                0x68, ...u32(at('path')),
+                0xff, 0x15, ...u32(iat('CreateFileA')),
+                0x89, 0xc3, //                       mov ebx, eax
+
+                0x6a, 0x00,
+                0x68, ...u32(at('counted')),
+                0x6a, LENGTH,
+                0x68, ...u32(at('payload')),
+                0x53,
+                0xff, 0x15, ...u32(iat('WriteFile')),
+                0x53,
+                0xff, 0x15, ...u32(iat('CloseHandle')),
+
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+
+            return [
+                ...openForRead,
+                0x3d, ...u32(INVALID_HANDLE), //     cmp eax, INVALID_HANDLE_VALUE
+                0x74, readAndReport.length, //       je past the reporting arm
+                ...readAndReport,
+                ...write,
+            ];
+        },
     });
 }
 
@@ -693,6 +796,7 @@ if (output)
         threads: buildThreadsExe,
         qsort: buildQsortExe,
         window: buildWindowExe,
+        session: buildSessionExe,
     };
     if (!(kind in kinds))
     {
