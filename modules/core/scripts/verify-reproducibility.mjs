@@ -58,7 +58,7 @@ async function check(){
     try {
         manifest = readManifest();
     } catch (e){
-        console.e(`no valid dist/vendor/manifest.json yet: ${e.message}`);
+        console.error(`no valid dist/vendor/manifest.json yet: ${e.message}`);
         process.exit(1);
     }
 

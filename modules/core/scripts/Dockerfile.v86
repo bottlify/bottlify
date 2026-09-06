@@ -12,7 +12,14 @@
 #   - clang   → build/{softfloat,zstddeclib}.o (compiled with --target=wasm32)
 #   - python3 → tools/rust-lld-wrapper
 #   - wasm32-unknown-unknown rust target → cargo rustc --target wasm32-unknown-unknown
-FROM rust:1.80-bookworm
+#
+# The Rust floor is set by what v86's own sources use, and it moves: `&raw const`
+# (1.82), strict provenance (1.84) and `integer_sign_cast` (1.87) are all in the
+# CPU core. Upstream builds against whatever `stable` happens to be, so a bump of
+# the submodule can raise this floor without anything in v86 saying so -- the
+# symptom is a wall of E0658 out of `cargo`, and the fix is here rather than in
+# the sources.
+FROM rust:1.98-bookworm
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends make clang python3 nodejs wget default-jre-headless \

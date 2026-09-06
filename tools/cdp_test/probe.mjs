@@ -42,7 +42,7 @@ export async function probe({ attempts = 3 } = {}){
             return await singleProbe(attempt);
         } catch (e){
             lastError = e;
-            console.e(`probe attempt ${attempt}/${attempts} failed: ${e.message}`);
+            console.error(`probe attempt ${attempt}/${attempts} failed: ${e.message}`);
         }
     }
     throw lastError;
@@ -162,7 +162,7 @@ export async function runProbeAndExit(){
         console.log(JSON.stringify(result, null, 2));
         return result.ok ? 0 : 1;
     } catch (e){
-        console.e(`probe failed: ${e.message}`);
+        console.error(`probe failed: ${e.message}`);
         return 1;
     }
 }

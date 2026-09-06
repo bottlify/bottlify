@@ -43,7 +43,11 @@ jobs:
           node-version: 22
           cache: npm
       - uses: browser-actions/setup-chrome@v1
+        id: chrome
       - run: npm ci
+      # Asked of the action rather than assumed: where it puts the browser is
+      # its business and has moved before, and a wrong path here fails inside
+      # the probe rather than at the step that owns it.
       - run: npm run cdp:probe
         env:
-          CDP_TEST_CHROME: /usr/bin/google-chrome
+          CDP_TEST_CHROME: ${{ steps.chrome.outputs.chrome-path }}
