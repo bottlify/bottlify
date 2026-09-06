@@ -11,3 +11,6 @@ dist/
 tools/cdp_test/reports/
 *.log
 modules/core/vendor/prebuilt/
+
+# Game bundles built locally: gigabytes of someone else's data.
+bundles/
