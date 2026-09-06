@@ -70,22 +70,26 @@ test('diagnostics describe the run afterwards', async()=>{
 
     assert.equal(byName.cpu.metrics.protectedMode, true, 'the ROM switched the CPU over');
     assert.ok(byName.cpu.metrics.instructions > 0);
-    assert.equal(byName.cpu.metrics.traps, 5,
-        'the park slot, the callback sentinel, and the three imports');
+    // Every function of every library gets a stub, whether the program calls it
+    // or not: the modules exist in guest memory before the first instruction, so
+    // an address taken early is the address that works later (§13.3). Plus the
+    // park slot and the callback sentinel.
+    assert.equal(byName.cpu.metrics.traps, byName.win32.metrics.implemented + 2);
 
-    for (const fn of ['GetStdHandle', 'WriteFile', 'ExitProcess'])
-    {
-        assert.ok(byName.win32.metrics.implemented.includes(fn), `${fn} is implemented`);
-    }
     assert.equal(byName.win32.metrics.exitCode, 0);
+    assert.ok(byName.win32.metrics.libraries['KERNEL32.dll'] > 0);
 
-    assert.equal(byName.loader.metrics.images, 1);
+    // One image per system library, plus the program itself.
+    const systemModules = Object.keys(byName.win32.metrics.libraries).length;
+    assert.equal(byName.loader.metrics.images, systemModules + 1);
     assert.deepEqual(byName.loader.metrics.unresolved, []);
+
+    assert.deepEqual(byName.bridge.metrics.lastCall, 'KERNEL32.dll!ExitProcess');
 
     // The layout is in the snapshot because a wrong one usually explains a fault
     // faster than the fault does.
     const layout = byName.memory.metrics.layout.join(' ');
-    for (const region of ['entry-vector', 'stack', 'thunks', 'image'])
+    for (const region of ['entry-vector', 'stack', 'thunks', 'image', 'heap', 'KERNEL32.dll'])
     {
         assert.ok(layout.includes(region), `${region} is mapped`);
     }

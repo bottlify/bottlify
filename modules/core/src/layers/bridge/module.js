@@ -8,6 +8,7 @@ import { Convention, calleeCleanup } from './internal/conventions.js';
 import { createParking } from './internal/parking.js';
 import { createDispatcher } from './internal/dispatch.js';
 import { createCallbacks } from './internal/callback.js';
+import { createVtables } from './internal/vtable.js';
 
 /**
  * bridge — the boundary a call crosses in either direction.
@@ -25,6 +26,8 @@ let dispatcher = null;
 let parking = null;
 /** @type {any} */
 let callbacks = null;
+/** @type {any} */
+let vtables = null;
 /** @type {Error | null} */
 let failure = null;
 
@@ -160,6 +163,40 @@ export const bridgeModule = {
             },
 
             /**
+             * Puts a COM interface into guest memory and answers with the
+             * pointer a program may walk, call through and compare.
+             *
+             * Wired here rather than by a library, because the addresses in a
+             * vtable are stubs and the calls through them are thiscall -- both
+             * of which are this layer's, and neither of which anything above it
+             * should have to know.
+             *
+             * @param {{ allocate: (bytes: number) => number }} heap
+             */
+            useHeap(heap){
+                vtables = createVtables({
+                    memory,
+                    heap,
+                    register: (/** @type {string} */ name, /** @type {any} */ fn)=>
+                        this.register(name, fn),
+                });
+                return vtables;
+            },
+
+            /**
+             * @param {any} object
+             * @param {string} interfaceId
+             * @returns {number}
+             */
+            publishInterface(object, interfaceId){
+                if (!vtables)
+                {
+                    throw new Error('bridge: no heap to put a COM interface in yet');
+                }
+                return vtables.publish(object, interfaceId);
+            },
+
+            /**
              * An error thrown by a suspended handler, which nothing above was
              * waiting on. Null unless one happened.
              */
@@ -181,6 +218,17 @@ export const bridgeModule = {
             /** @param {number} address */
             symbolize: address=>dispatcher.symbolize(address),
 
+            /**
+             * Gives a guest address a name for a failure report. A stub already
+             * has one; the trampoline in a synthesised module that jumps to it
+             * is a different address the guest is far more likely to be standing
+             * on, and nothing else knows the two are the same function.
+             *
+             * @param {number} address
+             * @param {string} name
+             */
+            label: (address, name)=>dispatcher.placed(address, name),
+
             /** @param {number} id */
             dispatch: id=>dispatcher.dispatch(id),
             calls: ()=>dispatcher.calls(),
@@ -198,6 +246,7 @@ export const bridgeModule = {
                     ...dispatcher.diagnostics(),
                     ...parking.diagnostics(),
                     ...callbacks.diagnostics(),
+                    ...vtables ? vtables.diagnostics() : {},
                     failure: failure ? failure.message : null,
                 }
                 : {},
@@ -208,6 +257,7 @@ export const bridgeModule = {
         dispatcher = null;
         parking = null;
         callbacks = null;
+        vtables = null;
         failure = null;
     },
 };

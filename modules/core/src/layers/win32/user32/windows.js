@@ -133,6 +133,11 @@ function characterFor(key){
  * @property {(wndProc: number, message: DispatchedMessage) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  * @property {() => any} park   Stops the caller; returns the parked token.
+ * @property {(hwnd: number) => void} [created]
+ *           A window now exists. Whoever delivers input needs to know.
+ * @property {() => Promise<void>} idle
+ *           Resolves when the machine has taken another turn, so a call that is
+ *           waiting for something to arrive can look again.
  */
 
 /**
@@ -365,6 +370,11 @@ export function createWindowFunctions(host){
         };
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
+        // Input has to land somewhere, and what a person is looking at is the
+        // window that was made most recently until something says otherwise.
+        // Telling the host here is the only way it can know a handle it never
+        // saw created.
+        host.created?.(record.hwnd);
         return record.hwnd;
     };
 
@@ -672,18 +682,28 @@ export function createWindowFunctions(host){
                     // as `while (GetMessage(...))` spins forever on it.
                     return -1;
                 }
-                const entry = host.queue.peek({
+                const take = ()=>host.queue.peek({
                     hwnd: filter,
                     first: filterMin >>> 0,
                     last: filterMax >>> 0,
                     remove: true,
                 });
+
+                let entry = take();
                 if (!entry)
                 {
-                    // GetMessage waits; it does not report an empty queue. What
-                    // wakes the thread and hands it the message it was waiting
-                    // for belongs to the bridge and the scheduler.
-                    return host.park();
+                    // GetMessage waits; it does not report an empty queue. The
+                    // wait is the host's to hold, so the answer is a promise and
+                    // the bridge suspends the caller until something arrives.
+                    return (async()=>{
+                        while (!entry)
+                        {
+                            await host.idle();
+                            entry = take();
+                        }
+                        writeMessage(host, out, entry);
+                        return entry.message === WM_QUIT ? 0 : 1;
+                    })();
                 }
                 writeMessage(host, out, entry);
                 return entry.message === WM_QUIT ? 0 : 1;
@@ -731,7 +751,10 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                return host.dispatch(record.wndProc, message) | 0;
+                // Whatever the host gives back is the answer, including a
+                // promise: running a window procedure means running guest code,
+                // and the bridge suspends this call until it returns.
+                return host.dispatch(record.wndProc, message);
             },
         },
 

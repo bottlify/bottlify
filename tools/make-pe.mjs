@@ -13,7 +13,7 @@
  * runs them -- so they serve as contract tests rather than mocks: the same
  * binary must behave the same way under Windows and under Bottlify.
  *
- * Usage: node tools/make-pe.mjs <output.exe> [hello|threads]
+ * Usage: node tools/make-pe.mjs <output.exe> [hello|threads|qsort|window]
  */
 
 import { writeFile } from 'node:fs/promises';
@@ -298,6 +298,171 @@ export function buildHelloExe(message = 'Hello from Bottlify\r\n'){
     });
 }
 
+/** The message the windowed fixture answers, and what it reports having seen. */
+export const WINDOW_PROBE = 0x0401; // WM_APP + 1
+
+/**
+ * A windowed program: it registers a class, makes a window, and runs a message
+ * loop until it is told to quit.
+ *
+ * The interesting part is that its window procedure is its own code. Every
+ * message it handles is a call from us into the guest and back, so this
+ * exercises the whole path -- a host function that waits, a callback into guest
+ * code, and a result that decides what the program does next.
+ *
+ * It answers the probe message by remembering wParam, and quits when told.
+ *
+ * @returns {Uint8Array}
+ */
+export function buildWindowExe(){
+    // The window procedure sits at a fixed offset inside the code budget, so its
+    // address is known before the body that registers it is emitted.
+    const WNDPROC_OFFSET = 0x100;
+
+    const WM_DESTROY = 0x0002;
+    const WM_CLOSE = 0x0010;
+
+    return buildExe({
+        imports: {
+            'USER32.dll': [
+                'RegisterClassA', 'CreateWindowExA', 'GetMessageA',
+                'TranslateMessage', 'DispatchMessageA', 'DefWindowProcA',
+                'PostQuitMessage', 'DestroyWindow',
+            ],
+            'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'],
+        },
+        codeSize: 0x200,
+        data: {
+            className: [...'BottlifyWindow'].map(c=>c.charCodeAt(0)).concat(0),
+            title: [...'Probe'].map(c=>c.charCodeAt(0)).concat(0),
+            wndclass: new Array(40).fill(0), //  WNDCLASSA
+            msg: new Array(28).fill(0), //       MSG
+            seen: [0, 0, 0, 0], //               what the procedure was told
+            written: [0, 0, 0, 0],
+        },
+        code: ({ iat, at, code })=>{
+            // Every forward branch is measured from the block it skips rather
+            // than written down: a hand-counted displacement is right until the
+            // block changes, and then it lands in the middle of an instruction.
+            const setup = [
+                // wndclass.lpfnWndProc = WndProc; wndclass.lpszClassName = className
+                0xc7, 0x05, ...u32(at('wndclass') + 4), ...u32(code(WNDPROC_OFFSET)),
+                0xc7, 0x05, ...u32(at('wndclass') + 36), ...u32(at('className')),
+
+                // RegisterClassA(&wndclass)
+                0x68, ...u32(at('wndclass')),
+                0xff, 0x15, ...u32(iat('RegisterClassA')),
+
+                // CreateWindowExA(0, className, title, 0, 0, 0, 320, 240, 0, 0, 0, 0)
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                0x68, ...u32(240), 0x68, ...u32(320),
+                0x6a, 0x00, 0x6a, 0x00,
+                0x6a, 0x00,
+                0x68, ...u32(at('title')),
+                0x68, ...u32(at('className')),
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('CreateWindowExA')),
+            ];
+
+            // The body of the message loop, after the test that leaves it.
+            const pump = [
+                0x68, ...u32(at('msg')),
+                0xff, 0x15, ...u32(iat('TranslateMessage')),
+                0x68, ...u32(at('msg')),
+                0xff, 0x15, ...u32(iat('DispatchMessageA')),
+            ];
+            const fetch = [
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                0x68, ...u32(at('msg')),
+                0xff, 0x15, ...u32(iat('GetMessageA')),
+                0x85, 0xc0, //                       test eax, eax
+            ];
+            // while (GetMessageA(&msg, 0, 0, 0)) { translate; dispatch; }
+            const loop = [
+                ...fetch,
+                0x74, pump.length + 2, //            jz past the pump and its jump
+                ...pump,
+                0xeb, (256 - (fetch.length + 2 + pump.length + 2)) & 0xff, // jmp back
+            ];
+
+            const main = [
+                ...setup,
+                ...loop,
+
+                // WriteFile(GetStdHandle(-11), &seen, 4, &written, NULL)
+                0x6a, 0xf5,
+                0xff, 0x15, ...u32(iat('GetStdHandle')),
+                0x6a, 0x00,
+                0x68, ...u32(at('written')),
+                0x6a, 0x04,
+                0x68, ...u32(at('seen')),
+                0x50,
+                0xff, 0x15, ...u32(iat('WriteFile')),
+
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+
+            // LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM) -- stdcall,
+            // so it pops its own sixteen bytes of arguments. Each arm is built
+            // first and the branch over it measured from what it is skipping.
+            const remember = [
+                0x8b, 0x44, 0x24, 0x0c, //           mov eax, [esp+12]  (wParam)
+                0xa3, ...u32(at('seen')), //         mov [seen], eax
+                0x31, 0xc0, //                       xor eax, eax
+                0xc2, 0x10, 0x00, //                 ret 16
+            ];
+            const close = [
+                0xff, 0x74, 0x24, 0x04, //           push [esp+4]       (hWnd)
+                0xff, 0x15, ...u32(iat('DestroyWindow')),
+                0x31, 0xc0, //                       xor eax, eax
+                0xc2, 0x10, 0x00, //                 ret 16
+            ];
+            const quit = [
+                0x6a, 0x00, //                       push 0
+                0xff, 0x15, ...u32(iat('PostQuitMessage')),
+                0x31, 0xc0, //                       xor eax, eax
+                0xc2, 0x10, 0x00, //                 ret 16
+            ];
+            const wndProc = [
+                0x8b, 0x44, 0x24, 0x08, //           mov eax, [esp+8]   (uMsg)
+
+                0x3d, ...u32(WINDOW_PROBE),
+                0x75, remember.length, //            jne past this arm
+                ...remember,
+
+                0x3d, ...u32(WM_CLOSE),
+                0x75, close.length,
+                ...close,
+
+                0x3d, ...u32(WM_DESTROY),
+                0x75, quit.length,
+                ...quit,
+
+                // Anything else is the system's to answer: the same four
+                // arguments, forwarded in place. Each push moves ESP down by
+                // four, so the offset to the next one stays the same.
+                0xff, 0x74, 0x24, 0x10, //           push [esp+16] (lParam)
+                0xff, 0x74, 0x24, 0x10, //           push [esp+16] (wParam)
+                0xff, 0x74, 0x24, 0x10, //           push [esp+16] (uMsg)
+                0xff, 0x74, 0x24, 0x10, //           push [esp+16] (hWnd)
+                0xff, 0x15, ...u32(iat('DefWindowProcA')),
+                0xc2, 0x10, 0x00, //                 ret 16
+            ];
+
+            if (main.length > WNDPROC_OFFSET)
+            {
+                throw new Error('the body runs into the window procedure');
+            }
+            return [
+                ...main,
+                ...new Array(WNDPROC_OFFSET - main.length).fill(0xcc),
+                ...wndProc,
+            ];
+        },
+    });
+}
+
 /** The array the callback fixture sorts, and what it must become. */
 export const QSORT_INPUT = [7, 3, 9, 1, 8, 2];
 
@@ -523,7 +688,12 @@ const [, , output, kind = 'hello'] = process.argv;
 if (output)
 {
     /** @type {Record<string, () => Uint8Array>} */
-    const kinds = { hello: buildHelloExe, threads: buildThreadsExe, qsort: buildQsortExe };
+    const kinds = {
+        hello: buildHelloExe,
+        threads: buildThreadsExe,
+        qsort: buildQsortExe,
+        window: buildWindowExe,
+    };
     if (!(kind in kinds))
     {
         throw new Error(`unknown fixture "${kind}"; know ${Object.keys(kinds).join(', ')}`);

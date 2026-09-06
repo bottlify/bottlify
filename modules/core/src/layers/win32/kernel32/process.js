@@ -84,6 +84,38 @@ const MAX_MODULE_NAME = 260;
  */
 
 /**
+ * The per-thread kernel32 state: the last-error slot and the TLS values.
+ *
+ * Extracted so everything that writes an error code writes the same record.
+ * Two places building this shape independently is how one of them ends up
+ * setting an error nothing ever reads.
+ *
+ * @param {() => any} currentThread
+ */
+export function createThreadState(currentThread){
+    const stateOf = ()=>{
+        const thread = currentThread();
+        if (!thread.kernel32)
+        {
+            thread.kernel32 = {
+                lastError: ERROR_SUCCESS,
+                /** @type {Map<number, { generation: number, value: number }>} */
+                tls: new Map(),
+            };
+        }
+        return thread.kernel32;
+    };
+
+    return {
+        stateOf,
+        /** @param {number} code */
+        setError: code=>{
+            stateOf().lastError = code >>> 0;
+        },
+    };
+}
+
+/**
  * Builds the function table: name -> { argBytes, handler }.
  *
  * All of these are stdcall, which is the bridge's default, so none of them says
@@ -105,23 +137,7 @@ export function createProcessFunctions(host){
     const slots = new Array(TLS_SLOTS).fill(null);
     let generation = 0;
 
-    const stateOf = ()=>{
-        const thread = host.currentThread();
-        if (!thread.kernel32)
-        {
-            thread.kernel32 = {
-                lastError: ERROR_SUCCESS,
-                /** @type {Map<number, { generation: number, value: number }>} */
-                tls: new Map(),
-            };
-        }
-        return thread.kernel32;
-    };
-
-    /** @param {number} code */
-    const setError = code=>{
-        stateOf().lastError = code >>> 0;
-    };
+    const { stateOf, setError } = createThreadState(host.currentThread);
 
     /** @param {number} index */
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;

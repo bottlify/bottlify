@@ -25,6 +25,8 @@ import { captureTrace, formatTrace } from './trace.js';
  * @property {string} v86.moduleUrl
  * @property {ArrayBuffer} v86.wasmBytes
  * @property {number} [stackSize]
+ * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
+ * @property {string} [imagePath]    What the program believes it was loaded from.
  */
 
 /**
@@ -34,12 +36,69 @@ import { captureTrace, formatTrace } from './trace.js';
 export async function createApp(options){
     const events = createEvents();
 
+    // The address space above the program: a heap first, then the system
+    // modules one after another. Both sit well clear of an executable's own
+    // preferred base (0x400000) and inside the memory the emulator was given,
+    // which is what an address beyond it fails against.
+    const HEAP_BASE = 0x01000000;
+    const HEAP_SIZE = options.heapSize ?? 0x00800000;
+    const MODULE_BASE = 0x02000000;
+    const MODULE_STRIDE = 0x00100000;
+
+    /**
+     * The modules win32 implements, filled in below. win32 is built before they
+     * exist -- it is what says which functions they export -- so it is handed
+     * these lookups rather than the answers, and only ever calls them while the
+     * guest is running.
+     *
+     * @type {Map<string, any>}
+     */
+    const byName = new Map();
+    /** @type {Map<number, any>} */
+    const byBase = new Map();
+    /** @type {any} */
+    let mainModule = null;
+
+    /** @param {string | null} name */
+    const findModule = name=>{
+        if (name === null || name === '')
+        {
+            return mainModule;
+        }
+        // A name may arrive with or without its extension, and case never
+        // matters: the same library is asked for both ways in one program.
+        const wanted = name.toLowerCase().replace(/\.dll$/, '');
+        return byName.get(wanted) ?? null;
+    };
+
+    // Where input goes when nobody says otherwise: the most recently created
+    // window, which is what a person would be looking at.
+    let foreground = 0;
+
+    // A call that is waiting -- a message loop with an empty queue -- is let go
+    // once per scheduler turn to look again.
+    /** @type {(() => void)[]} */
+    let idlers = [];
+
     const core = await assembleModules({
         win32: {
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
             onTrace: text=>events.emit('debug', { text }),
+            arena: { base: HEAP_BASE, size: HEAP_SIZE },
+            modules: {
+                /** @param {string | null} name */
+                find: name=>findModule(name),
+                /** @param {number} base */
+                byBase: base=>byBase.get(base >>> 0) ?? null,
+                imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
+            },
+            idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
+            /** @param {number} hwnd */
+            created: hwnd=>{
+                foreground = hwnd;
+            },
         },
     });
 
@@ -63,18 +122,62 @@ export async function createApp(options){
         name: 'stack', base: initialStack - stackSize, size: stackSize,
         kind: memory.RegionKind.STACK, access: memory.Access.READ_WRITE,
     });
+    memory.register({
+        name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
+        kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
+    });
 
-    // Binding imports registers stubs, so the table's size is only known here.
+    // Every system module exists in guest memory before the program's first
+    // instruction, not when something first asks for it. An address taken early
+    // has to be the address that works later (§13.3), and a module conjured on
+    // demand cannot promise that.
+    Object.entries(win32.libraries()).forEach(([name, table], index)=>{
+        const exports = Object.entries(table).map(([exported, fn])=>({
+            name: exported,
+            target: bridge.register(`${name}!${exported}`, fn),
+        }));
+
+        const base = MODULE_BASE + index * MODULE_STRIDE;
+        const placed = loader.synthesise({ name, base, exports });
+
+        // An export's address is its trampoline inside the module, and that is
+        // what both the import table and GetProcAddress hand out -- so a program
+        // comparing the two finds them equal, as it does on Windows.
+        const addresses = new Map(exports.map(entry=>[entry.name, placed.addressOf(entry.name)]));
+        const ordinals = new Map([...addresses]
+            .map(([exported, address])=>[placed.ordinalOf(exported), address]));
+        for (const [exported, address] of addresses)
+        {
+            bridge.label(Number(address), `${name}!${exported}`);
+        }
+
+        const record = {
+            name,
+            base,
+            size: placed.size,
+            /** @param {string} exported */
+            addressOf: exported=>addresses.get(exported) ?? null,
+            /** @param {number} ordinal */
+            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+        };
+        byName.set(name.toLowerCase().replace(/\.dll$/, ''), record);
+        byBase.set(base, record);
+    });
+
     const image = loader.load(options.executable, {
         resolveImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
-            const fn = win32.resolve(name ?? '');
-            if (!fn)
-            {
-                return null;
-            }
-            return bridge.register(`${dll}!${name}`, fn);
+            const module = findModule(dll);
+            return module && name ? module.addressOf(name) : null;
         },
     });
+
+    mainModule = {
+        name: 'app.exe',
+        base: image.base,
+        addressOf: ()=>null,
+        addressOfOrdinal: ()=>null,
+    };
+    byBase.set(image.base, mainModule);
 
     const stubs = cpu.thunkImage();
     memory.register({
@@ -157,6 +260,32 @@ export async function createApp(options){
                 // never returns to the event loop on its normal path and such a
                 // handler would be resumed exactly never.
                 await Promise.resolve();
+
+                // And a turn is also when anything waiting for something to
+                // arrive -- a message loop with an empty queue -- gets to look
+                // again. Taken as a batch: a waiter that goes back to waiting
+                // must not be released twice by its own turn.
+                if (idlers.length > 0)
+                {
+                    const waiting = idlers;
+                    idlers = [];
+                    for (const release of waiting)
+                    {
+                        release();
+                    }
+                    await Promise.resolve();
+                }
+
+                // Still waiting after being let look means the machine has
+                // nothing to do until something arrives from outside -- a
+                // keystroke, a timer, a message from the page. A microtask does
+                // not let any of that happen, so this is the one place the loop
+                // hands the host back its turn, and it costs nothing precisely
+                // because the guest is idle.
+                if (idlers.length > 0)
+                {
+                    await new Promise(resolve=>setTimeout(resolve, 0));
+                }
 
                 const failure = bridge.failure();
                 if (failure)
@@ -269,6 +398,25 @@ export async function createApp(options){
                 logSinks.delete(sink);
             }
         },
+
+        /**
+         * Puts a message in the guest's queue: a keystroke, a mouse move, a
+         * request to close. This is the seam the input layer will post through,
+         * and the way a test drives a program that is waiting for a user.
+         *
+         * @param {{ hwnd?: number, message: number, wParam?: number, lParam?: number }} message
+         */
+        post(message){
+            win32.queue().post({
+                hwnd: message.hwnd ?? foreground,
+                message: message.message,
+                wParam: message.wParam ?? 0,
+                lParam: message.lParam ?? 0,
+            });
+        },
+
+        /** The registry the program reads and writes; it outlives the process. */
+        registry: ()=>win32.registry(),
 
         exitCode: ()=>win32.exitCode(),
         diagnostics: ()=>[

@@ -5,6 +5,7 @@
  */
 
 import { buildImage } from './internal/image.js';
+import { synthesiseModule } from './internal/synth.js';
 
 /**
  * loader — turning an executable file into something the guest can run.
@@ -68,6 +69,49 @@ export const loaderModule = {
                 };
                 loaded.push(record);
                 return record;
+            },
+
+            /**
+             * Puts a system module into guest memory: a real PE image with a
+             * real export directory whose exports jump to host stubs.
+             *
+             * Binding an import table covers only the calls a program makes
+             * through its own IAT. A program that resolves a name at runtime,
+             * walks an export directory itself, or copies the first bytes of an
+             * exported function needs the module to be there -- and all three
+             * are ordinary behaviour rather than exotic cases.
+             *
+             * @param {Object} options
+             * @param {string} options.name    As an import descriptor names it.
+             * @param {number} options.base
+             * @param {{ name: string, target: number }[]} options.exports
+             * @returns {{ base: number, size: number,
+             *   addressOf: (name: string) => number | null,
+             *   ordinalOf: (name: string) => number | null }}
+             */
+            synthesise({ name, base, exports }){
+                const module = synthesiseModule({ name, base, exports });
+
+                memory.register({
+                    name,
+                    base,
+                    size: module.size,
+                    kind: memory.RegionKind.IMAGE,
+                    // Written once, at assembly, and executable from then on:
+                    // the exports are jumps and the guest runs them.
+                    access: memory.Access.READ_WRITE_EXECUTE,
+                });
+                memory.writeBytes(base, module.bytes);
+                memory.protect(name, memory.Access.READ_EXECUTE);
+
+                const record = { base, entryPoint: 0, unresolved: [], name };
+                loaded.push(record);
+                return {
+                    base,
+                    size: module.size,
+                    addressOf: module.addressOf,
+                    ordinalOf: module.ordinalOf,
+                };
             },
 
             list: ()=>[...loaded],

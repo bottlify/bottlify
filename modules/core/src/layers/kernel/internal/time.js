@@ -31,6 +31,7 @@ export function createClock({
 } = {})
 {
     const startedAt = now();
+    const epochMs = startedAt;
     let virtualMs = 0;
     let creditedMs = 0;
     let capped = 0;
@@ -41,6 +42,16 @@ export function createClock({
     return {
         /** Milliseconds of guest time since boot. */
         virtualTime: ()=>virtualMs,
+
+        /**
+         * The guest's wall clock, in milliseconds since 1970.
+         *
+         * Anchored at boot and then carried by guest time rather than read from
+         * the host: a program that samples the wall clock twice and subtracts
+         * must get the same interval its own clock reports, or its notion of how
+         * long a frame took disagrees with the one it timed with.
+         */
+        wallClock: ()=>epochMs + virtualMs,
 
         /**
          * The guest ran for real: advance its clock by the wall time that passed.

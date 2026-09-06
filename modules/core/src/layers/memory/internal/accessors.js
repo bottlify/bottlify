@@ -44,6 +44,22 @@ export function createAccessors({ raw, regions }){
     };
 
     /**
+     * How far a scan for a terminator may actually read.
+     *
+     * A limit is how far the caller is willing to look, not a claim that all of
+     * it is mapped -- a string at the end of a region is ordinary, and demanding
+     * the whole limit be readable fails on it. Clamped to the region, so the
+     * scan still cannot wander into whatever is next.
+     *
+     * @param {number} address
+     * @param {number} limit
+     */
+    const scannable = (address, limit)=>{
+        const region = regions.find(address);
+        return region ? Math.min(limit, region.base + region.size - address) : limit;
+    };
+
+    /**
      * @param {number} address
      * @param {Uint8Array} bytes
      */
@@ -107,7 +123,7 @@ export function createAccessors({ raw, regions }){
          * @returns {string}
          */
         readCString(address, limit = 4096){
-            const bytes = read(address, limit);
+            const bytes = read(address, scannable(address, limit));
             const end = bytes.indexOf(0);
             if (end === -1)
             {
@@ -126,7 +142,7 @@ export function createAccessors({ raw, regions }){
          * @returns {string}
          */
         readWideString(address, limit = 8192){
-            const bytes = read(address, limit);
+            const bytes = read(address, scannable(address, limit) & ~1);
             for (let at = 0; at + 1 < bytes.length; at += 2)
             {
                 if (bytes[at] === 0 && bytes[at + 1] === 0)

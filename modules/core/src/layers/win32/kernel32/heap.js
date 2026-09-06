@@ -199,6 +199,7 @@ export function createHeapAllocator({ base, size }){
 /**
  * @typedef {Object} HeapHost
  * @property {{ base: number, size: number }} arena   Guest bytes to allocate out of.
+ * @property {any} [allocator]  An allocator over that arena, when one is shared.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  */
@@ -219,7 +220,11 @@ export function createHeapAllocator({ base, size }){
  * @param {HeapHost} host
  */
 export function createHeapFunctions(host){
-    const allocator = createHeapAllocator(host.arena);
+    // One allocator for the whole arena, whoever asks. The caller may bring its
+    // own so that everything guest memory is handed out from -- the heap, a DIB
+    // section, COM task memory -- comes from the same free list rather than from
+    // arenas carved up in advance into sizes nobody can predict.
+    const allocator = host.allocator ?? createHeapAllocator(host.arena);
 
     /** Handles are opaque to the guest: only ever compared, never dereferenced. */
     let nextHeap = 4;

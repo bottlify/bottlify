@@ -60,7 +60,9 @@ function fakeMemory(size = 0x12000){
     return {
         bytes,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        // A copy, like the real memory layer: a fake that hands out a window
+        // onto its own bytes invents aliasing bugs rather than finding them.
+        readMemory: (address, length)=>bytes.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address @param {number} maxLength */
@@ -72,6 +74,9 @@ function fakeMemory(size = 0x12000){
             }
             return new TextDecoder('latin1').decode(bytes.subarray(address, end));
         },
+        /** @param {number} address */
+        readU32: address=>(bytes[address] | (bytes[address + 1] << 8)
+            | (bytes[address + 2] << 16) | (bytes[address + 3] << 24)) >>> 0,
         /** @param {number} address @param {string} text */
         putString(address, text){
             for (let index = 0; index < text.length; index++)
@@ -138,6 +143,9 @@ function setup(){
     const dispatched = [];
     /** @type {any[]} */
     const parked = [];
+    /** Resolvers for a waiting call, released a turn at a time by the test. */
+    /** @type {(() => void)[]} */
+    const idlers = [];
 
     const fns = createWindowFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
@@ -153,8 +161,20 @@ function setup(){
             parked.push(true);
             return PARKED;
         },
+        idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
     });
-    return { memory, handles, queue, fns, dispatched, parked };
+
+    /** Lets every waiting call look at the queue once more. */
+    const tick = async()=>{
+        const waiting = idlers.splice(0, idlers.length);
+        for (const release of waiting)
+        {
+            release();
+        }
+        await Promise.resolve();
+    };
+
+    return { memory, handles, queue, fns, dispatched, parked, tick, idlers };
 }
 
 /**
@@ -547,11 +567,31 @@ test('a message loop runs until PostQuitMessage ends it', ()=>{
         'carrying the exit code the program chose');
 });
 
-test('GetMessageA parks the caller when there is nothing to give it', ()=>{
-    const { fns, parked } = setup();
+test('GetMessageA waits for a message rather than reporting an empty queue', async()=>{
+    const { fns, queue, memory, tick } = setup();
 
-    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), PARKED);
-    assert.deepEqual(parked, [true], 'a message loop with an empty queue waits, it does not spin');
+    // A message loop with nothing to do blocks. The wait is the host's, so what
+    // comes back is a promise, and the bridge suspends the guest thread on it.
+    const answer = /** @type {Promise<number>} */ (
+        /** @type {any} */ (fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0])));
+    assert.equal(typeof answer.then, 'function');
+
+    let settled = false;
+    answer.then(()=>{
+        settled = true;
+    });
+    await tick();
+    assert.equal(settled, false, 'still nothing to give it');
+
+    queue.post({ hwnd: 0, message: 0x0401, wParam: 7, lParam: 8 });
+    await tick();
+    await tick();
+
+    assert.equal(await answer, 1);
+    // The message was written into the guest's buffer before the call answered,
+    // which is the half a parked return value cannot carry.
+    assert.equal(memory.readU32(MSG_BUFFER + 4), 0x0401);
+    assert.equal(memory.readU32(MSG_BUFFER + 8), 7);
 });
 
 test('GetMessageA reports an error for a window filter that names nothing', ()=>{
