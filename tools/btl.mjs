@@ -62,25 +62,27 @@ import { crc32 }
 export { MAGIC, HEADER_SIZE, FORMAT_VERSION, Codec };
 
 /**
- * Four mebibytes.
+ * A quarter of a mebibyte.
  *
- * The block is the granularity of a random read, of one decompression, and of
- * what a parked guest thread waits for. It is no longer the granularity of a
- * request -- runs of blocks are coalesced up to a cap, and the rest of the
- * bundle is filled in while nothing is being read -- so the argument that used
- * to push this number down, one round trip per block, is gone.
+ * The block is not the granularity of a request -- runs of blocks are coalesced
+ * up to a separate cap, and the rest of the bundle is filled in while nothing is
+ * being read -- so the two numbers are independent knobs and this one answers
+ * only one question: how long a guest thread is held.
  *
- * What is left is the wait. A thread that reads a byte nobody has fetched is
- * parked for one whole block: about a third of a second here on a domestic
- * connection, against five seconds at 64 MiB. That is the ceiling this number
- * is chosen against, and it is why it is not larger.
+ * A thread that reads a byte nobody has fetched is parked for one whole block,
+ * however few bytes it asked for. That is the cost this is chosen against, and
+ * it outranks what a larger block would win. Compression context and index size
+ * both improve with size and neither is worth holding a thread: about 21 ms here
+ * on a domestic connection, against a third of a second at 4 MiB and five
+ * seconds at 64.
  *
- * An earlier measurement had 256 KiB beating 1, 4 and 16 MiB on ratio. That was
- * an artefact of the probe below, which was then a fixed size and so judged a
- * large block on an ever smaller fraction of itself; the probe is a fraction
- * now, and the measurement has to be taken again before it means anything.
+ * A measurement once had this size beating 1, 4 and 16 MiB on ratio as well.
+ * That part was an artefact of the probe below, which was then capped and so
+ * judged a large block on an ever smaller fraction of itself. The probe is an
+ * uncapped fraction now, so that comparison would have to be run again -- but
+ * its outcome would not move this number, because latency decides it.
  */
-export const DEFAULT_BLOCK_SIZE = 1 << 22;
+export const DEFAULT_BLOCK_SIZE = 1 << 18;
 
 /**
  * A block is stored uncompressed unless compression saves at least this much.

@@ -138,9 +138,16 @@ export function retryingFetch({ fetch, events, retry }){
  * The bound is not bandwidth but what a failure costs: a request that dies at
  * 95% is refetched whole, and a thread waiting on it is parked for all of it.
  *
- * It has to stay above one block, or a block would be split across two requests
- * and neither could be checked against its checksum. At the default block size
- * this coalesces four blocks into one request.
+ * This is a separate knob from the block size, and deliberately so: the block
+ * decides how long one thread is held, this decides how many times the network
+ * is asked. It only has to stay above one block, or a block would be split
+ * across two requests and neither half could be checked against its checksum.
+ * At the default block size a full request carries sixty-four blocks.
+ *
+ * A demand fetch never reaches this: a group is built only from blocks the read
+ * actually wants, so a small read is a small request and is not made to wait
+ * behind bytes it did not ask for. The cap is for the background filler and for
+ * reads that genuinely span that much.
  */
 const MAX_REQUEST_BYTES = 16 << 20;
 
