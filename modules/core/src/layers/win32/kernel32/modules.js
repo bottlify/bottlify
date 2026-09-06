@@ -176,7 +176,8 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
-                const path = handle === 0 ? host.imagePath() : `C:\\Windows\\System32\\${module.name}`;
+                const system = `C:\\Windows\\System32\\${module.name}`;
+                const path = handle === 0 ? host.imagePath() : system;
                 return writeString(buffer >>> 0, size >>> 0, path);
             },
         },

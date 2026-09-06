@@ -72,8 +72,20 @@ function makeNode(parent, name){
  * @param {Object} options
  * @param {import('./memory-store.js').SourceStore | null} [options.source]
  * @param {import('./memory-store.js').WritableStore} options.writable
+ * @param {((change: { path: string, kind: string }) => void) | null} [options.onChanged]
  */
-export function createOverlay({ source = null, writable }){
+export function createOverlay({ source = null, writable, onChanged = null }){
+    /**
+     * Announces that a path in the writable layer now differs from what anyone
+     * outside has. Only the fact and the path: a program writes a save in
+     * hundreds of small writes, and carrying the bytes on each of them would
+     * mean copying the file once per write to deliver something already stale
+     * by the next one. Whoever listens reads the file when it settles.
+     *
+     * @param {string} path
+     * @param {'written' | 'removed'} kind
+     */
+    const changed = (path, kind)=>onChanged?.({ path, kind });
     const root = makeNode(null, '');
     root.directory = true;
     root.inSource = source !== null;
@@ -345,6 +357,7 @@ export function createOverlay({ source = null, writable }){
             }
             copyUp(node);
             writable.write(node.path, offset, bytes);
+            changed(node.path, 'written');
         },
 
         /** @param {string[]} components @param {number} size */
@@ -391,6 +404,7 @@ export function createOverlay({ source = null, writable }){
             materialiseParents(node);
             writable.truncate(node.path, 0);
             node.inWritable = true;
+            changed(node.path, 'written');
             return { name: node.name, path: node.path, directory: false, size: 0 };
         },
 
@@ -440,6 +454,7 @@ export function createOverlay({ source = null, writable }){
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
             forget(node);
+            changed(node.path, 'removed');
         },
 
         /**
@@ -464,6 +479,41 @@ export function createOverlay({ source = null, writable }){
                 throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
             }
             forget(node);
+        },
+
+        /**
+         * Every file that lives in the writable layer: what the program itself
+         * has produced, and therefore what a session is made of. Nothing from
+         * the source is in it -- a bundle is fetched by digest, never uploaded.
+         *
+         * @returns {{ path: string, size: number }[]}
+         */
+        writableFiles(){
+            /** @type {{ path: string, size: number }[]} */
+            const found = [];
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.tombstone)
+                    {
+                        continue;
+                    }
+                    if (child.directory)
+                    {
+                        walk(child);
+                    }
+                    else if (child.inWritable)
+                    {
+                        found.push({
+                            path: child.path,
+                            size: writable.stat(child.path)?.size ?? 0,
+                        });
+                    }
+                }
+            };
+            walk(root);
+            return found;
         },
 
         diagnostics(){

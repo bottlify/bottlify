@@ -7,6 +7,7 @@
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
+import { resolveStorage } from './storage.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -27,6 +28,10 @@ import { captureTrace, formatTrace } from './trace.js';
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {string} [imagePath]    What the program believes it was loaded from.
+ * @property {any} [storage]
+ *           Where the session comes from and goes: a provider with `load` and
+ *           `save`, a function that only loads, or the string `local`.
+ * @property {string} [id]           Names the session when storage does not.
  */
 
 /**
@@ -101,6 +106,31 @@ export async function createApp(options){
             },
         },
     });
+
+    const filesystem = core.api('filesystem');
+    const storage = resolveStorage(options.storage, options.id ?? 'session');
+
+    // Seeded before the program's first instruction, and awaited: a save that
+    // arrives after the program has looked for it is a save that was not there.
+    const seeded = await storage.load();
+    if (seeded.length > 0)
+    {
+        filesystem.apply(seeded);
+    }
+
+    // One way out. What the program writes is announced once the writes settle;
+    // nothing is ever pulled back in while it runs.
+    const persist = storage.save;
+    if (persist)
+    {
+        filesystem.onChanged((/** @type {any[]} */ changes)=>{
+            events.emit('session', { changes });
+            Promise.resolve(persist(filesystem.export(), changes)).catch(
+                (/** @type {Error} */ error)=>{
+                    events.emit('error', { reason: 'session-save', error });
+                });
+        });
+    }
 
     const cpu = core.api('cpu');
     const memory = core.api('memory');
@@ -417,6 +447,17 @@ export async function createApp(options){
 
         /** The registry the program reads and writes; it outlives the process. */
         registry: ()=>win32.registry(),
+
+        /**
+         * The session: everything the program has written, and the way to put
+         * files in from outside.
+         */
+        session: {
+            /** @returns {{ path: string, bytes: Uint8Array }[]} */
+            export: ()=>filesystem.export(),
+            /** @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} changes */
+            apply: changes=>filesystem.apply(changes),
+        },
 
         exitCode: ()=>win32.exitCode(),
         diagnostics: ()=>[

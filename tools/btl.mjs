@@ -57,15 +57,26 @@ export const Codec = {
 };
 
 /**
- * One mebibyte.
+ * A quarter of a mebibyte.
  *
- * The block size is the granularity of a random read, so smaller is better for
- * seeking and worse for both the index and the compression ratio. A megabyte
- * keeps the index of a five-gigabyte bundle under a megabyte itself, and gives
- * a compressor enough to work with; anything a game reads is far smaller than
- * this, so the cost of a read is one block either way.
+ * The block is the granularity of a random read, of an HTTP range fetch, and of
+ * one decompression, so the instinct is that a bigger one compresses better and
+ * seeks worse. Measured across both games at 256 KiB, 1, 4 and 16 MiB, the first
+ * half of that is false here: 256 KiB gives the *best* ratio of the four, and
+ * 16 MiB loses 4.9 MiB on one game and 25.5 MiB on the other.
+ *
+ * The reason is the probe below rather than the compressor's window. A fixed
+ * 96 KiB probe is a third of a 256 KiB block and a hundredth of a 16 MiB one, so
+ * a compressible region diluted into a large block stops clearing the threshold
+ * and the whole block is stored. If a larger block is ever wanted, the probe has
+ * to grow with it.
+ *
+ * The index argument for large blocks is real and worthless in absolute terms:
+ * the whole index of the five-gigabyte bundle is 113 KiB at this size and 3.4 KiB
+ * at 16 MiB. Saving 110 KiB once is not worth making every random read fetch and
+ * inflate sixty-four times as much.
  */
-export const DEFAULT_BLOCK_SIZE = 1 << 20;
+export const DEFAULT_BLOCK_SIZE = 1 << 18;
 
 /**
  * A block is stored uncompressed unless compression saves at least this much.
@@ -80,10 +91,15 @@ const MIN_SAVING = 0.04;
  * How much of a block to compress before deciding whether to compress it.
  *
  * Game data is mostly already-compressed archives, and compressing all of it to
- * discover that is most of the build time. A cheap look at the first part of a
- * block predicts the rest well enough, because a block is one kind of data.
+ * discover that is most of the build time. A cheap look at part of a block
+ * predicts the rest well enough, because a block is one kind of data.
+ *
+ * A fraction rather than a fixed size, because a fixed one silently becomes a
+ * worse and worse predictor as the block grows -- which is exactly what made
+ * large blocks compress badly when this was 96 KiB regardless.
  */
-const PROBE_BYTES = 96 * 1024;
+const PROBE_FRACTION = 0.4;
+const PROBE_CAP = 256 * 1024;
 const PROBE_LEVEL = 1;
 
 const deflate = (/** @type {Buffer} */ bytes, /** @type {number} */ level)=>
@@ -98,7 +114,8 @@ const inflate = (/** @type {Buffer | Uint8Array} */ bytes)=>zlib.inflateRawSync(
  * @returns {{ codec: number, bytes: Buffer }}
  */
 export function packBlock(block, level = 9){
-    const probe = block.length > PROBE_BYTES ? block.subarray(0, PROBE_BYTES) : block;
+    const probeBytes = Math.min(PROBE_CAP, Math.ceil(block.length * PROBE_FRACTION));
+    const probe = block.length > probeBytes ? block.subarray(0, probeBytes) : block;
     const sample = deflate(probe, PROBE_LEVEL);
     if (sample.length > probe.length * (1 - MIN_SAVING))
     {

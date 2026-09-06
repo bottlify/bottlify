@@ -106,8 +106,8 @@ rather than for a better compressor** — the best codec in the table buys 2.6 p
 
 | bundle | files | in | out | ratio | blocks compressed | build |
 |---|---|---|---|---|---|---|
-| `warcraft-iii-frozen-throne` | 212 | 1112.0 MiB | 1086.9 MiB | 97.7% | 166 / 1276 | 15 s |
-| `world-of-warcraft-classic` | 48 | 5137.3 MiB | 5120.7 MiB | 99.7% | 113 / 5171 | 57 s |
+| `warcraft-iii-frozen-throne` | 212 | 1112.0 MiB | 1082.3 MiB | 97.3% | 659 / 4542 | 22 s |
+| `world-of-warcraft-classic` | 48 | 5137.3 MiB | 5105.2 MiB | 99.4% | 574 / 20581 | 81 s |
 
 Both verified by reading every file back and comparing against the digest written with it: 0 corrupt.
 Both rebuild byte-for-byte identical from the same input, which is what makes a bundle cacheable by
@@ -117,6 +117,69 @@ This is what "different games use different compression" turns out to mean in pr
 is the same and the *outcome* differs — Warcraft III compresses 13% of its blocks, World of Warcraft
 2% — and the manifest records what each one ended up being. A game that is mostly loose data would
 compress most of its blocks under exactly the same rule.
+
+### 1.2a. Block size, and two things the first measurement got wrong
+
+Pack time is free -- a bundle is built once, offline -- so the sweep was rerun at maximum levels and
+at four block sizes, exactly rather than by sampling. Two of the earlier conclusions did not survive.
+
+**Block size: 256 KiB, not 1 MiB.** The instinct is that a bigger block compresses better and seeks
+worse. Only the second half is true here:
+
+| block | WC3 deflate | WoW deflate | index (WoW) |
+|---|---|---|---|
+| 256 KiB | **97.36%** | **99.39%** | 113 KiB |
+| 1 MiB | 97.74% | 99.68% | 31 KiB |
+| 4 MiB | 97.96% | 99.80% | 9 KiB |
+| 16 MiB | 97.80% | 99.89% | 3 KiB |
+
+Bigger blocks compress *worse*, and the cause was ours: a fixed 96 KiB probe is a third of a 256 KiB
+block and a hundredth of a 16 MiB one, so a compressible region diluted into a large block stopped
+clearing the threshold and the whole block was stored. The probe is now a fraction of the block, so
+the trap is gone; the ratio still favours the small block, and the index cost that argued for large
+ones is 113 KiB against 3.4 KiB — one HTTP request either way, and not worth making every random
+read fetch sixty-four times as much. Rebuilt at 256 KiB, the two bundles give back 4.6 MiB and
+15.5 MiB for nothing.
+
+**"WASM is too slow for the read path" is false, and it was the load-bearing argument.** It had never
+been measured. It has been now, decoding the exact blocks these bundles keep, best-of-six, verified
+by digest:
+
+| decoder | WC3 MiB/s | WoW MiB/s |
+|---|---|---|
+| native zstd (Node) | 1794 | 2002 |
+| **WASM libzstd, buffers reused** | **1748** | **1681** |
+| pure-JS zstd (`fzstd`) | 564 | 656 |
+| native deflate-raw (Node zlib) | 370 | 656 |
+| **`DecompressionStream('deflate-raw')`** | **160** | **200** |
+
+WASM zstd is 6-25% off native, not the 30-50% assumed — and it is **7-9x faster than the browser's
+own deflate**, which turns out to be the slowest option measured, 2-3x slower than the same
+algorithm through Node's zlib. Even a pure-JS zstd beats native deflate.
+
+So the reason for choosing deflate has changed. It is no longer "the alternative is too slow in the
+read path" -- the alternative is the fastest read path available. What remains is: a second
+third-party dependency, against 20-30 MiB saved across six gigabytes and a decode that is several
+times quicker. **That is now a judgement rather than a measurement**, and it is deliberately left
+where it is until someone measures it in a browser rather than in Node: every number above is Node
+on one machine, and Chrome's `DecompressionStream` and Chrome's WASM engine may both differ.
+
+The format does not have to be decided again to change this. A codec is recorded per block and named
+in the manifest, so a zstd bundle and a deflate bundle are the same format, and a reader that has
+only the browser's decoder can still read the second kind.
+
+**The threshold is the biggest lever, and 4% is a choice rather than a knee** (WC3, 1 MiB):
+
+| threshold | deflate | zstd | compressed blocks |
+|---|---|---|---|
+| 1% | 96.77% | 95.72% | 480 / 516 |
+| 4% | 97.74% | 97.23% | 166 / 186 |
+| 10% | 98.33% | 97.98% | 76 / 87 |
+
+Moving 1% → 10% is 17.4 MiB with deflate, more than any block size or codec in the sweep. Lowering
+it trades download once for decompression on every read, so the right point depends on the codec:
+at 160 MiB/s a marginal block is not worth compressing, at 1700 MiB/s it plainly is. It stays at 4%
+while the codec stays deflate.
 
 ### 1.3. Why not ZIP64
 
@@ -161,6 +224,28 @@ Three kinds of bytes reach a running program, and they are not the same kind of 
 Treating them alike is the mistake to avoid. The bundle is **cached, not synced** — it is named by
 its own digest, so a cached copy never needs revalidating and two people playing the same game share
 the same bytes. Only the overlay and the session record are worth sending anywhere.
+
+### Why OPFS, specifically
+
+Not a convenience. Two reasons, and the second is the one that decides where the engine runs.
+
+**A bundle does not fit in memory.** These two are 1.1 and 5.3 GiB, and nothing stops a bundle being
+larger; a tab cannot hold that, and a typed array cannot address it on most engines anyway. So the
+bundle is never materialised — it lives as a file, and a read touches the one block it needs. That
+is what the block layout is for, and it already works past four gigabytes: the World of Warcraft
+bundle is 5.35 GB and every file in it verifies against the digest it was written with.
+
+**A guest read is synchronous, and OPFS is the only storage that can answer one.** When a program
+calls `ReadFile` the emulator is mid-instruction and wants bytes now. OPFS's
+`FileSystemSyncAccessHandle` reads at an offset synchronously — and exists *only in a worker*, which
+is where the engine runs. Everything else in the browser is promise-based, so every read would have
+to park the guest thread and resume it a turn later. The bridge can do that, and does it for a block
+that has not been fetched yet, but paying it on every read of every cached block is a different
+engine.
+
+That pins the arrangement: engine in a worker, bundle blocks in OPFS read synchronously, a network
+fetch only on the first touch of a block — which is the one case where parking is the honest answer
+because the data genuinely is not here yet.
 
 ### Pushing files in from outside
 

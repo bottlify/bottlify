@@ -19,6 +19,14 @@ import {
 const MOVE_CHUNK = 1 << 20;
 
 /**
+ * A store path back into the components the rest of this layer works in.
+ *
+ * @param {string} path
+ * @returns {string[]}
+ */
+const splitComponents = path=>path.split(/[\\/]/).filter(Boolean);
+
+/**
  * filesystem -- the volume a Win32 program sees: drive letters, Windows path
  * rules, a read-only source under a writable layer, and open files.
  *
@@ -53,6 +61,35 @@ export const filesystemModule = {
         drives = new Map();
         files = createFileTable({ limit: config?.openFileLimit });
 
+        // What has changed since anyone last asked. Kept as a set of paths
+        // rather than a log: a program writes one save in hundreds of writes,
+        // and the useful answer is "this file is different now", once.
+        /** @type {Map<string, { path: string, kind: string }>} */
+        const changes = new Map();
+        /** @type {((changes: any[]) => void) | null} */
+        let listener = config?.onChanged ?? null;
+        let notifying = false;
+
+        // Announced on a microtask so a burst of writes to one file becomes one
+        // notification, and so nothing is announced from inside a guest call
+        // that has not finished making the change it is announcing.
+        const notify = ()=>{
+            if (notifying || !listener)
+            {
+                return;
+            }
+            notifying = true;
+            queueMicrotask(()=>{
+                notifying = false;
+                const batch = [...changes.values()];
+                changes.clear();
+                if (batch.length > 0)
+                {
+                    listener?.(batch);
+                }
+            });
+        };
+
         /**
          * @param {string} letter
          * @param {any} stores
@@ -66,6 +103,13 @@ export const filesystemModule = {
             drives.set(key, createOverlay({
                 source: stores?.source ?? null,
                 writable: stores?.writable ?? createMemoryStore(),
+                onChanged: (/** @type {any} */ change)=>{
+                    changes.set(`${key}:${change.path}`, {
+                        path: formatPath(key, splitComponents(change.path)),
+                        kind: change.kind,
+                    });
+                    notify();
+                },
             }));
         };
 
@@ -120,6 +164,114 @@ export const filesystemModule = {
 
             /** @param {string} letter @param {any} stores */
             mount: (letter, stores)=>mount(letter, stores),
+
+            /**
+             * Says what has changed, once per file, after the writes settle.
+             *
+             * One way out, on purpose: nothing pulls files in behind a running
+             * program's back. What arrives from outside arrives through
+             * `apply`, and only when the caller asks for it.
+             *
+             * @param {(changes: { path: string, kind: string }[]) => void} handler
+             */
+            onChanged(handler){
+                listener = handler;
+            },
+
+            /**
+             * Puts files in from outside: a save restored from elsewhere, a
+             * config, an add-on.
+             *
+             * Through the overlay rather than into the store beneath it,
+             * because the overlay indexes the store once, at mount -- a write
+             * that went behind its back would be invisible until the next one.
+             *
+             * Refuses the whole batch if any of it names a file the guest holds
+             * open. Half an applied save is worse than none: the program reads
+             * a header from the new one and a body from the old.
+             *
+             * @param {{ path: string, bytes?: Uint8Array, delete?: boolean }[]} batch
+             * @returns {number} how many entries were applied
+             */
+            apply(batch){
+                const open = new Set(files.list().map((/** @type {any} */ file)=>
+                    foldName(file.path)));
+                for (const entry of batch)
+                {
+                    const { components, drive } = locate(entry.path);
+                    if (open.has(foldName(formatPath(drive, components))))
+                    {
+                        throw fsError(ErrorCode.SHARING_VIOLATION,
+                            `"${entry.path}" is open; the batch was not applied`);
+                    }
+                }
+
+                for (const entry of batch)
+                {
+                    const { tree, components } = locate(entry.path);
+                    if (entry.delete)
+                    {
+                        if (tree.stat(components))
+                        {
+                            tree.removeFile(components);
+                        }
+                        continue;
+                    }
+
+                    // The parent may not exist yet: what arrives from outside
+                    // carries its own shape, and a save lives in a directory
+                    // the program has not created yet on a fresh install.
+                    for (let depth = 1; depth < components.length; depth++)
+                    {
+                        const parent = components.slice(0, depth);
+                        if (!tree.stat(parent))
+                        {
+                            tree.createDirectory(parent);
+                        }
+                    }
+                    if (tree.stat(components))
+                    {
+                        tree.truncate(components, 0);
+                    }
+                    else
+                    {
+                        tree.createFile(components);
+                    }
+                    tree.write(components, 0, entry.bytes ?? new Uint8Array(0));
+                }
+                return batch.length;
+            },
+
+            /**
+             * Everything the writable layer holds: what a session is made of.
+             *
+             * The source is not in it. A bundle is named by its own digest and
+             * fetched, never uploaded, so what travels is only what the program
+             * itself produced.
+             *
+             * @param {string} [letter]
+             * @returns {{ path: string, bytes: Uint8Array }[]}
+             */
+            export(letter){
+                /** @type {{ path: string, bytes: Uint8Array }[]} */
+                const out = [];
+                for (const [key, tree] of drives)
+                {
+                    if (letter && key !== String(letter).toUpperCase())
+                    {
+                        continue;
+                    }
+                    for (const entry of tree.writableFiles())
+                    {
+                        const components = splitComponents(entry.path);
+                        out.push({
+                            path: formatPath(key, components),
+                            bytes: tree.read(components, 0, entry.size),
+                        });
+                    }
+                }
+                return out;
+            },
 
             /** @returns {string[]} */
             drives: ()=>[...drives.keys()],
