@@ -6,6 +6,7 @@
 
 import { createConsoleFunctions } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
+import { createDebugFunctions } from './kernel32/debug.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 
 /**
@@ -51,6 +52,8 @@ export const win32Module = {
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
+        /** @type {(text: string) => void} */
+        const trace = config?.onTrace ?? (()=>{});
 
         functions = {
             ...createConsoleFunctions({
@@ -61,6 +64,12 @@ export const win32Module = {
                     exitCode = code;
                 },
                 park: ()=>bridge.park(),
+            }),
+            ...createDebugFunctions({
+                readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+                readWideString: (address, maxLength)=>
+                    memory.readWideString(address, maxLength),
+                say: text=>trace(text),
             }),
             ...createThreadingFunctions({
                 kernel,

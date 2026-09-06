@@ -67,6 +67,8 @@ export const memoryModule = {
             writeU32: accessors.writeU32,
             /** @param {number} address @param {number} [limit] */
             readCString: (address, limit)=>accessors.readCString(address, limit),
+            /** @param {number} address @param {number} [limit] */
+            readWideString: (address, limit)=>accessors.readWideString(address, limit),
         };
     },
 

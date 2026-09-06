@@ -116,5 +116,26 @@ export function createAccessors({ raw, regions }){
             }
             return new TextDecoder('latin1').decode(bytes.subarray(0, end));
         },
+
+        /**
+         * The same for a UTF-16 string, which is what every W-suffixed entry
+         * point is handed.
+         *
+         * @param {number} address
+         * @param {number} [limit]  Bytes, not characters.
+         * @returns {string}
+         */
+        readWideString(address, limit = 8192){
+            const bytes = read(address, limit);
+            for (let at = 0; at + 1 < bytes.length; at += 2)
+            {
+                if (bytes[at] === 0 && bytes[at + 1] === 0)
+                {
+                    return new TextDecoder('utf-16le').decode(bytes.subarray(0, at));
+                }
+            }
+            throw new Error(
+                `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+        },
     };
 }

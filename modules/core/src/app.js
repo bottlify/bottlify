@@ -5,6 +5,7 @@
  */
 
 import { assembleModules } from './core.js';
+import { createEvents } from './events.js';
 
 /**
  * createApp — the consumer-facing entry point: run a Win32 application.
@@ -30,18 +31,14 @@ import { assembleModules } from './core.js';
  * @returns {Promise<any>} an AppController
  */
 export async function createApp(options){
-    /** @type {((handle: number, text: string) => void)[]} */
-    const sinks = [];
+    const events = createEvents();
 
     const core = await assembleModules({
         win32: {
             /** @param {number} handle @param {string} text */
-            onOutput: (handle, text)=>{
-                for (const sink of sinks)
-                {
-                    sink(handle, text);
-                }
-            },
+            onOutput: (handle, text)=>events.emit('output', { handle, text }),
+            /** @param {string} text */
+            onTrace: text=>events.emit('debug', { text }),
         },
     });
 
@@ -105,6 +102,21 @@ export async function createApp(options){
      */
     let paused = null;
 
+    // attachLog is sugar over the registry: the same subscription, remembered
+    // by the sink the caller gave, so detaching still takes what it was given.
+    /** @type {Map<Function, (payload: any) => void>} */
+    const logSinks = new Map();
+
+    /**
+     * Announces a failure the program itself cannot see, and hands back what to
+     * throw. A handler may answer with an error of its own to throw instead.
+     *
+     * @param {string} reason
+     * @param {Error} error
+     * @returns {Error}
+     */
+    const fail = (reason, error)=>events.emit('error', { reason, error }) ?? error;
+
     return {
         /** Where the program was mapped and where it starts. */
         image,
@@ -137,12 +149,13 @@ export async function createApp(options){
                 const failure = bridge.failure();
                 if (failure)
                 {
-                    throw failure;
+                    throw fail('host-call', failure);
                 }
 
                 const code = win32.exitCode();
                 if (code !== null)
                 {
+                    events.emit('exit', { code });
                     return code;
                 }
 
@@ -155,12 +168,14 @@ export async function createApp(options){
                     const waiting = kernel.diagnosticsSnapshot().waiting;
                     if (waiting.length > 0)
                     {
-                        throw new Error(`deadlock: ${waiting.join('; ')}`);
+                        throw fail('deadlock', new Error(`deadlock: ${waiting.join('; ')}`));
                     }
-                    throw new Error('every thread ended without the process exiting');
+                    throw fail('no-threads',
+                        new Error('every thread ended without the process exiting'));
                 }
             }
-            throw new Error(`program did not finish within ${maxTurns} turns`);
+            throw fail('runaway',
+                new Error(`program did not finish within ${maxTurns} turns`));
         },
 
         /** The program's first thread. */
@@ -192,21 +207,51 @@ export async function createApp(options){
         },
         stop: ()=>cpu.stop(),
 
+        /**
+         * Watches, answers, or swallows something the program did.
+         *
+         * Handlers run in registration order and the first to return anything
+         * other than `undefined` decides and stops the rest -- so observing and
+         * intercepting are the same mechanism, and a handler that returns
+         * nothing has not intervened.
+         *
+         * What is emitted today: `output` ({ handle, text }) for a write to a
+         * standard handle, `debug` ({ text }) for the program's own tracing,
+         * `error` ({ reason, error }) for a failure the program cannot see,
+         * and `exit` ({ code }) when it ends.
+         *
+         * @param {string} name
+         * @param {(payload: any) => any} handler
+         * @returns {() => void} stops this handler
+         */
+        on: (name, handler)=>events.on(name, handler),
+        /** @param {string} name @param {(payload: any) => any} handler */
+        off: (name, handler)=>events.off(name, handler),
+
         /** @param {(handle: number, text: string) => void} sink */
         attachLog(sink){
-            sinks.push(sink);
+            /** @param {any} payload */
+            const handler = payload=>{
+                sink(payload.handle, payload.text);
+            };
+            logSinks.set(sink, handler);
+            events.on('output', handler);
         },
         /** @param {(handle: number, text: string) => void} sink */
         detachLog(sink){
-            const at = sinks.indexOf(sink);
-            if (at !== -1)
+            const handler = logSinks.get(sink);
+            if (handler)
             {
-                sinks.splice(at, 1);
+                events.off('output', handler);
+                logSinks.delete(sink);
             }
         },
 
         exitCode: ()=>win32.exitCode(),
-        diagnostics: ()=>core.diagnostics(),
+        diagnostics: ()=>[
+            ...core.diagnostics(),
+            { name: 'app', version: '0.1.0', status: 'ready', metrics: events.diagnostics() },
+        ],
         dispose: ()=>core.dispose(),
     };
 }
