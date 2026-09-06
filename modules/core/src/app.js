@@ -46,6 +46,7 @@ export async function createApp(options){
 
     const cpu = core.api('cpu');
     const memory = core.api('memory');
+    const kernel = core.api('kernel');
     const loader = core.api('loader');
     const win32 = core.api('win32');
 
@@ -86,9 +87,21 @@ export async function createApp(options){
 
     memory.writeU32(entryVector, image.entryPoint);
 
-    /** @type {((code: number) => void) | null} */
-    let notifyExit = null;
-    let finished = false;
+    // The program's first thread. Everything after this runs under the
+    // scheduler, including the main thread -- there is no privileged path.
+    const mainThread = kernel.createThread({
+        entry: image.entryPoint,
+        stackTop: initialStack,
+        name: 'main',
+    });
+
+    /**
+     * Pausing is a gate rather than a flag polled in a loop: a paused caller
+     * waits on a promise that resuming resolves, so nothing spins.
+     *
+     * @type {{ gate: Promise<void>, open: () => void } | null}
+     */
+    let paused = null;
 
     cpu.onTrap((/** @type {number} */ id)=>{
         const entry = cpu.lookupTrap(id);
@@ -108,22 +121,12 @@ export async function createApp(options){
 
         cpu.writeReg32('eax', entry.handler(args) >>> 0);
 
-        const code = win32.exitCode();
-        if (code !== null && !finished)
+        // A handler that ended the process parks the calling thread too: its
+        // stub still has a `ret` to execute, and there is nothing left to
+        // return to.
+        if (win32.exitCode() !== null)
         {
-            // The stub still has a `ret` to execute. Send it to the park loop
-            // rather than back into a caller that no longer expects it, and stop
-            // the machine outside this callback -- stopping here would leave that
-            // `ret` to run anyway.
-            finished = true;
-            memory.writeU32(esp, cpu.parkAddress());
-            setTimeout(()=>{
-                cpu.stop();
-                if (notifyExit)
-                {
-                    notifyExit(code);
-                }
-            }, 0);
+            kernel.parkThread(kernel.currentThread());
         }
     });
 
@@ -132,29 +135,74 @@ export async function createApp(options){
         image,
 
         /**
-         * Runs until the program exits.
+         * Runs the program to completion, one scheduler turn at a time.
+         *
+         * Turns rather than a free-running emulator: a turn is where a thread
+         * can be preempted, where a blocked one is put back on the road, and
+         * where "nothing can run" becomes visible instead of looking like work.
          *
          * @param {Object} [runOptions]
-         * @param {number} [runOptions.timeoutMs]
+         * @param {number} [runOptions.maxTurns]
          * @returns {Promise<number>} the guest's exit code
          */
-        run({ timeoutMs = 30000 } = {}){
-            return new Promise((resolve, reject)=>{
-                const deadline = setTimeout(()=>{
-                    cpu.stop();
-                    reject(new Error(`application did not exit within ${timeoutMs}ms`));
-                }, timeoutMs);
-                notifyExit = code=>{
-                    clearTimeout(deadline);
-                    resolve(code);
-                };
-                cpu.run();
-            });
+        async run({ maxTurns = 200000 } = {}){
+            for (let turn = 0; turn < maxTurns; turn++)
+            {
+                if (paused)
+                {
+                    await paused.gate;
+                }
+
+                const code = win32.exitCode();
+                if (code !== null)
+                {
+                    return code;
+                }
+
+                const step = kernel.runOnce();
+                if (!step.ran)
+                {
+                    // Nobody is ready. Either everything finished without the
+                    // program exiting, or every thread is waiting on something
+                    // no one will signal -- and the diagnostics name what.
+                    const waiting = kernel.diagnosticsSnapshot().waiting;
+                    if (waiting.length > 0)
+                    {
+                        throw new Error(`deadlock: ${waiting.join('; ')}`);
+                    }
+                    throw new Error('every thread ended without the process exiting');
+                }
+            }
+            throw new Error(`program did not finish within ${maxTurns} turns`);
         },
 
-        /** Halts execution without ending the process; `resume` picks it back up. */
-        pause: ()=>cpu.stop(),
-        resume: ()=>cpu.run(),
+        /** The program's first thread. */
+        mainThread,
+
+        /**
+         * Stops handing out turns without ending anything; `resume` continues
+         * from the same place, since no thread's state was touched.
+         */
+        pause(){
+            if (paused)
+            {
+                return;
+            }
+            /** @type {() => void} */
+            let open = ()=>{};
+            const gate = new Promise(resolve=>{
+                open = ()=>resolve(undefined);
+            });
+            paused = { gate, open };
+        },
+        resume(){
+            if (!paused)
+            {
+                return;
+            }
+            paused.open();
+            paused = null;
+        },
         stop: ()=>cpu.stop(),
 
         /** @param {(handle: number, text: string) => void} sink */

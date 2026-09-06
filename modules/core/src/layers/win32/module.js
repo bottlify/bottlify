@@ -4,6 +4,7 @@
  */
 
 import { createConsoleFunctions } from './kernel32/console.js';
+import { createThreadingFunctions } from './kernel32/threading.js';
 
 /**
  * win32 — the API surface the guest was compiled against.
@@ -44,20 +45,29 @@ export const win32Module = {
      */
     async create(config, host){
         const memory = host.requireApi('memory');
+        const kernel = host.requireApi('kernel');
         exitCode = null;
         called = [];
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
 
-        functions = createConsoleFunctions({
-            readMemory: (address, length)=>memory.readBytes(address, length),
-            writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
-            write: (handle, text)=>sink(handle, text),
-            exit: code=>{
-                exitCode = code;
-            },
-        });
+        functions = {
+            ...createConsoleFunctions({
+                readMemory: (address, length)=>memory.readBytes(address, length),
+                writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+                write: (handle, text)=>sink(handle, text),
+                exit: code=>{
+                    exitCode = code;
+                },
+            }),
+            ...createThreadingFunctions({
+                kernel,
+                readMemory: (address, length)=>memory.readBytes(address, length),
+                currentThread: ()=>kernel.currentThread(),
+                park: thread=>kernel.parkThread(thread),
+            }),
+        };
 
         return {
             /**

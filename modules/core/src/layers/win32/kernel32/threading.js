@@ -193,8 +193,12 @@ export function createThreadingFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([code])=>{
-                kernel.exitThread(host.currentThread(), code >>> 0);
-                host.park(host.currentThread());
+                // Hold the thread before ending it: terminating clears the
+                // kernel's notion of a current thread, and the parking that
+                // follows still has to happen to the thread that called.
+                const thread = host.currentThread();
+                kernel.exitThread(thread, code >>> 0);
+                host.park(thread);
                 return 0;
             },
         },

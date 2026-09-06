@@ -40,6 +40,16 @@ export const kernelModule = {
      */
     async create(config, host){
         const cpu = host.requireApi('cpu');
+        const memory = host.requireApi('memory');
+
+        // Where new threads get their stacks. Each is registered in the address
+        // space like anything else, so a stack that runs into its neighbour is
+        // caught by the region map rather than by the corruption it causes.
+        const stacks = {
+            base: config?.stacks?.base ?? 0x00400000 - 0x00100000,
+            size: config?.stacks?.size ?? 0x10000,
+            issued: 0,
+        };
 
         switcher = createSwitcher({ cpu });
         scheduler = createScheduler({
@@ -57,20 +67,79 @@ export const kernelModule = {
             ThreadState,
             WaitResult,
 
-            /** @param {any} options */
-            createThread(options){
-                const thread = scheduler.create(options);
+            /**
+             * Creates a thread, giving it a stack of its own.
+             *
+             * The stack is primed the way a call would leave it: the thread's
+             * parameter above the return address, and the return address itself
+             * pointing at the park loop -- so a thread that runs off the end of
+             * its start routine stops instead of returning into nothing.
+             *
+             * @param {Object} options
+             * @param {number} options.entry
+             * @param {number} [options.parameter]
+             * @param {number} [options.stackTop]  Overrides the pool, for the first thread.
+             * @param {number} [options.tebAddress]
+             * @param {string} [options.name]
+             */
+            createThread({ entry, parameter = 0, stackTop, tebAddress, name }){
+                // A stack from the pool unless the caller brought its own (the
+                // first thread runs on the one the process was given).
+                const allocateStack = ()=>{
+                    const base = stacks.base + stacks.issued * stacks.size;
+                    memory.register({
+                        name: `stack-${stacks.issued + 1}`,
+                        base,
+                        size: stacks.size,
+                        kind: memory.RegionKind.STACK,
+                        access: memory.Access.READ_WRITE,
+                    });
+                    stacks.issued++;
+                    return base + stacks.size;
+                };
+                const top = (stackTop ?? allocateStack()) - 8;
+                memory.writeU32(top + 4, parameter);
+                memory.writeU32(top, cpu.parkAddress());
+
+                const thread = scheduler.create({
+                    entry,
+                    stackTop: top,
+                    tebAddress: tebAddress ?? 0,
+                    name,
+                });
                 thread.handle = handles.open('thread', thread);
                 return thread;
             },
+
+            /**
+             * Stops the running thread where it stands.
+             *
+             * Its stub is about to execute a `ret`, so the return address on the
+             * stack is put aside and replaced with the park loop: the loop is a
+             * parking slot, not code to resume into. The saved address is where
+             * the thread continues when it next gets a turn.
+             *
+             * @param {any} thread
+             */
+            parkThread(thread){
+                const esp = cpu.readReg32('esp');
+                thread.parkedReturn = memory.readU32(esp);
+                memory.writeU32(esp, cpu.parkAddress());
+            },
             currentThread: ()=>scheduler.current(),
             threads: ()=>scheduler.all(),
+
+            /** @param {number} address @param {number} id */
+            writeThreadId: (address, id)=>memory.writeU32(address, id),
 
             /**
              * Runs one turn. Returns what happened rather than a count, so a
              * caller can tell progress from an idle system from a finished one.
              */
             runOnce: ()=>scheduler.runOnce(),
+
+            /** The scheduler's own view, for a caller driving the machine. */
+            diagnosticsSnapshot: ()=>scheduler.diagnostics(),
 
             /** @param {any} thread @param {number} exitCode */
             exitThread(thread, exitCode){

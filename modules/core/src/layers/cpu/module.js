@@ -155,6 +155,26 @@ export const cpuModule = {
             captureContext: ()=>captureContext(started().cpu()),
 
             /**
+             * Points a saved context at where a parked thread should carry on,
+             * with the value its blocking call is about to return.
+             *
+             * A thread that blocked did not stop at a random place: its stub was
+             * redirected to the park loop and its real return address kept aside,
+             * because the loop is a parking slot, not code the thread should
+             * resume into. This puts it back on the road.
+             *
+             * @param {any} context
+             * @param {Object} options
+             * @param {number} options.eip
+             * @param {number} options.returnValue
+             */
+            resumeContextAt(context, { eip, returnValue }){
+                context.eip = eip;
+                context.reg32[0] = returnValue | 0; // EAX
+                context.inHlt = 0;
+            },
+
+            /**
              * Restores a thread, including the base of its TEB.
              *
              * The TEB address is a parameter rather than something the caller sets

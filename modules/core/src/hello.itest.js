@@ -71,8 +71,10 @@ test('diagnostics describe the run afterwards', async()=>{
     assert.ok(byName.cpu.metrics.instructions > 0);
     assert.equal(byName.cpu.metrics.traps, 4, 'park slot plus the three imports');
 
-    assert.deepEqual(byName.win32.metrics.implemented,
-        ['GetStdHandle', 'WriteFile', 'ExitProcess']);
+    for (const fn of ['GetStdHandle', 'WriteFile', 'ExitProcess'])
+    {
+        assert.ok(byName.win32.metrics.implemented.includes(fn), `${fn} is implemented`);
+    }
     assert.equal(byName.win32.metrics.exitCode, 0);
 
     assert.equal(byName.loader.metrics.images, 1);

@@ -97,8 +97,26 @@ export function createScheduler({ cpu, switcher, quantum = 100_000 }){
             // Round-robin: the queue order is creation order, and a thread that
             // has just run goes behind the others by being moved to the back.
             const next = candidates[0];
-            const switched = switcher.switchTo(
-                current && current.state === ThreadState.RUNNING ? current : null, next);
+
+            // A thread that blocked was parked mid-call: put it back where it
+            // was, carrying the result its wait produced. Doing this here rather
+            // than at wake time means it happens exactly once, on the path that
+            // is about to restore the context anyway.
+            if (next.parkedReturn !== null && next.parkedReturn !== undefined)
+            {
+                cpu.resumeContextAt(next.context, {
+                    eip: next.parkedReturn,
+                    returnValue: next.waitResult ?? 0,
+                });
+                next.parkedReturn = null;
+                next.waitResult = null;
+            }
+            // Whatever `current` is, it is the thread whose state is on the CPU,
+            // and it has to be saved before another one takes over -- including,
+            // especially, a thread that has just blocked. Saving only threads
+            // still marked RUNNING loses the state of every thread that parked
+            // itself in a wait, which then resumes from wherever it first began.
+            const switched = switcher.switchTo(current, next);
 
             if (current && current.state === ThreadState.RUNNING)
             {
