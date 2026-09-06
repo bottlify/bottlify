@@ -1,0 +1,498 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * The overlay: one read-only source, one writable layer, and the rules that
+ * make them look like a single volume to a program that cannot be told its
+ * installation is not writable.
+ *
+ * Three rules do all of the work:
+ *
+ * - A lookup finds the writable layer first, then the source.
+ * - The first write to a file that exists only in the source copies it up, so
+ *   the source is never modified and never has to be.
+ * - Deleting something that came from the source leaves a tombstone, because
+ *   the source cannot forget it and would otherwise hand it back on the next
+ *   enumeration.
+ *
+ * Both layers are indexed into one tree of nodes when the drive is mounted, and
+ * the tree is kept in step by every mutation that goes through here. A node is
+ * therefore the single answer to "does this exist, in which layer, and under
+ * what spelling" -- which is also what makes case-insensitive lookup with
+ * case-preserving enumeration cheap: the folded name is the key, the node's own
+ * name is what enumeration reports.
+ */
+
+import { ErrorCode, fsError } from './errors.js';
+import { foldName, matchName } from './paths.js';
+
+/**
+ * @typedef {Object} Node
+ * @property {string} name        As created; enumeration reports this.
+ * @property {string} path        Backslash-separated path handed to the stores.
+ * @property {Node | null} parent
+ * @property {boolean} directory
+ * @property {boolean} inSource
+ * @property {boolean} inWritable
+ * @property {boolean} tombstone  Deleted here, still present in the source.
+ * @property {Map<string, Node>} children  Keyed by folded name.
+ */
+
+/**
+ * @typedef {Object} Entry
+ * @property {string} name
+ * @property {string} path
+ * @property {boolean} directory
+ * @property {number} size
+ */
+
+/**
+ * @param {Node | null} parent
+ * @param {string} name
+ * @returns {Node}
+ */
+function makeNode(parent, name){
+    const path = !parent || parent.path.length === 0 ? name : `${parent.path}\\${name}`;
+    return {
+        name,
+        path,
+        parent,
+        directory: false,
+        inSource: false,
+        inWritable: false,
+        tombstone: false,
+        children: new Map(),
+    };
+}
+
+/**
+ * @param {Object} options
+ * @param {import('./memory-store.js').SourceStore | null} [options.source]
+ * @param {import('./memory-store.js').WritableStore} options.writable
+ */
+export function createOverlay({ source = null, writable }){
+    const root = makeNode(null, '');
+    root.directory = true;
+    root.inSource = source !== null;
+    root.inWritable = true;
+
+    /**
+     * @param {string} path
+     * @param {boolean} directory
+     * @param {'source' | 'writable'} layer
+     */
+    const index = (path, directory, layer)=>{
+        let node = root;
+        const parts = path.split('\\').filter(part=>part.length > 0);
+        parts.forEach((part, position)=>{
+            const key = foldName(part);
+            let child = node.children.get(key);
+            if (!child)
+            {
+                child = makeNode(node, part);
+                node.children.set(key, child);
+            }
+            // Anything with something under it is a directory, whether or not
+            // the store bothered to list it as one.
+            const leaf = position === parts.length - 1;
+            child.directory = child.directory || !leaf || directory;
+            if (layer === 'source')
+            {
+                child.inSource = true;
+            }
+            else
+            {
+                child.inWritable = true;
+            }
+            node = child;
+        });
+    };
+
+    for (const entry of source?.list() ?? [])
+    {
+        index(entry.path, entry.directory, 'source');
+    }
+    for (const entry of writable.list())
+    {
+        index(entry.path, entry.directory, 'writable');
+    }
+
+    /**
+     * @param {string[]} components
+     * @returns {Node | null}
+     */
+    const find = components=>{
+        let node = root;
+        for (const part of components)
+        {
+            if (!node.directory)
+            {
+                return null;
+            }
+            const child = node.children.get(foldName(part));
+            if (!child || child.tombstone)
+            {
+                return null;
+            }
+            node = child;
+        }
+        return node;
+    };
+
+    /**
+     * The parent a create or a delete has to act on. Missing it is a different
+     * failure from missing the file itself, and Win32 reports it differently.
+     *
+     * @param {string[]} components
+     * @returns {Node}
+     */
+    const parentOf = components=>{
+        const node = find(components.slice(0, -1));
+        if (!node)
+        {
+            throw fsError(ErrorCode.PATH_NOT_FOUND,
+                `No directory holds "${components.join('\\')}"`);
+        }
+        if (!node.directory)
+        {
+            throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
+        }
+        return node;
+    };
+
+    /** @param {string[]} components @returns {Node} */
+    const mustFind = components=>{
+        const node = find(components);
+        if (!node)
+        {
+            // Distinguishing the two costs one extra walk and saves a caller
+            // from reporting "file not found" for a missing directory.
+            parentOf(components);
+            throw fsError(ErrorCode.NOT_FOUND, `Nothing at "${components.join('\\')}"`);
+        }
+        return node;
+    };
+
+    /** @param {Node} node @returns {number} */
+    const sizeOf = node=>{
+        if (node.directory)
+        {
+            return 0;
+        }
+        const store = node.inWritable ? writable : source;
+        return store?.stat(node.path)?.size ?? 0;
+    };
+
+    /**
+     * Gives a node somewhere in the writable layer to live, parents first. A
+     * store is never asked to invent a directory it was not told about.
+     *
+     * @param {Node} node
+     */
+    const materialiseParents = node=>{
+        /** @type {Node[]} */
+        const missing = [];
+        for (let at = node.parent; at && !at.inWritable; at = at.parent)
+        {
+            missing.unshift(at);
+        }
+        for (const directory of missing)
+        {
+            writable.mkdir(directory.path);
+            directory.inWritable = true;
+        }
+    };
+
+    /**
+     * Copy-on-write: the moment a source file is first written to, its bytes
+     * move into the writable layer and every later read comes from there.
+     *
+     * @param {Node} node
+     */
+    const copyUp = node=>{
+        if (node.inWritable)
+        {
+            return;
+        }
+        materialiseParents(node);
+        const size = source?.stat(node.path)?.size ?? 0;
+        writable.write(node.path, 0, source ? source.read(node.path, 0, size) : new Uint8Array(0));
+        node.inWritable = true;
+    };
+
+    /**
+     * @param {Node} parent
+     * @param {string} name
+     * @returns {Node}
+     */
+    const childFor = (parent, name)=>{
+        const key = foldName(name);
+        const existing = parent.children.get(key);
+        if (!existing)
+        {
+            const created = makeNode(parent, name);
+            parent.children.set(key, created);
+            return created;
+        }
+        if (existing.tombstone)
+        {
+            // Recreating a deleted name must not resurrect what used to live
+            // under it, and takes the spelling it is being recreated with.
+            // `inSource` stays: the source still holds the name, so deleting
+            // this again has to leave a tombstone rather than uncover it.
+            existing.children.clear();
+            existing.tombstone = false;
+            existing.name = name;
+            existing.path = parent.path.length === 0 ? name : `${parent.path}\\${name}`;
+        }
+        return existing;
+    };
+
+    /**
+     * Drops a node from the writable layer, leaving a tombstone if the source
+     * would otherwise hand it straight back on the next enumeration.
+     *
+     * @param {Node} node
+     */
+    const forget = node=>{
+        if (node.inWritable)
+        {
+            writable.remove(node.path);
+            node.inWritable = false;
+        }
+        if (node.inSource)
+        {
+            node.tombstone = true;
+            return;
+        }
+        node.parent?.children.delete(foldName(node.name));
+    };
+
+    return {
+        /** @param {string[]} components @returns {Entry | null} */
+        stat(components){
+            const node = find(components);
+            return node
+                ? {
+                    name: node.name,
+                    path: node.path,
+                    directory: node.directory,
+                    size: sizeOf(node),
+                }
+                : null;
+        },
+
+        /**
+         * Merges both layers into one listing: tombstoned names are gone, and a
+         * name present in both appears once, under the spelling it was created
+         * with rather than the one the caller asked about.
+         *
+         * @param {string[]} components
+         * @param {string} [pattern]
+         * @returns {Entry[]}
+         */
+        list(components, pattern){
+            const node = mustFind(components);
+            if (!node.directory)
+            {
+                throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
+            }
+            const entries = [];
+            for (const child of node.children.values())
+            {
+                if (child.tombstone || (pattern && !matchName(pattern, child.name)))
+                {
+                    continue;
+                }
+                entries.push({
+                    name: child.name,
+                    path: child.path,
+                    directory: child.directory,
+                    size: sizeOf(child),
+                });
+            }
+            return entries;
+        },
+
+        /** @param {string[]} components @returns {number} */
+        size(components){
+            return sizeOf(mustFind(components));
+        },
+
+        /**
+         * @param {string[]} components @param {number} offset @param {number} length
+         * @returns {Uint8Array}
+         */
+        read(components, offset, length){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            const store = node.inWritable ? writable : source;
+            return store ? store.read(node.path, offset, length) : new Uint8Array(0);
+        },
+
+        /** @param {string[]} components @param {number} offset @param {Uint8Array} bytes */
+        write(components, offset, bytes){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            copyUp(node);
+            writable.write(node.path, offset, bytes);
+        },
+
+        /** @param {string[]} components @param {number} size */
+        truncate(components, size){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (size === 0 && !node.inWritable)
+            {
+                // Nothing of the source file survives a truncation to nothing,
+                // so copying it up first would only be work.
+                materialiseParents(node);
+                node.inWritable = true;
+            }
+            else
+            {
+                copyUp(node);
+            }
+            writable.truncate(node.path, size);
+        },
+
+        /**
+         * Creates an empty file, failing if the name is taken.
+         *
+         * @param {string[]} components
+         * @returns {Entry}
+         */
+        createFile(components){
+            const parent = parentOf(components);
+            const name = components[components.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root is not a file');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" already exists`);
+            }
+            const node = childFor(parent, name);
+            node.directory = false;
+            materialiseParents(node);
+            writable.truncate(node.path, 0);
+            node.inWritable = true;
+            return { name: node.name, path: node.path, directory: false, size: 0 };
+        },
+
+        /**
+         * Creates a directory. One that already exists in the source is joined
+         * rather than replaced, so what the source put in it stays visible.
+         *
+         * @param {string[]} components
+         * @returns {boolean} false when the directory was already there.
+         */
+        createDirectory(components){
+            const parent = parentOf(components);
+            const name = components[components.length - 1];
+            if (name === undefined)
+            {
+                throw fsError(ErrorCode.INVALID_PATH, 'A root always exists');
+            }
+            const existing = parent.children.get(foldName(name));
+            if (existing && !existing.tombstone)
+            {
+                if (!existing.directory)
+                {
+                    throw fsError(ErrorCode.ALREADY_EXISTS, `"${existing.path}" is a file`);
+                }
+                if (existing.inWritable)
+                {
+                    return false;
+                }
+                materialiseParents(existing);
+                writable.mkdir(existing.path);
+                existing.inWritable = true;
+                return false;
+            }
+            const node = childFor(parent, name);
+            node.directory = true;
+            materialiseParents(node);
+            writable.mkdir(node.path);
+            node.inWritable = true;
+            return true;
+        },
+
+        /** @param {string[]} components */
+        removeFile(components){
+            const node = mustFind(components);
+            if (node.directory)
+            {
+                throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            forget(node);
+        },
+
+        /**
+         * Removes an empty directory. A directory holding anything at all --
+         * including something that only exists in the source -- is refused.
+         *
+         * @param {string[]} components
+         */
+        removeDirectory(components){
+            const node = mustFind(components);
+            if (!node.directory)
+            {
+                throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${node.path}" is not a directory`);
+            }
+            if (node === root)
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED, 'A root cannot be removed');
+            }
+            const live = [...node.children.values()].some(child=>!child.tombstone);
+            if (live)
+            {
+                throw fsError(ErrorCode.DIRECTORY_NOT_EMPTY, `"${node.path}" is not empty`);
+            }
+            forget(node);
+        },
+
+        diagnostics(){
+            let files = 0;
+            let directories = 0;
+            let tombstones = 0;
+            let copied = 0;
+            /** @param {Node} node */
+            const walk = node=>{
+                for (const child of node.children.values())
+                {
+                    if (child.tombstone)
+                    {
+                        tombstones++;
+                    }
+                    else if (child.directory)
+                    {
+                        directories++;
+                    }
+                    else
+                    {
+                        files++;
+                        copied += child.inSource && child.inWritable ? 1 : 0;
+                    }
+                    walk(child);
+                }
+            };
+            walk(root);
+            return { files, directories, tombstones, copied, layered: source !== null };
+        },
+    };
+}

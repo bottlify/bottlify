@@ -23,7 +23,7 @@ const ALL_LAYERS = [
 ];
 
 /** Layers with a real implementation; the rest are still stubs. */
-const IMPLEMENTED = ['cpu', 'memory', 'kernel', 'bridge', 'loader', 'win32'];
+const IMPLEMENTED = ['cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'win32'];
 
 test('a default build contains every layer, in dependency order', async()=>{
     const core = await assembleModules({});
@@ -55,7 +55,6 @@ test('building the graph costs nothing: the emulator is not started', async()=>{
 
 test('a layer that is still a stub throws NOT_IMPLEMENTED', async()=>{
     const core = await assembleModules({});
-    assert.throws(()=>core.api('filesystem').open(), { code: 'NOT_IMPLEMENTED' });
     assert.throws(()=>core.api('graphics').present(), { code: 'NOT_IMPLEMENTED' });
 });
 

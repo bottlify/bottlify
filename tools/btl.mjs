@@ -191,9 +191,10 @@ export async function scanTree(root){
  * @param {(progress: any) => void} [options.onProgress]
  * @returns {Promise<any>} what the manifest needs to know about the bundle
  */
-export async function writeBundle({
-    root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
-}){
+export async function writeBundle(options){
+    const {
+        root, output, blockSize = DEFAULT_BLOCK_SIZE, level = 9, store = false, onProgress,
+    } = options;
     const { files, directories } = await scanTree(root);
     const handle = await open(output, 'w');
 

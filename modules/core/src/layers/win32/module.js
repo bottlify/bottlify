@@ -10,6 +10,8 @@ import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { createModuleFunctions } from './kernel32/modules.js';
+import { createFileFunctions } from './kernel32/files.js';
+import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
@@ -63,6 +65,7 @@ export const win32Module = {
         const memory = host.requireApi('memory');
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
+        const filesystem = host.requireApi('filesystem');
         exitCode = null;
 
         /** @type {(handle: number, text: string) => void} */
@@ -88,6 +91,7 @@ export const win32Module = {
             memory.readCString(address, maxLength);
 
         const { setError } = createThreadState(()=>kernel.currentThread());
+        const volume = createVolume(filesystem);
         hive = createHive();
         queue = createMessageQueue();
         com = createComRegistry();
@@ -112,8 +116,6 @@ export const win32Module = {
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
-                    readMemory,
-                    writeMemory,
                     write: (handle, text)=>sink(handle, text),
                     exit: code=>{
                         exitCode = code;
@@ -153,6 +155,22 @@ export const win32Module = {
                     byBase: base=>modules.byBase(base),
                     setLastError: setError,
                     imagePath: ()=>modules.imagePath(),
+                }),
+                // Last, deliberately: writing and closing a handle are the same
+                // entry points for a file as for a console or an event, and the
+                // one that knows about files answers for all of them.
+                ...createFileFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    files: volume,
+                    setLastError: setError,
+                    writeConsole: (handle, text)=>sink(handle, text),
+                    handles: {
+                        open: (type, object)=>kernel.handles.open(type, object),
+                        resolve: (handle, type)=>kernel.handles.resolve(handle, type),
+                        close: handle=>kernel.handles.close(handle),
+                    },
                 }),
             },
 

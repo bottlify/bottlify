@@ -1,0 +1,190 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * The volume, in the vocabulary the file surface speaks.
+ *
+ * Two layers describe a filesystem differently, and both are right for where
+ * they sit. The filesystem layer answers in named failures and hands out handle
+ * objects that carry their own position, because that is what a filesystem is.
+ * The Win32 surface wants something that never throws, tells apart "missing" and
+ * "the directory above is missing", and reads at an offset it names itself,
+ * because that is what CreateFile and ReadFile are.
+ *
+ * Translating between those two is the whole job of this file, and it lives on
+ * the win32 side because the vocabulary being translated *into* is the guest's.
+ * A failure becomes a return value here; which error number the guest is then
+ * told is still the surface's decision, not ours.
+ */
+
+/**
+ * @typedef {Object} VfsErrorNames
+ * @property {string} NOT_FOUND
+ * @property {string} PATH_NOT_FOUND
+ */
+
+/**
+ * @param {any} fs  The filesystem layer's API.
+ */
+export function createVolume(fs){
+    const { ErrorCode, Disposition, SeekFrom } = fs;
+
+    /**
+     * Runs an operation that may fail, and answers with a value instead.
+     *
+     * Every failure this layer reports is one the guest has a code for, so
+     * swallowing them here is not losing information -- it is moving where the
+     * information is expressed. What is not caught is a bug in us, and that
+     * should still be a thrown error rather than a file that quietly is not
+     * there.
+     *
+     * @template T
+     * @param {() => T} operation
+     * @param {T} fallback
+     * @returns {T}
+     */
+    const attempt = (operation, fallback)=>{
+        try
+        {
+            return operation();
+        }
+        catch (e){
+            const error = /** @type {any} */ (e);
+            if (!error?.code || !(error.code in ErrorCode))
+            {
+                throw error;
+            }
+            return fallback;
+        }
+    };
+
+    /**
+     * The disposition names the two layers use for the same five behaviours.
+     *
+     * @param {any} mode
+     */
+    const dispositionOf = mode=>{
+        if (mode.failIfExists)
+        {
+            return Disposition.CREATE_NEW;
+        }
+        if (mode.create && mode.truncate)
+        {
+            return Disposition.CREATE_ALWAYS;
+        }
+        if (mode.create)
+        {
+            return Disposition.OPEN_ALWAYS;
+        }
+        return mode.truncate ? Disposition.TRUNCATE_EXISTING : Disposition.OPEN_EXISTING;
+    };
+
+    return {
+        /**
+         * @param {string} path
+         * @returns {{ exists: boolean, isDirectory: boolean, size: number } | null}
+         */
+        stat(path){
+            const entry = attempt(()=>fs.stat(path), null);
+            return entry
+                ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size }
+                : null;
+        },
+
+        /**
+         * @param {string} path
+         * @param {any} mode
+         * @returns {any} an open file, or null
+         */
+        open(path, mode){
+            return attempt(()=>fs.open(path, {
+                read: mode.read !== false,
+                write: Boolean(mode.write),
+                disposition: dispositionOf(mode),
+            }), null);
+        },
+
+        /**
+         * The surface names the offset on every read, because a Win32 handle's
+         * position is the surface's to move. Seeking first is how that maps
+         * onto a handle that keeps its own.
+         *
+         * @param {any} node @param {number} offset @param {number} length
+         */
+        read(node, offset, length){
+            fs.seek(node, offset, SeekFrom.BEGIN);
+            return fs.read(node, length);
+        },
+
+        /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
+        write(node, offset, bytes){
+            fs.seek(node, offset, SeekFrom.BEGIN);
+            return fs.write(node, bytes);
+        },
+
+        /** @param {any} node @param {number} size */
+        truncate(node, size){
+            fs.seek(node, size, SeekFrom.BEGIN);
+            fs.setEndOfFile(node);
+        },
+
+        /** @param {any} node */
+        close: node=>fs.close(node),
+
+        /**
+         * Removes a file or an empty directory; the surface above already knows
+         * which of the two it asked for and reports accordingly.
+         *
+         * @param {string} path
+         * @returns {boolean}
+         */
+        remove(path){
+            const entry = attempt(()=>fs.stat(path), null);
+            if (!entry)
+            {
+                return false;
+            }
+            return attempt(()=>{
+                if (entry.directory)
+                {
+                    fs.removeDirectory(path);
+                }
+                else
+                {
+                    fs.deleteFile(path);
+                }
+                return true;
+            }, false);
+        },
+
+        /** @param {string} path @returns {boolean} */
+        mkdir: path=>attempt(()=>fs.createDirectory(path), false),
+
+        /** @param {string} from @param {string} to @returns {boolean} */
+        rename: (from, to)=>attempt(()=>{
+            fs.rename(from, to);
+            return true;
+        }, false),
+
+        /**
+         * @param {string} path @param {string} [pattern]
+         * @returns {{ name: string, isDirectory: boolean, size: number }[]}
+         */
+        list: (path, pattern)=>attempt(
+            ()=>fs.list(path, pattern).map((/** @type {any} */ entry)=>({
+                name: entry.name,
+                isDirectory: Boolean(entry.directory),
+                size: entry.size,
+            })), []),
+
+        currentDirectory: ()=>fs.currentDirectory(),
+        /** @param {string} path */
+        setCurrentDirectory: path=>attempt(()=>{
+            fs.setCurrentDirectory(path);
+            return true;
+        }, false),
+    };
+}

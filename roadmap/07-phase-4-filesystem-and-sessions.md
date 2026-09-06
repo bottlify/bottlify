@@ -148,6 +148,80 @@ The interchange argument is real and is answered separately: the bundler can lea
 so a game that arrives as one can be packed without unzipping it first. That belongs with the
 bundler phase. Nothing about it makes ZIP the shape the engine reads at runtime.
 
+## 1.4. Where files come from, and how they get in
+
+Three kinds of bytes reach a running program, and they are not the same kind of thing:
+
+| | changes | size | who writes it |
+|---|---|---|---|
+| the bundle | never | gigabytes | nobody: it is content-addressed and immutable |
+| the overlay | constantly | megabytes | the guest, and whoever pushes files in |
+| the session record | on save | kilobytes | us: which bundle, which overlay generation, the registry |
+
+Treating them alike is the mistake to avoid. The bundle is **cached, not synced** — it is named by
+its own digest, so a cached copy never needs revalidating and two people playing the same game share
+the same bytes. Only the overlay and the session record are worth sending anywhere.
+
+### Pushing files in from outside
+
+Something other than the guest has to be able to put files into the volume: a save restored from the
+cloud, a config a page hands over, a patch. The writable store already has the shape for it, but
+writing straight into the store is wrong, for a reason worth stating: **the overlay indexes the
+store once, at mount.** A write that goes behind its back is invisible until the next mount, and the
+program keeps reading what was there before.
+
+So the layer gets one explicit entry point rather than a back door:
+
+```
+filesystem.apply(changes)    // [{ path, bytes } | { path, delete: true }, ...]
+```
+
+with three properties that are the whole design:
+
+- **It goes through the overlay**, so the index, the tombstones and any open handle see it.
+- **It is a batch and it is atomic.** Half an applied save is worse than none: a program reads a
+  header written by the new one and a body left by the old. OPFS has no transaction, so the pattern
+  is write-aside then swap, with a journal naming the batch.
+- **It refuses to overwrite a file the guest holds open**, and says which. A save being rewritten
+  under a program that has it open is not a case anybody can make correct; the caller decides
+  whether to wait or to fail, and the layer will not pretend it worked.
+
+### The chain, and what should not be in it
+
+The obvious chain is `cloud <-> localStorage <-> OPFS`. **localStorage should not be in it at all**,
+for four reasons in ascending order of finality:
+
+1. It is synchronous, so every touch blocks the thread it is on.
+2. It is capped at about 5 MB — a single save file can exceed that.
+3. It stores strings, so bytes have to be base64'd: a third more of a budget that was already small.
+4. **It does not exist in a Worker.** The engine runs in one. There is no way to reach it from where
+   the filesystem lives, and routing through the page to get at it would mean posting every write
+   across a message port to a slower, smaller store.
+
+So the chain is:
+
+```
+cloud  <->  session record + overlay  <->  OPFS        (the guest's writes)
+cloud   ->  bundle, by digest          ->  OPFS cache  (immutable, evictable, never uploaded)
+```
+
+Where a small key-value store is genuinely wanted — "which session was last open" — it is IndexedDB
+or a file in OPFS, both of which a worker can reach.
+
+### Syncing without losing a save
+
+A save is the one thing a user cannot be asked to lose, so the conflict rule is chosen for that
+rather than for tidiness:
+
+- The session carries a **generation** that increments on every upload, and the last known remote
+  generation is stored with it.
+- Uploading with a stale generation is a conflict. On conflict **both versions are kept** — the
+  remote stays, the local becomes a second session the user can open — and nothing is merged
+  automatically. Per-file last-writer-wins silently destroys a save whenever two machines played
+  offline, and the user finds out weeks later.
+- Only the overlay and the registry travel. The bundle is named by digest; a machine that lacks it
+  fetches it from wherever bundles come from.
+
 ## 2. Steps
 
 ### P4.1 — the bundle format ✅
@@ -178,12 +252,14 @@ code after a *successful* `CreateFile`, `SetFilePointer`'s ambiguous 0xFFFFFFFF,
 **Done when:** a fixture creates a file, writes, seeks, reads it back, enumerates the directory it is
 in, and deletes it.
 
-### P4.4 — OPFS as the writable layer
+### P4.4 — OPFS as the writable layer, and `apply`
 
 The overlay's store, in the browser. The VFS is written against an injected store precisely so this
-is a backing implementation rather than a rewrite.
+is a backing implementation rather than a rewrite. With it, the `apply(changes)` entry point from
+§1.4: atomic, through the overlay, refusing to overwrite what the guest holds open.
 
-**Done when:** the acceptance below holds within one browser.
+**Done when:** the acceptance below holds within one browser, and a batch applied while a program is
+running is either wholly visible to it or wholly refused.
 
 ### P4.5 — mounting a bundle as the source
 
