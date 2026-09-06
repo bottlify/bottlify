@@ -128,5 +128,9 @@ export function launch({ browser = findBrowser() } = {}){
 export async function shutdown(handle){
     handle.proc.kill();
     await new Promise(resolve=>handle.proc.once('exit', resolve));
-    rmSync(handle.profileRoot, { recursive: true, force: true });
+    // The parent exiting is not the browser being gone: its renderer and zygote
+    // children are still flushing the profile, so a plain recursive remove loses
+    // the race and reports ENOTEMPTY on a directory that is about to be empty.
+    rmSync(handle.profileRoot,
+        { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
 }
