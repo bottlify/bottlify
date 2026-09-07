@@ -593,7 +593,7 @@ export function createWinmmFunctions(host){
 
         /** Midi out: no synthesiser and no port. */
         midiOutGetNumDevs: { argBytes: 0, handler: ()=>0 },
-        midiOutOpen: noDevice(24, MMSYSERR_BADDEVICEID),
+        midiOutOpen: noDevice(20, MMSYSERR_BADDEVICEID),
         midiOutClose: noDevice(4, MMSYSERR_INVALHANDLE),
         midiOutReset: noDevice(4, MMSYSERR_INVALHANDLE),
         midiOutShortMsg: noDevice(8, MMSYSERR_INVALHANDLE),
@@ -603,7 +603,7 @@ export function createWinmmFunctions(host){
 
         /** The mixer, which a program uses to find the volume controls. */
         mixerGetNumDevs: noDevices(0),
-        mixerOpen: noDevice(24, MMSYSERR_BADDEVICEID),
+        mixerOpen: noDevice(20, MMSYSERR_BADDEVICEID),
         mixerClose: noDevice(4, MMSYSERR_INVALHANDLE),
         mixerGetLineInfoA: noDevice(12, MMSYSERR_INVALHANDLE),
         mixerGetLineControlsA: noDevice(12, MMSYSERR_INVALHANDLE),
