@@ -219,10 +219,16 @@ export const kernelModule = {
                     result: 0,
                 });
             },
-            waitAll: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>
-                sync.waitAll(objects, thread),
-            waitAny: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>
-                sync.waitAny(objects, thread),
+            /**
+             * @param {any[]} objects @param {any} thread
+             * @param {{ deadline?: number, result?: number }} [timed]
+             */
+            waitAll: (objects, thread, timed)=>sync.waitAll(objects, thread, timed),
+            /**
+             * @param {any[]} objects @param {any} thread
+             * @param {{ deadline?: number, result?: number }} [timed]
+             */
+            waitAny: (objects, thread, timed)=>sync.waitAny(objects, thread, timed),
             setEvent: (/** @type {any} */ object)=>sync.setEvent(object),
             resetEvent: (/** @type {any} */ object)=>sync.resetEvent(object),
             releaseMutex: (/** @type {any} */ object, /** @type {any} */ thread)=>

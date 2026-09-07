@@ -495,7 +495,7 @@ export function createHeapFunctions(host){
         VirtualAlloc: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([pointer, bytes, type])=>{
+            handler: ([pointer, bytes])=>{
                 const size = bytes >>> 0;
                 if (size === 0)
                 {
@@ -543,10 +543,22 @@ export function createHeapFunctions(host){
                     }
                 }
 
-                if (type & MEM_COMMIT)
-                {
-                    zero(address, rounded);
-                }
+                // Zeroed whether this call commits or only reserves.
+                //
+                // Committing has to zero: Windows hands out zero-filled pages
+                // and a program relies on it. Reserving has to zero here for a
+                // different reason -- the arena hands back memory something
+                // else finished with, and a page a program reserved but has not
+                // committed reads as whatever was there before. On Windows
+                // touching it faults; here it yields old bytes, and a stale
+                // value that happens to look like a pointer is read as one. The
+                // program then passes it to something that dereferences it, far
+                // from anything that would explain where it came from.
+                //
+                // Reading zero where Windows would fault is the more forgiving
+                // of the two wrong answers, and the only one that cannot be
+                // mistaken for data.
+                zero(address, rounded);
                 return address;
             },
         },

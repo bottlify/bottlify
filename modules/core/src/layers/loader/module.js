@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { bindDelayImports } from './internal/delayload.js';
 import { bindImports, buildImage, mapImage } from './internal/image.js';
 import { synthesiseModule } from './internal/synth.js';
 
@@ -51,6 +52,12 @@ export const loaderModule = {
              */
             load(file, { resolveImport, base, missing, name = 'image' }){
                 const image = buildImage(file, { resolveImport, base, missing });
+                // Both tables. A delay-load slot left as the linker wrote it is
+                // resolved by the program's own helper, which walks an export
+                // directory by hand and refuses an address it does not believe;
+                // what the program then sees is not a missing function but its
+                // own data failing to open.
+                image.unresolved.push(...bindDelayImports(image, resolveImport, missing));
 
                 memory.register({
                     name,
@@ -123,6 +130,31 @@ export const loaderModule = {
                 // place, and the guest reads guest memory, not our copy.
                 memory.writeBytes(mapped.image.base, mapped.image.bytes);
                 mapped.record.unresolved = unresolved;
+                return unresolved;
+            },
+
+            /**
+             * The same, for the delay-load directory.
+             *
+             * Separate from `bind` because most images have no delay-load
+             * directory at all, and because the two answer to the same resolver
+             * only by choice -- binding both up front is what makes a
+             * delay-loaded name work here, since the program's own helper would
+             * refuse an address outside the named library's image bounds.
+             *
+             * @param {any} mapped  What `map` returned.
+             * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+             *     resolveImport
+             * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+             *     [missing]  Where a call to an import nothing claims should land.
+             * @returns {string[]} what nothing claimed
+             */
+            bindDelayed(mapped, resolveImport, missing){
+                const unresolved = bindDelayImports(mapped.image, resolveImport, missing);
+                memory.writeBytes(mapped.image.base, mapped.image.bytes);
+                // Appended, not replaced: an image binds both directories, and
+                // the record is the only place either is reported.
+                mapped.record.unresolved = [...mapped.record.unresolved, ...unresolved];
                 return unresolved;
             },
 

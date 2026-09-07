@@ -1180,6 +1180,9 @@ export async function createApp(options){
             }
 
             loader.bind(mapped, resolveImport, missingImport);
+            // Both tables, and in this order: the delay-load pass adds to what
+            // the first one recorded rather than replacing it.
+            loader.bindDelayed(mapped, resolveImport, missingImport);
 
             if (held.entryPoint && held.entryPoint !== base)
             {
@@ -1213,6 +1216,7 @@ export async function createApp(options){
     for (const library of shipped)
     {
         loader.bind(library.mapped, resolveImport, missingImport);
+        loader.bindDelayed(library.mapped, resolveImport, missingImport);
     }
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.

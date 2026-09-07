@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parsePe } from './pe.js';
-import { readDelayImports } from './delayload.js';
+import { mapImage } from './image.js';
+import { bindDelayImports, readDelayImports } from './delayload.js';
 
 const IMAGE_BASE = 0x400000;
 const SECTION_RVA = 0x1000;
@@ -63,56 +64,119 @@ function fixture(section, directories){
     return file;
 }
 
-const NAMES = 0x100;
-const IAT = 0x200;
-const DLL_NAME = 0x300;
-const FIRST_IMPORT = 0x400;
-const SECOND_IMPORT = 0x420;
+const DESCRIPTOR = 32;
 
 /**
- * One delay-load descriptor, written either way round.
+ * Each descriptor's tables live in a block of their own, clear of the
+ * descriptor array at the start of the section, so several can coexist.
+ */
+const BLOCK = 0x400;
+const NAMES = 0x000;
+const IAT = 0x040;
+const DLL_NAME = 0x080;
+const MODULE_HANDLE = 0x0c0;
+const IMPORT_NAMES = 0x100;
+const IMPORT_STRIDE = 0x20;
+const BOUND_TABLE = 0x200;
+const UNLOAD_TABLE = 0x240;
+
+/**
+ * @typedef {Object} DelayedDll
+ * @property {string} [dll]
+ * @property {(string | number)[]} [imports]  A name, or an ordinal.
+ */
+
+/**
+ * An image whose delay-load directory holds one descriptor per entry in `dlls`.
  *
  * `rvaBased` is the whole point of the fixture: the same logical table, stored
  * as RVAs with the bit set or as virtual addresses with it clear, has to read
- * back identically.
+ * and bind identically.
  *
  * @param {Object} options
  * @param {boolean} options.rvaBased
- * @param {(string | number)[]} [options.imports]  A name, or an ordinal.
- * @param {string} [options.dll]
+ * @param {DelayedDll[]} options.dlls
+ * @param {boolean} [options.optionalTables]  Emit a bound and an unload table.
+ * @returns {{ bytes: Uint8Array, image: import('./pe.js').PeImage }}
  */
-function withDelayImports({ rvaBased, imports = ['Alpha'], dll = 'thing.dll' }){
-    const section = new Uint8Array(0x1000);
+function withDelayLoads({ rvaBased, dlls, optionalTables = false }){
+    const section = new Uint8Array(0x2000);
     const view = new DataView(section.buffer);
     const encoder = new TextEncoder();
     // How this descriptor spells an address: an RVA, or that plus the base.
     const address = (/** @type {number} */ offset)=>
         (rvaBased ? 0 : IMAGE_BASE) + SECTION_RVA + offset;
 
-    view.setUint32(0, rvaBased ? 1 : 0, true); //          Attributes
-    view.setUint32(4, address(DLL_NAME), true); //         DllNameRVA
-    view.setUint32(8, address(0x500), true); //            ModuleHandleRVA
-    view.setUint32(12, address(IAT), true); //             ImportAddressTableRVA
-    view.setUint32(16, address(NAMES), true); //           ImportNameTableRVA
-    // Bytes 20 through 31 are the bound table, unload table and timestamp; a
-    // linker leaves them zero and nothing here reads them.
+    dlls.forEach(({ dll = 'thing.dll', imports = ['Alpha'] }, index)=>{
+        const at = index * DESCRIPTOR;
+        const block = blockOf(index);
 
-    section.set(encoder.encode(dll), DLL_NAME);
-
-    imports.forEach((entry, index)=>{
-        if (typeof entry === 'number')
+        view.setUint32(at, rvaBased ? 1 : 0, true); //                Attributes
+        view.setUint32(at + 4, address(block + DLL_NAME), true); //   DllNameRVA
+        view.setUint32(at + 8, address(block + MODULE_HANDLE), true); // ModuleHandleRVA
+        view.setUint32(at + 12, address(block + IAT), true); //       ImportAddressTableRVA
+        view.setUint32(at + 16, address(block + NAMES), true); //     ImportNameTableRVA
+        if (optionalTables)
         {
-            view.setUint32(NAMES + index * 4, 0x80000000 | entry, true);
-            return;
+            // A linker that emits neither leaves these zero, which is what the
+            // rest of the fixture does; a descriptor that has them must bind
+            // the same way, and reading them as required is how code walks off
+            // the end of a section.
+            view.setUint32(at + 20, address(block + BOUND_TABLE), true);
+            view.setUint32(at + 24, address(block + UNLOAD_TABLE), true);
+            view.setUint32(at + 28, 0x3fffffff, true); // TimeStamp
         }
-        const at = index === 0 ? FIRST_IMPORT : SECOND_IMPORT;
-        view.setUint16(at, 0, true); // hint
-        section.set(encoder.encode(entry), at + 2);
-        view.setUint32(NAMES + index * 4, address(at), true);
+
+        section.set(encoder.encode(dll), block + DLL_NAME);
+
+        imports.forEach((entry, slot)=>{
+            if (typeof entry === 'number')
+            {
+                view.setUint32(block + NAMES + slot * 4, 0x80000000 | entry, true);
+                return;
+            }
+            const name = block + IMPORT_NAMES + slot * IMPORT_STRIDE;
+            view.setUint16(name, 0, true); // hint
+            section.set(encoder.encode(entry), name + 2);
+            view.setUint32(block + NAMES + slot * 4, address(name), true);
+        });
     });
 
-    const bytes = fixture(section, { 13: { address: SECTION_RVA, size: 64 } });
+    const size = (dlls.length + 1) * DESCRIPTOR;
+    const bytes = fixture(section, { 13: { address: SECTION_RVA, size } });
     return { bytes, image: parsePe(bytes) };
+}
+
+/**
+ * The single-descriptor case, which most of these tests want.
+ *
+ * @param {Object} options
+ * @param {boolean} options.rvaBased
+ * @param {(string | number)[]} [options.imports]
+ * @param {string} [options.dll]
+ * @param {boolean} [options.optionalTables]
+ */
+function withDelayImports({ rvaBased, imports, dll, optionalTables }){
+    return withDelayLoads({ rvaBased, dlls: [{ dll, imports }], optionalTables });
+}
+
+/** Where descriptor `index` keeps its tables, as an offset into the section. */
+function blockOf(/** @type {number} */ index){
+    return BLOCK * (index + 1);
+}
+
+/** The RVA of one address-table slot. */
+function slotRva(/** @type {number} */ dll, /** @type {number} */ slot){
+    return SECTION_RVA + blockOf(dll) + IAT + slot * 4;
+}
+
+/**
+ * @param {{ bytes: Uint8Array }} mapped
+ * @param {number} rva
+ * @returns {number}
+ */
+function slotAt({ bytes }, rva){
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(rva, true);
 }
 
 test('a descriptor reads the same whether it stored RVAs or virtual addresses', ()=>{
@@ -138,8 +202,7 @@ test('what is imported is reported the way an ordinary import is', ()=>{
 
     assert.equal(entry.dll, 'thing.dll');
     assert.deepEqual(entry.entries.map(one=>one.name), ['Alpha', 'Beta']);
-    assert.deepEqual(entry.entries.map(one=>one.iatRva),
-        [SECTION_RVA + IAT, SECTION_RVA + IAT + 4],
+    assert.deepEqual(entry.entries.map(one=>one.iatRva), [slotRva(0, 0), slotRva(0, 1)],
         'a slot per import, so a caller can write answers into them');
 });
 
@@ -149,9 +212,9 @@ test('an address table slot is an offset into the image, never a virtual address
     const { bytes, image } = withDelayImports({ rvaBased: false });
     const [entry] = readDelayImports(bytes, image);
 
-    assert.equal(entry.entries[0].iatRva, SECTION_RVA + IAT);
+    assert.equal(entry.entries[0].iatRva, slotRva(0, 0));
     assert.ok(entry.entries[0].iatRva < IMAGE_BASE);
-    assert.equal(entry.moduleHandleRva, SECTION_RVA + 0x500);
+    assert.equal(entry.moduleHandleRva, SECTION_RVA + blockOf(0) + MODULE_HANDLE);
 });
 
 test('an import by ordinal has no name, and keeps its slot', ()=>{
@@ -159,7 +222,7 @@ test('an import by ordinal has no name, and keeps its slot', ()=>{
     const [entry] = readDelayImports(bytes, image);
 
     assert.deepEqual(entry.entries, [
-        { name: null, ordinal: 7, iatRva: SECTION_RVA + IAT },
+        { name: null, ordinal: 7, iatRva: slotRva(0, 0) },
     ]);
 });
 
@@ -176,4 +239,93 @@ test('an image that delay-loads nothing answers with nothing', ()=>{
 
     const empty = fixture(new Uint8Array(0x1000), { 13: { address: 0, size: 0 } });
     assert.deepEqual(readDelayImports(empty, parsePe(empty)), []);
+});
+
+/** The address `stamp` answers a name with: derived from it, so a slot names its own import. */
+const stamped = (/** @type {string} */ name)=>0xaa000000 + name.charCodeAt(0);
+
+/** Claims every name in thing.dll and nothing else, so both outcomes appear in one image. */
+const stamp = (/** @type {string} */ dll, /** @type {string | null} */ name)=>
+    dll === 'thing.dll' && name !== null ? stamped(name) : null;
+
+test('binding writes the same addresses whether the descriptor stored RVAs or VAs', ()=>{
+    // Read the wrong way the address table lands at a plausible offset inside
+    // the image, and binding writes over whatever is really there.
+    const asRvas = mapImage(withDelayImports({ rvaBased: true, imports: ['Alpha', 'Beta'] }).bytes);
+    const asVas = mapImage(withDelayImports({ rvaBased: false, imports: ['Alpha', 'Beta'] }).bytes);
+
+    assert.deepEqual(bindDelayImports(asRvas, stamp), []);
+    assert.deepEqual(bindDelayImports(asVas, stamp), []);
+
+    const slots = (/** @type {{ bytes: Uint8Array }} */ mapped)=>
+        [slotRva(0, 0), slotRva(0, 1)].map(rva=>slotAt(mapped, rva));
+
+    assert.deepEqual(slots(asRvas), [stamped('Alpha'), stamped('Beta')]);
+    assert.deepEqual(slots(asVas), slots(asRvas),
+        'the same table, spelled two ways, binds the same');
+});
+
+test('an unclaimed delay import is reported and its slot left as the file wrote it', ()=>{
+    const { bytes } = withDelayImports({ rvaBased: true, imports: ['Alpha', 'Beta', 7] });
+    const mapped = mapImage(bytes);
+    const before = slotAt(mapped, slotRva(0, 1));
+
+    const unresolved = bindDelayImports(mapped, (dll, name)=>name === 'Alpha' ? 0x11110000 : null);
+
+    assert.deepEqual(unresolved, ['thing.dll!Beta', 'thing.dll!#7']);
+    assert.equal(slotAt(mapped, slotRva(0, 0)), 0x11110000);
+    assert.equal(slotAt(mapped, slotRva(0, 1)), before,
+        'nothing claimed it, so nothing pretends to have');
+});
+
+test('the missing hook decides where a call to an unclaimed delay import lands', ()=>{
+    const mapped = mapImage(withDelayImports({ rvaBased: false, imports: ['Alpha'] }).bytes);
+
+    const unresolved = bindDelayImports(mapped, ()=>null, ()=>0xdead0000);
+
+    assert.deepEqual(unresolved, ['thing.dll!Alpha']);
+    assert.equal(slotAt(mapped, slotRva(0, 0)), 0xdead0000);
+});
+
+test('a descriptor carrying a bound and an unload table binds like one without', ()=>{
+    // Both are optional, and both are absent from most images; code that reads
+    // them as required walks off the end of a section on the ordinary case.
+    const plain = mapImage(withDelayImports({ rvaBased: true, imports: ['Alpha'] }).bytes);
+    const full = mapImage(
+        withDelayImports({ rvaBased: true, imports: ['Alpha'], optionalTables: true }).bytes);
+
+    assert.deepEqual(bindDelayImports(plain, stamp), []);
+    assert.deepEqual(bindDelayImports(full, stamp), []);
+
+    assert.equal(slotAt(full, slotRva(0, 0)), slotAt(plain, slotRva(0, 0)));
+});
+
+test('every descriptor in an image is bound, not just the first', ()=>{
+    const { bytes } = withDelayLoads({
+        rvaBased: false,
+        dlls: [
+            { dll: 'thing.dll', imports: ['Alpha'] },
+            { dll: 'other.dll', imports: ['Beta'] },
+            { dll: 'thing.dll', imports: ['Gamma', 4] },
+        ],
+    });
+    const mapped = mapImage(bytes);
+
+    const unresolved = bindDelayImports(mapped, stamp);
+
+    assert.deepEqual(unresolved, ['other.dll!Beta', 'thing.dll!#4']);
+    assert.equal(slotAt(mapped, slotRva(0, 0)), stamped('Alpha'));
+    assert.equal(slotAt(mapped, slotRva(2, 0)), stamped('Gamma'));
+});
+
+test('the module handle slot is left alone', ()=>{
+    // Its only reader is the program's own helper, and binding the address
+    // table is exactly what stops that helper from ever running. There is no
+    // honest value to put here: a resolver answers with an address per import,
+    // never a base per library.
+    const mapped = mapImage(withDelayImports({ rvaBased: true }).bytes);
+
+    bindDelayImports(mapped, stamp);
+
+    assert.equal(slotAt(mapped, SECTION_RVA + blockOf(0) + MODULE_HANDLE), 0);
 });

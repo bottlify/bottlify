@@ -34,6 +34,8 @@ function fakeKernel(){
         /** @type {any[]} */ blocked: [],
         /** @type {any[]} */ woken: [],
         /** @type {number[]} */ advanced: [],
+        /** @type {any[]} */ timed: [],
+        /** Guest time, which a deadline is measured against. */ now: 0,
     };
 
     /** @param {any} object @param {any} thread */
@@ -95,8 +97,10 @@ function fakeKernel(){
             state.blocked.push(thread);
             return null;
         },
-        /** @param {any[]} objects @param {any} thread */
-        waitAll(objects, thread){
+        clock: { virtualTime: ()=>state.now },
+        /** @param {any[]} objects @param {any} thread @param {any} [timed] */
+        waitAll(objects, thread, timed){
+            state.timed.push(timed);
             if (!objects.every(object=>
                 signalled(object) || (object.kind === 'mutex' && object.owner === thread)))
             {
@@ -113,8 +117,9 @@ function fakeKernel(){
             }
             return result;
         },
-        /** @param {any[]} objects @param {any} thread */
-        waitAny(objects, thread){
+        /** @param {any[]} objects @param {any} thread @param {any} [timed] */
+        waitAny(objects, thread, timed){
+            state.timed.push(timed);
             for (let at = 0; at < objects.length; at++)
             {
                 const object = objects[at];
@@ -377,15 +382,24 @@ test('a zero timeout that finds an object ready still takes it', ()=>{
     assert.equal(event.signalled, false, 'an auto-reset event was consumed, not merely peeked');
 });
 
-test('a finite timeout credits the clock for the time it reports having waited', ()=>{
+test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
+    host.kernel.state.now = 1000;
     host.register(0x10, 'event', host.kernel.createEvent({ signalled: false }));
     new DataView(host.bytes.buffer).setUint32(0x400, 0x10, true);
 
-    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 250]), WAIT_TIMEOUT);
-    assert.deepEqual(host.kernel.state.advanced, [250],
-        'a guest timing its own loop must not see the wait take no time at all');
+    // Parked, not refused. Answering at once that the time elapsed never lets
+    // whoever would signal the object have a turn, so the loop a program wraps
+    // around this cannot terminate however long it runs.
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 250]), PARKED);
+    assert.deepEqual(host.kernel.state.timed.at(-1), { deadline: 1250, result: WAIT_TIMEOUT },
+        'the deadline is guest time, not a duration: the scheduler compares, it does not count');
+
+    // INFINITE carries no deadline at all rather than one far away, so nothing
+    // downstream has to decide how far away is far enough.
+    fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]);
+    assert.equal(host.kernel.state.timed.at(-1), undefined);
 });
 
 test('a wait on nothing, or on too much, fails rather than guessing', ()=>{

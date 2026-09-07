@@ -375,34 +375,35 @@ export function createSyncFunctions(host){
 
                 const thread = host.currentThread();
 
-                // A timeout is answered by looking rather than by waiting.
-                //
-                // Zero is exact: a poll that finds nothing ready has genuinely
-                // timed out, and one that does find it takes it below without
-                // ever blocking. A non-zero timeout is NOT exact -- expiry needs
-                // a timer in the scheduler, which does not exist -- so it polls
-                // once, credits the clock for the time it was told to spend, and
-                // reports the timeout. That errs towards a caller retrying,
-                // which makes progress, rather than towards a wait that never
-                // ends, which does not.
-                if ((timeout >>> 0) !== INFINITE)
+                // Zero is a poll: it asks whether the set is ready now and
+                // never blocks, so a program checking is not stopped by the
+                // question.
+                const wait = timeout >>> 0;
+                if (wait === 0)
                 {
                     const satisfied = waitAll
                         ? objects.every(target=>ready(target, thread))
                         : objects.some(target=>ready(target, thread));
                     if (!satisfied)
                     {
-                        if ((timeout >>> 0) !== 0)
-                        {
-                            host.advanceClock?.(timeout >>> 0);
-                        }
                         return WAIT_TIMEOUT;
                     }
                 }
 
+                // Anything else is a real wait with a deadline behind it. This
+                // used to poll once, credit the clock and report a timeout,
+                // because expiry needed a timer the scheduler did not have. It
+                // has one now, and the difference is not academic: a program
+                // that waits a second for a worker and is told immediately that
+                // the second elapsed never gives the worker a turn, so the loop
+                // it is in cannot terminate however long it runs.
+                const timed = wait === INFINITE
+                    ? undefined
+                    : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT };
+
                 if (waitAll)
                 {
-                    const result = kernel.waitAll(objects, thread);
+                    const result = kernel.waitAll(objects, thread, timed);
                     if (result === null)
                     {
                         return host.park();
@@ -412,7 +413,7 @@ export function createSyncFunctions(host){
                     return result === KERNEL_ABANDONED ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
                 }
 
-                const any = kernel.waitAny(objects, thread);
+                const any = kernel.waitAny(objects, thread, timed);
                 if (any === null)
                 {
                     return host.park();

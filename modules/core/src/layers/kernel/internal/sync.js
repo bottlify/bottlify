@@ -207,9 +207,10 @@ export function createSyncObjects({ scheduler }){
          *
          * @param {any[]} objects_
          * @param {any} thread
+         * @param {{ deadline?: number, result?: number }} [timed]
          * @returns {number | null}
          */
-        waitAll(objects_, thread){
+        waitAll(objects_, thread, timed){
             const ready = objects_.every(object=>
                 isSignalled(object) || (object.kind === SyncKind.MUTEX && object.owner === thread));
             if (!ready)
@@ -221,7 +222,7 @@ export function createSyncObjects({ scheduler }){
                         object.waiters.push(thread);
                     }
                 }
-                scheduler.block(thread, `all of ${objects_.length} objects`);
+                scheduler.block(thread, `all of ${objects_.length} objects`, timed);
                 return null;
             }
 
@@ -242,9 +243,10 @@ export function createSyncObjects({ scheduler }){
          *
          * @param {any[]} objects_
          * @param {any} thread
+         * @param {{ deadline?: number, result?: number }} [timed]
          * @returns {{ index: number, result: number } | null}
          */
-        waitAny(objects_, thread){
+        waitAny(objects_, thread, timed){
             for (let i = 0; i < objects_.length; i++)
             {
                 const object = objects_[i];
@@ -258,7 +260,7 @@ export function createSyncObjects({ scheduler }){
             {
                 object.waiters.push(thread);
             }
-            scheduler.block(thread, `any of ${objects_.length} objects`);
+            scheduler.block(thread, `any of ${objects_.length} objects`, timed);
             return null;
         },
 

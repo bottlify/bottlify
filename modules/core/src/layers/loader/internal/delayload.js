@@ -106,6 +106,56 @@ export function readDelayImports(bytes, image){
 }
 
 /**
+ * Writes resolved addresses into an already-mapped image's delay-load address
+ * tables, the way `bindImports` does for the ordinary directory.
+ *
+ * Same contract, deliberately: the same resolver answers both directories, an
+ * import nothing claims is recorded rather than refused, and `missing` is the
+ * chance to put a stub where a call to it would otherwise land.
+ *
+ * The descriptor's module-handle slot is left alone. Its only reader is the
+ * program's own helper, and the helper is only reached through an address-table
+ * slot that still holds the thunk the linker put there -- which, once this has
+ * run, no slot does. There is also nothing honest to write in it: what a
+ * resolver hands back is an address per import, not a base per library, so any
+ * value here would be invented, and a program that later passes it to
+ * `FreeLibrary` or `GetProcAddress` would be handed the invention. Zero, which
+ * is what the linker wrote, at least means "not loaded".
+ *
+ * @param {{ bytes: Uint8Array, file: Uint8Array, image: import('./pe.js').PeImage }} mapped
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        resolveImport
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        [missing]  Where a call to an import nothing claims should land.
+ * @returns {string[]} what nothing claimed, as "dll!name"
+ */
+export function bindDelayImports({ bytes, file, image }, resolveImport, missing){
+    /** @type {string[]} */
+    const unresolved = [];
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    for (const { dll, entries } of readDelayImports(file, image))
+    {
+        for (const entry of entries)
+        {
+            const address = resolveImport(dll, entry.name, entry.ordinal);
+            if (address === null)
+            {
+                unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
+                const stub = missing?.(dll, entry.name, entry.ordinal) ?? null;
+                if (stub !== null)
+                {
+                    view.setUint32(entry.iatRva, stub >>> 0, true);
+                }
+                continue;
+            }
+            view.setUint32(entry.iatRva, address >>> 0, true);
+        }
+    }
+    return unresolved;
+}
+
+/**
  * Walks one descriptor's name table into the shape `readImports` reports.
  *
  * @param {Object} options

@@ -20,6 +20,9 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  * @property {number} base          Address the image is loaded at.
  * @property {number} entryPoint    Absolute address of the entry point.
  * @property {Uint8Array} bytes     The mapped image, indexed by RVA.
+ * @property {Uint8Array} file      The bytes it was read from; a directory that
+ *                                  is read by file offset needs them.
+ * @property {import('./pe.js').PeImage} image
  * @property {string[]} unresolved  Imports nothing claimed, as "dll!name".
  */
 
