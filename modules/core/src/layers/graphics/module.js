@@ -48,6 +48,7 @@ export const graphicsModule = {
      */
     async create(config, host){
         const memory = host.requireApi('memory');
+        const win32 = host.requireApi('win32');
         backend = null;
         created = [];
 
@@ -161,6 +162,20 @@ export const graphicsModule = {
             // tables that publish into nowhere.
             publishInterface: config?.publishInterface ?? (()=>0),
             screen: ()=>services.screen,
+            // What makes GetDC on a surface mean anything: gdi32 hands back a
+            // context whose bitmap addresses the surface's own bytes, so a
+            // program that gets a context and draws with GDI is drawing into
+            // the surface rather than into a copy of it. Without this the
+            // handle is one nothing else recognises.
+            // Reached when a program asks rather than now: a build assembled
+            // without win32 gets a stub, and a stub refuses -- which is the
+            // right answer to GetDC and the wrong answer to starting up.
+            gdi: {
+                /** @param {any} attributes */
+                createSurfaceDc: attributes=>win32.gdi().createSurfaceDc(attributes),
+                /** @param {number} handle */
+                deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
+            },
         });
 
         return {

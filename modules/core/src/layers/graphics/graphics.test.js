@@ -16,13 +16,20 @@ import { graphicsModule } from './module.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
+    /** @type {Record<string, any>} */
+    const apis = {
+        memory,
+        // Only the part this layer reaches for: a device context over a surface
+        // it owns rather than gdi32 does.
+        win32: { gdi: ()=>({ createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false }) },
+    };
     return /** @type {any} */ ({
         requireApi: (/** @type {string} */ name)=>{
-            if (name !== 'memory')
+            if (!(name in apis))
             {
                 throw new Error(`unexpected requireApi("${name}")`);
             }
-            return memory;
+            return apis[name];
         },
     });
 }

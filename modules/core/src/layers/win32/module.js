@@ -548,6 +548,21 @@ export const win32Module = {
             libraries: ()=>libraries,
 
             /**
+             * Device contexts over pixels this layer did not allocate.
+             *
+             * Not part of any library, because no program calls it: it is how a
+             * drawing surface owned elsewhere becomes something GDI can draw
+             * into, which is what a program is really asking for when it takes
+             * a device context on a surface and then uses GDI on it.
+             */
+            gdi: ()=>({
+                /** @param {any} attributes */
+                createSurfaceDc: attributes=>gdi.createSurfaceDc(attributes),
+                /** @param {number} handle */
+                deleteSurfaceDc: handle=>gdi.deleteSurfaceDc(handle),
+            }),
+
+            /**
              * Which ordinal is which export, for the libraries that have them.
              *
              * A library is imported by ordinal or by name, and some are only
