@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { buildImage } from './internal/image.js';
+import { bindImports, buildImage, mapImage } from './internal/image.js';
 import { synthesiseModule } from './internal/synth.js';
 
 /**
@@ -69,6 +69,57 @@ export const loaderModule = {
                 };
                 loaded.push(record);
                 return record;
+            },
+
+            /**
+             * Maps an image without binding a single import.
+             *
+             * The pair to `bind` below, and separate from it for one reason: a
+             * set of libraries that import each other cannot be bound one at a
+             * time, because binding the first needs the second's exports. Every
+             * image is mapped, so every base is settled and every export
+             * directory is readable, and only then is anything bound.
+             *
+             * @param {Uint8Array} file
+             * @param {Object} options
+             * @param {number} [options.base]
+             * @param {string} [options.name]
+             * @returns {any} the mapped image, to be handed back to `bind`
+             */
+            map(file, { base, name = 'image' }){
+                const image = mapImage(file, base);
+
+                memory.register({
+                    name,
+                    base: image.base,
+                    size: image.bytes.length,
+                    kind: memory.RegionKind.IMAGE,
+                    access: memory.Access.READ_WRITE_EXECUTE,
+                });
+                memory.writeBytes(image.base, image.bytes);
+
+                const record = { base: image.base, entryPoint: image.entryPoint,
+                    unresolved: [], name };
+                loaded.push(record);
+                return { image, record, name };
+            },
+
+            /**
+             * Writes resolved addresses into a mapped image's IAT, and puts the
+             * result back into guest memory.
+             *
+             * @param {any} mapped  What `map` returned.
+             * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+             *     resolveImport
+             * @returns {string[]} what nothing claimed
+             */
+            bind(mapped, resolveImport){
+                const unresolved = bindImports(mapped.image, resolveImport);
+                // Written again because binding edited the mapped bytes in
+                // place, and the guest reads guest memory, not our copy.
+                memory.writeBytes(mapped.image.base, mapped.image.bytes);
+                mapped.record.unresolved = unresolved;
+                return unresolved;
             },
 
             /**

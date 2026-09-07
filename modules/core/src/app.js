@@ -9,6 +9,8 @@ import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
 import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
+import { parsePe, readExports } from './layers/loader/internal/pe.js';
+import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createBlockCache, resolveBlockStore }
@@ -229,6 +231,152 @@ export async function inParallel(items, limit, work){
         }
     });
     await Promise.all(runners);
+}
+
+/**
+ * What a mapped library's base is rounded up to.
+ *
+ * Where they start is not a constant: it is wherever the system modules end,
+ * because a fixed address chosen in advance is a guess about how much memory
+ * the emulator was given, and a wrong guess maps a library outside guest RAM.
+ */
+const LIBRARY_ALIGN = 0x10000;
+
+/**
+ * Reads a whole file off the volume, waiting for whatever is not here yet.
+ *
+ * A read of a block that has not been fetched reports which blocks it needs
+ * rather than waiting -- that is what lets a guest read look synchronous -- so
+ * a host-side reader has to do what the guest's would: fetch, and look again.
+ * This runs before the first guest instruction, so it may simply wait.
+ *
+ * @param {any} filesystem
+ * @param {any} blocks
+ * @param {string} path
+ * @returns {Promise<Uint8Array | null>}
+ */
+async function readWholeFile(filesystem, blocks, path){
+    let handle;
+    try
+    {
+        handle = filesystem.open(path, { create: false });
+    }
+    catch {
+        return null;
+    }
+
+    try
+    {
+        const size = filesystem.size(handle);
+        const bytes = new Uint8Array(size);
+        let at = 0;
+        while (at < size)
+        {
+            let chunk;
+            try
+            {
+                chunk = filesystem.read(handle, size - at);
+            }
+            catch (e){
+                const miss = /** @type {any} */ (e);
+                if (miss?.code !== 'BLOCK_MISS' || !blocks)
+                {
+                    throw miss;
+                }
+                await blocks.fetch(miss.blocks);
+                continue;
+            }
+            if (chunk.length === 0)
+            {
+                break;
+            }
+            bytes.set(chunk, at);
+            at += chunk.length;
+        }
+        return bytes.subarray(0, at);
+    }
+    finally
+    {
+        filesystem.close(handle);
+    }
+}
+
+/**
+ * Maps every library the program brought with it, in dependency order.
+ *
+ * Nothing is bound here. A set of libraries that import each other has to be
+ * mapped first -- every base settled, every export directory readable -- and
+ * bound afterwards, or the first one binds against a library that has no
+ * address yet.
+ *
+ * A library is looked for beside the executable, which is where a program's own
+ * libraries live and where its loader would look.
+ *
+ * @param {any} options
+ * @returns {Promise<any[]>}
+ */
+async function mapShippedLibraries(options){
+    const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
+        byName, byBase } = options;
+    const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
+
+    const { order, missing } = await planDependencies({
+        entry: executable,
+        isSystem,
+        readLibrary: name=>readWholeFile(filesystem, blocks, `${directory}${name}`),
+    });
+
+    if (missing.length > 0)
+    {
+        // Not fatal: a program that never calls into one of these runs, and one
+        // that does fails where it called, which says far more than a refusal
+        // here would.
+        events.emit('libraries-missing', { names: missing });
+    }
+
+    let base = options.base;
+    /** @type {any[]} */
+    const mapped = [];
+    for (const { name, file } of order)
+    {
+        const image = parsePe(file);
+        if (base + image.sizeOfImage > options.memoryBytes)
+        {
+            // Refused here rather than as a RangeError from a write past the
+            // end of RAM, which says nothing about which library or why.
+            events.emit('libraries-missing', { names: [name], reason: 'no room' });
+            continue;
+        }
+        const record = loader.map(file, { base, name });
+        const { exports } = readExports(file, image);
+
+        const addresses = new Map(exports
+            .filter(entry=>entry.name !== null && entry.forwards === null)
+            .map(entry=>[String(entry.name), base + entry.rva]));
+        const ordinals = new Map(exports
+            .filter(entry=>entry.forwards === null)
+            .map(entry=>[entry.ordinal, base + entry.rva]));
+
+        const held = {
+            name,
+            base,
+            size: image.sizeOfImage,
+            /** @param {string} exported */
+            addressOf: exported=>addresses.get(exported) ?? null,
+            /** @param {number} ordinal */
+            addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            entryPoint: record.record.entryPoint,
+            mapped: record,
+        };
+        byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
+        byBase.set(base, held);
+        mapped.push(held);
+
+        base += Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+    }
+
+    events.emit('libraries', { loaded: mapped.map(entry=>entry.name), missing });
+    return mapped;
 }
 
 /**
@@ -680,12 +828,54 @@ export async function createApp(options){
         byBase.set(base, record);
     });
 
-    const image = loader.load(options.executable, {
-        resolveImport: (/** @type {string} */ dll, /** @type {string | null} */ name)=>{
-            const module = findModule(dll);
-            return module && name ? module.addressOf(name) : null;
-        },
+    /**
+     * An import's address, wherever the library that provides it came from.
+     *
+     * By ordinal as well as by name, because a library may be imported either
+     * way and some are imported only by number -- a descriptor that gives an
+     * ordinal and no name is not exotic, it is how a whole class of libraries
+     * has always been linked against.
+     *
+     * @param {string} dll
+     * @param {string | null} name
+     * @param {number | null} ordinal
+     */
+    const resolveImport = (dll, name, ordinal)=>{
+        const module = findModule(dll);
+        if (!module)
+        {
+            return null;
+        }
+        if (name !== null)
+        {
+            return module.addressOf(name);
+        }
+        return ordinal === null ? null : module.addressOfOrdinal(ordinal);
+    };
+
+    // The libraries the program brought with it, before the program itself.
+    //
+    // Every one is mapped before any is bound, because they import each other:
+    // binding the first needs the second's exports, which need the second's
+    // base. This is also why the executable is bound last, below, rather than
+    // here -- by then every library it names has an address.
+    const shipped = await mapShippedLibraries({
+        executable: options.executable,
+        imagePath: options.imagePath ?? 'C:\\app.exe',
+        filesystem, loader, blocks, events,
+        isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
+        byName, byBase,
+        // Straight after the system modules, which is the first address nothing
+        // else has claimed.
+        base: MODULE_BASE + Object.keys(win32.libraries()).length * MODULE_STRIDE,
+        memoryBytes: cpu.layout.memorySize,
     });
+    for (const library of shipped)
+    {
+        loader.bind(library.mapped, resolveImport);
+    }
+
+    const image = loader.load(options.executable, { resolveImport });
 
     mainModule = {
         name: 'app.exe',

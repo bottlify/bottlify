@@ -61,6 +61,10 @@ export const cpuModule = {
                 entryVector: settings.entryVector,
                 initialStack: settings.initialStack,
                 thunkBase: settings.thunkBase,
+                // What anything placing an image has to fit inside. A base
+                // chosen without it is a guess about how much memory the
+                // machine was given, and a wrong guess writes past the end.
+                memorySize: settings.memorySize,
             },
 
             /**
