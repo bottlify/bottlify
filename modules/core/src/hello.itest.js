@@ -90,15 +90,18 @@ test('diagnostics describe the run afterwards', async()=>{
     // exactly as a system one is, a program reaches it the same way, and a test
     // that names the layers it knows about goes red every time another one
     // starts exporting -- which has now happened twice.
-    const synthesised = app.diagnostics().reduce((/** @type {number} */ total,
-        /** @type {any} */ layer)=>{
+    /** @param {any} layer */
+    const librariesOf = layer=>{
         const libraries = layer.metrics?.libraries;
         if (Array.isArray(libraries))
         {
-            return total + libraries.length;
+            return libraries.length;
         }
-        return libraries ? total + Object.keys(libraries).length : total;
-    }, 0);
+        return libraries ? Object.keys(libraries).length : 0;
+    };
+    const synthesised = app.diagnostics()
+        .reduce((/** @type {number} */ total, /** @type {any} */ layer)=>
+            total + librariesOf(layer), 0);
     assert.equal(byName.loader.metrics.images, synthesised + 1);
     assert.deepEqual(byName.loader.metrics.unresolved, []);
 
