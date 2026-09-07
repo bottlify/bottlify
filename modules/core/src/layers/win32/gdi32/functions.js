@@ -21,6 +21,7 @@
  */
 
 import { createGdiObjects } from './objects.js';
+import { createDrawingFunctions } from './drawing.js';
 import {
     readBitmapInfoHeader,
     readLogBrush,
@@ -180,6 +181,9 @@ const MAX_FACE_NAME = 64;
  *           many bytes a format needs; it never decides where they live.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What GetDeviceCaps reports for a display DC.
+ * @property {import('./drawing.js').DrawingServices} [graphics]
+ *           Where pixels go. Absent in a build that cannot draw, and every
+ *           entry point that needs it then fails truthfully.
  */
 
 /**
@@ -595,6 +599,8 @@ export function createGdiFunctions(host){
         (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
 
     return {
+        ...createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }),
+
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
             argBytes: 4,

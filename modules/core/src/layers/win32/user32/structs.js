@@ -232,3 +232,110 @@ export function readMessage(memory, address){
 export function writeRect(memory, address, rect){
     writeU32s(memory, address, [rect.left, rect.top, rect.right, rect.bottom]);
 }
+
+/**
+ * PAINTSTRUCT. The trailing reserved bytes are part of the size a guest
+ * allocated, so they are named here even though nothing writes them.
+ */
+export const PAINTSTRUCT = Object.freeze({
+    hdc: 0,
+    fErase: 4,
+    rcPaint: 8,
+    fRestore: 24,
+    fIncUpdate: 28,
+    rgbReserved: 32,
+    SIZE: 64,
+});
+
+/** MONITORINFO. cbSize is written by the caller and tells us which it wants. */
+export const MONITORINFO = Object.freeze({
+    cbSize: 0,
+    rcMonitor: 4,
+    rcWork: 20,
+    dwFlags: 36,
+    SIZE: 40,
+});
+
+/** MONITORINFOEXA is MONITORINFO plus a device name. */
+export const MONITORINFOEXA_SIZE = 40 + 32;
+
+/**
+ * WINDOWINFO. The last two members are WORDs, which is why the structure ends
+ * at 60 rather than at a multiple of four fields.
+ */
+export const WINDOWINFO = Object.freeze({
+    cbSize: 0,
+    rcWindow: 4,
+    rcClient: 20,
+    dwStyle: 36,
+    dwExStyle: 40,
+    dwWindowStatus: 44,
+    cxWindowBorders: 48,
+    cyWindowBorders: 52,
+    atomWindowType: 56,
+    wCreatorVersion: 58,
+    SIZE: 60,
+});
+
+/** WINDOWPLACEMENT. */
+export const WINDOWPLACEMENT = Object.freeze({
+    length: 0,
+    flags: 4,
+    showCmd: 8,
+    ptMinPosition: 12,
+    ptMaxPosition: 20,
+    rcNormalPosition: 28,
+    SIZE: 44,
+});
+
+/**
+ * DEVMODEA, only the members a display-mode enumeration touches. The union at
+ * 44 and the printer members after it are skipped deliberately: naming a field
+ * this layer never reads or writes would suggest it means something here.
+ */
+export const DEVMODEA = Object.freeze({
+    dmDeviceName: 0,
+    dmSpecVersion: 32,
+    dmDriverVersion: 34,
+    dmSize: 36,
+    dmDriverExtra: 38,
+    dmFields: 40,
+    dmBitsPerPel: 104,
+    dmPelsWidth: 108,
+    dmPelsHeight: 112,
+    dmDisplayFlags: 116,
+    dmDisplayFrequency: 120,
+    SIZE: 156,
+});
+
+/** The dmFields bits this layer fills in. */
+export const DM_BITSPERPEL = 0x00040000;
+export const DM_PELSWIDTH = 0x00080000;
+export const DM_PELSHEIGHT = 0x00100000;
+export const DM_DISPLAYFREQUENCY = 0x00400000;
+
+/**
+ * @param {StructMemory} memory
+ * @param {number} address
+ * @returns {{ left: number, top: number, right: number, bottom: number }}
+ */
+export function readRect(memory, address){
+    return {
+        left: readU32(memory, address + RECT.left) | 0,
+        top: readU32(memory, address + RECT.top) | 0,
+        right: readU32(memory, address + RECT.right) | 0,
+        bottom: readU32(memory, address + RECT.bottom) | 0,
+    };
+}
+
+/**
+ * Writes a WORD without disturbing the one beside it. Two of WINDOWINFO's
+ * members share a DWORD, so the whole-DWORD writer cannot be used for them.
+ *
+ * @param {StructMemory} memory
+ * @param {number} address
+ * @param {number} value
+ */
+export function writeU16(memory, address, value){
+    memory.writeMemory(address, new Uint8Array([value & 0xff, (value >>> 8) & 0xff]));
+}

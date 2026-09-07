@@ -18,6 +18,7 @@
  */
 
 /** The message that ends a message loop. */
+export const WM_PAINT = 0x000f;
 export const WM_QUIT = 0x0012;
 
 /** A filter that accepts messages for any window, and thread messages besides. */

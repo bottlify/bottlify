@@ -1,0 +1,673 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * The gdi32 entry points that move pixels, and the objects that only exist
+ * because drawing needs them: regions, palettes and pixel formats.
+ *
+ * Nothing here draws. The drawing lives one layer over, and `win32` may not
+ * reach it -- `graphics` declares `win32` in its requires, so an import the
+ * other way closes a cycle the boundary check refuses. So the pixels arrive as
+ * an injected service, and this file is the guest ABI in front of it: read the
+ * arguments, resolve the handles, call, and turn the answer back into what a
+ * Win32 program expects.
+ *
+ * A build without that service still exports every one of these. They fail
+ * truthfully -- FALSE, or a null handle -- rather than reporting success and
+ * drawing nowhere, because a program that is told its blit worked has no reason
+ * to look again and every reason to carry on.
+ *
+ * Two decisions are worth stating because they are ceilings rather than
+ * omissions:
+ *
+ * - **A region is one rectangle.** The drawing half made the same choice for
+ *   clipping, and a second, richer region model here would be a second answer
+ *   to the same question. `CombineRgn` therefore answers with a bounding box
+ *   where a real region would answer with a shape: an OR of two far-apart
+ *   rectangles covers the span between them, which repaints more than it must
+ *   and never less.
+ * - **A palette selects and realizes but changes nothing.** Every surface here
+ *   is 32-bit BGRX, so there is no palette for a palette to be. Reporting that
+ *   zero entries changed is the truth about this pipeline, and it is also what
+ *   a program checks before deciding to redraw.
+ */
+
+import { readRect, writeU32s } from '../user32/structs.js';
+
+/** CombineRgn's modes. */
+const RGN_AND = 1;
+const RGN_OR = 2;
+const RGN_XOR = 3;
+const RGN_DIFF = 4;
+const RGN_COPY = 5;
+
+/** What CombineRgn and its relatives report about the shape they produced. */
+const NULLREGION = 1;
+const SIMPLEREGION = 2;
+const REGION_ERROR = 0;
+
+/** A gamma ramp is three arrays of 256 words, one per channel. */
+const GAMMA_CHANNEL_ENTRIES = 256;
+const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
+
+/**
+ * @typedef {Object} DrawingServices
+ * @property {(options: { objects: any, metrics: (font: number) => any }) => any}
+ *           [createDrawing]
+ *           Called once, and answers with the drawing interface. Absent in a
+ *           build that cannot draw.
+ * @property {(record: any) => any | null} [surfaceFor]
+ *           The pixels a device context draws into, or null when it has none.
+ * @property {any} [pixelFormat]
+ *           The pixel-format service: `choose(descriptor)`, `describe(index)`
+ *           and `count()`. Absent in a build with no rendering surface.
+ */
+
+/** An empty rectangle, which is what a region with no extent is. */
+const EMPTY = Object.freeze({ left: 0, top: 0, right: 0, bottom: 0 });
+
+/** @param {any} rect */
+const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
+
+/**
+ * The rectangle two regions combine to.
+ *
+ * AND is exact. OR, XOR and DIFF are the bounding box of what a real region
+ * would hold, which is the ceiling this file's header names -- and for DIFF it
+ * is the source rectangle unchanged, because anything smaller could remove a
+ * pixel the difference still contains.
+ *
+ * @param {any} first @param {any} second @param {number} mode
+ */
+export function combine(first, second, mode){
+    switch (mode | 0){
+        case RGN_COPY:
+            return first;
+        case RGN_AND:
+            return {
+                left: Math.max(first.left, second.left),
+                top: Math.max(first.top, second.top),
+                right: Math.min(first.right, second.right),
+                bottom: Math.min(first.bottom, second.bottom),
+            };
+        case RGN_OR:
+        case RGN_XOR:
+            if (isEmpty(first))
+            {
+                return second;
+            }
+            if (isEmpty(second))
+            {
+                return first;
+            }
+            return {
+                left: Math.min(first.left, second.left),
+                top: Math.min(first.top, second.top),
+                right: Math.max(first.right, second.right),
+                bottom: Math.max(first.bottom, second.bottom),
+            };
+        case RGN_DIFF:
+            return first;
+        default:
+            return null;
+    }
+}
+
+/**
+ * @param {Object} options
+ * @param {any} options.host
+ * @param {any} options.objects   The GDI object table.
+ * @param {(handle: number) => any | null} options.dcOf
+ * @param {(dc: any) => any} options.surfaceOf   What the DC reports about its size.
+ * @param {(dc: any) => any} options.currentMetrics
+ */
+export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }){
+    /** @type {DrawingServices} */
+    const services = host.graphics ?? {};
+
+    /**
+     * The drawing interface, built on first use and only if there is one.
+     *
+     * Lazy because a process that never draws should not pay for it, and
+     * because the object table it is given has to be this one -- a second copy
+     * would resolve a pen handle to a different pen.
+     */
+    /** @type {any} */
+    let drawing;
+    const draw = ()=>{
+        if (drawing === undefined)
+        {
+            drawing = services.createDrawing
+                ? services.createDrawing({
+                    objects,
+                    /** @param {number} font */
+                    metrics: font=>{
+                        const record = objects.get(font);
+                        const measured = currentMetrics({ font: record ? font : 0 });
+                        return {
+                            cellWidth: measured.aveCharWidth,
+                            cellHeight: measured.height,
+                            ascent: measured.ascent,
+                        };
+                    },
+                })
+                : null;
+        }
+        return drawing;
+    };
+
+    /**
+     * Binds a device context to its pixels, once, and answers with the drawing
+     * context. Null when this build cannot draw or this DC has no surface --
+     * both of which the caller must turn into a truthful failure.
+     *
+     * @param {number} handle
+     */
+    const bound = handle=>{
+        const dc = dcOf(handle);
+        const interfaces = draw();
+        if (!dc || !interfaces || !services.surfaceFor)
+        {
+            return null;
+        }
+        if (!dc.boundSurface)
+        {
+            const surface = services.surfaceFor(dc);
+            if (!surface)
+            {
+                return null;
+            }
+            interfaces.bind(handle >>> 0, surface, dc);
+            dc.boundSurface = surface;
+        }
+        return interfaces;
+    };
+
+    /** @param {number} handle @returns {any | null} */
+    const regionOf = handle=>{
+        const record = objects.get(handle);
+        return record && record.type === 'region' ? record.attributes : null;
+    };
+
+    /** @param {any} rect */
+    const newRegion = rect=>objects.create('region', {
+        left: rect.left | 0,
+        top: rect.top | 0,
+        right: rect.right | 0,
+        bottom: rect.bottom | 0,
+    });
+
+    return {
+        /**
+         * BOOL BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc,
+         *             int x1, int y1, DWORD rop)
+         */
+        BitBlt: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, rop])=>{
+                const interfaces = bound(dest);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                // A source DC is bound too, and separately: a blit whose source
+                // has no pixels is a blit that cannot happen, not one that
+                // reads zeroes.
+                if ((source >>> 0) !== 0 && !bound(source))
+                {
+                    return 0;
+                }
+                return interfaces.bitBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
+                    (source >>> 0) || null, x1 | 0, y1 | 0, rop >>> 0) ? 1 : 0;
+            },
+        },
+
+        /** BOOL LineTo(HDC hdc, int x, int y) */
+        LineTo: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, x, y])=>{
+                const interfaces = bound(handle);
+                return interfaces ? (interfaces.lineTo(handle >>> 0, x | 0, y | 0), 1) : 0;
+            },
+        },
+
+        /**
+         * COLORREF SetPixel(HDC hdc, int x, int y, COLORREF color)
+         *
+         * Answers with the colour actually set, which is not always the one
+         * asked for -- and with CLR_INVALID, not zero, when nothing was set,
+         * because zero is black and a program cannot tell the two apart.
+         */
+        SetPixel: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, color])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0xffffffff;
+                }
+                interfaces.setPixel(handle >>> 0, x | 0, y | 0, color >>> 0);
+                return interfaces.getPixel(handle >>> 0, x | 0, y | 0) >>> 0;
+            },
+        },
+
+        /** COLORREF GetPixel(HDC hdc, int x, int y) */
+        GetPixel: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, x, y])=>{
+                const interfaces = bound(handle);
+                return interfaces
+                    ? interfaces.getPixel(handle >>> 0, x | 0, y | 0) >>> 0
+                    : 0xffffffff;
+            },
+        },
+
+        /** BOOL TextOutA(HDC hdc, int x, int y, LPCSTR lpString, int c) */
+        TextOutA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, string, count])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const text = (string >>> 0) === 0
+                    ? ''
+                    : host.readCString(string, Math.max(count | 0, 0) || 0x10000)
+                        .slice(0, Math.max(count | 0, 0) || undefined);
+                interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
+                return 1;
+            },
+        },
+
+        /** int FillRgn(HDC hdc, HRGN hrgn, HBRUSH hbr) */
+        FillRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, region, brush])=>{
+                const rect = regionOf(region);
+                const interfaces = bound(handle);
+                if (!rect || !interfaces)
+                {
+                    return 0;
+                }
+                interfaces.fillRect(handle >>> 0, rect, brush >>> 0);
+                return 1;
+            },
+        },
+
+        /** HRGN CreateRectRgn(int x1, int y1, int x2, int y2) */
+        CreateRectRgn: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([left, top, right, bottom])=>
+                newRegion({ left, top, right, bottom }),
+        },
+
+        /** HRGN CreateRectRgnIndirect(const RECT *lprect) */
+        CreateRectRgnIndirect: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([rect])=>
+                (rect >>> 0) === 0 ? 0 : newRegion(readRect(host, rect)),
+        },
+
+        /** int CombineRgn(HRGN hrgnDst, HRGN hrgnSrc1, HRGN hrgnSrc2, int iMode) */
+        CombineRgn: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([destination, first, second, mode])=>{
+                const target = objects.get(destination);
+                const left = regionOf(first);
+                if (!target || target.type !== 'region' || !left)
+                {
+                    return REGION_ERROR;
+                }
+                const right = regionOf(second) ?? EMPTY;
+                const result = combine(left, right, mode);
+                if (!result)
+                {
+                    return REGION_ERROR;
+                }
+                target.attributes = { ...result };
+                return isEmpty(result) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int SelectClipRgn(HDC hdc, HRGN hrgn)
+         *
+         * A null region means no clipping, which is the whole surface -- not an
+         * empty one, which would clip everything away.
+         */
+        SelectClipRgn: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, region])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return REGION_ERROR;
+                }
+                const dc = dcOf(handle);
+                if ((region >>> 0) === 0)
+                {
+                    const surface = surfaceOf(dc);
+                    interfaces.setClipRect(handle >>> 0, {
+                        left: 0, top: 0, right: surface.width, bottom: surface.height,
+                    });
+                    return SIMPLEREGION;
+                }
+                const rect = regionOf(region);
+                if (!rect)
+                {
+                    return REGION_ERROR;
+                }
+                interfaces.setClipRect(handle >>> 0, rect);
+                return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int GetObjectA(HGDIOBJ h, int c, LPVOID pv)
+         *
+         * A null buffer asks how large one would have to be, which is how a
+         * program sizes its own before asking again.
+         */
+        GetObjectA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, size, out])=>{
+                const record = objects.get(handle);
+                if (!record)
+                {
+                    return 0;
+                }
+                const shape = describeObject(record);
+                if (!shape)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) === 0)
+                {
+                    return shape.size;
+                }
+                if ((size | 0) < shape.size)
+                {
+                    return 0;
+                }
+                writeU32s(host, out, shape.words);
+                return shape.size;
+            },
+        },
+
+        /**
+         * HPALETTE CreateHalftonePalette(HDC hdc)
+         *
+         * Real, and empty. Every surface here is 32-bit, so a halftone palette
+         * has nothing to hold -- but a program that gets a null handle back
+         * treats it as an error, and this is not one.
+         */
+        CreateHalftonePalette: {
+            argBytes: 4,
+            handler: ()=>objects.create('palette', { entries: [] }),
+        },
+
+        /** HPALETTE SelectPalette(HDC hdc, HPALETTE hPal, BOOL bForceBkgd) */
+        SelectPalette: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, palette])=>{
+                const dc = dcOf(handle);
+                const record = objects.get(palette);
+                if (!dc || !record || record.type !== 'palette')
+                {
+                    return 0;
+                }
+                const previous = dc.palette ?? 0;
+                dc.palette = palette >>> 0;
+                return previous;
+            },
+        },
+
+        /**
+         * UINT RealizePalette(HDC hdc)
+         *
+         * How many entries changed, which here is none: there is no palette in
+         * a 32-bit pipeline for a realization to change. A program reads this to
+         * decide whether it must redraw, and the honest answer saves it the work.
+         */
+        RealizePalette: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(dcOf(handle) ? 0 : 0xffffffff),
+        },
+
+        /**
+         * UINT GetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries,
+         *                       RGBQUAD *prgbq)
+         *
+         * Zero entries copied, for the same reason: a colour table belongs to a
+         * DIB of eight bits or fewer, and this pipeline has none.
+         */
+        GetDIBColorTable: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /** BOOL GdiFlush(void) */
+        GdiFlush: {
+            argBytes: 0,
+            handler: ()=>1,
+        },
+
+        /**
+         * BOOL GetDeviceGammaRamp(HDC hdc, LPVOID lpRamp)
+         *
+         * The identity ramp, written out in full. A program that reads it,
+         * adjusts it and writes it back must get something it can adjust, and
+         * an untouched buffer would leave it multiplying by whatever was there.
+         */
+        GetDeviceGammaRamp: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, ramp])=>{
+                if (!dcOf(handle) || (ramp >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const bytes = new Uint8Array(GAMMA_RAMP_BYTES);
+                const view = new DataView(bytes.buffer);
+                for (let channel = 0; channel < 3; channel++)
+                {
+                    for (let index = 0; index < GAMMA_CHANNEL_ENTRIES; index++)
+                    {
+                        const at = (channel * GAMMA_CHANNEL_ENTRIES + index) * 2;
+                        view.setUint16(at, index * 257, true);
+                    }
+                }
+                host.writeMemory(ramp >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetDeviceGammaRamp(HDC hdc, LPVOID lpRamp)
+         *
+         * Accepted and discarded. Refusing would send a program down a fallback
+         * path over a setting that changes no pixel it can observe here.
+         */
+        SetDeviceGammaRamp: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
+        },
+
+        /** BOOL OffsetViewportOrgEx(HDC hdc, int x, int y, LPPOINT lppt) */
+        OffsetViewportOrgEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, point])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((point >>> 0) !== 0)
+                {
+                    writeU32s(host, point, [dc.viewportOrg.x | 0, dc.viewportOrg.y | 0]);
+                }
+                dc.viewportOrg = {
+                    x: (dc.viewportOrg.x | 0) + (x | 0),
+                    y: (dc.viewportOrg.y | 0) + (y | 0),
+                };
+                return 1;
+            },
+        },
+
+        /** int ChoosePixelFormat(HDC hdc, const PIXELFORMATDESCRIPTOR *ppfd) */
+        ChoosePixelFormat: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, descriptor])=>{
+                if (!dcOf(handle) || !services.pixelFormat || (descriptor >>> 0) === 0)
+                {
+                    return 0;
+                }
+                return services.pixelFormat.choose(
+                    host.readMemory(descriptor >>> 0, services.pixelFormat.size())) | 0;
+            },
+        },
+
+        /**
+         * int DescribePixelFormat(HDC hdc, int iPixelFormat, UINT nBytes,
+         *                         LPPIXELFORMATDESCRIPTOR ppfd)
+         *
+         * Answers with how many formats there are whether or not it describes
+         * one, which is how a program enumerates them.
+         */
+        DescribePixelFormat: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, index, bytes, out])=>{
+                if (!dcOf(handle) || !services.pixelFormat)
+                {
+                    return 0;
+                }
+                const count = services.pixelFormat.count() | 0;
+                if ((out >>> 0) === 0)
+                {
+                    return count;
+                }
+                const described = services.pixelFormat.describe(index | 0, bytes | 0);
+                if (!described)
+                {
+                    return 0;
+                }
+                host.writeMemory(out >>> 0, described);
+                return count;
+            },
+        },
+
+        /** int GetPixelFormat(HDC hdc) */
+        GetPixelFormat: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const dc = dcOf(handle);
+                return dc ? dc.pixelFormat ?? 0 : 0;
+            },
+        },
+
+        /**
+         * BOOL SetPixelFormat(HDC hdc, int format, const PIXELFORMATDESCRIPTOR *ppfd)
+         *
+         * Set once. Setting the format already in effect succeeds and changes
+         * nothing; setting a different one fails, which is what a program that
+         * probes formats depends on.
+         */
+        SetPixelFormat: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, format])=>{
+                const dc = dcOf(handle);
+                if (!dc || !services.pixelFormat)
+                {
+                    return 0;
+                }
+                const wanted = format | 0;
+                if (wanted < 1 || wanted > services.pixelFormat.count())
+                {
+                    return 0;
+                }
+                if ((dc.pixelFormat ?? 0) !== 0)
+                {
+                    return dc.pixelFormat === wanted ? 1 : 0;
+                }
+                dc.pixelFormat = wanted;
+                return 1;
+            },
+        },
+    };
+}
+
+/**
+ * What GetObject reports for one object, as the words of its struct.
+ *
+ * Only the shapes a program reads back are here. An object whose struct is not
+ * described answers zero rather than a buffer of the wrong length, because a
+ * caller that trusted the length would read past its own allocation.
+ *
+ * @param {any} record
+ * @returns {{ size: number, words: number[] } | null}
+ */
+function describeObject(record){
+    const attributes = record.attributes ?? {};
+    switch (record.type){
+        // LOGPEN: style, POINT width, colour.
+        case 'pen':
+            return {
+                size: 16,
+                words: [
+                    attributes.style | 0,
+                    attributes.width | 0,
+                    0,
+                    attributes.color >>> 0,
+                ],
+            };
+        // LOGBRUSH: style, colour, hatch.
+        case 'brush':
+            return {
+                size: 12,
+                words: [
+                    attributes.style | 0,
+                    attributes.color >>> 0,
+                    attributes.hatch | 0,
+                ],
+            };
+        // BITMAP: type, width, height, widthBytes, planes+bitsPixel, bits.
+        case 'bitmap':
+            return {
+                size: 24,
+                words: [
+                    0,
+                    attributes.width | 0,
+                    attributes.height | 0,
+                    attributes.pitch | 0,
+                    (attributes.planes ?? 1) & 0xffff
+                        | ((attributes.bitCount ?? 32) & 0xffff) << 16,
+                    attributes.bits >>> 0,
+                ],
+            };
+        default:
+            return null;
+    }
+}

@@ -16,7 +16,9 @@
  * class asked for, and the queue behaves the way a message loop expects.
  */
 
-import { ANY_WINDOW, WM_QUIT } from './messages.js';
+import { ANY_WINDOW, WM_PAINT, WM_QUIT } from './messages.js';
+import { createPaintFunctions } from './paint.js';
+import { createSystemFunctions } from './system.js';
 import {
     WNDCLASSA,
     WNDCLASSEXA,
@@ -123,6 +125,10 @@ function characterFor(key){
 
 /**
  * @typedef {Object} WindowHost
+ * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
+ *           The display every system metric is derived from.
+ * @property {() => any} [dc]
+ *           The device-context service painting takes its DCs from.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -378,7 +384,15 @@ export function createWindowFunctions(host){
         return record.hwnd;
     };
 
+    // The three halves of user32 are one table to the guest, and separate files
+    // only because the subjects are: windows and classes here, painting and its
+    // device contexts next door, and everything a program asks the system about
+    // itself after that. They share the window records rather than each keeping
+    // a copy, which is why they are built here and not beside each other.
     return {
+        ...createPaintFunctions({ host, live, queue: host.queue, WM_PAINT }),
+        ...createSystemFunctions({ host, live, windows }),
+
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
             argBytes: 4,

@@ -1,0 +1,496 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * The synchronisation a C runtime's startup reaches for before it reaches for
+ * anything else: critical sections, the interlocked arithmetic that reference
+ * counts are built out of, waits on more than one object, and suspending a
+ * thread.
+ *
+ * A critical section is not a handle. It is a structure the guest allocated,
+ * usually inside its own data, and the guest reads the fields back -- a runtime
+ * checks the recursion count, a debugger walks the list, a program asserts on
+ * the owner. So the structure in guest memory is the record, kept true on every
+ * transition, and the kernel object beside it exists only to hold the threads
+ * that have to wait. Keeping the state solely on our side would leave a guest
+ * reading zeroes out of a section it is standing inside.
+ *
+ * The transition that has to be got right is the handoff. A thread that cannot
+ * take the section stops inside the kernel and its call never returns, so it is
+ * in no position to write the structure once it wins. The thread that *leaves*
+ * writes it, for whoever the kernel just handed it to -- which is the only
+ * moment at which both the new owner and the structure are known.
+ */
+
+/**
+ * Offsets into RTL_CRITICAL_SECTION, 32-bit.
+ *
+ * DebugInfo and LockSemaphore are at 0x00 and 0x10 and are deliberately left at
+ * zero: the first is a pointer into a structure only a debugger walks, and the
+ * second is created lazily by Windows itself, so a guest that finds either null
+ * is looking at something Windows also produces.
+ */
+const CS_LOCK_COUNT = 0x04;
+const CS_RECURSION_COUNT = 0x08;
+const CS_OWNING_THREAD = 0x0c;
+const CS_SPIN_COUNT = 0x14;
+const CS_SIZE = 0x18;
+
+/** LockCount while nobody holds the section. Held, it is zero or above. */
+const CS_UNLOCKED = -1;
+
+/** Waits with this timeout never give up. */
+const INFINITE = 0xffffffff;
+
+/** What a wait returns. WAIT_OBJECT_0 and WAIT_ABANDONED_0 are bases, not values. */
+const WAIT_OBJECT_0 = 0x00000000;
+const WAIT_ABANDONED_0 = 0x00000080;
+const WAIT_TIMEOUT = 0x00000102;
+const WAIT_FAILED = 0xffffffff;
+
+/** The kernel's own answer for an abandoned mutex, before the index is added. */
+const KERNEL_ABANDONED = 0x00000080;
+
+/** GetCurrentThread hands out this, and it is -2 on every Windows. */
+const CURRENT_THREAD = 0xfffffffe;
+
+/** More than this in one wait is a caller that has lost track of its handles. */
+const MAXIMUM_WAIT_OBJECTS = 64;
+
+/**
+ * @typedef {Object} SyncHost
+ * @property {any} kernel                        The kernel layer's API.
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {() => any} currentThread
+ * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
+ * @property {(milliseconds: number) => void} [advanceClock]
+ *   Credits the guest clock for time a wait was supposed to spend. See the
+ *   timeout note on WaitForMultipleObjects.
+ */
+
+/**
+ * Builds the function table: name -> { argBytes, handler }.
+ *
+ * `argBytes` is the size of the argument list the guest compiled against; all of
+ * these are stdcall, the bridge's default, so none of them says so.
+ *
+ * @param {SyncHost} host
+ */
+export function createSyncFunctions(host){
+    const { kernel } = host;
+
+    /**
+     * The kernel object behind a section, keyed by where the guest put it.
+     *
+     * Only the waiting is here. Everything a guest can observe is in its own
+     * structure; this holds what a structure cannot -- a queue of threads.
+     *
+     * @type {Map<number, any>}
+     */
+    const sections = new Map();
+
+    /** @param {number} address */
+    const readI32 = address=>new DataView(
+        host.readMemory(address, 4).buffer).getInt32(0, true);
+
+    /** @param {number} address @param {number} value */
+    const writeI32 = (address, value)=>{
+        const bytes = new Uint8Array(4);
+        new DataView(bytes.buffer).setInt32(0, value | 0, true);
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * The section at this address, made if it is not there yet.
+     *
+     * Windows faults on a section nobody initialised; making one instead turns
+     * that into a section that simply works. The trade is deliberate: the fault
+     * would arrive here as a host exception with none of the guest's context,
+     * which tells whoever is reading the failure less than nothing.
+     *
+     * @param {number} address
+     */
+    const sectionAt = address=>{
+        let mutex = sections.get(address);
+        if (!mutex)
+        {
+            mutex = kernel.createMutex({ name: `criticalsection@${address.toString(16)}` });
+            sections.set(address, mutex);
+        }
+        return mutex;
+    };
+
+    /**
+     * Writes what a section's structure says about itself, from what the kernel
+     * says about the mutex behind it.
+     *
+     * LockCount does not count the threads queued behind the owner. A thread
+     * that cannot take the section blocks in the kernel rather than spinning on
+     * this field, so nothing in this build can observe the difference; a guest
+     * reading it only ever needs to tell held from free.
+     *
+     * @param {number} address @param {any} mutex
+     */
+    const publish = (address, mutex)=>{
+        const owner = mutex.owner;
+        writeI32(address + CS_LOCK_COUNT, owner ? 0 : CS_UNLOCKED);
+        writeI32(address + CS_RECURSION_COUNT, owner ? mutex.recursion : 0);
+        writeI32(address + CS_OWNING_THREAD, owner ? owner.id : 0);
+    };
+
+    /**
+     * Resolves a handle to a kernel object, or null. A bad handle is a return
+     * code and not a crash: programs do pass stale handles, and Windows answers
+     * with a failure rather than stopping.
+     *
+     * @param {number} handle @param {string} [type]
+     */
+    const object = (handle, type)=>{
+        try
+        {
+            return kernel.handles.resolve(handle, type);
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
+
+    /** @param {number} handle */
+    const threadOf = handle=>(handle >>> 0) === CURRENT_THREAD
+        ? host.currentThread()
+        : object(handle >>> 0, 'thread');
+
+    /**
+     * Whether a wait on this object would return rather than block.
+     *
+     * Asked before waiting, never instead of it: a timeout is the one case where
+     * the answer has to be known without joining the queue, because joining it
+     * is the thing a timeout exists to avoid. The fields read here are the same
+     * ones the kernel's own signal test reads, and a mutex this thread already
+     * owns counts as ready because taking it again is a counter, not a wait.
+     *
+     * @param {any} target @param {any} thread
+     */
+    const ready = (target, thread)=>{
+        switch (target.kind)
+        {
+            case 'event':
+                return target.signalled === true;
+            case 'mutex':
+                return target.owner === null || target.owner === thread;
+            case 'semaphore':
+                return target.count > 0;
+            default:
+                return false;
+        }
+    };
+
+    /** @param {number} address @param {number} spinCount */
+    const initialise = (address, spinCount)=>{
+        sections.set(address,
+            kernel.createMutex({ name: `criticalsection@${address.toString(16)}` }));
+        // Written whole rather than field by field: the guest allocated this and
+        // its contents are whatever was there before.
+        host.writeMemory(address, new Uint8Array(CS_SIZE));
+        writeI32(address + CS_LOCK_COUNT, CS_UNLOCKED);
+        writeI32(address + CS_SPIN_COUNT, spinCount);
+    };
+
+    return {
+        /** VOID InitializeCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        InitializeCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                initialise(pointer >>> 0, 0);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL InitializeCriticalSectionAndSpinCount(LPCRITICAL_SECTION, DWORD)
+         *
+         * The spin count is recorded and not honoured. Spinning is a bet that a
+         * section will be released within a few thousand cycles on another core,
+         * and there is no other core here -- a spin would burn the quantum of the
+         * only thread that could release it.
+         */
+        InitializeCriticalSectionAndSpinCount: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, spinCount])=>{
+                initialise(pointer >>> 0, spinCount | 0);
+                return 1;
+            },
+        },
+
+        /** BOOL TryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        TryEnterCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const address = pointer >>> 0;
+                const mutex = sectionAt(address);
+                if (!ready(mutex, host.currentThread()))
+                {
+                    return 0;
+                }
+                kernel.wait(mutex, host.currentThread());
+                publish(address, mutex);
+                return 1;
+            },
+        },
+
+        /** VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        DeleteCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const address = pointer >>> 0;
+                sections.delete(address);
+                host.writeMemory(address, new Uint8Array(CS_SIZE));
+                return 0;
+            },
+        },
+
+        /** VOID EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        EnterCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const address = pointer >>> 0;
+                const mutex = sectionAt(address);
+                const taken = kernel.wait(mutex, host.currentThread());
+                if (taken === null)
+                {
+                    // Blocked. The structure is not ours to write now -- it
+                    // still describes the thread that holds it, and the one
+                    // that leaves will write it for us.
+                    return host.park();
+                }
+                publish(address, mutex);
+                return 0;
+            },
+        },
+
+        /** VOID LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        LeaveCriticalSection: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const address = pointer >>> 0;
+                const mutex = sections.get(address);
+                if (!mutex)
+                {
+                    return 0;
+                }
+                kernel.releaseMutex(mutex, host.currentThread());
+                // After the release the mutex names its next owner, if the
+                // kernel woke one. That thread's call has already returned, so
+                // this is the only moment the structure can be made true for it.
+                publish(address, mutex);
+                return 0;
+            },
+        },
+
+        /** LONG InterlockedIncrement(LONG volatile *lpAddend) */
+        InterlockedIncrement: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                // The value AFTER the operation. A reference count that returns
+                // the value before it releases one object too early, and does it
+                // a long way from here.
+                const next = (readI32(pointer >>> 0) + 1) | 0;
+                writeI32(pointer >>> 0, next);
+                return next >>> 0;
+            },
+        },
+
+        /** LONG InterlockedDecrement(LONG volatile *lpAddend) */
+        InterlockedDecrement: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>{
+                const next = (readI32(pointer >>> 0) - 1) | 0;
+                writeI32(pointer >>> 0, next);
+                return next >>> 0;
+            },
+        },
+
+        /** LONG InterlockedExchange(LONG volatile *Target, LONG Value) */
+        InterlockedExchange: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, value])=>{
+                // The value BEFORE, unlike the two above. This is the pair a
+                // lock is built from, and it is only useful as the old value.
+                const previous = readI32(pointer >>> 0);
+                writeI32(pointer >>> 0, value);
+                return previous >>> 0;
+            },
+        },
+
+        /** LONG InterlockedCompareExchange(LONG volatile *Destination, LONG Exchange, LONG Comparand) */
+        InterlockedCompareExchange: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([pointer, exchange, comparand])=>{
+                const previous = readI32(pointer >>> 0);
+                if (previous === (comparand | 0))
+                {
+                    writeI32(pointer >>> 0, exchange);
+                }
+                return previous >>> 0;
+            },
+        },
+
+        /** DWORD WaitForMultipleObjects(DWORD nCount, const HANDLE *lpHandles, BOOL bWaitAll, DWORD dwMilliseconds) */
+        WaitForMultipleObjects: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([count, handles, waitAll, timeout])=>{
+                const total = count >>> 0;
+                if (total === 0 || total > MAXIMUM_WAIT_OBJECTS)
+                {
+                    return WAIT_FAILED;
+                }
+                const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
+                /** @type {any[]} */
+                const objects = [];
+                for (let at = 0; at < total; at++)
+                {
+                    const target = object(view.getUint32(at * 4, true));
+                    if (!target)
+                    {
+                        return WAIT_FAILED;
+                    }
+                    objects.push(target);
+                }
+
+                const thread = host.currentThread();
+
+                // A timeout is answered by looking rather than by waiting.
+                //
+                // Zero is exact: a poll that finds nothing ready has genuinely
+                // timed out, and one that does find it takes it below without
+                // ever blocking. A non-zero timeout is NOT exact -- expiry needs
+                // a timer in the scheduler, which does not exist -- so it polls
+                // once, credits the clock for the time it was told to spend, and
+                // reports the timeout. That errs towards a caller retrying,
+                // which makes progress, rather than towards a wait that never
+                // ends, which does not.
+                if ((timeout >>> 0) !== INFINITE)
+                {
+                    const satisfied = waitAll
+                        ? objects.every(target=>ready(target, thread))
+                        : objects.some(target=>ready(target, thread));
+                    if (!satisfied)
+                    {
+                        if ((timeout >>> 0) !== 0)
+                        {
+                            host.advanceClock?.(timeout >>> 0);
+                        }
+                        return WAIT_TIMEOUT;
+                    }
+                }
+
+                if (waitAll)
+                {
+                    const result = kernel.waitAll(objects, thread);
+                    if (result === null)
+                    {
+                        return host.park();
+                    }
+                    // Waiting for all of them reports one answer for the set:
+                    // there is no index, because every one of them was taken.
+                    return result === KERNEL_ABANDONED ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
+                }
+
+                const any = kernel.waitAny(objects, thread);
+                if (any === null)
+                {
+                    return host.park();
+                }
+                // The index is added to the base, which is what makes
+                // WAIT_OBJECT_0 a base rather than a value.
+                const base = any.result === KERNEL_ABANDONED ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
+                return (base + any.index) >>> 0;
+            },
+        },
+
+        /** HANDLE GetCurrentThread(VOID) */
+        GetCurrentThread: {
+            argBytes: 0,
+            handler: ()=>CURRENT_THREAD,
+        },
+
+        /** DWORD SuspendThread(HANDLE hThread) */
+        SuspendThread: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    return WAIT_FAILED;
+                }
+                // The count before, which is what tells a caller whether it was
+                // the one that stopped the thread or merely the second to ask.
+                const previous = thread.suspendCount ?? 0;
+                thread.suspendCount = previous + 1;
+                if (previous === 0)
+                {
+                    kernel.block(thread, 'suspended');
+                }
+                return thread === host.currentThread() ? host.park(thread) : previous >>> 0;
+            },
+        },
+
+        /** DWORD ResumeThread(HANDLE hThread) */
+        ResumeThread: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    return WAIT_FAILED;
+                }
+                const previous = thread.suspendCount ?? 0;
+                if (previous === 0)
+                {
+                    return 0;
+                }
+                thread.suspendCount = previous - 1;
+                if (thread.suspendCount === 0)
+                {
+                    kernel.wake(thread);
+                }
+                return previous >>> 0;
+            },
+        },
+
+        /** BOOL TerminateThread(HANDLE hThread, DWORD dwExitCode) */
+        TerminateThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, code])=>{
+                const thread = threadOf(handle);
+                if (!thread)
+                {
+                    return 0;
+                }
+                kernel.exitThread(thread, code >>> 0);
+                // Killing yourself does not return. Killing somebody else does,
+                // and says it worked.
+                return thread === host.currentThread() ? host.park(thread) : 1;
+            },
+        },
+    };
+}

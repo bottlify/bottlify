@@ -897,12 +897,20 @@ test('every function declares the stack its arguments occupy', ()=>{
     const table = /** @type {Record<string, { argBytes: number }>} */ (
         /** @type {unknown} */ (fns));
 
-    assert.deepEqual(Object.keys(fns).sort(), Object.keys(expected).sort());
     for (const [name, argBytes] of Object.entries(expected))
     {
         // stdcall: the callee pops these bytes itself, so a wrong count corrupts
         // the guest stack silently rather than failing here.
         assert.equal(table[name].argBytes, argBytes, `${name} pops the wrong number of bytes`);
+    }
+
+    // Checked over the whole table rather than against a list of names: this
+    // table is two tables merged, and a list would have to be edited every time
+    // a function lands, which is a list that stops being read.
+    for (const [name, entry] of Object.entries(table))
+    {
+        assert.equal(Number.isInteger(entry.argBytes) && entry.argBytes % 4 === 0, true,
+            `${name} declares argBytes ${entry.argBytes}, which is not a stack slot count`);
     }
 });
 

@@ -16,6 +16,8 @@ const MEM_DECOMMIT = 0x4000;
 const MEM_RELEASE = 0x8000;
 const INVALID_SIZE = 0xffffffff;
 const PAGE_SIZE = 4096;
+const GMEM_MOVEABLE = 0x0002;
+const GMEM_ZEROINIT = 0x0040;
 
 const ARENA = { base: 0x1000, size: 0x4000 };
 
@@ -324,4 +326,57 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.HeapSize.argBytes, 12);
     assert.equal(fns.VirtualAlloc.argBytes, 16);
     assert.equal(fns.VirtualFree.argBytes, 12);
+});
+
+test('a global allocation is already the pointer a caller has to lock for', ()=>{
+    // The 16-bit inheritance: moveable memory was a handle you locked into a
+    // pointer. Win32 made them the same thing, but programs still write the
+    // lock/unlock pairs and those still have to balance.
+    const { fns } = setup();
+
+    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 64]);
+    assert.notEqual(handle, 0);
+    assert.equal(fns.GlobalLock.handler([handle]), handle, 'locking moves nothing');
+    assert.equal(fns.GlobalUnlock.handler([handle]), 1);
+    assert.equal(fns.GlobalSize.handler([handle]), 64);
+});
+
+test('a zero-initialised global allocation is actually zeroed', ()=>{
+    const { host, fns } = setup();
+
+    const handle = fns.GlobalAlloc.handler([GMEM_ZEROINIT, 32]);
+    assert.equal(all(host.bytes.subarray(handle, handle + 32), 0), true);
+
+    const dirty = fns.GlobalAlloc.handler([0, 32]);
+    assert.equal(all(host.bytes.subarray(dirty, dirty + 32), 0xaa), true,
+        'and one that did not ask for it is left as it was found');
+});
+
+test('freeing answers with nothing on success and the handle back on failure', ()=>{
+    // The opposite of almost everything else here, and a program tests it.
+    const { fns } = setup();
+
+    const handle = fns.GlobalAlloc.handler([0, 16]);
+    assert.equal(fns.GlobalFree.handler([handle]), 0);
+    assert.equal(fns.GlobalFree.handler([handle]), handle, 'freeing it twice fails');
+    assert.equal(fns.GlobalLock.handler([handle]), 0, 'and it can no longer be locked');
+});
+
+test('LocalFree releases the same blocks GlobalAlloc hands out', ()=>{
+    // Win32 keeps both spellings over one heap, and a program mixes them.
+    const { fns } = setup();
+
+    const handle = fns.GlobalAlloc.handler([0, 16]);
+    assert.equal(fns.LocalFree.handler([handle]), 0);
+    assert.equal(fns.LocalFree.handler([handle]), handle);
+});
+
+test('the global functions declare the stack they pop', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GlobalAlloc.argBytes, 8);
+    assert.equal(fns.GlobalFree.argBytes, 4);
+    assert.equal(fns.GlobalLock.argBytes, 4);
+    assert.equal(fns.GlobalUnlock.argBytes, 4);
+    assert.equal(fns.GlobalSize.argBytes, 4);
+    assert.equal(fns.LocalFree.argBytes, 4);
 });

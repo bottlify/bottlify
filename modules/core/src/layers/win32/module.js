@@ -11,6 +11,11 @@ import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
+import { createSyncFunctions } from './kernel32/sync.js';
+import { createLocaleFunctions } from './kernel32/locale.js';
+import { createEnvironmentFunctions } from './kernel32/environment.js';
+import { createSystemFunctions } from './kernel32/system.js';
+import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
@@ -150,6 +155,43 @@ export const win32Module = {
                     // it is what keeps a guest from believing no time passed.
                     sleep: milliseconds=>kernel.clock.advance(milliseconds),
                 }),
+                ...createSyncFunctions({
+                    kernel,
+                    readMemory,
+                    writeMemory,
+                    currentThread: ()=>kernel.currentThread(),
+                    park: (/** @type {any} */ thread)=>bridge.park(thread),
+                    advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
+                }),
+                ...createLocaleFunctions({ readMemory, writeMemory, setLastError: setError }),
+                ...createEnvironmentFunctions({
+                    readCString,
+                    writeMemory,
+                    setLastError: setError,
+                    allocate: bytes=>allocator.allocate(bytes),
+                    // What a program believes it was started with. Kept stable
+                    // because the pointer is handed out once and callers keep it.
+                    commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
+                    environment: ()=>config?.environment ?? {
+                        SystemRoot: 'C:\\WINDOWS',
+                        TEMP: 'C:\\WINDOWS\\TEMP',
+                        windir: 'C:\\WINDOWS',
+                    },
+                }),
+                ...createSystemFunctions({
+                    readMemory,
+                    writeMemory,
+                    setLastError: setError,
+                    systemTimeMs: ()=>kernel.clock.wallClock(),
+                    park: ()=>bridge.park(),
+                    resolveHandle: (/** @type {number} */ handle,
+                        /** @type {string | undefined} */ type)=>
+                        kernel.handles.resolve(handle, type),
+                    exit: code=>{
+                        exitCode = code >>> 0;
+                    },
+                }),
+                ...createExceptionFunctions({ readMemory }),
                 ...createModuleFunctions({
                     readCString,
                     writeMemory,

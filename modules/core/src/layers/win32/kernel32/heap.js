@@ -21,6 +21,9 @@
 
 /** Flags the guest passes; the rest of HeapAlloc's flags do not change behaviour here. */
 const HEAP_ZERO_MEMORY = 0x00000008;
+
+/** GlobalAlloc's spelling of the same request. */
+const GMEM_ZEROINIT = 0x00000040;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x00000010;
 
 const MEM_COMMIT = 0x00001000;
@@ -469,6 +472,83 @@ export function createHeapFunctions(host){
                 // except for the fault a program would have to be provoking on
                 // purpose to notice.
                 return (type & MEM_DECOMMIT) ? 1 : 0;
+            },
+        },
+
+        /**
+         * HGLOBAL GlobalAlloc(UINT uFlags, SIZE_T dwBytes)
+         *
+         * The 16-bit inheritance: a moveable allocation was a handle that had to
+         * be locked into a pointer, and a fixed one was already a pointer. Win32
+         * kept both spellings and made them the same thing, so the handle a
+         * program locks is the pointer it gets back, and GlobalLock is identity.
+         * Programs still write the lock/unlock pairs, and they still have to
+         * balance -- so they are answered, they are simply not moving anything.
+         */
+        GlobalAlloc: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([flags, bytes])=>{
+                const size = bytes >>> 0;
+                const address = allocator.allocate(size === 0 ? 1 : size);
+                if (address === 0)
+                {
+                    return 0;
+                }
+                if (flags & GMEM_ZEROINIT)
+                {
+                    zero(address, size);
+                }
+                return address;
+            },
+        },
+
+        /** HGLOBAL GlobalFree(HGLOBAL hMem) */
+        GlobalFree: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const address = handle >>> 0;
+                // Windows returns NULL on success and the handle back on failure,
+                // which is the opposite of almost everything else in this file.
+                return allocator.free(address) ? 0 : address;
+            },
+        },
+
+        /** LPVOID GlobalLock(HGLOBAL hMem) */
+        GlobalLock: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0) ? handle >>> 0 : 0,
+        },
+
+        /**
+         * BOOL GlobalUnlock(HGLOBAL hMem)
+         *
+         * Nothing is locked, so the count never reaches zero and this reports
+         * "still locked" -- which is what Windows reports for a fixed block, and
+         * what a caller of a fixed allocation therefore already handles.
+         */
+        GlobalUnlock: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0) ? 1 : 0,
+        },
+
+        /** SIZE_T GlobalSize(HGLOBAL hMem) */
+        GlobalSize: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0)?.size ?? 0,
+        },
+
+        /** HLOCAL LocalFree(HLOCAL hMem) */
+        LocalFree: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const address = handle >>> 0;
+                return allocator.free(address) ? 0 : address;
             },
         },
     };
