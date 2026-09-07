@@ -285,6 +285,33 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /**
+     * The one implementation both ChangeDisplaySettings entry points call.
+     *
+     * The one mode on offer is the one already in effect, so asking for it
+     * succeeds and asking for another fails. A build that reported success for
+     * a mode it did not switch to would have every later metric disagree with
+     * what the program believes.
+     *
+     * @param {number} devMode
+     */
+    const changeDisplaySettings = devMode=>{
+        if ((devMode >>> 0) === 0)
+        {
+            // A null mode means "go back to what the registry says", which here
+            // is what is already on the screen.
+            return DISP_CHANGE_SUCCESSFUL;
+        }
+        const wanted = host.readMemory(devMode + DEVMODEA.dmPelsWidth, 8);
+        const width = (wanted[0] | wanted[1] << 8 | wanted[2] << 16
+            | wanted[3] << 24) >>> 0;
+        const height = (wanted[4] | wanted[5] << 8 | wanted[6] << 16
+            | wanted[7] << 24) >>> 0;
+        return width === screen.width && height === screen.height
+            ? DISP_CHANGE_SUCCESSFUL
+            : DISP_CHANGE_BADMODE;
+    };
+
+    /**
      * The one implementation both AdjustWindowRect entry points call.
      *
      * Named rather than reached through `this` from inside the table below: an
@@ -496,20 +523,23 @@ export function createSystemFunctions({ host, live, windows, classes }){
         ChangeDisplaySettingsExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, devMode])=>{
-                if ((devMode >>> 0) === 0)
-                {
-                    return DISP_CHANGE_SUCCESSFUL;
-                }
-                const wanted = host.readMemory(devMode + DEVMODEA.dmPelsWidth, 8);
-                const width = (wanted[0] | wanted[1] << 8 | wanted[2] << 16
-                    | wanted[3] << 24) >>> 0;
-                const height = (wanted[4] | wanted[5] << 8 | wanted[6] << 16
-                    | wanted[7] << 24) >>> 0;
-                return width === screen.width && height === screen.height
-                    ? DISP_CHANGE_SUCCESSFUL
-                    : DISP_CHANGE_BADMODE;
-            },
+            handler: ([, devMode])=>changeDisplaySettings(devMode),
+        },
+
+        /**
+         * LONG ChangeDisplaySettingsA(DEVMODEA *lpDevMode, DWORD dwFlags)
+         *
+         * The older two-argument spelling of the same thing, and the one a
+         * program of this era actually calls when it goes full screen. Missing
+         * it is not a missing feature: an import nobody wrote gets a stub that
+         * cleans up no arguments, so the caller returns with its stack eight
+         * bytes adrift and dies later in a stack-cookie check, a long way from
+         * anything that would explain it.
+         */
+        ChangeDisplaySettingsA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([devMode])=>changeDisplaySettings(devMode),
         },
 
         /**

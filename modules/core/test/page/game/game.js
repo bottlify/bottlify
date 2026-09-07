@@ -27,7 +27,13 @@ const out = document.querySelector('#out');
 const canvas = /** @type {HTMLCanvasElement} */ (document.querySelector('#frame'));
 
 /** How much of each unbounded collection survives the trip back out. */
-const LIMITS = { events: 400, output: 400, calls: 200, fileTail: 4000 };
+const LIMITS = {
+    events: 400, output: 400, calls: 200,
+    // Whole files, not a tail. A game of this age writes its own crash report,
+    // and it names the exception, the address and the module -- all of which
+    // are at the top of the file, which is exactly what a tail throws away.
+    file: 1 << 20,
+};
 
 /** @type {any} */
 const namespace = { errors: [] };
@@ -377,7 +383,9 @@ async function run(request){
     result.files = app.session.export().map((/** @type {any} */ file)=>({
         path: file.path,
         bytes: file.bytes.length,
-        tail: new TextDecoder('latin1').decode(file.bytes).slice(-LIMITS.fileTail),
+        truncated: file.bytes.length > LIMITS.file,
+        text: new TextDecoder('latin1')
+            .decode(file.bytes.subarray(0, LIMITS.file)),
     }));
 
     result.failures = collected.failures;

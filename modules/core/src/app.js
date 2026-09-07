@@ -724,14 +724,26 @@ async function mountBundle({ options, cpu, filesystem, events }){
 export async function createApp(options){
     const events = createEvents();
 
-    // The address space above the program: a heap first, then the system
-    // modules one after another. Both sit well clear of an executable's own
-    // preferred base (0x400000) and inside the memory the emulator was given,
-    // which is what an address beyond it fails against.
-    const HEAP_BASE = 0x01000000;
-    const HEAP_SIZE = options.heapSize ?? 0x00800000;
+    // The address space above the program: the system modules first, then the
+    // libraries a game brought with it, and the heap above all of them with
+    // everything that is left.
+    //
+    // The heap is last because it is the part that has to be big. A game of
+    // this era loads its textures, its models and its sound into ordinary
+    // memory and expects hundreds of megabytes of it; a heap wedged between
+    // the image and the modules can only ever be a few, and what a program
+    // does when it runs out is not fail gracefully -- one real title writes a
+    // crash report saying there was not enough memory and stops, tens of
+    // millions of instructions after everything else had worked.
+    //
+    // The gap left for modules is generous for the same reason in reverse: a
+    // library a game ships can itself be twelve megabytes, and a library
+    // placed inside the heap would be overwritten by the first large
+    // allocation.
     const MODULE_BASE = 0x02000000;
     const MODULE_STRIDE = 0x00100000;
+    const HEAP_BASE = 0x0c000000;
+    const HEAP_SIZE = options.heapSize ?? 0x14000000;
 
     /**
      * The modules win32 implements, filled in below. win32 is built before they
@@ -772,6 +784,9 @@ export async function createApp(options){
     // once per scheduler turn to look again.
     /** @type {(() => void)[]} */
     let idlers = [];
+
+    /** What the program is told its display is, where it was told anything. */
+    const display = options.screen ?? null;
 
     const core = await assembleModules({
         kernel: {
@@ -816,6 +831,14 @@ export async function createApp(options){
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
             now: ()=>core.api('kernel').clock.virtualTime(),
+            // Where a keystroke goes. The same window win32 reports as
+            // foreground, because a person types into what they are looking at
+            // and only this side of the assembly knows which that is.
+            foreground: ()=>foreground,
+            // The cursor is confined to the display the program was told it
+            // has: a program that reads a position outside its own screen
+            // concludes the mouse left the window.
+            bounds: display && (()=>({ width: display.width, height: display.height })),
         },
         graphics: {
             // Where a COM interface goes when a program asks for one. Without
@@ -1267,7 +1290,7 @@ export async function createApp(options){
             }
 
             const image = parsePe(file);
-            if (nextLibraryBase + image.sizeOfImage > cpu.layout.memorySize)
+            if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
             {
                 absentLibraries.add(key);
                 events.emit('libraries-missing', { names: [name], reason: 'no room' });
@@ -1766,6 +1789,25 @@ export async function createApp(options){
                 wParam: message.wParam ?? 0,
                 lParam: message.lParam ?? 0,
             });
+        },
+
+        /**
+         * Input, which a program reads two ways at once: `attach` listens to
+         * the viewport the game draws into and turns what happens there into
+         * both a window message and a change of DirectInput state.
+         *
+         * `send` is the same road without a browser on it, for a test or a
+         * recorded session; `poll` reads what has no events of its own -- a
+         * gamepad -- and belongs on whatever already runs once a frame, since
+         * a scheduler turn is far too often to ask.
+         */
+        input: {
+            /** @param {any} canvas @param {{ pointerLock?: boolean }} [inputOptions] */
+            attach: (canvas, inputOptions)=>input.attach(canvas, inputOptions),
+            detach: ()=>input.detach(),
+            /** @param {any} event */
+            send: event=>input.send(event),
+            poll: ()=>input.poll(),
         },
 
         /**

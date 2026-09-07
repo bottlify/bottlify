@@ -360,6 +360,17 @@ export async function game(options){
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
 
+        // Everything the program wrote, kept as files rather than as excerpts.
+        // A game's own crash report is its account of what went wrong and beats
+        // any trace taken from outside it -- but only if all of it survives.
+        for (const file of result.files ?? [])
+        {
+            const name = `game-${stamp}-${file.path.replace(/[\\/:]+/g, '_')}`;
+            const saved = join(REPORTS_DIR, name);
+            writeFileSync(saved, file.text, 'latin1');
+            file.saved = saved;
+        }
+
         const text = describe(result, {
             title: manifest.title,
             version: manifest.version,
