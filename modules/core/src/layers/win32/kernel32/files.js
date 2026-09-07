@@ -723,6 +723,62 @@ export function createFileFunctions(host){
         return host.handles.open('find', { entries, index: 1 });
     });
 
+    /**
+     * CreateFile, in terms of a resolved path, so both spellings open the same
+     * file. Sharing, security and the template are accepted and ignored: there
+     * is one process, no security descriptor to check against, and no attribute
+     * of a template file we could copy. A request Windows would refuse for want
+     * of a share mode succeeds here.
+     */
+    const createFile = bothForms(28, ([name, access, , , disposition], text)=>{
+        const path = text.path(name);
+        const mode = openModes[disposition >>> 0];
+        if (!mode)
+        {
+            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+        const rights = access >>> 0;
+        const read = (rights & GENERIC_READ) !== 0 || (rights & GENERIC_ALL) !== 0;
+        const write = (rights & GENERIC_WRITE) !== 0 || (rights & GENERIC_ALL) !== 0;
+        if (disposition === TRUNCATE_EXISTING && !write)
+        {
+            return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
+        }
+
+        const existing = files.stat(path);
+        const exists = Boolean(existing && existing.exists);
+        if (exists && existing?.isDirectory)
+        {
+            // Opening a directory needs FILE_FLAG_BACKUP_SEMANTICS,
+            // which nothing here honours.
+            return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
+        }
+        if (exists && disposition === CREATE_NEW)
+        {
+            return fail(ERROR_FILE_EXISTS, INVALID_HANDLE_VALUE);
+        }
+        if (!exists && (disposition === OPEN_EXISTING
+                || disposition === TRUNCATE_EXISTING))
+        {
+            return fail(missing(path), INVALID_HANDLE_VALUE);
+        }
+
+        const node = files.open(path, { read, write, ...mode });
+        if (!node)
+        {
+            return fail(exists ? ERROR_ACCESS_DENIED : missing(path),
+                INVALID_HANDLE_VALUE);
+        }
+
+        // A program reads the error after a *successful* CreateFile:
+        // ERROR_ALREADY_EXISTS is how the two dispositions that accept
+        // either state say which one they found, and clearing it
+        // otherwise is what makes that test mean anything.
+        const opened = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
+        host.setLastError(exists && opened ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+        return host.handles.open('file', { path, node, read, write, position: 0 });
+    });
+
     const findNextFile = bothForms(8, ([handle, data], text)=>{
         const search = object(handle, 'find');
         if (!search)
@@ -740,67 +796,14 @@ export function createFileFunctions(host){
 
     return {
         /**
-         * HANDLE CreateFileA(LPCSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
-         *                    LPSECURITY_ATTRIBUTES, DWORD dwCreationDisposition,
-         *                    DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+         * HANDLE CreateFile(LPCSTR, DWORD dwDesiredAccess, DWORD dwShareMode,
+         *   LPSECURITY_ATTRIBUTES, DWORD dwCreationDisposition,
+         *   DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
          *
-         * Sharing, security and the template are accepted and ignored: there is
-         * one process, no security descriptor to check against, and no
-         * attribute of a template file we could copy. A request Windows would
-         * refuse for want of a share mode succeeds here.
+         * One body, both spellings.
          */
-        CreateFileA: {
-            argBytes: 28,
-            /** @param {number[]} args */
-            handler: ([name, access, , , disposition])=>{
-                const path = pathArgument(name);
-                const mode = openModes[disposition >>> 0];
-                if (!mode)
-                {
-                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
-                }
-                const rights = access >>> 0;
-                const read = (rights & GENERIC_READ) !== 0 || (rights & GENERIC_ALL) !== 0;
-                const write = (rights & GENERIC_WRITE) !== 0 || (rights & GENERIC_ALL) !== 0;
-                if (disposition === TRUNCATE_EXISTING && !write)
-                {
-                    return fail(ERROR_INVALID_PARAMETER, INVALID_HANDLE_VALUE);
-                }
-
-                const existing = files.stat(path);
-                const exists = Boolean(existing && existing.exists);
-                if (exists && existing?.isDirectory)
-                {
-                    // Opening a directory needs FILE_FLAG_BACKUP_SEMANTICS,
-                    // which nothing here honours.
-                    return fail(ERROR_ACCESS_DENIED, INVALID_HANDLE_VALUE);
-                }
-                if (exists && disposition === CREATE_NEW)
-                {
-                    return fail(ERROR_FILE_EXISTS, INVALID_HANDLE_VALUE);
-                }
-                if (!exists && (disposition === OPEN_EXISTING
-                    || disposition === TRUNCATE_EXISTING))
-                {
-                    return fail(missing(path), INVALID_HANDLE_VALUE);
-                }
-
-                const node = files.open(path, { read, write, ...mode });
-                if (!node)
-                {
-                    return fail(exists ? ERROR_ACCESS_DENIED : missing(path),
-                        INVALID_HANDLE_VALUE);
-                }
-
-                // A program reads the error after a *successful* CreateFile:
-                // ERROR_ALREADY_EXISTS is how the two dispositions that accept
-                // either state say which one they found, and clearing it
-                // otherwise is what makes that test mean anything.
-                const opened = disposition === CREATE_ALWAYS || disposition === OPEN_ALWAYS;
-                host.setLastError(exists && opened ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
-                return host.handles.open('file', { path, node, read, write, position: 0 });
-            },
-        },
+        CreateFileA: createFile.ansi,
+        CreateFileW: createFile.wide,
 
         /**
          * BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD lpNumberOfBytesRead,

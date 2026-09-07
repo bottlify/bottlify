@@ -178,31 +178,44 @@ test('a property is read back, and answers with what removing it took away', ()=
     assert.equal(fns.GetPropA.handler([hwnd, NAME_A]), 0);
 });
 
-test('a property dies with its window', ()=>{
+test('a property belongs to one window, and dies with it', ()=>{
     // Handles are recycled. A property that outlived its window would surface
     // on whatever window is handed that value next, as data its new owner never
-    // set and cannot account for.
+    // set and cannot account for -- so it must not be reachable from another
+    // window even while both are alive.
     const { memory, fns } = setup();
-    const hwnd = makeWindow(memory, fns);
+    const first = makeWindow(memory, fns);
+    const second = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, 0, 0, 0, 100, 100, 0, 0, HINSTANCE, 0]);
     memory.putString(NAME_A, 'MyData');
-    fns.SetPropA.handler([hwnd, NAME_A, 0x1234]);
 
-    fns.DestroyWindow.handler([hwnd]);
-    assert.equal(fns.GetPropA.handler([hwnd, NAME_A]), 0);
+    fns.SetPropA.handler([first, NAME_A, 0x1234]);
+    assert.equal(fns.GetPropA.handler([second, NAME_A]), 0,
+        'the other window never set this and cannot account for it');
+
+    fns.DestroyWindow.handler([first]);
+    assert.equal(fns.GetPropA.handler([first, NAME_A]), 0);
 });
 
 test('an atom and a string are different names for different properties', ()=>{
     // A pointer whose high word is zero is an atom, not a string -- the same
     // convention GetProcAddress uses, and the reason no string may live in the
     // first 64 KiB.
+    //
+    // The two are made to collide on purpose: the same text is planted at the
+    // low address used as an atom and at a real one, so a name read as a string
+    // when it is an atom gives both properties the same key and one overwrites
+    // the other.
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
-    memory.putString(NAME_B, 'Name');
+    const ATOM = 0xc001;
+    memory.putString(ATOM, 'Shared');
+    memory.putString(NAME_B, 'Shared');
 
-    fns.SetPropA.handler([hwnd, 0xc001, 0xaaaa]);
+    fns.SetPropA.handler([hwnd, ATOM, 0xaaaa]);
     fns.SetPropA.handler([hwnd, NAME_B, 0xbbbb]);
 
-    assert.equal(fns.GetPropA.handler([hwnd, 0xc001]), 0xaaaa);
+    assert.equal(fns.GetPropA.handler([hwnd, ATOM]), 0xaaaa);
     assert.equal(fns.GetPropA.handler([hwnd, NAME_B]), 0xbbbb);
 });
 
@@ -283,8 +296,11 @@ test('an accelerator table is six bytes to an entry, not eight', ()=>{
     // error.
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
+    // Six, written out rather than taken from the code under test: a fixture
+    // laid out with the same constant moves with it and can never disagree.
+    assert.equal(ACCEL_SIZE, 6);
     memory.bytes.set([FVIRTKEY, 0, 0x70, 0, 0x11, 0x11], ACCEL);
-    memory.bytes.set([FVIRTKEY, 0, 0x71, 0, 0x22, 0x22], ACCEL + ACCEL_SIZE);
+    memory.bytes.set([FVIRTKEY, 0, 0x71, 0, 0x22, 0x22], ACCEL + 6);
     const table = fns.CreateAcceleratorTableA.handler([ACCEL, 2]);
 
     memory.putU32s(MSG, [hwnd, WM_KEYDOWN, 0x71, 0]);

@@ -35,6 +35,7 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
  * @typedef {Object} EnvironmentHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(bytes: number) => number} allocate   Guest bytes that stay put.
  * @property {(code: number) => void} setLastError
  * @property {() => string} commandLine
@@ -47,6 +48,9 @@ const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 export function createEnvironmentFunctions(host){
     /** Handed out once and kept, because callers keep it. @type {number | null} */
     let commandLineAddress = null;
+    /** The same text in the other encoding, kept for the same reason. */
+    /** @type {number | null} */
+    let commandLineWideAddress = null;
     /** @type {Map<string, number>} */
     const blocks = new Map();
     const variables = new Map(Object.entries(host.environment()));
@@ -57,6 +61,20 @@ export function createEnvironmentFunctions(host){
         for (let at = 0; at < text.length; at++)
         {
             bytes[at] = text.charCodeAt(at) & 0xff;
+        }
+        const address = host.allocate(bytes.length);
+        host.writeMemory(address, bytes);
+        return address;
+    };
+
+    /** @param {string} text */
+    const writeWideString = text=>{
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            const code = text.charCodeAt(at);
+            bytes[at * 2] = code & 0xff;
+            bytes[at * 2 + 1] = code >> 8;
         }
         const address = host.allocate(bytes.length);
         host.writeMemory(address, bytes);
@@ -116,6 +134,28 @@ export function createEnvironmentFunctions(host){
         return path.length;
     };
 
+    /**
+     * The wide twin of reportPath. Counted in characters in both forms, so only
+     * the writing differs.
+     *
+     * @param {string} path @param {number} buffer @param {number} size
+     */
+    const reportWidePath = (path, buffer, size)=>{
+        if ((size >>> 0) < path.length + 1)
+        {
+            return path.length + 1;
+        }
+        const bytes = new Uint8Array((path.length + 1) * 2);
+        for (let at = 0; at < path.length; at++)
+        {
+            const code = path.charCodeAt(at);
+            bytes[at * 2] = code & 0xff;
+            bytes[at * 2 + 1] = code >> 8;
+        }
+        host.writeMemory(buffer >>> 0, bytes);
+        return path.length;
+    };
+
     return {
         /** LPSTR GetCommandLineA(VOID) */
         GetCommandLineA: {
@@ -123,6 +163,21 @@ export function createEnvironmentFunctions(host){
             handler: ()=>{
                 commandLineAddress ??= writeAnsi(host.commandLine());
                 return commandLineAddress;
+            },
+        },
+
+        /**
+         * LPWSTR GetCommandLineW(VOID)
+         *
+         * The same text as the ANSI form, in the other encoding, and cached
+         * separately -- a caller keeps whichever pointer it was given, so the
+         * two must each stay put once handed out.
+         */
+        GetCommandLineW: {
+            argBytes: 0,
+            handler: ()=>{
+                commandLineWideAddress ??= writeWideString(host.commandLine());
+                return commandLineWideAddress;
             },
         },
 
@@ -210,6 +265,37 @@ export function createEnvironmentFunctions(host){
                 host.writeMemory(info >>> 0, bytes);
                 return 0;
             },
+        },
+
+        /**
+         * BOOL SetEnvironmentVariableW(LPCWSTR lpName, LPCWSTR lpValue)
+         *
+         * The same store as the ANSI form. Two stores would let a program set a
+         * variable one way and fail to read it back the other.
+         */
+        SetEnvironmentVariableW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name, value])=>{
+                const wanted = host.readWideString(name >>> 0, 0x400);
+                if ((value >>> 0) === 0)
+                {
+                    variables.delete(wanted);
+                }
+                else
+                {
+                    variables.set(wanted, host.readWideString(value >>> 0, 0x2000));
+                }
+                blocks.clear();
+                return 1;
+            },
+        },
+
+        /** UINT GetSystemDirectoryW(LPWSTR lpBuffer, UINT uSize) */
+        GetSystemDirectoryW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>reportWidePath(SYSTEM_DIRECTORY, buffer, size),
         },
 
         /** UINT GetSystemDirectoryA(LPSTR lpBuffer, UINT uSize) */

@@ -141,11 +141,14 @@ function writer(memory, base){
         },
         /** Every item template begins on a four-byte boundary. */
         align(){
-            while ((at & 3) !== 0)
+            while (true)
             {
+                if ((at & 3) === 0)
+                {
+                    return this;
+                }
                 put(0);
             }
-            return this;
         },
     };
 }

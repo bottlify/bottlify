@@ -62,7 +62,7 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
- * @property {{ read: (node: any, offset: number, length: number) => Uint8Array,
+ * @property {{ read: (node: any, offset: number, length: number) => Uint8Array | null,
  *              write: (node: any, offset: number, bytes: Uint8Array) => number }} files
  */
 
@@ -194,6 +194,15 @@ export function createMappingFunctions(host){
                 if (mapping.node)
                 {
                     const bytes = host.files.read(mapping.node, offset, wanted);
+                    if (bytes === null)
+                    {
+                        // The file cannot be read without waiting, and this call
+                        // has nowhere to wait. Refused rather than mapped as
+                        // zeroes, which a caller would read as a file of nulls
+                        // and never question.
+                        host.release(address);
+                        return fail(ERROR_NOT_ENOUGH_MEMORY);
+                    }
                     if (bytes.length > 0)
                     {
                         host.writeMemory(address, bytes);

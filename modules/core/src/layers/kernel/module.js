@@ -211,6 +211,16 @@ export const kernelModule = {
                 resolve: (handle, type)=>handles.resolve(handle, type),
                 /** @param {number} handle */
                 close: handle=>handles.close(handle),
+                /**
+                 * What kind of object a handle names, without resolving it.
+                 *
+                 * Duplicating a handle has to make one of the same kind, and
+                 * asking for the object to find that out would fail for a kind
+                 * the caller did not name.
+                 *
+                 * @param {number} handle
+                 */
+                typeOf: handle=>handles.typeOf(handle),
             },
 
             clock,

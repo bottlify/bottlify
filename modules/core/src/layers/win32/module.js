@@ -16,6 +16,11 @@ import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createExceptionFunctions } from './kernel32/exceptions.js';
+import { createResourceFunctions } from './kernel32/resources.js';
+import { createDriveFunctions } from './kernel32/drives.js';
+import { createMappingFunctions } from './kernel32/mapping.js';
+import { createFileTimeFunctions } from './kernel32/filetime.js';
+import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
 import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
@@ -111,6 +116,20 @@ export const win32Module = {
             memory.writeBytes(address, bytes);
         const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readCString(address, maxLength);
+        const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
+            memory.readWideString(address, maxLength);
+
+        /** Everything a table needs from the kernel's handle table. */
+        const handles = {
+            /** @param {string} type @param {any} object */
+            open: (type, object)=>kernel.handles.open(type, object),
+            /** @param {number} handle @param {string} [type] */
+            resolve: (handle, type)=>kernel.handles.resolve(handle, type),
+            /** @param {number} handle */
+            close: handle=>kernel.handles.close(handle),
+            /** @param {number} handle */
+            typeOf: handle=>kernel.handles.typeOf(handle),
+        };
 
         const { setError } = createThreadState(()=>kernel.currentThread());
         // Absent unless a bundle is mounted, in which case a read of a block
@@ -163,8 +182,12 @@ export const win32Module = {
                 ...createThreadingFunctions({
                     kernel,
                     readMemory,
+                    writeMemory,
+                    setLastError: setError,
                     currentThread: ()=>kernel.currentThread(),
-                    park: thread=>bridge.park(thread),
+                    park: (/** @type {any} */ thread)=>bridge.park(thread),
+                    /** @param {number} handle */
+                    handleType: handle=>kernel.handles.typeOf(handle),
                 }),
                 ...createDebugFunctions({
                     readCString,
@@ -172,7 +195,12 @@ export const win32Module = {
                         memory.readWideString(address, maxLength),
                     say: text=>trace(text),
                 }),
-                ...createHeapFunctions({ arena, allocator, readMemory, writeMemory }),
+                ...createHeapFunctions({
+                    arena, allocator, readMemory, writeMemory,
+                    setLastError: setError,
+                    /** @param {number} address */
+                    regionAt: address=>memory.find(address),
+                }),
                 ...createProcessFunctions({
                     readMemory,
                     writeMemory,
@@ -194,9 +222,73 @@ export const win32Module = {
                     park: (/** @type {any} */ thread)=>bridge.park(thread),
                     advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
                 }),
-                ...createLocaleFunctions({ readMemory, writeMemory, setLastError: setError }),
+                ...createLocaleFunctions({
+                    readMemory, writeMemory,
+                    setLastError: setError,
+                    systemTimeMs: ()=>kernel.clock.wallClock(),
+                }),
+                ...createResourceFunctions({
+                    readCString,
+                    setLastError: setError,
+                    /** @param {number} instance @param {any} type @param {any} name */
+                    findResource: (instance, type, name)=>
+                        modules.findResource?.(instance, type, name) ?? null,
+                    /** @param {number} instance */
+                    moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                }),
+                ...createDriveFunctions({
+                    readCString, readWideString, readMemory, writeMemory,
+                    setLastError: setError,
+                    drives: ()=>filesystem.drives(),
+                }),
+                ...createMappingFunctions({
+                    readMemory,
+                    writeMemory,
+                    setLastError: setError,
+                    /** @param {number} bytes */
+                    allocate: bytes=>allocator.allocate(bytes),
+                    /** @param {number} address */
+                    release: address=>allocator.free(address),
+                    /** @param {number} ms */
+                    advanceClock: ms=>kernel.clock.advance(ms),
+                    handles,
+                    files: {
+                        /**
+                         * A mapping is read here, at map time, rather than on
+                         * every access -- so a block that is not resident yet
+                         * would be a promise, and this call cannot wait. The
+                         * mapping layer is told, and refuses rather than
+                         * handing the guest a promise it cannot use.
+                         *
+                         * @param {any} node @param {number} offset @param {number} length
+                         */
+                        read: (node, offset, length)=>{
+                            const bytes = volume.read(node, offset, length);
+                            return bytes instanceof Promise ? null : bytes;
+                        },
+                        /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
+                        write: (node, offset, bytes)=>volume.write(node, offset, bytes),
+                    },
+                }),
+                ...createFileTimeFunctions({
+                    readMemory,
+                    writeMemory,
+                    setLastError: setError,
+                    /** @param {number} handle @param {string} [type] */
+                    resolveHandle: (handle, type)=>kernel.handles.resolve(handle, type),
+                    /** @param {string} path */
+                    stat: path=>filesystem.stat(path),
+                }),
+                ...createConsoleIoFunctions({
+                    readMemory,
+                    writeMemory,
+                    setLastError: setError,
+                    write: (/** @type {number} */ handle, /** @type {string} */ text)=>
+                        sink(handle, text),
+                }),
                 ...createEnvironmentFunctions({
                     readCString,
+                    readWideString,
                     writeMemory,
                     setLastError: setError,
                     allocate: bytes=>allocator.allocate(bytes),
@@ -214,6 +306,8 @@ export const win32Module = {
                     writeMemory,
                     setLastError: setError,
                     systemTimeMs: ()=>kernel.clock.wallClock(),
+                    /** @param {number} bytes */
+                    allocate: bytes=>allocator.allocate(bytes),
                     park: ()=>bridge.park(),
                     resolveHandle: (/** @type {number} */ handle,
                         /** @type {string | undefined} */ type)=>
@@ -225,6 +319,7 @@ export const win32Module = {
                 ...createExceptionFunctions({ readMemory }),
                 ...createModuleFunctions({
                     readCString,
+                    readWideString,
                     writeMemory,
                     find: name=>modules.find(name),
                     byBase: base=>modules.byBase(base),
@@ -238,14 +333,11 @@ export const win32Module = {
                     readMemory,
                     writeMemory,
                     readCString,
+                    readWideString,
                     files: volume,
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
-                    handles: {
-                        open: (type, object)=>kernel.handles.open(type, object),
-                        resolve: (handle, type)=>kernel.handles.resolve(handle, type),
-                        close: handle=>kernel.handles.close(handle),
-                    },
+                    handles,
                 }),
             },
 
@@ -294,10 +386,7 @@ export const win32Module = {
                 readMemory,
                 writeMemory,
                 readCString,
-                handles: {
-                    open: (type, object)=>kernel.handles.open(type, object),
-                    close: handle=>kernel.handles.close(handle),
-                },
+                handles,
                 queue,
                 dispatch: (wndProc, message)=>bridge.callGuest({
                     entry: wndProc,

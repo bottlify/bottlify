@@ -23,6 +23,9 @@
 /** A module name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
 
+/** The path separator, named so it is not confused with an escape. */
+const SEPARATOR = String.fromCharCode(92);
+
 /** ERROR_MOD_NOT_FOUND, ERROR_PROC_NOT_FOUND. */
 const ERROR_MOD_NOT_FOUND = 126;
 const ERROR_PROC_NOT_FOUND = 127;
@@ -52,6 +55,7 @@ const isOrdinal = value=>(value >>> 16) === 0;
  *           A module by name; null asks for the running program's own image.
  * @property {(base: number) => ModuleRecord | null} byBase
  * @property {(code: number) => void} setLastError
+ * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => string} imagePath  The path the running program was loaded from.
  * @property {(name: string) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
@@ -193,6 +197,51 @@ export function createModuleFunctions(host){
                     return 0;
                 }
                 return address;
+            },
+        },
+
+        /** HMODULE LoadLibraryW(LPCWSTR lpLibFileName) */
+        LoadLibraryW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>load(host.readWideString(name >>> 0, MAX_NAME)),
+        },
+
+        /**
+         * DWORD GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+         *
+         * The same path as the ANSI form, written wide. A C runtime asks for its
+         * own module path early and compares it with what it finds elsewhere, so
+         * the two spellings must name one file.
+         */
+        GetModuleFileNameW: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, size])=>{
+                const module = handle === 0 ? host.find(null) : host.byBase(handle >>> 0);
+                if (!module)
+                {
+                    host.setLastError(ERROR_MOD_NOT_FOUND);
+                    return 0;
+                }
+                const system = `C:${SEPARATOR}Windows${SEPARATOR}System32${SEPARATOR}`
+                    + module.name;
+                const path = handle === 0 ? host.imagePath() : system;
+                const room = size >>> 0;
+                if (buffer === 0 || room === 0)
+                {
+                    return 0;
+                }
+                const kept = path.slice(0, room - 1);
+                const bytes = new Uint8Array((kept.length + 1) * 2);
+                for (let at = 0; at < kept.length; at++)
+                {
+                    const code = kept.charCodeAt(at);
+                    bytes[at * 2] = code & 0xff;
+                    bytes[at * 2 + 1] = code >> 8;
+                }
+                host.writeMemory(buffer >>> 0, bytes);
+                return kept.length;
             },
         },
 

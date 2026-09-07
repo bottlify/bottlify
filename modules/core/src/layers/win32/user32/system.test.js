@@ -326,3 +326,34 @@ test('capture is a pair: releasing clears what setting recorded', ()=>{
     assert.equal(fns.GetCapture.handler([]), 0,
         'a release that does not clear leaves a program believing it has the mouse');
 });
+
+test('EnableWindow answers with the state it found, not the one it set', ()=>{
+    // The return is true when the window was *already* disabled, which is the
+    // opposite way round from what the argument means -- and is the classic way
+    // to read this backwards.
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+
+    assert.equal(fns.EnableWindow.handler([hwnd, 0]), 0, 'it was enabled');
+    assert.equal(fns.EnableWindow.handler([hwnd, 0]), 1, 'and now it was disabled');
+    assert.equal(fns.EnableWindow.handler([hwnd, 1]), 1);
+    assert.equal(fns.EnableWindow.handler([hwnd, 1]), 0);
+    assert.equal(fns.EnableWindow.handler([0x9999, 1]), 0, 'and a window that is not one');
+});
+
+test('a class long is class data: every window of a class reads the same value', ()=>{
+    const { memory, fns } = setup();
+    const first = makeWindow(memory, fns);
+    const second = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, 0, 0, 0, 100, 100, 0, 0, HINSTANCE, 0]);
+
+    const GCL_HICON = -14;
+    assert.equal(fns.GetClassLongA.handler([first, GCL_HICON]), 0x11);
+    assert.equal(fns.SetClassLongA.handler([second, GCL_HICON, 0x77]), 0x11,
+        'and setting through one answers with what the class held');
+    assert.equal(fns.GetClassLongA.handler([first, GCL_HICON]), 0x77,
+        'which the other window now reads too');
+
+    fns.GetClassNameA.handler([first, OUT_BUFFER, 32]);
+    assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
+});

@@ -52,6 +52,50 @@ const CURRENT_PROCESS = 0xffffffff;
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
 
+/** Thread priorities. One value, because the scheduler has one. */
+const THREAD_PRIORITY_NORMAL = 0;
+const THREAD_PRIORITY_ERROR_RETURN = 0x7fffffff;
+
+/** FormatMessage's two flags that change what it does. */
+const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100;
+const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
+
+/** A string argument is at most this long; longer is a pointer that is not one. */
+const MAX_STRING = 4096;
+
+/** Codes this surface can also report. */
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+
+/**
+ * What FormatMessage says about a code, for the codes this build produces.
+ *
+ * A program shows or logs these, so they are the real Windows wordings rather
+ * than paraphrases: a person searching for the text of an error they saw should
+ * find the same results they would from a real machine.
+ */
+const SYSTEM_MESSAGES = Object.freeze({
+    0: 'The operation completed successfully.',
+    2: 'The system cannot find the file specified.',
+    3: 'The system cannot find the path specified.',
+    5: 'Access is denied.',
+    6: 'The handle is invalid.',
+    8: 'Not enough memory resources are available to process this command.',
+    18: 'There are no more files.',
+    50: 'The request is not supported.',
+    80: 'The file exists.',
+    87: 'The parameter is incorrect.',
+    111: 'The file name is too long.',
+    120: 'This function is not supported on this system.',
+    122: 'The data area passed to a system call is too small.',
+    126: 'The specified module could not be found.',
+    127: 'The specified procedure could not be found.',
+    145: 'The directory is not empty.',
+    183: 'Cannot create a file when that file already exists.',
+    259: 'No more data is available.',
+    267: 'The directory name is invalid.',
+});
+
 /**
  * @typedef {Object} SystemHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -61,12 +105,72 @@ const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(code: number) => void} exit
  * @property {() => any} park
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory, for the one caller that asks for it:
+ *           FormatMessage with FORMAT_MESSAGE_ALLOCATE_BUFFER. Without
+ *           it that one flag is refused and everything else works.
  */
 
 /**
  * @param {SystemHost} host
  */
 export function createSystemFunctions(host){
+    /**
+     * What SetErrorMode last recorded. Nothing reads it but the next call, and
+     * that is enough: the save-and-restore pattern a caller uses depends only on
+     * getting back what it put in.
+     */
+    let errorMode = 0;
+
+    /** @param {number} address @param {number} maxLength */
+    const readAnsi = (address, maxLength)=>{
+        let text = '';
+        for (let at = 0; at < maxLength; at++)
+        {
+            const byte = host.readMemory(address + at, 1)[0];
+            if (byte === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(byte);
+        }
+        return text;
+    };
+
+    /** @param {number} address @param {string} text  Written with a terminator. */
+    const writeAnsi = (address, text)=>{
+        const bytes = new Uint8Array(text.length + 1);
+        for (let at = 0; at < text.length; at++)
+        {
+            bytes[at] = text.charCodeAt(at) & 0xff;
+        }
+        host.writeMemory(address, bytes);
+    };
+
+    /**
+     * The buffer protocol these two share: nothing written and the length
+     * reported when there is no room, the length written otherwise -- in both
+     * cases without the terminator, which is what FormatMessage and
+     * GetProfileString both document.
+     *
+     * @param {number} buffer @param {number} size @param {string} text
+     */
+    const writeAnsiTo = (buffer, size, text)=>{
+        if (buffer === 0 || text.length + 1 > size)
+        {
+            return 0;
+        }
+        writeAnsi(buffer, text);
+        return text.length;
+    };
+
+    /** @param {number} address @param {number} value */
+    const writeDword = (address, value)=>{
+        host.writeMemory(address, new Uint8Array([
+            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+        ]));
+    };
+
     /** @param {number} address @param {number} length */
     const readable = (address, length)=>{
         try
@@ -377,6 +481,199 @@ export function createSystemFunctions(host){
                 }
                 host.exit(code >>> 0);
                 return host.park();
+            },
+        },
+
+        /**
+         * BOOL Beep(DWORD dwFreq, DWORD dwDuration)
+         *
+         * Succeeds and makes no sound. The PC speaker it drives is not something
+         * this build has, and blocking for the duration -- which is what a real
+         * Beep does -- would stall the guest for a tone nobody hears.
+         */
+        Beep: {
+            argBytes: 8,
+            handler: ()=>1,
+        },
+
+        /**
+         * UINT SetErrorMode(UINT uMode)
+         *
+         * Remembered and reported back, because the value is the return of the
+         * next call: a caller sets a mode, does its work, and puts the previous
+         * one back from what this returned. Nothing acts on it -- there are no
+         * system error dialogs here to suppress -- but the save-and-restore
+         * pattern has to work or a caller restores a mode it never had.
+         */
+        SetErrorMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mode])=>{
+                const previous = errorMode;
+                errorMode = mode >>> 0;
+                return previous;
+            },
+        },
+
+        /**
+         * int GetThreadPriority(HANDLE hThread)
+         *
+         * Every thread runs at normal priority. The scheduler here is round
+         * robin over equal quanta, so a priority would be a number a caller
+         * could set and read back while nothing about the run changed --
+         * reporting normal is the one answer that is true.
+         */
+        GetThreadPriority: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>object(handle, 'thread')
+                ? THREAD_PRIORITY_NORMAL
+                : THREAD_PRIORITY_ERROR_RETURN,
+        },
+
+        /**
+         * BOOL SetThreadPriority(HANDLE hThread, int nPriority)
+         *
+         * Accepted and not acted on, for the reason above. It succeeds rather
+         * than failing because a program that cannot lower a worker's priority
+         * often refuses to start the worker at all.
+         */
+        SetThreadPriority: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>object(handle, 'thread') ? 1 : 0,
+        },
+
+        /**
+         * BOOL CreateProcessW(...)
+         *
+         * The same refusal as CreateProcessA, from the same place, because the
+         * two differing about whether a process can be started would be a
+         * program that succeeds through one spelling and not the other.
+         */
+        CreateProcessW: {
+            argBytes: 40,
+            handler: ()=>{
+                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            },
+        },
+
+        /**
+         * DWORD GetProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
+         *   LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize)
+         *
+         * Reads win.ini, which does not exist, so every key is absent and the
+         * caller's own default is what comes back. That is the documented
+         * behaviour for a missing key and is exactly what a caller passing a
+         * default is prepared for -- inventing a value instead would override a
+         * choice the program already made.
+         */
+        GetProfileStringA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, , fallback, buffer, size])=>{
+                const text = fallback === 0 ? '' : readAnsi(fallback >>> 0, MAX_STRING);
+                return writeAnsiTo(buffer >>> 0, size >>> 0, text);
+            },
+        },
+
+        /**
+         * DWORD FormatMessageA(DWORD dwFlags, LPCVOID lpSource, DWORD dwMessageId,
+         *   DWORD dwLanguageId, LPSTR lpBuffer, DWORD nSize, va_list *Arguments)
+         *
+         * Only the system half. A program calls this to turn the code it just
+         * got from GetLastError into something to show or log, so the table
+         * below covers the codes this build actually produces; anything else
+         * gets a line naming the number, which is more use than an empty string
+         * and cannot be mistaken for a real message.
+         *
+         * FORMAT_MESSAGE_ALLOCATE_BUFFER changes what lpBuffer means: it is no
+         * longer the buffer but a pointer to where the address of one goes, and
+         * a caller that passes it will call LocalFree on what it finds there.
+         */
+        FormatMessageA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([flags, , messageId, , buffer, size])=>{
+                if ((flags >>> 0 & FORMAT_MESSAGE_FROM_SYSTEM) === 0)
+                {
+                    // FROM_STRING and FROM_HMODULE both need a source this can
+                    // not read: one is a format the caller supplies with inserts
+                    // to expand, the other a message table in a module.
+                    host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
+                    return 0;
+                }
+                const code = messageId >>> 0;
+                const text = /** @type {Record<number, string>} */ (SYSTEM_MESSAGES)[code]
+                    ?? `Error ${code}.`;
+
+                if ((flags >>> 0 & FORMAT_MESSAGE_ALLOCATE_BUFFER) !== 0)
+                {
+                    if (!host.allocate || buffer === 0)
+                    {
+                        host.setLastError(ERROR_INVALID_PARAMETER);
+                        return 0;
+                    }
+                    const address = host.allocate(text.length + 1);
+                    if (address === 0)
+                    {
+                        host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        return 0;
+                    }
+                    writeAnsi(address, text);
+                    writeDword(buffer >>> 0, address);
+                    return text.length;
+                }
+                return writeAnsiTo(buffer >>> 0, size >>> 0, text);
+            },
+        },
+
+        /**
+         * LPSTR lstrcatA(LPSTR lpString1, LPCSTR lpString2)
+         *
+         * Appends in place, and cannot check the destination has room -- the
+         * signature carries no size, which is why Windows deprecated it. What it
+         * does check is that both pointers are readable, because the usual
+         * failure is a null second argument and the usual result of not checking
+         * is a fault inside kernel32 rather than a NULL return the caller
+         * handles.
+         */
+        lstrcatA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                if (first === 0 || second === 0)
+                {
+                    return 0;
+                }
+                const head = readAnsi(first >>> 0, MAX_STRING);
+                const tail = readAnsi(second >>> 0, MAX_STRING);
+                writeAnsi((first >>> 0) + head.length, tail);
+                return first >>> 0;
+            },
+        },
+
+        /**
+         * LPSTR lstrcpynA(LPSTR lpString1, LPCSTR lpString2, int iMaxLength)
+         *
+         * Copies at most iMaxLength characters *including* the terminator, and
+         * always terminates -- which is the difference from strncpy and the
+         * whole reason a program reaches for it. Off by one here truncates every
+         * copy or overruns every buffer.
+         */
+        lstrcpynA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([destination, source, max])=>{
+                const room = max | 0;
+                if (destination === 0 || source === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                const text = readAnsi(source >>> 0, MAX_STRING).slice(0, room - 1);
+                writeAnsi(destination >>> 0, text);
+                return destination >>> 0;
             },
         },
     };

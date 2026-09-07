@@ -28,9 +28,6 @@
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 
-/** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
-const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
-
 /** What GetTimeZoneInformation answers: this machine is not in daylight time. */
 const TIME_ZONE_ID_UNKNOWN = 0;
 

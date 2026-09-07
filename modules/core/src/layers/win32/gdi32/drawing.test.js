@@ -389,8 +389,12 @@ test('a rectangle is in a region when it shares any pixel with it', ()=>{
 });
 
 test('palette entries are kept, and only as far as the palette goes', ()=>{
-    const { memory, fns, hdc } = setup();
-    const palette = fns.CreateHalftonePalette.handler([hdc]);
+    const { memory, fns } = setup();
+    // A palette created from a LOGPALETTE, because that is the one with entries
+    // in it: a halftone palette here is empty, and a palette with no entries has
+    // nowhere for entries to be set.
+    memory.putU32s(STRUCT, [3 << 16 | 0x300, 0, 0, 0]);
+    const palette = fns.CreatePalette.handler([STRUCT]);
     assert.notEqual(palette, 0);
 
     memory.putU32s(STRUCT, [0x11111111, 0x22222222, 0x33333333]);
@@ -443,11 +447,12 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
     const drawing = fakeDrawing();
     /** @type {any[]} */
     const seen = [];
-    drawing.drawing.rectangle = (/** @type {any[]} */ ...args)=>{
+    const service = /** @type {any} */ (drawing.drawing);
+    service.rectangle = (/** @type {any[]} */ ...args)=>{
         seen.push(['rectangle', ...args]);
         return true;
     };
-    drawing.drawing.extTextOutA = (/** @type {any[]} */ ...args)=>{
+    service.extTextOutA = (/** @type {any[]} */ ...args)=>{
         seen.push(['extTextOutA', ...args]);
         return true;
     };

@@ -41,14 +41,15 @@ const MAX_PATH = 260;
  * The geometry claimed, and the reason for these particular numbers.
  *
  * 512-byte sectors and 8 to a cluster is an ordinary FAT32 volume of the era.
- * The cluster count is chosen so that clusters × sectors × bytes stays under
- * 2^32: a caller that multiplies them -- which is the documented way to get a
- * byte count out of GetDiskFreeSpace -- must not wrap.
+ * The cluster count is chosen so that clusters × sectors × bytes stays *below*
+ * 2^32 -- a two-gigabyte volume, half of it free. That is the documented way to
+ * get a byte count out of GetDiskFreeSpace, and a product landing exactly on
+ * 2^32 wraps to zero, which reads as a full disk rather than an empty one.
  */
 const BYTES_PER_SECTOR = 512;
 const SECTORS_PER_CLUSTER = 8;
-const TOTAL_CLUSTERS = 0x0010_0000;
-const FREE_CLUSTERS = 0x0008_0000;
+const TOTAL_CLUSTERS = 0x0008_0000;
+const FREE_CLUSTERS = 0x0004_0000;
 
 /** What the volume calls itself. */
 const VOLUME_LABEL = 'Bottlify';

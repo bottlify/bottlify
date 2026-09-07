@@ -39,6 +39,20 @@ function fakeHost(overrides = {}){
             }
             return text;
         },
+        /** @param {number} address @param {number} maxLength */
+        readWideString(address, maxLength){
+            let text = '';
+            for (let at = 0; at < maxLength; at++)
+            {
+                const code = bytes[address + at * 2] | bytes[address + at * 2 + 1] << 8;
+                if (code === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(code);
+            }
+            return text;
+        },
         /** @param {number} size */
         allocate(size){
             const address = next;

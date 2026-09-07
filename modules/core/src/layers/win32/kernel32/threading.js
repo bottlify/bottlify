@@ -23,12 +23,26 @@ const INFINITE = 0xffffffff;
 /** What the guest gets back when a handle is not what it claims to be. */
 const WAIT_FAILED = 0xffffffff;
 
+/** Codes this surface reports. */
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_NOT_SUPPORTED = 50;
+
+/** DuplicateHandle's one option that changes what it does. */
+const DUPLICATE_CLOSE_SOURCE = 0x00000001;
+
 /**
  * @typedef {Object} ThreadingHost
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(code: number) => void} setLastError
+ * @property {(handle: number) => string | null} [handleType]
+ *           What kind of object a handle names. The kernel's handle table
+ *           knows; it is not forwarded through the kernel API yet, and
+ *           without it DuplicateHandle refuses rather than guessing.
  */
 
 /**
@@ -109,6 +123,127 @@ export function createThreadingFunctions(host){
                     throw new Error('WaitForSingleObject: only INFINITE and 0 are implemented');
                 }
                 return settle(kernel.wait(target, host.currentThread()));
+            },
+        },
+
+
+        /**
+         * HANDLE CreateSemaphoreA(LPSECURITY_ATTRIBUTES, LONG lInitialCount,
+         *                         LONG lMaximumCount, LPCSTR lpName)
+         *
+         * The counts are signed and both are checked, because the failure they
+         * guard against is silent: a maximum of zero or an initial count above
+         * it makes every later wait behave in a way the caller cannot explain.
+         */
+        CreateSemaphoreA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, initial, maximum])=>{
+                const start = initial | 0;
+                const limit = maximum | 0;
+                if (limit <= 0 || start < 0 || start > limit)
+                {
+                    return 0;
+                }
+                const semaphore = kernel.createSemaphore({
+                    initial: start, maximum: limit, name: 'semaphore',
+                });
+                return kernel.handles.open('semaphore', semaphore);
+            },
+        },
+
+        /**
+         * BOOL ReleaseSemaphore(HANDLE, LONG lReleaseCount, LPLONG lpPreviousCount)
+         *
+         * Releasing past the maximum fails and releases nothing -- it does not
+         * clamp. A caller uses exactly that to detect its own double release,
+         * and the previous count is written only on success, which is what makes
+         * the check meaningful.
+         */
+        ReleaseSemaphore: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, count, previous])=>{
+                const semaphore = object(handle >>> 0, 'semaphore');
+                if (!semaphore || (count | 0) <= 0)
+                {
+                    return 0;
+                }
+                try
+                {
+                    const before = kernel.releaseSemaphore(semaphore, count | 0);
+                    if (previous !== 0)
+                    {
+                        host.writeMemory(previous >>> 0, new Uint8Array([
+                            before & 0xff, before >>> 8 & 0xff,
+                            before >>> 16 & 0xff, before >>> 24 & 0xff,
+                        ]));
+                    }
+                    return 1;
+                }
+                catch (e){
+                    void e;
+                    return 0;
+                }
+            },
+        },
+
+        /**
+         * HANDLE OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
+         *
+         * Always fails with "no such thing", and that is the useful answer. A
+         * named mutex is how a program discovers a second copy of itself already
+         * running; there is exactly one process here, so nothing it could open
+         * exists, and reporting one would make it exit believing it is the
+         * second copy.
+         */
+        OpenMutexA: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError(ERROR_FILE_NOT_FOUND);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle,
+         *   HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle,
+         *   DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)
+         *
+         * A second handle onto the same object, which is what a duplicate is --
+         * not a copy of the object. Closing either leaves the other usable,
+         * which is the property a caller duplicates a handle to get.
+         *
+         * Both process handles are ignored: there is one process, and a
+         * duplicate into another one has nowhere to go.
+         */
+        DuplicateHandle: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([, source, , target, , , options])=>{
+                const held = object(source >>> 0);
+                const kind = host.handleType ? host.handleType(source >>> 0) : null;
+                if (!held || target === 0 || kind === null)
+                {
+                    // Without the source handle's type there is nothing to
+                    // reopen the object under, and a duplicate filed under the
+                    // wrong type fails every later typed lookup -- a slower,
+                    // stranger failure than refusing here.
+                    host.setLastError(kind === null && held
+                        ? ERROR_NOT_SUPPORTED
+                        : ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const duplicate = kernel.handles.open(kind, held);
+                host.writeMemory(target >>> 0, new Uint8Array([
+                    duplicate & 0xff, duplicate >>> 8 & 0xff,
+                    duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
+                ]));
+                if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
+                {
+                    kernel.handles.close(source >>> 0);
+                }
+                return 1;
             },
         },
 

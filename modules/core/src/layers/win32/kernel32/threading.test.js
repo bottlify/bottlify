@@ -100,6 +100,11 @@ function setup(){
     const current = { name: 'caller' };
     /** @type {any[]} */
     const parked = [];
+    /** What a handler wrote, by address, so a test can read an out-parameter. */
+    /** @type {Map<number, Uint8Array>} */
+    const written = new Map();
+    /** @type {number[]} */
+    const errors = [];
     const fns = createThreadingFunctions({
         kernel,
         readMemory: ()=>new Uint8Array(0),
@@ -108,8 +113,16 @@ function setup(){
             parked.push(thread ?? current);
             return PARKED;
         },
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>{
+            written.set(address, bytes);
+        },
+        /** @param {number} code */
+        setLastError: code=>{
+            errors.push(code);
+        },
     });
-    return { kernel, fns, parked, current };
+    return { kernel, fns, parked, current, written, errors };
 }
 
 test('CreateThread makes a thread and does not switch to it', ()=>{

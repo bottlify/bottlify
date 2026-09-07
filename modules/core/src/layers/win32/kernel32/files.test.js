@@ -823,3 +823,80 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.FindNextFileA.argBytes, 8);
     assert.equal(fns.FindClose.argBytes, 4);
 });
+
+/**
+ * Plants UTF-16 text where a wide entry point will read it.
+ *
+ * @param {any} memory @param {number} at @param {string} text
+ */
+function putWide(memory, at, text){
+    for (let index = 0; index < text.length; index++)
+    {
+        const code = text.charCodeAt(index);
+        memory.bytes[at + index * 2] = code & 0xff;
+        memory.bytes[at + index * 2 + 1] = code >> 8;
+    }
+    memory.bytes[at + text.length * 2] = 0;
+    memory.bytes[at + text.length * 2 + 1] = 0;
+    return at;
+}
+
+test('a file made one spelling is found by the other', ()=>{
+    // The property the shared bodies exist for. Two implementations of one
+    // operation drift, and the drift shows up as a file that opens one way and
+    // not the other -- which is invisible until a program mixes the two, and
+    // every C runtime does.
+    const { memory, fns, at } = setup();
+
+    const handle = fns.CreateFileW.handler(
+        [putWide(memory, NAME, 'C:\\GAME\\WIDE.DAT'), GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0]);
+    assert.notEqual(handle, INVALID_HANDLE_VALUE);
+    fns.CloseHandle.handler([handle]);
+
+    assert.notEqual(fns.GetFileAttributesA.handler([at(NAME, 'C:\\GAME\\WIDE.DAT')]),
+        0xffffffff, 'the ANSI form sees what the wide form made');
+    assert.equal(fns.DeleteFileW.handler([putWide(memory, NAME, 'C:\\GAME\\WIDE.DAT')]), 1);
+    assert.equal(fns.GetFileAttributesA.handler([at(NAME, 'C:\\GAME\\WIDE.DAT')]), 0xffffffff);
+});
+
+test('a wide directory listing writes twice as wide a name, at the same offset', ()=>{
+    // WIN32_FIND_DATAW shares every offset up to cFileName with the ANSI form
+    // and then does not, which is exactly why the tail is easy to get wrong.
+    const { memory, files, fns } = setup();
+    files.put('C:\\GAME\\ONE.DAT', 'x');
+    // Marked past the end of the ANSI structure, so a short write shows: every
+    // offset up to cFileName is shared between the two forms, and the tail is
+    // the only place the difference is visible at all.
+    memory.bytes.fill(0xee, 0x600 + 320, 0x600 + 600);
+
+    const search = fns.FindFirstFileW.handler(
+        [putWide(memory, NAME, 'C:\\GAME\\*'), 0x600]);
+    assert.notEqual(search, INVALID_HANDLE_VALUE);
+
+    // cFileName is at 44 in both forms; here it is UTF-16.
+    const name = [];
+    for (let at2 = 0x600 + 44; memory.bytes[at2] !== 0; at2 += 2)
+    {
+        name.push(String.fromCharCode(memory.bytes[at2] | memory.bytes[at2 + 1] << 8));
+    }
+    assert.equal(name.join(''), 'ONE.DAT');
+    assert.equal(memory.bytes[0x600 + 591], 0, 'the last byte of the wide form is written');
+    assert.equal(memory.bytes[0x600 + 592], 0xee, 'and nothing beyond it is');
+    fns.FindClose.handler([search]);
+});
+
+test('GetFullPathNameW keeps a trailing separator the caller wrote', ()=>{
+    // Resolution strips it; a caller that wrote one meant a directory and uses
+    // the NULL file part to tell the two apart.
+    const { memory, fns } = setup();
+    const written = fns.GetFullPathNameW.handler(
+        [putWide(memory, NAME, 'C:\\GAME\\DATA\\'), 64, 0x600, 0x900]);
+
+    const text = [];
+    for (let at2 = 0x600; memory.bytes[at2] !== 0 || memory.bytes[at2 + 1] !== 0; at2 += 2)
+    {
+        text.push(String.fromCharCode(memory.bytes[at2] | memory.bytes[at2 + 1] << 8));
+    }
+    assert.equal(text.join(''), 'C:\\GAME\\DATA\\');
+    assert.equal(written, 13);
+});
