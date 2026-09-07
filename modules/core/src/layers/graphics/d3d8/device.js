@@ -1,6 +1,6 @@
 /*
  * Copyright © 2026 Bottlify Project
- * Licensed under BSD-2-Clause License
+ * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
 
@@ -32,13 +32,22 @@
  *
  * The viewport is the one thing here that is not a version difference at all,
  * and it is spelled out in `SetViewport`.
+ *
+ * Drawing is optional. A device built with a backend hands every clear and
+ * draw to `render.js`; one built without keeps modelling what the program can
+ * observe, so that a headless build behaves and a pure-state test needs no GPU
+ * double. Either way this file decides whether a call is legal, and only a
+ * legal one reaches the renderer.
  */
 
 import {
-    D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTFOUND,
-    D3DFMT, D3DLIGHTTYPE, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
+    D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
+    D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL, D3DRTYPE, D3DTS, D3DUSAGE, D3D_OK,
+    FORMAT_INFO, isShaderHandle,
 } from './constants.js';
 import { createDefaultRenderStates } from './renderstates.js';
+import { createDefaultStageStates } from './stagestates.js';
+import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
 import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
     reportedBackBufferCount, targetPairResult, validatePresentParameters,
@@ -67,6 +76,51 @@ export const DEFAULT_CAPS = Object.freeze({
 
 /**
  * @typedef {import('../d3d9/device.js').Light} Light
+ */
+
+/**
+ * @typedef {Object} Material
+ * @property {{ r: number, g: number, b: number, a: number }} Diffuse
+ * @property {{ r: number, g: number, b: number, a: number }} Ambient
+ * @property {{ r: number, g: number, b: number, a: number }} Specular
+ * @property {{ r: number, g: number, b: number, a: number }} Emissive
+ * @property {number} Power
+ */
+
+/** @returns {Material} the material a fresh device has: everything zero */
+function defaultMaterial(){
+    const black = ()=>({ r: 0, g: 0, b: 0, a: 0 });
+    return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
+}
+
+/** @param {Material} material @returns {Material} */
+const copyMaterial = material=>({
+    Diffuse: { ...material.Diffuse },
+    Ambient: { ...material.Ambient },
+    Specular: { ...material.Specular },
+    Emissive: { ...material.Emissive },
+    Power: material.Power,
+});
+
+/**
+ * Whether a number names a transform: the view, the projection, one of the
+ * eight texture matrices, or one of the 256 world matrices.
+ *
+ * @param {number} type
+ */
+function isTransformType(type){
+    return type === D3DTS.VIEW || type === D3DTS.PROJECTION
+        || (type >= D3DTS.TEXTURE0 && type <= D3DTS.TEXTURE7)
+        || (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST);
+}
+
+/**
+ * @typedef {Object} DeviceServices
+ *     What a device that draws needs from outside itself. Absent, the device
+ *     is the pure state model.
+ * @property {any} [backend]         The rendering backend.
+ * @property {(address: number, length: number)=>Uint8Array} [readMemory]
+ * @property {(descriptor: any)=>any} [createSampler]
  */
 
 /**
@@ -141,11 +195,18 @@ function reportPresentParameters(parameters){
  * reason: device creation can fail on its parameters, and the caller has to be
  * able to see that failure without already holding a device.
  *
- * @param {Partial<DeviceCaps>} [caps]
+ * @param {Partial<DeviceCaps> & DeviceServices} [options]
  */
-export function createDirect3D8(caps = {}){
+export function createDirect3D8(options = {}){
+    const { backend, readMemory, createSampler, ...caps } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
+    /** @type {DeviceServices} */
+    const services = { backend, readMemory, createSampler };
+    if (backend && !readMemory)
+    {
+        throw new Error('graphics/d3d8: a device that draws needs readMemory as well as a backend');
+    }
     return {
         caps: resolved,
 
@@ -163,7 +224,7 @@ export function createDirect3D8(caps = {}){
                 return hr;
             }
             out.device = createDeviceObject(
-                normalisePresentParameters(parameters), resolved, behaviourFlags);
+                normalisePresentParameters(parameters), resolved, behaviourFlags, services);
             reportPresentParameters(parameters);
             return D3D_OK;
         },
@@ -174,8 +235,9 @@ export function createDirect3D8(caps = {}){
  * @param {import('./validity.js').PresentParameters} parameters
  * @param {DeviceCaps} caps
  * @param {number} behaviourFlags
+ * @param {DeviceServices} services
  */
-function createDeviceObject(parameters, caps, behaviourFlags){
+function createDeviceObject(parameters, caps, behaviourFlags, services){
     let presentParameters = parameters;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
@@ -189,6 +251,13 @@ function createDeviceObject(parameters, caps, behaviourFlags){
 
     /** @type {Map<number, { light: Light, enabled: boolean }>} */
     let lights = new Map();
+
+    /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
+    let stageStates = new Map();
+    /** @type {Map<number, Float32Array>} D3DTS -> the matrix; absent means identity */
+    let transforms = new Map();
+    /** @type {Material} */
+    let material = defaultMaterial();
 
     /** @type {Map<number, { buffer: any, stride: number }>} */
     const streams = new Map();
@@ -213,6 +282,15 @@ function createDeviceObject(parameters, caps, behaviourFlags){
     let boundPixelShader = 0;
 
     const count = createReferenceCount();
+
+    const renderer = services.backend
+        ? createRenderer({
+            backend: services.backend,
+            readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
+                services.readMemory),
+            createSampler: services.createSampler ?? null,
+        })
+        : null;
 
     /**
      * What stops a Reset. A default-pool resource the program still holds, or
@@ -346,20 +424,77 @@ function createDeviceObject(parameters, caps, behaviourFlags){
         return record;
     };
 
+    /** @param {number} stage */
+    const stageStatesFor = stage=>{
+        const existing = stageStates.get(stage);
+        if (existing)
+        {
+            return existing;
+        }
+        const made = createDefaultStageStates(stage);
+        stageStates.set(stage, made);
+        return made;
+    };
+
     /**
+     * A vertex or index buffer. Its storage is guest memory at `base`, which
+     * is what a lock hands back; the renderer reads the locked range from
+     * there on unlock, under the flags the lock was taken with.
+     *
      * @param {{ length: number, usage: number, pool: number, type: number, fvf?: number,
-     *           format?: number }} options
+     *           format?: number }} spec
      */
-    const createBuffer = options=>{
-        const bufferCount = explicitCount(options.pool);
-        return {
-            ...options,
+    const createBuffer = spec=>{
+        const bufferCount = explicitCount(spec.pool);
+        const base = allocate(spec.length);
+        let locked = false;
+        const buffer = {
+            ...spec,
+            base,
             get refCount(){
                 return bufferCount.value;
             },
             addRef: ()=>bufferCount.addRef(),
             release: ()=>bufferCount.release(),
+
+            /**
+             * A size of zero means "to the end", which is the only way a
+             * program asks for the whole buffer.
+             *
+             * @param {number} offset
+             * @param {number} size
+             * @param {{ pBits?: number }} out
+             * @param {number} [flags]
+             */
+            Lock(offset, size, out, flags = 0){
+                const length = size === 0 ? spec.length - offset : size;
+                if (locked || offset < 0 || !(length > 0) || offset + length > spec.length)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                locked = true;
+                out.pBits = base + offset;
+                if (renderer)
+                {
+                    renderer.lockBuffer(buffer, offset, length, flags);
+                }
+                return D3D_OK;
+            },
+
+            Unlock(){
+                if (!locked)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                locked = false;
+                if (renderer)
+                {
+                    renderer.unlockBuffer(buffer);
+                }
+                return D3D_OK;
+            },
         };
+        return buffer;
     };
 
     /**
@@ -380,6 +515,80 @@ function createDeviceObject(parameters, caps, behaviourFlags){
         const out = {};
         surface.GetDesc(out);
         return out.desc;
+    };
+
+    /**
+     * What the renderer reads at the moment of a draw. Live views, so that a
+     * state set after this object was made is the state a later draw sees.
+     *
+     * @type {import('./render.js').RenderModel}
+     */
+    const model = {
+        get renderStates(){
+            return renderStates;
+        },
+        stageStates: stageStatesFor,
+        textures,
+        get stream(){
+            return stream(0);
+        },
+        get indices(){
+            return indices;
+        },
+        get baseVertexIndex(){
+            return baseVertexIndex;
+        },
+        get viewport(){
+            return viewport;
+        },
+        get renderTarget(){
+            return renderTarget;
+        },
+        get depthStencil(){
+            return depthStencil;
+        },
+        get transforms(){
+            return transforms;
+        },
+        get backBuffer(){
+            return backBuffers[0];
+        },
+        get stageProcessing(){
+            return device.stageProcessing;
+        },
+    };
+
+    /**
+     * What every draw is refused for before its own arguments are looked at.
+     *
+     * @param {number} type
+     * @param {number} primitiveCount
+     * @returns {number} D3D_OK, or the refusal
+     */
+    const drawPreconditions = (type, primitiveCount)=>{
+        if (!inScene || vertexCountOf(type, primitiveCount) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        const processing = device.stageProcessing;
+        // A vertex format with no position is not a format, and there is
+        // nothing to draw without either that or a shader.
+        if (processing.vertexShader === 0 && (processing.fvf & 0xe) === 0)
+        {
+            return D3DERR_INVALIDCALL;
+        }
+        return D3D_OK;
+    };
+
+    /**
+     * The user-pointer draws leave stream zero and the index binding empty:
+     * the data they drew came from neither, and a program that draws from a
+     * buffer afterwards has to bind it again.
+     */
+    const unbindStreamZero = ()=>{
+        stream(0).buffer = null;
+        indices = null;
+        baseVertexIndex = 0;
     };
 
     const device = {
@@ -417,7 +626,31 @@ function createDeviceObject(parameters, caps, behaviourFlags){
          * never learns that the device came back.
          */
         Present(){
-            return deviceState === DEVICE_STATE.OK ? D3D_OK : D3DERR_DEVICELOST;
+            if (deviceState !== DEVICE_STATE.OK)
+            {
+                return D3DERR_DEVICELOST;
+            }
+            if (renderer)
+            {
+                renderer.present(model);
+            }
+            return D3D_OK;
+        },
+
+        /**
+         * Settled when every frame presented so far has reached the backend.
+         * Present answers the program before that happens, so this is how a
+         * test -- or a caller that can park the program -- waits for pixels.
+         *
+         * @returns {Promise<void>}
+         */
+        idle(){
+            return renderer ? renderer.idle() : Promise.resolve();
+        },
+
+        /** What the renderer has done and declined to do. Null without a backend. */
+        diagnostics(){
+            return renderer ? renderer.diagnostics() : null;
         },
 
         BeginScene(){
@@ -487,8 +720,225 @@ function createDeviceObject(parameters, caps, behaviourFlags){
             inScene = false;
             deviceState = DEVICE_STATE.OK;
             renderStates = defaultStates();
+            stageStates = new Map();
+            transforms = new Map();
+            material = defaultMaterial();
             lights = new Map();
             buildImplicitResources();
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} stage
+         * @param {number} type   D3DTSS
+         * @param {number} value
+         */
+        SetTextureStageState(stage, type, value){
+            if (stage < 0 || stage >= STAGE_COUNT)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const states = stageStatesFor(stage);
+            if (!states.has(type))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            states.set(type, value >>> 0);
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} stage
+         * @param {number} type   D3DTSS
+         * @param {{ value?: number }} out
+         */
+        GetTextureStageState(stage, type, out){
+            if (stage < 0 || stage >= STAGE_COUNT)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const states = stageStatesFor(stage);
+            if (!states.has(type))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.value = states.get(type);
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} type      D3DTS
+         * @param {ArrayLike<number>} matrix  Sixteen floats, row-major as D3DMATRIX lays them.
+         */
+        SetTransform(type, matrix){
+            if (!isTransformType(type) || !matrix || matrix.length !== 16)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            transforms.set(type, Float32Array.from(matrix));
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} type
+         * @param {{ matrix?: Float32Array }} out
+         *        The identity for a transform never written, which is what a
+         *        fresh device holds.
+         */
+        GetTransform(type, out){
+            if (!isTransformType(type))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.matrix = Float32Array.from(transforms.get(type) ?? IDENTITY);
+            return D3D_OK;
+        },
+
+        /** @param {Material} value */
+        SetMaterial(value){
+            if (!value)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            material = copyMaterial(value);
+            return D3D_OK;
+        },
+
+        /** @param {{ material?: Material }} out */
+        GetMaterial(out){
+            out.material = copyMaterial(material);
+            return D3D_OK;
+        },
+
+        /**
+         * Clears the viewport, or the given rectangles within it: a viewport
+         * smaller than the target leaves everything outside it alone.
+         *
+         * @param {number} rectCount
+         * @param {readonly { x1: number, y1: number, x2: number, y2: number }[] | null} rects
+         * @param {number} flags D3DCLEAR
+         * @param {number} color D3DCOLOR
+         * @param {number} z
+         * @param {number} stencil
+         */
+        Clear(rectCount, rects, flags, color, z, stencil){
+            if ((flags & (D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) === 0
+                || (rectCount > 0 && !rects))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if ((flags & (D3DCLEAR.ZBUFFER | D3DCLEAR.STENCIL)) !== 0)
+            {
+                if (!depthStencil)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+                if ((flags & D3DCLEAR.STENCIL) !== 0
+                    && describe(depthStencil).Format !== D3DFMT.D24S8)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
+            }
+            if (renderer)
+            {
+                renderer.clear(model, rectCount > 0 ? (rects ?? []).slice(0, rectCount) : [],
+                    flags, color >>> 0, z, stencil);
+            }
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} type D3DPRIMITIVETYPE
+         * @param {number} startVertex
+         * @param {number} primitiveCount
+         */
+        DrawPrimitive(type, startVertex, primitiveCount){
+            const hr = drawPreconditions(type, primitiveCount);
+            if (hr !== D3D_OK || !stream(0).buffer)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (renderer)
+            {
+                renderer.drawPrimitive(model, type, startVertex, primitiveCount);
+            }
+            return D3D_OK;
+        },
+
+        /**
+         * The minimum index and vertex count are the hints this version's
+         * signature carries; nothing here needs them.
+         *
+         * @param {number} type
+         * @param {number} _minIndex
+         * @param {number} _numVertices
+         * @param {number} startIndex
+         * @param {number} primitiveCount
+         */
+        DrawIndexedPrimitive(type, _minIndex, _numVertices, startIndex, primitiveCount){
+            const hr = drawPreconditions(type, primitiveCount);
+            if (hr !== D3D_OK || !stream(0).buffer || !indices)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (renderer)
+            {
+                renderer.drawIndexedPrimitive(model, type, startIndex, primitiveCount);
+            }
+            return D3D_OK;
+        },
+
+        /**
+         * The bytes rather than the pointer: whoever reads guest memory reads
+         * `vertexCountOf(type, primitiveCount) * stride` of them.
+         *
+         * @param {number} type
+         * @param {number} primitiveCount
+         * @param {Uint8Array} vertexData
+         * @param {number} stride
+         */
+        DrawPrimitiveUP(type, primitiveCount, vertexData, stride){
+            const hr = drawPreconditions(type, primitiveCount);
+            if (hr !== D3D_OK || !vertexData || !(stride > 0)
+                || vertexData.byteLength < vertexCountOf(type, primitiveCount) * stride)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (renderer)
+            {
+                renderer.drawPrimitiveUp(model, type, primitiveCount, vertexData, stride);
+            }
+            unbindStreamZero();
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} type
+         * @param {number} _minIndex
+         * @param {number} numVertices  How many vertices `vertexData` holds.
+         * @param {number} primitiveCount
+         * @param {Uint8Array} indexData
+         * @param {number} indexFormat  D3DFMT_INDEX
+         * @param {Uint8Array} vertexData
+         * @param {number} stride
+         */
+        DrawIndexedPrimitiveUP(
+            type, _minIndex, numVertices, primitiveCount, indexData, indexFormat, vertexData,
+            stride,
+        )
+        {
+            const hr = drawPreconditions(type, primitiveCount);
+            if (hr !== D3D_OK || !vertexData || !indexData || !(stride > 0)
+                || vertexData.byteLength < numVertices * stride)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (renderer)
+            {
+                renderer.drawIndexedPrimitiveUp(model, type, numVertices, primitiveCount,
+                    indexData, indexFormat, vertexData, stride);
+            }
+            unbindStreamZero();
             return D3D_OK;
         },
 
@@ -811,7 +1261,7 @@ function createDeviceObject(parameters, caps, behaviourFlags){
             {
                 return hr;
             }
-            out.texture = createTexture({
+            const texture = createTexture({
                 width,
                 height,
                 levels: levels || 1,
@@ -821,6 +1271,11 @@ function createDeviceObject(parameters, caps, behaviourFlags){
                 count: explicitCount(pool),
                 allocate,
             });
+            if (renderer)
+            {
+                renderer.trackTexture(texture, { width, height, format });
+            }
+            out.texture = texture;
             return D3D_OK;
         },
 

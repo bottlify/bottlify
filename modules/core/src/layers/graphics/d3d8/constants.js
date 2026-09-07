@@ -1,6 +1,6 @@
 /*
  * Copyright © 2026 Bottlify Project
- * Licensed under BSD-2-Clause License
+ * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
 
@@ -125,3 +125,105 @@ export const D3DFVF_RESERVED0 = 0x0001;
 export function isShaderHandle(handle){
     return handle !== 0 && (handle & D3DFVF_RESERVED0) !== 0;
 }
+
+/** D3DPRIMITIVETYPE. */
+export const D3DPT = Object.freeze({
+    POINTLIST: 1,
+    LINELIST: 2,
+    LINESTRIP: 3,
+    TRIANGLELIST: 4,
+    TRIANGLESTRIP: 5,
+    TRIANGLEFAN: 6,
+});
+
+/** D3DCLEAR flags. */
+export const D3DCLEAR = Object.freeze({
+    TARGET: 0x1,
+    ZBUFFER: 0x2,
+    STENCIL: 0x4,
+});
+
+/** D3DLOCK flags, the ones a buffer lock's meaning depends on. */
+export const D3DLOCK = Object.freeze({
+    READONLY: 0x00000010,
+    NOSYSLOCK: 0x00000800,
+    NOOVERWRITE: 0x00001000,
+    DISCARD: 0x00002000,
+});
+
+/**
+ * The two index formats. Not in D3DFMT because that table is D3D9's and is
+ * frozen; the numbers are the same in both versions.
+ */
+export const D3DFMT_INDEX = Object.freeze({
+    INDEX16: 101,
+    INDEX32: 102,
+});
+
+/**
+ * D3DTRANSFORMSTATETYPE. A world matrix is numbered from 256 upward:
+ * D3DTS_WORLD is D3DTS_WORLDMATRIX(0), and 255 more follow it.
+ */
+export const D3DTS = Object.freeze({
+    VIEW: 2,
+    PROJECTION: 3,
+    TEXTURE0: 16,
+    TEXTURE7: 23,
+    WORLD: 256,
+    WORLD_LAST: 511,
+});
+
+/**
+ * D3DTEXTURESTAGESTATETYPE. In this version a stage carries its sampler with
+ * it: the address modes and filters D3D9 moved to a separate sampler-state
+ * table are stage states here, which is why they are numbered among the rest.
+ */
+export const D3DTSS = Object.freeze({
+    COLOROP: 1,
+    COLORARG1: 2,
+    COLORARG2: 3,
+    ALPHAOP: 4,
+    ALPHAARG1: 5,
+    ALPHAARG2: 6,
+    BUMPENVMAT00: 7,
+    BUMPENVMAT01: 8,
+    BUMPENVMAT10: 9,
+    BUMPENVMAT11: 10,
+    TEXCOORDINDEX: 11,
+    ADDRESSU: 13,
+    ADDRESSV: 14,
+    BORDERCOLOR: 15,
+    MAGFILTER: 16,
+    MINFILTER: 17,
+    MIPFILTER: 18,
+    MIPMAPLODBIAS: 19,
+    MAXMIPLEVEL: 20,
+    MAXANISOTROPY: 21,
+    BUMPENVLSCALE: 22,
+    BUMPENVLOFFSET: 23,
+    TEXTURETRANSFORMFLAGS: 24,
+    ADDRESSW: 25,
+    COLORARG0: 26,
+    ALPHAARG0: 27,
+    RESULTARG: 28,
+});
+
+/** D3DTEXTUREFILTERTYPE. */
+export const D3DTEXF = Object.freeze({
+    NONE: 0,
+    POINT: 1,
+    LINEAR: 2,
+    ANISOTROPIC: 3,
+});
+
+/** D3DTEXTUREADDRESS. */
+export const D3DTADDRESS = Object.freeze({
+    WRAP: 1,
+    MIRROR: 2,
+    CLAMP: 3,
+    BORDER: 4,
+    MIRRORONCE: 5,
+});
+
+/** The stage cascade's operations and argument selectors, shared with the shader generator. */
+export { D3DTA, D3DTOP } from '../webgpu/internal/fixedfunction.js';

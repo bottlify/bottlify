@@ -1,16 +1,18 @@
 /*
  * Copyright © 2026 Bottlify Project
- * Licensed under BSD-2-Clause License
+ * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTFOUND,
-    D3DFMT, D3DLIGHTTYPE, D3DORDER, D3DPOOL, D3DRS, D3DRS_MAX, D3DRS_REMOVED_IN_D3D9,
-    D3DSWAPEFFECT, D3DUSAGE, D3D_OK, dwordToFloat, floatToDword, isShaderHandle,
+    D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
+    D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DORDER, D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
+    D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3D_OK,
+    dwordToFloat, floatToDword, isShaderHandle,
 } from './constants.js';
+import { DEFAULT_STAGE_STATES } from './stagestates.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D8 } from './device.js';
@@ -1165,5 +1167,213 @@ test('an unusable usage combination is refused whatever the entry point', ()=>{
         device.CreateTexture(16, 16, 1, 0, D3DFMT.D24S8, D3DPOOL.DEFAULT, out),
         D3DERR_INVALIDCALL, 'nor a depth texture the adapter does not offer');
 
+    assertFullyReleased(device);
+});
+
+// --- texture stages, transforms and the material: state a draw reads ---
+
+test('stage zero modulates the texture by default and every other stage is off', ()=>{
+    const device = createDevice();
+    /** @type {{ value?: number }} */
+    const out = {};
+
+    assert.equal(device.GetTextureStageState(0, D3DTSS.COLOROP, out), D3D_OK);
+    assert.equal(out.value, D3DTOP.MODULATE);
+    assert.equal(device.GetTextureStageState(0, D3DTSS.ALPHAOP, out), D3D_OK);
+    assert.equal(out.value, D3DTOP.SELECTARG1);
+    for (let stage = 1; stage < 8; stage++)
+    {
+        assert.equal(device.GetTextureStageState(stage, D3DTSS.COLOROP, out), D3D_OK);
+        assert.equal(out.value, D3DTOP.DISABLE, `stage ${stage} is off until armed`);
+        assert.equal(device.GetTextureStageState(stage, D3DTSS.TEXCOORDINDEX, out), D3D_OK);
+        assert.equal(out.value, stage, 'and reads its own coordinate set');
+    }
+    assert.equal(device.GetTextureStageState(3, D3DTSS.COLORARG1, out), D3D_OK);
+    assert.equal(out.value, D3DTA.TEXTURE);
+    assert.equal(device.GetTextureStageState(3, D3DTSS.COLORARG2, out), D3D_OK);
+    assert.equal(out.value, D3DTA.CURRENT);
+    for (const entry of DEFAULT_STAGE_STATES)
+    {
+        assert.equal(device.GetTextureStageState(5, entry.state, out), D3D_OK, entry.name);
+    }
+
+    assertFullyReleased(device);
+});
+
+test('a stage state reads back what was written, and Reset puts it back', ()=>{
+    const device = createDevice();
+    /** @type {{ value?: number }} */
+    const out = {};
+
+    assert.equal(device.SetTextureStageState(2, D3DTSS.COLOROP, D3DTOP.ADD), D3D_OK);
+    assert.equal(device.GetTextureStageState(2, D3DTSS.COLOROP, out), D3D_OK);
+    assert.equal(out.value, D3DTOP.ADD);
+    assert.equal(device.SetTextureStageState(8, D3DTSS.COLOROP, D3DTOP.ADD), D3DERR_INVALIDCALL,
+        'there are eight stages');
+    assert.equal(device.SetTextureStageState(0, 99, 1), D3DERR_INVALIDCALL, 'not a stage state');
+    assert.equal(device.GetTextureStageState(0, 99, out), D3DERR_INVALIDCALL);
+
+    assert.equal(device.Reset(), D3D_OK);
+    assert.equal(device.GetTextureStageState(2, D3DTSS.COLOROP, out), D3D_OK);
+    assert.equal(out.value, D3DTOP.DISABLE);
+
+    assertFullyReleased(device);
+});
+
+test('a transform never written is the identity, and a written one reads back', ()=>{
+    const device = createDevice();
+    /** @type {{ matrix?: Float32Array }} */
+    const out = {};
+    const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translated = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 4, 5, 6, 1];
+
+    assert.equal(device.GetTransform(D3DTS.VIEW, out), D3D_OK);
+    assert.deepEqual([...(out.matrix ?? [])], identity);
+    assert.equal(device.SetTransform(D3DTS.WORLD + 3, translated), D3D_OK, 'world matrix three');
+    assert.equal(device.GetTransform(D3DTS.WORLD + 3, out), D3D_OK);
+    assert.deepEqual([...(out.matrix ?? [])], translated);
+    assert.equal(device.GetTransform(D3DTS.WORLD, out), D3D_OK);
+    assert.deepEqual([...(out.matrix ?? [])], identity, 'world matrix zero is another matrix');
+    assert.equal(device.SetTransform(4, identity), D3DERR_INVALIDCALL, 'not a transform');
+    assert.equal(device.SetTransform(D3DTS.VIEW, [1, 2, 3]), D3DERR_INVALIDCALL, 'not a matrix');
+
+    assert.equal(device.Reset(), D3D_OK);
+    assert.equal(device.GetTransform(D3DTS.WORLD + 3, out), D3D_OK);
+    assert.deepEqual([...(out.matrix ?? [])], identity, 'Reset forgets every transform');
+
+    assertFullyReleased(device);
+});
+
+test('the material reads back as a copy of what was set', ()=>{
+    const device = createDevice();
+    /** @type {{ material?: any }} */
+    const out = {};
+    const material = {
+        Diffuse: { r: 1, g: 0.5, b: 0.25, a: 1 },
+        Ambient: { r: 0, g: 0, b: 0, a: 0 },
+        Specular: { r: 0, g: 0, b: 0, a: 0 },
+        Emissive: { r: 0.1, g: 0.2, b: 0.3, a: 0 },
+        Power: 8,
+    };
+
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.equal(out.material.Power, 0, 'a fresh device has a black material');
+    assert.equal(device.SetMaterial(material), D3D_OK);
+    material.Power = 16;
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.equal(out.material.Power, 8, 'the device kept its own copy');
+    assert.deepEqual(out.material.Emissive, { r: 0.1, g: 0.2, b: 0.3, a: 0 });
+
+    assertFullyReleased(device);
+});
+
+// --- what a draw or a clear is refused for, with nothing behind the device ---
+
+test('a draw outside a scene, of nothing, or without a stream is refused', ()=>{
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, FVF_XYZ_DIFFUSE, D3DPOOL.DEFAULT, vertices),
+        D3D_OK);
+    const bytes = new Uint8Array(60);
+
+    assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 16), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3DERR_INVALIDCALL,
+        'no scene is open');
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 0), D3DERR_INVALIDCALL, 'nothing');
+    assert.equal(device.DrawPrimitive(9, 0, 1), D3DERR_INVALIDCALL, 'not a primitive type');
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 3, 0, 1), D3DERR_INVALIDCALL,
+        'no indices are bound');
+    assert.equal(device.SetStreamSource(0, null, 0), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3DERR_INVALIDCALL, 'no stream');
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 16), D3D_OK,
+        'a user-pointer draw needs no stream');
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, bytes, 16), D3DERR_INVALIDCALL,
+        'but it needs enough bytes');
+    assert.equal(device.DrawIndexedPrimitiveUP(D3DPT.TRIANGLELIST, 0, 3, 1, new Uint8Array(6),
+        D3DFMT_INDEX.INDEX16, bytes, 16), D3D_OK);
+    assert.equal(device.SetVertexShader(0), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 16), D3DERR_INVALIDCALL,
+        'no vertex format and no shader');
+
+    assert.equal(device.EndScene(), D3D_OK);
+    vertices.buffer.release();
+    assertFullyReleased(device);
+});
+
+test('a user-pointer draw unbinds stream zero and the indices', ()=>{
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, FVF_XYZ_DIFFUSE, D3DPOOL.DEFAULT, vertices),
+        D3D_OK);
+    assert.equal(device.CreateIndexBuffer(6, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indices),
+        D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 16), D3D_OK);
+    assert.equal(device.SetIndices(indices.buffer, 5), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_XYZ_DIFFUSE), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(48), 16), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+
+    /** @type {{ buffer?: any, stride?: number, baseVertexIndex?: number }} */
+    const out = {};
+    assert.equal(device.GetStreamSource(0, out), D3D_OK);
+    assert.equal(out.buffer, null);
+    assert.equal(out.stride, 16, 'the stride survives, as it does for any unbinding');
+    assert.equal(device.GetIndices(out), D3D_OK);
+    assert.equal(out.buffer, null);
+    assert.equal(out.baseVertexIndex, 0);
+
+    vertices.buffer.release();
+    indices.buffer.release();
+    assertFullyReleased(device);
+});
+
+test('a buffer lock hands out its storage and refuses what does not fit', ()=>{
+    const device = createDevice();
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(100, 0, FVF_XYZ_DIFFUSE, D3DPOOL.DEFAULT, out), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+
+    assert.equal(out.buffer.Unlock(), D3DERR_INVALIDCALL, 'nothing to unlock');
+    assert.equal(out.buffer.Lock(90, 20, locked, 0), D3DERR_INVALIDCALL, 'past the end');
+    assert.equal(out.buffer.Lock(16, 0, locked, 0), D3D_OK, 'zero means to the end');
+    assert.equal(locked.pBits, out.buffer.base + 16);
+    assert.equal(out.buffer.Lock(0, 4, locked, 0), D3DERR_INVALIDCALL, 'already locked');
+    assert.equal(out.buffer.Unlock(), D3D_OK);
+    assert.equal(out.buffer.Unlock(), D3DERR_INVALIDCALL);
+
+    out.buffer.release();
+    assertFullyReleased(device);
+});
+
+test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
+    const device = createDevice({ parameters: { enableAutoDepthStencil: false } });
+
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, 0, 1, 0), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.ZBUFFER, 0, 1, 0), D3DERR_INVALIDCALL);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.STENCIL, 0, 1, 0),
+        D3DERR_INVALIDCALL);
+    assert.equal(device.Clear(0, null, 0, 0, 1, 0), D3DERR_INVALIDCALL, 'nothing to clear');
+    assert.equal(device.Clear(2, null, D3DCLEAR.TARGET, 0, 1, 0), D3DERR_INVALIDCALL,
+        'two rectangles and no rectangles');
+
+    /** @type {{ surface?: any }} */
+    const depth = {};
+    assert.equal(device.CreateDepthStencilSurface(WIDTH, HEIGHT, D3DFMT.D16, depth), D3D_OK);
+    assert.equal(device.SetRenderTarget(null, depth.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.ZBUFFER, 0, 1, 0), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.STENCIL, 0, 1, 0), D3DERR_INVALIDCALL,
+        'D16 has no stencil');
+    assert.equal(device.SetRenderTarget(null, null), D3D_OK);
+    depth.surface.release();
     assertFullyReleased(device);
 });
