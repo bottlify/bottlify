@@ -536,6 +536,12 @@ export const win32Module = {
                 created: config?.created ?? (()=>{}),
                 /** @param {number} instance @param {number} id */
                 loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
+                // Where the pointer is and what is held down. The input layer
+                // is above this one and cannot be imported from here, so both
+                // are handed down as thunks; a build without one answers what
+                // it answered before, which is that nothing is pressed.
+                cursor: config?.cursor,
+                keyState: config?.keyState,
             }),
 
             'ADVAPI32.dll': createRegistryFunctions({

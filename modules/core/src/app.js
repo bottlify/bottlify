@@ -860,6 +860,13 @@ export async function createApp(options){
                 const audio = core.api('audio');
                 return audio?.available?.() ? audio.output() : null;
             },
+            // Where the pointer is and what is held down, for the calls that
+            // ask rather than wait for a message. Handed down for the same
+            // reason as the mixer: input is above win32 and cannot be reached
+            // from it, and it does not exist yet when this is read.
+            cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
+            /** @param {number} key */
+            keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -1276,7 +1283,15 @@ export async function createApp(options){
         return (async()=>{
             const path = options.imagePath ?? 'C:\\app.exe';
             const directory = path.slice(0, path.lastIndexOf('\\') + 1);
-            const wanted = `${directory}${name}`;
+            // A name that already says where it is, is where it is. Windows
+            // searches for a bare name and takes a qualified one as given, and
+            // a program that has worked out an absolute path -- a runtime
+            // loading its own plug-ins out of a directory beside the
+            // executable, say -- passes one. Prefixing it again asks for
+            // C:\App\C:\App\..., which is not there, and the plug-in is
+            // reported missing while sitting exactly where it was asked for.
+            const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
+            const wanted = qualified ? name : `${directory}${name}`;
             const file = await readWholeFile(filesystem, blocks, wanted);
             if (!file)
             {
@@ -1548,6 +1563,25 @@ export async function createApp(options){
     const sound = core.api('audio')?.output?.() ?? null;
 
     /**
+     * How often the run loop leaves the microtask queue entirely.
+     *
+     * A whole turn is a hundred thousand guest instructions by default, so this
+     * is a handful of milliseconds of guest time -- short enough that a person
+     * clicking a button is answered at once, long enough that the loop is not
+     * paying for a trip round the event loop on every turn.
+     */
+    const TURNS_PER_YIELD = 16;
+
+    /**
+     * A macrotask, so everything the host has queued gets a turn.
+     *
+     * `setTimeout` rather than a message channel or an immediate: it is the one
+     * spelling that exists in a worker, in a page and in Node, and this file
+     * runs in all three.
+     */
+    const breathe = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+
+    /**
      * Pausing is a gate rather than a flag polled in a loop: a paused caller
      * waits on a promise that resuming resolves, so nothing spins.
      *
@@ -1609,6 +1643,19 @@ export async function createApp(options){
                 // never returns to the event loop on its normal path and such a
                 // handler would be resumed exactly never.
                 await Promise.resolve();
+
+                // And a real one now and then, because that one is a microtask
+                // and microtasks do not let anything else happen. A program
+                // running hot never leaves the microtask queue, so nothing
+                // outside gets a turn: a click on a pause button is not
+                // delivered, a timer does not fire, and a page looks hung while
+                // the guest is working perfectly. Every few turns is enough to
+                // keep the outside responsive and rare enough that the cost of
+                // going round the event loop does not show.
+                if (turn % TURNS_PER_YIELD === 0)
+                {
+                    await breathe();
+                }
 
                 // Sound is written ahead here rather than on demand: the device
                 // reads on a thread of its own and must never find the ring

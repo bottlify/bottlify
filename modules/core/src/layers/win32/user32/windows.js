@@ -147,6 +147,13 @@ function characterFor(key){
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {() => Promise<void>} idle
+ * @property {() => { x: number, y: number }} [cursor]
+ *           Where the pointer is. Absent in a build with no input, and then
+ *           the answer is the origin.
+ * @property {(key: number) => number} [keyState]
+ *           Whether a virtual key is down, as GetAsyncKeyState reports it:
+ *           the high bit set while it is held. Absent means nothing is
+ *           pressed, which is the one safe wrong answer.
  *           Resolves when the machine has taken another turn, so a call that is
  *           waiting for something to arrive can look again.
  */

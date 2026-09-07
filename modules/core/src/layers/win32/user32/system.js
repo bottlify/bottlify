@@ -980,7 +980,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                writeU32s(host, point, [host.cursor?.x ?? 0, host.cursor?.y ?? 0]);
+                const at = host.cursor?.() ?? { x: 0, y: 0 };
+                writeU32s(host, point, [at.x, at.y]);
                 return 1;
             },
         },
@@ -1000,19 +1001,26 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * SHORT GetAsyncKeyState(int vKey) / SHORT GetKeyState(int nVirtKey)
          *
-         * Nothing is down. The input layer is a stub in this build, and a key
-         * state invented here would have a program act on a press that never
-         * happened -- which is worse than a program that receives no input.
+         * The high bit says the key is down; the low bit of GetKeyState says a
+         * toggle is on. A program polls these instead of reading messages when
+         * it wants the state now rather than in the order it changed, and a
+         * game does both at once -- menus from messages, movement from these.
+         *
+         * A build with nothing feeding it answers that nothing is pressed,
+         * which is the one safe wrong answer: a state invented here would have
+         * a program act on a press that never happened.
          */
         GetAsyncKeyState: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
         },
 
         /** SHORT GetKeyState(int nVirtKey) */
         GetKeyState: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
         },
 
         /**
