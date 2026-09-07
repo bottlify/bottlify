@@ -16,10 +16,14 @@ const MEM_DECOMMIT = 0x4000;
 const MEM_RELEASE = 0x8000;
 const INVALID_SIZE = 0xffffffff;
 const PAGE_SIZE = 4096;
+/** Where Windows may begin a reservation, and so where this one may too. */
+const GRANULARITY = 64 * 1024;
 const GMEM_MOVEABLE = 0x0002;
 const GMEM_ZEROINIT = 0x0040;
 
 const ARENA = { base: 0x1000, size: 0x4000 };
+/** For the VirtualAlloc tests: room for several whole allocation granules. */
+const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
 
 /**
  * Guest memory, dirtied on purpose.
@@ -275,20 +279,23 @@ test('the process heap cannot be destroyed out from under the program', ()=>{
     assert.equal(fns.HeapSize.handler([heap, 0, address]), 32);
 });
 
-test('VirtualAlloc commits page-aligned, zeroed memory', ()=>{
-    const { host, fns } = setup();
+test('VirtualAlloc commits granular, zeroed memory', ()=>{
+    const { host, fns } = setup(RESERVING_ARENA);
 
     const address = fns.VirtualAlloc.handler([0, 100, MEM_COMMIT | MEM_RESERVE, 0x04]);
 
     assert.notEqual(address, 0);
-    assert.equal(address % PAGE_SIZE, 0);
+    // Not merely page-aligned: an allocator built on VirtualAlloc may recover
+    // the base of a reservation from the top bits of an address inside it,
+    // which only works because Windows never begins one anywhere else.
+    assert.equal(address % GRANULARITY, 0);
     assert.ok(all(host.bytes.subarray(address, address + PAGE_SIZE), 0),
         'a committed page reads as zero on Windows, and code depends on it');
     assert.equal(fns.VirtualAlloc.handler([0, 0, MEM_COMMIT, 0x04]), 0, 'zero bytes is a failure');
 });
 
 test('VirtualFree releases whole reservations only', ()=>{
-    const { fns } = setup();
+    const { fns } = setup(RESERVING_ARENA);
     const address = fns.VirtualAlloc.handler([0, PAGE_SIZE, MEM_COMMIT | MEM_RESERVE, 0x04]);
     const heap = fns.GetProcessHeap.handler();
     const block = fns.HeapAlloc.handler([heap, 0, 32]);

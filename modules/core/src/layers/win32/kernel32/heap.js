@@ -38,6 +38,19 @@ const ALIGNMENT = 8;
 
 const PAGE_SIZE = 4096;
 
+/**
+ * Where a VirtualAlloc reservation may begin.
+ *
+ * Windows places every reservation on a 64 KiB boundary and says so through
+ * GetSystemInfo, and allocators built on VirtualAlloc take it at its word: a
+ * common design keeps no back-pointer in a block header at all, storing only
+ * the top sixteen bits of the segment it came from and recovering the segment
+ * by shifting them back. Handing out a page-aligned base breaks that
+ * arithmetic -- the recovered "segment" lands in the middle of some earlier
+ * allocation, and the header read from it is whatever data was there.
+ */
+const ALLOCATION_GRANULARITY = 64 * 1024;
+
 /** Codes this surface reports. */
 const ERROR_INVALID_PARAMETER = 87;
 /** What VirtualAlloc reports for an address outside anything it reserved. */
@@ -532,7 +545,7 @@ export function createHeapFunctions(host){
                 else
                 {
                     address = allocator.allocate(rounded,
-                        { alignment: PAGE_SIZE, owner: VIRTUAL });
+                        { alignment: ALLOCATION_GRANULARITY, owner: VIRTUAL });
                     if (address === 0)
                     {
                         // A caller checks the return and then asks why. A zero
