@@ -601,7 +601,7 @@ export function createGdiFunctions(host){
     const dibSize = (width, height, bitCount)=>
         (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
 
-    return {
+    const table = {
         ...createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }),
 
         /** HDC GetDC(HWND hWnd) */
@@ -1259,6 +1259,58 @@ export function createGdiFunctions(host){
                 });
                 return 1;
             },
+        },
+    };
+
+    return {
+        table,
+
+        /**
+         * A device context over memory somebody else owns.
+         *
+         * This is how a drawing surface that is not GDI's own becomes something
+         * GDI can draw into: the caller says where the pixels are in guest
+         * memory and how they are laid out, and gets back a memory DC whose
+         * selected bitmap addresses exactly those bytes. Every subsequent draw
+         * lands in the caller's surface rather than in a copy of it -- which is
+         * the whole point, because a program gets a DC on a surface, draws with
+         * GDI, and expects to see the result when it presents.
+         *
+         * Refused rather than approximated when the row stride is not the one
+         * GDI would compute for that width and depth: drawing with the wrong
+         * stride shears the picture by a pixel per row, which reads as a
+         * corrupted image rather than as a rejected call.
+         *
+         * @param {{ width: number, height: number, pitch: number,
+         *           bitCount: number, bits: number }} attributes
+         * @returns {number} A device context handle, or zero.
+         */
+        createSurfaceDc(attributes){
+            const { width, height, pitch, bitCount, bits } = attributes;
+            if (!(width > 0) || !(height > 0) || (bits >>> 0) === 0
+                || pitch !== dibSize(width, 1, bitCount))
+            {
+                return 0;
+            }
+            const dc = createContext(0, 'memory');
+            dc.defaultBitmap = objects.create('bitmap', {
+                width,
+                height,
+                planes: 1,
+                bitCount,
+                // Top-down, because a surface's first row is its top one.
+                // A DIB counted the other way would draw the image inverted.
+                topDown: true,
+                bits: bits >>> 0,
+                section: bits >>> 0,
+            });
+            select(dc, dc.defaultBitmap);
+            return dc.hdc;
+        },
+
+        /** @param {number} handle */
+        deleteSurfaceDc(handle){
+            return table.DeleteDC.handler([handle]) === 1;
         },
     };
 }

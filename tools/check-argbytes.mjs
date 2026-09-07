@@ -32,7 +32,7 @@ import { inputModule } from '../modules/core/src/layers/input/module.js';
 
 const SPECS = 'https://raw.githubusercontent.com/wine-mirror/wine/master/dlls';
 const LIBRARIES = [
-    'kernel32', 'user32', 'gdi32', 'advapi32', 'ole32', 'winmm', 'shell32',
+    'kernel32', 'user32', 'gdi32', 'advapi32', 'ole32', 'winmm', 'shell32', 'ntdll',
     'dsound', 'dinput', 'dinput8', 'version', 'comdlg32', 'imm32', 'comctl32',
 ];
 

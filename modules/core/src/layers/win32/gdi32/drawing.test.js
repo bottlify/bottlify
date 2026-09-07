@@ -168,7 +168,7 @@ function setup(graphics){
         handles: fakeHandles(),
         surfaces: fakeSurfaces(),
         graphics,
-    });
+    }).table;
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number,

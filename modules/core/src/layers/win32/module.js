@@ -40,6 +40,7 @@ import { createVersionFunctions } from './version/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createOleFunctions } from './ole32/functions.js';
+import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComRegistry } from './ole32/objects.js';
 
 /**
@@ -124,6 +125,21 @@ export const win32Module = {
         // needs them is exception handling, which hands a program a context and
         // continues execution from a changed one.
         const cpuRegisters = config?.registers ?? { read: ()=>0, write: ()=>{} };
+
+        /**
+         * Writes back a set of registers, for the entry points whose answer is
+         * a register rather than a return value -- exception handling continuing
+         * from a changed context, and the arithmetic helpers that answer in a
+         * pair.
+         *
+         * @param {Record<string, number>} values
+         */
+        const setRegisters = values=>{
+            for (const [name, value] of Object.entries(values))
+            {
+                cpuRegisters.write(name, value >>> 0);
+            }
+        };
         const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readWideString(address, maxLength);
 
@@ -164,6 +180,22 @@ export const win32Module = {
         };
         bridge.useHeap(heap);
 
+        // Built here rather than with the other tables because two things need
+        // it: the library a program links against, and the drawing layer, which
+        // asks it for a device context over pixels GDI did not allocate.
+        const gdi = createGdiFunctions({
+            readMemory,
+            writeMemory,
+            readCString,
+            handles: {
+                /** @param {string} type @param {any} object */
+                open: (type, object)=>kernel.handles.open(type, object),
+                /** @param {number} handle */
+                close: handle=>kernel.handles.close(handle),
+            },
+            surfaces: heap,
+        });
+
         // The transport is injected, as the GPU device and the block store are.
         // Without one this is a machine with a network card and no cable: every
         // call behaves, and nothing reaches anywhere.
@@ -190,13 +222,7 @@ export const win32Module = {
             teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
             registers: ()=>Object.fromEntries(
                 registerNames.map(name=>[name, cpuRegisters.read(name)])),
-            /** @param {Record<string, number>} values */
-            setRegisters: values=>{
-                for (const [name, value] of Object.entries(values))
-                {
-                    cpuRegisters.write(name, value >>> 0);
-                }
-            },
+            setRegisters,
             /** @param {any} call */
             callGuest: call=>bridge.callGuest(call),
             /** @param {string} text */
@@ -388,13 +414,7 @@ export const win32Module = {
                     isMapped: address=>memory.find(address) !== null,
                     registers: ()=>Object.fromEntries(
                         registerNames.map(name=>[name, cpuRegisters.read(name)])),
-                    /** @param {Record<string, number>} values */
-                    setRegisters: values=>{
-                        for (const [name, value] of Object.entries(values))
-                        {
-                            cpuRegisters.write(name, value >>> 0);
-                        }
-                    },
+                    setRegisters,
                     /** @param {any} call */
                     callGuest: call=>bridge.callGuest(call),
                     unwind: seh.unwind,
@@ -486,16 +506,7 @@ export const win32Module = {
                 hive,
             }),
 
-            'GDI32.dll': createGdiFunctions({
-                readMemory,
-                writeMemory,
-                readCString,
-                handles: {
-                    open: (type, object)=>kernel.handles.open(type, object),
-                    close: handle=>kernel.handles.close(handle),
-                },
-                surfaces: heap,
-            }),
+            'GDI32.dll': gdi.table,
 
             'ole32.dll': createOleFunctions({
                 readMemory,
@@ -510,6 +521,24 @@ export const win32Module = {
                 },
             }),
         };
+
+        // Added after the rest because it is built from them: nearly everything
+        // ntdll exports is a second name for a function another library already
+        // publishes, and it has to be the same entry rather than a second
+        // implementation. The heap is the clearest case -- kernel32's owns the
+        // process-heap handle and the tag on every block, so a separate one
+        // would reject the very handle GetProcessHeap hands out.
+        libraries['ntdll.dll'] = createNtdllFunctions({
+            readMemory,
+            writeMemory,
+            readCString,
+            readWideString,
+            kernel32: libraries['KERNEL32.dll'],
+            crt: libraries['msvcrt.dll'],
+            teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+            arena,
+            setRegisters,
+        });
 
         /** Every function, whichever library exports it. */
         const flat = ()=>Object.assign({}, ...Object.values(libraries));

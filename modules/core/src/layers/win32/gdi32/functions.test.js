@@ -179,14 +179,14 @@ function setup(){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const surfaces = fakeSurfaces();
-    const fns = createGdiFunctions({
+    const gdi = createGdiFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         handles,
         surfaces,
     });
-    return { memory, handles, surfaces, fns };
+    return { memory, handles, surfaces, fns: gdi.table, gdi };
 }
 
 /** A display DC, which most of these need. */
