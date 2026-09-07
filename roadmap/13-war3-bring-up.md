@@ -15,16 +15,41 @@
 
 | | |
 |---|---|
-| images loaded | 26 |
+| images loaded | 30 |
 | imports nothing claimed | 1 (`wininet!InternetCanonicalizeUrlA`) |
-| asked for by name at run time and not found | 3 |
-| guest instructions | ~1 031 000 |
-| COM interfaces published | 0 |
-| stops at | Storm's own error report, `.\SFile.cpp(832)` |
+| guest instructions | ~37 668 000 |
+| stops at | `Direct3DCreate8`, because a Node process has no GPU |
 
-So the bundle path is finished work: a real installation mounts, every image maps, imports bind,
-and a million guest instructions run. What is left is a chain of blockers, and the value of the
-probe is that it names the next link rather than requiring it to be guessed.
+W1 is closed. The four archives open, their hash and block tables are read byte-exact into guest
+memory, the game reads its files out of them, loads `Game.dll`, calls `GameMain`, reads its
+configuration out of the registry, and asks for a Direct3D 8 device. What stopped it before was
+never the archives: it was `DllMain`'s third argument (see `12-decisions-and-optimisations.md`
+A15), which made the archive library overwrite its own hash table with one built from a different
+seed. Two other generic defects were found on the way and are recorded there as A16 and A17.
+
+The next measurement has to happen in a browser, because the wall is a GPU rather than a missing
+function. The Node probe cannot go further on its own.
+
+## What found it, and what to reach for next time
+
+Worth writing down, because the same three questions come up every time and none of them could be
+answered before:
+
+- **What did the program call, from the beginning?** `--log <file>` writes every host call with its
+  arguments and the text they point at. The ring in a failure report holds the end of a run, and a
+  program that gives up decided so tens of thousands of calls earlier.
+- **What did one of the game's own libraries do?** `--watch Storm.dll` or
+  `--watch MSVCR80.dll!toupper` puts a stub in front of that import which records the call and then
+  forwards into the real function, and a second stub catches the return. Nothing else can see a call
+  between two guest modules, and that is where a game's decisions are made.
+- **What is in that global right now?** `--peek 0x37e9610:16` with `--grep` reads guest memory at
+  the moment a chosen call acts on it. A table that has been overwritten is invisible from every
+  other angle.
+
+The static half lives in `.tools/` (see its README): a capstone disassembler that speaks the same
+addresses the probe prints, and a cached Ghidra service for decompilation and string cross-
+references. The last defect was found by decompiling a `DllMain` there and then peeking, here, at
+the table it built.
 
 ## W1 — reach the archives
 

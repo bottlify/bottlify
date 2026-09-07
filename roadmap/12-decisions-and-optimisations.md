@@ -217,6 +217,40 @@ scenario existing at all.
 
 ---
 
+### A15. What the loader tells a library about how it arrived
+
+`DllMain`'s third argument is not decoration. Windows passes NULL when a library came in through
+`LoadLibrary` and a non-NULL value when the loader brought it in because the image imports it, and a
+library is entitled to do genuinely different things in each case. We passed zero for both until a
+real library's archive code turned out to build its hash table twice -- once, guarded, for itself,
+and again with a different seed on the dynamic-load path only -- so that being told the wrong thing
+made it overwrite a correct table with a useless one. Every archive lookup after that reported that
+the file did not exist, with the archives open, the tables byte-exact in guest memory, and the names
+hashed from the right characters.
+
+The value we pass is 1, and only its non-nullness is contractual. `DLL_PROCESS_DETACH` carries the
+same distinction the other way round -- NULL for `FreeLibrary`, non-NULL for process exit -- and
+will matter when detach is implemented.
+
+### A16. A Win32 name lives exactly as long as a handle to its object
+
+A named event or mutex is destroyed when its last handle closes, and the name goes with it. Keeping
+the name after that breaks the one idiom the name exists for: a program creates the object to find
+out whether another copy of itself is already running, closes it, and creates it again for real --
+and the second create must not be told the name is taken by the handle it has just closed. The
+registry therefore checks, on every named create, whether anything still holds a handle to the
+object it remembered, and forgets the name when nothing does.
+
+### A17. VirtualAlloc places a reservation on a 64 KiB boundary
+
+`GetSystemInfo` reports an allocation granularity of 64 KiB and an allocator built on `VirtualAlloc`
+is entitled to believe it. A common design keeps no back-pointer in a block header at all, storing
+only the top sixteen bits of the segment the block came from and recovering the segment by shifting
+them back. Handing out a page-aligned base breaks that arithmetic silently: the recovered "segment"
+lands in the middle of an earlier allocation and the header read from it is whatever data was there.
+The cost of honouring it is address space, which is the thing this engine has most of.
+
+
 ## B. Where we could go faster
 
 ### B1. The x87 helpers, emitted as guest code
