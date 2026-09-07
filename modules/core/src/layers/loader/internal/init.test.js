@@ -12,8 +12,10 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH } from './init.js';
 const u32At = (/** @type {Uint8Array} */ bytes, /** @type {number} */ at)=>
     bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24;
 
-const library = (/** @type {string} */ name, /** @type {number} */ base)=>
-    ({ name, base, entryPoint: base + 0x1000 });
+/** @param {string} name @param {number} base */
+function library(name, base){
+    return { name, base, entryPoint: base + 0x1000 };
+}
 
 test('each library is attached, in the order it was given', ()=>{
     const { bytes, attached } = synthesiseProcessInit({

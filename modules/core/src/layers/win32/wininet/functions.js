@@ -564,8 +564,10 @@ export function createWininetFunctions(host){
                 const raw = [...Object.entries(response.headers)]
                     .map(([name, value])=>`${name}: ${value}`);
 
-                /** @type {string | null} */
-                let text = null;
+                // Every branch below either assigns this or returns, so it is
+                // a string by the time anything reads it.
+                /** @type {string} */
+                let text;
                 if (query === HTTP_QUERY_STATUS_CODE)
                 {
                     text = String(response.status);
