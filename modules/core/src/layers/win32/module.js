@@ -39,6 +39,7 @@ import { createShellFunctions } from './shell32/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
+import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions } from './ole32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComRegistry } from './ole32/objects.js';
@@ -487,6 +488,17 @@ export const win32Module = {
             'COMDLG32.dll': createCommonDialogFunctions({ readMemory }),
 
             'IMM32.dll': createImmFunctions({ writeMemory }),
+
+            // The transport is the assembling caller's to supply and is absent
+            // by default: this build has no network, and the entry points say
+            // so rather than pretending a request failed for some other reason.
+            // The library is published either way, because a program that
+            // imports it and never uses it -- which is the common case -- must
+            // still be able to load.
+            'WININET.dll': createWininetFunctions({
+                readMemory, writeMemory, readCString, setLastError: setError,
+                request: config?.http ?? null,
+            }),
 
             'USER32.dll': createWindowFunctions({
                 readMemory,
