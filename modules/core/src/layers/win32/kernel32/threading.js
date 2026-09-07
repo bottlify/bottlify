@@ -337,7 +337,12 @@ export function createThreadingFunctions(host){
                     kernel.wait(mutex, host.currentThread());
                 }
                 remember(name, 'mutex', mutex, found !== null);
-                return kernel.handles.open('mutex', mutex);
+                const handle = kernel.handles.open('mutex', mutex);
+                if (name === null)
+                {
+                    mutex.name = `#${handle.toString(16)}`;
+                }
+                return handle;
             },
         },
 
@@ -368,7 +373,16 @@ export function createThreadingFunctions(host){
                     name: name ?? 'event',
                 });
                 remember(name, 'event', event, found !== null);
-                return kernel.handles.open('event', event);
+                const handle = kernel.handles.open('event', event);
+                // An unnamed object is most of them, and "event" tells a reader
+                // nothing when three threads are blocked on three of them. The
+                // handle is what the trace shows at every other call, so it is
+                // what ties a blocked thread to the code that made the object.
+                if (name === null)
+                {
+                    event.name = `#${handle.toString(16)}`;
+                }
+                return handle;
             },
         },
 
