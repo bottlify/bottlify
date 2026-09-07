@@ -44,11 +44,13 @@ export const loaderModule = {
              * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
              *     options.resolveImport
              * @param {number} [options.base]
+             * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+             *     [options.missing]  Where a call to an import nothing claims should land.
              * @param {string} [options.name]  Region name, for diagnostics.
              * @returns {{ base: number, entryPoint: number, unresolved: string[] }}
              */
-            load(file, { resolveImport, base, name = 'image' }){
-                const image = buildImage(file, { resolveImport, base });
+            load(file, { resolveImport, base, missing, name = 'image' }){
+                const image = buildImage(file, { resolveImport, base, missing });
 
                 memory.register({
                     name,
@@ -111,10 +113,12 @@ export const loaderModule = {
              * @param {any} mapped  What `map` returned.
              * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
              *     resolveImport
+             * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+             *     [missing]  Where a call to an import nothing claims should land.
              * @returns {string[]} what nothing claimed
              */
-            bind(mapped, resolveImport){
-                const unresolved = bindImports(mapped.image, resolveImport);
+            bind(mapped, resolveImport, missing){
+                const unresolved = bindImports(mapped.image, resolveImport, missing);
                 // Written again because binding edited the mapped bytes in
                 // place, and the guest reads guest memory, not our copy.
                 memory.writeBytes(mapped.image.base, mapped.image.bytes);

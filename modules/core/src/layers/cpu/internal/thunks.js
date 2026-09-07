@@ -102,6 +102,37 @@ export function createThunkTable({ base, port }){
             return { id, address };
         },
 
+        /**
+         * One slot's bytes, for a stub taken after the table was written.
+         *
+         * Registration goes on for the life of a process -- a COM interface
+         * published when a program first asks for it takes a slot per method,
+         * and so does a stub standing in for an import nothing claims. Written
+         * once at assembly and never again, the table holds zeroes where those
+         * later slots are, and a guest calling one of them runs the zeroes.
+         *
+         * @param {number} id
+         * @returns {Uint8Array}
+         */
+        stub(id){
+            const entry = entries[id];
+            if (!entry || id === 0)
+            {
+                throw new Error(`cpu: trap ${id} has no stub`);
+            }
+            return buildStub({
+                trapId: entry.id,
+                port,
+                popBytes: entry.popBytes,
+                preserveResult: entry.preserveResult,
+            });
+        },
+
+        /** How many slots have been taken, park loop included. */
+        get count(){
+            return entries.length;
+        },
+
         /** @returns {Uint8Array} the whole table, ready to write at `base` */
         image(){
             const bytes = new Uint8Array(entries.length * STUB_SIZE);

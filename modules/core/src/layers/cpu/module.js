@@ -38,6 +38,8 @@ let host = null;
 /** @type {any} */
 let thunks = null;
 let running = false;
+/** Whether the stub table has been put into guest memory yet. */
+let tableWritten = false;
 
 export const cpuModule = {
     name: 'cpu',
@@ -66,6 +68,11 @@ export const cpuModule = {
             // needs a megabyte below that pointer, and the stubs sitting in
             // the middle of that span would cap it at less.
             thunkBase: config?.thunkBase ?? 0x100000,
+            // Sixteen thousand stubs. Every import of every library takes one,
+            // and so does every method of every COM interface a program asks
+            // for -- which is unbounded in principle and in the low thousands
+            // in practice.
+            thunkCapacity: config?.thunkCapacity ?? 16384 * 16,
         };
 
         /** @type {(id: number) => void} */
@@ -87,6 +94,9 @@ export const cpuModule = {
                 entryVector: settings.entryVector,
                 initialStack: settings.initialStack,
                 thunkBase: settings.thunkBase,
+                // Room for every stub this process will ever take, not just the
+                // ones taken before the table was first written.
+                thunkCapacity: settings.thunkCapacity,
                 // What anything placing an image has to fit inside. A base
                 // chosen without it is a guess about how much memory the
                 // machine was given, and a wrong guess writes past the end.
@@ -197,11 +207,34 @@ export const cpuModule = {
              */
             registerTrap(name, popBytes, options){
                 started();
-                return thunks.register(name, popBytes, options);
+                const taken = thunks.register(name, popBytes, options);
+                // Written straight into the guest when the table is already
+                // there. Registration never stops -- a COM interface published
+                // when a program first asks for it takes a slot per method --
+                // and a slot whose bytes were never written is sixteen zeroes
+                // that a guest will happily execute.
+                if (tableWritten)
+                {
+                    started().writePhysical(taken.address, thunks.stub(taken.id));
+                }
+                return taken;
             },
 
-            /** @returns {Uint8Array} the stub table, to be written at layout.thunkBase */
-            thunkImage: ()=>started() && thunks.image(),
+            /**
+             * The stub table, to be written at `layout.thunkBase`.
+             *
+             * Reserve `layout.thunkCapacity` bytes for it rather than the
+             * length of what comes back: slots taken later are written in
+             * place, and a region sized to the table as it stands today would
+             * put every one of them outside the address space.
+             *
+             * @returns {Uint8Array}
+             */
+            thunkImage(){
+                started();
+                tableWritten = true;
+                return thunks.image();
+            },
             /** Where a terminating call returns to instead of into its caller. */
             parkAddress: ()=>thunks.parkAddress,
 
@@ -343,5 +376,6 @@ export const cpuModule = {
         host = null;
         thunks = null;
         running = false;
+        tableWritten = false;
     },
 };

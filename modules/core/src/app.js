@@ -882,7 +882,7 @@ export async function createApp(options){
     // Clamped to what actually fits under the initial stack pointer, because
     // the region below it is finite and a request larger than the room is a
     // layout question rather than something to honour silently.
-    const stackRoom = initialStack - (thunkBase + cpu.thunkImage().length);
+    const stackRoom = initialStack - (thunkBase + cpu.layout.thunkCapacity);
     const stackSize = options.stackSize
         ?? Math.min(Math.max(parsePe(options.executable).stackReserve, 0x10000), stackRoom);
 
@@ -993,6 +993,46 @@ export async function createApp(options){
     let nextLibraryBase = 0;
 
     /**
+     * Where a call to an import nothing claims lands.
+     *
+     * Left alone, the slot keeps what the file wrote into it -- the relative
+     * address of the name block -- so a call through it jumps to a small
+     * number, runs whatever bytes are there, and dies as an invalid opcode
+     * naming an address that has nothing to do with the import. What is wanted
+     * instead is the name.
+     *
+     * The stub pops nothing, so the caller's stack is left wrong. That is
+     * accepted deliberately: it never returns. Deriving the right count needs
+     * a decorated name and most of these have none, and a stack that survives
+     * a call to a function nobody wrote is not worth the pretence.
+     *
+     * One stub per name, because a program is quite capable of calling the
+     * same missing import a thousand times before it gives up.
+     *
+     * @type {Map<string, number>}
+     */
+    const missingImports = new Map();
+
+    /** @param {string} dll @param {string | null} name @param {number | null} ordinal */
+    const missingImport = (dll, name, ordinal)=>{
+        const label = `${dll}!${name ?? `#${ordinal}`}`;
+        const known = missingImports.get(label);
+        if (known !== undefined)
+        {
+            return known;
+        }
+        const address = bridge.register(label, {
+            argBytes: 0,
+            handler: ()=>{
+                events.emit('unimplemented', { import: label });
+                throw new Error(`called ${label}, which nothing implements`);
+            },
+        });
+        missingImports.set(label, address);
+        return address;
+    };
+
+    /**
      * LoadLibrary, for a library nothing has loaded yet.
      *
      * Synchronous unless a PE actually has to be read, because the dispatcher
@@ -1062,16 +1102,23 @@ export async function createApp(options){
             nextLibraryBase = base
                 + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
 
-            loader.bind(mapped, resolveImport);
-
-            // Its own libraries, if it brought any, before it is attached.
-            for (const dependency of parsePe(file) && readImports(file, image))
+            // Its own libraries first, then binding.
+            //
+            // The order is the whole of it. A library brought in by this one is
+            // where half of this one's imports come from, so binding before
+            // they are loaded leaves every one of those slots unclaimed -- and
+            // a program that calls through such a slot does not fail at the
+            // call, it runs whatever bytes the slot happened to name. What is
+            // seen is an invalid opcode at an address belonging to nothing.
+            for (const dependency of readImports(file, image))
             {
                 if (findModule(dependency.dll) === null)
                 {
                     await loadLibraryAtRuntime(dependency.dll);
                 }
             }
+
+            loader.bind(mapped, resolveImport, missingImport);
 
             if (held.entryPoint && held.entryPoint !== base)
             {
@@ -1104,7 +1151,7 @@ export async function createApp(options){
     });
     for (const library of shipped)
     {
-        loader.bind(library.mapped, resolveImport);
+        loader.bind(library.mapped, resolveImport, missingImport);
     }
     // Where a library asked for later goes: after the ones that came with the
     // program, or after the system modules when there were none.
@@ -1112,7 +1159,7 @@ export async function createApp(options){
         (highest, library)=>Math.max(highest, library.base + library.size),
         MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE);
 
-    const image = loader.load(options.executable, { resolveImport });
+    const image = loader.load(options.executable, { resolveImport, missing: missingImport });
 
     mainModule = {
         name: 'app.exe',
@@ -1128,11 +1175,18 @@ export async function createApp(options){
 
     const stubs = cpu.thunkImage();
     memory.register({
-        name: 'thunks', base: thunkBase, size: stubs.length,
+        // Sized to what the table may grow to rather than to what it holds
+        // now. Slots go on being taken for the life of the process -- one per
+        // method of every COM interface a program asks for, one per import
+        // nothing claims -- and each is written straight into the guest, which
+        // needs somewhere inside the map to write to.
+        name: 'thunks', base: thunkBase, size: cpu.layout.thunkCapacity,
         kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
     });
     memory.writeBytes(thunkBase, stubs);
-    // Written once; from here a write into the stubs would be corruption.
+    // Read-execute from the guest's side. Later slots are written from ours,
+    // which does not go through this permission -- so a guest writing here is
+    // still corruption and is still refused.
     memory.protect('thunks', memory.Access.READ_EXECUTE);
 
     // Every library the program brought with it is attached before the program

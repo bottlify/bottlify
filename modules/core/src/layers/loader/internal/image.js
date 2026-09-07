@@ -30,11 +30,13 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  *        options.resolveImport
  *   Returns the guest address to write into the IAT, or null if unavailable.
  * @param {number} [options.base]  Load address; defaults to the image's own ImageBase.
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        [options.missing]  Where a call to an import nothing claims should land.
  * @returns {LoadedImage}
  */
-export function buildImage(file, { resolveImport, base }){
+export function buildImage(file, { resolveImport, base, missing }){
     const mapped = mapImage(file, base);
-    return { ...mapped, unresolved: bindImports(mapped, resolveImport) };
+    return { ...mapped, unresolved: bindImports(mapped, resolveImport, missing) };
 }
 
 /**
@@ -101,12 +103,20 @@ export function mapImage(file, base){
  * never calls it runs, and one that does fails where it called, which is a far
  * better place to find out than here.
  *
+ * "Where it called" only holds if the slot leads somewhere that says so. Left
+ * as the file wrote it, the slot holds the relative address of the name block,
+ * so a call through it jumps into whatever happens to sit at that offset from
+ * zero and dies as an invalid opcode with nothing naming the import. `missing`
+ * is the chance to put a stub there instead; the entry is recorded either way.
+ *
  * @param {{ bytes: Uint8Array, file: Uint8Array, image: import('./pe.js').PeImage }} mapped
  * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
  *        resolveImport
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        [missing]  Where a call to an import nothing claims should land.
  * @returns {string[]} what nothing claimed, as "dll!name"
  */
-export function bindImports({ bytes, file, image }, resolveImport){
+export function bindImports({ bytes, file, image }, resolveImport, missing){
     /** @type {string[]} */
     const unresolved = [];
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
@@ -119,6 +129,11 @@ export function bindImports({ bytes, file, image }, resolveImport){
             if (address === null)
             {
                 unresolved.push(`${dll}!${entry.name ?? `#${entry.ordinal}`}`);
+                const stub = missing?.(dll, entry.name, entry.ordinal) ?? null;
+                if (stub !== null)
+                {
+                    view.setUint32(entry.iatRva, stub >>> 0, true);
+                }
                 continue;
             }
             view.setUint32(entry.iatRva, address >>> 0, true);
