@@ -1041,6 +1041,9 @@ export function createRenderer(options){
             top.surface.release();
             const entry = { gpu: null, dirty: true, base: top.surface.base, ...desc };
             textures.set(texture, entry);
+            // Reachable by the level's surface as well, because a copy names
+            // that rather than the texture it belongs to.
+            textures.set(top.surface, entry);
 
             const unlockLevel = texture.UnlockRect;
             texture.UnlockRect = (/** @type {number} */ level)=>{
@@ -1062,6 +1065,25 @@ export function createRenderer(options){
                 }
                 return hr;
             };
+        },
+
+        /**
+         * Says that something other than a lock has written a texture's top
+         * level, which is how a copy between surfaces reaches a texture that is
+         * not lockable at all.
+         *
+         * A resource this renderer does not track is not an error: only a
+         * texture is ever uploaded from guest memory, so a copy into anything
+         * else has nothing to invalidate.
+         *
+         * @param {any} resource  A texture, or the surface of its top level.
+         */
+        markDirty(resource){
+            const tracked = textures.get(resource);
+            if (tracked)
+            {
+                tracked.dirty = true;
+            }
         },
 
         /**

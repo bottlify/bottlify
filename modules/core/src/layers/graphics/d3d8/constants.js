@@ -92,6 +92,28 @@ export const D3DSWAPEFFECT = Object.freeze({
     COPY_VSYNC: 4,
 });
 
+/**
+ * D3DDEVTYPE. What a program asked CreateDevice for, and what the device
+ * reports back as its own kind -- the two are the same number, because a
+ * device that answered with a different kind than it was asked for would be a
+ * device the program never created.
+ */
+export const D3DDEVTYPE = Object.freeze({
+    HAL: 1,
+    REF: 2,
+    SW: 3,
+});
+
+/**
+ * D3DSTATEBLOCKTYPE, which is what a state block made in one call rather than
+ * recorded holds: the pixel half, the vertex half, or everything.
+ */
+export const D3DSBT = Object.freeze({
+    ALL: 1,
+    PIXELSTATE: 2,
+    VERTEXSTATE: 3,
+});
+
 /** The behaviour flags CreateDevice takes. Only vertex processing matters here. */
 export const D3DCREATE = Object.freeze({
     FPU_PRESERVE: 0x00000002,

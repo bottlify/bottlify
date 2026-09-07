@@ -130,7 +130,39 @@ a right one. So these lists grow when the renderer grows, and never in anticipat
 What to watch for: a program that finds no format it wants and refuses to start. That is a signal to
 implement the format, not to add it to the list.
 
-### A11. The thiscall convention is kept although nothing uses it
+### A11. Direct3D 8 refuses eight things it could have pretended to do
+
+Shaders (`CreateVertexShader`, `CreatePixelShader`), cube maps, volume textures, palettes, additional
+swap chains, the hardware cursor, `GetFrontBuffer` and `ProcessVertices` all fail rather than
+succeed. **Status: decided, and it is the A10 rule applied a second time.**
+
+The sharpest case is the shaders. The renderer *skips* any draw with a shader bound, so a
+`CreateVertexShader` that succeeded would put a program on the programmable path where every draw is
+silently dropped — a black screen reached by a fast route, where the refusal would have sent the same
+program down the fixed-function path to a picture. `SetVertexShader` is implemented anyway, because
+that one dword also carries the vertex format and every fixed-function draw needs it.
+
+Three narrower notes from the same work, each a decision rather than a fact:
+
+- **Multisampling is accepted everywhere and ignored everywhere.** The presentation parameters already
+  dropped theirs, so render targets and depth buffers drop theirs too and the whole device is
+  consistently one sample per pixel. `CheckDeviceMultiSampleType` says so. Degradation here is
+  aesthetic rather than structural, which is why it is dropped rather than refused.
+- **The gamma ramp and the clip planes are state without effect** — stored, read back, and changing
+  no picture. The capabilities report zero for both, so a program that checks is told the truth and a
+  program that does not gets readback rather than a refusal.
+- **Sixty-four megabytes of texture memory**, a round number nothing measures, and the second copy of
+  it: DirectDraw reports the same figure from a constant the Direct3D side cannot see. Two numbers
+  that must agree and have no way to.
+
+**The largest hole left in this API**, recorded here because it is known and unfixed:
+`GetDeviceCaps` writes a `D3DCAPS8` that is almost entirely zero — no device capability bits at all.
+A program that branches on hardware rasterisation will conclude there is no accelerator, which
+directly contradicts A2. It was left empty deliberately rather than filled from recalled flag
+constants, which is the right call; it wants a pass with a header, or with the constants this tree
+has already checked for Direct3D 7.
+
+### A12. The thiscall convention is kept although nothing uses it
 
 Every COM interface method in this engine is stdcall, because that is what a COM method is: the
 interface pointer is the first argument on the stack, which is precisely what makes the C bindings
@@ -151,7 +183,7 @@ again. It stays because a C++ runtime, one of the `msvcp` libraries on the porti
 real member functions that genuinely use it, and its definition now carries a warning saying loudly
 what it is not for.
 
-### A12. A module's whole file stays in host memory for its resources
+### A13. A module's whole file stays in host memory for its resources
 
 Every loaded image keeps its bytes on the host side, because a resource is read out of the file
 rather than out of the mapping. Without it a library a program ships answers nothing for strings,
@@ -161,7 +193,7 @@ megabytes for a large title. The alternative is re-reading from the volume on ea
 which is a wait on a guest thread, and holding a thread is the cost this project ranks above all
 others. Revisit only with a measurement showing the memory matters more than the latency does.
 
-### A13. Nothing here has run against a real GPU or a real guest
+### A14. Nothing here has run against a real GPU or a real guest
 
 The whole drawing path — the DirectDraw blitter, the presenter, the Direct3D 8 draw path, the
 device-context seam onto GDI — is verified by unit and contract tests only. In particular the

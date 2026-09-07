@@ -41,11 +41,12 @@
  */
 
 import {
-    D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
-    D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL, D3DRTYPE, D3DTS, D3DUSAGE, D3D_OK,
-    FORMAT_INFO, isShaderHandle,
+    D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
+    D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
+    D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
 } from './constants.js';
-import { createDefaultRenderStates } from './renderstates.js';
+import { GAMMA_RAMP_ENTRIES } from './structs.js';
+import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
 import { createDefaultStageStates } from './stagestates.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from './render.js';
 import {
@@ -91,6 +92,40 @@ export const DEFAULT_CAPS = Object.freeze({
 function defaultMaterial(){
     const black = ()=>({ r: 0, g: 0, b: 0, a: 0 });
     return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
+}
+
+/**
+ * What the device reports as texture memory.
+ *
+ * A round number nothing here measures, and the same one DirectDraw reports as
+ * video memory: there is no accounting of what the backend's device holds, and
+ * a program asking this is sizing a cache rather than allocating anything.
+ */
+const AVAILABLE_TEXTURE_MEMORY = 64 << 20;
+
+/** The render states a state block leaves alone, by their own declaration. */
+const NOT_CAPTURED_BY_STATE_BLOCK = new Set(DEFAULT_RENDER_STATES
+    .filter(entry=>entry.capturedByStateBlock === false)
+    .map(entry=>entry.state));
+
+/**
+ * @typedef {Object} GammaRamp
+ * @property {Uint16Array} red
+ * @property {Uint16Array} green
+ * @property {Uint16Array} blue
+ */
+
+/**
+ * The ramp a display has before a program sets one, each entry standing for
+ * itself. The scale is the eight-bit index widened to sixteen bits by 257, so
+ * that the last entry is the largest value rather than one short of it.
+ *
+ * @returns {GammaRamp}
+ */
+function identityGammaRamp(){
+    const channel = ()=>Uint16Array.from(
+        { length: GAMMA_RAMP_ENTRIES }, (_, index)=>index * 257);
+    return { red: channel(), green: channel(), blue: channel() };
 }
 
 /** @param {Material} material @returns {Material} */
@@ -207,37 +242,146 @@ export function createDirect3D8(options = {}){
     {
         throw new Error('graphics/d3d8: a device that draws needs readMemory as well as a backend');
     }
-    return {
+    const count = createReferenceCount();
+    const root = {
         caps: resolved,
+        get refCount(){
+            return count.value;
+        },
+        addRef: ()=>count.addRef(),
+        release: ()=>count.release(),
+
+        /**
+         * Whether a resource of this kind could be made in this format.
+         *
+         * Answered by the table the creates themselves consult rather than by a
+         * list of its own, so that a program told yes here is told yes there.
+         * A kind of resource this build does not make -- a cube map, a volume,
+         * a buffer -- is not available in any format.
+         *
+         * @param {number} usage
+         * @param {number} resourceType  D3DRTYPE
+         * @param {number} format
+         * @returns {number} D3D_OK or D3DERR_NOTAVAILABLE
+         */
+        CheckDeviceFormat(usage, resourceType, format){
+            const surfaceType = resourceType === D3DRTYPE.TEXTURE
+                ? SURFACE_TYPE.TEXTURE_2D
+                : surfaceTypeOfUsage(resourceType, usage);
+            if (!surfaceType)
+            {
+                return D3DERR_NOTAVAILABLE;
+            }
+            return createResult(surfaceType, format, D3DPOOL.DEFAULT, usage, resolved) === D3D_OK
+                ? D3D_OK
+                : D3DERR_NOTAVAILABLE;
+        },
+
+        /**
+         * @param {number} adapterFormat
+         * @param {number} backBufferFormat
+         * @returns {number}
+         */
+        CheckDeviceType(adapterFormat, backBufferFormat){
+            return isColourFormat(adapterFormat) && isColourFormat(backBufferFormat)
+                ? D3D_OK
+                : D3DERR_NOTAVAILABLE;
+        },
+
+        /**
+         * One sample per pixel and no other count. This build renders no
+         * multisampled target, so every other type is unavailable -- which is
+         * the answer that keeps a program from asking for one.
+         *
+         * @param {number} multiSampleType
+         */
+        CheckDeviceMultiSampleType(multiSampleType){
+            return multiSampleType === 0 ? D3D_OK : D3DERR_NOTAVAILABLE;
+        },
+
+        /**
+         * @param {number} renderTargetFormat
+         * @param {number} depthStencilFormat
+         */
+        CheckDepthStencilMatch(renderTargetFormat, depthStencilFormat){
+            return isColourFormat(renderTargetFormat) && isDepthFormat(depthStencilFormat)
+                ? D3D_OK
+                : D3DERR_NOTAVAILABLE;
+        },
 
         /**
          * @param {import('./validity.js').PresentParameters} parameters
          *        Written back through, the way the guest passes a pointer.
          * @param {{ device?: ReturnType<typeof createDeviceObject> }} out
          * @param {number} [behaviourFlags]
+         * @param {Partial<CreationParameters>} [creation]
+         *        What the call was made with, kept so the device can answer with
+         *        it rather than with a description of itself.
          * @returns {number}
          */
-        CreateDevice(parameters, out, behaviourFlags = 0){
+        CreateDevice(parameters, out, behaviourFlags = 0, creation = {}){
             const hr = validatePresentParameters(parameters);
             if (hr !== D3D_OK)
             {
                 return hr;
             }
             out.device = createDeviceObject(
-                normalisePresentParameters(parameters), resolved, behaviourFlags, services);
+                normalisePresentParameters(parameters), resolved, behaviourFlags, services, {
+                    direct3D: root,
+                    AdapterOrdinal: creation.AdapterOrdinal ?? 0,
+                    DeviceType: creation.DeviceType ?? D3DDEVTYPE.HAL,
+                    hFocusWindow: creation.hFocusWindow ?? 0,
+                    BehaviorFlags: behaviourFlags,
+                });
             reportPresentParameters(parameters);
             return D3D_OK;
         },
     };
+    return root;
 }
+
+/**
+ * @typedef {Object} CreationParameters
+ * @property {number} AdapterOrdinal
+ * @property {number} DeviceType
+ * @property {number} hFocusWindow
+ * @property {number} BehaviorFlags
+ */
+
+/**
+ * @typedef {CreationParameters & { direct3D: any }} DeviceIdentity
+ *     Everything about a device that came from the call that made it, including
+ *     the object it was made through.
+ */
+
+/**
+ * @typedef {Object} StateBlock
+ * @property {Map<number, number>} renderStates
+ * @property {Map<number, number>} stageStates   Keyed by (stage << 8) | type.
+ * @property {Map<number, Float32Array>} transforms
+ * @property {Map<number, any>} textures         Per stage; null means "nothing bound".
+ * @property {Material | null} material
+ */
+
+/**
+ * @typedef {Object} SurfaceMove
+ *     One rectangle of one copy, as addresses in the guest's own memory.
+ * @property {number} from
+ * @property {number} to
+ * @property {number} rowBytes
+ * @property {number} rows
+ * @property {number} fromPitch
+ * @property {number} toPitch
+ */
 
 /**
  * @param {import('./validity.js').PresentParameters} parameters
  * @param {DeviceCaps} caps
  * @param {number} behaviourFlags
  * @param {DeviceServices} services
+ * @param {DeviceIdentity} [identity]
  */
-function createDeviceObject(parameters, caps, behaviourFlags, services){
+function createDeviceObject(parameters, caps, behaviourFlags, services, identity){
     let presentParameters = parameters;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
@@ -280,6 +424,25 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
     let nextShaderHandle = 1;
     let boundVertexShader = 0;
     let boundPixelShader = 0;
+
+    /** @type {Map<number, Float32Array>} index -> the four coefficients */
+    let clipPlanes = new Map();
+
+    /**
+     * The two clip words a program reads back. Nothing here computes them --
+     * this device transforms on the GPU and never reports which planes a vertex
+     * fell outside of -- so what comes back is what went in.
+     */
+    let clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
+
+    /** @type {GammaRamp} */
+    let gammaRamp = identityGammaRamp();
+
+    /** @type {Map<number, StateBlock>} */
+    const stateBlocks = new Map();
+    /** @type {StateBlock | null} The block being recorded, if one is. */
+    let recording = null;
+    let nextStateBlock = 1;
 
     const count = createReferenceCount();
 
@@ -434,6 +597,187 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
         const made = createDefaultStageStates(stage);
         stageStates.set(stage, made);
         return made;
+    };
+
+    /** @returns {StateBlock} a block holding nothing yet */
+    const emptyBlock = ()=>({
+        renderStates: new Map(),
+        stageStates: new Map(),
+        transforms: new Map(),
+        textures: new Map(),
+        material: null,
+    });
+
+    /**
+     * Notes one state into the block being recorded, if one is.
+     *
+     * The state is also applied, which is the reading this layer takes of a
+     * recording device: a program between Begin and End sees its own changes,
+     * and a program that only ever applies the block afterwards cannot tell the
+     * difference.
+     *
+     * @template T
+     * @param {(block: StateBlock) => Map<number, T>} pick
+     * @param {number} key
+     * @param {T} value
+     */
+    const recordState = (pick, key, value)=>{
+        if (recording)
+        {
+            pick(recording).set(key, value);
+        }
+    };
+
+    /** @param {StateBlock} block */
+    const applyBlock = block=>{
+        for (const [state, value] of block.renderStates)
+        {
+            renderStates.set(state, value);
+        }
+        for (const [key, value] of block.stageStates)
+        {
+            stageStatesFor(key >>> 8).set(key & 0xff, value);
+        }
+        for (const [type, matrix] of block.transforms)
+        {
+            transforms.set(type, Float32Array.from(matrix));
+        }
+        for (const [stage, texture] of block.textures)
+        {
+            if (texture)
+            {
+                textures.set(stage, texture);
+            }
+            else
+            {
+                textures.delete(stage);
+            }
+        }
+        if (block.material)
+        {
+            material = copyMaterial(block.material);
+        }
+    };
+
+    /**
+     * The block's states take the values of the moment; which states it holds
+     * does not change, which is the whole difference between capturing a block
+     * and making one.
+     *
+     * @param {StateBlock} block
+     */
+    const captureBlock = block=>{
+        for (const state of block.renderStates.keys())
+        {
+            block.renderStates.set(state, renderStates.get(state) ?? 0);
+        }
+        for (const key of block.stageStates.keys())
+        {
+            block.stageStates.set(key, stageStatesFor(key >>> 8).get(key & 0xff) ?? 0);
+        }
+        for (const type of block.transforms.keys())
+        {
+            block.transforms.set(type, Float32Array.from(transforms.get(type) ?? IDENTITY));
+        }
+        for (const stage of block.textures.keys())
+        {
+            block.textures.set(stage, textures.get(stage) ?? null);
+        }
+        if (block.material)
+        {
+            block.material = copyMaterial(material);
+        }
+    };
+
+    /**
+     * Everything of one kind, as it stands now.
+     *
+     * The split between the two halves is coarser than the header's: Direct3D
+     * assigns each render state to the pixel or the vertex half individually,
+     * and this takes the render and stage states as the pixel half and the
+     * transforms and the material as the vertex half. A block of one half
+     * therefore restores a superset of what it should, and a block of
+     * everything is exact.
+     *
+     * @param {StateBlock} block
+     * @param {number} type D3DSBT
+     */
+    const fillBlock = (block, type)=>{
+        if (type !== D3DSBT.VERTEXSTATE)
+        {
+            for (const [state, value] of renderStates)
+            {
+                if (!NOT_CAPTURED_BY_STATE_BLOCK.has(state))
+                {
+                    block.renderStates.set(state, value);
+                }
+            }
+            for (let stage = 0; stage < STAGE_COUNT; stage++)
+            {
+                for (const [tss, value] of stageStatesFor(stage))
+                {
+                    block.stageStates.set((stage << 8) | tss, value);
+                }
+                block.textures.set(stage, textures.get(stage) ?? null);
+            }
+        }
+        if (type !== D3DSBT.PIXELSTATE)
+        {
+            for (const [key, matrix] of transforms)
+            {
+                block.transforms.set(key, Float32Array.from(matrix));
+            }
+            block.material = copyMaterial(material);
+        }
+    };
+
+    /**
+     * How far apart two rows of a surface are. The surfaces here are laid out
+     * tightly, so this is the same arithmetic `createSurface` does; a format
+     * whose lock counts blocks rather than pixels would need its own answer,
+     * and this layer creates none.
+     *
+     * @param {import('../d3d9/resources.js').SurfaceDesc} desc
+     */
+    const pitchOf = desc=>desc.Width * FORMAT_INFO[desc.Format].bytesPerPixel;
+
+    /**
+     * A whole surface, as one move.
+     *
+     * @param {any} source
+     * @param {any} destination
+     * @returns {SurfaceMove}
+     */
+    const wholeSurfaceMove = (source, destination)=>{
+        const from = describe(source);
+        const to = describe(destination);
+        return {
+            from: source.base,
+            to: destination.base,
+            rowBytes: Math.min(pitchOf(from), pitchOf(to)),
+            rows: Math.min(from.Height, to.Height),
+            fromPitch: pitchOf(from),
+            toPitch: pitchOf(to),
+        };
+    };
+
+    /**
+     * The surface of a texture level, without leaving a reference behind: the
+     * count is the texture's own, so taking one and giving it straight back
+     * leaves the caller's ownership exactly as it found it.
+     *
+     * @param {any} texture
+     * @param {number} level
+     */
+    const levelSurface = (texture, level)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        if (texture.GetSurfaceLevel(level, held) !== D3D_OK || !held.surface)
+        {
+            return null;
+        }
+        held.surface.release();
+        return held.surface;
     };
 
     /**
@@ -621,6 +965,82 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
         },
 
         /**
+         * The object this device was made through, which a program asks for so
+         * that it can enumerate or check a format without having kept one.
+         *
+         * @param {{ direct3D?: any }} out
+         */
+        GetDirect3D(out){
+            if (!identity?.direct3D)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            identity.direct3D.addRef();
+            out.direct3D = identity.direct3D;
+            return D3D_OK;
+        },
+
+        /**
+         * What CreateDevice was called with, unaltered. Nothing here is this
+         * device describing itself, which is why none of it can be wrong.
+         *
+         * @param {{ parameters?: CreationParameters }} out
+         */
+        GetCreationParameters(out){
+            if (!identity)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.parameters = {
+                AdapterOrdinal: identity.AdapterOrdinal,
+                DeviceType: identity.DeviceType,
+                hFocusWindow: identity.hFocusWindow,
+                BehaviorFlags: identity.BehaviorFlags,
+            };
+            return D3D_OK;
+        },
+
+        /** @returns {number} bytes, rounded the way this call always reports them */
+        GetAvailableTextureMem(){
+            return AVAILABLE_TEXTURE_MEMORY;
+        },
+
+        /**
+         * Nothing here is managed on the device's behalf: a texture's storage
+         * is the guest's own memory and is uploaded when it changes, so there
+         * is nothing to discard however many bytes the caller asked for, and
+         * the call has already done all it can.
+         */
+        ResourceManagerDiscardBytes(){
+            return D3D_OK;
+        },
+
+        /**
+         * The ramp is kept and handed back, and nothing applies it: this device
+         * reports no gamma capability, so a program that checks before setting
+         * one knows that already, and one that does not gets the state it wrote
+         * rather than an invented one.
+         *
+         * @param {GammaRamp} ramp
+         */
+        SetGammaRamp(ramp){
+            gammaRamp = {
+                red: Uint16Array.from(ramp.red),
+                green: Uint16Array.from(ramp.green),
+                blue: Uint16Array.from(ramp.blue),
+            };
+        },
+
+        /** @param {{ ramp?: GammaRamp }} out */
+        GetGammaRamp(out){
+            out.ramp = {
+                red: Uint16Array.from(gammaRamp.red),
+                green: Uint16Array.from(gammaRamp.green),
+                blue: Uint16Array.from(gammaRamp.blue),
+            };
+        },
+
+        /**
          * A device that can be reset still cannot present: the two answers
          * differ, and a program that resets on the strength of Present alone
          * never learns that the device came back.
@@ -724,6 +1144,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
             transforms = new Map();
             material = defaultMaterial();
             lights = new Map();
+            clipPlanes = new Map();
+            clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
             buildImplicitResources();
             return D3D_OK;
         },
@@ -744,6 +1166,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
                 return D3DERR_INVALIDCALL;
             }
             states.set(type, value >>> 0);
+            recordState(block=>block.stageStates, (stage << 8) | type, value >>> 0);
             return D3D_OK;
         },
 
@@ -776,6 +1199,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
                 return D3DERR_INVALIDCALL;
             }
             transforms.set(type, Float32Array.from(matrix));
+            recordState(block=>block.transforms, type, Float32Array.from(matrix));
             return D3D_OK;
         },
 
@@ -794,6 +1218,39 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
             return D3D_OK;
         },
 
+        /**
+         * The transform already there, times the one given, in the order a
+         * row-vector convention multiplies them: the new matrix is applied
+         * after the old, which is what makes a chain of these read left to
+         * right.
+         *
+         * @param {number} type
+         * @param {ArrayLike<number>} matrix
+         */
+        MultiplyTransform(type, matrix){
+            if (!isTransformType(type) || !matrix || matrix.length !== 16)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const current = transforms.get(type) ?? IDENTITY;
+            const product = new Float32Array(16);
+            for (let row = 0; row < 4; row++)
+            {
+                for (let column = 0; column < 4; column++)
+                {
+                    let sum = 0;
+                    for (let step = 0; step < 4; step++)
+                    {
+                        sum += current[row * 4 + step] * matrix[step * 4 + column];
+                    }
+                    product[row * 4 + column] = sum;
+                }
+            }
+            transforms.set(type, product);
+            recordState(block=>block.transforms, type, Float32Array.from(product));
+            return D3D_OK;
+        },
+
         /** @param {Material} value */
         SetMaterial(value){
             if (!value)
@@ -801,6 +1258,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
                 return D3DERR_INVALIDCALL;
             }
             material = copyMaterial(value);
+            if (recording)
+            {
+                recording.material = copyMaterial(value);
+            }
             return D3D_OK;
         },
 
@@ -952,6 +1413,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
                 return D3DERR_INVALIDCALL;
             }
             renderStates.set(state, value >>> 0);
+            recordState(block=>block.renderStates, state, value >>> 0);
             return D3D_OK;
         },
 
@@ -1020,6 +1482,140 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
                 return D3DERR_INVALIDCALL;
             }
             out.enabled = record.enabled ? LIGHT_ENABLED : 0;
+            return D3D_OK;
+        },
+
+        /**
+         * A user clip plane, as its four coefficients. Which of them are in
+         * force is D3DRS_CLIPPLANEENABLE's business, so an index is writable
+         * whether or not anything reads it.
+         *
+         * @param {number} index
+         * @param {ArrayLike<number>} plane
+         */
+        SetClipPlane(index, plane){
+            if (index < 0 || index >= 32 || !plane || plane.length !== 4)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            clipPlanes.set(index, Float32Array.from(plane));
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} index
+         * @param {{ plane?: Float32Array }} out
+         *        Zeroes for a plane never written, which is what a fresh device
+         *        holds -- a plane of no coefficients clips nothing.
+         */
+        GetClipPlane(index, out){
+            if (index < 0 || index >= 32)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.plane = Float32Array.from(clipPlanes.get(index) ?? [0, 0, 0, 0]);
+            return D3D_OK;
+        },
+
+        /** @param {{ ClipUnion: number, ClipIntersection: number }} status */
+        SetClipStatus(status){
+            if (!status)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            clipStatus = {
+                ClipUnion: status.ClipUnion >>> 0,
+                ClipIntersection: status.ClipIntersection >>> 0,
+            };
+            return D3D_OK;
+        },
+
+        /** @param {{ status?: { ClipUnion: number, ClipIntersection: number } }} out */
+        GetClipStatus(out){
+            out.status = { ...clipStatus };
+            return D3D_OK;
+        },
+
+        /**
+         * How many passes the state as it stands would take.
+         *
+         * Always one, and that is a property of this renderer rather than a
+         * guess: the whole stage cascade becomes a single generated shader, so
+         * a state this device accepts is a state it draws in one pass or not at
+         * all.
+         *
+         * @param {{ passes?: number }} out
+         */
+        ValidateDevice(out){
+            out.passes = 1;
+            return D3D_OK;
+        },
+
+        // --- state blocks ---
+
+        BeginStateBlock(){
+            if (recording)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            recording = emptyBlock();
+            return D3D_OK;
+        },
+
+        /** @param {{ handle?: number }} out */
+        EndStateBlock(out){
+            if (!recording)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const handle = nextStateBlock++;
+            stateBlocks.set(handle, recording);
+            recording = null;
+            out.handle = handle;
+            return D3D_OK;
+        },
+
+        /** @param {number} handle */
+        ApplyStateBlock(handle){
+            const block = stateBlocks.get(handle);
+            if (!block)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            applyBlock(block);
+            return D3D_OK;
+        },
+
+        /** @param {number} handle */
+        CaptureStateBlock(handle){
+            const block = stateBlocks.get(handle);
+            if (!block)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            captureBlock(block);
+            return D3D_OK;
+        },
+
+        /** @param {number} handle */
+        DeleteStateBlock(handle){
+            return stateBlocks.delete(handle) ? D3D_OK : D3DERR_INVALIDCALL;
+        },
+
+        /**
+         * @param {number} type D3DSBT
+         * @param {{ handle?: number }} out
+         */
+        CreateStateBlock(type, out){
+            if (!/** @type {number[]} */ (Object.values(D3DSBT)).includes(type))
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const block = emptyBlock();
+            fillBlock(block, type);
+            const handle = nextStateBlock++;
+            stateBlocks.set(handle, block);
+            out.handle = handle;
             return D3D_OK;
         },
 
@@ -1095,6 +1691,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
             {
                 textures.delete(stage);
             }
+            recordState(block=>block.textures, stage, texture ?? null);
             return D3D_OK;
         },
 
@@ -1420,26 +2017,104 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
          * A blit between two surfaces, which D3D9 does not have. Neither side
          * may be a depth stencil, and it cannot stretch.
          *
+         * The bytes are not moved here. Both surfaces live in the guest's own
+         * memory and this file cannot reach it, so what a successful call hands
+         * back is where they are and how they are laid out; whoever can read
+         * that memory does the moving. The destination is marked for upload
+         * before it is written rather than after, because what the mark decides
+         * is only whether the next draw re-reads it.
+         *
          * @param {any} source
          * @param {readonly import('./validity.js').CopyRect[] | null} rects
          * @param {number} rectCount
          * @param {any} destination
          * @param {readonly { x: number, y: number }[] | null} points
+         * @param {{ moves?: SurfaceMove[] }} [out]
          */
-        CopyRects(source, rects, rectCount, destination, points){
+        CopyRects(source, rects, rectCount, destination, points, out = {}){
             if (!source || !destination)
             {
                 return D3DERR_INVALIDCALL;
             }
             const from = describe(source);
             const to = describe(destination);
-            return copyRectsResult(
+            const chosen = rectCount > 0 ? (rects ?? []).slice(0, rectCount) : null;
+            const targets = rectCount > 0 ? (points ?? []).slice(0, rectCount) : null;
+            const hr = copyRectsResult(
                 { type: surfaceTypeOf(from), format: from.Format, width: from.Width,
                     height: from.Height },
                 { type: surfaceTypeOf(to), format: to.Format, width: to.Width,
                     height: to.Height },
-                rectCount > 0 ? (rects ?? []).slice(0, rectCount) : null,
-                rectCount > 0 ? (points ?? []).slice(0, rectCount) : null);
+                chosen, targets);
+            if (hr !== D3D_OK)
+            {
+                return hr;
+            }
+            const bytesPerPixel = FORMAT_INFO[from.Format].bytesPerPixel;
+            out.moves = chosen && targets
+                ? chosen.map((rect, index)=>({
+                    from: source.base + rect.top * pitchOf(from) + rect.left * bytesPerPixel,
+                    to: destination.base + targets[index].y * pitchOf(to)
+                        + targets[index].x * bytesPerPixel,
+                    rowBytes: (rect.right - rect.left) * bytesPerPixel,
+                    rows: rect.bottom - rect.top,
+                    fromPitch: pitchOf(from),
+                    toPitch: pitchOf(to),
+                }))
+                : [wholeSurfaceMove(source, destination)];
+            renderer?.markDirty(destination);
+            return D3D_OK;
+        },
+
+        /**
+         * Every level a system-memory texture and a device-memory one share.
+         *
+         * The rules are this layer's reading of what the call has to mean and
+         * are narrower than the header's: the source is system memory, the
+         * destination is not, the format is the same on both sides, and level
+         * zero is the same size. A destination with fewer levels takes the
+         * levels it has.
+         *
+         * As with CopyRects, the moves are described rather than made.
+         *
+         * @param {any} source
+         * @param {any} destination
+         * @param {{ moves?: SurfaceMove[] }} [out]
+         */
+        UpdateTexture(source, destination, out = {}){
+            if (!source || !destination)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const top = levelSurface(source, 0);
+            const into = levelSurface(destination, 0);
+            if (!top || !into)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const from = describe(top);
+            const to = describe(into);
+            if (from.Pool !== D3DPOOL.SYSTEMMEM || to.Pool === D3DPOOL.SYSTEMMEM
+                || from.Format !== to.Format
+                || from.Width !== to.Width || from.Height !== to.Height)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {SurfaceMove[]} */
+            const moves = [];
+            const levels = Math.min(source.levels ?? 1, destination.levels ?? 1);
+            for (let level = 0; level < levels; level++)
+            {
+                const one = levelSurface(source, level);
+                const other = levelSurface(destination, level);
+                if (one && other)
+                {
+                    moves.push(wholeSurfaceMove(one, other));
+                }
+            }
+            out.moves = moves;
+            renderer?.markDirty(destination);
+            return D3D_OK;
         },
 
         // --- shaders, which in this version are handles rather than objects ---
@@ -1575,6 +2250,38 @@ function createDeviceObject(parameters, caps, behaviourFlags, services){
     };
 
     return device;
+}
+
+/** @param {number} format @returns {boolean} a format this layer lays out, and a colour one */
+function isColourFormat(format){
+    return FORMAT_INFO[format] !== undefined && !FORMAT_INFO[format].depth;
+}
+
+/** @param {number} format */
+function isDepthFormat(format){
+    return FORMAT_INFO[format] !== undefined && FORMAT_INFO[format].depth === true;
+}
+
+/**
+ * Which kind of surface a plain resource of this usage would be, or null for a
+ * kind of resource this build does not make at all.
+ *
+ * @param {number} resourceType D3DRTYPE
+ * @param {number} usage
+ * @returns {string | null}
+ */
+function surfaceTypeOfUsage(resourceType, usage){
+    if (resourceType !== D3DRTYPE.SURFACE)
+    {
+        return null;
+    }
+    if ((usage & D3DUSAGE.DEPTHSTENCIL) !== 0)
+    {
+        return SURFACE_TYPE.DEPTH_STENCIL;
+    }
+    return (usage & D3DUSAGE.RENDERTARGET) !== 0
+        ? SURFACE_TYPE.RENDER_TARGET
+        : SURFACE_TYPE.PLAIN;
 }
 
 /**
