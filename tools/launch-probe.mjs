@@ -131,7 +131,13 @@ async function main(){
         storage: null,
     });
 
-    const unresolved = byLibrary(app.image.unresolved ?? []);
+    // Every image, not just the executable. A library the game ships has its own
+    // imports into system libraries, and one of those missing is enough to kill
+    // its load -- which looks like the library failing rather than like a
+    // function nobody wrote.
+    const loader = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'loader');
+    const unresolved = byLibrary(loader?.metrics?.unresolved ?? app.image.unresolved ?? []);
     if (unresolved.length === 0)
     {
         console.log('every import bound.\n');
