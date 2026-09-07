@@ -32,6 +32,16 @@ import { isParkedCall } from './parking.js';
 const CALL_RING = 4096;
 
 /**
+ * How many calls are kept with their arguments and answers.
+ *
+ * Far fewer than the names, because this is what a failure is read backwards
+ * from and nobody reads a thousand lines of it. Names alone say what a program
+ * was doing; these say what it asked and what it was told, which is the only
+ * way to see an answer that was wrong rather than missing.
+ */
+const DETAIL_RING = 64;
+
+/**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
@@ -57,6 +67,9 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
      */
     const called = new Array(CALL_RING);
     let ringAt = 0;
+    /** @type {{ name: string, from: number, args: number[], result: string }[]} */
+    const detailed = new Array(DETAIL_RING);
+    let detailAt = 0;
 
     /**
      * The most-called names in the ring, with their counts, commonest first.
@@ -164,9 +177,25 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
 
             parking.beginCall(frame);
             let result;
+            const record = {
+                name: fn.name,
+                // Which instruction made this call. Read from the frame that was
+                // captured above rather than the stack, because a handler that
+                // calls the guest back has overwritten the stack by the time
+                // anybody reads this.
+                from: frame.hostReturn,
+                // Copied, because a handler that writes through a pointer can
+                // change what the arguments describe before anyone reads them.
+                args: args.slice(0, 6),
+                result: 'threw',
+            };
+            detailed[detailAt++ % DETAIL_RING] = record;
             try
             {
                 result = fn.handler(args);
+                record.result = isParkedCall(result)
+                    ? 'parked'
+                    : `0x${(Number(result) >>> 0).toString(16)}`;
             }
             finally
             {
@@ -202,6 +231,24 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             // trace only shows where the loop was when it was interrupted.
             hot: hot(40),
         }),
+
+        /**
+         * The last few calls with what was asked and what was answered, oldest
+         * first. Read backwards from a failure, this is where an answer that
+         * was wrong rather than missing shows itself.
+         *
+         * @param {number} [count]
+         */
+        detailed(count = DETAIL_RING){
+            const kept = Math.min(count, detailAt, DETAIL_RING);
+            /** @type {any[]} */
+            const out = [];
+            for (let back = kept; back > 0; back--)
+            {
+                out.push(detailed[(detailAt - back) % DETAIL_RING]);
+            }
+            return out;
+        },
 
         /**
          * The calls the guest has made, oldest first -- as many as the ring

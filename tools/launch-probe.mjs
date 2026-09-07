@@ -74,6 +74,19 @@ function report(app){
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
     }
 
+    const bridge = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'bridge')?.metrics ?? {};
+    // Read backwards from the failure: what was asked, and what it was told.
+    // Names alone say what a program was doing; these say whether an answer was
+    // wrong rather than missing.
+    for (const call of (bridge.recentDetailed ?? []).slice(-24))
+    {
+        const args = call.args.map((/** @type {number} */ a)=>
+            `0x${(a >>> 0).toString(16)}`).join(', ');
+        const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
+        console.log(`    ${from}  ${call.name}(${args}) = ${call.result}`);
+    }
+
     const hottest = app.diagnostics()
         .find((/** @type {any} */ layer)=>layer.name === 'bridge')?.metrics?.hot ?? [];
     if (hottest.length > 0)

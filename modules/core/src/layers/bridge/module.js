@@ -251,6 +251,7 @@ export const bridgeModule = {
             metrics: dispatcher
                 ? {
                     ...dispatcher.diagnostics(),
+                    recentDetailed: dispatcher.detailed(24),
                     ...parking.diagnostics(),
                     ...callbacks.diagnostics(),
                     ...vtables ? vtables.diagnostics() : {},
