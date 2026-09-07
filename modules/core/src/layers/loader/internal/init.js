@@ -29,6 +29,25 @@
 /** DLL_PROCESS_ATTACH. The other three reasons are per-thread and per-detach. */
 export const DLL_PROCESS_ATTACH = 1;
 
+/**
+ * What DllMain's third argument says here: the library was linked against, not
+ * loaded by name at run time.
+ *
+ * Windows passes NULL for a library brought in by LoadLibrary and something
+ * that is not NULL for one the loader brought in because the image imports it.
+ * A library reads this to tell the two apart and can do genuinely different
+ * things in each case -- initialising state one way when it is part of a
+ * process from the start and another when it arrives later. Passing zero for
+ * both makes every statically-linked library take the branch meant for the
+ * other case, which is not a subtle difference: one real library rebuilds a
+ * table it had already built correctly, with a different seed, and every
+ * lookup through that table fails from then on.
+ *
+ * The value itself is only ever compared against NULL. One is what the loader
+ * is observed to pass.
+ */
+const LOADED_STATICALLY = 1;
+
 /** @param {number} value */
 const u32 = value=>[
     value & 0xff,
@@ -85,7 +104,7 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi }){
             {
                 // A TLS callback takes exactly DllMain's three arguments.
                 code.push(
-                    0x6a, 0x00, //                     push 0
+                    0x6a, LOADED_STATICALLY, //        push 1
                     0x6a, DLL_PROCESS_ATTACH, //       push 1
                     0x68, ...u32(library.base), //     push hinstDLL
                     0xb8, ...u32(callback), //         mov eax, callback
@@ -102,7 +121,7 @@ export function synthesiseProcessInit({ libraries, entryPoint, tlsApi }){
         // BOOL WINAPI DllMain(HINSTANCE, DWORD, LPVOID) -- stdcall, so it pops
         // its own three arguments and nothing is cleaned up here.
         code.push(
-            0x6a, 0x00, //                  push 0            (lpvReserved)
+            0x6a, LOADED_STATICALLY, //    push 1            (lpvReserved)
             0x6a, DLL_PROCESS_ATTACH, //    push 1            (fdwReason)
             0x68, ...u32(library.base), //  push hinstDLL
             // Through a register rather than a relative call: the stub is

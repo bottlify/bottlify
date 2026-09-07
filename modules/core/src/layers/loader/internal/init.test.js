@@ -26,8 +26,8 @@ test('each library is attached, in the order it was given', ()=>{
     assert.deepEqual(attached, ['msacm32.dll', 'fmod.dll'],
         'a dependency is attached before what depends on it');
 
-    // push 0 / push 1 / push hinst / mov eax, DllMain / call eax, twice.
-    assert.deepEqual([...bytes.subarray(0, 4)], [0x6a, 0x00, 0x6a, DLL_PROCESS_ATTACH]);
+    // push 1 / push 1 / push hinst / mov eax, DllMain / call eax, twice.
+    assert.deepEqual([...bytes.subarray(0, 4)], [0x6a, 0x01, 0x6a, DLL_PROCESS_ATTACH]);
     assert.equal(bytes[4], 0x68);
     assert.equal(u32At(bytes, 5), 0x03000000, 'hinstDLL is the base it was mapped at');
     assert.equal(bytes[9], 0xb8);
@@ -71,7 +71,10 @@ test('the arguments are the ones DllMain is declared to take', ()=>{
     });
 
     // Pushed right to left, so the stack reads hinstDLL, fdwReason, lpvReserved.
-    assert.equal(bytes[1], 0x00, 'lpvReserved is pushed first, and is null');
+    assert.notEqual(bytes[1], 0x00,
+        'lpvReserved is pushed first, and says the library was linked against '
+        + 'rather than loaded by name -- a library reads it and takes a '
+        + 'different path for each');
     assert.equal(bytes[3], DLL_PROCESS_ATTACH, 'then the reason');
     assert.equal(u32At(bytes, 5), 0x03000000, 'then the handle, which is the base');
 });
