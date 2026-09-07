@@ -19,6 +19,10 @@ export default [
             '.ghidra-home/**',
             '.certs/**',
             'roadmap/**',
+            // The launcher is its own application, with its own package.json,
+            // its own framework and its own conventions. Holding it to the
+            // engine's house style would be a style argument, not a check.
+            'ui/**',
         ],
     },
     js.configs.recommended,
