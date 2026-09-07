@@ -173,6 +173,10 @@ export const graphicsModule = {
             status: factories ? 'ready' : 'created',
             metrics: {
                 apis: factories ? Object.keys(factories) : [],
+                // Which libraries a program can reach this layer through. It
+                // exports its own, and anything counting what is synthesised
+                // into guest memory has to include them.
+                libraries: seam ? Object.keys(seam.libraries) : [],
                 // What a program actually asked for says more about a run than
                 // what the build could have offered.
                 created,

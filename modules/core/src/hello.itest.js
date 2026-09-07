@@ -74,14 +74,23 @@ test('diagnostics describe the run afterwards', async()=>{
     // or not: the modules exist in guest memory before the first instruction, so
     // an address taken early is the address that works later (§13.3). Plus the
     // park slot and the callback sentinel.
-    assert.equal(byName.cpu.metrics.traps, byName.win32.metrics.implemented + 2);
+    //
+    // Counted against what the bridge registered rather than against one
+    // layer's tally: the drawing libraries are exported to a program exactly as
+    // the system ones are, and an assertion naming only win32 says a program's
+    // reachable surface is smaller than it is.
+    assert.equal(byName.cpu.metrics.traps, byName.bridge.metrics.implemented + 2);
 
     assert.equal(byName.win32.metrics.exitCode, 0);
     assert.ok(byName.win32.metrics.libraries['KERNEL32.dll'] > 0);
 
-    // One image per system library, plus the program itself.
-    const systemModules = Object.keys(byName.win32.metrics.libraries).length;
-    assert.equal(byName.loader.metrics.images, systemModules + 1);
+    // One image per synthesised library, plus the program itself. Counted from
+    // both layers that export libraries rather than from win32 alone, because a
+    // drawing library is synthesised into guest memory exactly as a system one
+    // is and a program reaches it the same way.
+    const synthesised = Object.keys(byName.win32.metrics.libraries).length
+        + (byName.graphics.metrics.libraries?.length ?? 0);
+    assert.equal(byName.loader.metrics.images, synthesised + 1);
     assert.deepEqual(byName.loader.metrics.unresolved, []);
 
     assert.deepEqual(byName.bridge.metrics.lastCall, 'KERNEL32.dll!ExitProcess');
