@@ -25,6 +25,7 @@ const ALL_LAYERS = [
 /** Layers with a real implementation; the rest are still stubs. */
 const IMPLEMENTED = [
     'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'win32', 'graphics',
+    'audio', 'input',
 ];
 
 test('a default build contains every layer, in dependency order', async()=>{
@@ -56,8 +57,12 @@ test('building the graph costs nothing: the emulator is not started', async()=>{
 });
 
 test('a layer that is still a stub throws NOT_IMPLEMENTED', async()=>{
+    // The mechanism, on the one layer that is still a stub. What matters is
+    // that an unbuilt layer refuses loudly rather than answering with a
+    // plausible nothing -- a silent zero from a layer nobody wrote is a defect
+    // that surfaces wherever the caller used it.
     const core = await assembleModules({});
-    assert.throws(()=>core.api('audio').play(), { code: 'NOT_IMPLEMENTED' });
+    assert.throws(()=>core.api('log').write('anything'), { code: 'NOT_IMPLEMENTED' });
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{

@@ -405,6 +405,16 @@ export const win32Module = {
                     readCString,
                     write: (handle, text)=>sink(handle, text),
                     callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
+                    // One allocator behind malloc and HeapAlloc alike: a C++
+                    // program frees with `delete` what a library function
+                    // allocated with `malloc`, and Windows lets it.
+                    allocate: bytes=>allocator.allocate(bytes),
+                    free: address=>allocator.free(address),
+                    block: address=>allocator.block(address),
+                    resize: (address, bytes)=>allocator.resize(address, bytes),
+                    systemTimeMs: ()=>kernel.clock.wallClock(),
+                    now: ()=>kernel.clock.virtualTime(),
+                    files: volume,
                 }),
             },
 
@@ -535,6 +545,16 @@ export const win32Module = {
              * it through CoCreateInstance like any other.
              */
             com: ()=>com,
+
+            /**
+             * The one allocator the whole process draws from.
+             *
+             * Handed out because a layer that puts bytes where a guest will
+             * read them -- a sound buffer it locks and writes through -- has to
+             * take them from the same free list as everything else, or two
+             * allocators hand out the same address.
+             */
+            heap: ()=>heap,
 
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,

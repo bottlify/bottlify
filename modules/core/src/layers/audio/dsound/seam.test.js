@@ -1,0 +1,588 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
+import {
+    createDirectSound, createPublisher, describe,
+    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSBPOSITIONNOTIFY,
+    IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
+    IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer,
+    IDIRECTSOUND_SLOTS, IDIRECTSOUNDBUFFER_SLOTS, IDIRECTSOUNDBUFFER8_SLOTS,
+} from './seam.js';
+import { DSBSTATUS_PLAYING, DSBPLAY_LOOPING, DSBLOCK_ENTIREBUFFER } from './buffers.js';
+
+const DSERR_INVALIDPARAM = 0x80070057 | 0;
+const DSBCAPS_PRIMARYBUFFER = 0x00000001;
+
+/** Flat guest memory, one megabyte, addressed from zero. */
+function guestMemory(){
+    const bytes = new Uint8Array(0x100000);
+    return {
+        bytes,
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writeMemory: (address, data)=>bytes.set(data, address),
+        /** @param {number} address */
+        u32: address=>new DataView(bytes.buffer).getUint32(address, true),
+        /** @param {number} address @param {number} value */
+        setU32: (address, value)=>new DataView(bytes.buffer).setUint32(address, value, true),
+        /** @param {number} address @param {number} value */
+        setU16: (address, value)=>new DataView(bytes.buffer).setUint16(address, value, true),
+    };
+}
+
+/**
+ * A publisher that lays no vtable but records the method list it was given, so
+ * a test can call a slot by name and by index -- which is what the guest does.
+ */
+function fakeBridge(){
+    /** @type {Map<number, { object: any, id: string, methods: any[] }>} */
+    const byPointer = new Map();
+    /** One address per object and interface, as the real publisher promises. */
+    const published = new WeakMap();
+    let next = 0x10000;
+    return {
+        byPointer,
+        /** @param {number} pointer */
+        recordAt(pointer){
+            const entry = byPointer.get(pointer);
+            assert.ok(entry, `nothing published at ${pointer}`);
+            return entry;
+        },
+        /** @param {any} object @param {string} id */
+        publishInterface(object, id){
+            const record = object.interfaceFor(id);
+            if (!record)
+            {
+                return 0;
+            }
+            let byInterface = published.get(object);
+            if (!byInterface)
+            {
+                byInterface = new Map();
+                published.set(object, byInterface);
+            }
+            if (byInterface.has(id))
+            {
+                return byInterface.get(id);
+            }
+            const pointer = next;
+            next += 4;
+            byInterface.set(id, pointer);
+            byPointer.set(pointer, { object, id, methods: record.methods });
+            return pointer;
+        },
+
+        /**
+         * QueryInterface, as the bridge implements it: a second interface on
+         * the same object, at its own address.
+         *
+         * @param {number} pointer @param {string} id
+         */
+        query(pointer, id){
+            const entry = byPointer.get(pointer);
+            assert.ok(entry, `nothing published at ${pointer}`);
+            return this.publishInterface(entry.object, id);
+        },
+        /**
+         * Calls a method the way the bridge does: `this` is the first argument
+         * and the object is passed alongside.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        call(pointer, name, args = []){
+            const entry = byPointer.get(pointer);
+            assert.ok(entry, `nothing published at ${pointer}`);
+            const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
+            assert.ok(method, `${entry.id} has no ${name}`);
+            assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
+            return method.invoke(entry.object, [pointer, ...args]) | 0;
+        },
+        /** @param {number} pointer */
+        methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
+    };
+}
+
+/** A clock the test moves by hand. */
+function clock(){
+    let ms = 1000;
+    return { now: ()=>ms, advance: (/** @type {number} */ by)=>{
+        ms += by;
+    } };
+}
+
+/** Everything a test needs, wired the way the module wires it. */
+function fixture(){
+    const memory = guestMemory();
+    const bridge = fakeBridge();
+    const time = clock();
+    /** @type {number[]} */
+    const signalled = [];
+    let nextAddress = 0x50000;
+    const dsound = createDirectSound({
+        memory,
+        allocate: (/** @type {number} */ bytes)=>{
+            const address = nextAddress;
+            nextAddress += (bytes + 0xfff) & ~0xfff;
+            return address;
+        },
+        now: time.now,
+        publishInterface: (object, id)=>bridge.publishInterface(object, id),
+        signal: event=>signalled.push(event),
+    });
+    return { memory, bridge, time, dsound, signalled };
+}
+
+/** DirectSoundCreate, giving back the interface pointer. */
+function createRoot(f = fixture()){
+    const out = 0x1000;
+    const result = f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, out, 0]);
+    assert.equal(result, DS_OK);
+    return { ...f, root: f.memory.u32(out) };
+}
+
+/**
+ * Lays a WAVEFORMATEX and a DSBUFFERDESC in guest memory.
+ *
+ * @param {any} memory @param {any} [spec]
+ */
+function describeBuffer(memory, spec = {}){
+    const { bytes = 8192, flags = 0, channels = 2, rate = 22050, bits = 16,
+        format = 0x2000, descriptor = 0x2100 } = spec;
+    memory.setU16(format + WAVEFORMATEX.wFormatTag, 1);
+    memory.setU16(format + WAVEFORMATEX.nChannels, channels);
+    memory.setU32(format + WAVEFORMATEX.nSamplesPerSec, rate);
+    memory.setU16(format + WAVEFORMATEX.wBitsPerSample, bits);
+    // Deliberately wrong: the model derives the frame size and must not read it.
+    memory.setU16(format + WAVEFORMATEX.nBlockAlign, 999);
+
+    memory.setU32(descriptor + DSBUFFERDESC.dwSize, DSBUFFERDESC.SIZE);
+    memory.setU32(descriptor + DSBUFFERDESC.dwFlags, flags);
+    memory.setU32(descriptor + DSBUFFERDESC.dwBufferBytes, bytes);
+    memory.setU32(descriptor + DSBUFFERDESC.lpwfxFormat,
+        (flags & DSBCAPS_PRIMARYBUFFER) !== 0 ? 0 : format);
+    return descriptor;
+}
+
+/**
+ * The buffer's IDirectSoundNotify, which is a different interface pointer on
+ * the same object -- reached the way a program reaches it, by QueryInterface.
+ *
+ * @param {any} f @param {number} buffer
+ */
+const notifyOn = (f, buffer)=>f.bridge.query(buffer, IID_IDirectSoundNotify);
+
+/**
+ * Creates one secondary buffer and returns its interface pointer.
+ *
+ * @param {any} f @param {any} [spec]
+ */
+function createBuffer(f, spec = {}){
+    const descriptor = describeBuffer(f.memory, spec);
+    const out = 0x1800;
+    const result = f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]);
+    assert.equal(result, DS_OK, 'CreateSoundBuffer');
+    return f.memory.u32(out);
+}
+
+test('every declared slot counts `this` in its argument size', ()=>{
+    for (const [name, slots] of [
+        ['IDirectSound', IDIRECTSOUND_SLOTS],
+        ['IDirectSoundBuffer', IDIRECTSOUNDBUFFER_SLOTS],
+    ])
+    {
+        for (const [method, args] of /** @type {[string, number][]} */ (slots))
+        {
+            const declared = describe('{00000000-0000-0000-0000-000000000000}',
+                [[method, args]]).methods[0];
+            assert.equal(declared.argBytes, 4 + args * 4, `${name}::${method}`);
+            assert.equal(declared.argBytes % 4, 0);
+        }
+    }
+});
+
+test('IDirectSoundBuffer8 keeps IDirectSoundBuffer\'s slots in the same places', ()=>{
+    // A method that moves is a call into a different function, and nothing
+    // reports it -- so the shared prefix is the whole safety property here.
+    const base = IDIRECTSOUNDBUFFER_SLOTS.map(([name])=>name);
+    const eight = IDIRECTSOUNDBUFFER8_SLOTS.map(([name])=>name);
+    assert.deepEqual(eight.slice(0, base.length), base);
+    assert.deepEqual(eight.slice(base.length),
+        ['SetFX', 'AcquireResources', 'GetObjectInPath']);
+});
+
+test('a published vtable begins with IUnknown\'s three, in order', ()=>{
+    const f = createRoot();
+    const methods = f.bridge.methodsOf(f.root);
+    assert.deepEqual(methods.slice(0, 3).map((/** @type {any} */ m)=>m.name),
+        IUNKNOWN_METHODS.map(m=>m.name));
+    assert.equal(methods[3].name, 'CreateSoundBuffer', 'and then the interface\'s own');
+    assert.equal(methods.length, 3 + IDIRECTSOUND_SLOTS.length);
+});
+
+test('every slot is present, including the ones nothing implements', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    const names = f.bridge.methodsOf(buffer).slice(3).map((/** @type {any} */ m)=>m.name);
+    assert.deepEqual(names, IDIRECTSOUNDBUFFER_SLOTS.map(([name])=>name));
+    // SetFormat and Initialize are declared and unimplemented; leaving either
+    // out would shift Lock, Play and everything after it.
+    for (const missing of ['SetFormat', 'Initialize'])
+    {
+        const method = f.bridge.methodsOf(buffer).find(
+            (/** @type {any} */ m)=>m.name === missing);
+        assert.ok(method, `${missing} must occupy its slot`);
+        assert.equal(method.invoke, undefined);
+    }
+});
+
+test('one object has one identity however many times it is published', ()=>{
+    const f = createRoot();
+    const again = 0x1004;
+    f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, again, 0]);
+    assert.equal(f.memory.u32(again), f.root,
+        'a second pointer is a second object to a program comparing them');
+});
+
+test('an object answers QueryInterface for what it has and refuses what it has not', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    const adapter = f.bridge.recordAt(buffer).object;
+    assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer));
+    assert.ok(adapter.interfaceFor(IID_IDirectSoundBuffer8));
+    assert.ok(adapter.interfaceFor(IID_IDirectSoundNotify));
+    assert.ok(adapter.interfaceFor(IID_IUNKNOWN), 'every object has IUnknown');
+    assert.equal(adapter.interfaceFor(IID_IDirectSound3DBuffer), null,
+        'a short vtable is worse than E_NOINTERFACE');
+});
+
+test('the root answers to both IDirectSound and IDirectSound8', ()=>{
+    const f = createRoot();
+    const adapter = f.bridge.recordAt(f.root).object;
+    assert.equal(adapter.interfaceFor(IID_IDirectSound8).methods.length,
+        adapter.interfaceFor(IID_IDirectSound).methods.length);
+});
+
+test('CreateSoundBuffer refuses a descriptor with no size or no format', ()=>{
+    const f = createRoot();
+    const out = 0x1800;
+    const noSize = describeBuffer(f.memory, { bytes: 0 });
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [noSize, out, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.memory.u32(out), 0, 'and zeroes the pointer it refused to fill');
+
+    f.memory.setU32(noSize + DSBUFFERDESC.dwBufferBytes, 4096);
+    f.memory.setU32(noSize + DSBUFFERDESC.lpwfxFormat, 0);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [noSize, out, 0]),
+        DSERR_INVALIDPARAM);
+});
+
+test('a primary buffer needs neither a size nor a format', ()=>{
+    const f = createRoot();
+    const descriptor = describeBuffer(f.memory,
+        { bytes: 0, flags: DSBCAPS_PRIMARYBUFFER });
+    const out = 0x1800;
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [descriptor, out, 0]), DS_OK);
+    assert.notEqual(f.memory.u32(out), 0);
+    assert.equal(f.dsound.buffers()[0].primary, true);
+});
+
+test('CreateSoundBuffer refuses null pointers rather than dereferencing them', ()=>{
+    const f = createRoot();
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [0, 0x1800, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(f.root, 'CreateSoundBuffer', [0x2100, 0, 0]),
+        DSERR_INVALIDPARAM);
+});
+
+test('GetCurrentPosition writes both cursors, and the write cursor leads', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 88200 });
+    f.bridge.call(buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.time.advance(100);
+
+    const play = 0x1900;
+    const write = 0x1904;
+    assert.equal(f.bridge.call(buffer, 'GetCurrentPosition', [play, write]), DS_OK);
+    assert.ok(f.memory.u32(write) > f.memory.u32(play));
+});
+
+test('GetCurrentPosition accepts a null for either cursor', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    // A program that only wants the play cursor passes NULL for the other, and
+    // writing through it would be a fault rather than a wrong number.
+    assert.equal(f.bridge.call(buffer, 'GetCurrentPosition', [0x1900, 0]), DS_OK);
+    assert.equal(f.bridge.call(buffer, 'GetCurrentPosition', [0, 0x1904]), DS_OK);
+});
+
+test('GetStatus reports playing, and a null pointer is refused', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    const status = 0x1900;
+    assert.equal(f.bridge.call(buffer, 'GetStatus', [status]), DS_OK);
+    assert.equal(f.memory.u32(status), 0);
+    f.bridge.call(buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.bridge.call(buffer, 'GetStatus', [status]);
+    assert.equal(f.memory.u32(status) & DSBSTATUS_PLAYING, DSBSTATUS_PLAYING);
+    assert.equal(f.bridge.call(buffer, 'GetStatus', [0]), DSERR_INVALIDPARAM);
+});
+
+test('Lock hands back guest addresses, and the wrap as a second range', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const [p1, n1, p2, n2] = [0x1900, 0x1904, 0x1908, 0x190c];
+    assert.equal(f.bridge.call(buffer, 'Lock', [4000, 200, p1, n1, p2, n2, 0]), DS_OK);
+
+    const base = f.dsound.buffers()[0].address;
+    assert.equal(f.memory.u32(p1), base + 4000);
+    assert.equal(f.memory.u32(n1), 96);
+    assert.equal(f.memory.u32(p2), base, 'the wrap continues at the buffer\'s start');
+    assert.equal(f.memory.u32(n2), 104);
+});
+
+test('Lock always writes the second range, even when it is empty', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const [p1, n1, p2, n2] = [0x1900, 0x1904, 0x1908, 0x190c];
+    // Left over from an earlier lock. A program that reads these without
+    // checking splices audio from somewhere else into its stream.
+    f.memory.setU32(p2, 0xdeadbeef);
+    f.memory.setU32(n2, 1234);
+    f.bridge.call(buffer, 'Lock', [0, 100, p1, n1, p2, n2, 0]);
+    assert.equal(f.memory.u32(p2), 0);
+    assert.equal(f.memory.u32(n2), 0);
+});
+
+test('Lock refuses without somewhere to put the first range', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    assert.equal(f.bridge.call(buffer, 'Lock', [0, 16, 0, 0x1904, 0, 0, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(buffer, 'Lock', [0, 16, 0x1900, 0, 0, 0, 0]),
+        DSERR_INVALIDPARAM);
+});
+
+test('DSBLOCK_ENTIREBUFFER locks all of it from the start', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const [p1, n1, p2, n2] = [0x1900, 0x1904, 0x1908, 0x190c];
+    f.bridge.call(buffer, 'Lock',
+        [3000, 8, p1, n1, p2, n2, DSBLOCK_ENTIREBUFFER]);
+    assert.equal(f.memory.u32(p1), f.dsound.buffers()[0].address);
+    assert.equal(f.memory.u32(n1), 4096);
+    assert.equal(f.memory.u32(n2), 0);
+});
+
+test('Unlock succeeds once and then reports the mistake', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    f.bridge.call(buffer, 'Lock', [0, 64, 0x1900, 0x1904, 0x1908, 0x190c, 0]);
+    assert.equal(f.bridge.call(buffer, 'Unlock', [0, 0, 0, 0]), DS_OK);
+    assert.notEqual(f.bridge.call(buffer, 'Unlock', [0, 0, 0, 0]), DS_OK);
+});
+
+test('GetCaps fills DSBCAPS and refuses a header that does not declare its size', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    const caps = 0x1a00;
+    assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DSERR_INVALIDPARAM,
+        'dwSize is zero, so the caller and we disagree about the layout');
+    f.memory.setU32(caps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    assert.equal(f.bridge.call(buffer, 'GetCaps', [caps]), DS_OK);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwBufferBytes), 4096);
+    assert.equal(f.memory.u32(caps + DSBCAPS.dwFlags), 0);
+});
+
+test('GetFormat writes a WAVEFORMATEX derived from the format, not echoed back', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { channels: 2, rate: 44100, bits: 16 });
+    const out = 0x1b00;
+    const written = 0x1bff;
+    assert.equal(f.bridge.call(buffer, 'GetFormat',
+        [out, WAVEFORMATEX.SIZE, written]), DS_OK);
+    assert.equal(f.memory.u32(out + WAVEFORMATEX.nSamplesPerSec), 44100);
+    // The descriptor said 999; the frame size is four, because that is what
+    // two channels of sixteen bits actually occupy.
+    assert.equal(f.memory.bytes[out + WAVEFORMATEX.nBlockAlign], 4);
+    assert.equal(f.memory.u32(out + WAVEFORMATEX.nAvgBytesPerSec), 44100 * 4);
+    assert.equal(f.memory.u32(written), WAVEFORMATEX.SIZE);
+});
+
+test('GetFormat with a buffer too small refuses rather than truncating', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    assert.equal(f.bridge.call(buffer, 'GetFormat', [0x1b00, 4, 0]), DSERR_INVALIDPARAM);
+});
+
+test('GetFormat with no structure answers only the size it would need', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    const written = 0x1bff;
+    assert.equal(f.bridge.call(buffer, 'GetFormat', [0, 0, written]), DS_OK);
+    assert.equal(f.memory.u32(written), WAVEFORMATEX.SIZE);
+});
+
+test('volume, pan and frequency round-trip through guest memory', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { rate: 22050 });
+    const out = 0x1c00;
+
+    f.bridge.call(buffer, 'SetVolume', [-2500 | 0]);
+    f.bridge.call(buffer, 'GetVolume', [out]);
+    assert.equal(f.memory.u32(out) | 0, -2500);
+
+    f.bridge.call(buffer, 'SetPan', [3000]);
+    f.bridge.call(buffer, 'GetPan', [out]);
+    assert.equal(f.memory.u32(out) | 0, 3000);
+
+    f.bridge.call(buffer, 'SetFrequency', [11025]);
+    f.bridge.call(buffer, 'GetFrequency', [out]);
+    assert.equal(f.memory.u32(out), 11025);
+});
+
+test('the getters refuse a null rather than writing to address zero', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    for (const name of ['GetVolume', 'GetPan', 'GetFrequency'])
+    {
+        assert.equal(f.bridge.call(buffer, name, [0]), DSERR_INVALIDPARAM, name);
+    }
+});
+
+test('SetNotificationPositions reads an array of DSBPOSITIONNOTIFY', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 88200 });
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 44100);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.SIZE + DSBPOSITIONNOTIFY.dwOffset, 66000);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.SIZE + DSBPOSITIONNOTIFY.hEventNotify, 0x88);
+
+    assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [2, array]), DS_OK);
+    assert.deepEqual(f.dsound.buffers()[0].notifications,
+        [{ offset: 44100, event: 0x77 }, { offset: 66000, event: 0x88 }]);
+});
+
+test('SetNotificationPositions with a count and no array is refused', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [3, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [0, 0]), DS_OK,
+        'clearing them needs no array');
+});
+
+test('a notification the cursor passed is signalled when the buffer is next read', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 88200 });
+    const array = 0x1d00;
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.dwOffset, 22000);
+    f.memory.setU32(array + DSBPOSITIONNOTIFY.hEventNotify, 0x77);
+    f.bridge.call(notifyOn(f, buffer), 'SetNotificationPositions', [1, array]);
+    f.bridge.call(buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.time.advance(500);
+
+    assert.deepEqual(f.signalled, [], 'nothing fires on a timer nobody runs');
+    f.bridge.call(buffer, 'GetCurrentPosition', [0x1900, 0x1904]);
+    assert.deepEqual(f.signalled, [0x77],
+        'a program that polls instead of waiting must still see its notifications');
+});
+
+test('DuplicateSoundBuffer shares the samples and not the cursor', ()=>{
+    const f = createRoot();
+    const original = createBuffer(f, { bytes: 88200 });
+    const out = 0x1e00;
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [original, out, 0]), DS_OK);
+    const copy = f.memory.u32(out);
+    assert.notEqual(copy, original, 'a duplicate is its own object');
+
+    const [source, duplicate] = f.dsound.buffers();
+    assert.equal(duplicate.address, source.address, 'the audio is not paid for twice');
+
+    f.bridge.call(copy, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.time.advance(100);
+    const position = 0x1900;
+    f.bridge.call(original, 'GetCurrentPosition', [position, 0]);
+    assert.equal(f.memory.u32(position), 0, 'playing one does not move the other');
+});
+
+test('DuplicateSoundBuffer refuses a pointer it never published', ()=>{
+    const f = createRoot();
+    assert.equal(f.bridge.call(f.root, 'DuplicateSoundBuffer', [0xbadf00d, 0x1e00, 0]),
+        DSERR_INVALIDPARAM);
+});
+
+test('the device reports caps only into a header that declares its size', ()=>{
+    const f = createRoot();
+    const caps = 0x1f00;
+    assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DSERR_INVALIDPARAM);
+    f.memory.setU32(caps + DSCAPS.dwSize, DSCAPS.SIZE);
+    assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DS_OK);
+    assert.equal(f.memory.u32(caps + DSCAPS.dwPrimaryBuffers), 1);
+});
+
+test('the library exports the entry points a program links against', ()=>{
+    const f = fixture();
+    const table = f.dsound.libraries['DSOUND.dll'];
+    assert.equal(table.DirectSoundCreate.argBytes, 12);
+    assert.equal(table.DirectSoundCreate8.argBytes, 12);
+    assert.equal(table.DirectSoundEnumerateA.argBytes, 8);
+    assert.equal(table.DirectSoundCaptureCreate.argBytes, 12);
+    for (const [name, entry] of Object.entries(table))
+    {
+        assert.equal(entry.argBytes % 4, 0, `${name} is not a whole number of slots`);
+    }
+});
+
+test('DirectSoundCreate refuses to write through a null', ()=>{
+    const f = fixture();
+    assert.equal(
+        f.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0, 0]),
+        DSERR_INVALIDPARAM);
+});
+
+test('with no bridge behind it the seam refuses instead of publishing nowhere', ()=>{
+    const memory = guestMemory();
+    const dsound = createDirectSound({
+        memory,
+        allocate: ()=>0x50000,
+        now: ()=>0,
+        publishInterface: ()=>0,
+    });
+    assert.equal(dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, 0x1000, 0]),
+        DS_OK);
+    assert.equal(memory.u32(0x1000), 0, 'and hands back a null the program can check');
+});
+
+test('the publisher keeps one adapter per object and can find it again', ()=>{
+    let next = 0x9000;
+    const publisher = createPublisher({ publishInterface: ()=>{
+        next += 4;
+        return next;
+    } });
+    const object = { addRef: ()=>1, release: ()=>0 };
+    const interfaces = [describe(IID_IDirectSound, IDIRECTSOUND_SLOTS)];
+    const first = publisher.publish(object, interfaces, IID_IDirectSound);
+    const second = publisher.publish(object, interfaces, IID_IDirectSound);
+    assert.equal(publisher.objectAt(first), object);
+    assert.equal(publisher.objectAt(second), object);
+    assert.equal(publisher.objectAt(0), null, 'a null pointer is a legitimate argument');
+    assert.equal(publisher.count(), 2);
+});
+
+test('diagnostics report what a run actually did', ()=>{
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    f.bridge.call(buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    const report = f.dsound.diagnostics();
+    assert.equal(report.buffers, 1);
+    assert.equal(report.playing, 1);
+    assert.equal(report.device, null, 'nothing is heard, and it says so');
+});

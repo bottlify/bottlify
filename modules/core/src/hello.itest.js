@@ -85,11 +85,20 @@ test('diagnostics describe the run afterwards', async()=>{
     assert.ok(byName.win32.metrics.libraries['KERNEL32.dll'] > 0);
 
     // One image per synthesised library, plus the program itself. Counted from
-    // both layers that export libraries rather than from win32 alone, because a
-    // drawing library is synthesised into guest memory exactly as a system one
-    // is and a program reaches it the same way.
-    const synthesised = Object.keys(byName.win32.metrics.libraries).length
-        + (byName.graphics.metrics.libraries?.length ?? 0);
+    // every layer that reports libraries rather than from a list of layer
+    // names: a drawing or a sound library is synthesised into guest memory
+    // exactly as a system one is, a program reaches it the same way, and a test
+    // that names the layers it knows about goes red every time another one
+    // starts exporting -- which has now happened twice.
+    const synthesised = app.diagnostics().reduce((/** @type {number} */ total,
+        /** @type {any} */ layer)=>{
+        const libraries = layer.metrics?.libraries;
+        if (Array.isArray(libraries))
+        {
+            return total + libraries.length;
+        }
+        return libraries ? total + Object.keys(libraries).length : total;
+    }, 0);
     assert.equal(byName.loader.metrics.images, synthesised + 1);
     assert.deepEqual(byName.loader.metrics.unresolved, []);
 

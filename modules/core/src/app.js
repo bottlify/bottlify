@@ -721,6 +721,21 @@ export async function createApp(options){
     let idlers = [];
 
     const core = await assembleModules({
+        audio: {
+            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
+                core.api('bridge').publishInterface(object, iid),
+            // The guest's clock, never the host's. A program that fills a sound
+            // buffer reads how far playback has got and compares it with a time
+            // it took from somewhere else; two clocks make it disagree with
+            // itself about whether it is behind.
+            now: ()=>core.api('kernel').clock.virtualTime(),
+            allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
+        },
+        input: {
+            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
+                core.api('bridge').publishInterface(object, iid),
+            now: ()=>core.api('kernel').clock.virtualTime(),
+        },
         graphics: {
             // Where a COM interface goes when a program asks for one. Without
             // it the drawing entry points refuse rather than publishing into
@@ -812,6 +827,8 @@ export async function createApp(options){
     const win32 = core.api('win32');
     const bridge = core.api('bridge');
     const graphics = core.api('graphics');
+    const audio = core.api('audio');
+    const input = core.api('input');
 
     await cpu.boot(options.v86);
 
@@ -844,7 +861,12 @@ export async function createApp(options){
     // The drawing APIs are libraries like any other as far as a program is
     // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
     // and nothing about how they are reached should differ.
-    const allLibraries = { ...win32.libraries(), ...graphics.libraries?.() ?? {} };
+    const allLibraries = {
+        ...win32.libraries(),
+        ...graphics.libraries?.() ?? {},
+        ...audio.libraries?.() ?? {},
+        ...input.libraries?.() ?? {},
+    };
     Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to

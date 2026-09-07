@@ -27,9 +27,14 @@ import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { win32Module } from '../modules/core/src/layers/win32/module.js';
+import { audioModule } from '../modules/core/src/layers/audio/module.js';
+import { inputModule } from '../modules/core/src/layers/input/module.js';
 
 const SPECS = 'https://raw.githubusercontent.com/wine-mirror/wine/master/dlls';
-const LIBRARIES = ['kernel32', 'user32', 'gdi32', 'advapi32', 'ole32', 'winmm', 'shell32'];
+const LIBRARIES = [
+    'kernel32', 'user32', 'gdi32', 'advapi32', 'ole32', 'winmm', 'shell32',
+    'dsound', 'dinput', 'dinput8', 'version', 'comdlg32', 'imm32', 'comctl32',
+];
 
 /** Types that occupy two stack slots rather than one. */
 const WIDE = new Set(['int64', 'double']);
@@ -103,8 +108,17 @@ async function main(){
         }
     }
 
-    const api = await win32Module.create({}, /** @type {any} */ (silentHost()));
-    const libraries = api.libraries();
+    // Every layer that exports a library to a program, not only win32: a
+    // drawing or sound library's stub pops its own arguments exactly as a
+    // system one does, and gets the count wrong exactly as easily.
+    const win32 = await win32Module.create({}, /** @type {any} */ (silentHost()));
+    const audio = await audioModule.create({}, /** @type {any} */ (silentHost()));
+    const input = await inputModule.create({}, /** @type {any} */ (silentHost()));
+    const libraries = {
+        ...win32.libraries(),
+        ...audio.libraries?.() ?? {},
+        ...input.libraries?.() ?? {},
+    };
 
     let checked = 0;
     let unknown = 0;
