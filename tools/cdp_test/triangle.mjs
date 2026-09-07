@@ -20,13 +20,11 @@
  * different failures, and each of those numbers separates them.
  */
 
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { spawn } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findBrowser, shutdown } from './browser.mjs';
+import { launchWithGpu, shutdown } from './browser.mjs';
 import { CdpEndpoint } from './cdp.mjs';
 import { serveStatic } from './server.mjs';
 import { TRIANGLE_COLOURS, TRIANGLE_REPORT } from '../make-pe.mjs';
@@ -49,79 +47,6 @@ const EXPECTED = [
     { name: 'cleared-top-left', x: 10, y: 10, colour: TRIANGLE_COLOURS.clear },
     { name: 'cleared-bottom-right', x: 310, y: 230, colour: TRIANGLE_COLOURS.clear },
 ];
-
-/**
- * A browser that will hand out a GPU.
- *
- * The acceptance probe launches with `--disable-gpu`, which is right for it and
- * fatal here, so this scenario opens its own. Two of these flags were each the
- * difference between a device and none, and both were found by measurement:
- * `--enable-unsafe-webgpu` stops the browser refusing every adapter it has not
- * blessed -- without it `requestAdapter` answers null and Dawn reports "no
- * available adapters", which reads as a machine with no WebGPU at all -- and
- * `--enable-unsafe-swiftshader` leaves a software adapter available where there
- * is no hardware one. Which adapter answered is in the report, because a
- * software rasteriser and a real one are not the same measurement.
- *
- * @param {Object} [options]
- * @param {string} [options.browser]
- * @returns {Promise<any>}
- */
-function launchWithGpu({ browser = findBrowser() } = {}){
-    const profileRoot = mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-gpu-'));
-    const proc = spawn(
-        browser,
-        [
-            '--headless=new',
-            '--no-sandbox',
-            '--no-proxy-server',
-            '--proxy-bypass-list=*',
-            '--enable-unsafe-webgpu',
-            '--enable-unsafe-swiftshader',
-            '--window-size=1280,720',
-            `--user-data-dir=${profileRoot}`,
-            '--remote-debugging-port=0',
-            'about:blank',
-        ],
-        { stdio: ['ignore', 'ignore', 'pipe'] },
-    );
-
-    let stderr = '';
-    let browserWs = '';
-    proc.stderr.on('data', chunk=>{
-        stderr += chunk.toString();
-        const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-        if (match)
-        {
-            browserWs = match[1];
-        }
-    });
-
-    return new Promise((resolveHandle, reject)=>{
-        const started = Date.now();
-        const timer = setInterval(()=>{
-            if (browserWs)
-            {
-                clearInterval(timer);
-                resolveHandle({ proc, browserWs, profileRoot });
-                return;
-            }
-            if (proc.exitCode != null)
-            {
-                clearInterval(timer);
-                reject(new Error(
-                    `browser exited early (${proc.exitCode}): ${stderr.slice(0, 400)}`));
-                return;
-            }
-            if (Date.now() - started > 15000)
-            {
-                clearInterval(timer);
-                reject(new Error(
-                    `timed out waiting for the CDP endpoint: ${stderr.slice(0, 400)}`));
-            }
-        }, 50);
-    });
-}
 
 /**
  * Waits for an expression to answer something other than null, polling.

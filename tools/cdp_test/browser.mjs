@@ -57,17 +57,55 @@ export function findBrowser(){
  * @returns {Promise<BrowserHandle>}
  */
 export function launch({ browser = findBrowser() } = {}){
+    return start(browser, [
+        '--disable-gpu',
+        '--autoplay-policy=no-user-gesture-required',
+    ]);
+}
+
+/**
+ * Launches a headless browser that will hand out a GPU.
+ *
+ * The acceptance probe launches with `--disable-gpu`, which is right for it and
+ * fatal for anything that draws, so a scenario needing a device asks for one
+ * here. Two of these flags were each the difference between a device and none,
+ * and both were found by measurement: `--enable-unsafe-webgpu` stops the
+ * browser refusing every adapter it has not blessed -- without it
+ * `requestAdapter` answers null and Dawn reports "no available adapters", which
+ * reads as a machine with no WebGPU at all -- and `--enable-unsafe-swiftshader`
+ * leaves a software adapter available where there is no hardware one. Which
+ * adapter answered is worth reporting, because a software rasteriser and a real
+ * one are not the same measurement.
+ *
+ * @param {Object} [options]
+ * @param {string} [options.browser]
+ * @returns {Promise<BrowserHandle>}
+ */
+export function launchWithGpu({ browser = findBrowser() } = {}){
+    return start(browser, [
+        '--enable-unsafe-webgpu',
+        '--enable-unsafe-swiftshader',
+    ]);
+}
+
+/**
+ * Spawns the browser and waits for it to say where its CDP endpoint is.
+ *
+ * @param {string} browser
+ * @param {string[]} flags   What this scenario needs on top of the common set.
+ * @returns {Promise<BrowserHandle>}
+ */
+function start(browser, flags){
     const profileRoot = mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'));
     const proc = spawn(
         browser,
         [
             '--headless=new',
             '--no-sandbox',
-            '--disable-gpu',
             '--no-proxy-server',
             '--proxy-bypass-list=*',
-            '--autoplay-policy=no-user-gesture-required',
             '--window-size=1280,720',
+            ...flags,
             `--user-data-dir=${profileRoot}`,
             '--remote-debugging-port=0',
             'about:blank',

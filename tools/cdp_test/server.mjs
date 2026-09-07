@@ -5,7 +5,8 @@
  */
 
 import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
+import { createReadStream } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 
 /**
@@ -35,17 +36,24 @@ const MIME = {
  */
 
 /**
- * Serves `sandboxDir` under /sandbox/ and `srcDir` under /src/.
+ * Serves `sandboxDir` under /sandbox/ and `srcDir` under /src/, plus any extra
+ * prefix a caller names.
+ *
+ * Every response is streamed and every file is range-addressable, because one
+ * of the things served this way is a game bundle: a gigabyte that must never be
+ * read whole to answer a request for one block of it.
  *
  * @param {Object} roots
  * @param {string} roots.sandboxDir
  * @param {string} roots.srcDir
+ * @param {{ prefix: string, root: string }[]} [roots.extra]
  * @returns {Promise<StaticServer>}
  */
-export async function serveStatic({ sandboxDir, srcDir }){
+export async function serveStatic({ sandboxDir, srcDir, extra = [] }){
     const routes = [
         { prefix: '/sandbox/', root: sandboxDir },
         { prefix: '/src/', root: srcDir },
+        ...extra,
     ];
 
     const server = createServer(async(req, res)=>{
@@ -68,14 +76,48 @@ export async function serveStatic({ sandboxDir, srcDir }){
             res.writeHead(403).end();
             return;
         }
+        /** @type {import("node:fs").Stats} */
+        let stats;
         try {
-            const data = await readFile(abs);
-            res.writeHead(200,
-                { 'Content-Type': MIME[extname(abs)] ?? 'application/octet-stream' });
-            res.end(data);
+            stats = await stat(abs);
         } catch {
             res.writeHead(404).end();
+            return;
         }
+        if (!stats.isFile())
+        {
+            res.writeHead(404).end();
+            return;
+        }
+
+        const type = MIME[extname(abs)] ?? 'application/octet-stream';
+        const asked = /^bytes=(\d+)-(\d*)$/.exec(String(req.headers.range ?? ''));
+        if (!asked)
+        {
+            res.writeHead(200, {
+                'Content-Type': type,
+                'Content-Length': stats.size,
+                'Accept-Ranges': 'bytes',
+            });
+            createReadStream(abs).pipe(res);
+            return;
+        }
+
+        const start = Number(asked[1]);
+        const end = Math.min(
+            asked[2] === '' ? stats.size - 1 : Number(asked[2]), stats.size - 1);
+        if (start > end)
+        {
+            res.writeHead(416, { 'Content-Range': `bytes */${stats.size}` }).end();
+            return;
+        }
+        res.writeHead(206, {
+            'Content-Type': type,
+            'Content-Length': end - start + 1,
+            'Content-Range': `bytes ${start}-${end}/${stats.size}`,
+            'Accept-Ranges': 'bytes',
+        });
+        createReadStream(abs, { start, end }).pipe(res);
     });
 
     const port = await new Promise(resolvePort=>{
