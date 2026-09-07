@@ -9,6 +9,7 @@ import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { createGraphicsLibraries } from './seam/exports.js';
+import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 
 /**
@@ -38,6 +39,8 @@ let created = [];
 let seam = null;
 /** @type {any} */
 let presenter = null;
+/** @type {any} */
+let pacer = null;
 
 export const graphicsModule = {
     name: 'graphics',
@@ -158,11 +161,27 @@ export const graphicsModule = {
             apis: ()=>Object.keys(factories),
         };
 
+        // Frames are paced only when the assembling caller has something to
+        // pace them against: a clock and a way to be called at display rate.
+        // A worker has no display of its own, so both arrive from whoever owns
+        // the page, and a headless build keeps delivering on a microtask.
+        //
+        // What this buys is not throughput. A guest presents whenever its own
+        // loop happens to finish, the display refreshes on its own schedule,
+        // and without pacing the result stutters visibly while the average
+        // frame rate looks healthy.
+        pacer = config?.schedule && config?.now
+            ? createPacer({ now: config.now, schedule: config.schedule })
+            : null;
+
         // The backend is asked for on the first present rather than now, so a
         // build that never shows one of these surfaces never builds a GPU.
         presenter = createPresenter({
             backend: ()=>api.backend(),
             readMemory: services.readMemory,
+            // The presenter still coalesces a burst of blits onto one flush;
+            // the pacer only decides when that flush happens.
+            schedule: pacer ? (/** @type {() => void} */ flush)=>pacer.request(flush) : undefined,
         });
 
         seam = createGraphicsLibraries({
@@ -253,6 +272,8 @@ export const graphicsModule = {
                 // through DirectDraw never enters a drawing pass, so nothing
                 // in those numbers says whether anything reached the screen.
                 presenter: presenter ? presenter.diagnostics() : null,
+                // Absent in a build with no display to pace against.
+                pacing: pacer ? pacer.diagnostics() : null,
             },
         };
     },
