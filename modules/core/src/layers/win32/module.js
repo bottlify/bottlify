@@ -388,6 +388,13 @@ export const win32Module = {
                     byBase: base=>modules.byBase(base),
                     setLastError: setError,
                     imagePath: ()=>modules.imagePath(),
+                    // Reading a library off the volume belongs to whoever
+                    // assembled the process, so it is passed straight through.
+                    // Without it LoadLibrary can only answer for what is
+                    // already mapped, and a program asking for a library it
+                    // ships is told the module does not exist.
+                    /** @param {string} name */
+                    load: name=>modules.load?.(name) ?? 0,
                     /** @param {any} asked */
                     resolved: asked=>modules.resolved?.(asked),
                 }),
