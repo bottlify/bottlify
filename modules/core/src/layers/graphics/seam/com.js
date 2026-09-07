@@ -75,8 +75,12 @@ function adapt(api, interfaces){
             };
         },
 
-        addRef: ()=>api.addRef?.() ?? 1,
-        release: ()=>api.release?.() ?? 0,
+        // Forwarded with the interface it was called through, because an API
+        // whose generations count separately needs to know which one.
+        /** @param {string} [id] */
+        addRef: id=>api.addRef?.(id) ?? 1,
+        /** @param {string} [id] */
+        release: id=>api.release?.(id) ?? 0,
     };
     return adapter;
 }

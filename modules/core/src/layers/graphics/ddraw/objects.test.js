@@ -821,12 +821,14 @@ test('a fresh object shows the screen at 32 bits, and a mode change needs a leve
     const ddraw = createDirectDraw({ version: 7 });
     assert.deepEqual(ddraw.displayMode,
         { width: 640, height: 480, bitCount: 32, refreshRate: 0 });
-    assert.equal(ddraw.setDisplayMode(320, 240, 8), DDERR_NOCOOPERATIVELEVELSET);
-    assert.equal(ddraw.restoreDisplayMode(), DDERR_NOCOOPERATIVELEVELSET);
+    assert.equal(ddraw.setDisplayMode(320, 240, 8), DD_OK, 'a mode needs no cooperative level');
+    assert.equal(ddraw.restoreDisplayMode(), DD_OK);
+    assert.equal(ddraw.displayMode.width, 640, 'and restoring puts the screen back');
 
     ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
     assert.equal(ddraw.setDisplayMode(320, 240, 24), DDERR_INVALIDMODE, 'no 24-bit mode');
-    assert.equal(ddraw.setDisplayMode(0, 240, 32), DDERR_INVALIDMODE, 'no empty mode');
+    assert.equal(ddraw.setDisplayMode(0, 240, 32), DD_OK, 'a zero extent is accepted');
+    assert.equal(ddraw.displayMode.width, 640, 'and sets nothing');
     assert.equal(ddraw.displayMode.width, 640, 'a refused mode changes nothing');
 
     assert.equal(ddraw.release('IDirectDraw7'), 0);

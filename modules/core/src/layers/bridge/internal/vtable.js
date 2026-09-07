@@ -115,10 +115,16 @@ export function createVtables({ memory, register, heap }){
         switch (method.builtin){
             case 'queryInterface':
                 return queryInterface(object, args);
+            // Which interface the call came through is passed on, because not
+            // every object model counts references per object. DirectDraw
+            // counts them per interface generation -- four QueryInterface calls
+            // leave four counts of one -- and an object told only "somebody
+            // added a reference" cannot honour that. An implementation that
+            // counts per object ignores the argument and is unaffected.
             case 'addRef':
-                return object.addRef();
+                return object.addRef(interfaceId);
             case 'release':
-                return object.release();
+                return object.release(interfaceId);
             default:
                 if (!method.invoke)
                 {
@@ -156,7 +162,9 @@ export function createVtables({ memory, register, heap }){
         }
 
         const pointer = publish(object, wanted, record.methods);
-        object.addRef();
+        // The reference belongs to the interface the caller asked for, not to
+        // the one it asked through.
+        object.addRef(wanted);
         memory.writeU32(ppv >>> 0, pointer);
         return 0; // S_OK
     }

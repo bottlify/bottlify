@@ -26,10 +26,16 @@
  *   over a given address and a way to say the screen has changed, and does
  *   neither itself.
  *
+ * The reference counts are the one place the seam adds a fact of its own.
+ * The bridge names the interface an AddRef, Release or QueryInterface is for
+ * by its identifier; the object model names a generation. The map between
+ * the two lives here, and the object handed to the publisher is a facade over
+ * the model that applies it -- so a reference taken through IDirectDraw7 lands
+ * in IDirectDraw7's count and nowhere else.
+ *
  * What the seam cannot yet honour is said plainly where it lives: the
  * enumerations, which need a call back into guest code that nothing here can
- * make, and AddRef and Release, which the bridge dispatches without saying
- * which interface pointer they came through.
+ * make.
  */
 
 import {
@@ -175,6 +181,39 @@ export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }
     /** Which ddraw object made a surface: what GetDDInterface hands back. */
     /** @type {WeakMap<object, any>} */
     const owners = new WeakMap();
+
+    /** One facade per model, so one object is one identity. */
+    /** @type {WeakMap<object, any>} */
+    const facades = new WeakMap();
+
+    /**
+     * The model, with its counts addressed by interface identifier.
+     *
+     * A prototype rather than a copy: every method and getter the model has
+     * stays reachable, and only the two that take a generation are replaced.
+     * An identifier that names no generation -- IUnknown, say -- counts
+     * against the generation the object was created as, which is what the
+     * model does when told nothing.
+     *
+     * @param {any} root
+     */
+    const facadeOf = root=>{
+        const existing = facades.get(root);
+        if (existing)
+        {
+            return existing;
+        }
+        const generationOf = (/** @type {string | undefined} */ id)=>{
+            const version = id === undefined ? null : versionOf(id);
+            return version === null ? undefined : GENERATIONS[version].name;
+        };
+        const facade = Object.create(root, {
+            addRef: { value: (/** @type {string} */ id)=>root.addRef(generationOf(id)) },
+            release: { value: (/** @type {string} */ id)=>root.release(generationOf(id)) },
+        });
+        facades.set(root, facade);
+        return facade;
+    };
 
     /**
      * A RECT at an address. Typed loosely on purpose: the field reader answers
@@ -1055,7 +1094,7 @@ export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }
          * @returns {number}
          */
         publishRoot: (root, version)=>
-            publisher.publish(root, ddrawInterfaces, GENERATIONS[version].id),
+            publisher.publish(facadeOf(root), ddrawInterfaces, GENERATIONS[version].id),
 
         /** For tests, which have no guest to call through. */
         interfaces: {

@@ -278,10 +278,17 @@ test('a newer generation is reachable from an older pointer, with its own longer
     const table = h.box.memory.readU32(seventh);
     assert.notEqual(h.box.memory.readU32(table + (3 + IDIRECTDRAW7_SLOTS.length - 1) * 4), 0);
 
-    // The bridge dispatches AddRef and Release without saying which pointer
-    // they came through, so both go to the generation the object was created
-    // as; the model's separate counts are reachable only once it does.
+    // The two generations do not share a count: the query took one reference
+    // on the seventh and none on the first, so releasing the seventh brings it
+    // to zero while the object lives on, held by the first.
+    const model = h.roots[0];
+    assert.equal(model.refCount('IDirectDraw'), 1);
+    assert.equal(model.refCount('IDirectDraw7'), 1);
+    assert.equal(h.box.call(seventh, 1, []), 2, 'AddRef through the seventh');
+    assert.equal(model.refCount('IDirectDraw'), 1, 'leaves the first alone');
     assert.equal(h.release(seventh), 1);
+    assert.equal(h.release(seventh), 0);
+    assert.equal(model.destroyed, false, 'zero on one generation is not the end');
     assert.equal(h.release(first), 0);
     h.assertAllReleased();
 });
@@ -583,11 +590,10 @@ test('a mode set through the first generation is what the seventh reads back', (
     const h = seamed();
     assert.equal(h.ddrawDll.DirectDrawCreate.handler([0, 0x4100, 0]), DD_OK);
     const first = h.box.memory.readU32(0x4100);
-    assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetDisplayMode'), [8, 4, 8]),
-        DDERR_NOCOOPERATIVELEVELSET);
+    assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetDisplayMode'), [8, 4, 8]), DD_OK,
+        'a mode is set with no cooperative level');
     assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetCooperativeLevel'),
         [HWND, DDSCL_NORMAL]), DD_OK);
-    assert.equal(h.box.call(first, slot(IDIRECTDRAW_SLOTS, 'SetDisplayMode'), [8, 4, 8]), DD_OK);
 
     const desc = 0x5200;
     h.box.memory.writeU32(desc, DDSURFACEDESC.SIZE);

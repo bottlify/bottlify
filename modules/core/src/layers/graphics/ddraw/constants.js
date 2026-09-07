@@ -35,8 +35,8 @@ export const DDERR_CANNOTDETACHSURFACE = dderr(20);
 export const DDERR_INVALIDCAPS = dderr(100);
 export const DDERR_INVALIDOBJECT = dderr(130);
 export const DDERR_INVALIDRECT = dderr(150);
-export const DDERR_INVALIDMODE = dderr(190);
-export const DDERR_NOCOLORKEY = dderr(210);
+export const DDERR_INVALIDMODE = dderr(120);
+export const DDERR_NOCOLORKEY = dderr(215);
 export const DDERR_NOCOOPERATIVELEVELSET = dderr(212);
 export const DDERR_NOEXCLUSIVEMODE = dderr(225);
 export const DDERR_NOTFOUND = dderr(255);
@@ -46,7 +46,7 @@ export const DDERR_SURFACELOST = dderr(450);
 export const DDERR_SURFACENOTATTACHED = dderr(460);
 export const DDERR_NOCLIPPERATTACHED = dderr(568);
 export const DDERR_HWNDALREADYSET = dderr(571);
-export const DDERR_CLIPPERISUSINGHWND = dderr(573);
+export const DDERR_CLIPPERISUSINGHWND = dderr(567);
 export const DDERR_NOPALETTEATTACHED = dderr(572);
 export const DDERR_EXCLUSIVEMODEALREADYSET = dderr(581);
 export const DDERR_NOTFLIPPABLE = dderr(582);
@@ -82,17 +82,17 @@ export const DDCKEY_SRCBLT = 0x00000008;
 
 /** DDCAPS.dwCaps, the bits this build reports. */
 export const DDCAPS_BLT = 0x00000040;
-export const DDCAPS_BLTSTRETCH = 0x00000020;
+export const DDCAPS_BLTSTRETCH = 0x00000200;
 export const DDCAPS_BLTCOLORFILL = 0x04000000;
 export const DDCAPS_COLORKEY = 0x00400000;
 export const DDCAPS_GDI = 0x00000400;
-export const DDCAPS_PALETTE = 0x00001000;
+export const DDCAPS_PALETTE = 0x00008000;
 export const DDCAPS_CANBLTSYSMEM = 0x80000000;
 export const DDCAPS2_CERTIFIED = 0x00000001;
 export const DDCAPS2_WIDESURFACES = 0x00001000;
 export const DDCAPS2_CANRENDERWINDOWED = 0x00080000;
 export const DDCKEYCAPS_DESTBLT = 0x00000001;
-export const DDCKEYCAPS_SRCBLT = 0x00000040;
+export const DDCKEYCAPS_SRCBLT = 0x00000200;
 
 /** DDSCAPS.dwCaps. */
 export const DDSCAPS_BACKBUFFER = 0x00000004;

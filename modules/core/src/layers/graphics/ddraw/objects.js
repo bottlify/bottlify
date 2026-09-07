@@ -1335,11 +1335,14 @@ export function createDirectDraw(options = {}){
          * @param {number} [refreshRate]
          */
         setDisplayMode(width, height, bitCount, refreshRate = 0){
-            if (!levelSet)
+            // A zero extent is accepted and changes nothing: programs pass one
+            // and expect success, and the mode they had is the mode they keep.
+            // No cooperative level is needed to set a mode.
+            if (!(width > 0) || !(height > 0))
             {
-                return DDERR_NOCOOPERATIVELEVELSET;
+                return DD_OK;
             }
-            if (!(width > 0) || !(height > 0) || pixelFormatForDepth(bitCount) === null)
+            if (pixelFormatForDepth(bitCount) === null)
             {
                 return DDERR_INVALIDMODE;
             }
@@ -1348,10 +1351,6 @@ export function createDirectDraw(options = {}){
         },
 
         restoreDisplayMode(){
-            if (!levelSet)
-            {
-                return DDERR_NOCOOPERATIVELEVELSET;
-            }
             displayMode = { ...nativeMode };
             return DD_OK;
         },
