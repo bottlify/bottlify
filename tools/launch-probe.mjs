@@ -53,6 +53,39 @@ function byLibrary(unresolved){
     return [...grouped].sort((left, right)=>right[1].length - left[1].length);
 }
 
+/**
+ * What a run spent itself on.
+ *
+ * The single most useful thing after a run that did not finish: which imports
+ * the guest was calling, by count. A program stuck in a loop says so here in
+ * one line, where a stack trace only shows where the loop happened to be when
+ * it was interrupted.
+ *
+ * @param {any} app
+ */
+function report(app){
+    for (const layer of app.diagnostics())
+    {
+        const metrics = layer.metrics ?? {};
+        const interesting = Object.entries(metrics)
+            .filter(([, value])=>typeof value === 'number' || typeof value === 'string')
+            .map(([name, value])=>`${name}=${value}`)
+            .join(' ');
+        console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+    }
+
+    const hottest = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'bridge')?.metrics?.hot ?? [];
+    if (hottest.length > 0)
+    {
+        console.log('\n  what it was calling, most recent first:');
+        for (const [name, count] of hottest)
+        {
+            console.log(`    ${String(count).padStart(5)}  ${name}`);
+        }
+    }
+}
+
 async function main(){
     const { id, turns } = parse(process.argv.slice(2));
     if (!id)
@@ -118,6 +151,22 @@ async function main(){
     const failures = [];
     app.on('error', (/** @type {any} */ payload)=>failures.push(payload));
 
+    // What the program says about itself: OutputDebugString, and anything it
+    // writes to a standard handle. Games say a great deal here and it is the
+    // cheapest window into a run there is.
+    app.attachLog((/** @type {number} */ stream, /** @type {string} */ text)=>{
+        process.stdout.write(`  [guest ${stream}] ${text}`);
+    });
+    // Everything a failing run says about itself. A guest fault reports where
+    // the guest stood; a host one reports what threw, and the two are told
+    // apart only by looking.
+    for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
+        'library-loaded', 'unimplemented', 'warning'])
+    {
+        app.on(name, (/** @type {any} */ payload)=>
+            console.log(`  [${name}] ${JSON.stringify(payload).slice(0, 300)}`));
+    }
+
     let stopped;
     try
     {
@@ -129,10 +178,21 @@ async function main(){
     }
 
     console.log(`stopped: ${stopped}`);
+    report(app);
     for (const failure of failures.slice(0, 3))
     {
         // The trace, not the payload. A dump of the whole event is unreadable
         // and the one thing wanted from it is where the guest was standing.
+        const reason = failure.reason ?? failure.error?.reason;
+        const said = failure.error?.message ?? failure.message;
+        console.log(`  reason: ${reason}${said ? ` — ${said}` : ''}`);
+        // Where it threw on our side. A guest trace says where the guest stood,
+        // which for a host fault inside a stub is the stub -- true and useless.
+        const where = failure.error?.stack ?? failure.stack;
+        if (where)
+        {
+            console.log(String(where).split('\n').slice(0, 8).join('\n'));
+        }
         const text = failure.traceText ?? failure.text ?? failure.error?.traceText;
         console.log(text ? `
 ${text}` : `  ${JSON.stringify(failure).slice(0, 200)}`);

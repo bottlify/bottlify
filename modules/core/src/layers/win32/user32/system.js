@@ -754,20 +754,41 @@ export function createSystemFunctions({ host, live, windows }){
          * int LoadStringA(HINSTANCE hInstance, UINT uID, LPSTR lpBuffer,
          *                int cchBufferMax)
          *
-         * Not implemented, and it says so by answering zero with an empty buffer.
-         * A string table lives in the module's resource directory, which the
-         * loader does not read yet; inventing a string would put text a program
-         * shows to a person into its window with nothing marking it as invented.
+         * The string lives in the module's resource directory, in a bundle of
+         * sixteen. What comes back from there is UTF-16; this is the ANSI entry
+         * point, so it is narrowed here rather than anywhere further in -- the
+         * wide entry point wants the same string untouched.
+         *
+         * A zero buffer is not an error: it asks for the string's address, and
+         * a program that passes one is reading the resource in place. Nothing
+         * here can give it one, so it gets a length of zero, which is what a
+         * caller checks.
          */
         LoadStringA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, , buffer, size])=>{
-                if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+            handler: ([instance, id, buffer, size])=>{
+                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
                 {
-                    host.writeMemory(buffer, new Uint8Array(1));
+                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    {
+                        host.writeMemory(buffer, new Uint8Array(1));
+                    }
+                    return 0;
                 }
-                return 0;
+                // The count includes the terminator, so the string itself gets
+                // one fewer -- a caller sizing a buffer from the return value
+                // and then reading it back would otherwise lose its last
+                // character every time.
+                const kept = text.slice(0, (size | 0) - 1);
+                const bytes = new Uint8Array(kept.length + 1);
+                for (let at = 0; at < kept.length; at++)
+                {
+                    bytes[at] = kept.charCodeAt(at) & 0xff;
+                }
+                host.writeMemory(buffer, bytes);
+                return kept.length;
             },
         },
 

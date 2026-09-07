@@ -139,6 +139,9 @@ function characterFor(key){
  * @property {(wndProc: number, message: DispatchedMessage) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  * @property {() => any} park   Stops the caller; returns the parked token.
+ * @property {(instance: number, id: number) => string | null} [loadString]
+ *           A string out of a module's resources. Absent in a build with no
+ *           loader behind it, which answers as a module with no string table.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {() => Promise<void>} idle

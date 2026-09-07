@@ -26,6 +26,12 @@ import { isParkedCall } from './parking.js';
  */
 
 /**
+ * How many call names the ring keeps. Enough that a failure report shows the
+ * shape of what led to it, small enough that it is a rounding error in memory.
+ */
+const CALL_RING = 4096;
+
+/**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
  * @param {any} deps.memory    For the stack itself, so a wild ESP is caught here.
@@ -36,8 +42,54 @@ import { isParkedCall } from './parking.js';
 export function createDispatcher({ cpu, memory, parking, suspend }){
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
-    /** @type {string[]} */
-    const called = [];
+    /**
+     * The names of recent calls, as a ring.
+     *
+     * Bounded, and that is the whole point of it. This is diagnostics: a
+     * failure report wants the last handful of calls, and nothing wants the
+     * millionth. Kept as a growing list it is a leak that scales with how well
+     * the engine works -- a program that runs for an hour makes hundreds of
+     * millions of calls, and the array eventually refuses to grow at all,
+     * failing inside the dispatcher with a message about array length that says
+     * nothing about the guest.
+     *
+     * @type {string[]}
+     */
+    const called = new Array(CALL_RING);
+    let ringAt = 0;
+
+    /**
+     * The most-called names in the ring, with their counts, commonest first.
+     *
+     * @param {number} count
+     * @returns {[string, number][]}
+     */
+    const hot = count=>{
+        /** @type {Map<string, number>} */
+        const counts = new Map();
+        for (const name of history(CALL_RING))
+        {
+            counts.set(name, (counts.get(name) ?? 0) + 1);
+        }
+        return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, count);
+    };
+
+    /**
+     * The last `count` calls, oldest first.
+     *
+     * @param {number} count
+     * @returns {string[]}
+     */
+    const history = count=>{
+        const kept = Math.min(count, ringAt, CALL_RING);
+        /** @type {string[]} */
+        const out = [];
+        for (let back = kept; back > 0; back--)
+        {
+            out.push(called[(ringAt - back) % CALL_RING]);
+        }
+        return out;
+    };
     /** Guest address of each stub, so a return address can be given a name. */
     /** @type {Map<number, string>} */
     const byAddress = new Map();
@@ -95,7 +147,7 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             });
 
             calls++;
-            called.push(fn.name);
+            called[ringAt++ % CALL_RING] = fn.name;
 
             // Everything the handler might need about where it was called from,
             // read before it runs: a handler that calls the guest back writes
@@ -144,13 +196,20 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
         diagnostics: ()=>({
             implemented: functions.size,
             calls,
-            lastCall: called.length > 0 ? called[called.length - 1] : null,
+            lastCall: ringAt === 0 ? null : called[(ringAt - 1) % CALL_RING],
+            // What the guest has been doing, rather than the one thing it did
+            // last. A program stuck in a loop says so here in a line; a stack
+            // trace only shows where the loop was when it was interrupted.
+            hot: hot(12),
         }),
 
-        /** Which imports the guest has actually called, in order. */
-        calls: ()=>[...called],
+        /**
+         * The calls the guest has made, oldest first -- as many as the ring
+         * still holds, which is every one of them until it wraps.
+         */
+        calls: ()=>history(ringAt),
 
         /** @param {number} count @returns {string[]} the last few, oldest first */
-        recent: count=>called.slice(-count),
+        recent: count=>history(Math.min(count, CALL_RING)),
     };
 }

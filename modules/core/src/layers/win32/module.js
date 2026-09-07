@@ -243,6 +243,8 @@ export const win32Module = {
                 park: ()=>bridge.park(),
                 idle,
                 created: config?.created ?? (()=>{}),
+                /** @param {number} instance @param {number} id */
+                loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
             }),
 
             'ADVAPI32.dll': createRegistryFunctions({

@@ -9,9 +9,11 @@ import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
 import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { parsePe, readExports } from './layers/loader/internal/pe.js';
+import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
-import { synthesiseProcessInit } from './layers/loader/internal/init.js';
+import { loadString } from './layers/loader/internal/resources.js';
+import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
+    from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createBlockCache, resolveBlockStore }
@@ -726,6 +728,25 @@ export async function createApp(options){
                 /** @param {number} base */
                 byBase: base=>byBase.get(base >>> 0) ?? null,
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
+                /** @param {string} name */
+                load: name=>loadLibraryAtRuntime(name),
+                /**
+                 * A string out of a module's own resources.
+                 *
+                 * An HINSTANCE is the base a module was mapped at, and zero
+                 * means the running program -- which is what a program passes
+                 * when it asks for its own strings, which is nearly always.
+                 *
+                 * @param {number} instance @param {number} id
+                 */
+                loadString: (instance, id)=>{
+                    const module = instance === 0
+                        ? mainModule
+                        : byBase.get(instance >>> 0) ?? null;
+                    return module?.file
+                        ? loadString(module.file, module.image, id)
+                        : null;
+                },
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
@@ -854,6 +875,101 @@ export async function createApp(options){
         return ordinal === null ? null : module.addressOfOrdinal(ordinal);
     };
 
+    /**
+     * Libraries asked for while the program runs, and the ones that are not
+     * there. Both are remembered, and the second matters as much as the first:
+     * a title probes for hardware support once a frame by asking for a library
+     * that does not exist, and a probe that has to wait is a stall per frame.
+     *
+     * @type {Set<string>}
+     */
+    const absentLibraries = new Set();
+    /** Where the next runtime library goes. Set once the shipped ones are placed. */
+    let nextLibraryBase = 0;
+
+    /**
+     * LoadLibrary, for a library nothing has loaded yet.
+     *
+     * Synchronous unless a PE actually has to be read, because the dispatcher
+     * treats a promise as "park the guest thread" and the two cheap answers --
+     * already here, known absent -- must not cost that.
+     *
+     * @param {string} name
+     * @returns {number | Promise<number>}
+     */
+    const loadLibraryAtRuntime = name=>{
+        const key = name.toLowerCase().replace(/\.dll$/, '');
+        if (absentLibraries.has(key))
+        {
+            return 0;
+        }
+        return (async()=>{
+            const path = options.imagePath ?? 'C:\\app.exe';
+            const directory = path.slice(0, path.lastIndexOf('\\') + 1);
+            const file = await readWholeFile(filesystem, blocks, `${directory}${name}`);
+            if (!file)
+            {
+                absentLibraries.add(key);
+                return 0;
+            }
+
+            const image = parsePe(file);
+            if (nextLibraryBase + image.sizeOfImage > cpu.layout.memorySize)
+            {
+                absentLibraries.add(key);
+                events.emit('libraries-missing', { names: [name], reason: 'no room' });
+                return 0;
+            }
+
+            const base = nextLibraryBase;
+            const mapped = loader.map(file, { base, name });
+            const { exports } = readExports(file, image);
+            const addresses = new Map(exports
+                .filter(entry=>entry.name !== null && entry.forwards === null)
+                .map(entry=>[String(entry.name), base + entry.rva]));
+            const ordinals = new Map(exports
+                .filter(entry=>entry.forwards === null)
+                .map(entry=>[entry.ordinal, base + entry.rva]));
+
+            const held = {
+                name, base, size: image.sizeOfImage,
+                /** @param {string} exported */
+                addressOf: exported=>addresses.get(exported) ?? null,
+                /** @param {number} ordinal */
+                addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+                entryPoint: mapped.record.entryPoint,
+            };
+            // Registered before its own imports are bound, so a library that
+            // imports back into itself -- or into one still being loaded --
+            // finds an address rather than nothing.
+            byName.set(key, held);
+            byBase.set(base, held);
+            nextLibraryBase = base
+                + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+
+            loader.bind(mapped, resolveImport);
+
+            // Its own libraries, if it brought any, before it is attached.
+            for (const dependency of parsePe(file) && readImports(file, image))
+            {
+                if (findModule(dependency.dll) === null)
+                {
+                    await loadLibraryAtRuntime(dependency.dll);
+                }
+            }
+
+            if (held.entryPoint && held.entryPoint !== base)
+            {
+                await bridge.callGuest({
+                    entry: held.entryPoint,
+                    args: [base, DLL_PROCESS_ATTACH, 0],
+                });
+            }
+            events.emit('library-loaded', { name, base });
+            return base;
+        })();
+    };
+
     // The libraries the program brought with it, before the program itself.
     //
     // Every one is mapped before any is bound, because they import each other:
@@ -875,6 +991,11 @@ export async function createApp(options){
     {
         loader.bind(library.mapped, resolveImport);
     }
+    // Where a library asked for later goes: after the ones that came with the
+    // program, or after the system modules when there were none.
+    nextLibraryBase = shipped.reduce(
+        (highest, library)=>Math.max(highest, library.base + library.size),
+        MODULE_BASE + Object.keys(win32.libraries()).length * MODULE_STRIDE);
 
     const image = loader.load(options.executable, { resolveImport });
 
@@ -883,6 +1004,10 @@ export async function createApp(options){
         base: image.base,
         addressOf: ()=>null,
         addressOfOrdinal: ()=>null,
+        // Kept because a program reads its own resources, and a resource
+        // directory is read out of the file rather than out of the mapping.
+        file: options.executable,
+        image: parsePe(options.executable),
     };
     byBase.set(image.base, mainModule);
 

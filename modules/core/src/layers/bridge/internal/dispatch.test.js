@@ -187,5 +187,31 @@ test('what the guest called is recorded in order', ()=>{
     dispatcher.dispatch(1);
 
     assert.deepEqual(dispatcher.calls(), ['A', 'B', 'A']);
-    assert.deepEqual(dispatcher.diagnostics(), { implemented: 2, calls: 3, lastCall: 'A' });
+    const { implemented, calls, lastCall, hot } = dispatcher.diagnostics();
+    assert.deepEqual({ implemented, calls, lastCall }, { implemented: 2, calls: 3, lastCall: 'A' });
+    assert.deepEqual(hot, [['A', 2], ['B', 1]], 'and what it called most, commonest first');
+});
+
+test('the call log is bounded, and a long run does not grow it', ()=>{
+    // Diagnostics must not scale with how well the engine works. A program that
+    // runs for an hour makes hundreds of millions of calls; kept as a list this
+    // ends as a failure inside the dispatcher whose message is about array
+    // length and says nothing about the guest.
+    const { dispatcher } = machine();
+    dispatcher.register(1, {
+        name: 'Tick',
+        convention: Convention.STDCALL,
+        argBytes: 0,
+        handler: ()=>0,
+    });
+
+    for (let at = 0; at < 10000; at++)
+    {
+        dispatcher.dispatch(1);
+    }
+
+    assert.equal(dispatcher.diagnostics().calls, 10000, 'every call is still counted');
+    assert.equal(dispatcher.calls().length, 4096, 'but only the recent ones are kept');
+    assert.equal(dispatcher.recent(3).length, 3);
+    assert.equal(dispatcher.diagnostics().lastCall, 'Tick');
 });

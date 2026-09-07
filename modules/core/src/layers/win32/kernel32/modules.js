@@ -53,12 +53,57 @@ const isOrdinal = value=>(value >>> 16) === 0;
  * @property {(base: number) => ModuleRecord | null} byBase
  * @property {(code: number) => void} setLastError
  * @property {() => string} imagePath  The path the running program was loaded from.
+ * @property {(name: string) => number | Promise<number>} [load]
+ *           Brings a library in if it is not here yet, answering with its base
+ *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
  */
 
 /**
  * @param {ModulesHost} host
  */
 export function createModuleFunctions(host){
+    /**
+     * What both LoadLibrary entry points do.
+     *
+     * The answer is a number when it can be, and a promise only when a library
+     * has to be read off the volume. That distinction is the whole of it: the
+     * dispatcher decides a call is asynchronous by whether a promise came back,
+     * so an implementation that always returned one would park and unpark the
+     * guest thread on every call -- including a library that is already here
+     * and one that is known not to exist, which titles ask about once a frame
+     * while probing for hardware that may have been plugged in.
+     *
+     * Which is also why there is no separate "is it loaded" predicate beside
+     * this. A second decision function drifts from the first, and then the
+     * answer about whether waiting is needed stops matching the waiting.
+     *
+     * @param {string} name
+     * @returns {number | Promise<number>}
+     */
+    const load = name=>{
+        const known = host.find(name);
+        if (known)
+        {
+            return known.base;
+        }
+        const answer = host.load?.(name) ?? 0;
+        if (typeof answer === 'number')
+        {
+            if (answer === 0)
+            {
+                host.setLastError(ERROR_MOD_NOT_FOUND);
+            }
+            return answer;
+        }
+        return answer.then(base=>{
+            if (base === 0)
+            {
+                host.setLastError(ERROR_MOD_NOT_FOUND);
+            }
+            return base;
+        });
+    };
+
     /**
      * Writes a NUL-terminated string and reports what a Win32 out-parameter of
      * this shape reports: characters written, not counting the terminator, and
@@ -95,15 +140,7 @@ export function createModuleFunctions(host){
         LoadLibraryA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([name])=>{
-                const module = host.find(host.readCString(name >>> 0, MAX_NAME));
-                if (!module)
-                {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
-                    return 0;
-                }
-                return module.base;
-            },
+            handler: ([name])=>load(host.readCString(name >>> 0, MAX_NAME)),
         },
 
         /** HMODULE LoadLibraryExA(LPCSTR, HANDLE, DWORD dwFlags) */
@@ -114,13 +151,7 @@ export function createModuleFunctions(host){
                 // The flags select how a library is mapped -- as data, with or
                 // without running its entry point. Ours have no entry point and
                 // one mapping, so every flag describes what already happened.
-                const module = host.find(host.readCString(name >>> 0, MAX_NAME));
-                if (!module)
-                {
-                    host.setLastError(ERROR_MOD_NOT_FOUND);
-                    return 0;
-                }
-                return module.base;
+                return load(host.readCString(name >>> 0, MAX_NAME));
             },
         },
 
