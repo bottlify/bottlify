@@ -6,6 +6,8 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createThunkTable } from './internal/thunks.js';
+import { FAULT_TRAP_BASE } from './internal/boot-rom.js';
+import { readFault, describeFault } from './internal/faults.js';
 import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
 
 /**
@@ -86,7 +88,32 @@ export const cpuModule = {
                 }
                 host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
                 thunks = createThunkTable({ base: settings.thunkBase, port: settings.trapPort });
-                host.onTrap((/** @type {number} */ id)=>dispatch(id));
+                host.onTrap((/** @type {number} */ id)=>{
+                    // A processor exception arrives as a trap like any other,
+                    // from a stub the ROM put behind its vector. Answered here
+                    // rather than passed on, because the layer that owns the
+                    // interrupt table is the one that knows what the numbers
+                    // mean, and because a fault handed to the call dispatcher
+                    // would come back as "trap has no implementation" -- true,
+                    // and the wrong thing to have been told.
+                    const vector = id - FAULT_TRAP_BASE;
+                    if (vector >= 0 && vector < 32)
+                    {
+                        const fault = readFault(
+                            vector,
+                            host.readReg32('esp'),
+                            (/** @type {number} */ address)=>{
+                                const bytes = host.readPhysical(address, 4);
+                                return bytes[0] | bytes[1] << 8
+                                    | bytes[2] << 16 | bytes[3] << 24;
+                            },
+                        );
+                        const error = new Error(describeFault(fault));
+                        Object.assign(error, { code: 'GUEST_FAULT', fault });
+                        throw error;
+                    }
+                    return dispatch(id);
+                });
             },
 
             booted: ()=>host !== null,

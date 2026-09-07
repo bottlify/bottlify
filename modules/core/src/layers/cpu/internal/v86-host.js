@@ -47,6 +47,7 @@ export async function createV86Host(config){
     const rom = buildBootRom({
         entryVector: config.entryVector,
         initialStack: config.initialStack,
+        trapPort: config.trapPort,
     });
 
     const emulator = new V86({
