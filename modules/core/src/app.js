@@ -1148,6 +1148,13 @@ export async function createApp(options){
         processId: 0x1000,
         version: { major: 5, minor: 1, build: 2600 },
         imageBase: image.base,
+        imagePath: options.imagePath ?? 'C:\\app.exe',
+        // Quoted, and this is not cosmetic: a program is handed one string and
+        // argv[0] ends at the first space, so an unquoted path with a space in
+        // it hands the rest of the path to the program as its first argument.
+        commandLine: `"${options.imagePath ?? 'C:\\app.exe'}"`,
+        currentDirectory: 'C:\\',
+        standardHandles: { input: 0, output: 0, error: 0 },
     });
 
     // The program's first thread. Everything after this runs under the
