@@ -97,6 +97,15 @@ const SYSTEM_MESSAGES = Object.freeze({
 });
 
 /**
+ * The sign of a comparison, which is all lstrcmp promises. A caller may test
+ * it against zero and nothing else, so returning a difference of bytes would
+ * be inventing a guarantee.
+ *
+ * @param {string} left @param {string} right
+ */
+const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
+
+/**
  * @typedef {Object} SystemHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -133,6 +142,22 @@ export function createSystemFunctions(host){
                 break;
             }
             text += String.fromCharCode(byte);
+        }
+        return text;
+    };
+
+    /** @param {number} address @param {number} maxLength */
+    const readWide = (address, maxLength)=>{
+        let text = '';
+        for (let at = 0; at < maxLength; at++)
+        {
+            const pair = host.readMemory(address + at * 2, 2);
+            const unit = pair[0] | pair[1] << 8;
+            if (unit === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(unit);
         }
         return text;
     };
@@ -675,6 +700,74 @@ export function createSystemFunctions(host){
                 writeAnsi(destination >>> 0, text);
                 return destination >>> 0;
             },
+        },
+
+        /**
+         * int lstrlenA(LPCSTR lpString)
+         *
+         * Zero for a null pointer rather than a fault. That is the one thing
+         * this adds over strlen and the reason programs use it on a pointer
+         * they have not checked.
+         */
+        lstrlenA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([text])=>((text >>> 0) === 0
+                ? 0
+                : readAnsi(text >>> 0, MAX_STRING).length),
+        },
+
+        /** int lstrlenW(LPCWSTR lpString) */
+        lstrlenW: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([text])=>((text >>> 0) === 0
+                ? 0
+                : readWide(text >>> 0, MAX_STRING).length),
+        },
+
+        /**
+         * LPSTR lstrcpyA(LPSTR lpString1, LPCSTR lpString2)
+         *
+         * No length anywhere, so nothing here can bound it; what it can do is
+         * refuse a null on either side, which is the failure that would
+         * otherwise happen inside kernel32 rather than at the caller.
+         */
+        lstrcpyA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([destination, source])=>{
+                if (destination === 0 || source === 0)
+                {
+                    return 0;
+                }
+                writeAnsi(destination >>> 0, readAnsi(source >>> 0, MAX_STRING));
+                return destination >>> 0;
+            },
+        },
+
+        /**
+         * int lstrcmpA(LPCSTR, LPCSTR) and int lstrcmpiA(LPCSTR, LPCSTR)
+         *
+         * Both answer the sign of a comparison rather than a difference of
+         * bytes, which is all a caller may rely on. The insensitive form folds
+         * case the way the C library does here: without a code page there is
+         * nothing better to fold by, and above ASCII the two disagree only for
+         * text this build cannot decode anyway.
+         */
+        lstrcmpA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>compare(
+                readAnsi(first >>> 0, MAX_STRING), readAnsi(second >>> 0, MAX_STRING)),
+        },
+
+        lstrcmpiA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>compare(
+                readAnsi(first >>> 0, MAX_STRING).toLowerCase(),
+                readAnsi(second >>> 0, MAX_STRING).toLowerCase()),
         },
     };
 }

@@ -45,6 +45,7 @@ const isOrdinal = value=>(value >>> 16) === 0;
  * @property {number} base
  * @property {(name: string) => number | null} addressOf
  * @property {(ordinal: number) => number | null} addressOfOrdinal
+ * @property {string} [path]  Where it was loaded from, when it came from a file.
  */
 
 /**
@@ -79,6 +80,26 @@ export function createModuleFunctions(host){
      * @type {Set<number>}
      */
     const withoutThreadCalls = new Set();
+
+    /**
+     * Where a module's file is, as a program asking about it expects.
+     *
+     * This matters more than it looks. A library is asked where it lives and
+     * then looks for its own data beside itself, so a wrong directory does not
+     * fail here: it fails much later, as data that is not where the program is
+     * certain it put it.
+     *
+     * A library read off the volume knows its own path, and a library a game
+     * ships does not live in a system directory. A module we synthesised has no
+     * file at all, and the system directory is the honest answer for something
+     * that exists only because Windows would have had it there — a program
+     * comparing that path against the system directory is right to find them
+     * equal.
+     *
+     * @param {ModuleRecord} module
+     */
+    const fileNameOf = module=>module.path
+        ?? `C:${SEPARATOR}Windows${SEPARATOR}System32${SEPARATOR}${module.name}`;
 
     /**
      * What both LoadLibrary entry points do.
@@ -271,9 +292,7 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
-                const system = `C:${SEPARATOR}Windows${SEPARATOR}System32${SEPARATOR}`
-                    + module.name;
-                const path = handle === 0 ? host.imagePath() : system;
+                const path = handle === 0 ? host.imagePath() : fileNameOf(module);
                 const room = size >>> 0;
                 if (buffer === 0 || room === 0)
                 {
@@ -303,8 +322,7 @@ export function createModuleFunctions(host){
                     host.setLastError(ERROR_MOD_NOT_FOUND);
                     return 0;
                 }
-                const system = `C:\\Windows\\System32\\${module.name}`;
-                const path = handle === 0 ? host.imagePath() : system;
+                const path = handle === 0 ? host.imagePath() : fileNameOf(module);
                 return writeString(buffer >>> 0, size >>> 0, path);
             },
         },

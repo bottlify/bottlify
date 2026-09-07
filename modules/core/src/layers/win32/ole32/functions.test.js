@@ -499,6 +499,7 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoInitialize: 4,
         CoInitializeEx: 8,
         CoUninitialize: 0,
+        CoFreeUnusedLibraries: 0,
         CoCreateInstance: 20,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,

@@ -54,8 +54,16 @@ const DETAIL_RING = 4096;
  * @param {() => number} [deps.lastError]
  *        The running thread's last error, for the trace. Injected because it
  *        belongs to a layer above this one.
+ * @param {boolean} [deps.traceStrings]
+ *        Read the text an argument points at while the call is being made
+ *        rather than when the trace is read. Off by default: it costs a scan
+ *        of guest memory per pointer argument on every recorded call. On, it
+ *        is the only way to see a string a program built on its own stack,
+ *        which by the end of a run is somebody else's stack.
  */
-export function createDispatcher({ cpu, memory, parking, suspend, lastError }){
+export function createDispatcher(deps){
+    const { cpu, memory, parking, suspend, lastError } = deps;
+    const traceStrings = deps.traceStrings ?? false;
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /**
@@ -75,7 +83,7 @@ export function createDispatcher({ cpu, memory, parking, suspend, lastError }){
     let ringAt = 0;
     /**
      * @type {{ name: string, from: number, args: number[], result: string,
-     *          error: number }[]}
+     *          error: number, strings: (string | null)[] | null }[]}
      */
     const detailed = new Array(DETAIL_RING);
     let detailAt = 0;
@@ -250,6 +258,11 @@ export function createDispatcher({ cpu, memory, parking, suspend, lastError }){
                 // Copied, because a handler that writes through a pointer can
                 // change what the arguments describe before anyone reads them.
                 args: args.slice(0, 6),
+                // Read now rather than later when asked for: a string a program
+                // assembled on its own stack has been overwritten several
+                // frames deep by the time anybody reads the trace, and what
+                // comes back then belongs to whatever ran next.
+                strings: traceStrings ? args.slice(0, 6).map(peekString) : null,
                 result: 'threw',
                 error: 0,
             };
@@ -314,7 +327,9 @@ export function createDispatcher({ cpu, memory, parking, suspend, lastError }){
             for (let back = kept; back > 0; back--)
             {
                 const record = detailed[(detailAt - back) % DETAIL_RING];
-                out.push({ ...record, strings: record.args.map(peekString) });
+                out.push(record.strings
+                    ? record
+                    : { ...record, strings: record.args.map(peekString) });
             }
             return out;
         },

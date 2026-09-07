@@ -39,6 +39,7 @@ import { createBlockCache, resolveBlockStore }
  * @property {ArrayBuffer} v86.wasmBytes
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
+ * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
  * @property {string} [imagePath]    What the program believes it was loaded from.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
@@ -56,6 +57,8 @@ import { createBlockCache, resolveBlockStore }
  *           reader has let go is then fetched again.
  * @property {string} [bundle.id]  Names this bundle's cache. Two bundles sharing
  *           a name would read each other's blocks, so it has to be the bundle's.
+ * @property {string} [bundle.prefix]  Where in the volume the bundle appears.
+ *           Defaults to the directory a game is installed into.
  * @property {boolean} [bundle.prefetch]  Whether to fill the cache in the gaps
  *           when nothing is being read. On by default, and inert when there is
  *           nowhere durable to keep the blocks.
@@ -251,6 +254,17 @@ export async function inParallel(items, limit, work){
 const LIBRARY_ALIGN = 0x10000;
 
 /**
+ * Where a mounted game appears inside the guest's volume: its files sit
+ * directly in this directory, the way an installation's do.
+ *
+ * A directory of its own rather than the root, because a program of this era
+ * finds its own data by asking where it is itself and looking beside that. At
+ * the root those two places coincide, so a wrong answer to that question still
+ * works and stays hidden until something depends on it being right.
+ */
+const BUNDLE_DIRECTORY = 'App';
+
+/**
  * Reads a whole file off the volume, waiting for whatever is not here yet.
  *
  * A read of a block that has not been fetched reports which blocks it needs
@@ -383,6 +397,11 @@ async function mapShippedLibraries(options){
             // one it makes to tell a person what went wrong.
             file,
             image,
+            // Where it came from. A program asks a library where it lives and
+            // then looks for its own data beside it, so answering with a
+            // system directory sends it looking in the wrong place -- and a
+            // library a game ships does not live in a system directory.
+            path: `${directory}${name}`,
         };
         byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
         byBase.set(base, held);
@@ -508,6 +527,11 @@ async function mountBundle({ options, cpu, filesystem, events }){
         /** @param {number} index */
         readBlock: index=>cache.read(index, storedLength(bundle.block(index))),
         decode,
+        // A game lives in a directory of its own, the way an installation does.
+        // At the root of the volume a program's own directory and the system
+        // root are the same place, so every answer to "where do I live" happens
+        // to work and a wrong one is invisible until it is not.
+        prefix: options.bundle.prefix ?? BUNDLE_DIRECTORY,
     });
 
     filesystem.mount('C', { source });
@@ -734,6 +758,8 @@ export async function createApp(options){
             // reader is handed down from here. It costs one call per traced
             // call and buys a trace that says which call left an error behind.
             lastError: ()=>core.api('win32').lastError(),
+            // Costly and off unless asked for; see the dispatcher.
+            traceStrings: options.traceStrings ?? false,
         },
         log: {
             // The guest's clock, for the same reason the sound buffers use it:
@@ -1013,6 +1039,28 @@ export async function createApp(options){
      */
     const missingImports = new Map();
 
+    /**
+     * How many argument bytes a stub for an unknown name must pop.
+     *
+     * Returning at all makes this matter: a stdcall callee cleans up and a
+     * caller that gets its stack back four bytes short is corrupted from there
+     * on, which surfaces nowhere near the call.
+     *
+     * The decoration is the only evidence there is, and it is enough for both
+     * cases. `_name@N` is stdcall with N bytes of arguments; an undecorated
+     * name is a C function, where the caller cleans up and popping nothing is
+     * exactly right. A name that is neither -- a C++ mangling, an ordinal -- is
+     * refused rather than guessed at, because a wrong count is worse than a
+     * loud stop.
+     *
+     * @param {string | null} name
+     * @returns {number}
+     */
+    const cleanupFor = name=>{
+        const decorated = name === null ? null : /@(\d+)$/.exec(name);
+        return decorated ? Number(decorated[1]) : 0;
+    };
+
     /** @param {string} dll @param {string | null} name @param {number | null} ordinal */
     const missingImport = (dll, name, ordinal)=>{
         const label = `${dll}!${name ?? `#${ordinal}`}`;
@@ -1022,10 +1070,22 @@ export async function createApp(options){
             return known;
         }
         const address = bridge.register(label, {
-            argBytes: 0,
+            argBytes: cleanupFor(name),
             handler: ()=>{
                 events.emit('unimplemented', { import: label });
-                throw new Error(`called ${label}, which nothing implements`);
+                // Zero, and back to the caller. It is the only value that reads
+                // as failure under every convention at once -- a null pointer,
+                // a null handle, FALSE, a count of none -- so a caller that
+                // checks its result takes its own failure path and says
+                // something about what it wanted.
+                //
+                // Not every convention: zero is S_OK to a caller expecting an
+                // HRESULT and ERROR_SUCCESS to one expecting a status, and both
+                // then read an out-parameter nobody wrote. That is the trade,
+                // and it is the better half of it -- stopping the process here
+                // reports one missing import per run, where continuing reports
+                // every one a program actually calls.
+                return 0;
             },
         });
         missingImports.set(label, address);
@@ -1093,6 +1153,7 @@ export async function createApp(options){
                 // at run time has to keep its own.
                 file,
                 image,
+                path: wanted,
             };
             // Registered before its own imports are bound, so a library that
             // imports back into itself -- or into one still being loaded --
@@ -1170,6 +1231,11 @@ export async function createApp(options){
         // directory is read out of the file rather than out of the mapping.
         file: options.executable,
         image: parsePe(options.executable),
+        // The same answer whether a program asks by null handle or by its own
+        // image base, which are the two ways of asking the same question. A
+        // program that asks the second way and is told a system directory goes
+        // looking for its own data there.
+        path: options.imagePath ?? 'C:\\app.exe',
     };
     byBase.set(image.base, mainModule);
 

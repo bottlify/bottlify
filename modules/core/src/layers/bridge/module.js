@@ -98,6 +98,7 @@ export const bridgeModule = {
         // code a program later complains about actually came from.
         dispatcher = createDispatcher({
             cpu, memory, parking, suspend, lastError: config?.lastError,
+            traceStrings: config?.traceStrings ?? false,
         });
 
         // Claimed here rather than by whoever assembles the process: a trap that

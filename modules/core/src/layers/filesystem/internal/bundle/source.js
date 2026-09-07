@@ -64,16 +64,25 @@ export const BLOCK_MISS = 'BLOCK_MISS';
  */
 const DEFAULT_CACHE_BLOCKS = 16;
 
+/** The path separator, named so it is not confused with an escape. */
+const SEPARATOR = String.fromCharCode(92);
+
 /**
  * @param {Object} options
  * @param {import('./format.js').Bundle} options.bundle
  * @param {ReadBlock} options.readBlock
  * @param {import('./format.js').Decode} options.decode
  * @param {number} [options.cacheBlocks]
+ * @param {string} [options.prefix]
+ *        A directory the whole bundle appears under, without separators at
+ *        either end. A game belongs in a directory of its own rather than at
+ *        the root of the volume: a program works out where its data lives from
+ *        where it is itself, and a bundle mounted at the root makes every
+ *        answer to that question -- right or wrong -- happen to work.
  * @returns {import('../memory-store.js').SourceStore}
  */
 export function createBundleSource({
-    bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
+    bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS, prefix = '',
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -81,18 +90,33 @@ export function createBundleSource({
     /** @type {Map<string, import('./format.js').BundleFile>} */
     const byPath = new Map();
 
+    const under = prefix === '' ? '' : prefix + SEPARATOR;
+    /** @param {string} path */
+    const outward = path=>`${under}${path}`;
+
     for (const file of bundle.files)
     {
-        byPath.set(foldName(file.path), file);
-        entries.push({ path: file.path, directory: false, size: file.size });
+        byPath.set(foldName(outward(file.path)), file);
+        entries.push({ path: outward(file.path), directory: false, size: file.size });
     }
     // A directory only appears here when it is empty: every other one is implied
     // by the paths under it, and the overlay puts those back on its own.
     /** @type {Set<string>} */
-    const directories = new Set(bundle.directories.map(foldName));
+    const directories = new Set(bundle.directories.map(path=>foldName(outward(path))));
     for (const path of bundle.directories)
     {
-        entries.push({ path, directory: true, size: 0 });
+        entries.push({ path: outward(path), directory: true, size: 0 });
+    }
+    // The prefix's own components are directories nothing else declares: they
+    // hold the bundle rather than coming from it.
+    const parts = prefix.split(SEPARATOR).filter(Boolean);
+    for (const part of parts.map((_, at)=>parts.slice(0, at + 1).join(SEPARATOR)))
+    {
+        if (!directories.has(foldName(part)))
+        {
+            directories.add(foldName(part));
+            entries.push({ path: part, directory: true, size: 0 });
+        }
     }
 
     /** @type {Map<number, Uint8Array>} Decoded blocks, oldest use first. */

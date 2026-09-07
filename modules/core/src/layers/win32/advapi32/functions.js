@@ -35,6 +35,9 @@ const ERROR_NO_MORE_ITEMS = 259;
 const REG_CREATED_NEW_KEY = 1;
 const REG_OPENED_EXISTING_KEY = 2;
 
+/** The only type the older RegSetValue/RegQueryValue pair can carry. */
+const REG_SZ = 1;
+
 /** Registry key names stop at 255 characters, value names at 16383. */
 const MAX_NAME = 16384;
 
@@ -208,6 +211,29 @@ export function createRegistryFunctions(host){
         return key ? handler(key, args) : ERROR_INVALID_HANDLE;
     };
 
+    /**
+     * LONG RegCreateKeyExA(HKEY, LPCSTR, DWORD, LPSTR lpClass, DWORD, REGSAM,
+     *                      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD lpdwDisposition)
+     *
+     * Named here rather than written into the table because the older
+     * RegCreateKeyA is the same call with everything but three arguments
+     * defaulted, and two copies of a create would drift.
+     */
+    const createKeyEx = {
+        argBytes: 36,
+        handler: onKey((key, [, subKey, , , , , , result, disposition])=>{
+            if (result === 0)
+            {
+                return ERROR_INVALID_PARAMETER;
+            }
+            const made = hive.create(key, readText(subKey));
+            writeDword(result, allocate(made.key));
+            writeDwordIf(disposition,
+                made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
+            return ERROR_SUCCESS;
+        }),
+    };
+
     /** LONG RegOpenKeyExA(HKEY, LPCSTR, DWORD ulOptions, REGSAM, PHKEY) */
     const openKeyEx = {
         argBytes: 20,
@@ -249,17 +275,98 @@ export function createRegistryFunctions(host){
          * LONG RegCreateKeyExA(HKEY, LPCSTR, DWORD, LPSTR lpClass, DWORD, REGSAM,
          *                      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD lpdwDisposition)
          */
-        RegCreateKeyExA: {
-            argBytes: 36,
-            handler: onKey((key, [, subKey, , , , , , result, disposition])=>{
-                if (result === 0)
+        RegCreateKeyExA: createKeyEx,
+
+        /**
+         * LONG RegCreateKeyA(HKEY, LPCSTR, PHKEY)
+         *
+         * The ancestor of RegCreateKeyExA, and still called. No class, no
+         * options, no access mask and no disposition reported -- the caller
+         * cannot tell whether the key was made or found, which is exactly why
+         * the Ex form exists.
+         */
+        RegCreateKeyA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, subKey, result])=>
+                createKeyEx.handler([handle, subKey, 0, 0, 0, 0, 0, result, 0]),
+        },
+
+        /**
+         * LONG RegSetValueA(HKEY, LPCSTR lpSubKey, DWORD dwType, LPCSTR lpData,
+         *                   DWORD cbData)
+         *
+         * The ancestor of RegSetValueExA, and a different shape rather than a
+         * shorter one: the second argument names a *subkey*, not a value, and
+         * what it writes is always that key's unnamed default as a string. A
+         * caller passing a subkey that does not exist expects it to be made.
+         *
+         * The length is advisory and the string is taken as terminated, which
+         * is what the documentation says and what callers rely on -- several
+         * pass zero.
+         */
+        RegSetValueA: {
+            argBytes: 20,
+            handler: onKey((key, [, subKey, type, data])=>{
+                if ((type >>> 0) !== REG_SZ)
                 {
                     return ERROR_INVALID_PARAMETER;
                 }
-                const made = hive.create(key, readText(subKey));
-                writeDword(result, allocate(made.key));
-                writeDwordIf(disposition,
-                    made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
+                const name = readText(subKey);
+                const target = name === null || name === ''
+                    ? key
+                    : hive.create(key, name).key;
+                const text = readText(data) ?? '';
+                const bytes = new Uint8Array(text.length + 1);
+                for (let at = 0; at < text.length; at++)
+                {
+                    bytes[at] = text.charCodeAt(at) & 0xff;
+                }
+                hive.setValue(target, '', REG_SZ, bytes);
+                return ERROR_SUCCESS;
+            }),
+        },
+
+        /**
+         * LONG RegQueryValueA(HKEY, LPCSTR lpSubKey, LPSTR lpValue, PLONG lpcbValue)
+         *
+         * The reading half of the pair above, and asymmetric with it: the size
+         * is a LONG in bytes, in and out, and a NULL buffer asks how much room
+         * the value needs rather than reading it.
+         */
+        RegQueryValueA: {
+            argBytes: 16,
+            handler: onKey((key, [, subKey, buffer, sizePointer])=>{
+                const name = readText(subKey);
+                const target = name === null || name === ''
+                    ? key
+                    : hive.open(key, name);
+                if (!target)
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                const value = hive.getValue(target, '');
+                if (!value)
+                {
+                    return ERROR_FILE_NOT_FOUND;
+                }
+                const required = value.data.length;
+                if (sizePointer === 0)
+                {
+                    return buffer === 0 ? ERROR_SUCCESS : ERROR_INVALID_PARAMETER;
+                }
+                if (buffer === 0)
+                {
+                    writeDword(sizePointer, required);
+                    return ERROR_SUCCESS;
+                }
+                if (readDword(sizePointer) < required)
+                {
+                    writeDword(sizePointer, required);
+                    return ERROR_MORE_DATA;
+                }
+                host.writeMemory(buffer, value.data);
+                writeDword(sizePointer, required);
                 return ERROR_SUCCESS;
             }),
         },

@@ -180,6 +180,20 @@ export function createOleFunctions(host){
         },
 
         /** void CoUninitialize(void) */
+        /**
+         * void CoFreeUnusedLibraries(void)
+         *
+         * A hint that any in-process server with no objects left may be
+         * unloaded. Nothing here is unloaded ever -- an address handed out
+         * earlier has to keep working -- so the honest answer is to accept the
+         * hint and do nothing with it, which is also what Windows does when
+         * every server says it is still needed.
+         */
+        CoFreeUnusedLibraries: {
+            argBytes: 0,
+            handler: ()=>0,
+        },
+
         CoUninitialize: {
             argBytes: 0,
             handler: ()=>{

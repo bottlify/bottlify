@@ -144,7 +144,9 @@ function report(app, { grep = null, calls = 24 } = {}){
         // raw dwords says a library was asked for and not which one.
         const args = call.args.map((/** @type {number} */ a, /** @type {number} */ index)=>(
             call.strings?.[index]
-                ? JSON.stringify(call.strings[index])
+                // The address too: where a string lives says who built it, and
+                // that is usually the question when the text is wrong.
+                ? `${JSON.stringify(call.strings[index])}@0x${(a >>> 0).toString(16)}`
                 : `0x${(a >>> 0).toString(16)}`)).join(', ');
         const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
         // The error the call left behind, when it left one. That is where a
@@ -202,8 +204,12 @@ async function main(){
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
-        imagePath: `C:\\${manifest.entry}`,
+        // Where createApp mounts a bundle, so the program is told it was loaded
+        // from inside its own installation rather than from the volume's root.
+        imagePath: `C:\\App\\${manifest.entry}`,
         heapSize: heap,
+        // A probe is read afterwards, which is exactly when a stack string is gone.
+        traceStrings: true,
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
         bundle: { fetch, store: null, prefetch: false },
