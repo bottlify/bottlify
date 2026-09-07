@@ -348,3 +348,140 @@ test('the gamma ramp read back is the identity, in full', ()=>{
     assert.equal(fns.SetDeviceGammaRamp.handler([hdc, RAMP]), 1);
     assert.equal(fns.GetDeviceGammaRamp.handler([hdc, 0]), 0, 'a null ramp is a failure');
 });
+
+// --- what the newly bound entry points actually reach ---
+
+test('a region reports itself as a well-formed region, and sizes its own buffer', ()=>{
+    // A null buffer, or one too small, has to answer with the size a caller
+    // must allocate. Answering with failure instead leaves it with nothing to
+    // allocate from.
+    const { memory, fns } = setup();
+    const region = fns.CreateRectRgn.handler([3, 4, 30, 40]);
+
+    const needed = fns.GetRegionData.handler([region, 0, 0]);
+    assert.equal(needed, 32 + 16, 'the header, then one rectangle');
+    assert.equal(fns.GetRegionData.handler([region, needed - 1, OUT]), needed,
+        'a buffer one byte short is still answered with the size, not with failure');
+
+    assert.equal(fns.GetRegionData.handler([region, needed, OUT]), needed);
+    assert.equal(memory.u32(OUT), 32, 'dwSize is the header, not the whole buffer');
+    assert.equal(memory.u32(OUT + 4), 1, 'RDH_RECTANGLES');
+    assert.equal(memory.u32(OUT + 8), 1, 'one rectangle');
+    assert.deepEqual(
+        [memory.u32(OUT + 16), memory.u32(OUT + 20), memory.u32(OUT + 24), memory.u32(OUT + 28)],
+        [3, 4, 30, 40], 'and the bounding box is that rectangle');
+    assert.equal(memory.u32(OUT + 32), 3, 'the rectangles follow the header');
+});
+
+test('a rectangle is in a region when it shares any pixel with it', ()=>{
+    // The question is whether the region has to be redrawn, and one shared
+    // pixel says it does -- containment would answer no far too often.
+    const { memory, fns } = setup();
+    const region = fns.CreateRectRgn.handler([10, 10, 20, 20]);
+
+    memory.putU32s(STRUCT, [15, 15, 25, 25]);
+    assert.equal(fns.RectInRegion.handler([region, STRUCT]), 1, 'overlapping');
+    memory.putU32s(STRUCT, [20, 20, 30, 30]);
+    assert.equal(fns.RectInRegion.handler([region, STRUCT]), 0,
+        'touching at the corner is not overlapping: the edge is half-open');
+    memory.putU32s(STRUCT, [0, 0, 100, 100]);
+    assert.equal(fns.RectInRegion.handler([region, STRUCT]), 1, 'containing');
+});
+
+test('palette entries are kept, and only as far as the palette goes', ()=>{
+    const { memory, fns, hdc } = setup();
+    const palette = fns.CreateHalftonePalette.handler([hdc]);
+    assert.notEqual(palette, 0);
+
+    memory.putU32s(STRUCT, [0x11111111, 0x22222222, 0x33333333]);
+    const written = fns.SetPaletteEntries.handler([palette, 0, 3, STRUCT]);
+    assert.equal(written, 3);
+
+    // Past the end is where the copy stops, not an error -- and the count says
+    // where it stopped, which is what a caller checks.
+    assert.equal(fns.SetPaletteEntries.handler([palette, 1 << 20, 3, STRUCT]), 0);
+    assert.equal(fns.SetPaletteEntries.handler([0x1234, 0, 3, STRUCT]), 0,
+        'and a handle that is not a palette is not one');
+});
+
+test('the system palette has no entries to report', ()=>{
+    // A system palette exists on a device of eight bits or fewer, and this one
+    // is 32. Reporting entries would have a program match colours against a
+    // palette nothing draws through.
+    const { fns, hdc } = setup();
+    assert.equal(fns.GetSystemPaletteEntries.handler([hdc, 0, 16, OUT]), 0);
+});
+
+test('text alignment is remembered even with nothing to draw on', ()=>{
+    // A program that sets an alignment, draws, and restores must get back what
+    // it set. Keeping it only on the drawing service would hand it a zero it
+    // never set.
+    const { fns, hdc } = setup();
+
+    const TA_RIGHT = 2;
+    assert.equal(fns.SetTextAlign.handler([hdc, TA_RIGHT]), 0, 'the default is TA_LEFT');
+    assert.equal(fns.GetTextAlign.handler([hdc]), TA_RIGHT);
+    assert.equal(fns.SetTextAlign.handler([hdc, 0]), TA_RIGHT, 'and the previous comes back');
+    assert.equal(fns.SetTextAlign.handler([0x9999, 0]), 0xffffffff,
+        'GDI_ERROR for a handle that is not a device context');
+});
+
+test('character widths are an estimate, and the same one text is measured with', ()=>{
+    const { memory, fns, hdc } = setup();
+    memory.putU32s(OUT, [0xdead, 0xdead, 0xdead, 0xdead, 0xdead, 0xdead]);
+
+    assert.equal(fns.GetCharABCWidthsA.handler([hdc, 0x41, 0x42, OUT]), 1);
+    assert.equal(memory.u32(OUT), 0, 'no left bearing');
+    assert.notEqual(memory.u32(OUT + 4), 0, 'the advance is the whole cell');
+    assert.equal(memory.u32(OUT + 8), 0, 'no right bearing');
+    assert.equal(memory.u32(OUT + 12), 0, 'and the second character is written too');
+    assert.equal(fns.GetCharABCWidthsA.handler([hdc, 0x42, 0x41, OUT]), 0,
+        'a range that runs backwards is not a range');
+});
+
+test('the drawing entry points reach the service, and fail without one', ()=>{
+    const drawing = fakeDrawing();
+    /** @type {any[]} */
+    const seen = [];
+    drawing.drawing.rectangle = (/** @type {any[]} */ ...args)=>{
+        seen.push(['rectangle', ...args]);
+        return true;
+    };
+    drawing.drawing.extTextOutA = (/** @type {any[]} */ ...args)=>{
+        seen.push(['extTextOutA', ...args]);
+        return true;
+    };
+    const { memory, fns, hdc } = setup(drawing.services);
+
+    assert.equal(fns.Rectangle.handler([hdc, 1, 2, 30, 40]), 1);
+    assert.deepEqual(seen[0], ['rectangle', hdc, 1, 2, 30, 40]);
+
+    // The count is authoritative and the string is not terminated: reading to a
+    // terminator would draw the rest of the caller's buffer.
+    memory.bytes.set([0x41, 0x42, 0x43, 0x44], STRUCT);
+    assert.equal(fns.ExtTextOutA.handler([hdc, 5, 6, 0, 0, STRUCT, 2, 0]), 1);
+    assert.equal(seen[1][6], 'AB');
+
+    const bare = setup();
+    assert.equal(bare.fns.Rectangle.handler([bare.hdc, 0, 0, 1, 1]), 0);
+    assert.equal(bare.fns.ExtTextOutA.handler([bare.hdc, 0, 0, 0, 0, 0, 0, 0]), 0);
+});
+
+test('GetDIBits describes a bitmap before it copies one', ()=>{
+    // A null buffer asks for the shape, which is bookkeeping and answerable
+    // without any pixels at all -- and is how a caller sizes the buffer it will
+    // ask with next.
+    const { memory, fns, hdc } = setup();
+    const bitmap = fns.CreateCompatibleBitmap.handler([hdc, 64, 48]);
+
+    memory.putU32s(STRUCT, new Array(10).fill(0));
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, 0, STRUCT, 0]), 48);
+    assert.equal(memory.u32(STRUCT), 40, 'biSize');
+    assert.equal(memory.u32(STRUCT + 4), 64, 'biWidth');
+    assert.equal(memory.u32(STRUCT + 8), 48, 'biHeight');
+    assert.equal(memory.u16(STRUCT + 12), 1, 'biPlanes');
+
+    // Without the bitmap selected into the context there is no surface to read,
+    // and rows from somewhere else would be worse than none.
+    assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, OUT, STRUCT, 0]), 0);
+});

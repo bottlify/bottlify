@@ -43,22 +43,59 @@ export const HANDLE_STDERR = 3;
  * @param {ConsoleHost} host
  */
 export function createConsoleFunctions(host){
+    /**
+     * Where a standard handle has been pointed, when a program has moved one.
+     *
+     * A C runtime redirects its own streams during startup -- freopen on stdout
+     * is the ordinary case -- and then expects GetStdHandle to report what it
+     * set. Keeping the two in one place is what makes that true; a SetStdHandle
+     * that recorded nothing would leave every later write going to the original
+     * destination while the program believed otherwise.
+     *
+     * @type {Map<number, number>}
+     */
+    const redirected = new Map();
+
+    /** @param {number} which @returns {number} the default for a standard handle */
+    const standard = which=>{
+        switch (which | 0){
+            case STD_INPUT_HANDLE:
+                return HANDLE_STDIN;
+            case STD_OUTPUT_HANDLE:
+                return HANDLE_STDOUT;
+            case STD_ERROR_HANDLE:
+                return HANDLE_STDERR;
+            default:
+                return 0xffffffff; // INVALID_HANDLE_VALUE
+        }
+    };
+
     return {
         /** HANDLE GetStdHandle(DWORD nStdHandle) */
         GetStdHandle: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([nStdHandle])=>{
-                switch (nStdHandle | 0){
-                    case STD_INPUT_HANDLE:
-                        return HANDLE_STDIN;
-                    case STD_OUTPUT_HANDLE:
-                        return HANDLE_STDOUT;
-                    case STD_ERROR_HANDLE:
-                        return HANDLE_STDERR;
-                    default:
-                        return 0xffffffff; // INVALID_HANDLE_VALUE
+            handler: ([nStdHandle])=>
+                redirected.get(nStdHandle | 0) ?? standard(nStdHandle),
+        },
+
+        /**
+         * BOOL SetStdHandle(DWORD nStdHandle, HANDLE hHandle)
+         *
+         * Records the redirection and closes nothing. Windows does not close the
+         * handle being replaced either -- the caller owns both and usually keeps
+         * the old one to put back.
+         */
+        SetStdHandle: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([which, handle])=>{
+                if (standard(which) === 0xffffffff)
+                {
+                    return 0;
                 }
+                redirected.set(which | 0, handle >>> 0);
+                return 1;
             },
         },
 

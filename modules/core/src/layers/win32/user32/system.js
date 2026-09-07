@@ -118,6 +118,29 @@ const GW_HWNDPREV = 3;
 const GW_OWNER = 4;
 const GW_CHILD = 5;
 
+/**
+ * GetClassLong / SetClassLong indices. They are negative for the same reason
+ * the window ones are: a non-negative index addresses the class extra bytes,
+ * and a named field has to sit somewhere no offset can reach.
+ */
+const GCL_MENUNAME = -8;
+const GCL_HBRBACKGROUND = -10;
+const GCL_HCURSOR = -12;
+const GCL_HICON = -14;
+const GCL_HMODULE = -16;
+const GCL_CBWNDEXTRA = -18;
+const GCL_CBCLSEXTRA = -20;
+const GCL_WNDPROC = -24;
+const GCL_STYLE = -26;
+const GCW_ATOM = -32;
+const GCL_HICONSM = -34;
+
+/** The style bit EnableWindow sets, and the only one it touches. */
+const WS_DISABLED = 0x08000000;
+
+/** A class or window name is at most this long. */
+const MAX_NAME = 256;
+
 /** ChangeDisplaySettingsEx succeeds only for the mode already in effect. */
 const DISP_CHANGE_SUCCESSFUL = 0;
 const DISP_CHANGE_BADMODE = -2;
@@ -133,8 +156,9 @@ const REFRESH_HZ = 60;
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
  * @param {Map<number, any>} options.windows
+ * @param {Map<string, any>} options.classes  Registered classes, by name.
  */
-export function createSystemFunctions({ host, live, windows }){
+export function createSystemFunctions({ host, live, windows, classes }){
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
     /** The window that has the mouse, shared by SetCapture and ReleaseCapture. */
@@ -142,6 +166,85 @@ export function createSystemFunctions({ host, live, windows }){
 
     /** Windows in creation order, which is the only order this build has. */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
+
+    /** @param {number} hwnd @returns {any | null} the class a window was made from */
+    const classOfWindow = hwnd=>{
+        const record = live(hwnd);
+        return record ? classes.get(record.className) ?? null : null;
+    };
+
+    /** @param {any} cls @param {number} index */
+    const readClassLong = (cls, index)=>{
+        switch (index | 0){
+            case GCL_STYLE:
+                return cls.style;
+            case GCL_WNDPROC:
+                return cls.wndProc;
+            case GCL_CBCLSEXTRA:
+                return cls.classExtra;
+            case GCL_CBWNDEXTRA:
+                return cls.windowExtra;
+            case GCL_HMODULE:
+                return cls.instance;
+            case GCL_HICON:
+                return cls.icon;
+            case GCL_HICONSM:
+                return cls.iconSm;
+            case GCL_HCURSOR:
+                return cls.cursor;
+            case GCL_HBRBACKGROUND:
+                return cls.background;
+            case GCL_MENUNAME:
+                return cls.menuName;
+            case GCW_ATOM:
+                return cls.atom;
+            default:
+                break;
+        }
+        const at = index | 0;
+        // Class extra bytes are storage the class asked for. Reading outside
+        // them would be reading whatever happens to follow in our own record.
+        cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+        return at >= 0 && at + 4 <= cls.extra.byteLength ? cls.extra.getUint32(at, true) : 0;
+    };
+
+    /** @param {any} cls @param {number} index @param {number} value */
+    const writeClassLong = (cls, index, value)=>{
+        switch (index | 0){
+            case GCL_STYLE:
+                cls.style = value >>> 0;
+                return;
+            case GCL_WNDPROC:
+                cls.wndProc = value >>> 0;
+                return;
+            case GCL_HICON:
+                cls.icon = value >>> 0;
+                return;
+            case GCL_HICONSM:
+                cls.iconSm = value >>> 0;
+                return;
+            case GCL_HCURSOR:
+                cls.cursor = value >>> 0;
+                return;
+            case GCL_HBRBACKGROUND:
+                cls.background = value >>> 0;
+                return;
+            case GCL_MENUNAME:
+                cls.menuName = value >>> 0;
+                return;
+            case GCL_HMODULE:
+                cls.instance = value >>> 0;
+                return;
+            default:
+                break;
+        }
+        const at = index | 0;
+        cls.extra ??= new DataView(new ArrayBuffer(Math.max(cls.classExtra, 0)));
+        if (at >= 0 && at + 4 <= cls.extra.byteLength)
+        {
+            cls.extra.setUint32(at, value >>> 0, true);
+        }
+    };
 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
@@ -1012,6 +1115,254 @@ export function createSystemFunctions({ host, live, windows }){
         GetFocus: {
             argBytes: 0,
             handler: ()=>host.focus?.() ?? 0,
+        },
+
+        /**
+         * DWORD GetClassLongA(HWND hWnd, int nIndex)
+         *
+         * Class data, not window data: every window of a class reads and writes
+         * the same values, which is the whole reason a program reaches for this
+         * instead of GetWindowLong.
+         */
+        GetClassLongA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, index])=>{
+                const cls = classOfWindow(hwnd);
+                return cls ? readClassLong(cls, index) : 0;
+            },
+        },
+
+        /** DWORD SetClassLongA(HWND hWnd, int nIndex, LONG dwNewLong) */
+        SetClassLongA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const cls = classOfWindow(hwnd);
+                if (!cls)
+                {
+                    return 0;
+                }
+                const previous = readClassLong(cls, index);
+                writeClassLong(cls, index, value);
+                return previous;
+            },
+        },
+
+        /** int GetClassNameA(HWND hWnd, LPSTR lpClassName, int nMaxCount) */
+        GetClassNameA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, out, maxCount])=>{
+                const record = live(hwnd);
+                const room = maxCount | 0;
+                if (!record || (out >>> 0) === 0 || room <= 0)
+                {
+                    return 0;
+                }
+                return writeString(out >>> 0, record.className, room);
+            },
+        },
+
+        /**
+         * BOOL EnableWindow(HWND hWnd, BOOL bEnable)
+         *
+         * The return is the state it *found*, and it is true when the window was
+         * already disabled -- the opposite way round from what the argument
+         * means, which is the classic way to read this backwards.
+         */
+        EnableWindow: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, enable])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const wasDisabled = (record.style & WS_DISABLED) !== 0;
+                record.style = (enable >>> 0) !== 0
+                    ? (record.style & ~WS_DISABLED) >>> 0
+                    : (record.style | WS_DISABLED) >>> 0;
+                return wasDisabled ? 1 : 0;
+            },
+        },
+
+        /** HWND SetActiveWindow(HWND hWnd) */
+        SetActiveWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const previous = host.focus?.() ?? 0;
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                host.setFocus?.(hwnd >>> 0);
+                return previous;
+            },
+        },
+
+        /** BOOL SetForegroundWindow(HWND hWnd) */
+        SetForegroundWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                host.setFocus?.(hwnd >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * HWND FindWindowExA(HWND hWndParent, HWND hWndChildAfter,
+         *                   LPCSTR lpszClass, LPCSTR lpszWindow)
+         *
+         * A null class or title matches anything, which is what makes this a
+         * search rather than a lookup -- and hWndChildAfter is what lets a
+         * caller walk every match instead of finding the first one for ever.
+         */
+        FindWindowExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([parent, after, className, windowName])=>{
+                const wanted = (className >>> 0) === 0
+                    ? null
+                    : host.readCString(className >>> 0, MAX_NAME);
+                const title = (windowName >>> 0) === 0
+                    ? null
+                    : host.readCString(windowName >>> 0, MAX_NAME);
+                const siblings = ordered().filter(record=>record.parent === (parent >>> 0));
+                const start = (after >>> 0) === 0
+                    ? 0
+                    : siblings.findIndex(record=>record.hwnd === (after >>> 0)) + 1;
+                for (let index = Math.max(start, 0); index < siblings.length; index++)
+                {
+                    const record = siblings[index];
+                    if ((wanted === null || record.className === wanted)
+                        && (title === null || record.title === title))
+                    {
+                        return record.hwnd;
+                    }
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * HWND GetTopWindow(HWND hWnd)
+         *
+         * A null window asks about the desktop's children, which are the
+         * top-level windows -- the same thing GetWindow's GW_CHILD would answer
+         * for a window that has no parent.
+         */
+        GetTopWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                if ((hwnd >>> 0) !== 0 && !live(hwnd))
+                {
+                    return 0;
+                }
+                return ordered().find(record=>record.parent === (hwnd >>> 0))?.hwnd ?? 0;
+            },
+        },
+
+        /**
+         * int GetWindowTextLengthA(HWND hWnd)
+         *
+         * Without the terminator, unlike the buffer size GetWindowTextA takes --
+         * a caller allocates this plus one, and a length that included the
+         * terminator would have it allocate one too many for ever.
+         */
+        GetWindowTextLengthA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>live(hwnd)?.title.length ?? 0,
+        },
+
+        /**
+         * DWORD GetWindowThreadProcessId(HWND hWnd, LPDWORD lpdwProcessId)
+         *
+         * The process reported has to be the one GetCurrentProcessId reports,
+         * or a program comparing the two decides its own window belongs to
+         * somebody else. Which thread created a window is not recorded, so the
+         * thread identifier is the one that is asking.
+         */
+        GetWindowThreadProcessId: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, out])=>{
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
+                }
+                return host.currentThread?.().id >>> 0 || 1;
+            },
+        },
+
+        /**
+         * BOOL IntersectRect(LPRECT lprcDst, const RECT *lprcSrc1,
+         *                   const RECT *lprcSrc2)
+         *
+         * An empty intersection writes an empty rectangle as well as answering
+         * FALSE: a caller that ignores the return and reads the destination
+         * must not find one of the sources still in it.
+         */
+        IntersectRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, first, second])=>{
+                if ((out >>> 0) === 0 || (first >>> 0) === 0 || (second >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const a = readRect(host, first >>> 0);
+                const b = readRect(host, second >>> 0);
+                const meet = {
+                    left: Math.max(a.left, b.left),
+                    top: Math.max(a.top, b.top),
+                    right: Math.min(a.right, b.right),
+                    bottom: Math.min(a.bottom, b.bottom),
+                };
+                const empty = meet.right <= meet.left || meet.bottom <= meet.top;
+                writeRect(host, out >>> 0,
+                    empty ? { left: 0, top: 0, right: 0, bottom: 0 } : meet);
+                return empty ? 0 : 1;
+            },
+        },
+
+        /**
+         * LRESULT CallWindowProcA(WNDPROC lpPrevWndFunc, HWND hWnd, UINT Msg,
+         *                        WPARAM wParam, LPARAM lParam)
+         *
+         * Subclassing: a program has replaced a window procedure and calls the
+         * one it replaced through this. It goes through the same dispatch every
+         * other call into guest code goes through, so the bridge suspends this
+         * call until the procedure returns.
+         */
+        CallWindowProcA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([previous, hwnd, message, wParam, lParam])=>{
+                if ((previous >>> 0) === 0)
+                {
+                    return 0;
+                }
+                return host.dispatch(previous >>> 0, {
+                    hwnd: hwnd >>> 0,
+                    message: message >>> 0,
+                    wParam: wParam >>> 0,
+                    lParam: lParam >>> 0,
+                });
+            },
         },
 
         /** HWND SetFocus(HWND hWnd) */

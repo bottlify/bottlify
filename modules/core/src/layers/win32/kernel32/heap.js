@@ -38,6 +38,58 @@ const ALIGNMENT = 8;
 
 const PAGE_SIZE = 4096;
 
+/** Codes this surface reports. */
+const ERROR_INVALID_PARAMETER = 87;
+const ERROR_NO_MORE_ITEMS = 259;
+
+/**
+ * The one page protection this build offers.
+ *
+ * Nothing here enforces page permissions -- guest memory is one buffer the
+ * emulator reads and writes freely -- so every page is readable, writable and
+ * executable. VirtualProtect and VirtualQuery both report that rather than
+ * echoing back whatever a caller asked for, because a caller that saves the old
+ * protection and restores it must get something true both times.
+ */
+const PAGE_NOACCESS = 0x01;
+const PAGE_EXECUTE_READWRITE = 0x40;
+
+/** VirtualQuery's State and Type, beside the MEM_COMMIT already declared above. */
+const MEM_FREE = 0x10000;
+const MEM_PRIVATE = 0x20000;
+
+/**
+ * MEMORY_BASIC_INFORMATION, as the 32-bit guest compiled it. Seven fields, all
+ * four bytes, and the order matters more than the size: a caller reads State to
+ * decide whether the address is usable at all.
+ */
+const MEMORY_BASIC_INFORMATION = Object.freeze({
+    BaseAddress: 0,
+    AllocationBase: 4,
+    AllocationProtect: 8,
+    RegionSize: 12,
+    State: 16,
+    Protect: 20,
+    Type: 24,
+    SIZE: 28,
+});
+
+/**
+ * MEMORYSTATUS. Eight DWORDs, the first of which is the structure's own size --
+ * which is how the later MEMORYSTATUSEX is told apart from this one.
+ */
+const MEMORYSTATUS = Object.freeze({
+    dwLength: 0,
+    dwMemoryLoad: 4,
+    dwTotalPhys: 8,
+    dwAvailPhys: 12,
+    dwTotalPageFile: 16,
+    dwAvailPageFile: 20,
+    dwTotalVirtual: 24,
+    dwAvailVirtual: 28,
+    SIZE: 32,
+});
+
 /** Marks the blocks VirtualAlloc handed out, so HeapFree cannot reach them. */
 const VIRTUAL = Symbol('virtual');
 
@@ -205,6 +257,10 @@ export function createHeapAllocator({ base, size }){
  * @property {any} [allocator]  An allocator over that arena, when one is shared.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(code: number) => void} setLastError
+ * @property {(address: number) => { base: number, size: number } | null} [regionAt]
+ *           The memory layer's region map, when the assembling caller wired one.
+ *           Without it VirtualQuery reports every address as free.
  */
 
 /**
@@ -238,6 +294,13 @@ export function createHeapFunctions(host){
 
     const processHeap = newHandle();
     const heaps = new Set([processHeap]);
+
+    /** @param {number} address @param {number} value */
+    const writeDword = (address, value)=>{
+        host.writeMemory(address, new Uint8Array([
+            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+        ]));
+    };
 
     /** @param {number} address @param {number} length */
     const zero = (address, length)=>{
@@ -549,6 +612,260 @@ export function createHeapFunctions(host){
             handler: ([handle])=>{
                 const address = handle >>> 0;
                 return allocator.free(address) ? 0 : address;
+            },
+        },
+        /**
+         * HGLOBAL GlobalHandle(LPCVOID pMem)
+         *
+         * A handle and a pointer are the same number here, because every block
+         * this allocator hands out is fixed -- there is no moveable memory to
+         * indirect through. The call still has to check the pointer: its whole
+         * purpose is to turn a pointer a caller is unsure about into a handle or
+         * a failure.
+         */
+        GlobalHandle: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([address])=>allocator.block(address >>> 0) ? address >>> 0 : 0,
+        },
+
+        /**
+         * DWORD GetProcessHeaps(DWORD NumberOfHeaps, PHANDLE ProcessHeaps)
+         *
+         * Reports how many there are whatever room the caller offered, which is
+         * the two-call protocol: asked with room for none, it answers with the
+         * count so the caller can allocate and ask again.
+         */
+        GetProcessHeaps: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([count, buffer])=>{
+                const all = [...heaps];
+                if (buffer !== 0 && (count >>> 0) >= all.length)
+                {
+                    const data = new Uint8Array(all.length * 4);
+                    const view = new DataView(data.buffer);
+                    all.forEach((heap, at)=>view.setUint32(at * 4, heap, true));
+                    host.writeMemory(buffer >>> 0, data);
+                }
+                return all.length;
+            },
+        },
+
+        /**
+         * BOOL HeapLock(HANDLE hHeap)
+         *
+         * A heap is serialised against other threads on Windows and a caller
+         * takes the lock to walk it without anything changing underneath. Guest
+         * threads here are switched by the scheduler and never inside a host
+         * call, so a walk cannot be interrupted and the lock has nothing to
+         * exclude. The handle is still checked, because a caller that locked the
+         * wrong heap wants to know.
+         */
+        HeapLock: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>heaps.has(handle >>> 0) ? 1 : 0,
+        },
+
+        /** BOOL HeapUnlock(HANDLE hHeap) */
+        HeapUnlock: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>heaps.has(handle >>> 0) ? 1 : 0,
+        },
+
+        /**
+         * BOOL HeapValidate(HANDLE hHeap, DWORD dwFlags, LPCVOID lpMem)
+         *
+         * With a pointer, whether that block belongs to that heap; without one,
+         * whether the heap exists. Both are real answers rather than a constant
+         * yes -- a debug runtime calls this after every allocation and treats a
+         * no as corruption, so answering yes for a block that was freed would
+         * hide exactly what it is looking for.
+         */
+        HeapValidate: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, , address])=>{
+                const heap = handle >>> 0;
+                if (!heaps.has(heap))
+                {
+                    return 0;
+                }
+                return address === 0 ? 1 : (blockOf(heap, address >>> 0) ? 1 : 0);
+            },
+        },
+
+        /**
+         * SIZE_T HeapCompact(HANDLE hHeap, DWORD dwFlags)
+         *
+         * Returns the largest free span. The allocator coalesces on free, so
+         * there is never anything to compact and the number is simply measured.
+         * Zero would mean the heap is full, which it is not.
+         */
+        HeapCompact: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!heaps.has(handle >>> 0))
+                {
+                    return 0;
+                }
+                return allocator.diagnostics().largestFree;
+            },
+        },
+
+        /**
+         * BOOL HeapWalk(HANDLE hHeap, LPPROCESS_HEAP_ENTRY lpEntry)
+         *
+         * Not implemented, and it says so with the code that ends a walk. A
+         * caller loops until this returns FALSE and then checks the error; told
+         * there are no more items it stops cleanly, where any other failure
+         * would have it report a corrupt heap.
+         */
+        HeapWalk: {
+            argBytes: 8,
+            handler: ()=>{
+                host.setLastError(ERROR_NO_MORE_ITEMS);
+                return 0;
+            },
+        },
+
+        /**
+         * BOOL VirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect,
+         *                     PDWORD lpflOldProtect)
+         *
+         * Reports the previous protection and changes nothing, because there is
+         * nothing to change: this build does not enforce page protection, so
+         * every page is already readable, writable and executable and every
+         * request a caller makes is already satisfied. A runtime making its
+         * generated code executable gets what it asked for.
+         *
+         * The old protection is not invented -- it is what this build actually
+         * offers -- and lpflOldProtect must be written, because a caller that
+         * puts the protection back afterwards reads it from there.
+         */
+        VirtualProtect: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([address, size, , oldProtect])=>{
+                if (address === 0 || (size >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                if (oldProtect !== 0)
+                {
+                    writeDword(oldProtect >>> 0, PAGE_EXECUTE_READWRITE);
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer,
+         *                     SIZE_T dwLength)
+         *
+         * Answered from the memory layer's own region map when the assembling
+         * caller supplied one, so that what is reported mapped is what actually
+         * is. A build without it answers that the address is free, which is the
+         * honest form of not knowing -- inventing a committed region would have
+         * a caller write into memory nothing backs.
+         */
+        VirtualQuery: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([address, buffer, length])=>{
+                if (buffer === 0 || (length >>> 0) < MEMORY_BASIC_INFORMATION.SIZE)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const at = address >>> 0;
+                const region = host.regionAt ? host.regionAt(at) : null;
+                const data = new Uint8Array(MEMORY_BASIC_INFORMATION.SIZE);
+                const view = new DataView(data.buffer);
+                view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, at, true);
+                if (region)
+                {
+                    view.setUint32(MEMORY_BASIC_INFORMATION.AllocationBase,
+                        region.base, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.AllocationProtect,
+                        PAGE_EXECUTE_READWRITE, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize,
+                        region.base + region.size - at, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.State, MEM_COMMIT, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.Protect,
+                        PAGE_EXECUTE_READWRITE, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.Type, MEM_PRIVATE, true);
+                }
+                else
+                {
+                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, PAGE_SIZE, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.State, MEM_FREE, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.Protect, PAGE_NOACCESS, true);
+                }
+                host.writeMemory(buffer >>> 0, data);
+                return MEMORY_BASIC_INFORMATION.SIZE;
+            },
+        },
+
+        /**
+         * BOOL VirtualLock(LPVOID lpAddress, SIZE_T dwSize)
+         *
+         * Locking pages into the working set is a promise about paging, and
+         * there is no paging here -- guest memory is one buffer that is always
+         * present. The promise therefore already holds.
+         */
+        VirtualLock: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
+        },
+
+        /** BOOL VirtualUnlock(LPVOID lpAddress, SIZE_T dwSize) */
+        VirtualUnlock: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([address, size])=>address !== 0 && (size >>> 0) !== 0 ? 1 : 0,
+        },
+
+        /**
+         * VOID GlobalMemoryStatus(LPMEMORYSTATUS lpBuffer)
+         *
+         * What the arena actually holds, not a number chosen to look generous. A
+         * program sizes a cache from this, and one told about memory that is not
+         * there allocates until it fails.
+         *
+         * dwLength is written back because the structure is versioned by its own
+         * size and a caller checks it.
+         */
+        GlobalMemoryStatus: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([buffer])=>{
+                if (buffer === 0)
+                {
+                    return 0;
+                }
+                const free = allocator.diagnostics().free;
+                const total = host.arena.size;
+                const data = new Uint8Array(MEMORYSTATUS.SIZE);
+                const view = new DataView(data.buffer);
+                view.setUint32(MEMORYSTATUS.dwLength, MEMORYSTATUS.SIZE, true);
+                view.setUint32(MEMORYSTATUS.dwMemoryLoad,
+                    total === 0 ? 0 : Math.round((total - free) / total * 100), true);
+                view.setUint32(MEMORYSTATUS.dwTotalPhys, total, true);
+                view.setUint32(MEMORYSTATUS.dwAvailPhys, free, true);
+                // No page file, so the virtual figures are the physical ones --
+                // which is what a machine with paging turned off reports.
+                view.setUint32(MEMORYSTATUS.dwTotalPageFile, total, true);
+                view.setUint32(MEMORYSTATUS.dwAvailPageFile, free, true);
+                view.setUint32(MEMORYSTATUS.dwTotalVirtual, total, true);
+                view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
+                host.writeMemory(buffer >>> 0, data);
+                return 0;
             },
         },
     };

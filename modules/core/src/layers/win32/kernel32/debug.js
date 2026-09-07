@@ -49,6 +49,25 @@ export function createDebugFunctions(host){
             },
         },
 
+        /**
+         * VOID DebugBreak()
+         *
+         * On Windows this raises a breakpoint for an attached debugger, and
+         * terminates the process when none is attached. Nothing is attached
+         * here, so what a program means by calling it is "stop now" -- but it is
+         * reported rather than acted on, because it is nearly always reached
+         * from an assertion whose message went through OutputDebugString a
+         * moment earlier, and that pair is the most useful thing a failing
+         * program tells us.
+         */
+        DebugBreak: {
+            argBytes: 0,
+            handler: ()=>{
+                host.say('DebugBreak');
+                return 0;
+            },
+        },
+
         /** BOOL IsDebuggerPresent() */
         IsDebuggerPresent: {
             argBytes: 0,

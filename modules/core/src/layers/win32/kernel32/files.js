@@ -84,6 +84,29 @@ const FILE_ATTRIBUTE_ARCHIVE = 0x20;
 /** The ANSI path limit, and the size of cFileName with it. */
 const MAX_PATH = 260;
 
+/**
+ * The path separator, as a named constant rather than a literal, because it is
+ * also this file's escape character and the two are easy to confuse when one
+ * appears inside a template or a regular expression.
+ */
+const SEPARATOR = '\\';
+
+/**
+ * OFSTRUCT, which OpenFile fills in. The path is eight-bit text in a fixed
+ * array at the end, and cBytes counts the whole structure rather than the path.
+ */
+const OFSTRUCT_SIZE = 136;
+const OFSTRUCT_PATH = 8;
+const OFSTRUCT_PATH_MAX = 128;
+
+/** OpenFile's uStyle bits, and its failure value. */
+const OF_WRITE = 0x0001;
+const OF_READWRITE = 0x0002;
+const OF_CREATE = 0x1000;
+const OF_DELETE = 0x0200;
+const OF_EXIST = 0x4000;
+const HFILE_ERROR = 0xffffffff;
+
 /** How much of a file to move at a time when copying one. */
 const COPY_CHUNK = 1 << 20;
 
@@ -167,6 +190,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
  * @property {FileSystem} files
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, text: string) => void} writeConsole
@@ -447,6 +471,272 @@ export function createFileFunctions(host){
         [OPEN_ALWAYS]: { create: true },
         [TRUNCATE_EXISTING]: { truncate: true },
     };
+
+    /**
+     * WIN32_FIND_DATAW: the same fields as the ANSI form, with both names twice
+     * as wide. Everything up to cFileName sits at the same offset in both, which
+     * is exactly why the tail is easy to get wrong -- a reader that shares the
+     * offsets and forgets the widths writes the second name over the first.
+     */
+    const WIN32_FIND_DATAW = Object.freeze({
+        ...WIN32_FIND_DATAA,
+        cAlternateFileName: 564,
+        SIZE: 592,
+    });
+
+    /** @param {string} text @returns {Uint8Array} UTF-16, with no terminator. */
+    const utf16 = text=>{
+        const bytes = new Uint8Array(text.length * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            const code = text.charCodeAt(at);
+            bytes[at * 2] = code & 0xff;
+            bytes[at * 2 + 1] = code >> 8;
+        }
+        return bytes;
+    };
+
+    /**
+     * The wide twin of writeStringTo. The two-call protocol is counted in
+     * characters in both forms -- a caller passing a character count and reading
+     * one back never sees the byte width -- so only the writing differs.
+     *
+     * @param {number} buffer @param {number} size @param {string} text
+     */
+    const writeWideStringTo = (buffer, size, text)=>{
+        if (buffer === 0 || text.length + 1 > (size >>> 0))
+        {
+            return text.length + 1;
+        }
+        host.writeMemory(buffer, utf16(text + String.fromCharCode(0)));
+        return text.length;
+    };
+
+    /** @param {number} address @param {DirectoryEntry} entry */
+    const writeWideFindData = (address, entry)=>{
+        const data = new Uint8Array(WIN32_FIND_DATAW.SIZE);
+        const view = new DataView(data.buffer);
+        view.setUint32(WIN32_FIND_DATAW.dwFileAttributes, attributesOf(entry), true);
+        const size = entry.size ?? 0;
+        view.setUint32(WIN32_FIND_DATAW.nFileSizeHigh, high(size), true);
+        view.setUint32(WIN32_FIND_DATAW.nFileSizeLow, low(size), true);
+        data.set(utf16(entry.name.slice(0, MAX_PATH - 1)), WIN32_FIND_DATAW.cFileName);
+        host.writeMemory(address, data);
+    };
+
+    /**
+     * How text arrives and leaves, which is the whole of the difference between
+     * an ANSI entry point and its wide twin.
+     *
+     * Every operation below is written once, over resolved strings, and appears
+     * twice in the table with one of these two bound to it. Writing the pair
+     * separately is how a file comes to open one way and not the other.
+     *
+     * @typedef {Object} TextForm
+     * @property {(pointer: number) => string} path
+     * @property {(pointer: number) => string} raw
+     *           What the caller actually wrote, before resolution. One function
+     *           needs it: GetFullPathName keeps a trailing separator the caller
+     *           put there, and resolution is what takes it off.
+     * @property {(buffer: number, size: number, text: string) => number} write
+     * @property {(address: number, entry: DirectoryEntry) => void} findData
+     * @property {number} unit  Bytes per character, for pointer arithmetic.
+     */
+
+    /** @type {TextForm} */
+    const ANSI = {
+        path: pathArgument,
+        raw: pointer=>pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH),
+        write: writeStringTo,
+        findData: writeFindData,
+        unit: 1,
+    };
+
+    /** @type {TextForm} */
+    const WIDE = {
+        path: pointer=>fullPath(
+            pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH)),
+        raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH),
+        write: writeWideStringTo,
+        findData: writeWideFindData,
+        unit: 2,
+    };
+
+    /**
+     * One operation, both spellings.
+     *
+     * @param {number} argBytes
+     * @param {(args: number[], text: TextForm) => any} body
+     */
+    const bothForms = (argBytes, body)=>({
+        ansi: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, ANSI) },
+        wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, WIDE) },
+    });
+
+    const deleteFile = bothForms(4, ([name], text)=>{
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists)
+        {
+            return fail(missing(path));
+        }
+        if (entry.isDirectory)
+        {
+            return fail(ERROR_ACCESS_DENIED);
+        }
+        return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED);
+    });
+
+    const moveFile = bothForms(8, ([from, to], text)=>{
+        const source = text.path(from);
+        const destination = text.path(to);
+        if (!files.stat(source)?.exists)
+        {
+            return fail(missing(source));
+        }
+        if (files.stat(destination)?.exists)
+        {
+            return fail(ERROR_ALREADY_EXISTS);
+        }
+        return files.rename(source, destination) ? 1 : fail(ERROR_ACCESS_DENIED);
+    });
+
+    const createDirectory = bothForms(8, ([name], text)=>{
+        const path = text.path(name);
+        if (files.stat(path)?.exists)
+        {
+            return fail(ERROR_ALREADY_EXISTS);
+        }
+        // Only one level at a time, as Windows does: a missing parent is a
+        // failure, not something to create on the way past.
+        return files.mkdir(path) ? 1 : fail(ERROR_PATH_NOT_FOUND);
+    });
+
+    const removeDirectory = bothForms(4, ([name], text)=>{
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists)
+        {
+            return fail(missing(path));
+        }
+        if (!entry.isDirectory)
+        {
+            return fail(ERROR_DIRECTORY);
+        }
+        return files.remove(path) ? 1 : fail(ERROR_DIR_NOT_EMPTY);
+    });
+
+    const getFileAttributes = bothForms(4, ([name], text)=>{
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists)
+        {
+            return fail(missing(path), INVALID_FILE_ATTRIBUTES);
+        }
+        return attributesOf(entry);
+    });
+
+    const setFileAttributes = bothForms(8, ([name], text)=>{
+        const path = text.path(name);
+        return files.stat(path)?.exists ? 1 : fail(missing(path));
+    });
+
+    const setCurrentDirectory = bothForms(4, ([name], text)=>{
+        const path = text.path(name);
+        const entry = files.stat(path);
+        if (!entry || !entry.exists || !entry.isDirectory)
+        {
+            return fail(ERROR_PATH_NOT_FOUND);
+        }
+        files.setCurrentDirectory(path);
+        return 1;
+    });
+
+    const getCurrentDirectory = bothForms(8, ([size, buffer], text)=>
+        text.write(buffer >>> 0, size, files.currentDirectory()));
+
+    const getFullPathName = bothForms(16, ([name, size, buffer, filePart], text)=>{
+        const asked = text.raw(name);
+        if (asked === '')
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const resolved = text.path(name);
+        // A caller that wrote a trailing separator meant a directory and gets
+        // one back; resolution is what removed it. The file part is NULL for
+        // exactly that case, which is how the caller tells the two apart.
+        const trailing = (asked.endsWith(SEPARATOR) || asked.endsWith('/'))
+            && !resolved.endsWith(SEPARATOR);
+        const written = trailing ? resolved + SEPARATOR : resolved;
+
+        const result = text.write(buffer >>> 0, size, written);
+        if (result === written.length)
+        {
+            const at = written.lastIndexOf(SEPARATOR);
+            // Into the caller's own buffer, so the offset is in characters
+            // scaled by however wide one is.
+            writeDwordIf(filePart >>> 0, written.endsWith(SEPARATOR)
+                ? 0
+                : (buffer >>> 0) + (at + 1) * text.unit);
+        }
+        return result;
+    });
+
+    /**
+     * GetLongPathName, which has nothing to lengthen.
+     *
+     * Short 8.3 names are a FAT artefact and nothing here produces them, so
+     * every path is already its long form. Windows still requires the path to
+     * exist, and a caller uses the failure to test exactly that.
+     */
+    const getLongPathName = bothForms(12, ([name, buffer, size], text)=>{
+        const path = text.path(name);
+        if (!files.stat(path)?.exists)
+        {
+            return fail(missing(path));
+        }
+        return text.write(buffer >>> 0, size, path);
+    });
+
+    const findFirstFile = bothForms(8, ([name, data], text)=>{
+        const path = text.path(name);
+        if (path === '')
+        {
+            return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
+        }
+        const directory = parentOf(path);
+        const pattern = path.slice(directory.endsWith(SEPARATOR)
+            ? directory.length
+            : directory.length + 1);
+        const holder = files.stat(directory);
+        if (!holder || !holder.exists || !holder.isDirectory)
+        {
+            return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
+        }
+        const entries = files.list(directory, pattern) ?? [];
+        if (entries.length === 0)
+        {
+            return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);
+        }
+        text.findData(data >>> 0, entries[0]);
+        host.setLastError(ERROR_SUCCESS);
+        return host.handles.open('find', { entries, index: 1 });
+    });
+
+    const findNextFile = bothForms(8, ([handle, data], text)=>{
+        const search = object(handle, 'find');
+        if (!search)
+        {
+            return fail(ERROR_INVALID_HANDLE);
+        }
+        if (search.index >= search.entries.length)
+        {
+            return fail(ERROR_NO_MORE_FILES);
+        }
+        text.findData(data >>> 0, search.entries[search.index]);
+        search.index++;
+        return 1;
+    });
 
     return {
         /**
@@ -788,49 +1078,13 @@ export function createFileFunctions(host){
             },
         },
 
-        /** BOOL DeleteFileA(LPCSTR) */
-        DeleteFileA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                const entry = files.stat(path);
-                if (!entry || !entry.exists)
-                {
-                    return fail(missing(path));
-                }
-                if (entry.isDirectory)
-                {
-                    return fail(ERROR_ACCESS_DENIED);
-                }
-                return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED);
-            },
-        },
+        /** BOOL DeleteFile(LPCSTR) -- one body, both spellings. */
+        DeleteFileA: deleteFile.ansi,
+        DeleteFileW: deleteFile.wide,
 
-        /**
-         * BOOL MoveFileA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName)
-         *
-         * Never replaces: MoveFileA without MOVEFILE_REPLACE_EXISTING fails if
-         * the destination is there, and the caller that means to overwrite
-         * deletes first.
-         */
-        MoveFileA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([from, to])=>{
-                const source = pathArgument(from);
-                const destination = pathArgument(to);
-                if (!files.stat(source)?.exists)
-                {
-                    return fail(missing(source));
-                }
-                if (files.stat(destination)?.exists)
-                {
-                    return fail(ERROR_ALREADY_EXISTS);
-                }
-                return files.rename(source, destination) ? 1 : fail(ERROR_ACCESS_DENIED);
-            },
-        },
+        /** BOOL MoveFile(LPCSTR lpExistingFileName, LPCSTR lpNewFileName) -- one body, both spellings. */
+        MoveFileA: moveFile.ansi,
+        MoveFileW: moveFile.wide,
 
         /**
          * BOOL CopyFileA(LPCSTR, LPCSTR, BOOL bFailIfExists)
@@ -891,131 +1145,33 @@ export function createFileFunctions(host){
             },
         },
 
-        /** BOOL CreateDirectoryA(LPCSTR, LPSECURITY_ATTRIBUTES) */
-        CreateDirectoryA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                if (files.stat(path)?.exists)
-                {
-                    return fail(ERROR_ALREADY_EXISTS);
-                }
-                // Only one level at a time, as Windows does: a missing parent
-                // is a failure, not something to create on the way past.
-                return files.mkdir(path) ? 1 : fail(ERROR_PATH_NOT_FOUND);
-            },
-        },
+        /** BOOL CreateDirectory(LPCSTR, LPSECURITY_ATTRIBUTES) -- one body, both spellings. */
+        CreateDirectoryA: createDirectory.ansi,
+        CreateDirectoryW: createDirectory.wide,
 
-        /** BOOL RemoveDirectoryA(LPCSTR) */
-        RemoveDirectoryA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                const entry = files.stat(path);
-                if (!entry || !entry.exists)
-                {
-                    return fail(missing(path));
-                }
-                if (!entry.isDirectory)
-                {
-                    return fail(ERROR_DIRECTORY);
-                }
-                // The filesystem refuses to remove a directory with anything in
-                // it, and that refusal is the only reason this can fail here.
-                return files.remove(path) ? 1 : fail(ERROR_DIR_NOT_EMPTY);
-            },
-        },
+        /** BOOL RemoveDirectory(LPCSTR) -- one body, both spellings. */
+        RemoveDirectoryA: removeDirectory.ansi,
+        RemoveDirectoryW: removeDirectory.wide,
 
-        /** DWORD GetFileAttributesA(LPCSTR) */
-        GetFileAttributesA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                const entry = files.stat(path);
-                if (!entry || !entry.exists)
-                {
-                    return fail(missing(path), INVALID_FILE_ATTRIBUTES);
-                }
-                return attributesOf(entry);
-            },
-        },
+        /** DWORD GetFileAttributes(LPCSTR) -- one body, both spellings. */
+        GetFileAttributesA: getFileAttributes.ansi,
+        GetFileAttributesW: getFileAttributes.wide,
 
-        /**
-         * BOOL SetFileAttributesA(LPCSTR, DWORD dwFileAttributes)
-         *
-         * Accepted and forgotten. We store no attribute bits and enforce none,
-         * so the honest answer to "make this read-only" is that it succeeded and
-         * changed nothing; failing instead would stop programs that only clear
-         * read-only before deleting.
-         */
-        SetFileAttributesA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                return files.stat(path)?.exists ? 1 : fail(missing(path));
-            },
-        },
+        /** BOOL SetFileAttributes(LPCSTR, DWORD dwFileAttributes) -- one body, both spellings. */
+        SetFileAttributesA: setFileAttributes.ansi,
+        SetFileAttributesW: setFileAttributes.wide,
 
-        /**
-         * DWORD GetFullPathNameA(LPCSTR, DWORD nBufferLength, LPSTR lpBuffer,
-         *                        LPSTR *lpFilePart)
-         *
-         * Purely textual, as on Windows: nothing is required to exist. The file
-         * part points into the caller's own buffer, and is NULL when the path
-         * names a directory -- which, having no filesystem to ask, is decided
-         * by the trailing separator the caller wrote.
-         */
-        GetFullPathNameA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([name, size, buffer, filePart])=>{
-                const written = name === 0 ? '' : host.readCString(name >>> 0, MAX_PATH);
-                if (written === '')
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                const resolved = fullPath(written);
-                const directory = /[\\/]$/.test(written) && !resolved.endsWith('\\');
-                const text = directory ? resolved + '\\' : resolved;
+        /** DWORD GetFullPathName(LPCSTR, DWORD, LPSTR, LPSTR *lpFilePart) -- one body, both spellings. */
+        GetFullPathNameA: getFullPathName.ansi,
+        GetFullPathNameW: getFullPathName.wide,
 
-                const result = writeStringTo(buffer >>> 0, size, text);
-                if (result === text.length)
-                {
-                    const at = text.lastIndexOf('\\');
-                    writeDwordIf(filePart >>> 0,
-                        text.endsWith('\\') ? 0 : (buffer >>> 0) + at + 1);
-                }
-                return result;
-            },
-        },
+        /** DWORD GetCurrentDirectory(DWORD nBufferLength, LPSTR lpBuffer) -- one body, both spellings. */
+        GetCurrentDirectoryA: getCurrentDirectory.ansi,
+        GetCurrentDirectoryW: getCurrentDirectory.wide,
 
-        /** DWORD GetCurrentDirectoryA(DWORD nBufferLength, LPSTR lpBuffer) */
-        GetCurrentDirectoryA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size,
-                files.currentDirectory()),
-        },
-
-        /** BOOL SetCurrentDirectoryA(LPCSTR) */
-        SetCurrentDirectoryA: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([name])=>{
-                const path = pathArgument(name);
-                const entry = files.stat(path);
-                if (!entry || !entry.exists || !entry.isDirectory)
-                {
-                    return fail(ERROR_PATH_NOT_FOUND);
-                }
-                files.setCurrentDirectory(path);
-                return 1;
-            },
-        },
+        /** BOOL SetCurrentDirectory(LPCSTR) -- one body, both spellings. */
+        SetCurrentDirectoryA: setCurrentDirectory.ansi,
+        SetCurrentDirectoryW: setCurrentDirectory.wide,
 
         /** DWORD GetTempPathA(DWORD nBufferLength, LPSTR lpBuffer) */
         GetTempPathA: {
@@ -1024,66 +1180,13 @@ export function createFileFunctions(host){
             handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size, TEMP_PATH),
         },
 
-        /**
-         * HANDLE FindFirstFileA(LPCSTR, LPWIN32_FIND_DATAA)
-         *
-         * The whole listing is taken now and walked from memory afterwards. A
-         * search is a position in a snapshot rather than a live cursor, which is
-         * what keeps a program that deletes as it enumerates -- the usual reason
-         * to enumerate at all -- from walking off the end of a shrinking list.
-         */
-        FindFirstFileA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([name, data])=>{
-                const path = pathArgument(name);
-                if (path === '')
-                {
-                    return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
-                }
-                const directory = parentOf(path);
-                const pattern = path.slice(directory.endsWith('\\')
-                    ? directory.length
-                    : directory.length + 1);
-                const holder = files.stat(directory);
-                if (!holder || !holder.exists || !holder.isDirectory)
-                {
-                    return fail(ERROR_PATH_NOT_FOUND, INVALID_HANDLE_VALUE);
-                }
-                const entries = files.list(directory, pattern) ?? [];
-                if (entries.length === 0)
-                {
-                    // Nothing matched is not the same as nowhere to look, and
-                    // callers branch on which of the two they got.
-                    return fail(ERROR_FILE_NOT_FOUND, INVALID_HANDLE_VALUE);
-                }
-                writeFindData(data >>> 0, entries[0]);
-                host.setLastError(ERROR_SUCCESS);
-                return host.handles.open('find', { entries, index: 1 });
-            },
-        },
+        /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
+        FindFirstFileA: findFirstFile.ansi,
+        FindFirstFileW: findFirstFile.wide,
 
-        /** BOOL FindNextFileA(HANDLE, LPWIN32_FIND_DATAA) */
-        FindNextFileA: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, data])=>{
-                const search = object(handle, 'find');
-                if (!search)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                if (search.index >= search.entries.length)
-                {
-                    // The end of the enumeration is a specific code, and a loop
-                    // that stops on anything else stops for the wrong reason.
-                    return fail(ERROR_NO_MORE_FILES);
-                }
-                writeFindData(data >>> 0, search.entries[search.index]);
-                search.index++;
-                return 1;
-            },
-        },
+        /** BOOL FindNextFile(HANDLE, LPWIN32_FIND_DATA) -- one body, both spellings. */
+        FindNextFileA: findNextFile.ansi,
+        FindNextFileW: findNextFile.wide,
 
         /**
          * BOOL FindClose(HANDLE)
@@ -1102,6 +1205,94 @@ export function createFileFunctions(host){
                 host.handles.close(handle >>> 0);
                 return 1;
             },
+        },
+
+        /** DWORD GetLongPathName(LPCSTR, LPSTR, DWORD) -- one body, both spellings. */
+        GetLongPathNameA: getLongPathName.ansi,
+        GetLongPathNameW: getLongPathName.wide,
+
+        /**
+         * HFILE OpenFile(LPCSTR lpFileName, LPOFSTRUCT lpReOpenBuff, UINT uStyle)
+         *
+         * The 16-bit call that predates CreateFile, still linked against by
+         * runtimes of this era. It is expressed in terms of CreateFile rather
+         * than reimplemented, because the two differing about whether a file
+         * exists would be worse than either being wrong.
+         *
+         * OF_EXIST is the reason it is worth having at all: a caller uses it to
+         * test for a file without opening one, and gets back a boolean-ish
+         * result rather than a handle it would have to close.
+         */
+        OpenFile: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([name, reopen, style])=>{
+                const path = pathArgument(name);
+                const entry = files.stat(path);
+                const flags = style >>> 0;
+                const exists = Boolean(entry && entry.exists);
+
+                if (reopen !== 0)
+                {
+                    // OFSTRUCT: cBytes, fFixedDisk, nErrCode, two reserved
+                    // words, then the path as eight-bit text. A caller reads the
+                    // path back out of it, so it is filled even on failure.
+                    const data = new Uint8Array(OFSTRUCT_SIZE);
+                    data[0] = OFSTRUCT_SIZE;
+                    data[1] = 1;
+                    data.set(latin1(path.slice(0, OFSTRUCT_PATH_MAX - 1)), OFSTRUCT_PATH);
+                    host.writeMemory(reopen >>> 0, data);
+                }
+
+                if ((flags & OF_EXIST) !== 0)
+                {
+                    return exists ? 1 : fail(missing(path), HFILE_ERROR);
+                }
+                if ((flags & OF_DELETE) !== 0)
+                {
+                    if (!exists)
+                    {
+                        return fail(missing(path), HFILE_ERROR);
+                    }
+                    return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
+
+                const write = (flags & (OF_WRITE | OF_READWRITE)) !== 0;
+                const create = (flags & OF_CREATE) !== 0;
+                if (!exists && !create)
+                {
+                    return fail(missing(path), HFILE_ERROR);
+                }
+                const node = files.open(path,
+                    { read: !write, write, create, truncate: create });
+                if (!node)
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return host.handles.open('file',
+                    { path, node, read: !write, write, position: 0 });
+            },
+        },
+
+        /**
+         * BOOL LockFile(HANDLE, DWORD, DWORD, DWORD, DWORD)
+         *
+         * There is one process, so a byte range nobody else can reach is a range
+         * already locked. Succeeding is not a pretence: the guarantee the caller
+         * asked for -- that nothing else writes here meanwhile -- holds.
+         */
+        LockFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+        },
+
+        /** BOOL UnlockFile(HANDLE, DWORD, DWORD, DWORD, DWORD) */
+        UnlockFile: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
         },
     };
 }

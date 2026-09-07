@@ -19,6 +19,8 @@
 import { ANY_WINDOW, WM_PAINT, WM_QUIT } from './messages.js';
 import { createPaintFunctions } from './paint.js';
 import { createSystemFunctions } from './system.js';
+import { createObjectFunctions } from './objects.js';
+import { createDialogFunctions } from './dialogs.js';
 import {
     WNDCLASSA,
     WNDCLASSEXA,
@@ -344,6 +346,43 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * A window record and the handle that names it, with everything a window
+     * has defaulted.
+     *
+     * Separate from CreateWindowExA because not every window comes from that
+     * call: a dialog's controls are windows of system classes this build does
+     * not register, and they still need real handles that DestroyWindow,
+     * GetWindowTextA and the message queue all work on.
+     *
+     * @param {any} fields
+     */
+    const makeWindow = fields=>{
+        const record = {
+            hwnd: 0,
+            className: '',
+            title: '',
+            style: 0,
+            exStyle: 0,
+            parent: 0,
+            instance: 0,
+            id: 0,
+            wndProc: 0,
+            menu: 0,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            userData: 0,
+            extra: new DataView(new ArrayBuffer(0)),
+            destroyed: false,
+            ...fields,
+        };
+        record.hwnd = host.handles.open('window', record);
+        windows.set(record.hwnd, record);
+        return record;
+    };
+
+    /**
      * CreateWindowExA, and CreateWindowA once its missing argument is filled in.
      *
      * @param {number[]} args  The extended style first, then the eleven that
@@ -357,8 +396,7 @@ export function createWindowFunctions(host){
         {
             return 0;
         }
-        const record = {
-            hwnd: 0,
+        const record = makeWindow({
             className: cls.name,
             title: (windowName >>> 0) === 0 ? '' : host.readCString(windowName, MAX_WINDOW_TEXT),
             style: style >>> 0,
@@ -366,19 +404,16 @@ export function createWindowFunctions(host){
             parent: parent >>> 0,
             instance: instance >>> 0,
             // For a child window hMenu is its control id; for a top-level one it
-            // is a menu handle, and there are no menus here to hold on to.
+            // is a menu handle, which the menu bookkeeping hangs on to.
             id: parent === 0 ? 0 : menu >>> 0,
+            menu: parent === 0 ? menu >>> 0 : 0,
             wndProc: cls.wndProc,
             x: coordinate(x, DEFAULT_ORIGIN),
             y: coordinate(y, DEFAULT_ORIGIN),
             width: coordinate(width, DEFAULT_WIDTH),
             height: coordinate(height, DEFAULT_HEIGHT),
-            userData: 0,
             extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))),
-            destroyed: false,
-        };
-        record.hwnd = host.handles.open('window', record);
-        windows.set(record.hwnd, record);
+        });
         // Input has to land somewhere, and what a person is looking at is the
         // window that was made most recently until something says otherwise.
         // Telling the host here is the only way it can know a handle it never
@@ -387,14 +422,16 @@ export function createWindowFunctions(host){
         return record.hwnd;
     };
 
-    // The three halves of user32 are one table to the guest, and separate files
-    // only because the subjects are: windows and classes here, painting and its
-    // device contexts next door, and everything a program asks the system about
-    // itself after that. They share the window records rather than each keeping
-    // a copy, which is why they are built here and not beside each other.
+    // user32 is one table to the guest and five files only because the subjects
+    // are: windows and classes here, painting and its device contexts next
+    // door, what a program asks the system about itself after that, the things
+    // a window owns, and dialogs. They share the window records rather than
+    // each keeping a copy, which is why they are built here.
     return {
         ...createPaintFunctions({ host, live, queue: host.queue, WM_PAINT }),
-        ...createSystemFunctions({ host, live, windows }),
+        ...createSystemFunctions({ host, live, windows, classes }),
+        ...createObjectFunctions({ host, live }),
+        ...createDialogFunctions({ host, live, windows, makeWindow, destroyWindow }),
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {

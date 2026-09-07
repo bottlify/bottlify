@@ -23,6 +23,12 @@ import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
 import { createHive } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
+import { createWinmmFunctions } from './winmm/functions.js';
+import { createComctlFunctions } from './comctl32/functions.js';
+import { createShellFunctions } from './shell32/functions.js';
+import { createVersionFunctions } from './version/functions.js';
+import { createCommonDialogFunctions } from './comdlg32/functions.js';
+import { createImmFunctions } from './imm32/functions.js';
 import { createOleFunctions } from './ole32/functions.js';
 import { createComRegistry } from './ole32/objects.js';
 
@@ -233,6 +239,32 @@ export const win32Module = {
                 write: (handle, text)=>sink(handle, text),
                 callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
             }),
+
+            'WINMM.dll': createWinmmFunctions({
+                readMemory,
+                writeMemory,
+                // The guest's clock, never the host's. A frame loop that timed
+                // an interval with one and read it with another would disagree
+                // with itself about how long its own frame took.
+                now: ()=>kernel.clock.virtualTime(),
+            }),
+
+            'COMCTL32.dll': createComctlFunctions({ readMemory, writeMemory }),
+
+            'SHELL32.dll': createShellFunctions({ writeMemory }),
+
+            'VERSION.dll': createVersionFunctions({
+                readMemory,
+                writeMemory,
+                readCString,
+                setLastError: setError,
+                /** @param {string} path */
+                versionInfo: path=>modules.versionInfo?.(path) ?? null,
+            }),
+
+            'COMDLG32.dll': createCommonDialogFunctions({ readMemory }),
+
+            'IMM32.dll': createImmFunctions({ writeMemory }),
 
             'USER32.dll': createWindowFunctions({
                 readMemory,

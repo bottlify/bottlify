@@ -293,6 +293,21 @@ function setup(){
         readMemory: memory.readMemory,
         writeMemory: memory.writeMemory,
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        /** @param {number} address @param {number} maxLength */
+        readWideString: (address, maxLength)=>{
+            let text = '';
+            for (let at = 0; at < maxLength; at++)
+            {
+                const code = memory.bytes[address + at * 2]
+                    | memory.bytes[address + at * 2 + 1] << 8;
+                if (code === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(code);
+            }
+            return text;
+        },
         files,
         setLastError: code=>{
             error.code = code;

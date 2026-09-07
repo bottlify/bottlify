@@ -35,7 +35,9 @@
  *   a program checks before deciding to redraw.
  */
 
-import { readRect, writeU32s } from '../user32/structs.js';
+import { readRect, writeU16, writeU32s } from '../user32/structs.js';
+import { BITMAPINFOHEADER, PALETTEENTRY_SIZE, readBitmapInfoHeader }
+    from './structs.js';
 
 /** CombineRgn's modes. */
 const RGN_AND = 1;
@@ -48,6 +50,20 @@ const RGN_COPY = 5;
 const NULLREGION = 1;
 const SIMPLEREGION = 2;
 const REGION_ERROR = 0;
+
+/**
+ * RGNDATAHEADER, then the rectangles. iType is the only value it may hold, and
+ * a caller that walks the buffer reads nCount rectangles out of the tail.
+ */
+const RGNDATAHEADER_SIZE = 32;
+const RECT_SIZE = 16;
+const RDH_RECTANGLES = 1;
+
+/** ABC: three LONGs, the left bearing, the black width and the right bearing. */
+const ABC_SIZE = 12;
+
+/** What a call that should have returned a UINT says when it failed. */
+const GDI_ERROR = 0xffffffff;
 
 /** A gamma ramp is three arrays of 256 words, one per channel. */
 const GAMMA_CHANNEL_ENTRIES = 256;
@@ -288,6 +304,169 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             },
         },
 
+        /** BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom) */
+        Rectangle: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const interfaces = bound(handle);
+                return interfaces && interfaces.rectangle(handle >>> 0,
+                    left | 0, top | 0, right | 0, bottom | 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL ExtTextOutA(HDC hdc, int x, int y, UINT options,
+         *   const RECT *lprect, LPCSTR lpString, UINT c, const INT *lpDx)
+         *
+         * The character count is authoritative and the string is not
+         * NUL-terminated: a program drawing a substring passes the whole buffer
+         * and a shorter count, and reading to a terminator would draw the rest
+         * of it.
+         *
+         * lpDx is one advance per character, which is how justified text is
+         * positioned. Ignoring it draws the same glyphs in the wrong places,
+         * which looks like a font problem and is not one.
+         */
+        ExtTextOutA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, options, rect, string, count, dx])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const length = count >>> 0;
+                const text = (string >>> 0) === 0 || length === 0
+                    ? ''
+                    : String.fromCharCode(...host.readMemory(string >>> 0, length));
+                const advances = (dx >>> 0) === 0 || length === 0
+                    ? undefined
+                    : [...Array(length).keys()].map(index=>{
+                        const bytes = host.readMemory((dx >>> 0) + index * 4, 4);
+                        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16
+                            | bytes[3] << 24) | 0;
+                    });
+                return interfaces.extTextOutA(handle >>> 0, x | 0, y | 0, options >>> 0,
+                    (rect >>> 0) === 0 ? null : readRect(host, rect), text, advances) ? 1 : 0;
+            },
+        },
+
+        /**
+         * UINT SetTextAlign(HDC hdc, UINT align)
+         *
+         * Kept on the device context rather than only on the drawing service,
+         * because a build with nothing to draw on still has to remember what it
+         * was told and hand the previous value back: a program that sets an
+         * alignment, draws, and restores would otherwise restore a zero it never
+         * set.
+         */
+        SetTextAlign: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, align])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return GDI_ERROR;
+                }
+                const previous = dc.textAlign;
+                dc.textAlign = align >>> 0;
+                bound(handle)?.setTextAlign(handle >>> 0, align >>> 0);
+                return previous;
+            },
+        },
+
+        /** UINT GetTextAlign(HDC hdc) */
+        GetTextAlign: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>dcOf(handle)?.textAlign ?? GDI_ERROR,
+        },
+
+        /**
+         * int GetDIBits(HDC hdc, HBITMAP hbm, UINT start, UINT cLines,
+         *   LPVOID lpvBits, LPBITMAPINFO lpbmi, UINT usage)
+         *
+         * A null lpvBits asks for the header to be filled in and nothing else,
+         * which is how a program discovers a bitmap shape before allocating for
+         * it. That path answers even when there is nothing to draw with, because
+         * the shape is bookkeeping and the pixels are not.
+         *
+         * The pixels come from the device context, so the bitmap asked about has
+         * to be the one selected into it. Any other bitmap has no surface this
+         * layer can reach, and reporting rows that came from somewhere else
+         * would be worse than reporting none.
+         */
+        GetDIBits: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([handle, bitmap, start, lines, bits, info])=>{
+                const record = objects.get(bitmap);
+                const dc = dcOf(handle);
+                if (!record || record.type !== 'bitmap' || !dc || (info >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const shape = record.attributes;
+                if ((bits >>> 0) === 0)
+                {
+                    writeU32s(host, info + BITMAPINFOHEADER.biSize,
+                        [BITMAPINFOHEADER.SIZE, shape.width, shape.height]);
+                    writeU16(host, info + BITMAPINFOHEADER.biPlanes, 1);
+                    writeU16(host, info + BITMAPINFOHEADER.biBitCount, shape.bitCount);
+                    writeU32s(host, info + BITMAPINFOHEADER.biCompression, [0, 0, 0, 0, 0, 0]);
+                    return shape.height;
+                }
+                const interfaces = dc.bitmap === (bitmap >>> 0) ? bound(handle) : null;
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const header = readBitmapInfoHeader(host, info);
+                const wanted = Math.min(lines >>> 0, shape.height);
+                const buffer = new Uint8Array(
+                    (((header.width * header.bitCount + 31) / 32 | 0) * 4) * wanted);
+                const written = interfaces.getDIBits(handle >>> 0, {
+                    header,
+                    bits: buffer,
+                    startScan: start >>> 0,
+                    scanLines: wanted,
+                });
+                host.writeMemory(bits >>> 0, buffer);
+                return written;
+            },
+        },
+
+        /**
+         * BOOL GetCharABCWidthsA(HDC hdc, UINT wFirst, UINT wLast, LPABC lpABC)
+         *
+         * An estimate, and consistent with every other measurement this build
+         * makes: the whole advance is the black box, with no bearing either
+         * side. Real bearings need a rasterised glyph, and a program that lays
+         * text out against these stays consistent with what is drawn, which is
+         * what matters until there are real ones.
+         */
+        GetCharABCWidthsA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0 || (last >>> 0) < (first >>> 0))
+                {
+                    return 0;
+                }
+                const width = currentMetrics(dc).aveCharWidth;
+                const count = (last >>> 0) - (first >>> 0) + 1;
+                for (let index = 0; index < count; index++)
+                {
+                    writeU32s(host, (out >>> 0) + index * ABC_SIZE, [0, width, 0]);
+                }
+                return 1;
+            },
+        },
+
         /** int FillRgn(HDC hdc, HRGN hrgn, HBRUSH hbr) */
         FillRgn: {
             argBytes: 12,
@@ -461,6 +640,113 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         GetDIBColorTable: {
             argBytes: 16,
             handler: ()=>0,
+        },
+
+        /**
+         * UINT SetPaletteEntries(HPALETTE hpal, UINT iStart, UINT cEntries,
+         *                       const PALETTEENTRY *pPalEntries)
+         *
+         * Bookkeeping, and honest as such: the entries are kept on the palette
+         * object where GetPaletteEntries and a future realisation can read them
+         * back. What they do not do is change any pixel, because every surface
+         * here is 32-bit and has no palette to change.
+         */
+        SetPaletteEntries: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, start, count, entries])=>{
+                const record = objects.get(handle);
+                if (!record || record.type !== 'palette' || (entries >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const first = start >>> 0;
+                const wanted = count >>> 0;
+                const held = record.attributes.entries;
+                let written = 0;
+                for (let index = 0; index < wanted; index++)
+                {
+                    // Past the end of the palette is not an error, it is where
+                    // the copy stops -- and the count reports where it stopped.
+                    if (first + index >= held.length)
+                    {
+                        break;
+                    }
+                    const bytes = host.readMemory(entries + index * PALETTEENTRY_SIZE, 4);
+                    held[first + index] = (bytes[0] | bytes[1] << 8
+                        | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+                    written++;
+                }
+                return written;
+            },
+        },
+
+        /**
+         * UINT GetSystemPaletteEntries(HDC hdc, UINT iStart, UINT cEntries,
+         *                             LPPALETTEENTRY pPalEntries)
+         *
+         * None. A system palette exists on a device of eight bits or fewer, and
+         * this one is 32; reporting entries a program could then match against
+         * would have it choose colours from a palette nothing draws through.
+         */
+        GetSystemPaletteEntries: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /**
+         * DWORD GetRegionData(HRGN hrgn, DWORD nCount, LPRGNDATA lpRgnData)
+         *
+         * A null buffer, or one too small, reports the size a caller must
+         * allocate -- which is how a program sizes one before asking again, and
+         * why answering with the size rather than with failure matters.
+         *
+         * One rectangle comes back because a region is one rectangle here. That
+         * is the ceiling this file's header names; a caller walking the buffer
+         * sees a well-formed region that covers more than a real one would.
+         */
+        GetRegionData: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([region, count, out])=>{
+                const rect = regionOf(region);
+                if (!rect)
+                {
+                    return 0;
+                }
+                const needed = RGNDATAHEADER_SIZE + RECT_SIZE;
+                if ((out >>> 0) === 0 || (count >>> 0) < needed)
+                {
+                    return needed;
+                }
+                writeU32s(host, out, [
+                    RGNDATAHEADER_SIZE,
+                    RDH_RECTANGLES,
+                    1,
+                    RECT_SIZE,
+                    rect.left, rect.top, rect.right, rect.bottom,
+                ]);
+                writeU32s(host, out + RGNDATAHEADER_SIZE,
+                    [rect.left, rect.top, rect.right, rect.bottom]);
+                return needed;
+            },
+        },
+
+        /** BOOL RectInRegion(HRGN hrgn, const RECT *lprect) */
+        RectInRegion: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([region, rect])=>{
+                const held = regionOf(region);
+                if (!held || (rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                // Any overlap at all, not containment: the question is whether
+                // the region has to be redrawn, and a single shared pixel says
+                // it does.
+                return isEmpty(combine(held, readRect(host, rect), RGN_AND)) ? 0 : 1;
+            },
         },
 
         /** BOOL GdiFlush(void) */

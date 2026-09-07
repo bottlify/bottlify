@@ -23,6 +23,7 @@
 import { createGdiObjects } from './objects.js';
 import { createDrawingFunctions } from './drawing.js';
 import {
+    BITMAPINFOHEADER,
     readBitmapInfoHeader,
     readLogBrush,
     readLogFont,
@@ -329,6 +330,7 @@ export function createGdiFunctions(host){
             bkColor: WHITE,
             bkMode: OPAQUE,
             rop2: R2_COPYPEN,
+            textAlign: 0,
             mapMode: MM_TEXT,
             viewportOrg: { x: 0, y: 0 },
             windowOrg: { x: 0, y: 0 },
@@ -376,6 +378,7 @@ export function createGdiFunctions(host){
         bkColor: dc.bkColor,
         bkMode: dc.bkMode,
         rop2: dc.rop2,
+        textAlign: dc.textAlign,
         mapMode: dc.mapMode,
         viewportOrg: { ...dc.viewportOrg },
         windowOrg: { ...dc.windowOrg },
@@ -993,6 +996,50 @@ export function createGdiFunctions(host){
                     // one thing about a DIB that a blitter cannot guess.
                     topDown: header.height < 0,
                     usage: usage >>> 0,
+                    bits: address,
+                    section: address,
+                });
+            },
+        },
+
+        /**
+         * HBITMAP CreateDIBitmap(HDC hdc, const BITMAPINFOHEADER *pbmih,
+         *   DWORD flInit, const VOID *pjBits, const BITMAPINFO *pbmi, UINT iUsage)
+         *
+         * The bitmap it produces is device-dependent by name and a DIB by
+         * construction, exactly as CreateDIBSection's is: one storage format
+         * downstream means one code path, and a program cannot observe the
+         * difference through any call this library offers.
+         *
+         * CBM_INIT copies the caller's rows in as they are, which is only
+         * correct because the two formats are the same one -- the header the
+         * bits were described by is the header the bitmap is created with.
+         */
+        CreateDIBitmap: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, infoHeader, init, bits])=>{
+                const CBM_INIT = 4;
+                const header = readBitmapInfoHeader(host, infoHeader);
+                if (header.size < BITMAPINFOHEADER.SIZE
+                    || (header.compression !== BI_RGB && header.compression !== BI_BITFIELDS)
+                    || !BIT_COUNTS.has(header.bitCount)
+                    || header.width <= 0 || header.height === 0)
+                {
+                    return 0;
+                }
+                const bytes = dibSize(header.width, header.height, header.bitCount);
+                const address = host.surfaces.allocate(bytes);
+                if ((init & CBM_INIT) !== 0 && (bits >>> 0) !== 0)
+                {
+                    host.writeMemory(address, host.readMemory(bits >>> 0, bytes));
+                }
+                return objects.create('bitmap', {
+                    width: header.width,
+                    height: Math.abs(header.height),
+                    planes: 1,
+                    bitCount: header.bitCount,
+                    topDown: header.height < 0,
                     bits: address,
                     section: address,
                 });

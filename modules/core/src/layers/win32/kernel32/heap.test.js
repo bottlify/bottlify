@@ -36,6 +36,7 @@ function fakeHost(arena = ARENA){
         arena,
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.subarray(address, address + length),
+        setLastError: ()=>{},
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
             for (let i = 0; i < data.length; i++)

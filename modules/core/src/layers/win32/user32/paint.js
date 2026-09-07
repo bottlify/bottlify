@@ -42,6 +42,10 @@ const ESTIMATED_LINE_HEIGHT = 16;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(region: number, rect: any) => void} [setRegion]
+ *           Fills in a region object the caller owns. It belongs to gdi32's
+ *           table, which this layer cannot reach, so it arrives as a service or
+ *           not at all.
  * @property {() => any} [dc]
  *           The device-context service, when the build has one: `get(hwnd)`
  *           makes a DC for a window, `release(hwnd, hdc)` gives it back. Absent
@@ -286,6 +290,79 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
             /** @param {number[]} args */
             handler: ([hdc, rect, brush])=>
                 contexts()?.frameRect?.(hdc >>> 0, readRect(host, rect), brush >>> 0) ?? 0,
+        },
+
+        /**
+         * HDC GetDCEx(HWND hWnd, HRGN hrgnClip, DWORD flags)
+         *
+         * The flags select a clip region and whether the non-client area is
+         * included. There is no non-client area and no region clipping on a
+         * window DC here, so every flag describes what a plain GetDC already
+         * gives -- and the region handle is the caller's to destroy either way,
+         * which is why nothing is done with it.
+         */
+        GetDCEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>contexts()?.get(hwnd >>> 0) ?? 0,
+        },
+
+        /**
+         * int GetUpdateRgn(HWND hWnd, HRGN hRgn, BOOL bErase)
+         *
+         * The caller supplies the region and this fills it in, which needs the
+         * object table those regions live in -- gdi32's, which user32 cannot
+         * reach. Without the service that bridges them the honest answer is
+         * ERROR: reporting a complexity for a region left holding whatever it
+         * held before would have the caller clip to the wrong shape.
+         */
+        GetUpdateRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, region])=>{
+                const ERROR = 0;
+                const NULLREGION = 1;
+                const SIMPLEREGION = 2;
+                const record = live(hwnd);
+                if (!record || !host.setRegion)
+                {
+                    return ERROR;
+                }
+                const dirty = record.updateRect;
+                host.setRegion(region >>> 0,
+                    dirty ?? { left: 0, top: 0, right: 0, bottom: 0 });
+                return dirty ? SIMPLEREGION : NULLREGION;
+            },
+        },
+
+        /**
+         * BOOL DrawEdge(HDC hdc, LPRECT qrc, UINT edge, UINT grfFlags)
+         *
+         * An edge is two rectangles of shaded lines, and which shades depend on
+         * the system colours. With no service to draw them this reports failure
+         * rather than adjusting the rectangle as though something had been
+         * drawn -- BF_ADJUST asks for exactly that, and a caller that got a
+         * shrunken rectangle back would lay its content out inside a border
+         * that is not there.
+         */
+        DrawEdge: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL DrawFocusRect(HDC hDC, const RECT *lprc)
+         *
+         * The focus rectangle is drawn by inverting, which is what makes
+         * drawing it twice erase it. Without somewhere to invert, failing is
+         * the only answer that does not leave a program believing it has a
+         * rectangle it must later remove.
+         */
+        DrawFocusRect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hdc, rect])=>
+                contexts()?.invertRect?.(hdc >>> 0, readRect(host, rect)) ?? 0,
         },
 
         /** BOOL ValidateRect(HWND hWnd, const RECT *lpRect) */
