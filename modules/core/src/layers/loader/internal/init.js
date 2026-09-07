@@ -38,21 +38,63 @@ const u32 = value=>[
 ];
 
 /**
+ * @typedef {Object} TlsSetup
+ * @property {number} indexAddress  The dword to write the slot number into.
+ * @property {number} blockAddress  This image's thread-local block, already filled.
+ * @property {number[]} callbacks   Addresses to call, in order, before DllMain.
+ */
+
+/**
  * @param {Object} options
- * @param {{ base: number, entryPoint: number, name: string }[]} options.libraries
+ * @param {{ base: number, entryPoint: number, name: string, tls?: TlsSetup }[]}
+ *        options.libraries
  *        In dependency order. One with no entry point is skipped: a library
  *        without DllMain is ordinary, not an error.
  * @param {number} options.entryPoint  Where the program itself starts.
- * @returns {{ bytes: Uint8Array, attached: string[] }}
+ * @param {{ alloc: number, set: number }} [options.tlsApi]
+ *        Guest addresses of TlsAlloc and TlsSetValue. Required if any image
+ *        carries thread-local storage; the slot has to come from the same pool
+ *        the program's own calls draw on, and only the guest can ask for one.
+ * @returns {{ bytes: Uint8Array, attached: string[], tlsImages: number }}
  */
-export function synthesiseProcessInit({ libraries, entryPoint }){
+export function synthesiseProcessInit({ libraries, entryPoint, tlsApi }){
     /** @type {number[]} */
     const code = [];
     /** @type {string[]} */
     const attached = [];
+    let tlsImages = 0;
 
     for (const library of libraries)
     {
+        // Thread-local storage first: a library's initialisers and its DllMain
+        // both expect to be able to reach it, and a runtime whose slot was
+        // never written reads slot zero -- a wrong answer rather than a
+        // missing one, and one that surfaces far from here.
+        if (library.tls && tlsApi)
+        {
+            code.push(
+                0xb8, ...u32(tlsApi.alloc), // mov eax, TlsAlloc
+                0xff, 0xd0, //                 call eax        -> eax = slot
+                0xa3, ...u32(library.tls.indexAddress), // mov [index], eax
+                0x68, ...u32(library.tls.blockAddress), // push block
+                0x50, //                                   push eax  (the slot)
+                0xb8, ...u32(tlsApi.set), // mov eax, TlsSetValue
+                0xff, 0xd0, //               call eax
+            );
+            for (const callback of library.tls.callbacks)
+            {
+                // A TLS callback takes exactly DllMain's three arguments.
+                code.push(
+                    0x6a, 0x00, //                     push 0
+                    0x6a, DLL_PROCESS_ATTACH, //       push 1
+                    0x68, ...u32(library.base), //     push hinstDLL
+                    0xb8, ...u32(callback), //         mov eax, callback
+                    0xff, 0xd0, //                     call eax
+                );
+            }
+            tlsImages++;
+        }
+
         if (!library.entryPoint || library.entryPoint === library.base)
         {
             continue;
@@ -77,5 +119,5 @@ export function synthesiseProcessInit({ libraries, entryPoint }){
         0xff, 0xe0, //               jmp eax
     );
 
-    return { bytes: new Uint8Array(code), attached };
+    return { bytes: new Uint8Array(code), attached, tlsImages };
 }

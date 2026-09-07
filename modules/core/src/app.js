@@ -12,6 +12,7 @@ import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { loadString } from './layers/loader/internal/resources.js';
+import { readTls } from './layers/loader/internal/tls.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
@@ -1037,24 +1038,84 @@ export async function createApp(options){
     // a real loader does and where a library expects to build the state its
     // exports assume. It is guest code because the calls belong on a guest
     // stack; the stub's last instruction enters the program.
-    const startup = synthesiseProcessInit({
-        libraries: shipped,
-        entryPoint: image.entryPoint,
+    // Somewhere to put what a process needs before it starts: thread-local
+    // blocks, and the stub that sets them up. Its own span rather than the
+    // guest heap, because the heap is the program's and this is written before
+    // the program exists to allocate from it.
+    const STARTUP_ARENA = 0x100000;
+    const startupArena = nextLibraryBase;
+    memory.register({
+        name: 'process-startup', base: startupArena, size: STARTUP_ARENA,
+        // Executable because the stub that runs before the program lives here
+        // too, and it is guest code.
+        kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
     });
-    // Straight after the last library, which is the last thing that claimed an
-    // address. Only reached when there is something to attach.
-    const startupBase = shipped.reduce(
-        (highest, library)=>Math.max(highest, library.base + library.size), 0);
-    const start = startup.attached.length === 0 ? image.entryPoint : (()=>{
-        memory.register({
-            name: 'process-init', base: startupBase, size: startup.bytes.length,
-            kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
-        });
-        memory.writeBytes(startupBase, startup.bytes);
-        memory.protect('process-init', memory.Access.READ_EXECUTE);
-        events.emit('libraries-attached', { names: startup.attached });
-        return startupBase;
-    })();
+    nextLibraryBase += STARTUP_ARENA;
+
+    let scratch = startupArena;
+    /** @param {number} size */
+    const allocateFromHeap = size=>{
+        const at = scratch;
+        // Aligned, because a thread-local block holds whatever the compiler put
+        // in it and some of that wants alignment the program never restates.
+        scratch += size + 15 & ~15;
+        if (scratch > startupArena + STARTUP_ARENA)
+        {
+            throw new Error('process startup needs more room than it was given');
+        }
+        return at;
+    };
+
+    // Thread-local storage, for every image that declares any.
+    //
+    // The block is filled here, on the host, because it is only bytes; the slot
+    // number has to come from the guest's own TlsAlloc, because a runtime later
+    // reads it with TlsGetValue and the two have to be talking about the same
+    // pool. So the stub does the asking and this does the filling.
+    const withTls = [mainModule, ...shipped].map(held=>{
+        const directory = held.file ? readTls(held.file, held.image ?? parsePe(held.file)) : null;
+        if (!directory)
+        {
+            return held;
+        }
+        const size = directory.templateSize + directory.zeroFillSize;
+        const blockAddress = allocateFromHeap(size);
+        memory.writeBytes(blockAddress, new Uint8Array(size));
+        memory.writeBytes(blockAddress, directory.template);
+
+        return {
+            ...held,
+            tls: {
+                indexAddress: held.base + directory.indexRva,
+                blockAddress,
+                callbacks: directory.callbackRvas.map(rva=>held.base + rva),
+            },
+        };
+    });
+
+    const kernel32 = findModule('kernel32');
+    const startup = synthesiseProcessInit({
+        libraries: withTls.filter(held=>held !== mainModule || held.tls),
+        entryPoint: image.entryPoint,
+        tlsApi: kernel32 && {
+            alloc: kernel32.addressOf('TlsAlloc') ?? 0,
+            set: kernel32.addressOf('TlsSetValue') ?? 0,
+        },
+    });
+    // Inside the same span the blocks came from, rather than beside it: it is
+    // written once, before anything runs, and giving it a region of its own
+    // only creates a boundary two allocations can land on either side of.
+    const start = startup.attached.length === 0 && startup.tlsImages === 0
+        ? image.entryPoint
+        : (()=>{
+            const at = allocateFromHeap(startup.bytes.length);
+            memory.writeBytes(at, startup.bytes);
+            events.emit('libraries-attached', {
+                names: startup.attached,
+                tlsImages: startup.tlsImages,
+            });
+            return at;
+        })();
 
     memory.writeU32(entryVector, start);
 
