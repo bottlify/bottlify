@@ -50,7 +50,14 @@ export const cpuModule = {
      */
     async create(config){
         const settings = {
-            memorySize: config?.memorySize ?? 64 * 1024 * 1024,
+            // A quarter of a gigabyte, because that is the order a program of
+            // this era expects and because the address space is what runs out
+            // first: system modules are placed a megabyte apart and a game's
+            // own libraries are megabytes each, so a smaller guest refuses a
+            // library for want of somewhere to put it long before it runs out
+            // of memory to fill. Must stay a power of two -- the emulator
+            // requires it.
+            memorySize: config?.memorySize ?? 256 * 1024 * 1024,
             trapPort: config?.trapPort ?? 0xb077,
             entryVector: config?.entryVector ?? 0x7000,
             initialStack: config?.initialStack ?? 0x300000,
