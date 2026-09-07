@@ -756,6 +756,16 @@ export async function createApp(options){
                 /** @param {string} name @param {number} value */
                 write: (name, value)=>core.api('cpu').writeReg32(name, value),
             },
+            // A C runtime returns a double on the floating-point stack, not in
+            // a register, so the functions that do are exported only when this
+            // is here to leave one there.
+            fpu: {
+                /** @param {number} value */
+                setResult: value=>core.api('cpu').fpu.setResult(value),
+                /** @param {number} index */
+                get: index=>core.api('cpu').fpu.get(index),
+                pop: ()=>core.api('cpu').fpu.pop(),
+            },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
                 /** @param {string | null} name */

@@ -415,6 +415,12 @@ export const win32Module = {
                     systemTimeMs: ()=>kernel.clock.wallClock(),
                     now: ()=>kernel.clock.virtualTime(),
                     files: volume,
+                    // Without this the functions returning a double are not
+                    // exported at all, and an unresolved import names the one
+                    // that is missing. Exported without it they would set a
+                    // register the caller never reads and leave it storing
+                    // whatever was on the floating-point stack already.
+                    fpu: config?.fpu,
                 }),
             },
 

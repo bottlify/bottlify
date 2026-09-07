@@ -5,6 +5,7 @@
  */
 
 import { createV86Host } from './internal/v86-host.js';
+import { createFpu } from './internal/fpu.js';
 import { createThunkTable } from './internal/thunks.js';
 import { FAULT_TRAP_BASE } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
@@ -67,6 +68,8 @@ export const cpuModule = {
             }
             return host;
         };
+
+        const fpu = createFpu({ get wasm_memory(){ return started().cpu().wasm_memory; } });
 
         return {
             layout: {
@@ -295,6 +298,14 @@ export const cpuModule = {
             instructionCount: ()=>started().instructionCount(),
             inProtectedMode: ()=>started().inProtectedMode(),
             eip: ()=>started().eip(),
+
+            /**
+             * The floating-point stack, for whoever answers a call that returns
+             * a double. Handed out before the guest starts and reached through
+             * a getter, so that an assembling caller can wire it at build time
+             * and the emulator's memory can still be grown and replaced later.
+             */
+            fpu,
         };
     },
 
