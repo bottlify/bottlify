@@ -320,6 +320,20 @@ export function createDispatcher(deps){
                     throw new Error(
                         `bridge: ${fn.name} answered asynchronously with nowhere to wait`);
                 }
+                // The trace says "waiting" and nothing after it, which for a
+                // read of a game's own archive is the whole question: whether
+                // it eventually delivered, and how much. Recorded when the
+                // answer arrives, as a line of its own -- the first line is
+                // already written and in order, and moving it would put the
+                // call somewhere it did not happen.
+                if (onCall)
+                {
+                    const asked = record;
+                    result.then((/** @type {number} */ value)=>onCall({
+                        ...asked,
+                        result: `0x${(value >>> 0).toString(16)} (was waiting)`,
+                    }));
+                }
                 suspend(result, frame);
                 return;
             }

@@ -1067,14 +1067,64 @@ export async function createApp(options){
         const stub = bridge.watch(label, {
             argBytes: asked.args * 4,
             target: address,
-            // Nothing to answer: the call is about to reach the real function,
-            // which will leave its own result in EAX. Being dispatched at all
-            // is the point -- that is what puts it in the trace, with its
-            // arguments and whatever text they point at.
-            handler: ()=>0,
+            // The call is about to reach the real function, which will leave
+            // its own result in EAX; nothing here answers it. What this does
+            // instead is arrange to be told what that answer was, by sending
+            // the function home through a stub of ours.
+            handler: ()=>{
+                const esp = cpu.readReg32('esp') >>> 0;
+                pending.push({ label, esp, returnTo: memory.readU32(esp) });
+                memory.writeU32(esp, catcher());
+                return 0;
+            },
         });
         watches.set(label, stub);
         return stub;
+    };
+
+    /**
+     * Watched calls that have not returned yet, innermost last.
+     *
+     * A stack rather than a map, because a return address is not enough to tell
+     * two calls apart and the answer is wanted per call. Threads can interleave
+     * and would confuse it; this is a diagnostic taken with a handful of
+     * functions watched, where they do not.
+     *
+     * @type {{ label: string, esp: number, returnTo: number }[]}
+     */
+    const pending = [];
+
+    /** @type {number | null} */
+    let catcherStub = null;
+
+    /**
+     * Where a watched function returns to instead of its caller: a stub that
+     * reports the answer and then sends it the rest of the way.
+     *
+     * Reached by the callee's own `ret`, so the return address is gone from the
+     * stack by the time this runs and has to be put back for the stub's own
+     * `ret` to find. EAX is the answer and is preserved into ECX by the stub,
+     * because the trap needs EAX to say which stub fired.
+     */
+    const catcher = ()=>{
+        catcherStub ??= bridge.register('<watch-return>', {
+            argBytes: 0,
+            preserveResult: true,
+            handler: ()=>{
+                const answer = cpu.readReg32('ecx') >>> 0;
+                const frame = pending.pop();
+                if (!frame)
+                {
+                    return answer;
+                }
+                events.emit('guest-return', { name: frame.label, result: answer });
+                const esp = (cpu.readReg32('esp') >>> 0) - 4;
+                memory.writeU32(esp, frame.returnTo);
+                cpu.writeReg32('esp', esp);
+                return answer;
+            },
+        });
+        return catcherStub;
     };
 
     /**
@@ -1687,6 +1737,21 @@ export async function createApp(options){
                 wParam: message.wParam ?? 0,
                 lParam: message.lParam ?? 0,
             });
+        },
+
+        /**
+         * A window on the running machine, for a tool that has to look at it.
+         *
+         * Deliberately narrow and read-only: what a diagnostic needs is to see
+         * what a program was given, and everything else it might ask for is
+         * already an event or a diagnostics counter.
+         */
+        debug: {
+            /** @param {number} address @param {number} length */
+            read: (address, length)=>memory.readBytes(address >>> 0, length),
+            /** @param {string} name */
+            register: name=>cpu.readReg32(name),
+            eip: ()=>cpu.eip(),
         },
 
         /** The registry the program reads and writes; it outlives the process. */

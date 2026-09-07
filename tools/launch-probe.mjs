@@ -26,6 +26,7 @@ import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
+import { peekBytes } from '../modules/core/src/trace.js';
 
 const PREBUILT = new URL('../modules/core/vendor/prebuilt/', import.meta.url);
 const BUNDLES = new URL('../bundles/', import.meta.url);
@@ -46,11 +47,19 @@ function parse(argv){
         // decided is decided early, and by the time it stops the ring that
         // would have shown it has been overwritten many times over.
         log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
-        // Which of a game's own libraries to watch calls into, comma-separated.
-        // Six arguments are read from each call, which is what the trace shows
-        // anyway; the count does not have to be right, because a watch forwards
-        // into the real function rather than returning, so it never has a stack
-        // to clean up.
+        // Addresses to read whenever a traced call matches --grep, as
+        // `0x37e9610:16`, comma-separated. A program's decisions live in its
+        // own globals, and the moment to look at one is the call that acts on
+        // it -- by the time a run stops, shutdown has cleared it.
+        peek: argv.includes('--peek')
+            ? argv[argv.indexOf('--peek') + 1].split(',').map(one=>{
+                const [address, length] = one.split(':');
+                return { address: Number(address), length: Number(length ?? 32) };
+            })
+            : [],
+        // Which of a game's own libraries to watch calls into, as `Storm.dll`
+        // for all of one library's exports or `MSVCR80.dll!toupper` for a
+        // single function, comma-separated.
         watch: argv.includes('--watch')
             ? argv[argv.indexOf('--watch') + 1].split(',')
             : [],
@@ -89,6 +98,26 @@ function formatCall(call){
     // program complains about much later actually came from.
     const left = call.error ? `  [err ${call.error}]` : '';
     return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
+}
+
+/**
+ * Whether an import is one `--watch` named, by library or by exact function.
+ *
+ * @param {string[]} watch
+ * @returns {(dll: string, name: string | null, ordinal: number | null)
+ *     => ({ args: number } | null)}
+ */
+function watching(watch){
+    return (dll, name, ordinal)=>{
+        const full = `${dll}!${name ?? `#${ordinal}`}`.toLowerCase();
+        const asked = watch.some(one=>full === one.toLowerCase()
+            || dll.toLowerCase() === one.toLowerCase());
+        // Six arguments read from every watched call, which is what a trace
+        // shows anyway. The count does not have to be right: a watch forwards
+        // into the real function rather than returning, so it never has a
+        // stack to clean up.
+        return asked ? { args: 6 } : null;
+    };
 }
 
 /**
@@ -288,7 +317,7 @@ function report(app, { grep = null, calls = 24 } = {}){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch }
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek }
         = parse(process.argv.slice(2));
     if (!id)
     {
@@ -339,13 +368,26 @@ async function main(){
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
-        onCall: sink ? (/** @type {any} */ call)=>sink.write(`${formatCall(call)}\n`) : undefined,
-        watchImport: watch.length === 0
-            ? undefined
-            : (/** @type {string} */ dll)=>(
-                watch.some(wanted=>dll.toLowerCase() === wanted.toLowerCase())
-                    ? { args: 6 }
-                    : null),
+        onCall: sink || peek.length > 0
+            ? (/** @type {any} */ call)=>{
+                sink?.write(`${formatCall(call)}\n`);
+                if (peek.length === 0 || grep === null || !call.name.includes(grep))
+                {
+                    return;
+                }
+                console.log(`  ${formatCall(call)}`);
+                for (const { address, length } of peek)
+                {
+                    const rows = peekBytes(
+                        { memory: { readBytes: app.debug.read } }, address, length);
+                    for (const row of rows ?? ['unreadable'])
+                    {
+                        console.log(`      0x${address.toString(16)}  ${row}`);
+                    }
+                }
+            }
+            : undefined,
+        watchImport: watch.length === 0 ? undefined : watching(watch),
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
         bundle: { fetch, store: null, prefetch: false },
@@ -404,6 +446,18 @@ async function main(){
     // `debug` carries what the program traced about itself, including the text
     // of a message box it is about to put in front of a person -- which is the
     // program's own account of the failure and beats any trace taken outside it.
+    // What a watched guest function answered. The call itself is recorded when
+    // it is made, because that is where it belongs in the order; the answer
+    // arrives later and is a line of its own.
+    app.on('guest-return', (/** @type {any} */ done)=>{
+        const line = `            ${done.name} -> 0x${done.result.toString(16)}`;
+        sink?.write(`${line}
+`);
+        if (grep !== null && done.name.includes(grep))
+        {
+            console.log(line);
+        }
+    });
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug'])
     {

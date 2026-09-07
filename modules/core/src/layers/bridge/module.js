@@ -128,14 +128,20 @@ export const bridgeModule = {
              * @param {string} [fn.convention]
              * @param {number} fn.argBytes
              * @param {Function} fn.handler
+             * @param {boolean} [fn.preserveResult]
+             *     For a stub a `ret` lands on rather than a `call`: whatever
+             *     EAX held arrives in ECX, since the trap needs EAX itself.
              * @returns {number} the guest address that calls it
              */
-            register(name, { convention = Convention.STDCALL, argBytes, handler }){
+            register(
+                name,
+                { convention = Convention.STDCALL, argBytes, handler, preserveResult = false })
+            {
                 // Before the first import, so the slot a callback returns to is
                 // in the table that gets written into guest memory.
                 callbacks.reserve();
                 const { id, address } = cpu.registerTrap(
-                    name, calleeCleanup(convention, argBytes));
+                    name, calleeCleanup(convention, argBytes), { preserveResult });
                 dispatcher.register(id, { name, convention, argBytes, handler });
                 dispatcher.placed(address, name);
                 return address;
