@@ -135,10 +135,10 @@ test('cull mode names the face, not the winding', ()=>{
     const cull = (/** @type {number} */ mode)=>
         pipelineDescriptor({ ...baseState(), cullMode: mode }, null).primitive.cullMode;
 
-    assert.equal(cull(1), 'none');
-    assert.equal(cull(2), 'front');
-    assert.equal(cull(3), 'back');
     assert.equal(pipelineDescriptor(baseState(), null).primitive.frontFace, 'ccw');
+    assert.equal(cull(1), 'none');
+    assert.equal(cull(2), 'back', 'D3DCULL_CW discards clockwise, which is the back face here');
+    assert.equal(cull(3), 'front', 'and D3DCULL_CCW discards the front one');
 });
 
 test('a blend factor with no counterpart is refused, not approximated', ()=>{

@@ -430,3 +430,168 @@ test('a failed GetDepthStencilSurface clears the pointer it was given', ()=>{
     assert.notEqual(box.call(device, slot, [out]), 0, 'there is no depth stencil to hand back');
     assert.equal(box.memory.readU32(out), 0);
 });
+
+/**
+ * The seam over a device that records what it was handed.
+ *
+ * A real device answers these calls by drawing, and a test that went through
+ * one would be reading the renderer's mind about what the seam passed it. What
+ * is under test here is only the translation: how many bytes a drawing call
+ * reads out of the program's arrays, and which of its arguments is a float.
+ */
+function recorded(){
+    const box = machine();
+    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const seam = createDirect3D8Seam({
+        publisher,
+        memory: box.services,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
+    });
+
+    /** @type {any[]} */
+    const calls = [];
+    const spy = (/** @type {string} */ name)=>(/** @type {any[]} */ ...args)=>{
+        calls.push({ name, args });
+        return 0;
+    };
+    const device = {
+        addRef: ()=>1,
+        release: ()=>1,
+        Clear: spy('Clear'),
+        SetTransform: spy('SetTransform'),
+        SetMaterial: spy('SetMaterial'),
+        SetTextureStageState: spy('SetTextureStageState'),
+        DrawPrimitive: spy('DrawPrimitive'),
+        DrawPrimitiveUP: spy('DrawPrimitiveUP'),
+        DrawIndexedPrimitiveUP: spy('DrawIndexedPrimitiveUP'),
+    };
+    const root = {
+        addRef: ()=>1,
+        release: ()=>1,
+        /** @param {any} _wanted @param {{ device?: any }} held */
+        CreateDevice: (_wanted, held)=>{
+            held.device = device;
+            return 0;
+        },
+    };
+
+    const rootPointer = seam.publishRoot(root);
+    const fields = createFields(box.services);
+    const parameters = 0x9000;
+    fields.writeStruct(parameters, D3DPRESENT_PARAMETERS8, { Windowed: 1 });
+    const out = 0x9200;
+    box.call(rootPointer, 3 + IDIRECT3D8_SLOTS.findIndex(([name])=>name === 'CreateDevice'),
+        [0, 1, 0, 0x40, parameters, out]);
+
+    const pointer = box.memory.readU32(out);
+    return {
+        box,
+        fields,
+        calls,
+        /** @param {string} name @param {number[]} args */
+        invoke: (name, args)=>box.call(pointer,
+            3 + IDIRECT3DDEVICE8_SLOTS.findIndex(([slot])=>slot === name), args),
+    };
+}
+
+test('Clear reads its depth as a float, not as the dword the slot arrived in', ()=>{
+    // Z is the one argument here declared float. Read as a dword it becomes a
+    // number in the billions, which clears the buffer to the far plane whatever
+    // the program asked for -- and nothing reports a depth that is merely wrong.
+    const { calls, invoke } = recorded();
+    const bits = new DataView(new ArrayBuffer(4));
+    bits.setFloat32(0, 0.5, true);
+
+    invoke('Clear', [0, 0, 1, 0xff204060, bits.getUint32(0, true), 0]);
+
+    assert.equal(calls[0].args[4], 0.5);
+    assert.equal(calls[0].args[3], 0xff204060, 'while the colour beside it stays a dword');
+    assert.equal(calls[0].args[1], null, 'no rectangles means the whole viewport');
+});
+
+test('Clear hands over as many rectangles as it was told there are', ()=>{
+    const { box, calls, invoke } = recorded();
+    const rects = 0x9400;
+    for (const [index, edges] of [[1, 2, 3, 4], [5, 6, 7, 8]].entries())
+    {
+        edges.forEach((value, at)=>box.memory.writeU32(rects + index * 16 + at * 4, value));
+    }
+
+    invoke('Clear', [2, rects, 1, 0, 0, 0]);
+
+    assert.deepEqual(calls[0].args[1], [
+        { x1: 1, y1: 2, x2: 3, y2: 4 },
+        { x1: 5, y1: 6, x2: 7, y2: 8 },
+    ]);
+});
+
+test('a transform arrives as sixteen floats, in the order the matrix holds them', ()=>{
+    const { fields, calls, invoke } = recorded();
+    const matrix = 0x9600;
+    for (let index = 0; index < 16; index++)
+    {
+        fields.writeF32(matrix + index * 4, index + 0.5);
+    }
+
+    invoke('SetTransform', [2, matrix]);
+
+    assert.equal(calls[0].args[0], 2);
+    assert.deepEqual([...calls[0].args[1]],
+        Array.from({ length: 16 }, (_, index)=>index + 0.5));
+    assert.equal(invoke('SetTransform', [2, 0]), 0x8876086c | 0,
+        'and a null matrix is refused here rather than read from address zero');
+});
+
+test('a material is four colours and a power, not seventeen anonymous words', ()=>{
+    const { fields, calls, invoke } = recorded();
+    const material = 0x9800;
+    for (let index = 0; index < 17; index++)
+    {
+        fields.writeF32(material + index * 4, index);
+    }
+
+    invoke('SetMaterial', [material]);
+
+    assert.deepEqual(calls[0].args[0], {
+        Diffuse: { r: 0, g: 1, b: 2, a: 3 },
+        Ambient: { r: 4, g: 5, b: 6, a: 7 },
+        Specular: { r: 8, g: 9, b: 10, a: 11 },
+        Emissive: { r: 12, g: 13, b: 14, a: 15 },
+        Power: 16,
+    });
+});
+
+test('a draw from the program\'s own memory reads the primitive\'s worth of bytes', ()=>{
+    // The call says how many primitives and how wide a vertex is; how far to
+    // read follows from the shape. Reading short truncates the last triangle,
+    // reading long copies whatever the program keeps after its array.
+    const { box, calls, invoke } = recorded();
+    const vertices = 0x9a00;
+    for (let index = 0; index < 256; index++)
+    {
+        box.bytes[vertices + index] = index;
+    }
+
+    // A strip of three triangles is five vertices, at twelve bytes each.
+    invoke('DrawPrimitiveUP', [5, 3, vertices, 12]);
+
+    assert.equal(calls[0].args[2].length, 5 * 12);
+    assert.equal(calls[0].args[2][0], 0);
+    assert.equal(calls[0].args[2][59], 59);
+});
+
+test('an indexed draw from user memory sizes its two arrays separately', ()=>{
+    // The index array follows the primitive count and the vertex array follows
+    // the vertex count the caller declared: one wrong and the draw reads a
+    // neighbouring allocation.
+    const { calls, invoke } = recorded();
+
+    // Two triangles in a list: six 16-bit indices over four 20-byte vertices.
+    invoke('DrawIndexedPrimitiveUP', [4, 0, 4, 2, 0x9c00, 101, 0x9e00, 20]);
+
+    assert.equal(calls[0].args[4].length, 6 * 2, 'six indices, two bytes each');
+    assert.equal(calls[0].args[6].length, 4 * 20);
+
+    invoke('DrawIndexedPrimitiveUP', [4, 0, 4, 2, 0x9c00, 102, 0x9e00, 20]);
+    assert.equal(calls[1].args[4].length, 6 * 4, 'and four bytes each when the format is 32-bit');
+});

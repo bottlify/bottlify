@@ -79,11 +79,17 @@ const BLEND_OP = Object.freeze({
  * D3DCULL → WebGPU's cull face.
  *
  * Direct3D names the winding it discards and WebGPU names the face it culls,
- * with front faces counter-clockwise unless told otherwise. Getting this
- * backwards turns a model inside out, which reads as geometry vanishing when
- * the camera moves rather than as anything obviously wrong with culling.
+ * with front faces counter-clockwise unless told otherwise. So D3DCULL_CW
+ * discards clockwise triangles, which are the back faces under that rule, and
+ * D3DCULL_CCW discards the front ones. Getting this backwards turns a model
+ * inside out, which reads as geometry vanishing when the camera moves rather
+ * than as anything obviously wrong with culling.
+ *
+ * Nothing needs flipping on the way across: both APIs put the framebuffer
+ * origin at the top left with Y up through the clip volume, so a triangle's
+ * winding on screen is the same one Direct3D judged.
  */
-const CULL = Object.freeze({ 1: 'none', 2: 'front', 3: 'back' });
+const CULL = Object.freeze({ 1: 'none', 2: 'back', 3: 'front' });
 
 /** @param {Record<number, string>} table @param {number} value @param {string} what */
 function lookUp(table, value, what){

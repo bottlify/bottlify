@@ -79,8 +79,18 @@ export const graphicsModule = {
                 screenHeight: services.screen.height,
                 ...options,
             }),
+            // The backend draws but does not make samplers, so the device it
+            // draws through is the one that hands it that ability. Asking for
+            // the backend here is what builds it: a program reaching this call
+            // is about to draw.
             /** @returns {any} */
-            d3d8: (/** @type {any} */ caps)=>createDirect3D8(caps),
+            d3d8: (/** @type {any} */ caps)=>createDirect3D8({
+                ...caps,
+                backend: api.backend(),
+                readMemory: services.readMemory,
+                createSampler: (/** @type {any} */ descriptor)=>
+                    device.device.createSampler(descriptor),
+            }),
             /** @returns {any} */
             d3d9: (/** @type {any} */ caps)=>createDirect3D9(caps),
         };

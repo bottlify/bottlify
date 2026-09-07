@@ -30,6 +30,8 @@ import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
     IID_IDirect3DIndexBuffer8 } from './iids.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, createFields } from './structs.js';
+import { D3DFMT_INDEX } from '../d3d8/constants.js';
+import { vertexCountOf } from '../d3d8/render.js';
 
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
@@ -109,17 +111,74 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         },
     })];
 
+    /**
+     * A buffer hands back an address in the guest's own memory, so locking is
+     * one out-parameter and nothing else: the program writes there itself, and
+     * the unlock is what tells this engine to look.
+     */
+    const bufferMethods = {
+        /** @param {any} buffer @param {number[]} args */
+        Lock: (buffer, [offset, size, out, flags])=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            const hr = buffer.Lock(offset >>> 0, size >>> 0, locked, flags >>> 0);
+            if (hr === D3D_OK && (out >>> 0) !== 0)
+            {
+                fields.writeU32(out >>> 0, locked.pBits ?? 0);
+            }
+            return hr;
+        },
+        /** @param {any} buffer */
+        Unlock: (/** @type {any} */ buffer)=>buffer.Unlock(),
+    };
+
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS),
+        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS),
+        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods),
     ];
 
     /** @param {number} pointer @returns {any} */
     const readRect = pointer=>((pointer >>> 0) === 0
         ? null
         : fields.readStruct(pointer >>> 0, { left: 0, top: 4, right: 8, bottom: 12 }));
+
+    /** @param {number} pointer @param {number} count @returns {Float32Array} */
+    const readFloats = (pointer, count)=>new Float32Array(
+        memory.readMemory(pointer >>> 0, count * 4).slice().buffer);
+
+    /**
+     * Bytes a drawing call reads straight out of the program's own arrays.
+     *
+     * Nothing is copied when the count comes out empty or the pointer is null:
+     * the object behind this refuses such a call, and refusing it there keeps
+     * one answer to what a malformed draw does.
+     *
+     * @param {number} pointer @param {number} length @returns {Uint8Array | null}
+     */
+    const readArray = (pointer, length)=>((pointer >>> 0) === 0 || !(length > 0)
+        ? null
+        : memory.readMemory(pointer >>> 0, length));
+
+    /** A colour in a material is four floats, and a material is four of those plus a power. */
+    const readMaterial = (/** @type {number} */ pointer)=>{
+        const f = readFloats(pointer, 17);
+        const colour = (/** @type {number} */ at)=>(
+            { r: f[at], g: f[at + 1], b: f[at + 2], a: f[at + 3] });
+        return {
+            Diffuse: colour(0),
+            Ambient: colour(4),
+            Specular: colour(8),
+            Emissive: colour(12),
+            Power: f[16],
+        };
+    };
+
+    /** How many indices a draw of this shape reads, and how wide each one is. */
+    const indexWidth = (/** @type {number} */ format)=>(format >>> 0) === D3DFMT_INDEX.INDEX32
+        ? 4
+        : 2;
 
     /**
      * The device's slots. Written out rather than generated because each one
@@ -267,6 +326,64 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         /** @param {any} device @param {number[]} args */
         SetIndices: (device, [buffer, base])=>
             device.SetIndices(publisher.objectAt(buffer), base >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        SetTextureStageState: (device, [stage, type, value])=>
+            device.SetTextureStageState(stage >>> 0, type >>> 0, value >>> 0),
+
+        // Sixteen floats, in the order D3DMATRIX lays them out. Read here
+        // rather than passed as an address because everything past this point
+        // works in numbers.
+        /** @param {any} device @param {number[]} args */
+        SetTransform: (device, [type, matrix])=>((matrix >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetTransform(type >>> 0, readFloats(matrix, 16))),
+
+        /** @param {any} device @param {number[]} args */
+        SetMaterial: (device, [pointer])=>((pointer >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetMaterial(readMaterial(pointer))),
+
+        // Z arrives as a float in a slot this seam otherwise reads as a dword:
+        // the bytes are the caller's, only the interpretation differs.
+        /** @param {any} device @param {number[]} args */
+        Clear: (device, [count, rects, flags, colour, z, stencil])=>device.Clear(
+            count >>> 0,
+            (rects >>> 0) === 0
+                ? null
+                : Array.from({ length: count >>> 0 }, (_, index)=>fields.readStruct(
+                    (rects >>> 0) + index * 16, { x1: 0, y1: 4, x2: 8, y2: 12 })),
+            flags >>> 0, colour >>> 0, fields.asFloat(z), stencil >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        DrawPrimitive: (device, [type, startVertex, primitiveCount])=>
+            device.DrawPrimitive(type >>> 0, startVertex >>> 0, primitiveCount >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        DrawIndexedPrimitive: (device, [type, minIndex, numVertices, startIndex, count])=>
+            device.DrawIndexedPrimitive(type >>> 0, minIndex >>> 0, numVertices >>> 0,
+                startIndex >>> 0, count >>> 0),
+
+        // The UP calls draw from the program's own arrays, so the seam is what
+        // decides how far to read: the vertex count the primitive shape implies,
+        // times the stride the caller declared.
+        /** @param {any} device @param {number[]} args */
+        DrawPrimitiveUP: (device, [type, primitiveCount, vertices, stride])=>
+            device.DrawPrimitiveUP(type >>> 0, primitiveCount >>> 0,
+                readArray(vertices,
+                    vertexCountOf(type >>> 0, primitiveCount >>> 0) * (stride >>> 0)),
+                stride >>> 0),
+
+        /** @param {any} device @param {number[]} args */
+        DrawIndexedPrimitiveUP: (device,
+            [type, minIndex, numVertices, count, indices, format, vertices, stride])=>
+            device.DrawIndexedPrimitiveUP(type >>> 0, minIndex >>> 0, numVertices >>> 0,
+                count >>> 0,
+                readArray(indices,
+                    vertexCountOf(type >>> 0, count >>> 0) * indexWidth(format)),
+                format >>> 0,
+                readArray(vertices, (numVertices >>> 0) * (stride >>> 0)),
+                stride >>> 0),
 
         /** @param {any} device @param {number[]} args */
         SetRenderTarget: (device, [target, depth])=>

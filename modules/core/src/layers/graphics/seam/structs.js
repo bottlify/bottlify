@@ -176,6 +176,18 @@ export function createFields(memory){
             scratch.setUint32(0, readU32(address), true);
             return scratch.getFloat32(0, true);
         },
+
+        /**
+         * A float that arrived in a stack slot rather than through memory: an
+         * argument declared float is pushed as its four bytes, and this seam
+         * reads every slot as a dword before it knows which is which.
+         *
+         * @param {number} bits
+         */
+        asFloat(bits){
+            scratch.setUint32(0, bits >>> 0, true);
+            return scratch.getFloat32(0, true);
+        },
         /** @param {number} address @param {number} value */
         writeF32(address, value){
             scratch.setFloat32(0, value, true);
