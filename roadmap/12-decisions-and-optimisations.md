@@ -193,13 +193,27 @@ megabytes for a large title. The alternative is re-reading from the volume on ea
 which is a wait on a guest thread, and holding a thread is the cost this project ranks above all
 others. Revisit only with a measurement showing the memory matters more than the latency does.
 
-### A14. Nothing here has run against a real GPU or a real guest
+### A14. One frame has now run against a real GPU; almost everything else has not
 
-The whole drawing path — the DirectDraw blitter, the presenter, the Direct3D 8 draw path, the
-device-context seam onto GDI — is verified by unit and contract tests only. In particular the
-presenter's texture usage flags are inferred from what the existing composition path needs. A real
-device is the only check of that, and until one runs, every graphics number in this repository is a
-statement about our own model rather than about a picture.
+**Closed in part, and kept for what it still says.** A hand-written guest program of a few dozen
+instructions creates a Direct3D 8 device, clears it, draws one triangle and presents — in a real
+browser, on a real adapter — and the presented surface reads back byte-exactly at four named points.
+Two colours in the whole frame, 53400 cleared and 23400 drawn, and 23400 is the triangle's exact
+analytic area. So the path from a guest `CALL` to a lit pixel exists and is sound, and a failure past
+this point is about a program's usage rather than about the path existing at all.
+
+What that run does *not* cover is most of the layer: the DirectDraw blitter, the presenter's upload
+path, textures, depth, blending, the device-context seam onto GDI, and every capability the entries
+above say is claimed. Those are still verified against our own model alone, and every graphics
+number in this repository that is not one of the four pixels above is a statement about that model
+rather than about a picture. The scenario is `tools/cdp_test/triangle.mjs`; extend it as more of the
+path becomes reachable rather than trusting the model further.
+
+Worth recording about the run itself: the whole thing was blocked by a defect nothing in the test
+suite could see — a trap stub taken after the stub table was written had no bytes behind it, so every
+COM call in the engine walked into blank memory. Our tests call a published vtable's handler
+directly; only executing the stub the guest would execute found it. That is the argument for this
+scenario existing at all.
 
 ---
 
