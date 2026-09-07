@@ -33,7 +33,55 @@ const LIMITS = {
     // and it names the exception, the address and the module -- all of which
     // are at the top of the file, which is exactly what a tail throws away.
     file: 1 << 20,
+    samples: 200000,
 };
+
+/** Every instruction pointer the sampler saw, in order. @type {number[]} */
+const samples = [];
+
+/**
+ * Where the guest spent its instructions, by module and offset.
+ *
+ * Counted here rather than sent out raw: a couple of hundred thousand addresses
+ * is megabytes over the wire, and the only thing anyone reads is the top of the
+ * histogram. A page says which function; an exact address says which loop, and
+ * a program that has stopped making progress is sitting in one.
+ *
+ * @param {string[]} layout  As the memory layer reports it.
+ */
+function profile(layout){
+    if (samples.length === 0)
+    {
+        return null;
+    }
+    const regions = layout.map(entry=>{
+        const [name, extent] = entry.split(' ');
+        const [base, size] = extent.split('+').map(Number);
+        return { name, base, end: base + size };
+    }).sort((left, right)=>left.base - right.base);
+
+    /** @param {number} address @param {number} mask */
+    const where = (address, mask)=>{
+        const region = regions.find(entry=>address >= entry.base && address < entry.end);
+        return region
+            ? `${region.name}+0x${((address - region.base) & mask).toString(16)}`
+            : '<unmapped>';
+    };
+    /** @param {number} mask @param {number} keep */
+    const histogram = (mask, keep)=>{
+        /** @type {Map<string, number>} */
+        const counts = new Map();
+        for (const eip of samples)
+        {
+            const key = where(eip, mask);
+            counts.set(key, (counts.get(key) ?? 0) + 1);
+        }
+        return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, keep)
+            .map(([at, count])=>({ at, count, share: count / samples.length }));
+    };
+
+    return { samples: samples.length, pages: histogram(~0xfff, 16), exact: histogram(~0, 16) };
+}
 
 /** @type {any} */
 const namespace = { errors: [] };
@@ -305,6 +353,19 @@ async function run(request){
         imagePath: request.imagePath,
         // A run is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
+        // Sampled guest execution, when asked for. A program that decides
+        // something inside its own code makes no host call to record, and the
+        // instruction pointer is then the only account of what it was doing --
+        // which is exactly the situation once a game reaches its own main loop.
+        quantum: request.quantum || undefined,
+        sample: request.quantum
+            ? (/** @type {number} */ eip)=>{
+                if (samples.length < LIMITS.samples)
+                {
+                    samples.push(eip);
+                }
+            }
+            : undefined,
         device: {
             device: handle.device,
             queue: handle.device.queue,
@@ -377,6 +438,7 @@ async function run(request){
         hot: metrics('bridge').hot ?? [],
         recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls),
     };
+    result.profile = profile(metrics('memory').layout ?? []);
 
     // What the program wrote. A game of this age keeps its own log, and it says
     // in plain words what it thought went wrong.

@@ -50,6 +50,13 @@ function parse(argv){
         // how it is doing while it runs.
         waitMs: number('--wait', 900) * 1000,
         calls: number('--calls', 40),
+        // Guest instructions per scheduler turn when a profile is asked for.
+        // Lowering it is what makes a sample a measurement rather than a
+        // rumour: a sample lands at a turn boundary, so the turn is the
+        // resolution.
+        quantum: argv.includes('--profile')
+            ? number('--profile', 2000) || 2000
+            : 0,
     };
 }
 
@@ -260,6 +267,24 @@ function describe(result, context, calls){
         say(`  [page] ${line}`);
     }
 
+    if (result.profile)
+    {
+        say('');
+        say(`  guest execution, ${result.profile.samples} samples by page:`);
+        for (const row of result.profile.pages)
+        {
+            say(`    ${String(row.count).padStart(7)}  `
+                + `${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
+        }
+        say('');
+        say('  the addresses it sat on:');
+        for (const row of result.profile.exact)
+        {
+            say(`    ${String(row.count).padStart(7)}  `
+                + `${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
+        }
+    }
+
     for (const file of result.files ?? [])
     {
         say('');
@@ -344,6 +369,7 @@ export async function game(options){
             // loaded from inside its own installation.
             imagePath: `C:\\App\\${manifest.entry}`,
             maxTurns: options.turns,
+            quantum: options.quantum,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
