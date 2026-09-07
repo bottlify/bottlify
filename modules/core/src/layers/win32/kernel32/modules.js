@@ -71,6 +71,16 @@ const isOrdinal = value=>(value >>> 16) === 0;
  */
 export function createModuleFunctions(host){
     /**
+     * Libraries that asked not to hear about threads. Kept because the answer
+     * to asking twice is still yes and because a diagnostic should be able to
+     * say which libraries opted out; nothing else reads it, since honouring the
+     * request is indistinguishable from not honouring it.
+     *
+     * @type {Set<number>}
+     */
+    const withoutThreadCalls = new Set();
+
+    /**
      * What both LoadLibrary entry points do.
      *
      * The answer is a number when it can be, and a promise only when a library
@@ -171,6 +181,34 @@ export function createModuleFunctions(host){
                 // Nothing is unmapped: an address handed out earlier must keep
                 // working, and a system module has no lifetime of its own.
                 return host.byBase(handle >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL DisableThreadLibraryCalls(HMODULE hLibModule)
+         *
+         * A library saying it does not want its entry point called for every
+         * thread that comes and goes. Accepted and recorded rather than acted
+         * on: the caller's intent is an optimisation, and the observable
+         * behaviour of honouring it is a DllMain that is not called -- which is
+         * indistinguishable from one that is called and does nothing.
+         *
+         * It is answered at all because a library calls this from inside its own
+         * attach and checks the result, and because refusing a call that cannot
+         * fail is worse than agreeing to something harmless.
+         */
+        DisableThreadLibraryCalls: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const module = host.byBase(handle >>> 0);
+                if (!module)
+                {
+                    host.setLastError(ERROR_MOD_NOT_FOUND);
+                    return 0;
+                }
+                withoutThreadCalls.add(handle >>> 0);
+                return 1;
             },
         },
 

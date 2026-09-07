@@ -79,6 +79,7 @@ const MAX_MODULE_NAME = 260;
  * @property {(name: string | null) => number} moduleHandle
  *           The base of a loaded module, or 0; null asks for the running image.
  * @property {(milliseconds: number) => void} sleep
+ * @property {() => any} park  The token that says the caller has been stopped.
  *           Records that the guest asked to wait. Actually waiting is the scheduler's.
  * @property {number} [processId]
  */
@@ -304,10 +305,16 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([milliseconds])=>{
-                // Reported, not waited on: making the thread stop is the
-                // scheduler's decision and needs the clock to drive expiry.
-                host.sleep(milliseconds >>> 0);
-                return 0;
+                // Zero yields rather than waits: it is a program saying another
+                // thread may go first, and turning it into a wait of no time
+                // would be the same thing more expensively.
+                const wait = milliseconds >>> 0;
+                if (wait === 0)
+                {
+                    return 0;
+                }
+                host.sleep(wait);
+                return host.park();
             },
         },
 

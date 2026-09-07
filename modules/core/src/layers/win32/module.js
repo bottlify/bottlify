@@ -272,7 +272,11 @@ export const win32Module = {
                     // Actually waiting is the scheduler's, and there is no timed
                     // wait yet. Crediting the clock is what we can honour, and
                     // it is what keeps a guest from believing no time passed.
-                    sleep: milliseconds=>kernel.clock.advance(milliseconds),
+                    // A real wait: the thread stops and the scheduler moves the
+                    // guest's clock when nothing else can run.
+                    /** @param {number} milliseconds */
+                    sleep: milliseconds=>kernel.sleep(kernel.currentThread(), milliseconds),
+                    park: ()=>bridge.park(),
                 }),
                 ...createSyncFunctions({
                     kernel,
@@ -615,7 +619,10 @@ export const win32Module = {
             // The running thread's last error, for whoever is tracing. A
             // program reports a code long after the call that produced it has
             // returned, and without this nothing ties the two together.
-            lastError: ()=>stateOf().lastError,
+            // Zero when there is no thread to ask: a call that ends its own
+            // thread is still on the stack when this is read, and a thread that
+            // has gone has no last error rather than an unknown one.
+            lastError: ()=>(kernel.currentThread() ? stateOf().lastError : 0),
 
             /**
              * Where a COM class is registered. Whoever implements an interface

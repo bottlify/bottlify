@@ -31,16 +31,60 @@ export const ThreadState = {
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
  * @param {number} [options.quantum]  Retired instructions per turn.
+ * @param {() => number} [options.now]  The guest's clock, for timed waits.
+ * @param {(ms: number) => void} [options.advance]
+ *        Moves the guest's clock forward when every thread is waiting on one.
  */
-export function createScheduler({ cpu, switcher, quantum = 100_000 }){
+export function createScheduler(options){
+    const { cpu, switcher, quantum = 100_000, now = ()=>0, advance = ()=>{} } = options;
     /** @type {any[]} */
     const threads = [];
     /** @type {any} */
     let current = null;
     let nextId = 1;
     let turns = 0;
+    let expiries = 0;
+    /** @type {((thread: any) => void)[]} */
+    const onExpiry = [];
 
     const ready = ()=>threads.filter(thread=>thread.state === ThreadState.READY);
+
+    /** The soonest deadline any blocked thread is waiting on, or null. */
+    const soonest = ()=>threads.reduce((best, thread)=>(
+        thread.state === ThreadState.BLOCKED && thread.deadline !== null
+        && thread.deadline !== undefined && (best === null || thread.deadline < best)
+            ? thread.deadline
+            : best), /** @type {number | null} */ (null));
+
+    /**
+     * Wakes every thread whose deadline has passed.
+     *
+     * A timed wait that expires is not a failure: the thread runs again and its
+     * call answers that the time ran out, which is a result a program acts on
+     * rather than an error it reports. Whoever put the thread on a waiter list
+     * is told, so the list does not keep a thread that has stopped waiting.
+     */
+    const expire = ()=>{
+        const at = now();
+        for (const thread of threads)
+        {
+            if (thread.state !== ThreadState.BLOCKED
+                || thread.deadline === null || thread.deadline === undefined
+                || thread.deadline > at)
+            {
+                continue;
+            }
+            thread.deadline = null;
+            thread.waitResult = thread.timeoutResult ?? 0;
+            thread.state = ThreadState.READY;
+            thread.waitingOn = null;
+            expiries++;
+            for (const told of onExpiry)
+            {
+                told(thread);
+            }
+        }
+    };
 
     return {
         /**
@@ -89,10 +133,27 @@ export function createScheduler({ cpu, switcher, quantum = 100_000 }){
          * @returns {{ ran: any | null, instructions: number, switched: boolean }}
          */
         runOnce(){
-            const candidates = ready();
+            expire();
+            let candidates = ready();
             if (candidates.length === 0)
             {
-                return { ran: null, instructions: 0, switched: false };
+                // Nothing can run, but something is waiting for a time rather
+                // than for another thread. Idling in wall clock would be a real
+                // pause for no reason -- the guest's clock is ours to move, and
+                // moving it to the soonest deadline is exactly what a machine
+                // with nothing to do does.
+                const deadline = soonest();
+                if (deadline === null)
+                {
+                    return { ran: null, instructions: 0, switched: false };
+                }
+                advance(Math.max(0, deadline - now()));
+                expire();
+                candidates = ready();
+                if (candidates.length === 0)
+                {
+                    return { ran: null, instructions: 0, switched: false };
+                }
             }
 
             // Round-robin: the queue order is creation order, and a thread that
@@ -148,10 +209,15 @@ export function createScheduler({ cpu, switcher, quantum = 100_000 }){
         /**
          * @param {any} thread
          * @param {string} [reason]  What it is waiting for, for diagnostics.
+         * @param {Object} [timed]
+         * @param {number} [timed.deadline]  Guest time after which it wakes anyway.
+         * @param {number} [timed.result]    What the call answers when it does.
          */
-        block(thread, reason){
+        block(thread, reason, timed){
             thread.state = ThreadState.BLOCKED;
             thread.waitingOn = reason ?? null;
+            thread.deadline = timed?.deadline ?? null;
+            thread.timeoutResult = timed?.result ?? 0;
         },
 
         /** @param {any} thread */
@@ -162,8 +228,22 @@ export function createScheduler({ cpu, switcher, quantum = 100_000 }){
             }
             thread.state = ThreadState.READY;
             thread.waitingOn = null;
+            thread.deadline = null;
             return true;
         },
+
+        /**
+         * Told when a thread's wait ran out of time, so whoever queued it can
+         * take it off whatever it was queued on.
+         *
+         * @param {(thread: any) => void} handler
+         */
+        onTimeout(handler){
+            onExpiry.push(handler);
+        },
+
+        /** Whether any thread is waiting on a time rather than on another thread. */
+        nextDeadline: ()=>soonest(),
 
         /** @param {any} thread @param {number} exitCode */
         terminate(thread, exitCode){
@@ -185,6 +265,8 @@ export function createScheduler({ cpu, switcher, quantum = 100_000 }){
             return {
                 quantum,
                 turns,
+                // Timed waits that ran out rather than being satisfied.
+                expiries,
                 threads: threads.length,
                 byState,
                 current: current ? current.name : null,

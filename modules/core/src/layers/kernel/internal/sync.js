@@ -37,6 +37,20 @@ export function createSyncObjects({ scheduler }){
     /** @type {any[]} */
     const objects = [];
 
+    // A thread whose wait ran out of time has stopped waiting, and a queue that
+    // still holds it would hand it the object later -- signalling something
+    // nobody is waiting for, and losing the signal for whoever was.
+    scheduler.onTimeout?.((/** @type {any} */ thread)=>{
+        for (const object of objects)
+        {
+            const at = object.waiters.indexOf(thread);
+            if (at >= 0)
+            {
+                object.waiters.splice(at, 1);
+            }
+        }
+    });
+
     /**
      * Waiters in arrival order. Windows does not promise FIFO, but choosing an
      * order and keeping it makes a multithreaded program reproducible, which is
@@ -160,9 +174,12 @@ export function createSyncObjects({ scheduler }){
          *
          * @param {any} object
          * @param {any} thread
+         * @param {Object} [timed]
+         * @param {number} [timed.deadline]  Guest time after which it gives up.
+         * @param {number} [timed.result]    What the call answers when it does.
          * @returns {number | null} the wait result, or null if the thread blocked
          */
-        wait(object, thread){
+        wait(object, thread, timed){
             // A thread that already owns a mutex takes it again without waiting;
             // a recursive acquisition is not a deadlock, it is a counter.
             if (object.kind === SyncKind.MUTEX && object.owner === thread)
@@ -177,7 +194,7 @@ export function createSyncObjects({ scheduler }){
             }
 
             object.waiters.push(thread);
-            scheduler.block(thread, `${object.kind} "${object.name}"`);
+            scheduler.block(thread, `${object.kind} "${object.name}"`, timed);
             return null;
         },
 

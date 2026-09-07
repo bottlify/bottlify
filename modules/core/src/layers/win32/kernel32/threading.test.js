@@ -25,6 +25,8 @@ function fakeKernel(){
         threadIds: /** @type {any[]} */ ([]),
         /** Set this to make the next wait block. */
         waitBlocks: false,
+        /** Guest time, which a deadline is measured against. */
+        now: 0,
     };
 
     const kernel = {
@@ -43,11 +45,12 @@ function fakeKernel(){
         createMutex: options=>({ kind: 'mutex', ...options }),
         /** @param {any} options */
         createEvent: options=>({ kind: 'event', ...options }),
-        /** @param {any} object @param {any} thread */
-        wait(object, thread){
-            state.waits.push({ object, thread });
+        /** @param {any} object @param {any} thread @param {any} [timed] */
+        wait(object, thread, timed){
+            state.waits.push({ object, thread, timed });
             return state.waitBlocks ? null : 0;
         },
+        clock: { virtualTime: ()=>state.now },
         /** @param {any} object @param {any} thread */
         releaseMutex(object, thread){
             state.released.push({ object, thread });
@@ -177,14 +180,25 @@ test('a bad handle is a return code, not a crash', ()=>{
     assert.equal(fns.CloseHandle.handler([0x9999]), 0);
 });
 
-test('a timed wait is refused rather than faked', ()=>{
-    const { fns } = setup();
+test('a timed wait carries a deadline, and a zero one is a poll', ()=>{
+    const { fns, kernel } = setup();
+    const state = kernel.state;
     const handle = fns.CreateEventA.handler([0, 0, 0, 0]);
+    state.now = 1000;
 
-    // Pretending a timeout elapsed, or that it never does, both produce programs
-    // that look fine until they hang. Until the clock drives expiry, say so.
-    assert.throws(()=>fns.WaitForSingleObject.handler([handle, 5000]),
-        /only INFINITE and 0 are implemented/);
+    state.waitBlocks = true;
+    fns.WaitForSingleObject.handler([handle, 5000]);
+    assert.deepEqual(state.waits.at(-1).timed, { deadline: 6000, result: 0x102 },
+        'the deadline is guest time, not a duration: the scheduler compares, it does not count');
+
+    // Zero asks whether the object is available now. A program checking must
+    // not be stopped by the question, so an unavailable object answers at once.
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
+
+    // INFINITE carries no deadline at all rather than one far away, so nothing
+    // downstream has to know how far away is far enough.
+    fns.WaitForSingleObject.handler([handle, 0xffffffff]);
+    assert.equal(state.waits.at(-1).timed, undefined);
 });
 
 test('a mutex created with initial ownership is taken by its creator', ()=>{

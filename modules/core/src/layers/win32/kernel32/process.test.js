@@ -73,9 +73,13 @@ function fakeHost(){
         moduleHandle: name=>(name === null || name.toLowerCase() === 'app.exe' ? IMAGE_BASE : 0),
         /** @param {number} milliseconds */
         sleep: milliseconds=>sleeps.push(milliseconds),
+        park: ()=>PARKED,
     };
     return host;
 }
+
+/** The token a parked call answers with; identity is all that matters. */
+const PARKED = Symbol('parked');
 
 function setup(){
     const host = fakeHost();
@@ -265,14 +269,18 @@ test('GetSystemTimeAsFileTime writes 100ns units since 1601', ()=>{
     assert.equal(u64(filetime), FILETIME_AT_UNIX_EPOCH + 10_000_000n);
 });
 
-test('Sleep records the request and returns', ()=>{
+test('Sleep stops the thread, and a zero sleep yields instead', ()=>{
     const { host, fns } = setup();
 
-    assert.equal(fns.Sleep.handler([250]), 0);
+    // A real wait: the caller is parked, and the scheduler answers it once the
+    // guest's clock has moved far enough.
+    assert.equal(fns.Sleep.handler([250]), PARKED);
+
+    // Zero is a program offering its turn, not asking for time. Parking on it
+    // would be the same thing at the cost of a context switch.
     assert.equal(fns.Sleep.handler([0]), 0);
 
-    assert.deepEqual(host.sleeps, [250, 0],
-        'who actually waits is the scheduler\'s business, but the request is not lost');
+    assert.deepEqual(host.sleeps, [250], 'and only the real wait reached the scheduler');
 });
 
 test('the identity queries answer for the thread that is running', ()=>{

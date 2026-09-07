@@ -53,16 +53,21 @@ export const kernelModule = {
         };
 
         switcher = createSwitcher({ cpu });
+        clock = createClock(config?.clock);
         scheduler = createScheduler({
             cpu,
             switcher,
+            // The guest's clock, which is what a timed wait is timed against
+            // and what the scheduler moves when every thread is waiting on one.
+            now: ()=>clock.virtualTime(),
+            /** @param {number} ms */
+            advance: ms=>clock.advance(ms),
             // Below a page the emulator cannot honour a smaller quantum anyway,
             // so asking for one would only be a lie in the configuration.
             quantum: config?.quantum ?? 100_000,
         });
         sync = createSyncObjects({ scheduler });
         handles = createHandleTable();
-        clock = createClock(config?.clock);
 
         return {
             ThreadState,
@@ -192,7 +197,28 @@ export const kernelModule = {
             createEvent: (/** @type {any} */ options)=>sync.createEvent(options),
             createMutex: (/** @type {any} */ options)=>sync.createMutex(options),
             createSemaphore: (/** @type {any} */ options)=>sync.createSemaphore(options),
-            wait: (/** @type {any} */ object, /** @type {any} */ thread)=>sync.wait(object, thread),
+            /**
+             * @param {any} object
+             * @param {any} thread
+             * @param {{ deadline?: number, result?: number }} [timed]
+             */
+            wait: (object, thread, timed)=>sync.wait(object, thread, timed),
+
+            /**
+             * Blocks a thread for a span of guest time and nothing else.
+             *
+             * The scheduler moves the clock forward when every thread is
+             * waiting on one, so a program that sleeps between frames costs the
+             * host nothing and still observes time passing.
+             *
+             * @param {any} thread @param {number} milliseconds
+             */
+            sleep(thread, milliseconds){
+                scheduler.block(thread, `${milliseconds} ms`, {
+                    deadline: clock.virtualTime() + milliseconds,
+                    result: 0,
+                });
+            },
             waitAll: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>
                 sync.waitAll(objects, thread),
             waitAny: (/** @type {any[]} */ objects, /** @type {any} */ thread)=>

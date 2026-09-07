@@ -22,6 +22,8 @@ const INFINITE = 0xffffffff;
 
 /** What the guest gets back when a handle is not what it claims to be. */
 const WAIT_FAILED = 0xffffffff;
+/** The wait ran out of time; the object was never signalled. */
+const WAIT_TIMEOUT = 0x102;
 
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -116,13 +118,20 @@ export function createThreadingFunctions(host){
                 {
                     return WAIT_FAILED;
                 }
-                if ((timeout >>> 0) !== INFINITE && timeout !== 0)
+                const wait = timeout >>> 0;
+                const thread = host.currentThread();
+                // Zero is a poll, not a wait: it asks whether the object is
+                // available now and never blocks. Blocking on it would stop a
+                // program that was only checking.
+                if (wait === 0)
                 {
-                    // Timed waits need the clock to drive expiry, which is not
-                    // built yet. Failing loudly beats pretending a timeout works.
-                    throw new Error('WaitForSingleObject: only INFINITE and 0 are implemented');
+                    const answer = kernel.wait(target, thread,
+                        { deadline: 0, result: WAIT_TIMEOUT });
+                    return answer === null ? WAIT_TIMEOUT : answer;
                 }
-                return settle(kernel.wait(target, host.currentThread()));
+                return settle(kernel.wait(target, thread, wait === INFINITE
+                    ? undefined
+                    : { deadline: kernel.clock.virtualTime() + wait, result: WAIT_TIMEOUT }));
             },
         },
 
