@@ -13,7 +13,7 @@
  * runs them -- so they serve as contract tests rather than mocks: the same
  * binary must behave the same way under Windows and under Bottlify.
  *
- * Usage: node tools/make-pe.mjs <output.exe> [hello|threads|qsort|window|session]
+ * Usage: node tools/make-pe.mjs <output.exe> [hello|threads|qsort|window|session|triangle]
  */
 
 import { writeFile } from 'node:fs/promises';
@@ -67,6 +67,13 @@ class Buf {
 const u32 = value=>[
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
 ];
+
+/** @param {number} value @returns {number[]} */
+const f32 = value=>{
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setFloat32(0, value, true);
+    return [...bytes];
+};
 
 /**
  * Builds an executable.
@@ -801,6 +808,247 @@ export function buildThreadsExe(){
     });
 }
 
+/**
+ * What the triangle fixture writes to stdout, one dword each, in this order.
+ * Everything after the second entry is an HRESULT.
+ */
+export const TRIANGLE_REPORT = Object.freeze([
+    'direct3D', 'hwnd', 'createDevice', 'device',
+    'clear', 'beginScene', 'setVertexShader', 'drawPrimitiveUP', 'endScene', 'present',
+]);
+
+/**
+ * A slot that was never reached. Zero would be indistinguishable from S_OK, so
+ * the report starts as something no call here can return.
+ */
+export const TRIANGLE_UNSET = 0xffffffff;
+
+/** The back buffer the fixture asks for, and therefore the frame to read back. */
+export const TRIANGLE_SCREEN = Object.freeze({ width: 320, height: 240 });
+
+/**
+ * The two D3DCOLORs the fixture paints with, as 0xAARRGGBB.
+ *
+ * Every channel differs from every other, and neither colour is a default:
+ * a swapped channel order shows up as the wrong colour rather than as a shade
+ * that still looks plausible.
+ */
+export const TRIANGLE_COLOURS = Object.freeze({
+    clear: 0xff3366cc,
+    triangle: 0xffcc9933,
+});
+
+/** Where the fixture puts the triangle, in back-buffer pixels. */
+export const TRIANGLE_VERTICES = Object.freeze([
+    { x: 160, y: 30 }, { x: 290, y: 210 }, { x: 30, y: 210 },
+]);
+
+/**
+ * A program that creates a Direct3D 8 device, clears it, draws one triangle and
+ * presents.
+ *
+ * This is the smallest program that can prove the whole path from a guest CALL
+ * to a lit pixel, so it is deliberately thin above that path: it makes a window
+ * because a device is created against one, and it does not pump messages
+ * because nothing here needs a message.
+ *
+ * Every Direct3D call after the entry point goes through a vtable, and the one
+ * thing to get right about those is how the interface pointer travels. A Win32
+ * COM method is declared STDMETHODCALLTYPE, which is `__stdcall`: the interface
+ * pointer is pushed as the first argument *on the stack*, which is exactly what
+ * makes the C binding `p->lpVtbl->Method(p, ...)` and the C++ call the same
+ * machine code. A compiler pushes it even when it already holds it in a
+ * register, and that is what this emits -- not `this` in ECX, which is what an
+ * ordinary C++ method takes and is not how COM is called.
+ *
+ * @returns {Uint8Array}
+ */
+export function buildTriangleExe(){
+    const D3D_SDK_VERSION = 220;
+    const D3DADAPTER_DEFAULT = 0;
+    const D3DDEVTYPE_HAL = 1;
+    const D3DCREATE_SOFTWARE_VERTEXPROCESSING = 0x20;
+    const D3DFMT_X8R8G8B8 = 22;
+    const D3DSWAPEFFECT_DISCARD = 1;
+    const D3DCLEAR_TARGET = 1;
+    const D3DPT_TRIANGLELIST = 4;
+    const D3DFVF_XYZRHW_DIFFUSE = 0x004 | 0x040;
+    const VERTEX_STRIDE = 20;
+    const WS_OVERLAPPEDWINDOW = 0x00cf0000;
+
+    // Vtable indices, counting IUnknown's three, exactly as the headers declare
+    // them. A wrong index here calls a different method with these arguments,
+    // which is why they are written as the header's own arithmetic.
+    const IDirect3D8_CreateDevice = 3 + 12;
+    const IDirect3DDevice8_Present = 3 + 12;
+    const IDirect3DDevice8_BeginScene = 3 + 31;
+    const IDirect3DDevice8_EndScene = 3 + 32;
+    const IDirect3DDevice8_Clear = 3 + 33;
+    const IDirect3DDevice8_DrawPrimitiveUP = 3 + 69;
+    const IDirect3DDevice8_SetVertexShader = 3 + 73;
+
+    /** @param {{ x: number, y: number }} point @param {number} colour */
+    const vertex = (point, colour)=>[
+        ...f32(point.x), ...f32(point.y), ...f32(0), ...f32(1), ...u32(colour),
+    ];
+
+    return buildExe({
+        imports: {
+            'USER32.dll': ['RegisterClassA', 'CreateWindowExA', 'DefWindowProcA'],
+            'D3D8.dll': ['Direct3DCreate8'],
+            'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'],
+        },
+        codeSize: 0x300,
+        data: {
+            className: [...'BottlifyTriangle'].map(c=>c.charCodeAt(0)).concat(0),
+            title: [...'Triangle'].map(c=>c.charCodeAt(0)).concat(0),
+            wndclass: new Array(40).fill(0), //  WNDCLASSA
+            // D3DPRESENT_PARAMETERS, with hDeviceWindow filled in once there is
+            // a window to name.
+            present: [
+                ...u32(TRIANGLE_SCREEN.width), ...u32(TRIANGLE_SCREEN.height),
+                ...u32(D3DFMT_X8R8G8B8), ...u32(1),
+                ...u32(0), ...u32(D3DSWAPEFFECT_DISCARD),
+                ...u32(0), ...u32(1),
+                ...u32(0), ...u32(0), ...u32(0), ...u32(0), ...u32(0),
+            ],
+            device: [0, 0, 0, 0], //             CreateDevice's out-parameter
+            vertices: TRIANGLE_VERTICES.flatMap(
+                point=>vertex(point, TRIANGLE_COLOURS.triangle)),
+            report: TRIANGLE_REPORT.flatMap(()=>u32(TRIANGLE_UNSET)),
+            written: [0, 0, 0, 0],
+        },
+        code: ({ iat, at })=>{
+            /** @param {number} value */
+            const push = value=>[0x68, ...u32(value)]; //     push imm32
+            /** @param {number} address */
+            const pushFrom = address=>[0xff, 0x35, ...u32(address)]; // push [address]
+            /** @param {string} name */
+            const record = name=>[
+                0xa3, ...u32(at('report') + TRIANGLE_REPORT.indexOf(name) * 4), // mov [slot], eax
+            ];
+
+            /**
+             * One method call through the vtable, with ESI holding the
+             * interface pointer: the arguments right to left, the interface
+             * pointer last, then an indirect call through the slot. The
+             * displacement is always a dword, which a compiler would shorten
+             * where it fits; nothing downstream can see the difference.
+             *
+             * @param {number} slot @param {number[][]} args
+             */
+            const method = (slot, args)=>[
+                ...args.slice().reverse().flat(),
+                0x56, //                                     push esi   (the interface)
+                0x8b, 0x06, //                               mov eax, [esi]
+                0xff, 0x90, ...u32(slot * 4), //             call [eax + slot*4]
+            ];
+
+            // Reached with the device made: clear, draw one triangle, present.
+            const drawing = [
+                // Clear(0, NULL, D3DCLEAR_TARGET, colour, 0.0f, 0)
+                ...method(IDirect3DDevice8_Clear, [
+                    push(0), push(0), push(D3DCLEAR_TARGET),
+                    push(TRIANGLE_COLOURS.clear), [0x68, ...f32(0)], push(0),
+                ]),
+                ...record('clear'),
+
+                ...method(IDirect3DDevice8_BeginScene, []),
+                ...record('beginScene'),
+
+                // The vertex format the draw below is in. There is no other way
+                // to declare one in this version: the FVF and a shader handle
+                // share this entry point.
+                ...method(IDirect3DDevice8_SetVertexShader, [push(D3DFVF_XYZRHW_DIFFUSE)]),
+                ...record('setVertexShader'),
+
+                // DrawPrimitiveUP(D3DPT_TRIANGLELIST, 1, vertices, stride)
+                ...method(IDirect3DDevice8_DrawPrimitiveUP, [
+                    push(D3DPT_TRIANGLELIST), push(1), push(at('vertices')), push(VERTEX_STRIDE),
+                ]),
+                ...record('drawPrimitiveUP'),
+
+                ...method(IDirect3DDevice8_EndScene, []),
+                ...record('endScene'),
+
+                // Present(NULL, NULL, NULL, NULL)
+                ...method(IDirect3DDevice8_Present, [push(0), push(0), push(0), push(0)]),
+                ...record('present'),
+            ];
+
+            // Reached with the Direct3D object made. A device it fails to
+            // create leaves a null behind, and calling through that would fault
+            // rather than report, so the branch over the drawing is measured
+            // from what it skips.
+            const creation = [
+                // CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hWnd,
+                //              behaviour, &present, &device)
+                ...method(IDirect3D8_CreateDevice, [
+                    push(D3DADAPTER_DEFAULT), push(D3DDEVTYPE_HAL),
+                    pushFrom(at('report') + TRIANGLE_REPORT.indexOf('hwnd') * 4),
+                    push(D3DCREATE_SOFTWARE_VERTEXPROCESSING),
+                    push(at('present')), push(at('device')),
+                ]),
+                ...record('createDevice'),
+                0x8b, 0x35, ...u32(at('device')), //         mov esi, [device]
+                0x89, 0x35, //                               mov [report.device], esi
+                ...u32(at('report') + TRIANGLE_REPORT.indexOf('device') * 4),
+                0x85, 0xf6, //                               test esi, esi
+                0x0f, 0x84, ...u32(drawing.length), //       jz past the drawing
+                ...drawing,
+            ];
+
+            const main = [
+                // wndclass.lpfnWndProc = DefWindowProcA -- the system's, since
+                // this program answers no messages of its own.
+                0xa1, ...u32(iat('DefWindowProcA')), //      mov eax, [__imp_DefWindowProcA]
+                0xa3, ...u32(at('wndclass') + 4),
+                0xc7, 0x05, ...u32(at('wndclass') + 36), ...u32(at('className')),
+
+                0x68, ...u32(at('wndclass')),
+                0xff, 0x15, ...u32(iat('RegisterClassA')),
+
+                // CreateWindowExA(0, className, title, WS_OVERLAPPEDWINDOW,
+                //                 0, 0, width, height, 0, 0, 0, 0)
+                0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00, 0x6a, 0x00,
+                ...push(TRIANGLE_SCREEN.height), ...push(TRIANGLE_SCREEN.width),
+                0x6a, 0x00, 0x6a, 0x00,
+                ...push(WS_OVERLAPPEDWINDOW),
+                ...push(at('title')),
+                ...push(at('className')),
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('CreateWindowExA')),
+                ...record('hwnd'),
+                0xa3, ...u32(at('present') + 0x18), //       present.hDeviceWindow = hWnd
+
+                // Direct3DCreate8(D3D_SDK_VERSION), which answers in EAX rather
+                // than through an out-parameter.
+                ...push(D3D_SDK_VERSION),
+                0xff, 0x15, ...u32(iat('Direct3DCreate8')),
+                ...record('direct3D'),
+                0x89, 0xc6, //                               mov esi, eax
+                0x85, 0xf6, //                               test esi, esi
+                0x0f, 0x84, ...u32(creation.length), //      jz past everything Direct3D
+                ...creation,
+
+                // WriteFile(GetStdHandle(-11), report, bytes, &written, NULL)
+                0x6a, 0xf5,
+                0xff, 0x15, ...u32(iat('GetStdHandle')),
+                0x6a, 0x00,
+                0x68, ...u32(at('written')),
+                0x6a, TRIANGLE_REPORT.length * 4,
+                0x68, ...u32(at('report')),
+                0x50,
+                0xff, 0x15, ...u32(iat('WriteFile')),
+
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+            return main;
+        },
+    });
+}
+
 const [, , output, kind = 'hello'] = process.argv;
 if (output)
 {
@@ -811,6 +1059,7 @@ if (output)
         qsort: buildQsortExe,
         window: buildWindowExe,
         session: buildSessionExe,
+        triangle: buildTriangleExe,
     };
     if (!(kind in kinds))
     {

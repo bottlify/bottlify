@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Bottlify graphics probe</title>
+  <style>
+    body { font: 15px/1.5 monospace; margin: 2rem; background: #1c1c1c; color: #e8e8e8; }
+    h1 { font-size: 1.2rem; }
+    #out { white-space: pre; background: #2a2a2a; padding: 1rem; border-radius: 6px; }
+    #frame { image-rendering: pixelated; border: 1px solid #555; }
+  </style>
+</head>
+<body>
+  <h1>Bottlify graphics — first frame on a real device</h1>
+  <canvas id="frame" width="320" height="240"></canvas>
+  <pre id="out">waiting…</pre>
+  <script type="module" src="./gpu.js"></script>
+</body>
+</html>
