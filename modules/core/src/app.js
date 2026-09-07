@@ -735,6 +735,12 @@ export async function createApp(options){
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
             onTrace: text=>events.emit('debug', { text }),
+            registers: {
+                /** @param {string} name */
+                read: name=>core.api('cpu').readReg32(name),
+                /** @param {string} name @param {number} value */
+                write: (name, value)=>core.api('cpu').writeReg32(name, value),
+            },
             arena: { base: HEAP_BASE, size: HEAP_SIZE },
             modules: {
                 /** @param {string | null} name */

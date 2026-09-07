@@ -16,6 +16,8 @@ import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createExceptionFunctions } from './kernel32/exceptions.js';
+import { createSeh } from './kernel32/seh.js';
+import { createCrtSeh } from './msvcrt/seh.js';
 import { createResourceFunctions } from './kernel32/resources.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
@@ -116,6 +118,12 @@ export const win32Module = {
             memory.writeBytes(address, bytes);
         const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readCString(address, maxLength);
+
+        // Registers, reached through configuration rather than by requiring the
+        // cpu layer: win32 does not depend on it and should not start to. What
+        // needs them is exception handling, which hands a program a context and
+        // continues execution from a changed one.
+        const cpuRegisters = config?.registers ?? { read: ()=>0, write: ()=>{} };
         const readWideString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readWideString(address, maxLength);
 
@@ -168,6 +176,31 @@ export const win32Module = {
             registry: createSocketRegistry({
                 adapter: config?.network ?? createLoopbackAdapter(),
             }),
+        });
+
+        // Structured exception handling. Everything it needs now exists: the
+        // chain's head lives in the thread block at FS:[0], and a processor
+        // fault is reported with its vector rather than stopping the machine.
+        const registerNames = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp', 'eip'];
+        const seh = createSeh({
+            readMemory,
+            writeMemory,
+            /** @param {number} address */
+            isMapped: address=>memory.find(address) !== null,
+            teb: ()=>kernel.currentThread()?.tebAddress ?? 0,
+            registers: ()=>Object.fromEntries(
+                registerNames.map(name=>[name, cpuRegisters.read(name)])),
+            /** @param {Record<string, number>} values */
+            setRegisters: values=>{
+                for (const [name, value] of Object.entries(values))
+                {
+                    cpuRegisters.write(name, value >>> 0);
+                }
+            },
+            /** @param {any} call */
+            callGuest: call=>bridge.callGuest(call),
+            /** @param {string} text */
+            trace: text=>trace(text),
         });
 
         libraries = {
@@ -316,7 +349,11 @@ export const win32Module = {
                         exitCode = code >>> 0;
                     },
                 }),
+                // Placed after the throwing pair it replaces: RaiseException and
+                // RtlUnwind are defined by not returning, and now there is a
+                // chain to walk they can do that properly.
                 ...createExceptionFunctions({ readMemory }),
+                ...seh.table,
                 ...createModuleFunctions({
                     readCString,
                     readWideString,
@@ -343,13 +380,33 @@ export const win32Module = {
                 }),
             },
 
-            'msvcrt.dll': createMsvcrtFunctions({
-                readMemory,
-                writeMemory,
-                readCString,
-                write: (handle, text)=>sink(handle, text),
-                callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
-            }),
+            'msvcrt.dll': {
+                ...createCrtSeh({
+                    readMemory,
+                    writeMemory,
+                    /** @param {number} address */
+                    isMapped: address=>memory.find(address) !== null,
+                    registers: ()=>Object.fromEntries(
+                        registerNames.map(name=>[name, cpuRegisters.read(name)])),
+                    /** @param {Record<string, number>} values */
+                    setRegisters: values=>{
+                        for (const [name, value] of Object.entries(values))
+                        {
+                            cpuRegisters.write(name, value >>> 0);
+                        }
+                    },
+                    /** @param {any} call */
+                    callGuest: call=>bridge.callGuest(call),
+                    unwind: seh.unwind,
+                }).table,
+                ...createMsvcrtFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    write: (handle, text)=>sink(handle, text),
+                    callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
+                }),
+            },
 
             // One registry behind all three, as on a real machine: a socket
             // opened through one of these names is the same socket seen through
