@@ -189,8 +189,15 @@ export function captureTrace(sources){
     {
         trace.eip = cpu.eip();
         trace.at = describeAddress(sources, trace.eip);
+        // What a register points at, when it points at anything nameable. A
+        // register holding a function's address is the whole answer to "what
+        // was it about to call", and reading that out of a hexadecimal number
+        // by hand is a step nobody should take twice.
         trace.registers = Object.fromEntries(
             REGISTERS.map(name=>[name, cpu.readReg32(name)]));
+        trace.pointing = Object.fromEntries(Object.entries(trace.registers)
+            .map(([name, value])=>[name, describeAddress(sources, Number(value))])
+            .filter(([, where])=>!String(where).endsWith('<unmapped>')));
         trace.instructions = cpu.instructionCount();
         trace.protectedMode = cpu.inProtectedMode();
     }
@@ -257,6 +264,15 @@ export function formatTrace(trace){
         for (let at = 0; at < pairs.length; at += 4)
         {
             lines.push(`  ${pairs.slice(at, at + 4).join(' ')}`);
+        }
+    }
+    // Only the registers that name something. Every register described would
+    // be a wall, and the ones holding a count or a flag describe nothing.
+    for (const [name, where] of Object.entries(trace.pointing ?? {}))
+    {
+        if (!/^(esp|ebp)$/.test(name))
+        {
+            lines.push(`  ${name} -> ${where}`);
         }
     }
     if (trace.hostCalls?.length > 0)
