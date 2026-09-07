@@ -12,7 +12,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { parsePe, readImports, rvaToFileOffset, applyRelocations } from './pe.js';
+import { parsePe, readImports, readExports, rvaToFileOffset, applyRelocations, DIR_EXPORT }
+    from './pe.js';
+import { synthesiseModule } from './synth.js';
 import { buildImage } from './image.js';
 
 const FIXTURE = new URL('../../../../test/fixtures/hello.exe', import.meta.url);
@@ -112,4 +114,65 @@ test('an import nobody claims is reported, not fatal', ()=>{
         resolveImport: (_dll, name)=>name === 'WriteFile' ? null : 0x00200000,
     });
     assert.deepEqual(loaded.unresolved, ['KERNEL32.dll!WriteFile']);
+});
+
+test('the export directory reads back what the synthesiser wrote', ()=>{
+    // Read against our own writer rather than a hand-built fixture: the writer
+    // is already proved correct by a guest resolving through it, so agreement
+    // here means the reader is right about a real export directory rather than
+    // about one shaped to suit it.
+    const module = synthesiseModule({
+        name: 'sample.dll',
+        base: 0x02000000,
+        exports: [
+            { name: 'Alpha', target: 0x11110000 },
+            { name: 'Beta', target: 0x22220000 },
+        ],
+    });
+
+    const image = parsePe(module.bytes);
+    const { name, exports } = readExports(module.bytes, image);
+
+    assert.equal(name, 'sample.dll', 'a module names itself in its export directory');
+    assert.deepEqual(exports.map(entry=>entry.name), ['Alpha', 'Beta']);
+    assert.equal(exports.every(entry=>entry.forwards === null), true,
+        'a trampoline is code, not a forwarder');
+
+    // The addresses have to be the ones the module hands out, or a program that
+    // walks the directory itself lands somewhere else than one that imported.
+    for (const entry of exports)
+    {
+        assert.equal(0x02000000 + entry.rva, module.addressOf(/** @type {string} */ (entry.name)));
+        assert.equal(entry.ordinal, module.ordinalOf(/** @type {string} */ (entry.name)));
+    }
+});
+
+test('an export pointing inside the directory is a forwarder, not code', ()=>{
+    // The case that is silent when missed: the address is a string, and running
+    // it puts the guest on ASCII a long way from the cause.
+    const module = synthesiseModule({
+        name: 'sample.dll',
+        base: 0x02000000,
+        exports: [{ name: 'Alpha', target: 0x11110000 }],
+    });
+
+    const image = parsePe(module.bytes);
+    const directory = image.directories[DIR_EXPORT];
+    const bytes = module.bytes.slice();
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+    // Point the one export at a string planted inside the directory's range.
+    const stringRva = directory.address + directory.size - 16;
+    const at = rvaToFileOffset(image, stringRva);
+    for (const [index, code] of [...'OTHER.Beta'].entries())
+    {
+        bytes[at + index] = code.charCodeAt(0);
+    }
+    bytes[at + 10] = 0;
+    const functionsRva = view.getUint32(rvaToFileOffset(image, directory.address) + 28, true);
+    view.setUint32(rvaToFileOffset(image, functionsRva), stringRva, true);
+
+    const { exports } = readExports(bytes, image);
+    assert.equal(exports.length, 1);
+    assert.equal(exports[0].forwards, 'OTHER.Beta');
 });
