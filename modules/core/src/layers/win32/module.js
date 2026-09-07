@@ -484,6 +484,12 @@ export const win32Module = {
                 // an interval with one and read it with another would disagree
                 // with itself about how long its own frame took.
                 now: ()=>kernel.clock.virtualTime(),
+                // Where the samples go, when anything is listening. The audio
+                // layer is above this one and cannot be imported from here, so
+                // the assembling caller hands it down -- as a thunk, because
+                // audio is built after win32 and does not exist yet when this
+                // configuration is read.
+                output: config?.output,
             }),
 
             'COMCTL32.dll': createComctlFunctions({ readMemory, writeMemory }),

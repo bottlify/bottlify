@@ -46,6 +46,11 @@ import { createBlockCache, resolveBlockStore }
  *     puts a watch in front of that function, so a call from one guest module
  *     into another shows up in the trace like a call into ours. This is the only
  *     way to see them, and a game's own libraries are where its decisions live.
+ * @property {{ drained?: boolean, sampleRate?: number }} [audio]
+ *     Sound leaves through a ring in shared memory. `drained` says that
+ *     something on the other side of it is really reading -- a WebAudio
+ *     worklet, usually -- which is what decides whether a program's play cursor
+ *     follows the sound or a clock.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -800,6 +805,12 @@ export async function createApp(options){
             // itself about whether it is behind.
             now: ()=>core.api('kernel').clock.virtualTime(),
             allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
+            // Whether anything is reading the other end of the ring. Told from
+            // outside because only the assembling caller knows whether it
+            // opened a device, and it decides whether a program's play cursor
+            // follows the sound or the clock.
+            drained: options.audio?.drained ?? false,
+            sampleRate: options.audio?.sampleRate,
         },
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
@@ -816,6 +827,16 @@ export async function createApp(options){
             screen: options.screen,
         },
         win32: {
+            // Sound leaves through the audio layer's mixer, and win32 sits
+            // below it. Handed down as a thunk and asked for only when a
+            // program opens a device: audio is created after win32, and a build
+            // with nothing draining the ring answers null, which is what keeps
+            // the wave cursor on the clock rather than stalling it against a
+            // device nobody is listening to.
+            output: ()=>{
+                const audio = core.api('audio');
+                return audio?.available?.() ? audio.output() : null;
+            },
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -1500,6 +1521,9 @@ export async function createApp(options){
         name: 'main',
     });
 
+    /** The mixer, when this build has one. Read once; it does not change. */
+    const sound = core.api('audio')?.output?.() ?? null;
+
     /**
      * Pausing is a gate rather than a flag polled in a loop: a paused caller
      * waits on a promise that resuming resolves, so nothing spins.
@@ -1562,6 +1586,11 @@ export async function createApp(options){
                 // never returns to the event loop on its normal path and such a
                 // handler would be resumed exactly never.
                 await Promise.resolve();
+
+                // Sound is written ahead here rather than on demand: the device
+                // reads on a thread of its own and must never find the ring
+                // empty because the emulator was inside a long instruction.
+                sound?.pump();
 
                 // And a turn is also when anything waiting for something to
                 // arrive -- a message loop with an empty queue -- gets to look
@@ -1752,6 +1781,21 @@ export async function createApp(options){
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
+        },
+
+        /**
+         * The sound this process is making, for whoever is playing it.
+         *
+         * `ring.memory` is what goes to an audio worklet: it is shared memory,
+         * so the two sides never wait for each other. `pump` fills it and is
+         * called once a scheduler turn by `run` below.
+         */
+        audio: {
+            ring: ()=>core.api('audio').output().ring,
+            format: ()=>{
+                const mixer = core.api('audio').output();
+                return { sampleRate: mixer.sampleRate, channels: mixer.channels };
+            },
         },
 
         /** The registry the program reads and writes; it outlives the process. */

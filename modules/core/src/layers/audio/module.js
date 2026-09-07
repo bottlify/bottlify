@@ -5,6 +5,7 @@
  */
 
 import { createDirectSound } from './dsound/seam.js';
+import { createMixer } from './output/mixer.js';
 
 /**
  * audio — the sound APIs a program was written against.
@@ -27,9 +28,17 @@ import { createDirectSound } from './dsound/seam.js';
  *   publishing into nowhere, which is what a build with no bridge behind it --
  *   a test, an inspection of the configuration -- should get.
  *
- * There is no output device. Nothing here opens WebAudio, and the file that
- * models a buffer says why that changes nothing a program can observe: what it
- * depends on is the pair of cursors, not the sound.
+ * The mixer is where sound leaves. It is host-independent on purpose: it adds
+ * every open source together, converts to one format, and writes ahead into a
+ * ring in shared memory. What turns that into something audible is a WebAudio
+ * worklet reading the other end of the ring, and that lives with whoever
+ * assembled the process -- the same division as the GPU device the graphics
+ * layer is handed rather than opens.
+ *
+ * A build with nothing draining the ring is not a broken build. The ring fills,
+ * writes are refused, and a program's cursor stops advancing -- which is what a
+ * device that is not consuming looks like from inside a program, and is
+ * therefore the honest thing for it to look like from inside this one.
  */
 
 /** @type {any} */
@@ -48,12 +57,18 @@ export const audioModule = {
     async create(config, host){
         const memory = host.requireApi('memory');
 
+        // Whether the other end of the ring is being read. Told from outside,
+        // because only the assembling caller knows whether it opened a device.
+        const drained = config?.drained ?? false;
+
         let nextAddress = 0x50000000;
         const allocate = config?.allocate ?? ((/** @type {number} */ bytes)=>{
             const address = nextAddress;
             nextAddress += (bytes + 0xfff) & ~0xfff;
             return address;
         });
+
+        const mixer = createMixer({ sampleRate: config?.sampleRate });
 
         const dsound = createDirectSound({
             memory: {
@@ -76,8 +91,27 @@ export const audioModule = {
              */
             libraries: ()=>dsound.libraries,
 
-            /** Whether anything can actually be heard. Nothing can, yet. */
-            available: ()=>false,
+            /**
+             * Where a sound API sends its samples.
+             *
+             * Handed out rather than reached for: win32's wave-out surface
+             * sits below this layer and cannot import it, so the assembling
+             * caller passes this down as a thunk the same way it passes down
+             * the thread's last error.
+             */
+            output: ()=>mixer,
+
+            /**
+             * Mixes ahead into the ring. Called once a scheduler turn by
+             * whoever is driving the machine, which is the only place that
+             * knows a turn has happened.
+             *
+             * @param {number} [frames]
+             */
+            pump: frames=>mixer.pump(frames),
+
+            /** Whether anything is draining the ring. */
+            available: ()=>drained,
 
             /** The buffers a program has created, for whoever is measuring. */
             buffers: ()=>dsound.buffers(),
@@ -96,6 +130,7 @@ export const audioModule = {
             metrics: {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dsound().diagnostics() : {}),
+                ...(current ? current.output().diagnostics() : {}),
             },
         };
     },

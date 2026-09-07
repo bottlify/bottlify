@@ -298,6 +298,30 @@ export function createThreadingFunctions(host){
         },
 
         /**
+         * HANDLE OpenEventA(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
+         *
+         * Unlike the mutex form this can succeed, and routinely does: one
+         * process names an event in one library and opens it by name in
+         * another, which is how two parts of the same program that do not know
+         * about each other agree on a signal. A name nothing created is
+         * "no such thing" -- not an error the caller cannot tell apart from a
+         * failure to open one that exists.
+         */
+        OpenEventA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , namePointer])=>{
+                const event = existing(nameOf(namePointer), 'event');
+                if (!event)
+                {
+                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                return kernel.handles.open('event', event);
+            },
+        },
+
+        /**
          * BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle,
          *   HANDLE hTargetProcessHandle, LPHANDLE lpTargetHandle,
          *   DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwOptions)

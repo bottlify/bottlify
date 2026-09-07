@@ -21,9 +21,12 @@
  * refills on that signal and on nothing else. So the flags are the contract,
  * not the sound: a buffer that never comes back stalls the program, and one
  * that comes back the instant it was written makes it spin. They are driven
- * here by a play cursor that advances against the guest's clock at the format's
- * own byte rate, which is what a device would do. No sound is produced -- the
- * audio layer is a stub -- and that is the one thing this cannot honour.
+ * here by a play cursor, and where that cursor comes from is the difference
+ * between sound and the appearance of it. Given a real output the cursor is
+ * what the device has consumed, so the flags a program watches and the sound a
+ * person hears are the same fact. Given none it advances against the guest's
+ * clock at the format's own byte rate -- which is what a device would do, keeps
+ * a program running at the right speed, and produces silence.
  *
  * Everything else reports what is true: there are no midi, mixer, aux, joystick
  * or recording devices, and opening one fails the way it fails on a machine
@@ -124,6 +127,11 @@ const TIME_BYTES = 0x0004;
  *           window, callback or event forms it asked for. Absent in a build
  *           that cannot reach guest code; the flags still behave, and a program
  *           that polls them still works.
+ * @property {() => any} [output]
+ *           Where the samples go. Handed down rather than reached for: the
+ *           audio layer sits above this one and cannot be imported from here.
+ *           Absent, or answering null, means there is nothing listening and the
+ *           cursor falls back to the clock.
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -152,6 +160,8 @@ export function createWinmmFunctions(host){
      * @property {number} playedBytes  Into the buffer at the head of the queue.
      * @property {number} sinceMs      When the cursor was last settled.
      * @property {boolean} paused
+     * @property {any} track           The mixer's source, or null.
+     * @property {number} trackBytes   Guest bytes the device had played last time.
      */
 
     /** @type {Map<number, WaveOut>} */
@@ -189,7 +199,20 @@ export function createWinmmFunctions(host){
 
         const elapsed = Math.max(0, now - device.sinceMs);
         device.sinceMs = now;
-        device.playedBytes += elapsed * device.bytesPerSecond / 1000;
+        if (device.track)
+        {
+            // What the device actually played, in the guest's own byte rate.
+            // Taken as a difference rather than as a position because the
+            // cursor is relative to the head of the queue, which moves.
+            const played = device.track.played() * device.bytesPerSecond
+                / device.track.rate;
+            device.playedBytes += Math.max(0, played - device.trackBytes);
+            device.trackBytes = played;
+        }
+        else
+        {
+            device.playedBytes += elapsed * device.bytesPerSecond / 1000;
+        }
 
         while (device.queue.length > 0 && device.playedBytes >= device.queue[0].length)
         {
@@ -428,6 +451,7 @@ export function createWinmmFunctions(host){
                 }
 
                 const handle = nextHandle++;
+                const mixer = host.output?.() ?? null;
                 devices.set(handle, {
                     bytesPerSecond,
                     callbackKind: (flags >>> 0) & CALLBACK_TYPEMASK,
@@ -437,6 +461,12 @@ export function createWinmmFunctions(host){
                     playedBytes: 0,
                     sinceMs: host.now(),
                     paused: false,
+                    track: mixer?.open({
+                        sampleRate: u32(header, WAVEFORMATEX.nSamplesPerSec),
+                        channels: u16(header, WAVEFORMATEX.nChannels),
+                        bitsPerSample: u16(header, WAVEFORMATEX.wBitsPerSample) || 16,
+                    }) ?? null,
+                    trackBytes: 0,
                 });
                 host.writeMemory(out >>> 0, dword(handle));
                 return MMSYSERR_NOERROR;
@@ -488,6 +518,15 @@ export function createWinmmFunctions(host){
                     device.playedBytes = 0;
                 }
                 device.queue.push({ header: at, length });
+                // The bytes are copied out now rather than referred to. The
+                // buffer stays the caller's and it is entitled to refill it the
+                // moment the header comes back, which is long before the sound
+                // in it has been heard.
+                if (device.track && length > 0)
+                {
+                    const data = u32(host.readMemory(at + WAVEHDR.lpData, 4), 0);
+                    device.track.write(host.readMemory(data, length));
+                }
                 return MMSYSERR_NOERROR;
             },
         },
@@ -503,6 +542,10 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 device.paused = true;
+                if (device.track)
+                {
+                    device.track.paused = true;
+                }
                 return MMSYSERR_NOERROR;
             },
         },
@@ -516,6 +559,10 @@ export function createWinmmFunctions(host){
                     return MMSYSERR_INVALHANDLE;
                 }
                 device.paused = false;
+                if (device.track)
+                {
+                    device.track.paused = false;
+                }
                 device.sinceMs = host.now();
                 return MMSYSERR_NOERROR;
             },
@@ -551,6 +598,8 @@ export function createWinmmFunctions(host){
                 }
                 device.queue = [];
                 device.playedBytes = 0;
+                device.trackBytes = 0;
+                device.track?.reset();
                 device.sinceMs = host.now();
                 return MMSYSERR_NOERROR;
             },
@@ -572,6 +621,7 @@ export function createWinmmFunctions(host){
                     // this, resets, and closes again.
                     return WAVERR_STILLPLAYING;
                 }
+                device.track?.close();
                 devices.delete(handle >>> 0);
                 return MMSYSERR_NOERROR;
             },
