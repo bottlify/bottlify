@@ -23,6 +23,9 @@ import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
 import { createHive } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
+import { createWinsockFunctions } from './wsock32/functions.js';
+import { createSocketRegistry } from './wsock32/sockets.js';
+import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions } from './winmm/functions.js';
 import { createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
@@ -134,6 +137,20 @@ export const win32Module = {
         };
         bridge.useHeap(heap);
 
+        // The transport is injected, as the GPU device and the block store are.
+        // Without one this is a machine with a network card and no cable: every
+        // call behaves, and nothing reaches anywhere.
+        const winsock = createWinsockFunctions({
+            readMemory,
+            writeMemory,
+            readCString,
+            heap,
+            currentThread: ()=>kernel.currentThread(),
+            registry: createSocketRegistry({
+                adapter: config?.network ?? createLoopbackAdapter(),
+            }),
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -240,6 +257,13 @@ export const win32Module = {
                 callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
             }),
 
+            // One registry behind all three, as on a real machine: a socket
+            // opened through one of these names is the same socket seen through
+            // another, and they share one error domain.
+            'WSOCK32.dll': winsock.sockets,
+            'WS2_32.dll': winsock.sockets,
+            'MSWSOCK.dll': winsock.extensions,
+
             'WINMM.dll': createWinmmFunctions({
                 readMemory,
                 writeMemory,
@@ -325,6 +349,22 @@ export const win32Module = {
         const api = {
             /** @returns {Record<string, Record<string, any>>} library name -> its exports */
             libraries: ()=>libraries,
+
+            /**
+             * Which ordinal is which export, for the libraries that have them.
+             *
+             * A library is imported by ordinal or by name, and some are only
+             * ever imported by number -- there is no name in the descriptor to
+             * fall back on. Whoever synthesises a module has to be told, because
+             * an ordinal it assigns itself is not the one the program compiled
+             * against.
+             *
+             * @returns {Record<string, Record<number, string>>}
+             */
+            ordinals: ()=>({
+                'WSOCK32.dll': winsock.ordinals.wsock32,
+                'WS2_32.dll': winsock.ordinals.ws2_32,
+            }),
 
             /**
              * @param {string} name

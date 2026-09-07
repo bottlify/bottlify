@@ -817,9 +817,19 @@ export async function createApp(options){
     // instruction, not when something first asks for it. An address taken early
     // has to be the address that works later (§13.3), and a module conjured on
     // demand cannot promise that.
+    const ordinalsOf = win32.ordinals ? win32.ordinals() : {};
     Object.entries(win32.libraries()).forEach(([name, table], index)=>{
+        // A library imported by number has to be synthesised with the numbers
+        // the program compiled against; one we assigned ourselves would bind to
+        // a different function, silently.
+        /** @type {Record<number, string>} */
+        const byOrdinal = ordinalsOf[name] ?? {};
+        const declared = new Map(Object.entries(byOrdinal)
+            .map(([ordinal, exported])=>[exported, Number(ordinal)]));
+
         const exports = Object.entries(table).map(([exported, fn])=>({
             name: exported,
+            ordinal: declared.get(exported),
             target: bridge.register(`${name}!${exported}`, fn),
         }));
 

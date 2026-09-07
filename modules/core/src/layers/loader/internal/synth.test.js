@@ -264,15 +264,6 @@ test('inputs that cannot produce a correct table are rejected', ()=>{
     ];
     assert.throws(()=>synthesiseModule({ name: 'A.dll', base: BASE, exports: twice }), /duplicate/);
 
-    const partial = [
-        { name: 'A', ordinal: 3, target: 0x1000 },
-        { name: 'B', target: 0x2000 },
-    ];
-    assert.throws(
-        ()=>synthesiseModule({ name: 'A.dll', base: BASE, exports: partial }),
-        /every export or for none/,
-    );
-
     const sameOrdinal = [
         { name: 'A', ordinal: 3, target: 0x1000 },
         { name: 'B', ordinal: 3, target: 0x2000 },
@@ -286,4 +277,24 @@ test('inputs that cannot produce a correct table are rejected', ()=>{
     // ASCII would sort by UTF-16 code unit instead and silently break it.
     const wide = [{ name: 'GeßtStdHandle', target: 0x1000 }];
     assert.throws(()=>synthesiseModule({ name: 'A.dll', base: BASE, exports: wide }), /ASCII/);
+});
+
+test('a library may pin some ordinals and leave the rest to us', ()=>{
+    // The ordinary case for a real library: the numbers its callers import by
+    // are fixed, and the linker assigns the others. Refusing a mixed set would
+    // refuse every library that has ever had a well-known ordinal.
+    const module = synthesiseModule({
+        name: 'mixed.dll',
+        base: 0x02000000,
+        exports: [
+            { name: 'Pinned', target: 0x1000, ordinal: 7 },
+            { name: 'Free', target: 0x2000 },
+            { name: 'AlsoPinned', target: 0x3000, ordinal: 151 },
+        ],
+    });
+
+    assert.equal(module.ordinalOf('Pinned'), 7, 'a declared ordinal is honoured exactly');
+    assert.equal(module.ordinalOf('AlsoPinned'), 151);
+    assert.equal(module.ordinalOf('Free'), 152,
+        'and one we assign sits above everything claimed, so it cannot collide');
 });

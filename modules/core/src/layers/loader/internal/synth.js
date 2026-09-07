@@ -177,20 +177,19 @@ function assignOrdinals(exports){
         names.add(entry.name);
     }
 
-    const explicit = exports.filter(entry=>entry.ordinal !== undefined);
-    if (explicit.length === 0)
-    {
-        return exports.map((entry, index)=>DEFAULT_ORDINAL_BASE + index);
-    }
-    if (explicit.length !== exports.length)
-    {
-        throw new Error('ordinals must be given for every export or for none');
-    }
-
+    // A declared ordinal is a fact about what a program compiled against and is
+    // honoured exactly; the rest are ours to hand out. A mixed set is the
+    // ordinary case, not an error: a real library pins the numbers its callers
+    // import by and lets its linker assign the others.
     /** @type {Set<number>} */
     const taken = new Set();
-    return exports.map(entry=>{
-        const ordinal = /** @type {number} */ (entry.ordinal);
+    for (const entry of exports)
+    {
+        if (entry.ordinal === undefined)
+        {
+            continue;
+        }
+        const ordinal = entry.ordinal;
         if (!Number.isInteger(ordinal) || ordinal < 1)
         {
             throw new Error(`export "${entry.name}" has an invalid ordinal ${ordinal}`);
@@ -200,7 +199,17 @@ function assignOrdinals(exports){
             throw new Error(`two exports claim ordinal ${ordinal}`);
         }
         taken.add(ordinal);
-        return ordinal;
+    }
+
+    // Above everything claimed, so an assigned number can never collide with a
+    // declared one and the two sets stay legible when something goes wrong.
+    let next = Math.max(DEFAULT_ORDINAL_BASE - 1, ...taken) + 1;
+    return exports.map(entry=>{
+        if (entry.ordinal !== undefined)
+        {
+            return entry.ordinal;
+        }
+        return next++;
     });
 }
 
