@@ -9,6 +9,7 @@ import { createThreadingFunctions } from './kernel32/threading.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
+import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createSyncFunctions } from './kernel32/sync.js';
@@ -277,6 +278,14 @@ export const win32Module = {
                     /** @param {number} milliseconds */
                     sleep: milliseconds=>kernel.sleep(kernel.currentThread(), milliseconds),
                     park: ()=>bridge.park(),
+                    // Where the running thread keeps its TLS slots, read out of
+                    // its own block rather than tracked here: the block is the
+                    // loader's to place, and reading it back cannot drift from
+                    // what the guest reaches through FS.
+                    tlsBlock: ()=>{
+                        const teb = kernel.currentThread()?.tebAddress ?? 0;
+                        return teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+                    },
                 }),
                 ...createSyncFunctions({
                     kernel,

@@ -36,6 +36,18 @@ const TLS_OUT_OF_INDEXES = 0xffffffff;
 export const TLS_SLOTS = 1088;
 
 /**
+ * How many of those live in the block a program can reach through FS.
+ *
+ * The compiler does not call TlsGetValue. `__declspec(thread) x` becomes
+ * `mov eax, _tls_index / mov ecx, fs:[0x2c] / mov eax, [ecx+eax*4]` -- it
+ * reads the array directly. So a slot in this range has two readers, the API
+ * and that sequence, and they have to see the same value; a slot above it has
+ * only the API, which is why Windows keeps the rest in an expansion block
+ * reached another way.
+ */
+const TLS_SLOTS_IN_BLOCK = 64;
+
+/**
  * The version reported to the guest: Windows XP, build 2600.
  *
  * A single answer has to be chosen, and this is the one an application of the
@@ -80,6 +92,8 @@ const MAX_MODULE_NAME = 260;
  *           The base of a loaded module, or 0; null asks for the running image.
  * @property {(milliseconds: number) => void} sleep
  * @property {() => any} park  The token that says the caller has been stopped.
+ * @property {() => number} [tlsBlock]  The running thread's array of TLS slots,
+ *           as the compiler reaches it through FS; zero when there is none.
  *           Records that the guest asked to wait. Actually waiting is the scheduler's.
  * @property {number} [processId]
  */
@@ -139,6 +153,29 @@ export function createProcessFunctions(host){
     let generation = 0;
 
     const { stateOf, setError } = createThreadState(host.currentThread);
+
+    /**
+     * Mirrors a slot into the block the compiler reads.
+     *
+     * Silent when there is no block -- a build with no process blocks assembled
+     * still has working Tls* calls, which is what the tests drive.
+     *
+     * @param {number} slot @param {number} value
+     */
+    const publishSlot = (slot, value)=>{
+        if (slot >= TLS_SLOTS_IN_BLOCK || !host.tlsBlock)
+        {
+            return;
+        }
+        const block = host.tlsBlock();
+        if (block === 0)
+        {
+            return;
+        }
+        host.writeMemory(block + slot * 4, new Uint8Array([
+            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+        ]));
+    };
 
     /** @param {number} index */
     const validSlot = index=>index >= 0 && index < TLS_SLOTS && slots[index] !== null;
@@ -383,6 +420,7 @@ export function createProcessFunctions(host){
                     generation: /** @type {number} */ (slots[slot]),
                     value: value >>> 0,
                 });
+                publishSlot(slot, value >>> 0);
                 return 1;
             },
         },

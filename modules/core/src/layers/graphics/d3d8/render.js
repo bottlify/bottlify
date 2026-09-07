@@ -1373,6 +1373,31 @@ export function createRenderer(options){
     async function replay(recorded, surface){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const frame = backend.beginFrame();
+        try
+        {
+            replayInto(frame, pipelines, recorded, surface);
+        }
+        finally
+        {
+            // Ended whatever happened. One object owns the command encoder and
+            // one call releases it, so a throw anywhere above -- a command
+            // whose buffer never reached the GPU, a depth attachment for a
+            // surface that has gone, a bind group the layout refuses -- would
+            // otherwise leave the frame open forever. Every later present then
+            // fails at `beginFrame` saying a frame is already open, and each
+            // failure is swallowed into a ring nobody reads. One bad frame
+            // becomes every frame after it, and the only symptom is a picture
+            // that stopped changing while the counters keep climbing.
+            frame.end();
+        }
+        lastFrame = recorded.commands;
+    }
+
+    /**
+     * @param {any} frame @param {any[]} pipelines
+     * @param {any} recorded @param {any} surface
+     */
+    function replayInto(frame, pipelines, recorded, surface){
         /** @type {any} */
         let pass = null;
         for (const command of recorded.commands)
@@ -1428,8 +1453,6 @@ export function createRenderer(options){
             counters.draws++;
         }
         frame.present(surface);
-        frame.end();
-        lastFrame = recorded.commands;
     }
 
     /** @param {any} command a pass command with a depth target */
