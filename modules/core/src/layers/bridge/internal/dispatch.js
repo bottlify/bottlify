@@ -200,7 +200,7 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             // What the guest has been doing, rather than the one thing it did
             // last. A program stuck in a loop says so here in a line; a stack
             // trace only shows where the loop was when it was interrupted.
-            hot: hot(12),
+            hot: hot(40),
         }),
 
         /**

@@ -166,6 +166,15 @@ async function main(){
     // Everything a failing run says about itself. A guest fault reports where
     // the guest stood; a host one reports what threw, and the two are told
     // apart only by looking.
+    // What a program asked for by name at run time and did not get. A zero here
+    // is a decision the program makes next, and that decision is usually
+    // invisible from anywhere else -- most often it calls the pointer anyway.
+    app.on('resolved', (/** @type {any} */ asked)=>{
+        if (asked.found === 0)
+        {
+            console.log(`  [missing] ${asked.module}!${asked.name}`);
+        }
+    });
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'unimplemented', 'warning'])
     {

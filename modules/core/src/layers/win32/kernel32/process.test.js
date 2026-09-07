@@ -319,3 +319,32 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.TlsGetValue.argBytes, 4);
     assert.equal(fns.TlsSetValue.argBytes, 8);
 });
+
+test('fibre-local storage is thread-local storage under other names', ()=>{
+    // A machine with no fibres has exactly one fibre per thread, so the two are
+    // the same store. A runtime looks the Fls names up at run time and takes a
+    // less-travelled fallback path when they are absent.
+    const { fns: table } = setup();
+
+    const slot = table.FlsAlloc.handler([0]);
+    assert.notEqual(slot, 0xffffffff, 'a slot was handed out');
+    assert.equal(table.FlsSetValue.handler([slot, 0x1234]), 1);
+    assert.equal(table.FlsGetValue.handler([slot]), 0x1234);
+    assert.equal(table.TlsGetValue.handler([slot]), 0x1234,
+        'and it is the same store the thread-local names see');
+    assert.equal(table.FlsFree.handler([slot]), 1);
+});
+
+test('a decoded pointer is the pointer that was encoded', ()=>{
+    // The pair is a contract with itself and nothing else. What a program
+    // requires is that decoding what it encoded gives the pointer back; the
+    // obfuscation in between protects a pointer sitting in memory from
+    // something that finds it, and there is nothing here to hide it from.
+    const { fns: table } = setup();
+
+    for (const pointer of [0, 1, 0x00401000, 0xffffffff])
+    {
+        assert.equal(table.DecodePointer.handler([table.EncodePointer.handler([pointer])]),
+            pointer >>> 0);
+    }
+});

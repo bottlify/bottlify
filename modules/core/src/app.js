@@ -730,6 +730,8 @@ export async function createApp(options){
                 imagePath: ()=>options.imagePath ?? 'C:\\app.exe',
                 /** @param {string} name */
                 load: name=>loadLibraryAtRuntime(name),
+                /** @param {any} asked */
+                resolved: asked=>events.emit('resolved', asked),
                 /**
                  * A string out of a module's own resources.
                  *

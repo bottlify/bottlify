@@ -153,7 +153,10 @@ export function createProcessFunctions(host){
     const readU32 = address=>new DataView(
         host.readMemory(address, 4).slice().buffer).getUint32(0, true);
 
-    return {
+    // Named, because the fibre-local entry points below are the thread-local
+    // ones under different names and call them rather than repeating them.
+    /** @type {Record<string, { argBytes: number, handler: Function }>} */
+    const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
         SetLastError: {
             argBytes: 4,
@@ -376,5 +379,71 @@ export function createProcessFunctions(host){
                 return 1;
             },
         },
+
+        // Fibre-local storage is thread-local storage on a machine with no
+        // fibres, which is this one: a fibre is a thread the program schedules
+        // itself, and without one there is exactly one fibre per thread. A C
+        // runtime looks these up at run time and falls back to the Tls pair
+        // when they are absent -- but it looks them up on every start, and a
+        // fallback path is a path fewer programs have exercised.
+        //
+        // The callback FlsAlloc takes is not called. It runs when a fibre ends,
+        // and nothing here ends one.
+        /** DWORD FlsAlloc(PFLS_CALLBACK_FUNCTION lpCallback) */
+        FlsAlloc: { argBytes: 4, handler: ()=>table.TlsAlloc.handler([]) },
+        /** BOOL FlsFree(DWORD dwFlsIndex) */
+        FlsFree: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.TlsFree.handler(args),
+        },
+        /** PVOID FlsGetValue(DWORD dwFlsIndex) */
+        FlsGetValue: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.TlsGetValue.handler(args),
+        },
+        /** BOOL FlsSetValue(DWORD dwFlsIndex, PVOID lpFlsData) */
+        FlsSetValue: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: args=>table.TlsSetValue.handler(args),
+        },
+
+        /**
+         * PVOID EncodePointer(PVOID Ptr) / PVOID DecodePointer(PVOID Ptr)
+         *
+         * On Windows these obfuscate a pointer against a per-process cookie, so
+         * that a pointer sitting in memory is not a usable address to anything
+         * that finds it. The pair is a contract with itself and nothing else:
+         * what matters is that decoding what was encoded gives the pointer
+         * back. Identity satisfies that exactly.
+         *
+         * They are here because a runtime asks for them by name and calls what
+         * it is given. Answering nothing sends it down a fallback path, and one
+         * measured run asked twenty-six times.
+         */
+        EncodePointer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>pointer >>> 0,
+        },
+        DecodePointer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>pointer >>> 0,
+        },
+        /** The same pair, under the names a runtime built for a system DLL uses. */
+        EncodeSystemPointer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>pointer >>> 0,
+        },
+        DecodeSystemPointer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>pointer >>> 0,
+        },
     };
+    return table;
 }

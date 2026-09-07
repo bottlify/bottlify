@@ -60,6 +60,10 @@ const isOrdinal = value=>(value >>> 16) === 0;
  * @property {(name: string) => number | Promise<number>} [load]
  *           Brings a library in if it is not here yet, answering with its base
  *           or zero. Answers synchronously whenever it can -- see LoadLibraryA.
+ * @property {(asked: { module: string, name: string, found: number }) => void} [resolved]
+ *           Told what a program looked up at runtime and what it was given. A
+ *           name we answer zero to is one the program then decides about, and
+ *           what it decides is usually invisible from anywhere else.
  */
 
 /**
@@ -188,9 +192,14 @@ export function createModuleFunctions(host){
                     return 0;
                 }
 
+                const wanted = isOrdinal(name >>> 0)
+                    ? `#${name >>> 0}`
+                    : host.readCString(name >>> 0, MAX_NAME);
                 const address = isOrdinal(name >>> 0)
                     ? module.addressOfOrdinal(name >>> 0)
-                    : module.addressOf(host.readCString(name >>> 0, MAX_NAME));
+                    : module.addressOf(wanted);
+
+                host.resolved?.({ module: module.name, name: wanted, found: address ?? 0 });
                 if (address === null)
                 {
                     host.setLastError(ERROR_PROC_NOT_FOUND);

@@ -325,6 +325,8 @@ export const win32Module = {
                     byBase: base=>modules.byBase(base),
                     setLastError: setError,
                     imagePath: ()=>modules.imagePath(),
+                    /** @param {any} asked */
+                    resolved: asked=>modules.resolved?.(asked),
                 }),
                 // Last, deliberately: writing and closing a handle are the same
                 // entry points for a file as for a console or an event, and the
