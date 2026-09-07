@@ -8,6 +8,7 @@ import { createBackend } from './webgpu/backend.js';
 import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
+import { createGraphicsLibraries } from './seam/exports.js';
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -32,6 +33,8 @@ let backend = null;
 let factories = null;
 /** @type {string[]} */
 let created = [];
+/** @type {any} */
+let seam = null;
 
 export const graphicsModule = {
     name: 'graphics',
@@ -82,7 +85,15 @@ export const graphicsModule = {
             d3d9: (/** @type {any} */ caps)=>createDirect3D9(caps),
         };
 
-        return {
+        /**
+         * The libraries a program links against to reach any of this.
+         *
+         * Built here rather than in the seam because it needs both halves: the
+         * factories above, and the bridge's vtable publisher. Nothing is
+         * created until a program calls one of these -- the tables are entry
+         * points, not objects.
+         */
+        const api = {
             /**
              * The backend, built on first use.
              *
@@ -115,21 +126,42 @@ export const graphicsModule = {
              * Named rather than exported directly, so that adding one does not
              * change this module's shape.
              *
-             * @param {string} api
+             * @param {string} name
              * @param {any} [options]
              */
-            create(api, options){
-                const factory = factories[api];
+            create(name, options){
+                const factory = factories[name];
                 if (!factory)
                 {
-                    throw new Error(`graphics: no such API "${api}"`);
+                    throw new Error(`graphics: no such API "${name}"`);
                 }
-                created.push(api);
+                created.push(name);
                 return factory(options);
             },
 
             /** Which APIs this build can hand out. */
             apis: ()=>Object.keys(factories),
+        };
+
+        seam = createGraphicsLibraries({
+            graphics: api,
+            memory: services,
+            // Absent in a build with no bridge behind it -- a test, an
+            // inspection -- which then gets tables that refuse rather than
+            // tables that publish into nowhere.
+            publishInterface: config?.publishInterface ?? (()=>0),
+            screen: ()=>services.screen,
+        });
+
+        return {
+            ...api,
+
+            /**
+             * The libraries, keyed as an import descriptor names them. The
+             * assembling caller merges these with win32's and hands the lot to
+             * the loader; nothing here needs a special case.
+             */
+            libraries: ()=>seam.libraries,
         };
     },
 
@@ -144,6 +176,7 @@ export const graphicsModule = {
                 // What a program actually asked for says more about a run than
                 // what the build could have offered.
                 created,
+                seam: seam ? seam.diagnostics() : null,
                 backend: backend ? backend.diagnostics() : null,
             },
         };
@@ -156,6 +189,7 @@ export const graphicsModule = {
         }
         backend = null;
         factories = null;
+        seam = null;
         created = [];
     },
 };

@@ -308,3 +308,109 @@ test('the frame history is a ring, not a leak', ()=>{
     assert.equal(snapshot.recentFrames.length, 3);
     assert.equal(snapshot.recentFrames[2].index, 9);
 });
+
+/**
+ * The pipeline tests below are the other kind: they assert the commands the
+ * backend issued through the recording device, never the pixels a device would
+ * produce. A real GPU's bytes are not reproducible across drivers, so a stored
+ * image cannot be compared against one; what a device is *asked* to do is
+ * exactly reproducible, and that is what is checked here. The formula itself is
+ * checked byte-exactly against a software reference in `internal/reference.test.js`.
+ */
+
+/** A minimal fixed-function state: position and diffuse, no stages. */
+const drawState = (over = {})=>({
+    fvf: 0x142,
+    vertexShader: 0,
+    pixelShader: 0,
+    targetFormat: 'rgba8unorm',
+    depthTest: false,
+    depthWrite: false,
+    depthFunc: 8,
+    cullMode: 1,
+    blend: false,
+    srcBlend: 5,
+    destBlend: 6,
+    blendOp: 1,
+    colorWrite: 0xf,
+    alphaTest: false,
+    alphaFunc: 8,
+    fogMode: 0,
+    stages: [],
+    ...over,
+});
+
+test('a pipeline is built from state, with an explicit layout and a checked shader', async()=>{
+    const { gpu, backend } = harness();
+    const built = await backend.pipelineFor(drawState());
+
+    assert.ok(built.gpu, 'a pipeline came back');
+    const descriptor = gpu.of('createRenderPipeline')[0].descriptor;
+    assert.notEqual(descriptor.layout, 'auto',
+        'an automatic layout drops a binding the shader did not use, and the draw vanishes');
+    assert.equal(descriptor.vertex.entryPoint, 'vertexMain');
+    assert.equal(descriptor.fragment.targets[0].format, 'rgba8unorm');
+    // Every module is asked what the compiler thought; one that was rejected
+    // still binds and still draws, wrongly.
+    assert.equal(gpu.count('getCompilationInfo'), 1);
+});
+
+test('two draws with the same state compile one shader', async()=>{
+    const { gpu, backend } = harness();
+
+    await backend.pipelineFor(drawState());
+    await backend.pipelineFor(drawState());
+
+    assert.equal(gpu.count('createShaderModule'), 1);
+    assert.equal(gpu.count('createRenderPipeline'), 1);
+    assert.deepEqual(backend.diagnostics().pipelines, { built: 1, reused: 1, resident: 1 });
+});
+
+test('a draw that differs only in a later stage gets its own pipeline', async()=>{
+    // The cascade at stage one selects a different fragment formula. A key that
+    // folded only stage zero would hand both draws the pipeline built for the
+    // first, and the second would render with the wrong formula and no error.
+    const { gpu, backend } = harness();
+    const stage = (over = {})=>({
+        colorOp: 4, colorArg1: 2, colorArg2: 0,
+        alphaOp: 4, alphaArg1: 2, alphaArg2: 0,
+        texCoordIndex: 0,
+        ...over,
+    });
+    const withTexture = { fvf: 0x142 | (2 << 8) };
+
+    await backend.pipelineFor(drawState({ ...withTexture, stages: [stage(), stage()] }));
+    await backend.pipelineFor(drawState({
+        ...withTexture,
+        stages: [stage(), stage({ texCoordIndex: 1 })],
+    }));
+
+    assert.equal(gpu.count('createRenderPipeline'), 2);
+    assert.equal(backend.diagnostics().pipelines.built, 2);
+});
+
+test('a stage takes a texture and a sampler binding, declared not inferred', async()=>{
+    const { gpu, backend } = harness();
+    await backend.pipelineFor(drawState({
+        fvf: 0x142 | (1 << 8),
+        stages: [{
+            colorOp: 4, colorArg1: 2, colorArg2: 0,
+            alphaOp: 4, alphaArg1: 2, alphaArg2: 0,
+            texCoordIndex: 0,
+        }],
+    }));
+
+    const layout = gpu.of('createBindGroupLayout')[0].descriptor;
+    assert.deepEqual(layout.entries.map((/** @type {any} */ e)=>e.binding), [0, 1, 2],
+        'the uniform block, then a texture and a sampler for the one stage');
+});
+
+test('a bound vertex shader is refused rather than quietly given fixed function', async()=>{
+    // Translating one is somebody else's job; producing a fixed-function
+    // pipeline for it would draw the wrong geometry and report nothing.
+    const { backend } = harness();
+    await assert.rejects(
+        ()=>backend.pipelineFor(drawState({ vertexShader: 7 })),
+        /must be translated before it reaches the backend/,
+    );
+});

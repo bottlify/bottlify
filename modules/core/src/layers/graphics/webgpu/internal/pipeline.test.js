@@ -1,0 +1,180 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under BSD-2-Clause License
+ * See LICENSE for details
+ */
+
+/**
+ * Everything here is computed by the engine, so everything here is asserted
+ * exactly: the same state produces the same key and the same descriptor, on
+ * every run and every machine. Nothing in this file reaches a device.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+    colorWriteMask, createPipelineCache, pipelineDescriptor, pipelineKey,
+} from './pipeline.js';
+
+/** A state with every field set, so a test can change exactly one. */
+const baseState = ()=>({
+    fvf: 0x142,
+    vertexShader: 0,
+    pixelShader: 0,
+    targetFormat: 'bgra8unorm',
+    depthFormat: 'depth24plus',
+    sampleCount: 1,
+    topology: 'triangle-list',
+    depthTest: true,
+    depthWrite: true,
+    depthFunc: 4,
+    cullMode: 3,
+    blend: false,
+    srcBlend: 5,
+    destBlend: 6,
+    blendOp: 1,
+    colorWrite: 0xf,
+    alphaTest: false,
+    alphaFunc: 5,
+    fogMode: 0,
+    stages: [],
+});
+
+const stage = (over = {})=>({
+    colorOp: 4, colorArg1: 2, colorArg2: 0,
+    alphaOp: 4, alphaArg1: 2, alphaArg2: 0,
+    texCoordIndex: 0,
+    ...over,
+});
+
+test('every field the descriptor reads is a field the key folds', ()=>{
+    // The defect this guards is silent: a key that folds less than the pipeline
+    // depends on hands two different draws one pipeline, and the second renders
+    // with the first one's state. So changing any single field must change the
+    // key — if one does not, that field is invisible to the cache.
+    const base = baseState();
+    const changes = {
+        fvf: 0x144,
+        vertexShader: 3,
+        pixelShader: 5,
+        targetFormat: 'rgba8unorm',
+        depthFormat: 'depth32float',
+        sampleCount: 4,
+        topology: 'triangle-strip',
+        depthTest: false,
+        depthWrite: false,
+        depthFunc: 8,
+        cullMode: 1,
+        blend: true,
+        srcBlend: 2,
+        destBlend: 1,
+        blendOp: 2,
+        colorWrite: 0x7,
+        alphaTest: true,
+        alphaFunc: 8,
+        fogMode: 3,
+    };
+
+    const original = pipelineKey(base);
+    for (const [field, value] of Object.entries(changes))
+    {
+        const changed = pipelineKey({ ...base, [field]: value });
+        assert.notEqual(changed, original, `changing ${field} left the key alone`);
+    }
+});
+
+test('the same state gives the same key, every time', ()=>{
+    assert.equal(pipelineKey(baseState()), pipelineKey(baseState()));
+    // Exact, because a key is compared by value and a diagnostic prints it.
+    assert.equal(
+        pipelineKey(baseState()),
+        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0|0[]',
+    );
+});
+
+test('a stage list is folded stage by stage, and its length is part of the key', ()=>{
+    // The cascade at stage one selects a different fragment formula and a
+    // different coordinate set. A key built from stage zero and a count
+    // collides across draws that differ in both.
+    const base = baseState();
+    const one = pipelineKey({ ...base, stages: [stage()] });
+    const differentSecond = pipelineKey({ ...base, stages: [stage(), stage({ colorOp: 7 })] });
+    const differentCoords = pipelineKey(
+        { ...base, stages: [stage(), stage({ texCoordIndex: 1 })] });
+    const sameFirst = pipelineKey({ ...base, stages: [stage(), stage()] });
+
+    assert.notEqual(one, sameFirst, 'a second stage is not the same as one stage');
+    assert.notEqual(sameFirst, differentSecond, 'stage one\'s operation is folded');
+    assert.notEqual(sameFirst, differentCoords, 'stage one\'s coordinate index is folded');
+});
+
+test('no stages and one default stage are different keys', ()=>{
+    // The cascade is off until a stage arms it, so "off" has to be expressible
+    // as something other than stage zero's value. Without the length prefix an
+    // empty list and a list of one flatten to the same string.
+    const base = baseState();
+    assert.notEqual(
+        pipelineKey({ ...base, stages: [] }),
+        pipelineKey({ ...base, stages: [stage()] }),
+    );
+});
+
+test('a depth test that is off keeps its attachment and always passes', ()=>{
+    // Dropping the attachment instead would take the depth target away from
+    // every later draw in the pass, which does want to test against it.
+    const descriptor = pipelineDescriptor({ ...baseState(), depthTest: false }, null);
+    assert.equal(descriptor.depthStencil.format, 'depth24plus');
+    assert.equal(descriptor.depthStencil.depthCompare, 'always');
+    assert.equal(descriptor.depthStencil.depthWriteEnabled, true);
+});
+
+test('cull mode names the face, not the winding', ()=>{
+    // Direct3D names the winding it discards; WebGPU names the face it culls.
+    // Getting it backwards turns models inside out, which reads as geometry
+    // vanishing when the camera moves.
+    const cull = (/** @type {number} */ mode)=>
+        pipelineDescriptor({ ...baseState(), cullMode: mode }, null).primitive.cullMode;
+
+    assert.equal(cull(1), 'none');
+    assert.equal(cull(2), 'front');
+    assert.equal(cull(3), 'back');
+    assert.equal(pipelineDescriptor(baseState(), null).primitive.frontFace, 'ccw');
+});
+
+test('a blend factor with no counterpart is refused, not approximated', ()=>{
+    // BOTHSRCALPHA sets the source and destination factor from one value: it is
+    // a pair, not a factor. Approximating it draws a wrong picture silently.
+    assert.throws(
+        ()=>pipelineDescriptor({ ...baseState(), blend: true, srcBlend: 12 }, null),
+        /Unsupported source blend: 12/,
+    );
+});
+
+test('the colour write mask carries each channel through', ()=>{
+    assert.equal(colorWriteMask(0), 0);
+    assert.equal(colorWriteMask(0xf), 0xf);
+    assert.equal(colorWriteMask(0x5), 0x5);
+});
+
+test('a pipeline in flight is shared, not built twice', async()=>{
+    // Two draws with the same state in one frame must compile one shader. The
+    // cache has to hold the promise, not only the finished pipeline, or the
+    // second draw starts a second build before the first resolves.
+    let builds = 0;
+    const cache = createPipelineCache({
+        build: async()=>{
+            builds++;
+            await Promise.resolve();
+            return { id: builds };
+        },
+    });
+
+    const [first, second] = await Promise.all([
+        cache.get(baseState()),
+        cache.get(baseState()),
+    ]);
+
+    assert.equal(builds, 1);
+    assert.equal(first, second);
+    assert.deepEqual(cache.stats(), { built: 1, reused: 1, resident: 1 });
+});

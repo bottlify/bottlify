@@ -39,6 +39,9 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {string} [imagePath]    What the program believes it was loaded from.
+ * @property {any} [device]          The GPU to draw on, when there is one.
+ * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
+ *           What the program is told its display is.
  * @property {any} [storage]
  *           Where the session comes from and goes: a provider with `load` and
  *           `save`, a function that only loads, or the string `local`.
@@ -717,6 +720,15 @@ export async function createApp(options){
     let idlers = [];
 
     const core = await assembleModules({
+        graphics: {
+            // Where a COM interface goes when a program asks for one. Without
+            // it the drawing entry points refuse rather than publishing into
+            // nowhere, which is what a build with no bridge should do.
+            publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
+                core.api('bridge').publishInterface(object, iid),
+            device: options.device ?? null,
+            screen: options.screen,
+        },
         win32: {
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
@@ -792,6 +804,7 @@ export async function createApp(options){
     const loader = core.api('loader');
     const win32 = core.api('win32');
     const bridge = core.api('bridge');
+    const graphics = core.api('graphics');
 
     await cpu.boot(options.v86);
 
@@ -821,7 +834,11 @@ export async function createApp(options){
     // has to be the address that works later (§13.3), and a module conjured on
     // demand cannot promise that.
     const ordinalsOf = win32.ordinals ? win32.ordinals() : {};
-    Object.entries(win32.libraries()).forEach(([name, table], index)=>{
+    // The drawing APIs are libraries like any other as far as a program is
+    // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
+    // and nothing about how they are reached should differ.
+    const allLibraries = { ...win32.libraries(), ...graphics.libraries?.() ?? {} };
+    Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
         // a different function, silently.
@@ -997,7 +1014,7 @@ export async function createApp(options){
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
         // else has claimed.
-        base: MODULE_BASE + Object.keys(win32.libraries()).length * MODULE_STRIDE,
+        base: MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE,
         memoryBytes: cpu.layout.memorySize,
     });
     for (const library of shipped)
@@ -1008,7 +1025,7 @@ export async function createApp(options){
     // program, or after the system modules when there were none.
     nextLibraryBase = shipped.reduce(
         (highest, library)=>Math.max(highest, library.base + library.size),
-        MODULE_BASE + Object.keys(win32.libraries()).length * MODULE_STRIDE);
+        MODULE_BASE + Object.keys(allLibraries).length * MODULE_STRIDE);
 
     const image = loader.load(options.executable, { resolveImport });
 

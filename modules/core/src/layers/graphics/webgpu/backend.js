@@ -10,6 +10,9 @@ import { createProfiler } from './internal/profiler.js';
 import { createShaderCache } from './internal/shaders.js';
 import { createTextureUploader } from './internal/textures.js';
 import { fullTarget, viewportState } from './internal/viewport.js';
+import { createPipelineCache, pipelineDescriptor } from './internal/pipeline.js';
+import { generateFixedFunction } from './internal/fixedfunction.js';
+import { decodeFvf } from './internal/vertexformat.js';
 
 /**
  * The rendering backend every guest-facing graphics API sits on.
@@ -69,6 +72,89 @@ export function createBackend(options){
         device,
         queue,
         usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+    });
+
+    /**
+     * A pipeline per distinct state, built once.
+     *
+     * The layout is explicit and shared: every fixed-function shader declares
+     * the same uniform block at binding zero and its textures from binding one
+     * upward, so a layout per stage count is all that is needed, and an
+     * automatic layout -- which drops a binding the generated shader happened
+     * not to use -- is never reached.
+     */
+    /** @type {Map<number, any>} */
+    const fixedFunctionLayouts = new Map();
+
+    /** @param {number} stageCount */
+    const layoutForStages = stageCount=>{
+        const existing = fixedFunctionLayouts.get(stageCount);
+        if (existing)
+        {
+            return existing;
+        }
+        /** @type {any[]} */
+        const entries = [
+            { binding: 0, visibility: 3, buffer: { type: 'uniform' } },
+        ];
+        for (let index = 0; index < stageCount; index++)
+        {
+            entries.push({ binding: 1 + index * 2, visibility: 2, texture: {} });
+            entries.push({ binding: 2 + index * 2, visibility: 2, sampler: {} });
+        }
+        const group = device.createBindGroupLayout({
+            label: `fixed-function:${stageCount}`,
+            entries,
+        });
+        const made = {
+            group,
+            pipeline: device.createPipelineLayout({
+                label: `fixed-function:${stageCount}`,
+                bindGroupLayouts: [group],
+            }),
+        };
+        fixedFunctionLayouts.set(stageCount, made);
+        return made;
+    };
+
+    const pipelines = createPipelineCache({
+        build: async state=>{
+            // A vertex shader means the caller owns the module; fixed function
+            // means this builds one from the state, which is the only reason
+            // the vertex format has to be decoded here at all.
+            if (state.vertexShader !== 0)
+            {
+                throw new Error(
+                    'A bound vertex shader must be translated before it reaches the backend');
+            }
+            const layout = decodeFvf(state.fvf);
+            const generated = generateFixedFunction(state, layout);
+            const module = await shaders.build(generated);
+            const descriptor = pipelineDescriptor(state, layout);
+            const layouts = layoutForStages(state.stages.length);
+
+            return {
+                bindGroupLayout: layouts.group,
+                vertexLayout: layout,
+                gpu: device.createRenderPipeline({
+                    label: generated.label,
+                    layout: layouts.pipeline,
+                    vertex: {
+                        module,
+                        entryPoint: 'vertexMain',
+                        buffers: [descriptor.vertexLayout],
+                    },
+                    fragment: {
+                        module,
+                        entryPoint: 'fragmentMain',
+                        targets: [descriptor.target],
+                    },
+                    primitive: descriptor.primitive,
+                    depthStencil: descriptor.depthStencil,
+                    multisample: descriptor.multisample,
+                }),
+            };
+        },
     });
 
     /** @type {any[]} */
@@ -330,6 +416,21 @@ export function createBackend(options){
             return shaders.build(request);
         },
 
+        /**
+         * The pipeline a draw's state describes, built once per distinct state.
+         *
+         * Asynchronous because compiling the shader is, and a caller has to
+         * await it before the draw -- which is the one place the cost of this
+         * design shows. Two draws with the same state in one frame share the
+         * promise rather than compiling twice.
+         *
+         * @param {import('./internal/pipeline.js').PipelineState} state
+         * @returns {Promise<any>}
+         */
+        pipelineFor(state){
+            return pipelines.get(state);
+        },
+
         uploadTexture,
 
         /**
@@ -467,6 +568,7 @@ export function createBackend(options){
                 ...snapshot,
                 shaders: shaders.stats(),
                 shaderMessages: shaders.messages(),
+                pipelines: pipelines.stats(),
                 uniforms: uniforms.stats(),
                 buffers: dynamicBuffers.map(buffer=>buffer.diagnostics()),
                 frameOpen: !!(openFrame && !openFrame.ended),
@@ -477,6 +579,8 @@ export function createBackend(options){
         dispose(){
             dynamicBuffers.length = 0;
             pendingCopies.length = 0;
+            pipelines.clear();
+            fixedFunctionLayouts.clear();
             openFrame = null;
             lastPresented = null;
         },
