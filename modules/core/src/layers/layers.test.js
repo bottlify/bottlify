@@ -24,7 +24,7 @@ const ALL_LAYERS = [
 
 /** Layers with a real implementation; the rest are still stubs. */
 const IMPLEMENTED = [
-    'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'win32', 'graphics',
+    'log', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'win32', 'graphics',
     'audio', 'input',
 ];
 
@@ -56,13 +56,17 @@ test('building the graph costs nothing: the emulator is not started', async()=>{
     assert.throws(()=>cpu.readReg32('eax'), /boot\(\) must be called/);
 });
 
-test('a layer that is still a stub throws NOT_IMPLEMENTED', async()=>{
-    // The mechanism, on the one layer that is still a stub. What matters is
-    // that an unbuilt layer refuses loudly rather than answering with a
-    // plausible nothing -- a silent zero from a layer nobody wrote is a defect
-    // that surfaces wherever the caller used it.
-    const core = await assembleModules({});
-    assert.throws(()=>core.api('log').write('anything'), { code: 'NOT_IMPLEMENTED' });
+test('a layer that is not built refuses loudly', async()=>{
+    // What matters is that an interface nobody implements refuses rather than
+    // answering with a plausible nothing -- a silent zero from a layer that is
+    // not there is a defect that surfaces wherever the caller used it.
+    //
+    // Driven through a *disabled* module rather than an unbuilt one: every
+    // layer now has an implementation, and the stub is what a module something
+    // still requires is replaced by when it is switched off. That is the same
+    // mechanism and the one that will still exist in a finished engine.
+    const core = await assembleModules({ win32: false });
+    assert.throws(()=>core.api('win32').anything(), { code: 'NOT_IMPLEMENTED' });
 });
 
 test('disabling a leaf nobody requires removes it from the build', async()=>{
