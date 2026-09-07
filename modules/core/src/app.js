@@ -375,6 +375,14 @@ async function mapShippedLibraries(options){
             addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
             entryPoint: record.record.entryPoint,
             mapped: record,
+            // Kept for the same reason the program's own image is: a resource
+            // is read out of the file rather than out of the mapping, and a
+            // library a program ships carries the strings, icons, dialogs and
+            // version information that program asks for. Without these a
+            // module answers nothing for every resource call -- including the
+            // one it makes to tell a person what went wrong.
+            file,
+            image,
         };
         byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
         byBase.set(base, held);
@@ -721,6 +729,12 @@ export async function createApp(options){
     let idlers = [];
 
     const core = await assembleModules({
+        bridge: {
+            // win32 sits above the bridge and cannot be reached from it, so the
+            // reader is handed down from here. It costs one call per traced
+            // call and buys a trace that says which call left an error behind.
+            lastError: ()=>core.api('win32').lastError(),
+        },
         log: {
             // The guest's clock, for the same reason the sound buffers use it:
             // a phase timed against the host and a phase timed against the
@@ -997,10 +1011,16 @@ export async function createApp(options){
         return (async()=>{
             const path = options.imagePath ?? 'C:\\app.exe';
             const directory = path.slice(0, path.lastIndexOf('\\') + 1);
-            const file = await readWholeFile(filesystem, blocks, `${directory}${name}`);
+            const wanted = `${directory}${name}`;
+            const file = await readWholeFile(filesystem, blocks, wanted);
             if (!file)
             {
                 absentLibraries.add(key);
+                // Said out loud, because this is the failure a program reports
+                // as "could not open" and then exits on. Without it the only
+                // trace is a zero, and a zero says nothing about which path was
+                // tried -- which is the whole question.
+                events.emit('library-missing', { name, path: wanted });
                 return 0;
             }
 
@@ -1029,6 +1049,10 @@ export async function createApp(options){
                 /** @param {number} ordinal */
                 addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
                 entryPoint: mapped.record.entryPoint,
+                // As above: resources come from the file, so a library loaded
+                // at run time has to keep its own.
+                file,
+                image,
             };
             // Registered before its own imports are bound, so a library that
             // imports back into itself -- or into one still being loaded --

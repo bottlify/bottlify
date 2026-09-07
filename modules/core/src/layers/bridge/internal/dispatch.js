@@ -34,12 +34,15 @@ const CALL_RING = 4096;
 /**
  * How many calls are kept with their arguments and answers.
  *
- * Far fewer than the names, because this is what a failure is read backwards
- * from and nobody reads a thousand lines of it. Names alone say what a program
- * was doing; these say what it asked and what it was told, which is the only
- * way to see an answer that was wrong rather than missing.
+ * Fewer than the names, because each carries arguments and an answer. Still
+ * generous, because the call that explains a failure is routinely hundreds
+ * back: a program that has just failed spends its last moments in its own
+ * error reporting, and the answer that was wrong came before all of it. Names
+ * alone say what a program was doing; these say what it asked and what it was
+ * told, which is the only way to see an answer that was wrong rather than
+ * missing.
  */
-const DETAIL_RING = 64;
+const DETAIL_RING = 4096;
 
 /**
  * @param {Object} deps
@@ -48,8 +51,11 @@ const DETAIL_RING = 64;
  * @param {any} deps.parking   Brackets each handler and issues the parked token.
  * @param {(answer: Promise<number>, frame: any) => void} [deps.suspend]
  *        What to do with a handler that has not finished; wired by the module.
+ * @param {() => number} [deps.lastError]
+ *        The running thread's last error, for the trace. Injected because it
+ *        belongs to a layer above this one.
  */
-export function createDispatcher({ cpu, memory, parking, suspend }){
+export function createDispatcher({ cpu, memory, parking, suspend, lastError }){
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /**
@@ -67,7 +73,10 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
      */
     const called = new Array(CALL_RING);
     let ringAt = 0;
-    /** @type {{ name: string, from: number, args: number[], result: string }[]} */
+    /**
+     * @type {{ name: string, from: number, args: number[], result: string,
+     *          error: number }[]}
+     */
     const detailed = new Array(DETAIL_RING);
     let detailAt = 0;
 
@@ -85,6 +94,60 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             counts.set(name, (counts.get(name) ?? 0) + 1);
         }
         return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, count);
+    };
+
+    /**
+     * An argument as the text it points at, or null when it is not a pointer
+     * to text.
+     *
+     * A trace of raw dwords says a library was asked for and not which one,
+     * and reading each pointer out of an image by hand is not a workflow. So
+     * this guesses, and the guess is safe because it happens only when a
+     * reader asks: reading is not on the path of a running program, and a
+     * value that only looks like a string costs nothing but a wrong line in a
+     * report.
+     *
+     * The pointer is read *now* rather than when the call was made, so what
+     * comes back is what is there at the end of a run. For the arguments this
+     * matters for -- a library name, a registry path, a file name -- that is
+     * the image's own constant data and does not move.
+     *
+     * @param {number} value
+     * @returns {string | null}
+     */
+    const peekString = value=>{
+        const address = value >>> 0;
+        if (address < 0x1000)
+        {
+            return null;
+        }
+        try
+        {
+            let text = '';
+            for (let at = address; at < address + 96; at++)
+            {
+                const byte = memory.readU8(at);
+                if (byte === 0)
+                {
+                    return text.length >= 2 ? text : null;
+                }
+                // Tab, newline and carriage return are text: a message a
+                // program is about to show a person is full of them, and
+                // rejecting them turns the most interesting string in a trace
+                // back into a bare pointer.
+                const printable = (byte >= 0x20 && byte <= 0x7e)
+                    || byte === 0x09 || byte === 0x0a || byte === 0x0d;
+                if (!printable)
+                {
+                    return null;
+                }
+                text += String.fromCharCode(byte);
+            }
+        }
+        catch (e){
+            void e;
+        }
+        return null;
     };
 
     /**
@@ -188,6 +251,7 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
                 // change what the arguments describe before anyone reads them.
                 args: args.slice(0, 6),
                 result: 'threw',
+                error: 0,
             };
             detailed[detailAt++ % DETAIL_RING] = record;
             try
@@ -200,6 +264,10 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             finally
             {
                 parking.endCall();
+                // What this call left in the thread's last error. A program
+                // reports a code long after whatever produced it returned, and
+                // this is the only record that ties the two together.
+                record.error = lastError ? lastError() : 0;
             }
 
             // A parked call's EAX belongs to whatever wakes the thread, and it
@@ -245,7 +313,8 @@ export function createDispatcher({ cpu, memory, parking, suspend }){
             const out = [];
             for (let back = kept; back > 0; back--)
             {
-                out.push(detailed[(detailAt - back) % DETAIL_RING]);
+                const record = detailed[(detailAt - back) % DETAIL_RING];
+                out.push({ ...record, strings: record.args.map(peekString) });
             }
             return out;
         },

@@ -40,7 +40,10 @@ const PAGE_SIZE = 4096;
 
 /** Codes this surface reports. */
 const ERROR_INVALID_PARAMETER = 87;
+/** What VirtualAlloc reports for an address outside anything it reserved. */
+const ERROR_INVALID_ADDRESS = 487;
 const ERROR_NO_MORE_ITEMS = 259;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
 
 /**
  * The one page protection this build offers.
@@ -204,6 +207,26 @@ export function createHeapAllocator({ base, size }){
 
         /** @param {number} address @returns {HeapBlock | null} */
         block: address=>live.get(address) ?? null,
+
+        /**
+         * The live block an address falls inside, rather than the one it
+         * starts. A reservation is committed a page at a time, and every page
+         * after the first is an interior address of a block the allocator
+         * already handed out.
+         *
+         * @param {number} address
+         * @returns {HeapBlock | null}
+         */
+        blockContaining(address){
+            for (const block of live.values())
+            {
+                if (address >= block.address && address < block.address + block.capacity)
+                {
+                    return block;
+                }
+            }
+            return null;
+        },
 
         /**
          * Adjusts a block's reported size without moving it. Only what was
@@ -484,13 +507,24 @@ export function createHeapFunctions(host){
                 let address;
                 if (requested !== 0)
                 {
-                    // Reserve-then-commit is a common two-step, so committing
-                    // inside something we already handed out succeeds. An
-                    // address we never gave out cannot be honoured: this
+                    // Reserve-then-commit is a common two-step, and the second
+                    // step names a page rather than the reservation: a program
+                    // reserves a span and commits pages inside it one at a
+                    // time as it grows into them, so every commit after the
+                    // first arrives with an interior address. Looking the
+                    // address up as the *start* of a block accepts only that
+                    // first page and refuses the rest, which a program reads
+                    // as having run out of memory while most of what it
+                    // reserved sits untouched.
+                    //
+                    // An address we never gave out is still refused: this
                     // allocator places memory, it does not map it.
-                    const existing = allocator.block(requested);
-                    if (!existing || existing.owner !== VIRTUAL || existing.capacity < rounded)
+                    const existing = allocator.blockContaining(requested);
+                    const offset = existing ? requested - existing.address : 0;
+                    if (!existing || existing.owner !== VIRTUAL
+                        || existing.capacity - offset < rounded)
                     {
+                        host.setLastError(ERROR_INVALID_ADDRESS);
                         return 0;
                     }
                     address = requested;
@@ -501,6 +535,10 @@ export function createHeapFunctions(host){
                         { alignment: PAGE_SIZE, owner: VIRTUAL });
                     if (address === 0)
                     {
+                        // A caller checks the return and then asks why. A zero
+                        // with no code behind it leaves whatever the previous
+                        // call happened to set, which is worse than useless.
+                        host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
                         return 0;
                     }
                 }

@@ -37,6 +37,15 @@ function parse(argv){
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
+        // Which calls to print with their arguments. A name, or a fragment of
+        // one, narrows a long trace to the handful that answer the question.
+        grep: argv.includes('--grep') ? argv[argv.indexOf('--grep') + 1] : null,
+        calls: argv.includes('--calls') ? Number(argv[argv.indexOf('--calls') + 1]) : 24,
+        // Sizing the guest's heap from the command line, so that "it ran out
+        // of memory" can be tested rather than argued about.
+        heap: argv.includes('--heap')
+            ? Number(argv[argv.indexOf('--heap') + 1]) * 1024 * 1024
+            : undefined,
     };
 }
 
@@ -93,8 +102,11 @@ function byLibrary(unresolved){
  *
  * @param {any} app
  */
-function report(app){
-    for (const layer of app.diagnostics())
+function report(app, { grep = null, calls = 24 } = {}){
+    // Taken once: a snapshot walks every ring it publishes, and asking three
+    // times over asks three times as much of the guest's address space.
+    const layers = app.diagnostics();
+    for (const layer of layers)
     {
         const metrics = layer.metrics ?? {};
         const interesting = Object.entries(metrics)
@@ -104,21 +116,44 @@ function report(app){
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
     }
 
-    const bridge = app.diagnostics()
+    const bridge = layers
         .find((/** @type {any} */ layer)=>layer.name === 'bridge')?.metrics ?? {};
     // Read backwards from the failure: what was asked, and what it was told.
     // Names alone say what a program was doing; these say whether an answer was
     // wrong rather than missing.
-    for (const call of (bridge.recentDetailed ?? []).slice(-24))
+    //
+    // First the order they arrived in. The histogram further down says what the
+    // program did; this says what it was doing, which is the question a failure
+    // asks.
+    const sequence = bridge.sequence ?? [];
+    if (sequence.length > 0)
     {
-        const args = call.args.map((/** @type {number} */ a)=>
-            `0x${(a >>> 0).toString(16)}`).join(', ');
-        const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
-        console.log(`    ${from}  ${call.name}(${args}) = ${call.result}`);
+        console.log('\n  in order:');
+        for (let at = 0; at < sequence.length; at += 6)
+        {
+            console.log(`    ${sequence.slice(at, at + 6).join('  ')}`);
+        }
+        console.log('');
     }
 
-    const hottest = app.diagnostics()
-        .find((/** @type {any} */ layer)=>layer.name === 'bridge')?.metrics?.hot ?? [];
+    const detailed = (bridge.recentDetailed ?? [])
+        .filter((/** @type {any} */ call)=>grep === null || call.name.includes(grep));
+    for (const call of detailed.slice(-calls))
+    {
+        // An argument that points at text is shown as the text. A trace of
+        // raw dwords says a library was asked for and not which one.
+        const args = call.args.map((/** @type {number} */ a, /** @type {number} */ index)=>(
+            call.strings?.[index]
+                ? JSON.stringify(call.strings[index])
+                : `0x${(a >>> 0).toString(16)}`)).join(', ');
+        const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
+        // The error the call left behind, when it left one. That is where a
+        // code a program complains about much later actually came from.
+        const left = call.error ? `  [err ${call.error}]` : '';
+        console.log(`    ${from}  ${call.name}(${args}) = ${call.result}${left}`);
+    }
+
+    const hottest = bridge.hot ?? [];
     if (hottest.length > 0)
     {
         console.log('\n  what it was calling, most recent first:');
@@ -130,7 +165,7 @@ function report(app){
 }
 
 async function main(){
-    const { id, turns, map } = parse(process.argv.slice(2));
+    const { id, turns, map, grep, calls, heap } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N]');
@@ -168,6 +203,7 @@ async function main(){
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
         imagePath: `C:\\${manifest.entry}`,
+        heapSize: heap,
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
         bundle: { fetch, store: null, prefetch: false },
@@ -223,8 +259,11 @@ async function main(){
             console.log(`  [missing] ${asked.module}!${asked.name}`);
         }
     });
+    // `debug` carries what the program traced about itself, including the text
+    // of a message box it is about to put in front of a person -- which is the
+    // program's own account of the failure and beats any trace taken outside it.
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
-        'library-loaded', 'unimplemented', 'warning'])
+        'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug'])
     {
         app.on(name, (/** @type {any} */ payload)=>
             console.log(`  [${name}] ${JSON.stringify(payload).slice(0, 300)}`));
@@ -252,7 +291,7 @@ async function main(){
         console.log(text.split('\n').slice(-40).map(line=>`    ${line}`).join('\n'));
     }
 
-    report(app);
+    report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
         // The trace, not the payload. A dump of the whole event is unreadable

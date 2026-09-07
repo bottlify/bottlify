@@ -130,7 +130,38 @@ a right one. So these lists grow when the renderer grows, and never in anticipat
 What to watch for: a program that finds no format it wants and refuses to start. That is a signal to
 implement the format, not to add it to the list.
 
-### A11. Nothing here has run against a real GPU or a real guest
+### A11. The thiscall convention is kept although nothing uses it
+
+Every COM interface method in this engine is stdcall, because that is what a COM method is: the
+interface pointer is the first argument on the stack, which is precisely what makes the C bindings
+binary-compatible with the C++ call. **Status: established against real compiled binaries** — twelve
+call sites read instruction by instruction across five images, all agreeing, plus a census in which
+the two libraries whose only virtual calls are COM show twenty-four and thirty stack-passed sites and
+not one in a register. The same binaries do emit the register form in their thousands, for their own
+C++ virtual calls, which is the control that makes the reading trustworthy.
+
+The engine had it wrong until this was measured, and no test could see it: our own harness drove the
+vtables in a way that agreed with the mistake. That is the lesson worth keeping — a convention is not
+verified by a test written against the same assumption.
+
+What is a decision rather than a fact: `Convention.THISCALL` now has no users and is kept anyway. The
+argument for deleting it is real, and it is the argument that produced the bug — a convention that is
+right in the abstract and wrong everywhere it has ever been reached for invites being reached for
+again. It stays because a C++ runtime, one of the `msvcp` libraries on the porting register, exports
+real member functions that genuinely use it, and its definition now carries a warning saying loudly
+what it is not for.
+
+### A12. A module's whole file stays in host memory for its resources
+
+Every loaded image keeps its bytes on the host side, because a resource is read out of the file
+rather than out of the mapping. Without it a library a program ships answers nothing for strings,
+icons, dialogs, menus and version information. **Status: decided, with a known cost** — a game that
+ships twenty libraries holds twenty images in host memory for the life of the process, tens of
+megabytes for a large title. The alternative is re-reading from the volume on each resource call,
+which is a wait on a guest thread, and holding a thread is the cost this project ranks above all
+others. Revisit only with a measurement showing the memory matters more than the latency does.
+
+### A13. Nothing here has run against a real GPU or a real guest
 
 The whole drawing path — the DirectDraw blitter, the presenter, the Direct3D 8 draw path, the
 device-context seam onto GDI — is verified by unit and contract tests only. In particular the

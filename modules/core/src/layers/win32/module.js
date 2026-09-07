@@ -155,7 +155,7 @@ export const win32Module = {
             typeOf: handle=>kernel.handles.typeOf(handle),
         };
 
-        const { setError } = createThreadState(()=>kernel.currentThread());
+        const { setError, stateOf } = createThreadState(()=>kernel.currentThread());
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
@@ -592,6 +592,11 @@ export const win32Module = {
 
             /** The registry, whose contents outlive the process (§9). */
             registry: ()=>hive,
+
+            // The running thread's last error, for whoever is tracing. A
+            // program reports a code long after the call that produced it has
+            // returned, and without this nothing ties the two together.
+            lastError: ()=>stateOf().lastError,
 
             /**
              * Where a COM class is registered. Whoever implements an interface
