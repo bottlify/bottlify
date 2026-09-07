@@ -8,6 +8,16 @@ import { createV86Host } from './internal/v86-host.js';
 import { createThunkTable } from './internal/thunks.js';
 import { FAULT_TRAP_BASE } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
+
+/**
+ * The exception that stopped the machine, if one did.
+ *
+ * Kept rather than raised: a fault is reported from inside the emulator's own
+ * port write, and an exception thrown there is lost crossing back into wasm.
+ *
+ * @type {any}
+ */
+let lastFault = null;
 import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
 
 /**
@@ -86,6 +96,7 @@ export const cpuModule = {
                 {
                     throw new Error('cpu: already booted');
                 }
+                lastFault = null;
                 host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
                 thunks = createThunkTable({ base: settings.thunkBase, port: settings.trapPort });
                 host.onTrap((/** @type {number} */ id)=>{
@@ -108,15 +119,30 @@ export const cpuModule = {
                                     | bytes[2] << 16 | bytes[3] << 24;
                             },
                         );
-                        const error = new Error(describeFault(fault));
-                        Object.assign(error, { code: 'GUEST_FAULT', fault });
-                        throw error;
+                        // Recorded and the machine stopped, never thrown. This
+                        // runs inside the emulator's port write, and an
+                        // exception raised there does not come back out -- it
+                        // is lost crossing into wasm, and what is seen
+                        // afterwards is a machine sitting in the stub's halt,
+                        // which reads as a hang rather than as a fault.
+                        lastFault = fault;
+                        host.stop();
+                        return 0;
                     }
                     return dispatch(id);
                 });
             },
 
             booted: ()=>host !== null,
+
+            /**
+             * The processor exception that stopped the machine, or null.
+             *
+             * Asked after a run that ended without the program saying it had
+             * finished: from outside, a halted processor and a finished program
+             * look the same.
+             */
+            fault: ()=>lastFault && { ...lastFault, text: describeFault(lastFault) },
 
             run(){
                 running = true;

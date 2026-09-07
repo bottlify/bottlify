@@ -13,6 +13,7 @@ import { parsePe, readExports, readImports } from './layers/loader/internal/pe.j
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
+import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
@@ -1136,11 +1137,30 @@ export async function createApp(options){
 
     memory.writeU32(entryVector, start);
 
+    // What FS points at. A program reaches this in code its compiler emitted
+    // rather than code anybody wrote -- a thread-local variable is an index off
+    // FS:[0x2c], an exception handler's prologue writes FS:[0] -- so a thread
+    // running without one reads linear address 0x2c, finds nothing, and carries
+    // on with a null.
+    const process = createProcessBlocks({
+        allocate: allocateFromHeap,
+        writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+        processId: 0x1000,
+        version: { major: 5, minor: 1, build: 2600 },
+        imageBase: image.base,
+    });
+
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
+    const mainBlock = process.createThreadBlock({
+        id: 1,
+        stackBase: initialStack,
+        stackLimit: initialStack - stackSize,
+    });
     const mainThread = kernel.createThread({
         entry: start,
         stackTop: initialStack,
+        tebAddress: mainBlock.teb,
         name: 'main',
     });
 
@@ -1244,6 +1264,19 @@ export async function createApp(options){
                 {
                     events.emit('exit', { code });
                     return code;
+                }
+
+                // A processor exception stops the machine rather than raising
+                // anything: the report cannot be thrown from where it is
+                // noticed, so it is left here to be found. Checked before the
+                // next turn, because from outside a halted processor and a
+                // program that finished look exactly alike.
+                const fault = cpu.fault();
+                if (fault)
+                {
+                    const error = new Error(fault.text);
+                    Object.assign(error, { code: 'GUEST_FAULT', fault });
+                    throw fail('guest-fault', error);
                 }
 
                 let step;
