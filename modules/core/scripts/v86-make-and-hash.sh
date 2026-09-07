@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Copyright © 2026 Bottlify Project
-# Licensed under BSD-2-Clause License
+# Licensed under the Mozilla Public License, version 2.0
 # See LICENSE for details
 #
 # Builds v86 from a checked-out submodule and copies the distributable

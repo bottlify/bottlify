@@ -14,3 +14,7 @@ modules/core/vendor/prebuilt/
 
 # Game bundles built locally: gigabytes of someone else's data.
 bundles/
+
+# The library application is developed locally and ships from its own place,
+# with its own assets and their own attribution.
+ui/

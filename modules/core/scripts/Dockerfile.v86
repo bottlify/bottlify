@@ -1,5 +1,5 @@
 # Copyright © 2026 Bottlify Project
-# Licensed under BSD-2-Clause License
+# Licensed under the Mozilla Public License, version 2.0
 # See LICENSE for details
 
 # Pinned build image for the vendored v86. Version pins are what make the

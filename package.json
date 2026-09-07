@@ -2,7 +2,7 @@
   "name": "bottlify",
   "private": true,
   "type": "module",
-  "license": "BSD-2-Clause",
+  "license": "MPL-2.0",
   "engines": {
     "node": ">=22"
   },
