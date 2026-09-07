@@ -259,10 +259,11 @@ export const IDIRECT3D9_SLOTS = /** @type {[string, number][]} */ ([
 /**
  * IDirectDraw7, after IUnknown's three.
  *
- * The four DirectDraw generations share this shape almost exactly; the earlier
- * ones lack the last few and take the smaller surface descriptor. Only the
- * seventh is declared here, because it is the one a program written after 1998
- * asks for and the one the objects behind this seam model.
+ * The four DirectDraw generations are prefixes of one list: each newer one
+ * appends and never reorders, which is what makes the older tables slices of
+ * this one. The single exception is SetDisplayMode, which the first generation
+ * declares with three arguments and every later one with five -- so the first
+ * generation's table is a slice with one entry replaced, not a slice.
  */
 export const IDIRECTDRAW7_SLOTS = /** @type {[string, number][]} */ ([
     ['Compact', 0],
@@ -294,8 +295,27 @@ export const IDIRECTDRAW7_SLOTS = /** @type {[string, number][]} */ ([
     ['EvaluateMode', 2],
 ]);
 
+/** IDirectDraw4: everything up to and including GetDeviceIdentifier. */
+export const IDIRECTDRAW4_SLOTS = IDIRECTDRAW7_SLOTS.slice(0, 25);
+
+/** IDirectDraw2: through GetAvailableVidMem. */
+export const IDIRECTDRAW2_SLOTS = IDIRECTDRAW7_SLOTS.slice(0, 21);
+
+/** IDirectDraw: through WaitForVerticalBlank, with the three-argument SetDisplayMode. */
+export const IDIRECTDRAW_SLOTS = /** @type {[string, number][]} */ (
+    IDIRECTDRAW7_SLOTS.slice(0, 20).map(function narrow(slot){
+        return slot[0] === 'SetDisplayMode' ? [slot[0], 3] : slot;
+    }));
+
 /**
  * IDirectDrawSurface7, after IUnknown's three.
+ *
+ * As with the ddraw object, the earlier surface generations are prefixes:
+ * the first ends at UpdateOverlayZOrder, the second adds the three through
+ * PageUnlock, the third SetSurfaceDesc, the fourth the private-data and
+ * uniqueness five, and the seventh the priority and LOD four. What the
+ * prefixes do not say is that the fourth generation onward takes the larger
+ * surface descriptor in Lock and GetSurfaceDesc; that is the seam's to know.
  *
  * The Blt family sits in the middle and the order within it is alphabetical by
  * accident rather than design -- Blt, BltBatch, BltFast -- which is the sort of
@@ -348,4 +368,27 @@ export const IDIRECTDRAWSURFACE7_SLOTS = /** @type {[string, number][]} */ ([
     ['GetPriority', 1],
     ['SetLOD', 1],
     ['GetLOD', 1],
+]);
+
+export const IDIRECTDRAWSURFACE4_SLOTS = IDIRECTDRAWSURFACE7_SLOTS.slice(0, 42);
+export const IDIRECTDRAWSURFACE3_SLOTS = IDIRECTDRAWSURFACE7_SLOTS.slice(0, 37);
+export const IDIRECTDRAWSURFACE2_SLOTS = IDIRECTDRAWSURFACE7_SLOTS.slice(0, 36);
+export const IDIRECTDRAWSURFACE_SLOTS = IDIRECTDRAWSURFACE7_SLOTS.slice(0, 33);
+
+/** IDirectDrawPalette, after IUnknown's three. One shape for every generation. */
+export const IDIRECTDRAWPALETTE_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetCaps', 1],
+    ['GetEntries', 4],
+    ['Initialize', 3],
+    ['SetEntries', 4],
+]);
+
+/** IDirectDrawClipper, after IUnknown's three. */
+export const IDIRECTDRAWCLIPPER_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetClipList', 3],
+    ['GetHWnd', 1],
+    ['Initialize', 2],
+    ['IsClipListChanged', 1],
+    ['SetClipList', 2],
+    ['SetHWnd', 2],
 ]);

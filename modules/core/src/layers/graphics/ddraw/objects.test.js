@@ -8,12 +8,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     CLASS_E_NOAGGREGATION,
+    DDCKEY_DESTBLT,
+    DDCKEY_SRCBLT,
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
+    DDERR_CLIPPERISUSINGHWND,
     DDERR_DCALREADYCREATED,
     DDERR_INVALIDCAPS,
+    DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
     DDERR_NOCLIPPERATTACHED,
+    DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
@@ -25,9 +30,11 @@ import {
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
+    DDPCAPS_4BIT,
     DDPCAPS_8BIT,
     DDPCAPS_ALLOW256,
     DDPCAPS_PRIMARYSURFACE,
+    DDPF_PALETTEINDEXED8,
     DDPF_RGB,
     DDSCAPS2_TEXTUREMANAGE,
     DDSCAPS_BACKBUFFER,
@@ -804,6 +811,271 @@ test('a surface with no size is refused, and a primary takes the screen\'s', ()=
     assert.ok(primary.caps & DDSCAPS_VISIBLE);
 
     assert.equal(primary.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- the display mode, and the surfaces that take their shape from it ---
+
+test('a fresh object shows the screen at 32 bits, and a mode change needs a level first', ()=>{
+    const ddraw = createDirectDraw({ version: 7 });
+    assert.deepEqual(ddraw.displayMode,
+        { width: 640, height: 480, bitCount: 32, refreshRate: 0 });
+    assert.equal(ddraw.setDisplayMode(320, 240, 8), DDERR_NOCOOPERATIVELEVELSET);
+    assert.equal(ddraw.restoreDisplayMode(), DDERR_NOCOOPERATIVELEVELSET);
+
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    assert.equal(ddraw.setDisplayMode(320, 240, 24), DDERR_INVALIDMODE, 'no 24-bit mode');
+    assert.equal(ddraw.setDisplayMode(0, 240, 32), DDERR_INVALIDMODE, 'no empty mode');
+    assert.equal(ddraw.displayMode.width, 640, 'a refused mode changes nothing');
+
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+test('a primary takes the mode\'s size and format, whatever it asked for', ()=>{
+    const ddraw = withLevel({ level: DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN });
+    assert.equal(ddraw.setDisplayMode(320, 240, 8), DD_OK);
+
+    const created = ddraw.createSurface({
+        flags: SIZED | DDSD_PIXELFORMAT,
+        caps: DDSCAPS_PRIMARYSURFACE,
+        width: 999,
+        height: 999,
+        pixelFormat: RGB32,
+    });
+    assert.equal(created.hr, DD_OK);
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(primary.width, 320);
+    assert.equal(primary.height, 240);
+    assert.equal(primary.pixelFormat.bitCount, 8);
+    assert.ok(primary.pixelFormat.flags & DDPF_PALETTEINDEXED8, 'eight bits is an index');
+    assert.equal(primary.pitch, 320, 'one byte a pixel');
+    assert.equal(primary.bytesPerPixel, 1);
+
+    assert.equal(ddraw.restoreDisplayMode(), DD_OK);
+    assert.deepEqual(ddraw.displayMode,
+        { width: 640, height: 480, bitCount: 32, refreshRate: 0 });
+
+    assert.equal(primary.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+test('an offscreen surface with no format takes the mode\'s, and one with a format keeps it', ()=>{
+    const ddraw = withLevel();
+    assert.equal(ddraw.setDisplayMode(640, 480, 16), DD_OK);
+
+    const bare = ddraw.createSurface({
+        flags: SIZED, caps: DDSCAPS_OFFSCREENPLAIN, width: 8, height: 8,
+    });
+    assert.equal(bare.hr, DD_OK);
+    const unformatted = /** @type {NonNullable<typeof bare.surface>} */ (bare.surface);
+    assert.equal(unformatted.pixelFormat.bitCount, 16);
+    assert.equal(unformatted.pixelFormat.redMask, 0xf800, 'five-six-five');
+    assert.equal(unformatted.pitch, 16);
+
+    const explicit = makeOffscreen(ddraw, { width: 8, height: 8 });
+    assert.equal(explicit.pixelFormat.bitCount, 32, 'a stated format is not overridden');
+    assert.equal(explicit.pitch, 32);
+
+    assert.equal(unformatted.release(), 0);
+    assert.equal(explicit.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- palette entries ---
+
+test('a palette holds every entry from the start and reads back what was set', ()=>{
+    const ddraw = withLevel();
+    const made = ddraw.createPalette(DDPCAPS_8BIT | DDPCAPS_ALLOW256, [0x00112233, 0x00445566]);
+    assert.equal(made.hr, DD_OK);
+    const palette = /** @type {NonNullable<typeof made.palette>} */ (made.palette);
+
+    assert.equal(palette.entries.length, 256);
+    assert.deepEqual(palette.getEntries(0, 3).entries, [0x00112233, 0x00445566, 0],
+        'the ones not given are zero, not absent');
+
+    assert.equal(palette.setEntries(250, [1, 2, 3, 4, 5, 6]), DD_OK);
+    assert.deepEqual(palette.getEntries(250, 6).entries, [1, 2, 3, 4, 5, 6]);
+    assert.equal(palette.setEntries(251, [1, 2, 3, 4, 5, 6]), DDERR_INVALIDPARAMS,
+        'one past the end refuses the whole write');
+    assert.deepEqual(palette.getEntries(250, 6).entries, [1, 2, 3, 4, 5, 6], 'and wrote nothing');
+    assert.equal(palette.getEntries(255, 2).hr, DDERR_INVALIDPARAMS);
+
+    const small = ddraw.createPalette(DDPCAPS_4BIT, []);
+    const sixteen = /** @type {NonNullable<typeof small.palette>} */ (small.palette);
+    assert.equal(sixteen.entries.length, 16);
+    assert.equal(sixteen.setEntries(0, new Array(17).fill(0)), DDERR_INVALIDPARAMS);
+
+    assert.equal(palette.release(), 0);
+    assert.equal(sixteen.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- the clipper's window ---
+
+test('a clipper bound to a window takes its list from the window, not from a call', ()=>{
+    const ddraw = withLevel();
+    const made = ddraw.createClipper(0);
+    const clipper = /** @type {NonNullable<typeof made.clipper>} */ (made.clipper);
+
+    assert.equal(clipper.window, 0);
+    assert.deepEqual(clipper.clipList, []);
+    assert.equal(clipper.isClipListChanged(), false, 'nothing has moved yet');
+
+    assert.equal(clipper.setClipList([{ left: 0, top: 0, right: 4, bottom: 4 }]), DD_OK);
+    assert.equal(clipper.isClipListChanged(), true);
+    assert.equal(clipper.isClipListChanged(), false, 'asking is what clears it');
+
+    assert.equal(clipper.setHWnd(HWND), DD_OK);
+    assert.equal(clipper.window, HWND);
+    assert.equal(clipper.setClipList([]), DDERR_CLIPPERISUSINGHWND);
+    assert.equal(clipper.clipList.length, 1, 'the refused call changed nothing');
+
+    assert.equal(clipper.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- colour keys ---
+
+test('a surface has no colour key until one is set, and each kind is its own', ()=>{
+    const ddraw = withLevel();
+    const surface = makeOffscreen(ddraw);
+
+    assert.deepEqual(surface.getColorKey(DDCKEY_SRCBLT), { hr: DDERR_NOCOLORKEY, key: null });
+
+    assert.equal(surface.setColorKey(DDCKEY_SRCBLT, { low: 0xff00ff, high: 0xff00ff }), DD_OK);
+    assert.deepEqual(surface.getColorKey(DDCKEY_SRCBLT),
+        { hr: DD_OK, key: { low: 0xff00ff, high: 0xff00ff } });
+    assert.equal(surface.getColorKey(DDCKEY_DESTBLT).hr, DDERR_NOCOLORKEY,
+        'the destination key is a different key');
+
+    assert.equal(surface.setColorKey(DDCKEY_DESTBLT, { low: 1, high: 2 }), DD_OK);
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 });
+
+    assert.equal(surface.setColorKey(DDCKEY_SRCBLT, null), DD_OK);
+    assert.equal(surface.getColorKey(DDCKEY_SRCBLT).hr, DDERR_NOCOLORKEY, 'null removes it');
+    assert.deepEqual(surface.getColorKey(DDCKEY_DESTBLT).key, { low: 1, high: 2 },
+        'and leaves the other alone');
+
+    assert.equal(surface.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- when the screen is told it changed ---
+
+test('the primary reports a change on a flip, an unlock and a released DC; others never', ()=>{
+    /** @type {any[]} */
+    const presented = [];
+    const ddraw = createDirectDraw({ version: 7, onPresent: surface=>presented.push(surface) });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const created = ddraw.createSurface({
+        flags: DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP,
+        backBufferCount: 1,
+    });
+    const front = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+
+    assert.equal(front.flip(null), DD_OK);
+    assert.equal(presented.length, 1, 'a flip is one report');
+    assert.equal(presented[0], front, 'and it names the front');
+
+    assert.equal(front.lock(null).hr, DD_OK);
+    assert.equal(presented.length, 1, 'locking shows nothing yet');
+    assert.equal(front.unlock(null), DD_OK);
+    assert.equal(presented.length, 2, 'unlocking is when the pixels may have changed');
+
+    const dc = front.getDC();
+    assert.equal(dc.hr, DD_OK);
+    assert.equal(front.releaseDC(/** @type {number} */ (dc.dc)), DD_OK);
+    assert.equal(presented.length, 3);
+
+    const offscreen = makeOffscreen(ddraw);
+    assert.equal(offscreen.lock(null).hr, DD_OK);
+    assert.equal(offscreen.unlock(null), DD_OK);
+    const other = offscreen.getDC();
+    assert.equal(offscreen.releaseDC(/** @type {number} */ (other.dc)), DD_OK);
+    assert.equal(presented.length, 3, 'an offscreen surface is not on the screen');
+
+    assert.equal(offscreen.release(), 0);
+    assert.equal(front.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- the device context, as whoever makes one is told about it ---
+
+test('a device context is asked for over the surface\'s own pixels, and given back', ()=>{
+    /** @type {any[]} */
+    const made = [];
+    /** @type {number[]} */
+    const returned = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x7700 + made.length;
+        },
+        releaseDc: handle=>returned.push(handle),
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_NORMAL);
+    const surface = makeOffscreen(ddraw, { width: 10, height: 6 });
+
+    assert.equal(surface.dc, null);
+    assert.equal(surface.locked, false);
+    assert.equal(ddraw.surfaceWithDc(0x7701), null, 'no DC yet');
+
+    const dc = surface.getDC();
+    assert.equal(dc.hr, DD_OK);
+    assert.equal(dc.dc, 0x7701, 'the handle is the one the maker chose');
+    assert.deepEqual(made,
+        [{ width: 10, height: 6, pitch: 40, bitCount: 32, bits: surface.buffer }]);
+    assert.equal(surface.dc, 0x7701);
+    assert.equal(ddraw.surfaceWithDc(0x7701), surface);
+
+    assert.equal(surface.lock(null).hr, DDERR_SURFACEBUSY);
+    assert.equal(surface.locked, false, 'a refused lock is not a lock');
+
+    assert.equal(surface.releaseDC(0x7701), DD_OK);
+    assert.deepEqual(returned, [0x7701]);
+    assert.equal(surface.dc, null);
+    assert.equal(ddraw.surfaceWithDc(0x7701), null, 'and the handle no longer names it');
+
+    assert.equal(surface.lock(null).hr, DD_OK);
+    assert.equal(surface.locked, true);
+    assert.equal(surface.unlock(null), DD_OK);
+    assert.equal(surface.locked, false);
+
+    assert.equal(surface.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+// --- what the object knows about its primary, and a surface about its changes ---
+
+test('the primary is found once made, and a surface counts its own changes', ()=>{
+    const ddraw = withLevel();
+    assert.equal(ddraw.primarySurface(), null);
+
+    const offscreen = makeOffscreen(ddraw);
+    assert.equal(ddraw.primarySurface(), null, 'an offscreen surface is not it');
+    const created = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    const primary = /** @type {NonNullable<typeof created.surface>} */ (created.surface);
+    assert.equal(ddraw.primarySurface(), primary);
+
+    assert.equal(offscreen.uniquenessValue(), 1);
+    offscreen.changeUniquenessValue();
+    assert.equal(offscreen.uniquenessValue(), 2);
+    assert.equal(primary.uniquenessValue(), 1, 'each surface counts alone');
+
+    assert.equal(primary.release(), 0);
+    assert.equal(ddraw.primarySurface(), null, 'released is gone');
+    assert.equal(offscreen.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
 });

@@ -146,6 +146,68 @@ export const D3DCAPS8 = Object.freeze({
     SIZE: 0xd4,
 });
 
+/** RECT, as DirectDraw's Blt and Lock take it: four longs. */
+export const RECT = Object.freeze({ left: 0x00, top: 0x04, right: 0x08, bottom: 0x0c, SIZE: 0x10 });
+
+/** DDCOLORKEY: a low and a high value, inclusive. */
+export const DDCOLORKEY = Object.freeze({ low: 0x00, high: 0x04, SIZE: 0x08 });
+
+/** DDSCAPS2, which the newer surface generations take where the old took one dword. */
+export const DDSCAPS2 = Object.freeze({
+    dwCaps: 0x00,
+    dwCaps2: 0x04,
+    dwCaps3: 0x08,
+    dwCaps4: 0x0c,
+    SIZE: 0x10,
+});
+
+/**
+ * DDBLTFX. Only the fields a blit here reads are named; the rest is depth
+ * and alpha state this layer does not honour. The fill colour is a union
+ * with the fill depth and the pattern surface, all at one offset.
+ */
+export const DDBLTFX = Object.freeze({
+    dwSize: 0x00,
+    dwDDFX: 0x04,
+    dwROP: 0x08,
+    dwFillColor: 0x50,
+    ddckDestColorkey: 0x54,
+    ddckSrcColorkey: 0x5c,
+    SIZE: 0x64,
+});
+
+/**
+ * DDCAPS as DirectX 7 lays it out. The structure grew twice, and a caller
+ * says which one it allocated through dwSize; the three sizes are the ones
+ * GetCaps accepts, and everything a caller's version lacks is simply not
+ * written.
+ */
+export const DDCAPS = Object.freeze({
+    dwSize: 0x00,
+    dwCaps: 0x04,
+    dwCaps2: 0x08,
+    dwCKeyCaps: 0x0c,
+    dwFXCaps: 0x10,
+    dwFXAlphaCaps: 0x14,
+    dwPalCaps: 0x18,
+    dwSVCaps: 0x1c,
+    dwZBufferBitDepths: 0x38,
+    dwVidMemTotal: 0x3c,
+    dwVidMemFree: 0x40,
+    dwNumFourCCCodes: 0x4c,
+    dwRops: 0x64,
+    ddsOldCaps: 0x84,
+    dwSVBCaps: 0xac,
+    dwVSBCaps: 0xd8,
+    dwSSBCaps: 0x104,
+    dwNLVBCaps: 0x13c,
+    ddsCaps: 0x16c,
+    SIZE: 0x17c,
+});
+
+/** The sizes of DDCAPS across the versions that declared it. */
+export const DDCAPS_SIZES = Object.freeze([0x13c, 0x16c, 0x17c]);
+
 /**
  * Reading and writing dwords through the memory service, in one place.
  *

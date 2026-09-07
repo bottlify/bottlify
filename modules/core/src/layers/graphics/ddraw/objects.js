@@ -47,8 +47,11 @@ import {
     DDERR_CANNOTATTACHSURFACE,
     DDERR_CANNOTDETACHSURFACE,
     DDERR_DCALREADYCREATED,
+    DDERR_CLIPPERISUSINGHWND,
+    DDERR_INVALIDMODE,
     DDERR_INVALIDPARAMS,
     DDERR_NOCLIPPERATTACHED,
+    DDERR_NOCOLORKEY,
     DDERR_NOCOOPERATIVELEVELSET,
     DDERR_NODC,
     DDERR_NOEXCLUSIVEMODE,
@@ -60,10 +63,16 @@ import {
     DDERR_SURFACEBUSY,
     DDERR_SURFACELOST,
     DDERR_SURFACENOTATTACHED,
+    DDPCAPS_1BIT,
+    DDPCAPS_2BIT,
+    DDPCAPS_4BIT,
     DDPCAPS_PRIMARYSURFACE,
+    DDPF_PALETTEINDEXED8,
+    DDPF_RGB,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
+    DDSCAPS_VISIBLE,
     DDSCAPS_ZBUFFER,
     DDSCL_EXCLUSIVE,
     DDSD_BACKBUFFERCOUNT,
@@ -110,6 +119,12 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  */
 
 /**
+ * @typedef {Object} ColorKey
+ * @property {number} low
+ * @property {number} high
+ */
+
+/**
  * @typedef {Object} SurfaceRequest
  * @property {number} flags       dwFlags, saying which of the rest was filled in.
  * @property {number} caps
@@ -133,6 +148,8 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {number} caps
  * @property {number[]} entries
  * @property {(on: boolean) => void} markPrimary
+ * @property {(start: number, values: readonly number[]) => number} setEntries
+ * @property {(start: number, count: number) => { hr: number, entries: number[] }} getEntries
  *
  * @typedef {Object} Clipper
  * @property {number} refCount
@@ -141,6 +158,9 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {() => number} release
  * @property {Rect[]} clipList
  * @property {(rects: Rect[]) => number} setClipList
+ * @property {number} window
+ * @property {(handle: number) => number} setHWnd
+ * @property {() => boolean} isClipListChanged
  *
  * @typedef {Object} LockResult
  * @property {number} hr
@@ -163,6 +183,14 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {boolean} implicit       Created as part of a complex surface.
  * @property {Palette | null} palette
  * @property {Clipper | null} clipper
+ * @property {number} bytesPerPixel
+ * @property {boolean} locked
+ * @property {number | null} dc
+ * @property {() => void} present
+ * @property {(which: number, key: ColorKey | null) => number} setColorKey
+ * @property {(which: number) => { hr: number, key: ColorKey | null }} getColorKey
+ * @property {() => number} uniquenessValue
+ * @property {() => void} changeUniquenessValue
  * @property {Surface | null} flipNext
  * @property {Surface | null} flipPrev
  * @property {(value: number) => void} setBuffer
@@ -187,17 +215,44 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {(target?: Surface | null, flags?: number) => number} flip
  */
 
-/** A pixel format for a surface whose description did not carry one. */
-const DEFAULT_PIXEL_FORMAT = Object.freeze({
-    size: 0x20,
-    flags: 0,
-    fourCC: 0,
-    bitCount: 32,
-    redMask: 0x00ff0000,
-    greenMask: 0x0000ff00,
-    blueMask: 0x000000ff,
-    alphaMask: 0,
-});
+/**
+ * The pixel format a display depth means, which is what a primary surface --
+ * and a surface whose description carried no format -- is created with.
+ *
+ * Three depths: a palettised byte, 5-6-5, and X8R8G8B8. Twenty-four bits is
+ * not a mode this layer sets, and a request for one is refused rather than
+ * answered with the nearest thing.
+ *
+ * @param {number} bitCount
+ * @returns {import("./structs.js").PixelFormatFields | null}
+ */
+export function pixelFormatForDepth(bitCount){
+    switch (bitCount)
+    {
+        case 8:
+            return { size: 0x20, flags: DDPF_RGB | DDPF_PALETTEINDEXED8, fourCC: 0,
+                bitCount: 8, redMask: 0, greenMask: 0, blueMask: 0, alphaMask: 0 };
+        case 16:
+            return { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 16,
+                redMask: 0xf800, greenMask: 0x07e0, blueMask: 0x001f, alphaMask: 0 };
+        case 32:
+            return { size: 0x20, flags: DDPF_RGB, fourCC: 0, bitCount: 32,
+                redMask: 0x00ff0000, greenMask: 0x0000ff00, blueMask: 0x000000ff, alphaMask: 0 };
+        default:
+            return null;
+    }
+}
+
+/** How many entries a palette holds, from the capability that says its width. */
+const PALETTE_SIZES = Object.freeze([
+    [DDPCAPS_1BIT, 2], [DDPCAPS_2BIT, 4], [DDPCAPS_4BIT, 16],
+]);
+
+/** @param {number} caps @returns {number} */
+function paletteSize(caps){
+    const narrow = PALETTE_SIZES.find(([bit])=>(caps & bit) !== 0);
+    return narrow ? narrow[1] : 256;
+}
 
 /**
  * @param {Rect | null} rect
@@ -244,9 +299,26 @@ function sameRect(a, b){
  *           Where a surface's pixels live. Injected so the model is testable
  *           with no backend; the default hands out distinct, page-aligned
  *           addresses and never reads or writes them.
- * @property {() => number} [createDc]
- *           A device context handle for GetDC. This layer records that one was
- *           handed out and nothing more -- what a DC *is* belongs to gdi.
+ * @property {(attributes: DcAttributes) => number} [createDc]
+ *           A device context handle for GetDC, over the surface's own pixels.
+ *           This layer records that one was handed out and nothing more --
+ *           what a DC *is* belongs to gdi, which is told where the pixels are.
+ * @property {(handle: number) => void} [releaseDc]
+ *           The other end of `createDc`.
+ * @property {(surface: Surface) => void} [onPresent]
+ *           Called whenever what the primary surface shows may have changed: a
+ *           flip, an unlock or a released DC on it, a blit into it. What
+ *           showing means -- uploading, composing, presenting -- is not decided
+ *           here.
+ */
+
+/**
+ * @typedef {Object} DcAttributes
+ * @property {number} width
+ * @property {number} height
+ * @property {number} pitch
+ * @property {number} bitCount
+ * @property {number} bits   Guest address of row zero.
  */
 
 /**
@@ -268,6 +340,15 @@ export function createDirectDraw(options = {}){
         nextDc += 4;
         return nextDc;
     });
+    const releaseDc = options.releaseDc ?? (()=>{});
+    const onPresent = options.onPresent ?? (()=>{});
+
+    /**
+     * The display mode, which is what a primary surface takes its size and
+     * format from. Restoring puts it back to what the screen was built as.
+     */
+    const nativeMode = { width: screenWidth, height: screenHeight, bitCount: 32, refreshRate: 0 };
+    let displayMode = { ...nativeMode };
 
     /** Per-generation counts. A generation exists once it has been handed out. */
     /** @type {Map<string, number>} */
@@ -438,9 +519,14 @@ export function createDirectDraw(options = {}){
      * @param {number} paletteCaps
      * @param {number[]} entries
      * @param {string | null} owner  The generation to release when the palette dies.
+     * @returns {Palette}
      */
     function makePalette(paletteCaps, entries, owner){
         let caps = paletteCaps >>> 0;
+        const size = paletteSize(caps);
+        // Every entry exists from the start: a program reads back the ones it
+        // never wrote and expects zeros, not a shorter array.
+        const held = Array.from({ length: size }, (_, index)=>(entries[index] ?? 0) >>> 0);
         const life = counted(()=>{
             if (owner)
             {
@@ -459,16 +545,49 @@ export function createDirectDraw(options = {}){
             get caps(){
                 return caps;
             },
-            entries: entries.slice(),
+            get entries(){
+                return held;
+            },
             /** @param {boolean} on */
             markPrimary(on){
                 caps = (on ? caps | DDPCAPS_PRIMARYSURFACE : caps & ~DDPCAPS_PRIMARYSURFACE) >>> 0;
             },
+
+            /**
+             * @param {number} start
+             * @param {readonly number[]} values  PALETTEENTRY dwords.
+             */
+            setEntries(start, values){
+                if (start < 0 || start + values.length > size)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                values.forEach((value, index)=>{
+                    held[start + index] = value >>> 0;
+                });
+                return DD_OK;
+            },
+
+            /**
+             * @param {number} start
+             * @param {number} count
+             * @returns {{ hr: number, entries: number[] }}
+             */
+            getEntries(start, count){
+                if (start < 0 || count < 0 || start + count > size)
+                {
+                    return { hr: DDERR_INVALIDPARAMS, entries: [] };
+                }
+                return { hr: DD_OK, entries: held.slice(start, start + count) };
+            },
         };
     }
 
+    /** @returns {Clipper} */
     function makeClipper(){
         let clipList = /** @type {Rect[]} */ ([]);
+        let window = 0;
+        let changed = false;
         const life = counted(()=>{
             clipList = [];
         });
@@ -484,10 +603,35 @@ export function createDirectDraw(options = {}){
             get clipList(){
                 return clipList;
             },
-            /** @param {Rect[]} rects */
+            /**
+             * A clipper bound to a window takes its list from the window, so a
+             * list set by hand is refused while one is bound.
+             *
+             * @param {Rect[]} rects
+             */
             setClipList(rects){
+                if (window !== 0)
+                {
+                    return DDERR_CLIPPERISUSINGHWND;
+                }
                 clipList = rects.map(rect=>({ ...rect }));
+                changed = true;
                 return DD_OK;
+            },
+            get window(){
+                return window;
+            },
+            /** @param {number} handle */
+            setHWnd(handle){
+                window = handle >>> 0;
+                changed = true;
+                return DD_OK;
+            },
+            /** Whether the list moved since the last time this was asked. */
+            isClipListChanged(){
+                const answer = changed;
+                changed = false;
+                return answer;
             },
         };
     }
@@ -512,15 +656,18 @@ export function createDirectDraw(options = {}){
         let flipImplicit = false;
         /** @type {Surface | null} */
         let depth = null;
-        /** @type {ReturnType<typeof makePalette> | null} */
+        /** @type {Palette | null} */
         let palette = null;
-        /** @type {ReturnType<typeof makeClipper> | null} */
+        /** @type {Clipper | null} */
         let clipper = null;
         /** @type {Rect[]} */
         const locks = [];
         /** @type {number | null} */
         let dc = null;
         let lost = false;
+        /** Colour keys by the DDCKEY flag that names them. @type {Map<number, ColorKey>} */
+        const colorKeys = new Map();
+        let uniqueness = 1;
 
         const life = counted(()=>{
             surfaces.delete(surface);
@@ -582,6 +729,58 @@ export function createDirectDraw(options = {}){
             get clipper(){
                 return clipper;
             },
+            get bytesPerPixel(){
+                return bpp;
+            },
+            get locked(){
+                return locks.length > 0;
+            },
+            get dc(){
+                return dc;
+            },
+
+            /**
+             * @param {number} which  A DDCKEY flag.
+             * @param {ColorKey | null} key  Null removes the key.
+             */
+            setColorKey(which, key){
+                if (key === null)
+                {
+                    colorKeys.delete(which);
+                }
+                else
+                {
+                    colorKeys.set(which, { low: key.low >>> 0, high: key.high >>> 0 });
+                }
+                return DD_OK;
+            },
+
+            /** @param {number} which */
+            getColorKey(which){
+                const key = colorKeys.get(which);
+                return key ? { hr: DD_OK, key: { ...key } } : { hr: DDERR_NOCOLORKEY, key: null };
+            },
+
+            uniquenessValue(){
+                return uniqueness;
+            },
+
+            /** Called by whatever wrote into the surface behind the program's back. */
+            changeUniquenessValue(){
+                uniqueness++;
+            },
+
+            /**
+             * What this surface shows may have changed. Only the visible
+             * primary is worth telling anyone about: everything else is seen
+             * through a blit or a flip onto it, which reports on its own.
+             */
+            present(){
+                if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0 && (caps & DDSCAPS_VISIBLE) !== 0)
+                {
+                    onPresent(surface);
+                }
+            },
 
             /** @param {number} value */
             setBuffer(value){
@@ -619,7 +818,7 @@ export function createDirectDraw(options = {}){
                 return DD_OK;
             },
 
-            /** @param {ReturnType<typeof makePalette> | null} next */
+            /** @param {Palette | null} next */
             setPalette(next){
                 if (palette)
                 {
@@ -650,7 +849,7 @@ export function createDirectDraw(options = {}){
                 return { hr: DD_OK, palette };
             },
 
-            /** @param {ReturnType<typeof makeClipper> | null} next */
+            /** @param {Clipper | null} next */
             setClipper(next){
                 clipper?.release();
                 clipper = next;
@@ -725,6 +924,7 @@ export function createDirectDraw(options = {}){
                     return DDERR_NOTLOCKED;
                 }
                 locks.splice(index, 1);
+                surface.present();
                 return DD_OK;
             },
 
@@ -741,7 +941,8 @@ export function createDirectDraw(options = {}){
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
-                dc = createDc();
+                dc = createDc({ width: spec.width, height: spec.height, pitch, bitCount: bpp * 8,
+                    bits: buffer });
                 return { hr: DD_OK, dc };
             },
 
@@ -752,7 +953,9 @@ export function createDirectDraw(options = {}){
                     return DDERR_NODC;
                 }
                 void handle;
+                releaseDc(dc);
                 dc = null;
+                surface.present();
                 return DD_OK;
             },
 
@@ -903,9 +1106,10 @@ export function createDirectDraw(options = {}){
                 }
                 if (target)
                 {
-                    const held = buffer;
+                    const swapped = buffer;
                     buffer = target.buffer;
-                    target.setBuffer(held);
+                    target.setBuffer(swapped);
+                    surface.present();
                     return DD_OK;
                 }
                 const members = chainMembers();
@@ -915,6 +1119,7 @@ export function createDirectDraw(options = {}){
                     members[index].setBuffer(members[index + 1].buffer);
                 }
                 members[members.length - 1].setBuffer(first);
+                surface.present();
                 return DD_OK;
             },
         };
@@ -1016,12 +1221,14 @@ export function createDirectDraw(options = {}){
             return { hr: sizeHr, surface: null };
         }
 
-        // A primary surface is the size of the display mode, whatever the
-        // caller wrote in the width and height fields.
+        // A primary surface is the size and format of the display mode,
+        // whatever the caller wrote in the width, height and format fields.
         const primary = (request.caps & DDSCAPS_PRIMARYSURFACE) !== 0;
-        const width = primary ? screenWidth : (request.width ?? 0);
-        const height = primary ? screenHeight : (request.height ?? 0);
-        const pixelFormat = request.pixelFormat ?? DEFAULT_PIXEL_FORMAT;
+        const width = primary ? displayMode.width : (request.width ?? 0);
+        const height = primary ? displayMode.height : (request.height ?? 0);
+        const modeFormat = /** @type {import("./structs.js").PixelFormatFields} */ (
+            pixelFormatForDepth(displayMode.bitCount));
+        const pixelFormat = primary || !request.pixelFormat ? modeFormat : request.pixelFormat;
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
         {
@@ -1117,6 +1324,38 @@ export function createDirectDraw(options = {}){
 
         createSurface,
 
+        get displayMode(){
+            return { ...displayMode };
+        },
+
+        /**
+         * @param {number} width
+         * @param {number} height
+         * @param {number} bitCount
+         * @param {number} [refreshRate]
+         */
+        setDisplayMode(width, height, bitCount, refreshRate = 0){
+            if (!levelSet)
+            {
+                return DDERR_NOCOOPERATIVELEVELSET;
+            }
+            if (!(width > 0) || !(height > 0) || pixelFormatForDepth(bitCount) === null)
+            {
+                return DDERR_INVALIDMODE;
+            }
+            displayMode = { width, height, bitCount, refreshRate };
+            return DD_OK;
+        },
+
+        restoreDisplayMode(){
+            if (!levelSet)
+            {
+                return DDERR_NOCOOPERATIVELEVELSET;
+            }
+            displayMode = { ...nativeMode };
+            return DD_OK;
+        },
+
         /**
          * @param {number} paletteCaps
          * @param {number[]} entries
@@ -1163,6 +1402,30 @@ export function createDirectDraw(options = {}){
                 surface.restore();
             }
             return DD_OK;
+        },
+
+        /** @returns {Surface | null} the primary surface, if a program has made one */
+        primarySurface(){
+            for (const surface of surfaces)
+            {
+                if ((surface.caps & DDSCAPS_PRIMARYSURFACE) !== 0)
+                {
+                    return surface;
+                }
+            }
+            return null;
+        },
+
+        /** @param {number} handle @returns {Surface | null} the surface a DC was taken on */
+        surfaceWithDc(handle){
+            for (const surface of surfaces)
+            {
+                if (surface.dc === (handle >>> 0))
+                {
+                    return surface;
+                }
+            }
+            return null;
         },
     };
 }

@@ -1,0 +1,1068 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * DirectDraw, between a guest call and the object that implements it.
+ *
+ * As with `d3d8.js`, everything here is translation: a slot reads the words
+ * the guest pushed, turns pointers into structures and interface pointers into
+ * objects, calls the method `ddraw/` already has, and writes back whatever the
+ * caller left room for. Two things make this seam larger than that one:
+ *
+ * - **Four generations of one object, five of another.** A program written
+ *   against IDirectDraw2 and one written against IDirectDraw7 call the same
+ *   method by different slot numbers, hand over descriptors of different
+ *   sizes, and are owed different reference-counting. The tables in
+ *   `vtables.js` settle the slots; the version threaded through every method
+ *   here settles the rest, so a CreateSurface through the second generation
+ *   takes no reference on the object and a Lock through the fourth reads the
+ *   longer descriptor.
+ * - **Pixels move.** A blit copies guest memory to guest memory, a lock hands
+ *   out an address into it, and a device context on a surface has to be one
+ *   GDI can draw through -- which is why this seam is handed a way to make one
+ *   over a given address and a way to say the screen has changed, and does
+ *   neither itself.
+ *
+ * What the seam cannot yet honour is said plainly where it lives: the
+ * enumerations, which need a call back into guest code that nothing here can
+ * make, and AddRef and Release, which the bridge dispatches without saying
+ * which interface pointer they came through.
+ */
+
+import {
+    describe, IDIRECTDRAW7_SLOTS, IDIRECTDRAW4_SLOTS, IDIRECTDRAW2_SLOTS, IDIRECTDRAW_SLOTS,
+    IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE4_SLOTS, IDIRECTDRAWSURFACE3_SLOTS,
+    IDIRECTDRAWSURFACE2_SLOTS, IDIRECTDRAWSURFACE_SLOTS, IDIRECTDRAWPALETTE_SLOTS,
+    IDIRECTDRAWCLIPPER_SLOTS,
+} from './vtables.js';
+import {
+    IID_IDirectDraw, IID_IDirectDraw2, IID_IDirectDraw4, IID_IDirectDraw7,
+    IID_IDirectDrawSurface, IID_IDirectDrawSurface2, IID_IDirectDrawSurface3,
+    IID_IDirectDrawSurface4, IID_IDirectDrawSurface7, IID_IDirectDrawPalette,
+    IID_IDirectDrawClipper,
+} from './iids.js';
+import {
+    DDBLTFX, DDCAPS, DDCAPS_SIZES, DDCOLORKEY, DDSCAPS2, RECT, createFields,
+} from './structs.js';
+import {
+    DDSURFACEDESC, DDSURFACEDESC2, bytesPerPixel, readSurfaceDesc, writePixelFormat,
+    writeSurfaceDesc,
+} from '../ddraw/structs.js';
+import {
+    DDBLTFAST_DESTCOLORKEY, DDBLTFAST_SRCCOLORKEY, DDBLT_KEYDESTOVERRIDE,
+    DDBLT_KEYSRCOVERRIDE, DDCAPS2_CANRENDERWINDOWED, DDCAPS2_CERTIFIED,
+    DDCAPS2_WIDESURFACES, DDCAPS_BLT, DDCAPS_BLTCOLORFILL, DDCAPS_BLTSTRETCH,
+    DDCAPS_CANBLTSYSMEM, DDCAPS_COLORKEY, DDCAPS_GDI, DDCAPS_PALETTE, DDCKEYCAPS_DESTBLT,
+    DDCKEYCAPS_SRCBLT, DDCKEY_DESTBLT, DDCKEY_SRCBLT, DDERR_ALREADYINITIALIZED,
+    DDERR_INVALIDPARAMS, DDERR_SURFACEBUSY, DDERR_SURFACELOST, DDERR_UNSUPPORTED, DDPCAPS_1BIT,
+    DDPCAPS_2BIT, DDPCAPS_4BIT, DDPCAPS_8BIT, DDPCAPS_ALLOW256, DDPCAPS_PRIMARYSURFACE,
+    DDSD_BACKBUFFERCOUNT, DDSD_CAPS, DDSD_HEIGHT, DDSD_PITCH, DDSD_PIXELFORMAT, DDSD_REFRESHRATE,
+    DDSD_WIDTH, DD_OK,
+} from '../ddraw/constants.js';
+import { pixelFormatForDepth } from '../ddraw/objects.js';
+import { blt, bltFast } from '../ddraw/blit.js';
+
+/** What the caps report as video memory: a round number nothing here measures. */
+const VIDEO_MEMORY = 64 << 20;
+
+/** RGNDATAHEADER: a size, a type that is always rectangles, a count, a byte size, a bound. */
+const RGNDATAHEADER = Object.freeze({
+    dwSize: 0x00,
+    iType: 0x04,
+    nCount: 0x08,
+    nRgnSize: 0x0c,
+    rcBound: 0x10,
+    SIZE: 0x20,
+});
+const RDH_RECTANGLES = 1;
+
+/**
+ * Which generation an IDirectDraw version number names, and which surface
+ * generation a surface made through it is handed back as. A program that asks
+ * IDirectDraw2 for a surface gets IDirectDrawSurface (the first), not the
+ * second: the two numberings never lined up.
+ */
+const GENERATIONS = Object.freeze({
+    1: { id: IID_IDirectDraw, name: 'IDirectDraw', slots: IDIRECTDRAW_SLOTS,
+        surface: IID_IDirectDrawSurface, layout: DDSURFACEDESC },
+    2: { id: IID_IDirectDraw2, name: 'IDirectDraw2', slots: IDIRECTDRAW2_SLOTS,
+        surface: IID_IDirectDrawSurface, layout: DDSURFACEDESC },
+    4: { id: IID_IDirectDraw4, name: 'IDirectDraw4', slots: IDIRECTDRAW4_SLOTS,
+        surface: IID_IDirectDrawSurface4, layout: DDSURFACEDESC2 },
+    7: { id: IID_IDirectDraw7, name: 'IDirectDraw7', slots: IDIRECTDRAW7_SLOTS,
+        surface: IID_IDirectDrawSurface7, layout: DDSURFACEDESC2 },
+});
+
+/** The surface generations, with the descriptor each takes and the ddraw interface it names. */
+const SURFACE_GENERATIONS = Object.freeze([
+    { id: IID_IDirectDrawSurface, slots: IDIRECTDRAWSURFACE_SLOTS, layout: DDSURFACEDESC,
+        ddraw: 'IDirectDraw' },
+    { id: IID_IDirectDrawSurface2, slots: IDIRECTDRAWSURFACE2_SLOTS, layout: DDSURFACEDESC,
+        ddraw: 'IDirectDraw' },
+    { id: IID_IDirectDrawSurface3, slots: IDIRECTDRAWSURFACE3_SLOTS, layout: DDSURFACEDESC,
+        ddraw: 'IDirectDraw' },
+    { id: IID_IDirectDrawSurface4, slots: IDIRECTDRAWSURFACE4_SLOTS, layout: DDSURFACEDESC2,
+        ddraw: 'IDirectDraw4' },
+    { id: IID_IDirectDrawSurface7, slots: IDIRECTDRAWSURFACE7_SLOTS, layout: DDSURFACEDESC2,
+        ddraw: 'IDirectDraw7' },
+]);
+
+/**
+ * A GUID as the braced string the interface tables are keyed by: three
+ * little-endian integers and eight raw bytes, which is not a flat read.
+ *
+ * @param {any} memory
+ * @param {number} address
+ * @returns {string}
+ */
+export function readGuid(memory, address){
+    const bytes = memory.readMemory(address >>> 0, 16);
+    const hex = (/** @type {number} */ value, /** @type {number} */ width)=>
+        value.toString(16).toUpperCase().padStart(width, '0');
+    const data1 = (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
+    const data2 = bytes[4] | (bytes[5] << 8);
+    const data3 = bytes[6] | (bytes[7] << 8);
+    const tail = [...bytes.slice(8)].map(byte=>hex(byte, 2)).join('');
+    return `{${hex(data1, 8)}-${hex(data2, 4)}-${hex(data3, 4)}-`
+        + `${tail.slice(0, 4)}-${tail.slice(4)}}`;
+}
+
+/**
+ * The generation an interface identifier names, or null.
+ *
+ * @param {string} id
+ * @returns {1 | 2 | 4 | 7 | null}
+ */
+export function versionOf(id){
+    const found = /** @type {(1 | 2 | 4 | 7)[]} */ ([1, 2, 4, 7]).find(
+        version=>GENERATIONS[version].id === id);
+    return found ?? null;
+}
+
+/**
+ * @typedef {Object} SurfaceDcServices
+ *     How a device context over a surface's own pixels is made and unmade.
+ *     GDI owns device contexts; this seam only knows where the pixels are.
+ * @property {(attributes: import('../ddraw/objects.js').DcAttributes) => number} createSurfaceDc
+ * @property {(handle: number) => void} deleteSurfaceDc
+ */
+
+/**
+ * @typedef {Object} PresentedSurface
+ *     What the primary surface shows, for whoever puts it on the screen.
+ * @property {number} buffer     Guest address of row zero.
+ * @property {number} width
+ * @property {number} height
+ * @property {number} pitch
+ * @property {number} bitCount
+ * @property {number[] | null} palette  256 PALETTEENTRY dwords when the surface is indexed.
+ */
+
+/**
+ * @param {Object} deps
+ * @param {any} deps.publisher    From createPublisher.
+ * @param {any} deps.memory       readMemory/writeMemory.
+ * @param {() => any} deps.screen The display this build is configured for.
+ * @param {SurfaceDcServices} [deps.gdi]
+ * @param {(surface: PresentedSurface) => void} [deps.present]
+ */
+export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }){
+    const fields = createFields(memory);
+
+    /** Which ddraw object made a surface: what GetDDInterface hands back. */
+    /** @type {WeakMap<object, any>} */
+    const owners = new WeakMap();
+
+    /**
+     * A RECT at an address. Typed loosely on purpose: the field reader answers
+     * a record of dwords, and the four names are the rectangle.
+     *
+     * @param {number} address @returns {any}
+     */
+    const rectAt = address=>fields.readStruct(address >>> 0, RECT);
+
+    /** @param {number} pointer @returns {import('../ddraw/objects.js').Rect | null} */
+    const readRect = pointer=>((pointer >>> 0) === 0 ? null : rectAt(pointer));
+
+    /** @param {number} pointer @returns {any} a low and a high value */
+    const readColorKey = pointer=>fields.readStruct(pointer >>> 0, DDCOLORKEY);
+
+    /**
+     * A resource, published as whichever interface it is, with the reference
+     * the out-parameter carries.
+     *
+     * @param {any} object
+     * @param {import('./com.js').InterfaceDescriptor[]} interfaces
+     * @param {string} id
+     * @param {number} out
+     */
+    const handBack = (object, interfaces, id, out)=>{
+        const pointer = publisher.publish(object, interfaces, id);
+        fields.writeU32(out, pointer);
+        return pointer;
+    };
+
+    // --- palette ---
+
+    /** @param {number} caps @returns {number} how many entries such a palette holds */
+    const paletteEntryCount = caps=>{
+        if ((caps & DDPCAPS_1BIT) !== 0)
+        {
+            return 2;
+        }
+        if ((caps & DDPCAPS_2BIT) !== 0)
+        {
+            return 4;
+        }
+        if ((caps & DDPCAPS_4BIT) !== 0)
+        {
+            return 16;
+        }
+        return 256;
+    };
+
+    /** @param {number} pointer @param {number} count @returns {number[]} PALETTEENTRY dwords */
+    const readEntries = (pointer, count)=>Array.from({ length: count },
+        (_, index)=>fields.readU32((pointer >>> 0) + index * 4));
+
+    const paletteInterfaces = [describe(IID_IDirectDrawPalette, IDIRECTDRAWPALETTE_SLOTS, {
+        /** @param {any} palette @param {number[]} args */
+        GetCaps: (palette, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, palette.caps);
+            return DD_OK;
+        },
+        /** @param {any} palette @param {number[]} args */
+        GetEntries: (palette, [, start, count, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const got = palette.getEntries(start >>> 0, count >>> 0);
+            if (got.hr !== DD_OK)
+            {
+                return got.hr;
+            }
+            got.entries.forEach((/** @type {number} */ entry, /** @type {number} */ index)=>{
+                fields.writeU32((out >>> 0) + index * 4, entry);
+            });
+            return DD_OK;
+        },
+        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+        /** @param {any} palette @param {number[]} args */
+        SetEntries: (palette, [, start, count, entries])=>((entries >>> 0) === 0
+            ? DDERR_INVALIDPARAMS
+            : palette.setEntries(start >>> 0, readEntries(entries, count >>> 0))),
+    })];
+
+    // --- clipper ---
+
+    /**
+     * A clip list travels as RGNDATA: a header and then the rectangles. Only
+     * rectangle regions exist here, and a program that hands over any other
+     * kind has handed over one this cannot read.
+     *
+     * @param {number} pointer
+     * @returns {import('../ddraw/objects.js').Rect[] | null}
+     */
+    const readRegion = pointer=>{
+        const at = pointer >>> 0;
+        if (fields.readU32(at + RGNDATAHEADER.iType) !== RDH_RECTANGLES)
+        {
+            return null;
+        }
+        const count = fields.readU32(at + RGNDATAHEADER.nCount);
+        return Array.from({ length: count },
+            (_, index)=>rectAt(at + RGNDATAHEADER.SIZE + index * RECT.SIZE));
+    };
+
+    /**
+     * @param {number} pointer
+     * @param {import('../ddraw/objects.js').Rect[]} rects
+     */
+    const writeRegion = (pointer, rects)=>{
+        const at = pointer >>> 0;
+        const bound = rects.reduce((box, rect)=>({
+            left: Math.min(box.left, rect.left),
+            top: Math.min(box.top, rect.top),
+            right: Math.max(box.right, rect.right),
+            bottom: Math.max(box.bottom, rect.bottom),
+        }), rects[0] ?? { left: 0, top: 0, right: 0, bottom: 0 });
+        fields.writeU32(at + RGNDATAHEADER.dwSize, RGNDATAHEADER.SIZE);
+        fields.writeU32(at + RGNDATAHEADER.iType, RDH_RECTANGLES);
+        fields.writeU32(at + RGNDATAHEADER.nCount, rects.length);
+        fields.writeU32(at + RGNDATAHEADER.nRgnSize, rects.length * RECT.SIZE);
+        fields.writeStruct(at + RGNDATAHEADER.rcBound, RECT, bound);
+        rects.forEach((rect, index)=>{
+            fields.writeStruct(at + RGNDATAHEADER.SIZE + index * RECT.SIZE, RECT, rect);
+        });
+    };
+
+    const clipperInterfaces = [describe(IID_IDirectDrawClipper, IDIRECTDRAWCLIPPER_SLOTS, {
+        /**
+         * A null region buffer asks how large one has to be; a size too small
+         * for the list is answered the same way, with the size and no list.
+         *
+         * @param {any} clipper @param {number[]} args
+         */
+        GetClipList: (clipper, [rect, region, size])=>{
+            if ((size >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const bounds = readRect(rect);
+            const rects = bounds
+                ? clipper.clipList.filter((/** @type {any} */ item)=>
+                    item.left < bounds.right && item.right > bounds.left
+                        && item.top < bounds.bottom && item.bottom > bounds.top)
+                : clipper.clipList;
+            const needed = RGNDATAHEADER.SIZE + rects.length * RECT.SIZE;
+            if ((region >>> 0) === 0 || fields.readU32(size >>> 0) < needed)
+            {
+                fields.writeU32(size >>> 0, needed);
+                return (region >>> 0) === 0 ? DD_OK : DDERR_INVALIDPARAMS;
+            }
+            writeRegion(region, rects);
+            fields.writeU32(size >>> 0, needed);
+            return DD_OK;
+        },
+        /** @param {any} clipper @param {number[]} args */
+        GetHWnd: (clipper, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, clipper.window);
+            return DD_OK;
+        },
+        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+        /** @param {any} clipper @param {number[]} args */
+        IsClipListChanged: (clipper, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, clipper.isClipListChanged() ? 1 : 0);
+            return DD_OK;
+        },
+        /** @param {any} clipper @param {number[]} args */
+        SetClipList: (clipper, [region])=>{
+            if ((region >>> 0) === 0)
+            {
+                return clipper.setClipList([]);
+            }
+            const rects = readRegion(region);
+            return rects === null ? DDERR_INVALIDPARAMS : clipper.setClipList(rects);
+        },
+        /** @param {any} clipper @param {number[]} args */
+        SetHWnd: (clipper, [, window])=>clipper.setHWnd(window >>> 0),
+    })];
+
+    // --- surface ---
+
+    /** @param {any} surface @returns {import('../ddraw/blit.js').BlitSurface} */
+    const blitView = surface=>({
+        buffer: surface.buffer,
+        pitch: surface.pitch,
+        width: surface.width,
+        height: surface.height,
+        bytesPerPixel: surface.bytesPerPixel,
+    });
+
+    /**
+     * The colour keys a blit uses. A key named on the surface is the default;
+     * an override flag takes the one in the effects structure instead.
+     *
+     * @param {any} surface @param {number} which DDCKEY
+     * @param {boolean} override @param {number} fx address of a DDBLTFX, or zero
+     * @param {number} offset the key's offset inside it
+     */
+    const keyFor = (surface, which, override, fx, offset)=>{
+        if (override && (fx >>> 0) !== 0)
+        {
+            return readColorKey((fx >>> 0) + offset);
+        }
+        return surface.getColorKey(which).key ?? undefined;
+    };
+
+    /**
+     * What every blit refuses before a pixel moves: a lost surface, a locked
+     * one, and a depth this layer has no arithmetic for.
+     *
+     * @param {any} dest @param {any} source
+     */
+    const blitPreconditions = (dest, source)=>{
+        for (const surface of source ? [dest, source] : [dest])
+        {
+            if (surface.isLost() !== DD_OK)
+            {
+                return DDERR_SURFACELOST;
+            }
+            if (surface.locked || surface.dc !== null)
+            {
+                return DDERR_SURFACEBUSY;
+            }
+            if (surface.bytesPerPixel === 3 || surface.bytesPerPixel === 0)
+            {
+                return DDERR_UNSUPPORTED;
+            }
+        }
+        return DD_OK;
+    };
+
+    /** @param {any} surface @returns {import('../ddraw/objects.js').Rect[] | undefined} */
+    const clipListOf = surface=>{
+        const clipper = surface.clipper;
+        return clipper && clipper.window === 0 && clipper.clipList.length > 0
+            ? clipper.clipList
+            : undefined;
+    };
+
+    /**
+     * The descriptor a surface reports. Every field a surface has is marked
+     * present, so a program that tests dwFlags before reading a field finds it.
+     *
+     * @param {any} surface
+     * @param {number} [surfacePointer]
+     */
+    const descriptorOf = (surface, surfacePointer)=>({
+        flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+            | (surface.backBufferCount > 0 ? DDSD_BACKBUFFERCOUNT : 0),
+        width: surface.width,
+        height: surface.height,
+        pitch: surface.pitch,
+        backBufferCount: surface.backBufferCount,
+        mipMapCount: 0,
+        caps: surface.caps,
+        caps2: surface.caps2,
+        pixelFormat: surface.pixelFormat,
+        surfacePointer,
+    });
+
+    /**
+     * The methods of one surface generation.
+     *
+     * @param {typeof SURFACE_GENERATIONS[number]} generation
+     */
+    const surfaceMethods = generation=>{
+        const layout = generation.layout;
+        const wide = layout === DDSURFACEDESC2;
+
+        /** @param {number} pointer DDSCAPS or DDSCAPS2, by generation */
+        const readCaps = pointer=>fields.readU32((pointer >>> 0) + (wide ? DDSCAPS2.dwCaps : 0));
+
+        return {
+            /** @param {any} surface @param {number[]} args */
+            AddAttachedSurface: (surface, [other])=>{
+                const attached = publisher.objectAt(other);
+                return attached ? surface.addAttachedSurface(attached) : DDERR_INVALIDPARAMS;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            Blt: (surface, [destRect, source, sourceRect, flags, fx])=>{
+                const from = publisher.objectAt(source);
+                const hr = blitPreconditions(surface, from);
+                if (hr !== DD_OK)
+                {
+                    return hr;
+                }
+                const outcome = blt({
+                    memory,
+                    dest: blitView(surface),
+                    destRect: readRect(destRect),
+                    src: from ? blitView(from) : undefined,
+                    srcRect: readRect(sourceRect),
+                    flags: flags >>> 0,
+                    fx: {
+                        fillColor: (fx >>> 0) === 0
+                            ? 0
+                            : fields.readU32((fx >>> 0) + DDBLTFX.dwFillColor),
+                        srcColorKey: from
+                            ? keyFor(from, DDCKEY_SRCBLT,
+                                (flags & DDBLT_KEYSRCOVERRIDE) !== 0, fx, DDBLTFX.ddckSrcColorkey)
+                            : undefined,
+                        destColorKey: keyFor(surface, DDCKEY_DESTBLT,
+                            (flags & DDBLT_KEYDESTOVERRIDE) !== 0, fx, DDBLTFX.ddckDestColorkey),
+                    },
+                    clipList: clipListOf(surface),
+                });
+                if (outcome === DD_OK)
+                {
+                    surface.changeUniquenessValue();
+                    surface.present();
+                }
+                return outcome;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            BltFast: (surface, [x, y, source, sourceRect, flags])=>{
+                const from = publisher.objectAt(source);
+                if (!from)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const hr = blitPreconditions(surface, from);
+                if (hr !== DD_OK)
+                {
+                    return hr;
+                }
+                const outcome = bltFast({
+                    memory,
+                    dest: blitView(surface),
+                    x: x | 0,
+                    y: y | 0,
+                    src: blitView(from),
+                    srcRect: readRect(sourceRect),
+                    flags: flags >>> 0,
+                    srcColorKey: (flags & DDBLTFAST_SRCCOLORKEY) !== 0
+                        ? from.getColorKey(DDCKEY_SRCBLT).key ?? undefined
+                        : undefined,
+                    destColorKey: (flags & DDBLTFAST_DESTCOLORKEY) !== 0
+                        ? surface.getColorKey(DDCKEY_DESTBLT).key ?? undefined
+                        : undefined,
+                });
+                if (outcome === DD_OK)
+                {
+                    surface.changeUniquenessValue();
+                    surface.present();
+                }
+                return outcome;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            DeleteAttachedSurface: (surface, [, other])=>{
+                const attached = publisher.objectAt(other);
+                return attached ? surface.deleteAttachedSurface(attached) : DDERR_INVALIDPARAMS;
+            },
+
+            // Enumerating needs a call back into guest code once per surface,
+            // which nothing here can make yet. Answering success having named
+            // nothing is what a program with no attachments would see.
+            EnumAttachedSurfaces: ()=>DD_OK,
+
+            /** @param {any} surface @param {number[]} args */
+            Flip: (surface, [target, flags])=>
+                surface.flip(publisher.objectAt(target), flags >>> 0),
+
+            /** @param {any} surface @param {number[]} args */
+            GetAttachedSurface: (surface, [caps, out])=>{
+                if ((caps >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const found = surface.getAttachedSurface(readCaps(caps));
+                if (found.hr === DD_OK)
+                {
+                    handBack(found.surface, surfaceInterfaces, generation.id, out >>> 0);
+                }
+                return found.hr;
+            },
+
+            GetBltStatus: ()=>DD_OK,
+
+            /** @param {any} surface @param {number[]} args */
+            GetCaps: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if (wide)
+                {
+                    fields.writeStruct(out >>> 0, DDSCAPS2, {
+                        dwCaps: surface.caps, dwCaps2: surface.caps2, dwCaps3: 0, dwCaps4: 0,
+                    });
+                }
+                else
+                {
+                    fields.writeU32(out >>> 0, surface.caps);
+                }
+                return DD_OK;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            GetClipper: (surface, [out])=>{
+                const got = surface.getClipper();
+                if (got.hr === DD_OK && (out >>> 0) !== 0)
+                {
+                    handBack(got.clipper, clipperInterfaces, IID_IDirectDrawClipper, out >>> 0);
+                }
+                return got.hr;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            GetColorKey: (surface, [which, out])=>{
+                const got = surface.getColorKey(which >>> 0);
+                if (got.hr === DD_OK && (out >>> 0) !== 0)
+                {
+                    fields.writeStruct(out >>> 0, DDCOLORKEY, got.key);
+                }
+                return got.hr;
+            },
+
+            /**
+             * The handle is written only on success: a refused second GetDC
+             * leaves the caller's variable exactly as it was.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            GetDC: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const got = surface.getDC();
+                if (got.hr === DD_OK)
+                {
+                    fields.writeU32(out >>> 0, got.dc);
+                }
+                return got.hr;
+            },
+
+            GetFlipStatus: ()=>DD_OK,
+
+            /** @param {any} surface @param {number[]} args */
+            GetPalette: (surface, [out])=>{
+                const got = surface.getPalette();
+                if (got.hr === DD_OK && (out >>> 0) !== 0)
+                {
+                    handBack(got.palette, paletteInterfaces, IID_IDirectDrawPalette, out >>> 0);
+                }
+                return got.hr;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            GetPixelFormat: (surface, [out])=>{
+                if ((out >>> 0) === 0 || fields.readU32(out >>> 0) !== 0x20)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                writePixelFormat(memory, out >>> 0, surface.pixelFormat);
+                return DD_OK;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            GetSurfaceDesc: (surface, [out])=>{
+                if ((out >>> 0) === 0 || fields.readU32(out >>> 0) !== layout.SIZE)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                writeSurfaceDesc(memory, out >>> 0, layout, descriptorOf(surface));
+                return DD_OK;
+            },
+
+            Initialize: ()=>DDERR_ALREADYINITIALIZED,
+
+            /** @param {any} surface */
+            IsLost: (/** @type {any} */ surface)=>surface.isLost(),
+
+            /**
+             * The descriptor is written on success with the address of the
+             * locked corner in lpSurface, and on failure with a null there:
+             * a caller that follows the pointer without reading the code
+             * then faults rather than writing into memory it does not own.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            Lock: (surface, [rect, desc])=>{
+                if ((desc >>> 0) === 0 || fields.readU32(desc >>> 0) !== layout.SIZE)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const locked = surface.lock(readRect(rect));
+                if (locked.hr !== DD_OK)
+                {
+                    fields.writeU32((desc >>> 0) + layout.lpSurface, 0);
+                    return locked.hr;
+                }
+                writeSurfaceDesc(memory, desc >>> 0, layout,
+                    descriptorOf(surface, locked.surfacePointer));
+                return DD_OK;
+            },
+
+            /** @param {any} surface @param {number[]} args */
+            ReleaseDC: (surface, [handle])=>surface.releaseDC(handle >>> 0),
+
+            /** @param {any} surface */
+            Restore: (/** @type {any} */ surface)=>surface.restore(),
+
+            /** @param {any} surface @param {number[]} args */
+            SetClipper: (surface, [clipper])=>surface.setClipper(publisher.objectAt(clipper)),
+
+            /** @param {any} surface @param {number[]} args */
+            SetColorKey: (surface, [which, key])=>surface.setColorKey(which >>> 0,
+                (key >>> 0) === 0 ? null : readColorKey(key)),
+
+            /** @param {any} surface @param {number[]} args */
+            SetPalette: (surface, [palette])=>surface.setPalette(publisher.objectAt(palette)),
+
+            // The older generations take the address the lock handed out, the
+            // newer ones the rectangle; only a rectangle names which lock to
+            // release, and the address form releases the latest one.
+            /** @param {any} surface @param {number[]} args */
+            Unlock: (surface, [argument])=>surface.unlock(wide ? readRect(argument) : null),
+
+            /** @param {any} surface @param {number[]} args */
+            GetDDInterface: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const root = owners.get(surface);
+                if (!root)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                const queried = root.queryInterface(generation.ddraw);
+                if (queried.hr !== DD_OK)
+                {
+                    return queried.hr;
+                }
+                handBack(root, ddrawInterfaces, GENERATION_BY_NAME[generation.ddraw].id,
+                    out >>> 0);
+                return DD_OK;
+            },
+
+            PageLock: ()=>DD_OK,
+            PageUnlock: ()=>DD_OK,
+
+            /** @param {any} surface @param {number[]} args */
+            GetUniquenessValue: (surface, [out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                fields.writeU32(out >>> 0, surface.uniquenessValue());
+                return DD_OK;
+            },
+
+            /** @param {any} surface */
+            ChangeUniquenessValue: (/** @type {any} */ surface)=>{
+                surface.changeUniquenessValue();
+                return DD_OK;
+            },
+        };
+    };
+
+    /** Every surface generation, so a QueryInterface across them succeeds. */
+    const surfaceInterfaces = SURFACE_GENERATIONS.map(generation=>
+        describe(generation.id, generation.slots, surfaceMethods(generation)));
+
+    // --- the ddraw object ---
+
+    /** @type {Record<string, typeof GENERATIONS[keyof typeof GENERATIONS]>} */
+    const GENERATION_BY_NAME = Object.fromEntries(
+        Object.values(GENERATIONS).map(generation=>[generation.name, generation]));
+
+    /**
+     * The capabilities this build reports, for the hardware and the emulation
+     * layer alike: one backend answers as both, and a program that branches on
+     * the difference finds none. No 3D is claimed here; that is Direct3D 7's
+     * decision to make when it arrives.
+     *
+     * @param {number} pointer
+     */
+    const writeCaps = pointer=>{
+        const at = pointer >>> 0;
+        const size = fields.readU32(at + DDCAPS.dwSize);
+        if (!DDCAPS_SIZES.includes(size))
+        {
+            return DDERR_INVALIDPARAMS;
+        }
+        memory.writeMemory(at, new Uint8Array(size));
+        fields.writeStruct(at, DDCAPS, {
+            dwSize: size,
+            dwCaps: DDCAPS_BLT | DDCAPS_BLTSTRETCH | DDCAPS_BLTCOLORFILL | DDCAPS_COLORKEY
+                | DDCAPS_GDI | DDCAPS_PALETTE | DDCAPS_CANBLTSYSMEM,
+            dwCaps2: DDCAPS2_CERTIFIED | DDCAPS2_WIDESURFACES | DDCAPS2_CANRENDERWINDOWED,
+            dwCKeyCaps: DDCKEYCAPS_SRCBLT | DDCKEYCAPS_DESTBLT,
+            dwPalCaps: DDPCAPS_8BIT | DDPCAPS_PRIMARYSURFACE | DDPCAPS_ALLOW256,
+            dwVidMemTotal: VIDEO_MEMORY,
+            dwVidMemFree: VIDEO_MEMORY,
+        });
+        return DD_OK;
+    };
+
+    /**
+     * The methods of one ddraw generation.
+     *
+     * @param {typeof GENERATIONS[keyof typeof GENERATIONS]} generation
+     * @param {1 | 2 | 4 | 7} version
+     */
+    const ddrawMethods = (generation, version)=>({
+        Compact: ()=>DD_OK,
+
+        /** @param {any} root @param {number[]} args */
+        CreateClipper: (root, [flags, out, outer])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const made = root.createClipper(flags >>> 0, { outer: outer >>> 0 });
+            if (made.hr === DD_OK)
+            {
+                handBack(made.clipper, clipperInterfaces, IID_IDirectDrawClipper, out >>> 0);
+            }
+            return made.hr;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        CreatePalette: (root, [flags, entries, out, outer])=>{
+            if ((out >>> 0) === 0 || (entries >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const made = root.createPalette(flags >>> 0,
+                readEntries(entries, paletteEntryCount(flags >>> 0)),
+                { version, outer: outer >>> 0 });
+            if (made.hr === DD_OK)
+            {
+                handBack(made.palette, paletteInterfaces, IID_IDirectDrawPalette, out >>> 0);
+            }
+            return made.hr;
+        },
+
+        /**
+         * The descriptor is read after the checks the object makes first:
+         * a malformed one under no cooperative level is never mentioned,
+         * which is why null is passed through rather than refused here.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        CreateSurface: (root, [desc, out, outer])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const request = (desc >>> 0) === 0
+                ? null
+                : readSurfaceDesc(memory, desc >>> 0, generation.layout);
+            const made = root.createSurface(request, { version, outer: outer >>> 0 });
+            if (made.hr !== DD_OK)
+            {
+                return made.hr;
+            }
+            owners.set(made.surface, root);
+            handBack(made.surface, surfaceInterfaces, generation.surface, out >>> 0);
+            return DD_OK;
+        },
+
+        // The three enumerations call back into guest code once per item,
+        // which nothing here can do yet; each reports having found nothing.
+        EnumDisplayModes: ()=>DD_OK,
+        EnumSurfaces: ()=>DD_OK,
+        FlipToGDISurface: ()=>DD_OK,
+
+        /** @param {any} root @param {number[]} args */
+        GetCaps: (root, [hal, hel])=>{
+            if ((hal >>> 0) === 0 && (hel >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            for (const pointer of [hal, hel])
+            {
+                if ((pointer >>> 0) !== 0)
+                {
+                    const hr = writeCaps(pointer);
+                    if (hr !== DD_OK)
+                    {
+                        return hr;
+                    }
+                }
+            }
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetDisplayMode: (root, [out])=>{
+            if ((out >>> 0) === 0 || fields.readU32(out >>> 0) !== generation.layout.SIZE)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            const mode = root.displayMode;
+            const pixelFormat = /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
+                pixelFormatForDepth(mode.bitCount));
+            writeSurfaceDesc(memory, out >>> 0, generation.layout, {
+                flags: DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT | DDSD_REFRESHRATE,
+                width: mode.width,
+                height: mode.height,
+                pitch: mode.width * bytesPerPixel(pixelFormat),
+                backBufferCount: 0,
+                mipMapCount: mode.refreshRate,
+                caps: 0,
+                caps2: 0,
+                pixelFormat,
+            });
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetFourCCCodes: (root, [count])=>{
+            if ((count >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(count >>> 0, 0);
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetGDISurface: (root, [out])=>{
+            const primary = root.primarySurface();
+            if (!primary || (out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            primary.addRef();
+            handBack(primary, surfaceInterfaces, generation.surface, out >>> 0);
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetMonitorFrequency: (root, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, 60);
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetScanLine: (root, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, 0);
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetVerticalBlankStatus: (root, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            fields.writeU32(out >>> 0, 0);
+            return DD_OK;
+        },
+
+        Initialize: ()=>DDERR_ALREADYINITIALIZED,
+
+        /** @param {any} root */
+        RestoreDisplayMode: (/** @type {any} */ root)=>root.restoreDisplayMode(),
+
+        /** @param {any} root @param {number[]} args */
+        SetCooperativeLevel: (root, [window, flags])=>
+            root.setCooperativeLevel(window >>> 0, flags >>> 0),
+
+        // The first generation takes width, height and depth; every later one
+        // adds a refresh rate and flags after them.
+        /** @param {any} root @param {number[]} args */
+        SetDisplayMode: (root, [width, height, depth, refresh])=>root.setDisplayMode(
+            width >>> 0, height >>> 0, depth >>> 0, version === 1 ? 0 : (refresh >>> 0)),
+
+        WaitForVerticalBlank: ()=>DD_OK,
+
+        /** @param {any} root @param {number[]} args */
+        GetAvailableVidMem: (root, [, total, free])=>{
+            if ((total >>> 0) === 0 && (free >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            for (const pointer of [total, free])
+            {
+                if ((pointer >>> 0) !== 0)
+                {
+                    fields.writeU32(pointer >>> 0, VIDEO_MEMORY);
+                }
+            }
+            return DD_OK;
+        },
+
+        /** @param {any} root @param {number[]} args */
+        GetSurfaceFromDC: (root, [handle, out])=>{
+            const surface = root.surfaceWithDc(handle >>> 0);
+            if (!surface || (out >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            surface.addRef();
+            handBack(surface, surfaceInterfaces, generation.surface, out >>> 0);
+            return DD_OK;
+        },
+
+        /** @param {any} root */
+        RestoreAllSurfaces: (/** @type {any} */ root)=>root.restoreAllSurfaces(),
+
+        TestCooperativeLevel: ()=>DD_OK,
+    });
+
+    /** Every generation, so a QueryInterface across them succeeds. */
+    const ddrawInterfaces = /** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
+        describe(GENERATIONS[version].id, GENERATIONS[version].slots,
+            ddrawMethods(GENERATIONS[version], version)));
+
+    return {
+        /**
+         * The options a ddraw object is created with so that its device
+         * contexts are GDI's and its screen changes are seen.
+         *
+         * @param {1 | 2 | 4 | 7} version
+         * @returns {import('../ddraw/objects.js').DirectDrawOptions}
+         */
+        rootOptions(version){
+            /** @type {import('../ddraw/objects.js').DirectDrawOptions} */
+            const options = {
+                version,
+                onPresent: surface=>{
+                    if (present)
+                    {
+                        present({
+                            buffer: surface.buffer,
+                            width: surface.width,
+                            height: surface.height,
+                            pitch: surface.pitch,
+                            bitCount: surface.bytesPerPixel * 8,
+                            palette: surface.palette ? surface.palette.entries : null,
+                        });
+                    }
+                },
+            };
+            if (gdi)
+            {
+                options.createDc = attributes=>gdi.createSurfaceDc(attributes);
+                options.releaseDc = handle=>gdi.deleteSurfaceDc(handle);
+            }
+            const display = screen();
+            options.screenWidth = display.width;
+            options.screenHeight = display.height;
+            return options;
+        },
+
+        /**
+         * Publishes the object DirectDrawCreate hands back, as the generation
+         * the entry point promises.
+         *
+         * @param {any} root  What graphics.create('ddraw') returned.
+         * @param {1 | 2 | 4 | 7} version
+         * @returns {number}
+         */
+        publishRoot: (root, version)=>
+            publisher.publish(root, ddrawInterfaces, GENERATIONS[version].id),
+
+        /** For tests, which have no guest to call through. */
+        interfaces: {
+            ddraw: ddrawInterfaces,
+            surface: surfaceInterfaces,
+            palette: paletteInterfaces,
+            clipper: clipperInterfaces,
+        },
+    };
+}
