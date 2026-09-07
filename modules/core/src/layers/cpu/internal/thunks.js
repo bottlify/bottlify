@@ -31,11 +31,27 @@ export const STUB_SIZE = 16;
  * @param {number} options.port      I/O port the host listens on.
  * @param {number} options.popBytes  Stack bytes the callee pops; 0 when the caller cleans up.
  * @param {boolean} [options.preserveResult]  Keep whatever EAX held on entry, in ECX.
+ * @param {number} [options.forwardTo]  Guest address to jump to instead of returning.
+ * @param {number} [options.address]    Where this stub will live; needed to reach it.
  * @returns {Uint8Array}
  */
-export function buildStub({ trapId, port, popBytes, preserveResult = false }){
+export function buildStub(
+    { trapId, port, popBytes, preserveResult = false, forwardTo = 0, address = 0 })
+{
     const u16 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff];
     const u32 = (/** @type {number} */ v)=>[...u16(v), v >>> 16 & 0xff, v >>> 24 & 0xff];
+
+    // A forwarding stub is a place to watch a call from, not a place to answer
+    // it: it traps so the host can see the arguments and then jumps into the
+    // real function, which returns straight to the original caller with the
+    // stack exactly as that function expects it. Nothing else can see calls
+    // between two guest modules, and by definition they are the calls a host
+    // trace has no record of.
+    const jump = forwardTo === 0
+        ? []
+        // The trap is 10 bytes and the jump 5, so the target is relative to the
+        // byte after all fifteen.
+        : [0xe9, ...u32(forwardTo - (address + (preserveResult ? 2 : 0) + 15))];
 
     const bytes = [
         // A stub reached by a `ret` is being handed a return value, and EAX is
@@ -46,7 +62,9 @@ export function buildStub({ trapId, port, popBytes, preserveResult = false }){
         0x66, 0xba, ...u16(port), // mov dx, port
         0xb8, ...u32(trapId), //     mov eax, trapId
         0xef, //                     out dx, eax   -> host handles it, leaves the result in EAX
-        ...popBytes > 0 ? [0xc2, ...u16(popBytes)] : [0xc3], // ret popBytes / ret
+        ...jump.length > 0
+            ? jump
+            : popBytes > 0 ? [0xc2, ...u16(popBytes)] : [0xc3], // ret popBytes / ret
     ];
     if (bytes.length > STUB_SIZE)
     {
@@ -66,7 +84,7 @@ export function createThunkTable({ base, port }){
     /**
      * @type {{
      *   id: number, name: string, popBytes: number,
-     *   address: number, preserveResult?: boolean,
+     *   address: number, preserveResult?: boolean, forwardTo?: number,
      * }[]}
      */
     const entries = [];
@@ -93,12 +111,13 @@ export function createThunkTable({ base, port }){
          * @param {number} popBytes   Stack bytes the callee pops.
          * @param {Object} [options]
          * @param {boolean} [options.preserveResult]
+         * @param {number} [options.forwardTo]
          * @returns {{ id: number, address: number }}
          */
-        register(name, popBytes, { preserveResult = false } = {}){
+        register(name, popBytes, { preserveResult = false, forwardTo = 0 } = {}){
             const id = entries.length;
             const address = base + id * STUB_SIZE;
-            entries.push({ id, name, popBytes, address, preserveResult });
+            entries.push({ id, name, popBytes, address, preserveResult, forwardTo });
             return { id, address };
         },
 
@@ -125,6 +144,8 @@ export function createThunkTable({ base, port }){
                 port,
                 popBytes: entry.popBytes,
                 preserveResult: entry.preserveResult,
+                forwardTo: entry.forwardTo,
+                address: entry.address,
             });
         },
 
@@ -146,6 +167,8 @@ export function createThunkTable({ base, port }){
                         port,
                         popBytes: entry.popBytes,
                         preserveResult: entry.preserveResult,
+                        forwardTo: entry.forwardTo,
+                        address: entry.address,
                     }),
                     entry.id * STUB_SIZE);
             }

@@ -40,6 +40,16 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {(dll: string, name: string | null, ordinal: number | null)
+ *     => ({ args: number } | null)} [watchImport]
+ *     Asked about every import as it is bound. Answering with an argument count
+ *     puts a watch in front of that function, so a call from one guest module
+ *     into another shows up in the trace like a call into ours. This is the only
+ *     way to see them, and a game's own libraries are where its decisions live.
+ * @property {(record: any) => void} [onCall]
+ *           Every host call as it returns. The ring kept for a failure holds
+ *           the end of a run; this holds all of it, for a tool willing to
+ *           write it somewhere.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {(eip: number) => void} [sample]
@@ -772,6 +782,7 @@ export async function createApp(options){
             lastError: ()=>core.api('win32').lastError(),
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
+            onCall: options.onCall,
         },
         log: {
             // The guest's clock, for the same reason the sound buffers use it:
@@ -1011,11 +1022,59 @@ export async function createApp(options){
         {
             return null;
         }
-        if (name !== null)
+        const address = name !== null
+            ? module.addressOf(name)
+            : ordinal === null ? null : module.addressOfOrdinal(ordinal);
+        return address === null ? null : watched(dll, name, ordinal, address);
+    };
+
+    /**
+     * Which imports to stand in front of, and what each one's arguments are.
+     * One stub per import, kept because a library is imported by many others
+     * and a second stub for the same function would report the same call twice.
+     *
+     * @type {Map<string, number>}
+     */
+    const watches = new Map();
+
+    /**
+     * Puts a watch in front of an import when the caller asked for one.
+     *
+     * Only a guest module's exports are worth watching: a call into one of our
+     * own is already a trap and already recorded, and pointing a watch at a
+     * stub would trap twice for one call.
+     *
+     * @param {string} dll @param {string | null} name
+     * @param {number | null} ordinal @param {number} address
+     * @returns {number}
+     */
+    const watched = (dll, name, ordinal, address)=>{
+        if (!options.watchImport)
         {
-            return module.addressOf(name);
+            return address;
         }
-        return ordinal === null ? null : module.addressOfOrdinal(ordinal);
+        const asked = options.watchImport(dll, name, ordinal);
+        if (!asked)
+        {
+            return address;
+        }
+        const label = `${dll}!${name ?? `#${ordinal}`}`;
+        const already = watches.get(label);
+        if (already !== undefined)
+        {
+            return already;
+        }
+        const stub = bridge.watch(label, {
+            argBytes: asked.args * 4,
+            target: address,
+            // Nothing to answer: the call is about to reach the real function,
+            // which will leave its own result in EAX. Being dispatched at all
+            // is the point -- that is what puts it in the trace, with its
+            // arguments and whatever text they point at.
+            handler: ()=>0,
+        });
+        watches.set(label, stub);
+        return stub;
     };
 
     /**

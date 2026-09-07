@@ -99,6 +99,7 @@ export const bridgeModule = {
         dispatcher = createDispatcher({
             cpu, memory, parking, suspend, lastError: config?.lastError,
             traceStrings: config?.traceStrings ?? false,
+            onCall: config?.onCall,
         });
 
         // Claimed here rather than by whoever assembles the process: a trap that
@@ -136,6 +137,41 @@ export const bridgeModule = {
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes));
                 dispatcher.register(id, { name, convention, argBytes, handler });
+                dispatcher.placed(address, name);
+                return address;
+            },
+
+            /**
+             * A place to stand between one guest module and another.
+             *
+             * Returns an address to put where the real one was: a call through
+             * it is seen by `handler` with its arguments already marshalled,
+             * and then goes on into the real function as though nothing had
+             * happened. Nothing else in the engine can see a call from one
+             * guest library into another -- there is no stub in the way and no
+             * trap to record -- and those are exactly the calls whose absence
+             * makes a trace stop short of the decision it was taken to explain.
+             *
+             * @param {string} name       What to call it in a trace.
+             * @param {Object} fn
+             * @param {number} fn.argBytes
+             * @param {number} fn.target  The real function, where the call goes on to.
+             * @param {string} [fn.convention]
+             * @param {Function} fn.handler
+             * @returns {number} the guest address to use in place of `target`
+             */
+            watch(name, { argBytes, target, convention = Convention.STDCALL, handler }){
+                callbacks.reserve();
+                const { id, address } = cpu.registerTrap(
+                    name, calleeCleanup(convention, argBytes), { forwardTo: target });
+                dispatcher.register(id, {
+                    name, convention, argBytes, handler,
+                    // So a trace does not report our nothing as the function's
+                    // answer. What this call returns is decided by the code it
+                    // forwards into, long after the record is written, and a
+                    // zero printed there reads as a failure that never happened.
+                    forwards: true,
+                });
                 dispatcher.placed(address, name);
                 return address;
             },

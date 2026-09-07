@@ -24,6 +24,16 @@
 const SCAN_BYTES = 0x400;
 const MAX_FRAMES = 24;
 
+/**
+ * How much of what a register points at to show.
+ *
+ * A register naming a region answers where a pointer came from; the bytes
+ * behind it answer whether what is there is what the program expected, which is
+ * the question a bad pointer actually raises. Two lines is enough to recognise
+ * a structure, a string, or a block of zeroes nobody filled in.
+ */
+const PEEK_BYTES = 32;
+
 /** The general-purpose registers, in the order a person reads them. */
 const REGISTERS = ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp'];
 
@@ -75,6 +85,38 @@ export function describeAddress({ memory, bridge }, address){
     return region.kind === 'image'
         ? `${hex(at)} ${region.name}+${offset} (rva ${offset})`
         : `${hex(at)} ${region.name}+${offset}`;
+}
+
+/**
+ * The bytes at an address, as hexadecimal and as text, or null if unreadable.
+ *
+ * @param {TraceSources} sources
+ * @param {number} address
+ * @param {number} [length]
+ * @returns {string[] | null}
+ */
+export function peekBytes({ memory }, address, length = PEEK_BYTES){
+    let bytes;
+    try
+    {
+        bytes = memory.readBytes(address >>> 0, length);
+    }
+    catch (e){
+        void e;
+        return null;
+    }
+    const lines = [];
+    for (let at = 0; at < bytes.length; at += 16)
+    {
+        const row = bytes.subarray(at, at + 16);
+        const hexadecimal = [...row]
+            .map((/** @type {number} */ b)=>b.toString(16).padStart(2, '0')).join(' ');
+        const text = [...row]
+            .map((/** @type {number} */ b)=>b >= 0x20 && b < 0x7f ? String.fromCharCode(b) : '.')
+            .join('');
+        lines.push(`${hexadecimal.padEnd(47)}  |${text}|`);
+    }
+    return lines;
 }
 
 /**
@@ -198,6 +240,14 @@ export function captureTrace(sources){
         trace.pointing = Object.fromEntries(Object.entries(trace.registers)
             .map(([name, value])=>[name, describeAddress(sources, Number(value))])
             .filter(([, where])=>!String(where).endsWith('<unmapped>')));
+        // And what is actually there. The address says which allocation a
+        // pointer came from; the bytes say whether it holds what the program
+        // was expecting, which is the question a wild pointer raises.
+        trace.peek = Object.fromEntries([
+            ['eip', peekBytes(sources, trace.eip, 16)],
+            ...Object.keys(trace.pointing)
+                .map(name=>[name, peekBytes(sources, Number(trace.registers[name]))]),
+        ].filter(([, lines])=>lines !== null));
         trace.instructions = cpu.instructionCount();
         trace.protectedMode = cpu.inProtectedMode();
     }
@@ -273,7 +323,17 @@ export function formatTrace(trace){
         if (!/^(esp|ebp)$/.test(name))
         {
             lines.push(`  ${name} -> ${where}`);
+            for (const row of trace.peek?.[name] ?? [])
+            {
+                lines.push(`        ${row}`);
+            }
         }
+    }
+    // What the processor is about to run, for whoever has the same binary open
+    // in a disassembler: these are the bytes to look for.
+    for (const row of trace.peek?.eip ?? [])
+    {
+        lines.push(`  code: ${row}`);
     }
     if (trace.hostCalls?.length > 0)
     {

@@ -23,6 +23,8 @@ import { isParkedCall } from './parking.js';
  * @property {string} convention
  * @property {number} argBytes
  * @property {Function} handler
+ * @property {boolean} [forwards]  The call goes on into guest code afterwards,
+ *     so the handler's answer is not the call's answer.
  */
 
 /**
@@ -55,6 +57,7 @@ const DETAIL_RING = 4096;
  *        The running thread's last error, for the trace. Injected because it
  *        belongs to a layer above this one.
  * @param {boolean} [deps.traceStrings]
+ * @param {(record: any) => void} [deps.onCall]
  *        Read the text an argument points at while the call is being made
  *        rather than when the trace is read. Off by default: it costs a scan
  *        of guest memory per pointer argument on every recorded call. On, it
@@ -64,6 +67,11 @@ const DETAIL_RING = 4096;
 export function createDispatcher(deps){
     const { cpu, memory, parking, suspend, lastError } = deps;
     const traceStrings = deps.traceStrings ?? false;
+    // A ring holds the end of a run, and the end of a run is rarely where the
+    // decision was made: a program that gives up after opening its archives
+    // made up its mind thousands of calls earlier. A sink keeps all of it, for
+    // whoever is willing to pay for the file.
+    const onCall = deps.onCall ?? null;
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /**
@@ -275,11 +283,13 @@ export function createDispatcher(deps){
                 // parked on it. Rendering it as a number turns every such call
                 // into a plain zero -- a failure under most conventions -- and
                 // a reader then chases a failure that did not happen.
-                record.result = isParkedCall(result)
-                    ? 'parked'
-                    : (typeof (/** @type {any} */ (result))?.then === 'function'
-                        ? 'waiting'
-                        : `0x${(Number(result) >>> 0).toString(16)}`);
+                record.result = fn.forwards
+                    ? 'forwarded'
+                    : isParkedCall(result)
+                        ? 'parked'
+                        : (typeof (/** @type {any} */ (result))?.then === 'function'
+                            ? 'waiting'
+                            : `0x${(Number(result) >>> 0).toString(16)}`);
             }
             finally
             {
@@ -288,6 +298,12 @@ export function createDispatcher(deps){
                 // reports a code long after whatever produced it returned, and
                 // this is the only record that ties the two together.
                 record.error = lastError ? lastError() : 0;
+                if (onCall)
+                {
+                    onCall(record.strings
+                        ? record
+                        : { ...record, strings: record.args.map(peekString) });
+                }
             }
 
             // A parked call's EAX belongs to whatever wakes the thread, and it

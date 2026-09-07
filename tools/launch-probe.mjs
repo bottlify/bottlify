@@ -22,6 +22,7 @@
  *     node tools/launch-probe.mjs warcraft-iii-frozen-throne [--turns 200000]
  */
 
+import { createWriteStream } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { openBundle } from './btl.mjs';
 import { createApp } from '../modules/core/src/app.js';
@@ -41,6 +42,18 @@ function parse(argv){
         // one, narrows a long trace to the handful that answer the question.
         grep: argv.includes('--grep') ? argv[argv.indexOf('--grep') + 1] : null,
         calls: argv.includes('--calls') ? Number(argv[argv.indexOf('--calls') + 1]) : 24,
+        // Every call to a file, not the last few thousand. What a program
+        // decided is decided early, and by the time it stops the ring that
+        // would have shown it has been overwritten many times over.
+        log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
+        // Which of a game's own libraries to watch calls into, comma-separated.
+        // Six arguments are read from each call, which is what the trace shows
+        // anyway; the count does not have to be right, because a watch forwards
+        // into the real function rather than returning, so it never has a stack
+        // to clean up.
+        watch: argv.includes('--watch')
+            ? argv[argv.indexOf('--watch') + 1].split(',')
+            : [],
         // Sizing the guest's heap from the command line, so that "it ran out
         // of memory" can be tested rather than argued about.
         // Sampled guest execution. A program that decides something inside its
@@ -53,6 +66,29 @@ function parse(argv){
             ? Number(argv[argv.indexOf('--heap') + 1]) * 1024 * 1024
             : undefined,
     };
+}
+
+/**
+ * One host call as a line: where it was called from, what it was given, what it
+ * answered, and what error it left behind.
+ *
+ * @param {any} call
+ * @returns {string}
+ */
+function formatCall(call){
+    // An argument that points at text is shown as the text. A trace of raw
+    // dwords says a library was asked for and not which one.
+    const args = call.args.map((/** @type {number} */ a, /** @type {number} */ index)=>(
+        call.strings?.[index]
+            // The address too: where a string lives says who built it, and
+            // that is usually the question when the text is wrong.
+            ? `${JSON.stringify(call.strings[index])}@0x${(a >>> 0).toString(16)}`
+            : `0x${(a >>> 0).toString(16)}`)).join(', ');
+    const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
+    // The error the call left behind, when it left one. That is where a code a
+    // program complains about much later actually came from.
+    const left = call.error ? `  [err ${call.error}]` : '';
+    return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
 }
 
 /**
@@ -237,19 +273,7 @@ function report(app, { grep = null, calls = 24 } = {}){
         .filter((/** @type {any} */ call)=>grep === null || call.name.includes(grep));
     for (const call of detailed.slice(-calls))
     {
-        // An argument that points at text is shown as the text. A trace of
-        // raw dwords says a library was asked for and not which one.
-        const args = call.args.map((/** @type {number} */ a, /** @type {number} */ index)=>(
-            call.strings?.[index]
-                // The address too: where a string lives says who built it, and
-                // that is usually the question when the text is wrong.
-                ? `${JSON.stringify(call.strings[index])}@0x${(a >>> 0).toString(16)}`
-                : `0x${(a >>> 0).toString(16)}`)).join(', ');
-        const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
-        // The error the call left behind, when it left one. That is where a
-        // code a program complains about much later actually came from.
-        const left = call.error ? `  [err ${call.error}]` : '';
-        console.log(`    ${from}  ${call.name}(${args}) = ${call.result}${left}`);
+        console.log(`    ${formatCall(call)}`);
     }
 
     const hottest = bridge.hot ?? [];
@@ -264,7 +288,8 @@ function report(app, { grep = null, calls = 24 } = {}){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile } = parse(process.argv.slice(2));
+    const { id, turns, map, grep, calls, heap, profile, log, watch }
+        = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N]');
@@ -297,6 +322,8 @@ async function main(){
     /** Every instruction pointer the sampler saw, in order. @type {number[]} */
     const samples = [];
 
+    const sink = log ? createWriteStream(log) : null;
+
     const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
     const app = await createApp({
         executable: new Uint8Array(executable),
@@ -312,6 +339,13 @@ async function main(){
         sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
+        onCall: sink ? (/** @type {any} */ call)=>sink.write(`${formatCall(call)}\n`) : undefined,
+        watchImport: watch.length === 0
+            ? undefined
+            : (/** @type {string} */ dll)=>(
+                watch.some(wanted=>dll.toLowerCase() === wanted.toLowerCase())
+                    ? { args: 6 }
+                    : null),
         // Nothing durable: a probe should not leave a copy of a game behind, and
         // the file is already on this disk.
         bundle: { fetch, store: null, prefetch: false },
@@ -423,6 +457,7 @@ async function main(){
 ${text}` : `  ${JSON.stringify(failure).slice(0, 200)}`);
     }
 
+    sink?.end();
     await app.dispose();
     await handle.close();
 }
