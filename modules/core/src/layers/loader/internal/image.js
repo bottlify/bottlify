@@ -33,6 +33,26 @@ import { applyRelocations, parsePe, readImports, rvaToFileOffset } from './pe.js
  * @returns {LoadedImage}
  */
 export function buildImage(file, { resolveImport, base }){
+    const mapped = mapImage(file, base);
+    return { ...mapped, unresolved: bindImports(mapped, resolveImport) };
+}
+
+/**
+ * Maps an image and relocates it, without binding a single import.
+ *
+ * Mapping and binding are separate because a set of libraries that import each
+ * other cannot be done one at a time: binding A needs B's exports, and B's may
+ * need A's. A real loader maps every image first, so every base is settled and
+ * every export directory is readable, and only then binds. Doing both in one
+ * step works exactly until two libraries refer to each other, which is the
+ * ordinary case among the libraries a game ships with.
+ *
+ * @param {Uint8Array} file
+ * @param {number} [base]
+ * @returns {{ base: number, entryPoint: number, bytes: Uint8Array, file: Uint8Array,
+ *             image: import('./pe.js').PeImage }}
+ */
+export function mapImage(file, base){
     const image = parsePe(file);
     const loadBase = base ?? image.imageBase;
 
@@ -65,9 +85,31 @@ export function buildImage(file, { resolveImport, base }){
 
     applyRelocations(bytes, image, loadBase - image.imageBase);
 
+    return {
+        base: loadBase,
+        entryPoint: loadBase + image.entryPointRva,
+        bytes,
+        file,
+        image,
+    };
+}
+
+/**
+ * Writes resolved addresses into an already-mapped image's IAT.
+ *
+ * An import nothing claims is recorded rather than refused: a program that
+ * never calls it runs, and one that does fails where it called, which is a far
+ * better place to find out than here.
+ *
+ * @param {{ bytes: Uint8Array, file: Uint8Array, image: import('./pe.js').PeImage }} mapped
+ * @param {(dll: string, name: string | null, ordinal: number | null) => number | null}
+ *        resolveImport
+ * @returns {string[]} what nothing claimed, as "dll!name"
+ */
+export function bindImports({ bytes, file, image }, resolveImport){
     /** @type {string[]} */
     const unresolved = [];
-    const view = new DataView(bytes.buffer);
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 
     for (const { dll, entries } of readImports(file, image))
     {
@@ -82,13 +124,7 @@ export function buildImage(file, { resolveImport, base }){
             view.setUint32(entry.iatRva, address >>> 0, true);
         }
     }
-
-    return {
-        base: loadBase,
-        entryPoint: loadBase + image.entryPointRva,
-        bytes,
-        unresolved,
-    };
+    return unresolved;
 }
 
 export { parsePe, readImports, rvaToFileOffset };
