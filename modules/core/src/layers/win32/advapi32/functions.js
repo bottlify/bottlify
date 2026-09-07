@@ -46,6 +46,14 @@ const HANDLE_STRIDE = 4;
 const HANDLE_LIMIT = 0x7ffffffc;
 
 /**
+ * Who the program is running as. There is one account and no way to become
+ * another, so this is a constant rather than something to configure -- but it
+ * has to be answered, because a program that cannot learn its own user name
+ * often refuses to start rather than carrying on without one.
+ */
+const USER_NAME = 'User';
+
+/**
  * @typedef {Object} RegistryHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -254,6 +262,49 @@ export function createRegistryFunctions(host){
                     made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
                 return ERROR_SUCCESS;
             }),
+        },
+
+        /**
+         * LONG RegFlushKey(HKEY)
+         *
+         * On a real machine this waits for the hive to reach the disk. Here the
+         * hive is memory a program cannot outlive, so there is nothing to wait
+         * for -- but the handle is still checked, because a caller that flushes
+         * a stale key is asking to be told.
+         */
+        RegFlushKey: {
+            argBytes: 4,
+            handler: onKey(()=>ERROR_SUCCESS),
+        },
+
+        /**
+         * BOOL GetUserNameA(LPSTR buffer, LPDWORD size)
+         *
+         * The size is in characters and includes the terminator in both
+         * directions, which is the opposite of the registry enumerators just
+         * above: on success it is the length written *with* the terminator, and
+         * on failure it is what the caller must allocate. A caller that gets
+         * either wrong allocates one byte short and truncates the last
+         * character of every name it ever reads.
+         */
+        GetUserNameA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([buffer, size])=>{
+                if ((size >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const needed = USER_NAME.length + 1;
+                if ((buffer >>> 0) === 0 || readDword(size >>> 0) < needed)
+                {
+                    writeDword(size >>> 0, needed);
+                    return 0;
+                }
+                writeText(buffer >>> 0, USER_NAME);
+                writeDword(size >>> 0, needed);
+                return 1;
+            },
         },
 
         /** LONG RegCloseKey(HKEY) */

@@ -89,6 +89,7 @@ export function fullPath(path, current){
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(bytes: number) => number} allocate
+ * @property {() => string[]} [drives]  Letters the filesystem has mounted.
  * @property {any} files  The volume: stat, remove, rename, mkdir and the
  *           current directory.
  */
@@ -263,13 +264,17 @@ export function createPathFunctions(host){
         /**
          * unsigned long _getdrives(void)
          *
-         * A bit per letter, A first. Only C exists here, and a program uses
-         * this to populate a drive list rather than to decide anything.
+         * A bit per letter, A first, and the same set GetLogicalDrives reports.
+         * A program populates a drive list from whichever of the two it happens
+         * to call, so the two disagreeing means a drive that exists through one
+         * name and not through the other.
          */
         _getdrives: {
             convention: 'cdecl',
             argBytes: 0,
-            handler: ()=>1 << 2,
+            handler: ()=>(host.drives?.() ?? ['C'])
+                .reduce((mask, letter)=>
+                    mask | 1 << (letter[0].toUpperCase().charCodeAt(0) - 0x41), 0) >>> 0,
         },
     };
 }

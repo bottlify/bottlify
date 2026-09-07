@@ -543,3 +543,49 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.RegEnumValueA.argBytes, 32);
     assert.equal(fns.RegQueryInfoKeyA.argBytes, 48);
 });
+
+test('flushing a key that was closed is refused, not quietly accepted', ()=>{
+    // There is nothing to write to a disk here, so the only thing this call can
+    // still tell a caller is whether the handle it is holding is real. Saying
+    // yes to a stale one throws that away.
+    const { fns, create } = setup();
+    const key = create('Software\\Test');
+
+    assert.equal(fns.RegFlushKey.handler([key]), ERROR_SUCCESS);
+    fns.RegCloseKey.handler([key]);
+    assert.equal(fns.RegFlushKey.handler([key]), ERROR_INVALID_HANDLE);
+});
+
+test('the user name is reported with a length that counts the terminator', ()=>{
+    // This one differs from the enumerators above and from GetComputerName:
+    // the size that comes back includes the null. A caller that sizes its next
+    // allocation from a count that excluded it is one byte short every time.
+    const { memory, fns } = setup();
+    memory.putDword(OUT_SIZE, 0x100);
+
+    assert.equal(fns.GetUserNameA.handler([OUT_NAME, OUT_SIZE]), 1);
+    const name = memory.string(OUT_NAME);
+    assert.ok(name.length > 0);
+    assert.equal(memory.dword(OUT_SIZE), name.length + 1);
+});
+
+test('too small a buffer is refused, and the size needed is written back', ()=>{
+    // The whole point of the failure: a caller calls twice, sizes from the
+    // first answer, and a wrong number there sends it round for ever or
+    // truncates the name it finally gets.
+    const { memory, fns } = setup();
+    memory.putDword(OUT_SIZE, 1);
+
+    assert.equal(fns.GetUserNameA.handler([OUT_NAME, OUT_SIZE]), 0);
+    const needed = memory.dword(OUT_SIZE);
+    assert.ok(needed > 1);
+
+    memory.putDword(OUT_SIZE, needed);
+    assert.equal(fns.GetUserNameA.handler([OUT_NAME, OUT_SIZE]), 1,
+        'and the size it asked for is enough');
+});
+
+test('no size pointer at all is a refusal rather than a write to address zero', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetUserNameA.handler([OUT_NAME, 0]), 0);
+});

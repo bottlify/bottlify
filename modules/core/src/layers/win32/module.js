@@ -415,6 +415,10 @@ export const win32Module = {
                     systemTimeMs: ()=>kernel.clock.wallClock(),
                     now: ()=>kernel.clock.virtualTime(),
                     files: volume,
+                    // The same set GetLogicalDrives reports, from the same
+                    // place: a program populates its drive list from whichever
+                    // of the two it happens to call.
+                    drives: ()=>filesystem.drives(),
                     // Without this the functions returning a double are not
                     // exported at all, and an unresolved import names the one
                     // that is missing. Exported without it they would set a

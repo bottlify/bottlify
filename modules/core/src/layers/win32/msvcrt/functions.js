@@ -63,6 +63,7 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
  * @property {() => number} [now]           Guest running time, milliseconds.
  * @property {any} [files]                  The volume, for the path functions.
+ * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {import('./float.js').FloatHost} [fpu]
  * @property {(message: string) => void} [abort]
  */
@@ -596,6 +597,7 @@ export function createMsvcrtFunctions(host){
                 readCString: host.readCString,
                 writeMemory: host.writeMemory,
                 allocate,
+                drives: host.drives,
                 files: host.files,
             })
             : {}),
