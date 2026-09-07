@@ -54,7 +54,11 @@ export const cpuModule = {
             trapPort: config?.trapPort ?? 0xb077,
             entryVector: config?.entryVector ?? 0x7000,
             initialStack: config?.initialStack ?? 0x300000,
-            thunkBase: config?.thunkBase ?? 0x200000,
+            // Low, so that everything between here and the initial stack
+            // pointer belongs to the stack. A program linked for a megabyte
+            // needs a megabyte below that pointer, and the stubs sitting in
+            // the middle of that span would cap it at less.
+            thunkBase: config?.thunkBase ?? 0x100000,
         };
 
         /** @type {(id: number) => void} */

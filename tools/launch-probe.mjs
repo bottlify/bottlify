@@ -36,7 +36,37 @@ function parse(argv){
     return {
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
+        map: argv.includes('--map'),
     };
+}
+
+/**
+ * The address space as the region map holds it, with the gaps between regions
+ * spelled out. A fault outside every region is usually a region that is too
+ * small rather than an address that is wrong, and the gap is where it could
+ * have grown to.
+ *
+ * @param {any} app
+ */
+function printMap(app){
+    const layout = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'memory')?.metrics?.layout ?? [];
+    console.log('\naddress space:');
+    let previousEnd = 0;
+    for (const entry of layout)
+    {
+        const [name, extent, access] = entry.split(' ');
+        const [base, size] = extent.split('+').map((/** @type {string} */ n)=>Number(n));
+        if (base > previousEnd)
+        {
+            console.log(`    ${'—'.padEnd(28)} gap 0x${(base - previousEnd).toString(16)}`);
+        }
+        console.log(`  0x${base.toString(16).padStart(8, '0')}`
+            + `..0x${(base + size).toString(16).padStart(8, '0')}`
+            + `  ${name.padEnd(24)} ${access}`);
+        previousEnd = Math.max(previousEnd, base + size);
+    }
+    console.log('');
 }
 
 /** Groups "dll!name" into a table by library. @param {string[]} unresolved */
@@ -100,7 +130,7 @@ function report(app){
 }
 
 async function main(){
-    const { id, turns } = parse(process.argv.slice(2));
+    const { id, turns, map } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N]');
@@ -166,6 +196,11 @@ async function main(){
         }
     }
 
+    if (map)
+    {
+        printMap(app);
+    }
+
     /** @type {any[]} */
     const failures = [];
     app.on('error', (/** @type {any} */ payload)=>failures.push(payload));
@@ -206,6 +241,17 @@ async function main(){
     }
 
     console.log(`stopped: ${stopped}`);
+
+    // What the program wrote. A game of this age keeps its own log, and it
+    // says in plain words what it thought went wrong -- which is a better
+    // account of a failure than any trace taken from outside it.
+    for (const file of app.session.export())
+    {
+        const text = new TextDecoder('latin1').decode(file.bytes);
+        console.log(`\n  ${file.path} (${file.bytes.length} bytes)`);
+        console.log(text.split('\n').slice(-40).map(line=>`    ${line}`).join('\n'));
+    }
+
     report(app);
     for (const failure of failures.slice(0, 3))
     {

@@ -47,6 +47,8 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @property {number} sectionAlignment
  * @property {number} sizeOfHeaders
  * @property {number} subsystem
+ * @property {number} stackReserve     How much stack the program was linked to expect.
+ * @property {number} stackCommit
  * @property {boolean} relocatable     False when the image has no relocation directory.
  * @property {PeSection[]} sections
  * @property {{ address: number, size: number }[]} directories
@@ -122,6 +124,12 @@ export function parsePe(bytes){
         sectionAlignment: view.getUint32(optional + 32, true),
         sizeOfHeaders: view.getUint32(optional + 60, true),
         subsystem: view.getUint16(optional + 68, true),
+        // What the linker reserved for the first thread. Not advice: a program
+        // built against a megabyte will use a megabyte, and giving it less
+        // fails as a read below the mapped stack rather than as a stack
+        // overflow, somewhere unrelated to the code that asked for the space.
+        stackReserve: view.getUint32(optional + 72, true),
+        stackCommit: view.getUint32(optional + 76, true),
         // Plenty of pre-2000 executables ship without a relocation directory and
         // simply cannot be moved: every absolute address in them assumes ImageBase.
         relocatable: relocDirectory !== undefined && relocDirectory.size > 0,

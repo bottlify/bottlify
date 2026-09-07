@@ -27,6 +27,11 @@ test('headers of a real 32-bit console executable', ()=>{
     assert.equal(image.sectionAlignment, 0x1000);
     assert.ok(image.entryPointRva > 0);
     assert.ok(image.sizeOfImage >= 0x2000);
+    // The stack the linker reserved. Read rather than assumed, because a
+    // program given less than it was built for fails as a read below its own
+    // stack, at whichever call was crossing the boundary.
+    assert.equal(image.stackReserve, 0x100000);
+    assert.equal(image.stackCommit, 0x1000);
     assert.equal(image.sections.length, 1);
     assert.equal(image.sections[0].name, '.text');
     assert.ok(image.sections[0].executable, 'code section is executable');

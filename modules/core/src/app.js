@@ -721,6 +721,13 @@ export async function createApp(options){
     let idlers = [];
 
     const core = await assembleModules({
+        log: {
+            // The guest's clock, for the same reason the sound buffers use it:
+            // a phase timed against the host and a phase timed against the
+            // guest cannot be added together, and the number this layer exists
+            // to produce -- how much of a frame was ours -- is a sum.
+            now: ()=>core.api('kernel').clock.virtualTime(),
+        },
         audio: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
@@ -848,7 +855,22 @@ export async function createApp(options){
     blocks = await mountBundle({ options, cpu, filesystem, events });
 
     const { entryVector, initialStack, thunkBase } = cpu.layout;
-    const stackSize = options.stackSize ?? 0x10000;
+
+    // The first thread gets the stack its own image asked the linker for.
+    //
+    // A fixed default is a guess, and the guess is wrong for anything but a
+    // trivial program: a C runtime starting up inside a library the program
+    // ships will walk past sixty-four kilobytes on its way to `main`. What
+    // that produces is not a stack-overflow exception -- it is a read below
+    // the mapped stack, reported at whichever call happened to be crossing
+    // the boundary, with nothing pointing at the code that wanted the space.
+    //
+    // Clamped to what actually fits under the initial stack pointer, because
+    // the region below it is finite and a request larger than the room is a
+    // layout question rather than something to honour silently.
+    const stackRoom = initialStack - (thunkBase + cpu.thunkImage().length);
+    const stackSize = options.stackSize
+        ?? Math.min(Math.max(parsePe(options.executable).stackReserve, 0x10000), stackRoom);
 
     memory.register({
         name: 'entry-vector', base: entryVector, size: 4,
