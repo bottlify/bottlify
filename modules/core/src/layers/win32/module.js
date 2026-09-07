@@ -243,6 +243,7 @@ export const win32Module = {
                 ...createThreadingFunctions({
                     kernel,
                     readMemory,
+                    readCString,
                     writeMemory,
                     setLastError: setError,
                     currentThread: ()=>kernel.currentThread(),

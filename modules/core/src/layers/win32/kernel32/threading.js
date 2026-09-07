@@ -27,6 +27,12 @@ const WAIT_TIMEOUT = 0x102;
 
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_SUCCESS = 0;
+/** What a create reports when the name was already taken. */
+const ERROR_ALREADY_EXISTS = 183;
+
+/** A name is at most this long; longer is a pointer that is not a string. */
+const MAX_NAME = 260;
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_NOT_SUPPORTED = 50;
 
@@ -37,6 +43,7 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @typedef {Object} ThreadingHost
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, maxLength: number) => string} readCString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
@@ -86,6 +93,61 @@ export function createThreadingFunctions(host){
      * @returns {number | any}
      */
     const settle = result=>result === null ? host.park() : result;
+
+    /**
+     * Objects that have a name, by that name.
+     *
+     * A name is not decoration. Two calls naming the same object must get the
+     * same object -- that is how one process coordinates with itself across
+     * libraries, and how a second copy of a program discovers the first. The
+     * create reports that the name was already taken, and the canonical
+     * single-instance idiom reads exactly that.
+     *
+     * Kept here rather than in the kernel because naming is a Win32 idea: the
+     * kernel has objects and no namespace.
+     *
+     * @type {Map<string, { kind: string, object: any }>}
+     */
+    const named = new Map();
+
+    /** @param {number} pointer @returns {string | null} */
+    const nameOf = pointer=>((pointer >>> 0) === 0
+        ? null
+        : host.readCString(pointer >>> 0, MAX_NAME) || null);
+
+    /**
+     * The object this name already stands for, or null. A name taken by an
+     * object of another kind is not a match: Windows keeps one namespace, so
+     * asking for an event by a mutex's name fails rather than converting it.
+     *
+     * @param {string | null} name @param {string} kind
+     */
+    const existing = (name, kind)=>{
+        if (name === null)
+        {
+            return null;
+        }
+        const held = named.get(name);
+        return held && held.kind === kind ? held.object : null;
+    };
+
+    /**
+     * Records the name and reports what the create should leave behind: a
+     * create that found its name already taken says so, and one that did not
+     * must clear the slot rather than leave whatever an unrelated call put
+     * there. The single-instance idiom reads this immediately after the call
+     * and cannot tell a stale value from its own.
+     *
+     * @param {string | null} name @param {string} kind @param {any} made
+     * @param {boolean} reused
+     */
+    const remember = (name, kind, made, reused)=>{
+        if (name !== null && !reused)
+        {
+            named.set(name, { kind, object: made });
+        }
+        host.setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
+    };
 
     return {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
@@ -208,9 +270,15 @@ export function createThreadingFunctions(host){
          */
         OpenMutexA: {
             argBytes: 12,
-            handler: ()=>{
-                host.setLastError(ERROR_FILE_NOT_FOUND);
-                return 0;
+            /** @param {number[]} args */
+            handler: ([, , namePointer])=>{
+                const mutex = existing(nameOf(namePointer), 'mutex');
+                if (!mutex)
+                {
+                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    return 0;
+                }
+                return kernel.handles.open('mutex', mutex);
             },
         },
 
@@ -260,12 +328,15 @@ export function createThreadingFunctions(host){
         CreateMutexA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, initialOwner])=>{
-                const mutex = kernel.createMutex({ name: 'mutex' });
-                if (initialOwner)
+            handler: ([, initialOwner, namePointer])=>{
+                const name = nameOf(namePointer);
+                const found = existing(name, 'mutex');
+                const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
+                if (initialOwner && found === null)
                 {
                     kernel.wait(mutex, host.currentThread());
                 }
+                remember(name, 'mutex', mutex, found !== null);
                 return kernel.handles.open('mutex', mutex);
             },
         },
@@ -288,11 +359,15 @@ export function createThreadingFunctions(host){
         CreateEventA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, manualReset, initialState])=>{
-                const event = kernel.createEvent({
+            handler: ([, manualReset, initialState, namePointer])=>{
+                const name = nameOf(namePointer);
+                const found = existing(name, 'event');
+                const event = found ?? kernel.createEvent({
                     manualReset: Boolean(manualReset),
                     signalled: Boolean(initialState),
+                    name: name ?? 'event',
                 });
+                remember(name, 'event', event, found !== null);
                 return kernel.handles.open('event', event);
             },
         },

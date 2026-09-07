@@ -40,6 +40,12 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
+ *           it is what makes `sample` a profile rather than a rumour.
+ * @property {(eip: number) => void} [sample]
+ *           Called with the guest's instruction pointer at every turn boundary.
+ *           This is the only view of what a program is doing between host calls,
+ *           which is where a program that fails on its own computed state fails.
  * @property {string} [imagePath]    What the program believes it was loaded from.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
@@ -753,6 +759,12 @@ export async function createApp(options){
     let idlers = [];
 
     const core = await assembleModules({
+        kernel: {
+            // How many guest instructions a thread runs before the next one
+            // gets a turn. Lowering it is how a sampled profile gets enough
+            // points to say anything; raising it costs nothing but resolution.
+            quantum: options.quantum,
+        },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced
@@ -1498,6 +1510,15 @@ export async function createApp(options){
                 try
                 {
                     step = kernel.runOnce();
+                    // Where the guest stood when its slice ran out. Sampled
+                    // here because this is the only boundary the host owns: a
+                    // program that decides something inside its own code makes
+                    // no call to record, and the instruction pointer is the
+                    // only thing that says which code that was.
+                    if (options.sample && step.ran)
+                    {
+                        options.sample(cpu.eip());
+                    }
                 }
                 catch (e){
                     // A fault inside the guest, or inside a host function

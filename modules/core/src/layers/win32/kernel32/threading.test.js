@@ -120,6 +120,8 @@ function setup(){
         writeMemory: (address, bytes)=>{
             written.set(address, bytes);
         },
+        // No object in this fixture is named, so every name is the empty one.
+        readCString: ()=>'',
         /** @param {number} code */
         setLastError: code=>{
             errors.push(code);

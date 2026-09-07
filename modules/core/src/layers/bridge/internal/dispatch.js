@@ -270,9 +270,16 @@ export function createDispatcher(deps){
             try
             {
                 result = fn.handler(args);
+                // A promise is neither a value nor the parked token: it is a
+                // call that has not finished, and the thread is about to be
+                // parked on it. Rendering it as a number turns every such call
+                // into a plain zero -- a failure under most conventions -- and
+                // a reader then chases a failure that did not happen.
                 record.result = isParkedCall(result)
                     ? 'parked'
-                    : `0x${(Number(result) >>> 0).toString(16)}`;
+                    : (typeof (/** @type {any} */ (result))?.then === 'function'
+                        ? 'waiting'
+                        : `0x${(Number(result) >>> 0).toString(16)}`);
             }
             finally
             {

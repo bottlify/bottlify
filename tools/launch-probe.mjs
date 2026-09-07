@@ -43,6 +43,12 @@ function parse(argv){
         calls: argv.includes('--calls') ? Number(argv[argv.indexOf('--calls') + 1]) : 24,
         // Sizing the guest's heap from the command line, so that "it ran out
         // of memory" can be tested rather than argued about.
+        // Sampled guest execution. A program that decides something inside its
+        // own code makes no host call to record, so the instruction pointer is
+        // the only account of what it was doing.
+        profile: argv.includes('--profile')
+            ? Number(argv[argv.indexOf('--profile') + 1] || 2000)
+            : 0,
         heap: argv.includes('--heap')
             ? Number(argv[argv.indexOf('--heap') + 1]) * 1024 * 1024
             : undefined,
@@ -74,6 +80,81 @@ function printMap(app){
             + `..0x${(base + size).toString(16).padStart(8, '0')}`
             + `  ${name.padEnd(24)} ${access}`);
         previousEnd = Math.max(previousEnd, base + size);
+    }
+    console.log('');
+}
+
+/**
+ * Where the guest spent its instructions, by module and offset.
+ *
+ * The histogram says which code a program was running; the tail says what it
+ * was doing last, which for a program that gives up on its own computed state
+ * is the only account there is. Offsets are rounded, because a sample lands
+ * wherever a slice happened to end and the question is which function, not
+ * which instruction.
+ *
+ * @param {any} app @param {number[]} samples
+ */
+function printProfile(app, samples){
+    const layout = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'memory')?.metrics?.layout ?? [];
+    /** @type {{ name: string, base: number, end: number }[]} */
+    const regions = layout.map((/** @type {string} */ entry)=>{
+        const [name, extent] = entry.split(' ');
+        const [base, size] = extent.split('+').map((/** @type {string} */ n)=>Number(n));
+        return { name, base, end: base + size };
+    }).sort((/** @type {any} */ a, /** @type {any} */ b)=>a.base - b.base);
+
+    /** @param {number} address */
+    const describe = address=>{
+        const region = regions.find(entry=>address >= entry.base && address < entry.end);
+        return region
+            ? `${region.name}+0x${(address - region.base).toString(16)}`
+            : `0x${address.toString(16)} <unmapped>`;
+    };
+    /** @param {number} address */
+    const bucket = address=>{
+        const region = regions.find(entry=>address >= entry.base && address < entry.end);
+        return region
+            ? `${region.name}+0x${((address - region.base) & ~0xfff).toString(16)}`
+            : '<unmapped>';
+    };
+
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    for (const eip of samples)
+    {
+        const key = bucket(eip);
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    console.log(`\nguest execution, ${samples.length} samples by page:`);
+    for (const [where, count] of [...counts].sort((a, b)=>b[1] - a[1]).slice(0, 20))
+    {
+        const share = (count * 100 / samples.length).toFixed(1);
+        console.log(`    ${String(count).padStart(6)}  ${share.padStart(5)}%  ${where}`);
+    }
+
+    // And the same again at instruction granularity. A page says which
+    // function; an address says which loop, and a program that has given up is
+    // usually sitting in one.
+    /** @type {Map<string, number>} */
+    const exact = new Map();
+    for (const eip of samples)
+    {
+        const key = describe(eip);
+        exact.set(key, (exact.get(key) ?? 0) + 1);
+    }
+    console.log('\n  the addresses it sat on:');
+    for (const [where, count] of [...exact].sort((a, b)=>b[1] - a[1]).slice(0, 12))
+    {
+        const share = (count * 100 / samples.length).toFixed(1);
+        console.log(`    ${String(count).padStart(6)}  ${share.padStart(5)}%  ${where}`);
+    }
+
+    console.log('\n  last seen, oldest first:');
+    for (const eip of samples.slice(-24))
+    {
+        console.log(`    ${describe(eip)}`);
     }
     console.log('');
 }
@@ -114,6 +195,22 @@ function report(app, { grep = null, calls = 24 } = {}){
             .map(([name, value])=>`${name}=${value}`)
             .join(' ');
         console.log(`  ${layer.name} [${layer.status}] ${interesting}`);
+    }
+
+    // What each thread is doing, and what a blocked one is blocked on. A
+    // program spinning on a flag another thread should set looks healthy from
+    // every other angle: the counters climb, the calls keep coming, and the
+    // one fact that explains it is which threads cannot run.
+    const kernel = layers
+        .find((/** @type {any} */ layer)=>layer.name === 'kernel')?.metrics ?? {};
+    if (kernel.byState || (kernel.waiting ?? []).length > 0)
+    {
+        console.log(`
+  threads: ${JSON.stringify(kernel.byState ?? {})}`);
+        for (const waiting of kernel.waiting ?? [])
+        {
+            console.log(`    blocked  ${waiting}`);
+        }
     }
 
     const bridge = layers
@@ -167,7 +264,7 @@ function report(app, { grep = null, calls = 24 } = {}){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap } = parse(process.argv.slice(2));
+    const { id, turns, map, grep, calls, heap, profile } = parse(process.argv.slice(2));
     if (!id)
     {
         console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N]');
@@ -197,6 +294,9 @@ async function main(){
     await bundle.close();
     console.log(`  entry image: ${executable.length} bytes\n`);
 
+    /** Every instruction pointer the sampler saw, in order. @type {number[]} */
+    const samples = [];
+
     const [wasm] = await Promise.all([readFile(new URL('v86.wasm', PREBUILT))]);
     const app = await createApp({
         executable: new Uint8Array(executable),
@@ -208,6 +308,8 @@ async function main(){
         // from inside its own installation rather than from the volume's root.
         imagePath: `C:\\App\\${manifest.entry}`,
         heapSize: heap,
+        quantum: profile > 0 ? profile : undefined,
+        sample: profile > 0 ? (/** @type {number} */ eip)=>samples.push(eip) : undefined,
         // A probe is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
         // Nothing durable: a probe should not leave a copy of a game behind, and
@@ -297,6 +399,10 @@ async function main(){
         console.log(text.split('\n').slice(-40).map(line=>`    ${line}`).join('\n'));
     }
 
+    if (profile > 0)
+    {
+        printProfile(app, samples);
+    }
     report(app, { grep, calls });
     for (const failure of failures.slice(0, 3))
     {
