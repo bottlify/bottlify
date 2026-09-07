@@ -20,6 +20,18 @@
 
 import { HANDLE_STDOUT } from '../kernel32/console.js';
 import { formatToString } from './format.js';
+import { createStringFunctions } from './strings.js';
+import { createConversionFunctions } from './convert.js';
+import { createScanFunctions } from './scan.js';
+import { createHeapFunctions } from './heap.js';
+import { createTimeFunctions } from './time.js';
+import { createPathFunctions } from './paths.js';
+import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
+import { createCxxFunctions } from './cxx.js';
+import { createMathFunctions } from './math.js';
+
+/** How many argument slots a `va_list` is read for, since it carries no count. */
+const VA_LIST_SLOTS = 64;
 
 /**
  * A string is scanned no further than this. Nothing in C bounds `strlen`, so a
@@ -42,6 +54,17 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
  * @property {(entry: number, args: number[]) => Promise<number>} callGuest
  *            Runs a guest routine and resolves with what it returned.
+ * @property {(bytes: number) => number} [allocate]  The process heap. Without
+ *            it every allocating function answers null, which is a failure a
+ *            caller is required to handle -- unlike a wrong pointer.
+ * @property {(address: number) => boolean} [free]
+ * @property {(address: number) => { size: number, capacity: number } | null} [block]
+ * @property {(address: number, bytes: number) => boolean} [resize]
+ * @property {() => number} [systemTimeMs]  Guest wall clock, milliseconds.
+ * @property {() => number} [now]           Guest running time, milliseconds.
+ * @property {any} [files]                  The volume, for the path functions.
+ * @property {import('./float.js').FloatHost} [fpu]
+ * @property {(message: string) => void} [abort]
  */
 
 /**
@@ -139,7 +162,21 @@ export function createMsvcrtFunctions(host){
         },
     };
 
-    return {
+    /**
+     * A `va_list` is a pointer into the caller's stack and carries no count, so
+     * a fixed window is read and the format string decides how much of it is
+     * meaningful. Reading past the arguments is harmless -- the extra slots are
+     * never consulted -- while reading too few would silently print zeros.
+     *
+     * @param {number} list
+     */
+    const varargsAt = list=>{
+        const bytes = copyOf(list, VA_LIST_SLOTS * 4);
+        const view = new DataView(bytes.buffer);
+        return Array.from({ length: VA_LIST_SLOTS }, (unused, slot)=>view.getInt32(slot * 4, true));
+    };
+
+    const table = {
         /** size_t strlen(const char *str) */
         strlen: {
             convention: 'cdecl',
@@ -389,7 +426,9 @@ export function createMsvcrtFunctions(host){
                         {
                             break;
                         }
-                        const first = host.readMemory(left, size);
+                        // Copied out, not viewed: the first write below lands in
+                        // the same memory a view would still be pointing at.
+                        const first = copyOf(left, size);
                         host.writeMemory(left, host.readMemory(right, size));
                         host.writeMemory(right, first);
                     }
@@ -413,5 +452,155 @@ export function createMsvcrtFunctions(host){
                 return text.length;
             },
         },
+
+        /**
+         * int _snprintf(char *buffer, size_t count, const char *format, ...)
+         *
+         * Truncation is reported as a negative return and the buffer is left
+         * unterminated -- the msvcrt behaviour, not C99's, and the difference
+         * is why code written against this one terminates the buffer itself.
+         */
+        _snprintf: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: args=>{
+                const limit = args[1] >>> 0;
+                const text = render(args, 3);
+                if (text.length > limit)
+                {
+                    host.writeMemory(args[0], packInto(new Uint8Array(limit), text));
+                    return -1;
+                }
+                writeString(args[0], text);
+                return text.length;
+            },
+        },
+
+        /** int vsprintf(char *buffer, const char *format, va_list args) */
+        vsprintf: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, format, list])=>{
+                const text = formatToString(readString(format), varargsAt(list), readString);
+                writeString(buffer, text);
+                return text.length;
+            },
+        },
+
+        /** int vprintf(const char *format, va_list args) */
+        vprintf: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([format, list])=>{
+                const text = formatToString(readString(format), varargsAt(list), readString);
+                host.write(HANDLE_STDOUT, text);
+                return text.length;
+            },
+        },
+
+        /**
+         * void *bsearch(const void *key, const void *base, size_t num,
+         *               size_t width, int (*compare)(const void *, const void *))
+         *
+         * The comparator is guest code, so this suspends across every step the
+         * way qsort does. The key is the first argument to it, which is the
+         * order a caller's comparator was written for and the reason a
+         * comparator shared with qsort is often subtly wrong here.
+         */
+        bsearch: {
+            convention: 'cdecl',
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: async([key, base, num, width, ordering])=>{
+                const size = width >>> 0;
+                let low = 0;
+                let high = (num >>> 0) - 1;
+                while (low <= high)
+                {
+                    const middle = (low + high) >> 1;
+                    const element = base + middle * size;
+                    const order = await host.callGuest(ordering, [key, element]);
+                    if (order === 0)
+                    {
+                        return element;
+                    }
+                    if (order < 0)
+                    {
+                        high = middle - 1;
+                    }
+                    else
+                    {
+                        low = middle + 1;
+                    }
+                }
+                return 0;
+            },
+        },
+    };
+
+    const allocate = host.allocate ?? (()=>0);
+    const narrow = {
+        ...table,
+        ...createStringFunctions({
+            readMemory: host.readMemory,
+            writeMemory: host.writeMemory,
+            readCString: host.readCString,
+            allocate,
+        }),
+    };
+
+    return {
+        ...narrow,
+        // Bound to the byte functions above, so the two families cannot drift.
+        ...createMultiByteFunctions(narrow),
+        ...createWideFunctions(host),
+        ...createConversionFunctions({
+            readCString: host.readCString,
+            writeMemory: host.writeMemory,
+            allocate,
+            fpu: host.fpu,
+        }),
+        ...createScanFunctions(host),
+        ...createCxxFunctions(host),
+
+        // The rest of the runtime needs seams the assembling caller may not
+        // have wired. A missing one leaves the functions unexported, and an
+        // unresolved import names what is missing -- which is a better failure
+        // than a function that answers plausibly and wrongly.
+        ...(host.allocate && host.free && host.block && host.resize
+            ? createHeapFunctions({
+                allocate: host.allocate,
+                free: host.free,
+                block: host.block,
+                resize: host.resize,
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+            })
+            : {}),
+        ...(host.systemTimeMs && host.now
+            ? createTimeFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                readCString: host.readCString,
+                allocate,
+                systemTimeMs: host.systemTimeMs,
+                now: host.now,
+                fpu: host.fpu,
+            })
+            : {}),
+        ...(host.files
+            ? createPathFunctions({
+                readCString: host.readCString,
+                writeMemory: host.writeMemory,
+                allocate,
+                files: host.files,
+            })
+            : {}),
+        ...(host.fpu
+            ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })
+            : {}),
     };
 }
