@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
+import { createDirectDrawSeam } from './ddraw.js';
 import {
     IDIRECTDRAW7_SLOTS, IDIRECTDRAW_SLOTS, IDIRECTDRAWSURFACE7_SLOTS, IDIRECTDRAWSURFACE_SLOTS,
     IDIRECTDRAWPALETTE_SLOTS, IDIRECTDRAWCLIPPER_SLOTS,
@@ -381,7 +382,8 @@ test('GetDC is a real device context over the surface, and not a mutex with Lock
     const hdc = h.box.memory.readU32(out);
     assert.notEqual(hdc, 0xdeadbeef);
     assert.deepEqual(h.dcs[0], { event: 'create', handle: hdc, attributes: {
-        width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer,
+        width: 8, height: 8, pitch: 32, bitCount: 32, bits: model.buffer, palette: null,
+        format: '555',
     } }, 'GDI was told exactly where the pixels are');
 
     h.box.memory.writeU32(out, 0xdeadbeef);
@@ -633,4 +635,150 @@ test('a mode set through the first generation is what the seventh reads back', (
     assert.equal(h.release(primary), 0);
     assert.equal(h.release(first), 0);
     h.assertAllReleased();
+});
+
+/**
+ * The enumerations, driven through the descriptors directly: each answers
+ * with a promise the bridge would suspend the caller on, and the vtable
+ * harness above reads a slot's answer as a number.
+ */
+function enumerating(){
+    const box = machine();
+    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    /** @type {{ entry: number, args: number[], desc: any }[]} */
+    const calls = [];
+    let cancelAfter = Infinity;
+    const seam = createDirectDrawSeam({
+        publisher,
+        memory: box.services,
+        screen: ()=>SCREEN,
+        callGuest: async({ entry, args })=>{
+            // What the callback was shown is read now, while it is valid.
+            calls.push({ entry, args, desc: {
+                width: box.memory.readU32(args[args.length - 2] + DDSURFACEDESC2.dwWidth),
+                height: box.memory.readU32(args[args.length - 2] + DDSURFACEDESC2.dwHeight),
+                bitCount: box.memory.readU32(
+                    args[args.length - 2] + DDSURFACEDESC2.ddpfPixelFormat + 0x0c),
+                caps: box.memory.readU32(args[args.length - 2] + DDSURFACEDESC2.dwCaps),
+            } });
+            return calls.length >= cancelAfter ? 0 : 1;
+        },
+        scratch: { allocate: box.allocateSurface },
+    });
+    const root = createDirectDraw({ version: 7, allocate: box.allocateSurface,
+        screenWidth: SCREEN.width, screenHeight: SCREEN.height });
+    root.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    const ddraw7 = seam.interfaces.ddraw[3];
+    const surface7 = seam.interfaces.surface[4];
+    /** @param {any} descriptor @param {string} name */
+    const method = (descriptor, name)=>{
+        const found = descriptor.methods.find((/** @type {any} */ m)=>m.name === name);
+        assert.ok(found && found.invoke, `${name} is implemented`);
+        return found.invoke;
+    };
+    return {
+        box,
+        publisher,
+        calls,
+        root,
+        cancel: (/** @type {number} */ after)=>{
+            cancelAfter = after;
+        },
+        /** @param {string} name @param {number[]} args */
+        ddraw: (name, args)=>method(ddraw7, name)(root, args),
+        /** @param {any} surface @param {string} name @param {number[]} args */
+        surface: (surface, name, args)=>method(surface7, name)(surface, args),
+    };
+}
+
+test('EnumDisplayModes names every mode at every depth, and stops when told', async()=>{
+    const h = enumerating();
+    assert.equal(await h.ddraw('EnumDisplayModes', [0, 0, 0x77, 0x1234]), DD_OK);
+    // The table has four sizes; the 16x16 screen is not one of them, so five.
+    assert.equal(h.calls.length, 5 * 3);
+    assert.deepEqual(h.calls[0].desc, { width: 640, height: 480, bitCount: 8, caps: 0 });
+    assert.deepEqual(h.calls[5].desc, { width: 800, height: 600, bitCount: 32, caps: 0 });
+    assert.deepEqual(h.calls[14].desc, { width: 16, height: 16, bitCount: 32, caps: 0 });
+    assert.equal(h.calls[0].entry, 0x1234);
+    assert.equal(h.calls[0].args[1], 0x77, 'the context travels');
+    assert.equal(h.ddraw('EnumDisplayModes', [0, 0, 0, 0]), DDERR_INVALIDPARAMS, 'no callback');
+
+    h.calls.length = 0;
+    h.cancel(2);
+    assert.equal(await h.ddraw('EnumDisplayModes', [0, 0, 0, 0x1234]), DD_OK);
+    assert.equal(h.calls.length, 2, 'DDENUMRET_CANCEL ends the walk');
+    assert.equal(h.root.release('IDirectDraw7'), 0);
+});
+
+test('EnumAttachedSurfaces hands each attachment over with a reference of its own', async()=>{
+    const h = enumerating();
+    const made = h.root.createSurface({
+        flags: DDSD_CAPS | DDSD_BACKBUFFERCOUNT,
+        caps: DDSCAPS_PRIMARYSURFACE | DDSCAPS_COMPLEX | DDSCAPS_FLIP,
+        backBufferCount: 2,
+    });
+    assert.equal(made.hr, DD_OK);
+    const front = /** @type {any} */ (made.surface);
+
+    assert.equal(await h.surface(front, 'EnumAttachedSurfaces', [0x55, 0x2000]), DD_OK);
+    assert.equal(h.calls.length, 1, 'the front has one attachment, the first back buffer');
+    const back = /** @type {any} */ (h.publisher.objectAt(h.calls[0].args[0]));
+    assert.equal(back, front.flipNext);
+    assert.equal(back.refCount, 2, 'the callback owns a reference the program releases');
+    assert.equal(h.calls[0].desc.width, 16);
+    assert.equal(h.calls[0].desc.caps & DDSCAPS_FLIP, DDSCAPS_FLIP);
+    assert.equal(h.calls[0].args[2], 0x55);
+    assert.equal(back.release(), 1);
+
+    assert.equal(front.release(), 0);
+    assert.equal(h.root.release('IDirectDraw7'), 0);
+    assert.ok(h.root.destroyed);
+});
+
+test('EnumSurfaces names all of them, or those that match the caps described', async()=>{
+    const h = enumerating();
+    /** @type {any} */
+    const plain = h.root.createSurface({ flags: DDSD_CAPS | DDSD_WIDTH | DDSD_HEIGHT,
+        caps: DDSCAPS_OFFSCREENPLAIN, width: 4, height: 4 });
+    /** @type {any} */
+    const primary = h.root.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    assert.equal(plain.hr, DD_OK);
+    assert.equal(primary.hr, DD_OK);
+
+    assert.equal(await h.ddraw('EnumSurfaces', [1, 0, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 2, 'DDENUMSURFACES_ALL');
+    for (const call of h.calls)
+    {
+        h.publisher.objectAt(call.args[0]).release();
+    }
+
+    h.calls.length = 0;
+    const wanted = 0x6000;
+    h.box.memory.writeU32(wanted + DDSURFACEDESC2.dwCaps, DDSCAPS_PRIMARYSURFACE);
+    assert.equal(await h.ddraw('EnumSurfaces', [2, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 1, 'DDENUMSURFACES_MATCH');
+    assert.equal(h.publisher.objectAt(h.calls[0].args[0]), primary.surface);
+    primary.surface.release();
+
+    h.calls.length = 0;
+    assert.equal(await h.ddraw('EnumSurfaces', [4, wanted, 0, 0x3000]), DD_OK);
+    assert.equal(h.calls.length, 1, 'DDENUMSURFACES_NOMATCH');
+    assert.equal(h.publisher.objectAt(h.calls[0].args[0]), plain.surface);
+    plain.surface.release();
+
+    assert.equal(plain.surface.release(), 0);
+    assert.equal(primary.surface.release(), 0);
+    assert.equal(h.root.release('IDirectDraw7'), 0);
+    assert.ok(h.root.destroyed);
+});
+
+test('without a way into the guest an enumeration names nothing and succeeds', ()=>{
+    const box = machine();
+    const publisher = createPublisher({ publishInterface: box.publishInterface });
+    const seam = createDirectDrawSeam({ publisher, memory: box.services, screen: ()=>SCREEN });
+    const root = createDirectDraw({ version: 7 });
+    const method = /** @type {any} */ (seam.interfaces.ddraw[3].methods.find(
+        (/** @type {any} */ m)=>m.name === 'EnumDisplayModes'));
+    assert.equal(method.invoke(root, [0, 0, 0, 0x1234]), DD_OK);
+    assert.equal(root.release('IDirectDraw7'), 0);
 });

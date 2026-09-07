@@ -132,9 +132,23 @@ export function createVtables({ memory, register, heap }){
                     // nothing is better than a hole a program jumps into.
                     return 0x80004001;
                 }
-                return method.invoke(object, args) | 0;
+                // A method that has to call back into guest code answers with a
+                // promise, and the dispatcher parks the caller until it
+                // settles. Coercing it here would hand the guest a zero --
+                // which is S_OK -- while the work it was waiting for had not
+                // started.
+                return thenableOrDword(method.invoke(object, args));
         }
     }
+
+    /**
+     * A result on its way to the guest: a dword, or a promise the dispatcher
+     * will park the caller on until it settles.
+     *
+     * @param {any} answer
+     */
+    const thenableOrDword = answer=>(
+        typeof answer?.then === 'function' ? answer : answer | 0);
 
     /**
      * QueryInterface, which is where identity is decided: the guest hands us a

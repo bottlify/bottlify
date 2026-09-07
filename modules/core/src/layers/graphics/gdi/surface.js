@@ -13,8 +13,64 @@
  * whether a byte offset lands on the pixel it was meant to.
  */
 
-/** Bit depth every surface has. See `contract.js` for why there is only one. */
+/**
+ * The depth a surface has unless told otherwise, and the one every raster
+ * operation is written for. An 8- or 16-bit surface converts at `read` and
+ * `write`, so the operations still see this depth.
+ */
 export const SURFACE_BIT_COUNT = 32;
+
+/** The two ways sixteen bits split into channels. */
+export const RGB_565 = '565';
+export const RGB_555 = '555';
+
+/**
+ * Widens a five- or six-bit channel by repeating its top bits into the low
+ * ones, so full scale stays full scale: a shift alone leaves white at 0xf8.
+ *
+ * @param {number} value
+ * @param {number} bits  5 or 6
+ * @returns {number}
+ */
+function widen(value, bits){
+    return ((value << (8 - bits)) | (value >>> (bits - (8 - bits)))) & 0xff;
+}
+
+/**
+ * A sixteen-bit pixel as a 32-bit one. `RGB_555` is what a BI_RGB DIB means
+ * by sixteen bits; `RGB_565` is what a DirectDraw display mode means.
+ *
+ * @param {number} value
+ * @param {string} format  RGB_555 or RGB_565
+ * @returns {number}
+ */
+export function expand16(value, format){
+    if (format === RGB_565)
+    {
+        return ((widen(value >>> 11, 5) << 16)
+            | (widen((value >>> 5) & 0x3f, 6) << 8)
+            | widen(value & 0x1f, 5)) >>> 0;
+    }
+    return ((widen((value >>> 10) & 0x1f, 5) << 16)
+        | (widen((value >>> 5) & 0x1f, 5) << 8)
+        | widen(value & 0x1f, 5)) >>> 0;
+}
+
+/**
+ * @param {number} pixel
+ * @param {string} format
+ * @returns {number} the sixteen-bit value, top bits of each channel kept
+ */
+export function narrow16(pixel, format){
+    const red = (pixel >>> 16) & 0xff;
+    const green = (pixel >>> 8) & 0xff;
+    const blue = pixel & 0xff;
+    if (format === RGB_565)
+    {
+        return ((red >>> 3) << 11) | ((green >>> 2) << 5) | (blue >>> 3);
+    }
+    return ((red >>> 3) << 10) | ((green >>> 3) << 5) | (blue >>> 3);
+}
 
 /**
  * Bytes per row for a DIB: each row starts on a four-byte boundary. A loop that
@@ -75,11 +131,22 @@ export function pixelToColor(pixel){
  * @property {number} [pitch]      Overrides the DIB rule for a surface someone else strided.
  * @property {Uint8Array} [bytes]  Existing memory to draw into, rather than fresh memory.
  * @property {number} [offset]     Where row zero starts inside `bytes`.
+ * @property {number} [bitCount]   8, 16 or 32; the operations still see 32.
+ * @property {number[]} [palette]  What an index means, for 8 bits: 32-bit pixels.
+ * @property {string} [format]     RGB_555 (default) or RGB_565, for 16 bits.
+ */
+
+/**
+ * A surface that also says how deep it is. The operations need only the
+ * contract's half; the depth is for whoever presents or re-reads the bytes.
+ *
+ * @typedef {import("./contract.js").Surface & {
+ *     bitCount: number, palette: number[] | null, format: string }} DepthSurface
  */
 
 /**
  * @param {SurfaceOptions} options
- * @returns {import("./contract.js").Surface}
+ * @returns {DepthSurface}
  */
 export function createSurface(options){
     const width = options.width | 0;
@@ -88,7 +155,18 @@ export function createSurface(options){
     {
         throw new RangeError('A surface needs a positive width and height');
     }
-    const pitch = options.pitch ?? dibPitch(width, SURFACE_BIT_COUNT);
+    const bitCount = options.bitCount ?? SURFACE_BIT_COUNT;
+    if (bitCount !== 8 && bitCount !== 16 && bitCount !== 32)
+    {
+        throw new RangeError(`A surface cannot be ${bitCount} bits deep`);
+    }
+    const palette = options.palette ?? null;
+    if (bitCount === 8 && !palette)
+    {
+        throw new RangeError('An eight-bit surface needs a palette');
+    }
+    const format = options.format ?? RGB_555;
+    const pitch = options.pitch ?? dibPitch(width, bitCount);
     const offset = options.offset ?? 0;
     const bytes = options.bytes ?? new Uint8Array(pitch * height);
     if (bytes.length < offset + (pitch * height))
@@ -99,7 +177,8 @@ export function createSurface(options){
     // rather than four, and it is only legal when both the pitch and the start
     // are DWORD-aligned -- which the DIB rule guarantees and an imported stride
     // does not.
-    const aligned = (pitch % 4) === 0 && ((bytes.byteOffset + offset) % 4) === 0;
+    const aligned = bitCount === 32 && (pitch % 4) === 0
+        && ((bytes.byteOffset + offset) % 4) === 0;
     const words = aligned
         ? new Uint32Array(bytes.buffer, bytes.byteOffset + offset, (pitch * height) / 4)
         : null;
@@ -108,6 +187,52 @@ export function createSurface(options){
     /** @param {number} y @returns {number} byte offset of the row's first pixel */
     const rowOffset = y=>offset + ((topDown ? y : height - 1 - y) * pitch);
 
+    /**
+     * The palette entry nearest a pixel, by squared distance in RGB. A fill
+     * asks the same question thousands of times, so the answer is remembered
+     * per pixel value; the palette is live, so the memory is dropped when it
+     * changes length and is only as trustworthy as the caller's discipline
+     * about not rewriting entries mid-draw.
+     *
+     * @type {Map<number, number>}
+     */
+    const nearest = new Map();
+    /** @param {number} pixel @returns {number} */
+    const indexOf = pixel=>{
+        const remembered = nearest.get(pixel);
+        if (remembered !== undefined)
+        {
+            return remembered;
+        }
+        const entries = /** @type {number[]} */ (palette);
+        let best = 0;
+        let bestDistance = Infinity;
+        for (let index = 0; index < entries.length && index < 256; index++)
+        {
+            const entry = entries[index] >>> 0;
+            if ((entry & 0xffffff) === (pixel & 0xffffff))
+            {
+                best = index;
+                break;
+            }
+            const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
+            const dg = ((entry >>> 8) & 0xff) - ((pixel >>> 8) & 0xff);
+            const db = (entry & 0xff) - (pixel & 0xff);
+            const distance = dr * dr + dg * dg + db * db;
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                best = index;
+            }
+        }
+        if (nearest.size >= 4096)
+        {
+            nearest.clear();
+        }
+        nearest.set(pixel, best);
+        return best;
+    };
+
     return {
         width,
         height,
@@ -115,9 +240,21 @@ export function createSurface(options){
         topDown,
         bytes,
         offset,
+        bitCount,
+        palette,
+        format,
 
         /** @param {number} x @param {number} y */
         read(x, y){
+            if (bitCount === 8)
+            {
+                return (/** @type {number[]} */ (palette)[bytes[rowOffset(y) + x]] ?? 0) >>> 0;
+            }
+            if (bitCount === 16)
+            {
+                const at = rowOffset(y) + (x * 2);
+                return expand16(bytes[at] | (bytes[at + 1] << 8), format);
+            }
             const at = rowOffset(y) + (x * 4);
             if (words)
             {
@@ -129,6 +266,19 @@ export function createSurface(options){
 
         /** @param {number} x @param {number} y @param {number} pixel */
         write(x, y, pixel){
+            if (bitCount === 8)
+            {
+                bytes[rowOffset(y) + x] = indexOf(pixel >>> 0);
+                return;
+            }
+            if (bitCount === 16)
+            {
+                const at = rowOffset(y) + (x * 2);
+                const value = narrow16(pixel >>> 0, format);
+                bytes[at] = value & 0xff;
+                bytes[at + 1] = (value >>> 8) & 0xff;
+                return;
+            }
             const at = rowOffset(y) + (x * 4);
             if (words)
             {
@@ -151,14 +301,20 @@ export function createSurface(options){
  * `topDown` flag is the one thing that cannot be recovered from the numbers,
  * which is why the bookkeeping half stores it rather than the signed height.
  *
+ * Eight bits needs the palette the indices mean; sixteen bits is 5-5-5 unless
+ * the attributes say 5-6-5. Anything else is not a depth this layer draws.
+ *
  * @param {{ width: number, height: number, bitCount: number, bits: number,
- *           topDown?: boolean }} attributes  A bitmap object's own attributes.
+ *           topDown?: boolean, palette?: number[], format?: string }} attributes
+ *        A bitmap object's own attributes.
  * @param {Uint8Array} memory   Guest memory, or the window of it holding the bits.
  * @param {number} [base]       The guest address `memory` starts at.
  * @returns {import("./contract.js").Surface | null}
  */
 export function surfaceForDibSection(attributes, memory, base = 0){
-    if (attributes.bitCount !== SURFACE_BIT_COUNT || (attributes.bits >>> 0) === 0)
+    const depth = attributes.bitCount;
+    if ((depth !== 8 && depth !== 16 && depth !== 32) || (attributes.bits >>> 0) === 0
+        || (depth === 8 && !attributes.palette))
     {
         return null;
     }
@@ -166,9 +322,12 @@ export function surfaceForDibSection(attributes, memory, base = 0){
         width: attributes.width,
         height: attributes.height,
         topDown: attributes.topDown === true,
-        pitch: dibPitch(attributes.width, attributes.bitCount),
+        pitch: dibPitch(attributes.width, depth),
         bytes: memory,
         offset: (attributes.bits >>> 0) - base,
+        bitCount: depth,
+        palette: attributes.palette,
+        format: attributes.format,
     });
 }
 

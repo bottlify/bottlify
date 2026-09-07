@@ -51,16 +51,23 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {any} [deps.publisher]
  *        The publisher to share, for a caller that needs the way back from a
  *        pointer to the object; one is made otherwise.
+ * @param {(call: { entry: number, args: number[] }) => Promise<number>} [deps.callGuest]
+ *        The bridge's way into guest code, which the DirectDraw enumerations need.
+ * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
+ *        Guest memory for what a callback is shown.
  * @returns {{ libraries: Record<string, Record<string, any>>, diagnostics: () => any }}
  */
 export function createGraphicsLibraries(
-    { graphics, memory, publishInterface, screen, gdi, present, publisher: shared },
+    { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
+        scratch },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({ publisher, memory, screen });
-    const ddraw = createDirectDrawSeam({ publisher, memory, screen, gdi, present });
+    const ddraw = createDirectDrawSeam({
+        publisher, memory, screen, gdi, present, callGuest, scratch,
+    });
 
     /** What a program has actually asked us to make, for a report. */
     /** @type {string[]} */

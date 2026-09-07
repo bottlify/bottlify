@@ -33,9 +33,11 @@
  * the model that applies it -- so a reference taken through IDirectDraw7 lands
  * in IDirectDraw7's count and nowhere else.
  *
- * What the seam cannot yet honour is said plainly where it lives: the
- * enumerations, which need a call back into guest code that nothing here can
- * make.
+ * The three enumerations call back into guest code once per item. They are
+ * asynchronous -- a call into the guest is -- and answer with a promise the
+ * bridge suspends the caller on. Without a way to call the guest they report
+ * success having named nothing, which is what a program with nothing to
+ * enumerate would see, and is said so where each of them lives.
  */
 
 import {
@@ -73,6 +75,22 @@ import { blt, bltFast } from '../ddraw/blit.js';
 
 /** What the caps report as video memory: a round number nothing here measures. */
 const VIDEO_MEMORY = 64 << 20;
+
+/** What an enumeration callback answers to go on, and to stop. */
+const DDENUMRET_CANCEL = 0;
+
+/** EnumSurfaces flags: which surfaces the caller wants named. */
+const DDENUMSURFACES_ALL = 0x00000001;
+const DDENUMSURFACES_MATCH = 0x00000002;
+const DDENUMSURFACES_NOMATCH = 0x00000004;
+
+/**
+ * The display modes this build offers, at every depth a mode can be set to.
+ * The screen's own size is added to the list when it is not already one of
+ * these, so a program that enumerates before choosing finds where it is.
+ */
+const MODES = Object.freeze([[640, 480], [800, 600], [1024, 768], [1280, 1024]]);
+const DEPTHS = Object.freeze([8, 16, 32]);
 
 /** RGNDATAHEADER: a size, a type that is always rectangles, a count, a byte size, a bound. */
 const RGNDATAHEADER = Object.freeze({
@@ -174,9 +192,30 @@ export function versionOf(id){
  * @param {() => any} deps.screen The display this build is configured for.
  * @param {SurfaceDcServices} [deps.gdi]
  * @param {(surface: PresentedSurface) => void} [deps.present]
+ * @param {(call: { entry: number, args: number[] }) => Promise<number>} [deps.callGuest]
+ *        The bridge's way into guest code, for the enumerations.
+ * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
+ *        Guest memory for the descriptor a callback is shown. One block is
+ *        taken and reused: a descriptor is the callback's to read while it
+ *        runs and nobody's afterwards.
  */
-export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }){
+export function createDirectDrawSeam(
+    { publisher, memory, screen, gdi, present, callGuest, scratch },
+)
+{
     const fields = createFields(memory);
+
+    /** @type {number} the descriptor block, taken on the first enumeration */
+    let descriptorBlock = 0;
+    const descriptorScratch = ()=>{
+        if (descriptorBlock === 0 && scratch)
+        {
+            descriptorBlock = scratch.allocate(DDSURFACEDESC2.SIZE);
+        }
+        return descriptorBlock;
+    };
+    /** Whether an enumeration can reach the program at all. */
+    const canEnumerate = ()=>callGuest !== undefined && descriptorScratch() !== 0;
 
     /** Which ddraw object made a surface: what GetDDInterface hands back. */
     /** @type {WeakMap<object, any>} */
@@ -580,10 +619,25 @@ export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }
                 return attached ? surface.deleteAttachedSurface(attached) : DDERR_INVALIDPARAMS;
             },
 
-            // Enumerating needs a call back into guest code once per surface,
-            // which nothing here can make yet. Answering success having named
-            // nothing is what a program with no attachments would see.
-            EnumAttachedSurfaces: ()=>DD_OK,
+            /**
+             * Each attached surface is handed to the callback with a
+             * reference of its own, which the program releases, and with its
+             * descriptor written into the scratch block for the duration.
+             *
+             * @param {any} surface @param {number[]} args
+             */
+            EnumAttachedSurfaces: (surface, [context, callback])=>{
+                if ((callback >>> 0) === 0)
+                {
+                    return DDERR_INVALIDPARAMS;
+                }
+                if (!canEnumerate())
+                {
+                    return DD_OK;
+                }
+                return enumerateSurfaces(surface.enumAttachedSurfaces(), generation,
+                    callback >>> 0, context >>> 0);
+            },
 
             /** @param {any} surface @param {number[]} args */
             Flip: (surface, [target, flags])=>
@@ -792,6 +846,31 @@ export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }
     const surfaceInterfaces = SURFACE_GENERATIONS.map(generation=>
         describe(generation.id, generation.slots, surfaceMethods(generation)));
 
+    /**
+     * Names each surface to the callback in turn, stopping when it says so.
+     *
+     * @param {any[]} list
+     * @param {{ id: string, layout: any }} generation  Which interface and descriptor to show.
+     * @param {number} callback
+     * @param {number} context
+     */
+    async function enumerateSurfaces(list, generation, callback, context){
+        const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        for (const surface of list)
+        {
+            surface.addRef();
+            const pointer = publisher.publish(surface, surfaceInterfaces, generation.id);
+            const desc = descriptorScratch();
+            writeSurfaceDesc(memory, desc, generation.layout, descriptorOf(surface));
+            const answer = await call({ entry: callback, args: [pointer, desc, context] });
+            if ((answer >>> 0) === DDENUMRET_CANCEL)
+            {
+                break;
+            }
+        }
+        return DD_OK;
+    }
+
     // --- the ddraw object ---
 
     /** @type {Record<string, typeof GENERATIONS[keyof typeof GENERATIONS]>} */
@@ -891,10 +970,96 @@ export function createDirectDrawSeam({ publisher, memory, screen, gdi, present }
             return DD_OK;
         },
 
-        // The three enumerations call back into guest code once per item,
-        // which nothing here can do yet; each reports having found nothing.
-        EnumDisplayModes: ()=>DD_OK,
-        EnumSurfaces: ()=>DD_OK,
+        /**
+         * Every mode in the table at every depth, and the screen's own size
+         * if the table lacks it. Without a way into the guest this reports
+         * success having named nothing.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        EnumDisplayModes: (root, [, , context, callback])=>{
+            if ((callback >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            if (!canEnumerate())
+            {
+                return DD_OK;
+            }
+            const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+            const display = screen();
+            const sizes = MODES.some(([width, height])=>
+                width === display.width && height === display.height)
+                ? MODES
+                : [...MODES, [display.width, display.height]];
+            return (async()=>{
+                for (const [width, height] of sizes)
+                {
+                    for (const depth of DEPTHS)
+                    {
+                        const pixelFormat =
+                            /** @type {import('../ddraw/structs.js').PixelFormatFields} */ (
+                                pixelFormatForDepth(depth));
+                        const desc = descriptorScratch();
+                        writeSurfaceDesc(memory, desc, generation.layout, {
+                            flags: DDSD_WIDTH | DDSD_HEIGHT | DDSD_PITCH | DDSD_PIXELFORMAT
+                                | DDSD_REFRESHRATE,
+                            width,
+                            height,
+                            pitch: width * bytesPerPixel(pixelFormat),
+                            backBufferCount: 0,
+                            mipMapCount: 0,
+                            caps: 0,
+                            caps2: 0,
+                            pixelFormat,
+                        });
+                        const answer = await call({ entry: callback >>> 0,
+                            args: [desc, context >>> 0] });
+                        if ((answer >>> 0) === DDENUMRET_CANCEL)
+                        {
+                            return DD_OK;
+                        }
+                    }
+                }
+                return DD_OK;
+            })();
+        },
+
+        /**
+         * Every surface this object made, or those whose capabilities match
+         * (or do not match) the ones described. Surfaces that could be created
+         * but do not exist are not enumerated: there is no table of them.
+         *
+         * @param {any} root @param {number[]} args
+         */
+        EnumSurfaces: (root, [flags, desc, context, callback])=>{
+            if ((callback >>> 0) === 0)
+            {
+                return DDERR_INVALIDPARAMS;
+            }
+            if (!canEnumerate())
+            {
+                return DD_OK;
+            }
+            const wanted = (desc >>> 0) === 0
+                ? 0
+                : (fields.readU32((desc >>> 0) + generation.layout.dwCaps) >>> 0);
+            const matches = (/** @type {any} */ surface)=>(surface.caps & wanted) === wanted;
+            const chosen = root.allSurfaces().filter((/** @type {any} */ surface)=>{
+                if ((flags & DDENUMSURFACES_ALL) !== 0)
+                {
+                    return true;
+                }
+                if ((flags & DDENUMSURFACES_NOMATCH) !== 0)
+                {
+                    return !matches(surface);
+                }
+                return (flags & DDENUMSURFACES_MATCH) === 0 || matches(surface);
+            });
+            return enumerateSurfaces(chosen, { id: generation.surface, layout: generation.layout },
+                callback >>> 0, context >>> 0);
+        },
+
         FlipToGDISurface: ()=>DD_OK,
 
         /** @param {any} root @param {number[]} args */

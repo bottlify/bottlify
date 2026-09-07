@@ -1035,8 +1035,10 @@ test('a device context is asked for over the surface\'s own pixels, and given ba
     const dc = surface.getDC();
     assert.equal(dc.hr, DD_OK);
     assert.equal(dc.dc, 0x7701, 'the handle is the one the maker chose');
-    assert.deepEqual(made,
-        [{ width: 10, height: 6, pitch: 40, bitCount: 32, bits: surface.buffer }]);
+    assert.deepEqual(made, [{
+        width: 10, height: 6, pitch: 40, bitCount: 32, bits: surface.buffer, palette: null,
+        format: '555',
+    }]);
     assert.equal(surface.dc, 0x7701);
     assert.equal(ddraw.surfaceWithDc(0x7701), surface);
 
@@ -1078,6 +1080,41 @@ test('the primary is found once made, and a surface counts its own changes', ()=
     assert.equal(primary.release(), 0);
     assert.equal(ddraw.primarySurface(), null, 'released is gone');
     assert.equal(offscreen.release(), 0);
+    assert.equal(ddraw.release('IDirectDraw7'), 0);
+    assert.ok(ddraw.destroyed);
+});
+
+test('a device context on a palettised surface carries its palette as pixels', ()=>{
+    /** @type {any[]} */
+    const made = [];
+    const ddraw = createDirectDraw({
+        version: 7,
+        createDc: attributes=>{
+            made.push(attributes);
+            return 0x7701;
+        },
+    });
+    ddraw.setCooperativeLevel(HWND, DDSCL_EXCLUSIVE | DDSCL_FULLSCREEN);
+    assert.equal(ddraw.setDisplayMode(64, 32, 8), DD_OK);
+    const primary = ddraw.createSurface({ flags: DDSD_CAPS, caps: DDSCAPS_PRIMARYSURFACE });
+    assert.equal(primary.hr, DD_OK);
+    const surface = /** @type {NonNullable<typeof primary.surface>} */ (primary.surface);
+    // PALETTEENTRY is red, green, blue, flags: entry one is (0x12, 0x34, 0x56).
+    const palette = ddraw.createPalette(DDPCAPS_8BIT, [0, 0x00563412]);
+    assert.equal(palette.hr, DD_OK);
+    assert.equal(surface.setPalette(palette.palette), DD_OK);
+
+    assert.equal(surface.getDC().hr, DD_OK);
+    assert.equal(made[0].bitCount, 8);
+    assert.equal(made[0].pitch, 64);
+    assert.equal(made[0].palette.length, 256);
+    assert.equal(made[0].palette[1], 0x00123456, 'a pixel is red, green, blue from the top');
+    assert.equal(surface.releaseDC(0x7701), DD_OK);
+
+    /** @type {any} */
+    const held = palette.palette;
+    assert.equal(surface.release(), 0);
+    assert.equal(held.release(), 0);
     assert.equal(ddraw.release('IDirectDraw7'), 0);
     assert.ok(ddraw.destroyed);
 });

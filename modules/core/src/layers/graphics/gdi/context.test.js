@@ -306,7 +306,7 @@ function fakeGdiHost(){
 
 test('the bits CreateDIBSection allocated are a surface this layer can draw into', ()=>{
     const host = fakeGdiHost();
-    const gdi = createGdiFunctions(host);
+    const gdi = createGdiFunctions(host).table;
 
     // A four-by-three top-down 32-bit section, written as the guest would.
     const info = new Uint8Array(BITMAPINFOHEADER.SIZE);

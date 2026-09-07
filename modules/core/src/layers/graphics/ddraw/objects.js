@@ -319,7 +319,22 @@ function sameRect(a, b){
  * @property {number} pitch
  * @property {number} bitCount
  * @property {number} bits   Guest address of row zero.
+ * @property {number[] | null} palette
+ *           The surface's palette as `0x00RRGGBB` pixels, for an 8-bit surface
+ *           with one set; null otherwise. A PALETTEENTRY holds red in its low
+ *           byte and a pixel holds blue, so the two are not the same dword.
+ * @property {'565' | '555'} format
+ *           Which 16-bit layout the surface's masks describe; meaningless at
+ *           other depths.
  */
+
+/**
+ * @param {number} entry a PALETTEENTRY dword: red, green, blue, flags as bytes
+ * @returns {number} the pixel a drawing surface holds
+ */
+function paletteEntryToPixel(entry){
+    return (((entry & 0xff) << 16) | (entry & 0xff00) | ((entry >>> 16) & 0xff)) >>> 0;
+}
 
 /**
  * @param {DirectDrawOptions} [options]
@@ -941,8 +956,15 @@ export function createDirectDraw(options = {}){
                 {
                     return { hr: DDERR_SURFACELOST, dc: null };
                 }
-                dc = createDc({ width: spec.width, height: spec.height, pitch, bitCount: bpp * 8,
-                    bits: buffer });
+                dc = createDc({
+                    width: spec.width,
+                    height: spec.height,
+                    pitch,
+                    bitCount: bpp * 8,
+                    bits: buffer,
+                    palette: bpp === 1 && palette ? palette.entries.map(paletteEntryToPixel) : null,
+                    format: spec.pixelFormat.greenMask === 0x07e0 ? '565' : '555',
+                });
                 return { hr: DD_OK, dc };
             },
 
@@ -1401,6 +1423,11 @@ export function createDirectDraw(options = {}){
                 surface.restore();
             }
             return DD_OK;
+        },
+
+        /** @returns {Surface[]} every surface alive, in creation order */
+        allSurfaces(){
+            return [...surfaces];
         },
 
         /** @returns {Surface | null} the primary surface, if a program has made one */

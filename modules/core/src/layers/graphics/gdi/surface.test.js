@@ -7,15 +7,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    RGB_555,
+    RGB_565,
     clearSurface,
     colorToPixel,
     createSurface,
     ddbPitch,
     dibPitch,
+    expand16,
     intersectRect,
     isEmptyRect,
+    narrow16,
     pixelToColor,
     surfaceBounds,
+    surfaceForDibSection,
 } from './surface.js';
 
 test('a DIB row is padded to four bytes and a bitmap row to two', ()=>{
@@ -90,6 +95,95 @@ test('rectangles intersect and report emptiness the half-open way', ()=>{
     assert.deepEqual(intersectRect(a, b), { left: 5, top: 5, right: 10, bottom: 6 });
     assert.equal(isEmptyRect(intersectRect(a, { left: 10, top: 0, right: 20, bottom: 10 })), true);
     assert.equal(isEmptyRect({ left: 0, top: 0, right: 1, bottom: 1 }), false);
+});
+
+test('byte-exact: an eight-bit surface stores the nearest palette index', ()=>{
+    // Entries chosen so that a metric on the wrong channels, or one that
+    // compares the packed number rather than the colours, picks differently:
+    // 0x00ff0000 is numerically nearer 0x00fe0000 than 0x00000010 is, but
+    // 0x00200000 is nearer black than red by any colour distance.
+    const palette = [0x00000000, 0x00ff0000, 0x0000ff00, 0x000000ff, 0x00fe0000];
+    const surface = createSurface({ width: 4, height: 4, bitCount: 8, palette });
+    assert.equal(surface.pitch, 4);
+    assert.equal(surface.bitCount, 8);
+
+    surface.write(0, 0, 0x00ff0000);
+    assert.equal(surface.bytes[0], 1, 'an exact match wins over a nearer neighbour');
+    surface.write(1, 0, 0x00200000);
+    assert.equal(surface.bytes[1], 0, 'dark red is nearest black');
+    surface.write(2, 0, 0x0010ff10);
+    assert.equal(surface.bytes[2], 2, 'a green with a little red and blue is still green');
+    surface.write(3, 3, 0x000000f0);
+    assert.equal(surface.bytes[15], 3);
+    // Red with a trace of blue: as far from black as from red on the other
+    // two channels, so only a distance that counts red picks the red entry.
+    surface.write(0, 1, 0x00ff0010);
+    assert.equal(surface.bytes[4], 1);
+
+    assert.equal(surface.read(0, 0), 0x00ff0000);
+    assert.equal(surface.read(1, 0), 0, 'and reads back the entry, not what was asked for');
+    assert.equal(surface.read(3, 3), 0x000000ff);
+    assert.equal(Buffer.from(surface.bytes).toString('base64'), 'AQACAAEAAAAAAAAAAAAAAw==',
+        'the whole buffer: row zero, the red at row one, the last corner, zeros elsewhere');
+
+    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 8 }), RangeError,
+        'eight bits without a palette');
+    assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 24 }), RangeError);
+});
+
+test('byte-exact: a sixteen-bit surface narrows and widens with the top bits replicated', ()=>{
+    for (const [pixel, packed] of [[0x00ff0000, 0xf800], [0x0000ff00, 0x07e0],
+        [0x000000ff, 0x001f], [0x00ffffff, 0xffff]])
+    {
+        assert.equal(narrow16(pixel, RGB_565), packed);
+        assert.equal(expand16(packed, RGB_565), pixel, 'full scale survives the round trip');
+    }
+    // 0x8410 is 10000 100000 10000: the midpoint of every channel widens to
+    // 132, 130, 132, not to 128 -- the top bits are repeated into the low ones.
+    assert.equal(expand16(0x8410, RGB_565), 0x00848284);
+    assert.equal(narrow16(0x00848284, RGB_565), 0x8410);
+
+    assert.equal(narrow16(0x00ff0000, RGB_555), 0x7c00);
+    assert.equal(expand16(0x7c00, RGB_555), 0x00ff0000);
+    assert.equal(expand16(0x4210, RGB_555), 0x00848484, 'five bits everywhere at 555');
+
+    const surface = createSurface({ width: 3, height: 1, bitCount: 16, format: RGB_565 });
+    assert.equal(surface.pitch, 8, 'six bytes of pixels, padded to a DWORD');
+    surface.write(0, 0, 0x00ff0000);
+    surface.write(1, 0, 0x00848284);
+    surface.write(2, 0, 0x000000ff);
+    assert.deepEqual([...surface.bytes], [0x00, 0xf8, 0x10, 0x84, 0x1f, 0x00, 0, 0],
+        'little-endian words, the padding untouched');
+    assert.equal(surface.read(1, 0), 0x00848284);
+
+    const fifteen = createSurface({ width: 1, height: 1, bitCount: 16 });
+    fifteen.write(0, 0, 0x00ff0000);
+    assert.deepEqual([...fifteen.bytes], [0x00, 0x7c, 0, 0], '555 unless told otherwise');
+});
+
+test('a DIB section at any drawable depth is a surface, and the rest are not', ()=>{
+    const memory = new Uint8Array(64);
+    const bits = 0x1000;
+    assert.equal(dibPitch(10, 8), 12);
+    assert.equal(dibPitch(10, 16), 20);
+
+    const eight = surfaceForDibSection(
+        { width: 4, height: 2, bitCount: 8, bits, palette: [0, 0x00abcdef], topDown: true },
+        memory, bits);
+    assert.ok(eight);
+    eight.write(1, 1, 0x00abcdef);
+    assert.equal(memory[4 + 1], 1, 'row one at the pitch, index one for the second entry');
+    assert.equal(surfaceForDibSection({ width: 4, height: 2, bitCount: 8, bits }, memory, bits),
+        null, 'eight bits with no palette is not drawable');
+
+    const sixteen = /** @type {any} */ (surfaceForDibSection(
+        { width: 2, height: 2, bitCount: 16, bits, format: RGB_565 }, memory, bits));
+    assert.ok(sixteen);
+    assert.equal(sixteen.format, RGB_565);
+    assert.equal(surfaceForDibSection({ width: 2, height: 2, bitCount: 24, bits }, memory, bits),
+        null);
+    assert.equal(surfaceForDibSection({ width: 2, height: 2, bitCount: 32, bits: 0 }, memory),
+        null);
 });
 
 test('clearing a surface reaches every pixel including the last', ()=>{

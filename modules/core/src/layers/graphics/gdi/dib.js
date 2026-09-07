@@ -29,7 +29,7 @@
 
 import { bitBlt, stretchBlt } from './blit.js';
 import { SRCCOPY } from './rop.js';
-import { createSurface, dibPitch } from './surface.js';
+import { RGB_555, createSurface, dibPitch, expand16, narrow16 } from './surface.js';
 
 /** BI_RGB: uncompressed, with the channel layout the bit count implies. */
 export const BI_RGB = 0;
@@ -37,33 +37,6 @@ export const BI_BITFIELDS = 3;
 
 /** The depths this layer converts. */
 const SUPPORTED_DEPTHS = new Set([8, 16, 24, 32]);
-
-/**
- * A 16-bit BI_RGB DIB is X1R5G5B5, five bits a channel. Widening a five-bit
- * channel by shifting alone leaves white at 0xf8, so the top bits are repeated
- * into the bottom ones and full scale stays full scale.
- *
- * @param {number} value
- * @returns {number}
- */
-function expand555(value){
-    const red = (value >>> 10) & 0x1f;
-    const green = (value >>> 5) & 0x1f;
-    const blue = value & 0x1f;
-    return ((((red << 3) | (red >>> 2)) << 16)
-        | (((green << 3) | (green >>> 2)) << 8)
-        | ((blue << 3) | (blue >>> 2))) >>> 0;
-}
-
-/**
- * @param {number} pixel
- * @returns {number}
- */
-function narrow555(pixel){
-    return ((((pixel >>> 19) & 0x1f) << 10)
-        | (((pixel >>> 11) & 0x1f) << 5)
-        | ((pixel >>> 3) & 0x1f)) & 0xffff;
-}
 
 /**
  * @typedef {Object} DibImage
@@ -137,7 +110,8 @@ export function decodeDib(image){
             else if (header.bitCount === 16)
             {
                 const at = row + (x * 2);
-                pixel = expand555(bits[at] | (bits[at + 1] << 8));
+                // A 16-bit BI_RGB DIB is X1R5G5B5, five bits a channel.
+                pixel = expand16(bits[at] | (bits[at + 1] << 8), RGB_555);
             }
             else
             {
@@ -204,7 +178,7 @@ export function encodeDib(surface, image){
             else
             {
                 const at = row + (x * 2);
-                const value = narrow555(pixel);
+                const value = narrow16(pixel, RGB_555);
                 bits[at] = value & 0xff;
                 bits[at + 1] = (value >>> 8) & 0xff;
             }

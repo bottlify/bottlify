@@ -36,9 +36,12 @@
  * transcribing from a header is what this file is. The four bytes `this`
  * occupies are added here, once, rather than in ninety-four places.
  *
+ * A method may answer with a promise instead of a number: a call into the
+ * guest is asynchronous, and the bridge suspends the caller on the promise.
+ *
  * @param {string} id
  * @param {[string, number][]} slots
- * @param {Record<string, (target: any, args: number[]) => number>} [implemented]
+ * @param {Record<string, (target: any, args: number[]) => number | Promise<number>>} [implemented]
  * @returns {import('./com.js').InterfaceDescriptor}
  */
 export function describe(id, slots, implemented = {}){
@@ -47,7 +50,9 @@ export function describe(id, slots, implemented = {}){
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,
-            invoke: implemented[name],
+            // The descriptor's own type says a number; a promise is what the
+            // bridge suspends on, and it passes through the adapter untouched.
+            invoke: /** @type {any} */ (implemented[name]),
         })),
     };
 }

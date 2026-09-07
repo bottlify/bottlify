@@ -133,6 +133,13 @@ const MM_PER_INCH = 25.4;
 /** Bit depths a bitmap can have. Anything else is not a format GDI knows. */
 const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
 
+/**
+ * Depths a device context over somebody else's surface can be made at.
+ * A palettised primary is the common one for a program of this era, which is
+ * why eight is here at all; the drawing half has no path for the rest.
+ */
+const SURFACE_DC_DEPTHS = new Set([8, 16, 32]);
+
 /** BITMAPINFOHEADER compressions a DIB section can be backed by plain memory. */
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
@@ -1282,12 +1289,18 @@ export function createGdiFunctions(host){
          * corrupted image rather than as a rejected call.
          *
          * @param {{ width: number, height: number, pitch: number,
-         *           bitCount: number, bits: number }} attributes
+         *           bitCount: number, bits: number, palette?: number[] | null,
+         *           format?: string }} attributes
          * @returns {number} A device context handle, or zero.
          */
         createSurfaceDc(attributes){
-            const { width, height, pitch, bitCount, bits } = attributes;
+            const { width, height, pitch, bitCount, bits, palette, format } = attributes;
+            // An indexed surface without its palette has no colours at all, and
+            // a drawing routine given one would have to invent them. The three
+            // depths are what a surface of this era actually is.
             if (!(width > 0) || !(height > 0) || (bits >>> 0) === 0
+                || !SURFACE_DC_DEPTHS.has(bitCount)
+                || (bitCount === 8 && !palette)
                 || pitch !== dibSize(width, 1, bitCount))
             {
                 return 0;
@@ -1303,6 +1316,8 @@ export function createGdiFunctions(host){
                 topDown: true,
                 bits: bits >>> 0,
                 section: bits >>> 0,
+                palette,
+                format,
             });
             select(dc, dc.defaultBitmap);
             return dc.hdc;

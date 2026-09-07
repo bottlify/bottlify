@@ -9,6 +9,7 @@ import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { createGraphicsLibraries } from './seam/exports.js';
+import { createPresenter } from './webgpu/internal/presenter.js';
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -35,6 +36,8 @@ let factories = null;
 let created = [];
 /** @type {any} */
 let seam = null;
+/** @type {any} */
+let presenter = null;
 
 export const graphicsModule = {
     name: 'graphics',
@@ -49,6 +52,7 @@ export const graphicsModule = {
     async create(config, host){
         const memory = host.requireApi('memory');
         const win32 = host.requireApi('win32');
+        const bridge = host.requireApi('bridge');
         backend = null;
         created = [];
 
@@ -154,6 +158,13 @@ export const graphicsModule = {
             apis: ()=>Object.keys(factories),
         };
 
+        // The backend is asked for on the first present rather than now, so a
+        // build that never shows one of these surfaces never builds a GPU.
+        presenter = createPresenter({
+            backend: ()=>api.backend(),
+            readMemory: services.readMemory,
+        });
+
         seam = createGraphicsLibraries({
             graphics: api,
             memory: services,
@@ -175,6 +186,20 @@ export const graphicsModule = {
                 createSurfaceDc: attributes=>win32.gdi().createSurfaceDc(attributes),
                 /** @param {number} handle */
                 deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
+            },
+
+            /** @param {any} surface */
+            present: surface=>presenter.present(surface),
+
+            // Enumeration is the one thing here that runs guest code: the
+            // program passes a function and expects to be called back once per
+            // mode or surface, with a descriptor it can read for the duration
+            // of the call.
+            /** @param {any} call */
+            callGuest: call=>bridge.callGuest(call),
+            scratch: {
+                /** @param {number} bytes */
+                allocate: bytes=>win32.heap().allocate(bytes),
             },
         });
 
@@ -207,6 +232,10 @@ export const graphicsModule = {
                 created,
                 seam: seam ? seam.diagnostics() : null,
                 backend: backend ? backend.diagnostics() : null,
+                // Counted separately from the backend's own: a surface shown
+                // through DirectDraw never enters a drawing pass, so nothing
+                // in those numbers says whether anything reached the screen.
+                presenter: presenter ? presenter.diagnostics() : null,
             },
         };
     },
