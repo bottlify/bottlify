@@ -190,7 +190,7 @@ export const DDSCL_ALLOWMODEX = 0x00000040;
 export const DDSCL_MULTITHREADED = 0x00000400;
 
 /** Lock and Flip flags this layer has an opinion about. */
-export const DDLOCK_READONLY = 0x00000020;
-export const DDLOCK_WRITEONLY = 0x00000040;
+export const DDLOCK_READONLY = 0x00000010;
+export const DDLOCK_WRITEONLY = 0x00000020;
 export const DDLOCK_WAIT = 0x00000001;
 export const DDFLIP_WAIT = 0x00000001;

@@ -25,6 +25,7 @@
 import { createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
+import { createDirect3D7Seam } from './d3d7.js';
 import { describe, IDIRECT3D9_SLOTS } from './vtables.js';
 import { IID_IDirect3D9, IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields } from './structs.js';
@@ -55,18 +56,22 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        The bridge's way into guest code, which the DirectDraw enumerations need.
  * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
  *        Guest memory for what a callback is shown.
+ * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
+ *        What a Direct3D 7 device draws with, reached when one is first made.
  * @returns {{ libraries: Record<string, Record<string, any>>, diagnostics: () => any }}
  */
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
-        scratch },
+        scratch, render },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({ publisher, memory, screen });
+    const d3d7 = createDirect3D7Seam({ publisher, memory, render, callGuest, scratch });
     const ddraw = createDirectDrawSeam({
         publisher, memory, screen, gdi, present, callGuest, scratch,
+        extraInterfaces: [d3d7.interface],
     });
 
     /** What a program has actually asked us to make, for a report. */

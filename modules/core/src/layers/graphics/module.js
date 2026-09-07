@@ -191,6 +191,23 @@ export const graphicsModule = {
             /** @param {any} surface */
             present: surface=>presenter.present(surface),
 
+            // What a Direct3D 7 device draws with. Reached when a program
+            // first asks its DirectDraw object for Direct3D, not now, so a
+            // build that never gets there never builds a GPU.
+            //
+            // The presenter goes with it rather than only its `present`
+            // function: a surface the GPU rendered into has nothing worth
+            // reading in guest memory, so the device claims that address and
+            // the presenter shows the texture instead of the stale bytes.
+            render: ()=>({
+                backend: device ? api.backend() : undefined,
+                readMemory: services.readMemory,
+                createSampler: device
+                    ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
+                    : undefined,
+                presenter,
+            }),
+
             // Enumeration is the one thing here that runs guest code: the
             // program passes a function and expects to be called back once per
             // mode or surface, with a descriptor it can read for the duration

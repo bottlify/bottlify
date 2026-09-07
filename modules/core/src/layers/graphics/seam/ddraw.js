@@ -73,6 +73,9 @@ import {
 import { pixelFormatForDepth } from '../ddraw/objects.js';
 import { blt, bltFast } from '../ddraw/blit.js';
 
+/** The Direct3D 7 interface, whose count is IDirectDraw7's. */
+const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
+
 /** What the caps report as video memory: a round number nothing here measures. */
 const VIDEO_MEMORY = 64 << 20;
 
@@ -198,9 +201,12 @@ export function versionOf(id){
  *        Guest memory for the descriptor a callback is shown. One block is
  *        taken and reused: a descriptor is the callback's to read while it
  *        runs and nobody's afterwards.
+ * @param {import('./com.js').InterfaceDescriptor[]} [deps.extraInterfaces]
+ *        Interfaces other seams put on the DirectDraw object -- IDirect3D7 is
+ *        reached by QueryInterface from it, not made by an entry point.
  */
 export function createDirectDrawSeam(
-    { publisher, memory, screen, gdi, present, callGuest, scratch },
+    { publisher, memory, screen, gdi, present, callGuest, scratch, extraInterfaces = [] },
 )
 {
     const fields = createFields(memory);
@@ -242,9 +248,24 @@ export function createDirectDrawSeam(
         {
             return existing;
         }
+        // Either an identifier or a generation name arrives here: the bridge
+        // sends identifiers, and the sibling APIs name the generation they
+        // share a count with. IDirect3D7 is IDirectDraw7's count.
         const generationOf = (/** @type {string | undefined} */ id)=>{
-            const version = id === undefined ? null : versionOf(id);
-            return version === null ? undefined : GENERATIONS[version].name;
+            if (id === undefined)
+            {
+                return undefined;
+            }
+            if (id === IID_IDirect3D7)
+            {
+                return GENERATIONS[7].name;
+            }
+            const version = versionOf(id);
+            if (version !== null)
+            {
+                return GENERATIONS[version].name;
+            }
+            return GENERATION_BY_NAME[id] ? id : undefined;
         };
         const facade = Object.create(root, {
             addRef: { value: (/** @type {string} */ id)=>root.addRef(generationOf(id)) },
@@ -1209,9 +1230,12 @@ export function createDirectDrawSeam(
     });
 
     /** Every generation, so a QueryInterface across them succeeds. */
-    const ddrawInterfaces = /** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
-        describe(GENERATIONS[version].id, GENERATIONS[version].slots,
-            ddrawMethods(GENERATIONS[version], version)));
+    const ddrawInterfaces = [
+        .../** @type {[1, 2, 4, 7]} */ ([1, 2, 4, 7]).map(version=>
+            describe(GENERATIONS[version].id, GENERATIONS[version].slots,
+                ddrawMethods(GENERATIONS[version], version))),
+        ...extraInterfaces,
+    ];
 
     return {
         /**

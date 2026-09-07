@@ -57,6 +57,81 @@ export function describe(id, slots, implemented = {}){
     };
 }
 
+/** IDirect3D7, after IUnknown's three. */
+export const IDIRECT3D7_SLOTS = /** @type {[string, number][]} */ ([
+    ['EnumDevices', 2],
+    ['CreateDevice', 3],
+    ['CreateVertexBuffer', 3],
+    ['EnumZBufferFormats', 3],
+    ['EvictManagedTextures', 0],
+]);
+
+/**
+ * IDirect3DDevice7, after IUnknown's three.
+ *
+ * Forty-six slots. The two that read wrongly when transcribed: SetViewport,
+ * MultiplyTransform and GetViewport sit in that order, with the multiply
+ * between the pair; and GetTexture precedes SetTexture, as it does in D3D8.
+ */
+export const IDIRECT3DDEVICE7_SLOTS = /** @type {[string, number][]} */ ([
+    ['GetCaps', 1],
+    ['EnumTextureFormats', 2],
+    ['BeginScene', 0],
+    ['EndScene', 0],
+    ['GetDirect3D', 1],
+    ['SetRenderTarget', 2],
+    ['GetRenderTarget', 1],
+    ['Clear', 6],
+    ['SetTransform', 2],
+    ['GetTransform', 2],
+    ['SetViewport', 1],
+    ['MultiplyTransform', 2],
+    ['GetViewport', 1],
+    ['SetMaterial', 1],
+    ['GetMaterial', 1],
+    ['SetLight', 2],
+    ['GetLight', 2],
+    ['SetRenderState', 2],
+    ['GetRenderState', 2],
+    ['BeginStateBlock', 0],
+    ['EndStateBlock', 1],
+    ['PreLoad', 1],
+    ['DrawPrimitive', 5],
+    ['DrawIndexedPrimitive', 7],
+    ['SetClipStatus', 1],
+    ['GetClipStatus', 1],
+    ['DrawPrimitiveStrided', 5],
+    ['DrawIndexedPrimitiveStrided', 7],
+    ['DrawPrimitiveVB', 5],
+    ['DrawIndexedPrimitiveVB', 7],
+    ['ComputeSphereVisibility', 5],
+    ['GetTexture', 2],
+    ['SetTexture', 2],
+    ['GetTextureStageState', 3],
+    ['SetTextureStageState', 3],
+    ['ValidateDevice', 1],
+    ['ApplyStateBlock', 1],
+    ['CaptureStateBlock', 1],
+    ['DeleteStateBlock', 1],
+    ['CreateStateBlock', 2],
+    ['Load', 5],
+    ['LightEnable', 2],
+    ['GetLightEnable', 2],
+    ['SetClipPlane', 2],
+    ['GetClipPlane', 2],
+    ['GetInfo', 3],
+]);
+
+/** IDirect3DVertexBuffer7, after IUnknown's three. */
+export const IDIRECT3DVERTEXBUFFER7_SLOTS = /** @type {[string, number][]} */ ([
+    ['Lock', 3],
+    ['Unlock', 0],
+    ['ProcessVertices', 7],
+    ['GetVertexBufferDesc', 1],
+    ['Optimize', 2],
+    ['ProcessVerticesStrided', 7],
+]);
+
 /**
  * IDirect3D8, after IUnknown's three.
  *

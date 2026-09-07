@@ -29,6 +29,11 @@
  *   screen changed once per blit, and a frame is dozens of blits. The
  *   uploads are coalesced onto a microtask: the first change in a burst
  *   schedules one flush, and the bytes travel once, after the burst.
+ * - **A surface a GPU drew has no bytes worth reading.** A Direct3D render
+ *   target is a DirectDraw surface by address, and its picture is in a
+ *   texture, not in guest memory. Whoever drew it claims the address, and a
+ *   present of that address is handed to the claimant to show its texture
+ *   instead of uploading whatever the guest bytes happen to hold.
  */
 
 /** The format every presented texture has; the same one the drawing APIs render to. */
@@ -123,9 +128,11 @@ export function createPresenter(options){
     let pending = null;
     /** @type {Uint8Array | null} */
     let converted = null;
-    const counters = { presents: 0, uploads: 0, bytes: 0 };
+    const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0 };
     /** @type {string[]} */
     const failures = [];
+    /** @type {Map<number, () => void>} buffer address -> who shows it */
+    const claims = new Map();
 
     /** @param {any} backend @param {PresentableSurface} surface */
     const textureFor = (backend, surface)=>{
@@ -149,6 +156,13 @@ export function createPresenter(options){
         pending = null;
         if (!surface)
         {
+            return;
+        }
+        const owner = claims.get(surface.buffer);
+        if (owner)
+        {
+            counters.shownByOwner++;
+            owner();
             return;
         }
         let backend;
@@ -215,10 +229,26 @@ export function createPresenter(options){
         /** Shows whatever is pending now, rather than after the burst. */
         flush,
 
+        /**
+         * A GPU owns the picture at this address. Presenting the address
+         * calls `show` instead of reading guest memory, until released.
+         *
+         * @param {number} buffer @param {() => void} show
+         */
+        claim(buffer, show){
+            claims.set(buffer >>> 0, show);
+        },
+
+        /** @param {number} buffer */
+        release(buffer){
+            claims.delete(buffer >>> 0);
+        },
+
         diagnostics(){
             return {
                 ...counters,
                 pending: pending !== null,
+                claimed: claims.size,
                 failures: [...failures],
             };
         },

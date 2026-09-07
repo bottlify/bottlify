@@ -32,6 +32,14 @@ export const IID_IDirectDrawSurface7 = '{06675A80-3B9B-11D2-B92F-00609797EA5B}';
 export const IID_IDirectDrawPalette = '{6C14DB84-A733-11CE-A521-0020AF0BE560}';
 export const IID_IDirectDrawClipper = '{6C14DB85-A733-11CE-A521-0020AF0BE560}';
 
+/**
+ * Direct3D 7, which is reached from the DirectDraw object by QueryInterface
+ * rather than made by an entry point of its own.
+ */
+export const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
+export const IID_IDirect3DDevice7 = '{F5049E79-4861-11D2-A407-00A0C90629A8}';
+export const IID_IDirect3DVertexBuffer7 = '{F5049E7D-4861-11D2-A407-00A0C90629A8}';
+
 /** Direct3D 8. */
 export const IID_IDirect3D8 = '{1DD9E8DA-1C77-4D40-B0CF-98FEFDFF9512}';
 export const IID_IDirect3DDevice8 = '{7385E5DF-8FE8-41D5-86B6-D7B48547B6CF}';

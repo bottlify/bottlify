@@ -127,7 +127,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented.length, 1);
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
-        presents: 3, uploads: 1, bytes: 64, pending: false, failures: [],
+        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, pending: false, claimed: 0,
+        failures: [],
     });
 
     h.presenter.present(surface);
@@ -164,4 +165,36 @@ test('recorded: with no GPU the change is noted and nothing is shown', ()=>{
     const report = presenter.diagnostics();
     assert.equal(report.uploads, 0);
     assert.match(report.failures[0], /no GPU/);
+});
+
+test('recorded: a claimed address is shown by its owner and its bytes are never read', ()=>{
+    const h = harness();
+    let shown = 0;
+    let read = 0;
+    const presenter = createPresenter({
+        backend: ()=>{
+            throw new Error('the owner shows it, not the backend');
+        },
+        readMemory: ()=>{
+            read++;
+            return new Uint8Array(4);
+        },
+        schedule: flush=>flush(),
+    });
+    presenter.claim(0x1000, ()=>{
+        shown++;
+    });
+    const surface = { buffer: 0x1000, width: 1, height: 1, pitch: 4, bitCount: 32,
+        palette: null };
+    presenter.present(surface);
+    assert.equal(shown, 1);
+    assert.equal(read, 0, 'guest memory holds nothing worth reading for a GPU-drawn surface');
+    assert.equal(presenter.diagnostics().shownByOwner, 1);
+    assert.equal(presenter.diagnostics().claimed, 1);
+
+    presenter.release(0x1000);
+    presenter.present(surface);
+    assert.equal(shown, 1, 'released, the address is guest bytes again');
+    assert.equal(presenter.diagnostics().failures.length, 1, 'and this build has no GPU for them');
+    void h;
 });

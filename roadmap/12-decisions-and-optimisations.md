@@ -111,7 +111,26 @@ The boot ROM installs gates for the processor's own exception vectors and no oth
 full table was tried and reverted: a vector fires during protected-mode entry and lands in a halting
 stub, which reads as a hang — worse than a loud refusal.
 
-### A10. Nothing here has run against a real GPU or a real guest
+### A10. Direct3D 7 offers only what the renderer can actually do
+
+Three lists are narrower than the hardware of the era would have reported, and all three narrow for
+the same reason. **Status: decided.**
+
+`EnumTextureFormats` names thirty-two- and sixteen-bit colour and nothing else; `EnumZBufferFormats`
+names sixteen bits of depth and twenty-four with eight of stencil, and no other combination; and the
+capability words in `d3d7/caps.js` claim only the cull modes, depth compares, blend factors, stage
+operations, filters and address modes the shader generator and pipeline implement today — no fog, no
+stencil operations, no lighting, no bump mapping, no cube maps, no W-buffer.
+
+The reasoning is the one recorded under A2 and is worth stating as a rule of its own: a capability
+bit is a promise about what draws correctly. A claim the renderer cannot honour sends a program down
+a fast path to a wrong picture, where the absence of the claim would have sent it down a slow path to
+a right one. So these lists grow when the renderer grows, and never in anticipation of it.
+
+What to watch for: a program that finds no format it wants and refuses to start. That is a signal to
+implement the format, not to add it to the list.
+
+### A11. Nothing here has run against a real GPU or a real guest
 
 The whole drawing path — the DirectDraw blitter, the presenter, the Direct3D 8 draw path, the
 device-context seam onto GDI — is verified by unit and contract tests only. In particular the

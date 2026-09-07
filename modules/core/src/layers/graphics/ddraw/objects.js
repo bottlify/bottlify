@@ -69,6 +69,7 @@ import {
     DDPCAPS_PRIMARYSURFACE,
     DDPF_PALETTEINDEXED8,
     DDPF_RGB,
+    DDPF_ZBUFFER,
     DDSCAPS_FLIP,
     DDSCAPS_PRIMARYSURFACE,
     DDSCAPS_SYSTEMMEMORY,
@@ -78,6 +79,7 @@ import {
     DDSD_BACKBUFFERCOUNT,
     DDSD_HEIGHT,
     DDSD_WIDTH,
+    DDSD_ZBUFFERBITDEPTH,
     DD_OK,
     E_NOINTERFACE,
 } from './constants.js';
@@ -132,8 +134,32 @@ const LEGACY_D3D = Object.freeze(new Set(['IDirect3D', 'IDirect3D2', 'IDirect3D3
  * @property {number} [width]
  * @property {number} [height]
  * @property {number} [backBufferCount]
+ * @property {number} [zBufferBitDepth]  dwZBufferBitDepth, in the older layout.
  * @property {import("./structs.js").PixelFormatFields} [pixelFormat]
  */
+
+/**
+ * The pixel format of a depth buffer asked for by bit depth alone, which is
+ * how the older descriptor describes one: a depth of sixteen is depth only,
+ * thirty-two is twenty-four bits of depth and eight of stencil, the way the
+ * hardware of the era laid them out.
+ *
+ * @param {number} bitDepth
+ * @returns {import("./structs.js").PixelFormatFields}
+ */
+export function depthFormatForDepth(bitDepth){
+    const stencil = bitDepth === 32 ? 8 : 0;
+    return {
+        size: 0x20,
+        flags: DDPF_ZBUFFER,
+        fourCC: 0,
+        bitCount: bitDepth,
+        redMask: stencil,
+        greenMask: stencil === 0 ? 0xffffffff >>> (32 - bitDepth) : 0x00ffffff,
+        blueMask: stencil === 0 ? 0 : 0xff000000,
+        alphaMask: 0,
+    };
+}
 
 /**
  * The three child objects, written out rather than inferred. A surface refers
@@ -939,6 +965,7 @@ export function createDirectDraw(options = {}){
                     return DDERR_NOTLOCKED;
                 }
                 locks.splice(index, 1);
+                uniqueness++;
                 surface.present();
                 return DD_OK;
             },
@@ -977,6 +1004,7 @@ export function createDirectDraw(options = {}){
                 void handle;
                 releaseDc(dc);
                 dc = null;
+                uniqueness++;
                 surface.present();
                 return DD_OK;
             },
@@ -1250,7 +1278,11 @@ export function createDirectDraw(options = {}){
         const height = primary ? displayMode.height : (request.height ?? 0);
         const modeFormat = /** @type {import("./structs.js").PixelFormatFields} */ (
             pixelFormatForDepth(displayMode.bitCount));
-        const pixelFormat = primary || !request.pixelFormat ? modeFormat : request.pixelFormat;
+        const depthRequest = (request.caps & DDSCAPS_ZBUFFER) !== 0
+            && (request.flags & DDSD_ZBUFFERBITDEPTH) !== 0;
+        const pixelFormat = depthRequest
+            ? depthFormatForDepth(request.zBufferBitDepth ?? 16)
+            : (primary || !request.pixelFormat ? modeFormat : request.pixelFormat);
         const owner = OWNING_GENERATIONS.has(generation) ? generation : null;
         if (owner)
         {
@@ -1423,6 +1455,17 @@ export function createDirectDraw(options = {}){
                 surface.restore();
             }
             return DD_OK;
+        },
+
+        /**
+         * Storage from the same allocator surfaces come from, for a sibling
+         * API whose objects live beside them: a Direct3D vertex buffer is a
+         * guest allocation exactly as a surface is.
+         *
+         * @param {number} bytes
+         */
+        allocateStorage(bytes){
+            return allocate(bytes);
         },
 
         /** @returns {Surface[]} every surface alive, in creation order */

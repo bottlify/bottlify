@@ -83,6 +83,120 @@ export const D3DVIEWPORT8 = Object.freeze({
     SIZE: 0x18,
 });
 
+/**
+ * D3DVIEWPORT7: the same six dwords as D3D8's viewport, under the older
+ * names. Declared separately so the name a reader checks against the header
+ * is the one they find there.
+ */
+export const D3DVIEWPORT7 = Object.freeze({
+    dwX: 0x00,
+    dwY: 0x04,
+    dwWidth: 0x08,
+    dwHeight: 0x0c,
+    dvMinZ: 0x10,
+    dvMaxZ: 0x14,
+    SIZE: 0x18,
+});
+
+/** D3DVERTEXBUFFERDESC. */
+export const D3DVERTEXBUFFERDESC = Object.freeze({
+    dwSize: 0x00,
+    dwCaps: 0x04,
+    dwFVF: 0x08,
+    dwNumVertices: 0x0c,
+    SIZE: 0x10,
+});
+
+/** D3DCLIPSTATUS: two dwords and six floats. */
+export const D3DCLIPSTATUS = Object.freeze({
+    dwFlags: 0x00,
+    dwStatus: 0x04,
+    minx: 0x08,
+    maxx: 0x0c,
+    miny: 0x10,
+    maxy: 0x14,
+    minz: 0x18,
+    maxz: 0x1c,
+    SIZE: 0x20,
+});
+
+/**
+ * D3DLIGHT7: a type, three colours, two vectors and seven floats. The same
+ * layout D3D8's light has.
+ */
+export const D3DLIGHT7 = Object.freeze({
+    dltType: 0x00,
+    dcvDiffuse: 0x04,
+    dcvSpecular: 0x14,
+    dcvAmbient: 0x24,
+    dvPosition: 0x34,
+    dvDirection: 0x40,
+    dvRange: 0x4c,
+    dvFalloff: 0x50,
+    dvAttenuation0: 0x54,
+    dvAttenuation1: 0x58,
+    dvAttenuation2: 0x5c,
+    dvTheta: 0x60,
+    dvPhi: 0x64,
+    SIZE: 0x68,
+});
+
+/** D3DPRIMCAPS, which a device description holds two of. */
+export const D3DPRIMCAPS = Object.freeze({
+    dwSize: 0x00,
+    dwMiscCaps: 0x04,
+    dwRasterCaps: 0x08,
+    dwZCmpCaps: 0x0c,
+    dwSrcBlendCaps: 0x10,
+    dwDestBlendCaps: 0x14,
+    dwAlphaCmpCaps: 0x18,
+    dwShadeCaps: 0x1c,
+    dwTextureCaps: 0x20,
+    dwTextureFilterCaps: 0x24,
+    dwTextureBlendCaps: 0x28,
+    dwTextureAddressCaps: 0x2c,
+    dwStippleWidth: 0x30,
+    dwStippleHeight: 0x34,
+    SIZE: 0x38,
+});
+
+/**
+ * D3DDEVICEDESC7. No size field of its own: the first dword is the device
+ * capabilities. The three WORD pairs are the only fields narrower than a
+ * dword, and the GUID is four-byte aligned, so nothing is padded.
+ */
+export const D3DDEVICEDESC7 = Object.freeze({
+    dwDevCaps: 0x00,
+    dpcLineCaps: 0x04,
+    dpcTriCaps: 0x3c,
+    dwDeviceRenderBitDepth: 0x74,
+    dwDeviceZBufferBitDepth: 0x78,
+    dwMinTextureWidth: 0x7c,
+    dwMinTextureHeight: 0x80,
+    dwMaxTextureWidth: 0x84,
+    dwMaxTextureHeight: 0x88,
+    dwMaxTextureRepeat: 0x8c,
+    dwMaxTextureAspectRatio: 0x90,
+    dwMaxAnisotropy: 0x94,
+    dvGuardBandLeft: 0x98,
+    dvGuardBandTop: 0x9c,
+    dvGuardBandRight: 0xa0,
+    dvGuardBandBottom: 0xa4,
+    dvExtentsAdjust: 0xa8,
+    dwStencilCaps: 0xac,
+    dwFVFCaps: 0xb0,
+    dwTextureOpCaps: 0xb4,
+    wMaxTextureBlendStages: 0xb8,
+    wMaxSimultaneousTextures: 0xba,
+    dwMaxActiveLights: 0xbc,
+    dvMaxVertexW: 0xc0,
+    deviceGUID: 0xc4,
+    wMaxUserClipPlanes: 0xd4,
+    wMaxVertexBlendMatrices: 0xd6,
+    dwVertexProcessingCaps: 0xd8,
+    SIZE: 0xec,
+});
+
 /** D3DRECT: four longs, and the order is left, top, right, bottom. */
 export const D3DRECT = Object.freeze({
     x1: 0x00,

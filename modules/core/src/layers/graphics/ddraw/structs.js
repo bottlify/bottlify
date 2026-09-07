@@ -196,6 +196,7 @@ export function writePixelFormat(memory, address, format){
  * @property {number} pitch
  * @property {number} backBufferCount
  * @property {number} mipMapCount  Also the refresh rate, also a Z depth on the older layout.
+ * @property {number} [zBufferBitDepth]  The same slot, under the name a depth request uses.
  * @property {number} caps
  * @property {number} caps2        Zero for the older layout, which has no such field.
  * @property {PixelFormatFields} pixelFormat
@@ -228,6 +229,7 @@ export function readSurfaceDesc(memory, address, layout){
         pitch: field(layout.lPitch),
         backBufferCount: field(layout.dwBackBufferCount),
         mipMapCount: field(layout.dwMipMapCount),
+        zBufferBitDepth: field(layout.dwMipMapCount),
         caps: field(layout.dwCaps),
         caps2: 'dwCaps2' in layout ? field(layout.dwCaps2) : 0,
         pixelFormat: readPixelFormat(memory, address + layout.ddpfPixelFormat),
