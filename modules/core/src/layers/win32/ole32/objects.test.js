@@ -73,7 +73,8 @@ test('registration refuses a malformed GUID and a miscounted argument list', ()=
     assert.throws(()=>registry.registerClass('{oops}', ()=>definition()), /not a GUID/);
 
     registry.registerClass(CLSID_TEST, ()=>({
-        // Zero argBytes forgets `this`, which every thiscall method has.
+        // Zero argBytes forgets the interface pointer, which every COM
+        // method is passed as its first argument.
         interfaces: [{ id: IID_FIRST, methods: [{ name: 'Draw', argBytes: 0 }] }],
     }));
     assert.throws(()=>registry.create(CLSID_TEST), /argBytes must count/);

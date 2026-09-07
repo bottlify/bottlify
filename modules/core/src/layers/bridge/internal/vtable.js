@@ -16,8 +16,18 @@ import { Convention } from './conventions.js';
  * object. So there is nothing to fake -- the layout has to exist.
  *
  * That makes it the bridge's work rather than any library's: the addresses in
- * the table are stubs, the calls through them are thiscall with `this` in ECX,
- * and both of those are what this layer already knows how to build.
+ * the table are stubs and the calls through them are stdcall, both of which
+ * this layer already knows how to build.
+ *
+ * **Not thiscall.** A COM method is declared STDMETHODCALLTYPE, which is
+ * `__stdcall`, and the interface pointer arrives as the first argument on the
+ * stack rather than in ECX -- which is exactly what makes the C bindings,
+ * `p->lpVtbl->Method(p, ...)`, binary-compatible with the C++ call. The name
+ * "this" invites the other reading and the other reading is wrong: it would
+ * take a register the caller never set, shift every argument by one position,
+ * and pop four bytes too few on return, corrupting the caller's stack on every
+ * COM call in the engine. Read against real compiled binaries: the compiler
+ * pushes the interface pointer even when it already has it in ECX.
  *
  *     interface pointer ->  [ vtable pointer ]     one word, in guest memory
  *                              |
@@ -35,7 +45,7 @@ const WORD = 4;
 /**
  * @typedef {Object} InterfaceMethod
  * @property {string} name
- * @property {number} argBytes            Counting `this`, per the thiscall rules.
+ * @property {number} argBytes            Counting the interface pointer.
  * @property {Function} [invoke]          Called as (object, args) with `this` removed.
  * @property {string} [builtin]           IUnknown's three, which we implement here.
  */
@@ -74,13 +84,13 @@ export function createVtables({ memory, register, heap }){
         const slots = table.map((method, index)=>register(
             `${interfaceId}::${method.name}`,
             {
-                convention: Convention.THISCALL,
+                convention: Convention.STDCALL,
                 argBytes: method.argBytes,
                 /** @param {number[]} args */
                 handler: args=>{
-                    // The first argument is `this` -- the interface pointer the
-                    // guest called through, not the object. What it identifies
-                    // is settled here so no implementation has to know how an
+                    // The first argument is the interface pointer the guest
+                    // called through, not the object. What it identifies is
+                    // settled here so no implementation has to know how an
                     // interface is laid out.
                     const [, ...rest] = args;
                     return dispatch(object, interfaceId, index, method, rest);

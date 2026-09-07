@@ -185,10 +185,11 @@ test('every slot the interface declares is there, including the unimplemented on
     assert.equal(box.call(pointer, 3, [0]) >>> 0, 0x80004001, 'E_NOTIMPL');
 });
 
-test('argBytes counts this, so the callee pops what it should', ()=>{
-    // These are thiscall and the bridge has the callee pop everything but
-    // `this`. A miscount does not return a wrong value, it returns to a wrong
-    // address, and the failure lands somewhere with no connection to here.
+test('argBytes counts the interface pointer, so the callee pops what it should', ()=>{
+    // A COM method is stdcall and the callee pops every argument, the
+    // interface pointer included. A miscount does not return a wrong value, it
+    // returns to a wrong address, and the failure lands somewhere with no
+    // connection to here.
     const { box, libraries } = seamed();
     const pointer = libraries.libraries['D3D8.dll'].Direct3DCreate8.handler([32]);
 

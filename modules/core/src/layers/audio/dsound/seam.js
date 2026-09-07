@@ -23,7 +23,8 @@
  * - **Every slot is listed, including the ones nothing implements.** A method
  *   with no implementation answers an error a program handles; a method left
  *   out shifts every later slot up one and breaks all of them silently.
- * - **`argBytes` counts `this`.** These are thiscall, and the bridge has the
+ * - **`argBytes` counts the interface pointer.** A COM method is stdcall,
+ *   and the bridge has the
  *   callee pop everything but `this`, so a miscount returns to a wrong address
  *   rather than returning a wrong value.
  */

@@ -20,7 +20,8 @@
  *   with no implementation answers E_NOTIMPL, which is a documented reply a
  *   program handles; a method left *out* shifts every method after it up one
  *   and breaks all of them. Completeness here matters more than coverage.
- * - **`argBytes` counts `this` and every argument.** These are thiscall, and
+ * - **`argBytes` counts the interface pointer and every argument.** A COM
+ * method is stdcall, and
  *   the bridge has the callee pop everything but `this` -- so a miscount does
  *   not return a wrong value, it returns to a wrong address.
  *

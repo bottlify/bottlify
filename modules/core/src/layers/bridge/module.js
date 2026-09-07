@@ -90,7 +90,15 @@ export const bridgeModule = {
                 });
         };
 
-        dispatcher = createDispatcher({ cpu, memory, parking, suspend });
+        // Reading the thread's last error belongs to win32, which sits above
+        // this layer and cannot be reached from it. The assembling caller
+        // hands it down instead, the way it hands down the interface
+        // publisher: what it buys is a trace that says which call left an
+        // error behind, and that is the only cheap way to find out where a
+        // code a program later complains about actually came from.
+        dispatcher = createDispatcher({
+            cpu, memory, parking, suspend, lastError: config?.lastError,
+        });
 
         // Claimed here rather than by whoever assembles the process: a trap that
         // reached anything but the bridge would be a call nobody marshalled.
@@ -167,7 +175,7 @@ export const bridgeModule = {
              * pointer a program may walk, call through and compare.
              *
              * Wired here rather than by a library, because the addresses in a
-             * vtable are stubs and the calls through them are thiscall -- both
+             * vtable are stubs and the calls through them are stdcall -- both
              * of which are this layer's, and neither of which anything above it
              * should have to know.
              *
@@ -251,7 +259,13 @@ export const bridgeModule = {
             metrics: dispatcher
                 ? {
                     ...dispatcher.diagnostics(),
-                    recentDetailed: dispatcher.detailed(24),
+                    recentDetailed: dispatcher.detailed(),
+                    // The order calls arrived in, not just how many of each.
+                    // A program stuck between two functions, or one that took
+                    // a branch nobody expected, is legible here and nowhere
+                    // else: the histogram below says what it did, this says
+                    // what it was doing.
+                    sequence: dispatcher.recent(80),
                     ...parking.diagnostics(),
                     ...callbacks.diagnostics(),
                     ...vtables ? vtables.diagnostics() : {},

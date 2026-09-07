@@ -37,7 +37,7 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @typedef {Object} ComMethod
  * @property {string} name
  * @property {number} argBytes
- *           thiscall, counted the way the bridge counts it: every argument
+ *           stdcall, counted the way the bridge counts it: every argument
  *           including `this`, so at least 4. `this` arrives in ECX and is not
  *           popped, which is the convention's business and not this file's.
  * @property {'queryInterface' | 'addRef' | 'release'} [builtin]

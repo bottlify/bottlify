@@ -26,7 +26,22 @@ export const Convention = {
     STDCALL: 'stdcall',
     /** C's: arguments on the stack, caller pops them. Variadic functions must use it. */
     CDECL: 'cdecl',
-    /** MSVC's for C++ methods: `this` in ECX, the rest on the stack, callee pops the rest. */
+    /**
+     * MSVC's for C++ methods: `this` in ECX, the rest on the stack, callee
+     * pops the rest.
+     *
+     * **Not what a COM interface method uses.** Those are STDMETHODCALLTYPE,
+     * which is `__stdcall`, and the interface pointer is the first argument on
+     * the stack -- which is what makes the C bindings binary-compatible with
+     * the C++ call. Reading the name and reaching for this one put every COM
+     * call in the engine four bytes out for a long time, and nothing could see
+     * it because our own tests drove the vtables through a harness that agreed
+     * with the mistake. A real compiled program pushes the interface pointer
+     * even when it already holds it in ECX.
+     *
+     * Nothing in the tree uses this today. It stays because a C++ runtime --
+     * one of the `msvcp` libraries -- exports real member functions that do.
+     */
     THISCALL: 'thiscall',
 };
 
