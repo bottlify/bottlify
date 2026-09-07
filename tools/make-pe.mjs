@@ -95,7 +95,13 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     // One descriptor per DLL, each with its own lookup and address tables --
     // which is how a real program imports, and the only way to say that two
     // functions come from different libraries.
-    const modules = Object.entries(imports).map(([dll, names])=>({ dll, names }));
+    /**
+     * @type {{ dll: string, names: string[], dllNameOffset: number,
+     *          iltOffset: number, iatOffset: number }[]}
+     */
+    const modules = Object.entries(imports).map(([dll, names])=>({
+        dll, names, dllNameOffset: 0, iltOffset: 0, iatOffset: 0,
+    }));
 
     let cursor = codeSize;
 
@@ -109,14 +115,22 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     }
 
     // Import name blocks: WORD hint + zero-terminated name, WORD-aligned.
+    //
+    // Keyed by library and name together. Two libraries exporting the same name
+    // is ordinary -- every one of them exports DllMain, and a CRT and a game
+    // both export malloc -- and a bare name silently gives the second one the
+    // first one's block, which lands as a malformed import table rather than as
+    // an error.
     /** @type {Record<string, number>} */
     const nameOffsets = {};
+    /** @param {string} dll @param {string} name */
+    const nameKey = (dll, name)=>`${dll}!${name}`;
     for (const module of modules)
     {
         for (const name of module.names)
         {
             cursor = (cursor + 1) & ~1;
-            nameOffsets[name] = cursor;
+            nameOffsets[nameKey(module.dll, name)] = cursor;
             cursor += 2 + name.length + 1;
         }
         cursor = (cursor + 1) & ~1;
@@ -178,7 +192,7 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     {
         for (const name of module.names)
         {
-            text.pad(nameOffsets[name]).u16(0).ascii(name).u8(0);
+            text.pad(nameOffsets[nameKey(module.dll, name)]).u16(0).ascii(name).u8(0);
         }
         text.pad(module.dllNameOffset).ascii(module.dll).u8(0);
     }
@@ -192,7 +206,7 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
             text.pad(offset);
             for (const name of module.names)
             {
-                text.u32(rva(nameOffsets[name]));
+                text.u32(rva(nameOffsets[nameKey(module.dll, name)]));
             }
             text.u32(0);
         }
@@ -249,7 +263,7 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     // The IAT directory spans every module's address table; they were laid out
     // consecutively, so the first one's start and the last one's end bound it.
     const last = modules[modules.length - 1];
-    directories[12] = [
+    directories[12] = modules.length === 0 ? [0, 0] : [
         rva(modules[0].iatOffset),
         last.iatOffset + (last.names.length + 1) * 4 - modules[0].iatOffset,
     ];
