@@ -253,6 +253,13 @@ export const kernelModule = {
                  * @param {number} handle
                  */
                 typeOf: handle=>handles.typeOf(handle),
+                /**
+                 * Whether anything still holds a handle to this object. A
+                 * Win32 name lives exactly as long as one does.
+                 *
+                 * @param {any} object
+                 */
+                holds: object=>handles.holds(object),
             },
 
             clock,

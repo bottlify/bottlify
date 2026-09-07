@@ -128,7 +128,22 @@ export function createThreadingFunctions(host){
             return null;
         }
         const held = named.get(name);
-        return held && held.kind === kind ? held.object : null;
+        if (!held)
+        {
+            return null;
+        }
+        // A name lives exactly as long as a handle to the object behind it.
+        // Windows destroys the object when the last one closes and the name
+        // goes with it, which is what makes the single-instance idiom work at
+        // all: a program creates the object to probe for a first copy, closes
+        // it, and creates it again for real -- and the second create must not
+        // be told the name is taken by the handle it just closed.
+        if (!kernel.handles.holds(held.object))
+        {
+            named.delete(name);
+            return null;
+        }
+        return held.kind === kind ? held.object : null;
     };
 
     /**

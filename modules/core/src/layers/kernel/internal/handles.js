@@ -96,6 +96,27 @@ export function createHandleTable({ limit = 0x40000000 } = {}){
             return entries.has(handle);
         },
 
+        /**
+         * Whether anything still holds a handle to this object.
+         *
+         * A scan, because handles are looked up by number and this asks the
+         * question the other way round. Affordable: the only caller is the
+         * name registry, which asks once per named create, and a program makes
+         * a handful of those in its whole life.
+         *
+         * @param {any} object @returns {boolean}
+         */
+        holds(object){
+            for (const entry of entries.values())
+            {
+                if (entry.object === object)
+                {
+                    return true;
+                }
+            }
+            return false;
+        },
+
         /** @param {number} handle @returns {string | null} */
         typeOf(handle){
             return entries.get(handle)?.type ?? null;
