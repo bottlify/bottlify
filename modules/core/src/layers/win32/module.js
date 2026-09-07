@@ -38,16 +38,20 @@ import { createComRegistry } from './ole32/objects.js';
  * hands out tables; whoever assembles the process binds them to the bridge.
  */
 
-/** @type {Record<string, Record<string, any>>} */
-let libraries = {};
-/** @type {number | null} */
-let exitCode = null;
-/** @type {any} */
-let hive = null;
-/** @type {any} */
-let queue = null;
-/** @type {any} */
-let com = null;
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- everything a running process owns lives inside its own
+ * `create()`, so two of them cannot write over each other. They did: the
+ * registry hive, the message queue and the COM registry were module-scoped,
+ * and a second process in one realm silently took the first one's.
+ *
+ * @type {any}
+ */
+let current = null;
 
 export const win32Module = {
     name: 'win32',
@@ -71,7 +75,11 @@ export const win32Module = {
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
         const filesystem = host.requireApi('filesystem');
-        exitCode = null;
+
+        /** @type {Record<string, Record<string, any>>} */
+        let libraries = {};
+        /** @type {number | null} */
+        let exitCode = null;
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
@@ -99,9 +107,9 @@ export const win32Module = {
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
-        hive = createHive();
-        queue = createMessageQueue();
-        com = createComRegistry();
+        const hive = createHive();
+        const queue = createMessageQueue();
+        const com = createComRegistry();
 
         // One allocator over the whole arena. Everything the guest is handed
         // memory from -- the heap it asks for, the bits of a DIB section, COM
@@ -282,7 +290,7 @@ export const win32Module = {
         /** Every function, whichever library exports it. */
         const flat = ()=>Object.assign({}, ...Object.values(libraries));
 
-        return {
+        const api = {
             /** @returns {Record<string, Record<string, any>>} library name -> its exports */
             libraries: ()=>libraries,
 
@@ -311,30 +319,31 @@ export const win32Module = {
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,
         };
+
+        current = api;
+        return api;
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        /** @type {Record<string, Record<string, any>>} */
+        const held = current ? current.libraries() : {};
         const counts = Object.fromEntries(
-            Object.entries(libraries).map(([name, table])=>[name, Object.keys(table).length]));
+            Object.entries(held).map(([name, table])=>[name, Object.keys(table).length]));
         return {
             name: 'win32',
             version: '0.2.0',
-            status: Object.keys(libraries).length > 0 ? 'ready' : 'created',
+            status: Object.keys(held).length > 0 ? 'ready' : 'created',
             metrics: {
                 libraries: counts,
-                implemented: Object.values(libraries)
+                implemented: Object.values(held)
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
-                exitCode,
+                exitCode: current ? current.exitCode() : null,
             },
         };
     },
 
     async dispose(){
-        libraries = {};
-        exitCode = null;
-        hive = null;
-        queue = null;
-        com = null;
+        current = null;
     },
 };
