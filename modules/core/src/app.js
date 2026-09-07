@@ -11,6 +11,7 @@ import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { synthesiseProcessInit } from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createBlockCache, resolveBlockStore }
@@ -894,12 +895,36 @@ export async function createApp(options){
     // Written once; from here a write into the stubs would be corruption.
     memory.protect('thunks', memory.Access.READ_EXECUTE);
 
-    memory.writeU32(entryVector, image.entryPoint);
+    // Every library the program brought with it is attached before the program
+    // runs, on the process's first thread, in dependency order -- which is what
+    // a real loader does and where a library expects to build the state its
+    // exports assume. It is guest code because the calls belong on a guest
+    // stack; the stub's last instruction enters the program.
+    const startup = synthesiseProcessInit({
+        libraries: shipped,
+        entryPoint: image.entryPoint,
+    });
+    // Straight after the last library, which is the last thing that claimed an
+    // address. Only reached when there is something to attach.
+    const startupBase = shipped.reduce(
+        (highest, library)=>Math.max(highest, library.base + library.size), 0);
+    const start = startup.attached.length === 0 ? image.entryPoint : (()=>{
+        memory.register({
+            name: 'process-init', base: startupBase, size: startup.bytes.length,
+            kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
+        });
+        memory.writeBytes(startupBase, startup.bytes);
+        memory.protect('process-init', memory.Access.READ_EXECUTE);
+        events.emit('libraries-attached', { names: startup.attached });
+        return startupBase;
+    })();
+
+    memory.writeU32(entryVector, start);
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.
     const mainThread = kernel.createThread({
-        entry: image.entryPoint,
+        entry: start,
         stackTop: initialStack,
         name: 'main',
     });
