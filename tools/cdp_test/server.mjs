@@ -1,6 +1,6 @@
 /*
  * Copyright © 2026 Bottlify Project
- * Licensed under BSD-2-Clause License
+ * Licensed under the Mozilla Public License, version 2.0
  * See LICENSE for details
  */
 
@@ -21,6 +21,11 @@ const MIME = {
     '.wasm': 'application/wasm',
     '.bin': 'application/octet-stream',
     '.map': 'application/json',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.svg': 'image/svg+xml',
 };
 
 /**
