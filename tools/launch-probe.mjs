@@ -39,6 +39,11 @@ function parse(argv){
         id,
         turns: turns === -1 ? 200000 : Number(argv[turns + 1]),
         map: argv.includes('--map'),
+        // Which executable in the bundle to start. `--which launcher` takes the
+        // one the manifest names as such, and any other value is a path in the
+        // bundle -- a launcher is a different program from the game it starts,
+        // and only running it says whether it runs.
+        which: argv.includes('--which') ? argv[argv.indexOf('--which') + 1] : null,
         // Which calls to print with their arguments. A name, or a fragment of
         // one, narrows a long trace to the handful that answer the question.
         grep: argv.includes('--grep') ? argv[argv.indexOf('--grep') + 1] : null,
@@ -317,11 +322,12 @@ function report(app, { grep = null, calls = 24 } = {}){
 }
 
 async function main(){
-    const { id, turns, map, grep, calls, heap, profile, log, watch, peek }
+    const { id, turns, map, grep, calls, heap, profile, log, watch, peek, which }
         = parse(process.argv.slice(2));
     if (!id)
     {
-        console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N]');
+        console.error('usage: node tools/launch-probe.mjs <bundle-id> [--turns N] '
+            + '[--which launcher|<path in bundle>]');
         process.exit(2);
     }
 
@@ -338,13 +344,21 @@ async function main(){
         return new Uint8Array(buffer);
     };
 
-    console.log(`${manifest.title} ${manifest.version} — ${manifest.entry}`);
+    // Which executable to start. A bundle names the game, but it may also name
+    // a launcher, and the launcher is a different program with a different
+    // start-up -- so "the game runs" says nothing about whether the launcher
+    // does, and finding that out has to be askable.
+    const wanted = which === 'launcher'
+        ? manifest.launcher ?? manifest.entry
+        : which ?? manifest.entry;
+
+    console.log(`${manifest.title} ${manifest.version} — ${wanted}`);
 
     // The tools-side reader takes a path and does its own reading; the engine's
     // takes a range fetcher. Both are used here, over the same file: this one to
     // lift the executable out, the engine's to serve the game its own files.
     const bundle = await openBundle(path);
-    const executable = await bundle.read(manifest.entry);
+    const executable = await bundle.read(wanted);
     await bundle.close();
     console.log(`  entry image: ${executable.length} bytes\n`);
 
