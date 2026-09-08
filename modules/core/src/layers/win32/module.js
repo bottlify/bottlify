@@ -45,6 +45,7 @@ import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions } from './ole32/functions.js';
+import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComRegistry } from './ole32/objects.js';
 import { registerQuartzClasses } from './quartz/graph.js';
@@ -738,6 +739,13 @@ export const win32Module = {
                         bridge.publishInterface(object, interfaceId),
                 },
             }),
+
+            'OLEAUT32.dll': createAutomationFunctions({
+                readMemory,
+                writeMemory,
+                heap,
+                divergence: config?.divergence,
+            }),
         };
 
         // Added after the rest because it is built from them: nearly everything
@@ -794,6 +802,9 @@ export const win32Module = {
             ordinals: ()=>({
                 'WSOCK32.dll': winsock.ordinals.wsock32,
                 'WS2_32.dll': winsock.ordinals.ws2_32,
+                // Automation is imported this way and no other: a program links
+                // it through numbers, with no name in the import table at all.
+                'OLEAUT32.dll': OLEAUT32_ORDINALS,
             }),
 
             /**
