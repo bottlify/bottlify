@@ -1007,6 +1007,15 @@ async function buildApp(options){
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
+    /**
+     * Resolved when the last of them answers, so the loop can wait for the
+     * thing itself rather than poll a timer until it happens.
+     *
+     * @type {Promise<void> | null}
+     */
+    let fetched = null;
+    /** @type {() => void} */
+    let arrived = ()=>{};
 
     // A call that is waiting -- a message loop with an empty queue -- is let go
     // once per scheduler turn to look again.
@@ -1362,8 +1371,27 @@ async function buildApp(options){
                 // apart, one of them is a number to reduce and the other is a
                 // loop to stop taking so seriously.
                 fetching++;
+                if (fetching === 1)
+                {
+                    // The loop is about to have nothing to do until this
+                    // answers, and it can be told exactly when that is. Without
+                    // it the only way to find out was to sleep and look again,
+                    // on a timeout a browser clamps to a millisecond -- which
+                    // measured out at nineteen wake-ups per range request and a
+                    // fifth of a whole run spent asking.
+                    fetched = new Promise(resolve=>{
+                        arrived = resolve;
+                    });
+                }
                 return blocks.fetch(needed).finally(()=>{
                     fetching--;
+                    if (fetching === 0)
+                    {
+                        const open = arrived;
+                        fetched = null;
+                        arrived = ()=>{};
+                        open();
+                    }
                 });
             },
             /** @param {number} hwnd */
@@ -2287,9 +2315,21 @@ async function buildApp(options){
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
                         const idledAt = clockSource();
-                        await (wait.timer
+                        // Whichever comes first: the range request answering,
+                        // or the timer coming round again.
+                        //
+                        // Not the request alone, however much cheaper that
+                        // reads. A thread waiting on the network is not the
+                        // only thread there is, and waiting for the answer
+                        // stops the machine for the whole of a request that can
+                        // take four seconds -- measured at two and a half times
+                        // the wall clock of looking again and finding work.
+                        const timer = wait.timer
                             ? new Promise(resolve=>setTimeout(resolve, 0))
-                            : breathe());
+                            : breathe();
+                        await (fetched && wait.timer
+                            ? Promise.race([fetched, timer])
+                            : timer);
                         // This time passed for the guest too, and it is the only
                         // time nothing credits. A thread suspended on a host call
                         // is parked on `hlt` and still counts as runnable, so the
