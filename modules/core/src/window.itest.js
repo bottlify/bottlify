@@ -85,10 +85,11 @@ test('the whole path was used, not shortcut', async()=>{
     const { diagnostics } = await runFixture();
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
-    // Three trips into the guest: the probe, the close, and the destroy the
-    // close produced. Fewer means something was answered on our side that the
-    // program was supposed to answer.
-    assert.equal(byName.bridge.metrics.callbacks, 3);
+    // Four trips into the guest: the WM_CREATE the window is told about, the
+    // probe, the close, and the destroy the close produced. Fewer means
+    // something was answered on our side that the program was supposed to
+    // answer.
+    assert.equal(byName.bridge.metrics.callbacks, 4);
     assert.equal(byName.bridge.metrics.deepestCallback, 1);
     assert.equal(byName.bridge.metrics.failure, null);
 

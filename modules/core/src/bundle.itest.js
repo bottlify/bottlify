@@ -81,7 +81,11 @@ test('a program reads a file out of a bundle, fetching only what it touches', as
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
-        bundle: { fetch: source.fetch },
+        // Mounted at the root rather than in an installation directory: this
+        // fixture asks for an absolute path, and what is under test here is the
+        // transport -- a read that misses, waits for its block and is retried
+        // -- not where a bundle is mounted.
+        bundle: { fetch: source.fetch, prefix: '' },
     });
 
     let printed = '';
@@ -117,7 +121,11 @@ test('what the bundle holds is visible to the program, and stays read-only', asy
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
-        bundle: { fetch: source.fetch },
+        // Mounted at the root rather than in an installation directory: this
+        // fixture asks for an absolute path, and what is under test here is the
+        // transport -- a read that misses, waits for its block and is retried
+        // -- not where a bundle is mounted.
+        bundle: { fetch: source.fetch, prefix: '' },
     });
 
     await app.run({ maxTurns: 20000 });
