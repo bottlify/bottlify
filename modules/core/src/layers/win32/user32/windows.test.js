@@ -918,3 +918,87 @@ test('DefWindowProcA answers WM_NCCREATE with TRUE', ()=>{
     const { fns } = setup();
     assert.equal(fns.DefWindowProcA.handler([0x40, WM_NCCREATE, 0, 0]), 1);
 });
+
+// --- finding a window that already exists ---
+
+test('a window is found by its class, its title, or both', ()=>{
+    const { memory, fns } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    const CLASS_QUERY = 0x11400;
+    const TITLE_QUERY = 0x11500;
+    memory.putString(CLASS_QUERY, 'MainWnd');
+    memory.putString(TITLE_QUERY, 'Main');
+
+    assert.equal(fns.FindWindowA.handler([CLASS_QUERY, 0]), hwnd);
+    assert.equal(fns.FindWindowA.handler([0, TITLE_QUERY]), hwnd);
+    assert.equal(fns.FindWindowA.handler([CLASS_QUERY, TITLE_QUERY]), hwnd);
+    assert.equal(fns.FindWindowA.handler([0, 0]), hwnd, 'both absent means the first there is');
+});
+
+test('a name that matches nothing answers with nothing', ()=>{
+    // The answer that matters most. A program discovers a copy of itself this
+    // way, and an installer refuses to run while what it installs is open --
+    // both read "not found" as permission to continue, so a window that is not
+    // the one asked for is a worse answer than no window at all.
+    const { memory, fns } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+
+    const OTHER = 0x11400;
+    memory.putString(OTHER, 'SomeOtherClass');
+    assert.equal(fns.FindWindowA.handler([OTHER, 0]), 0,
+        'a class nobody registered names nothing');
+
+    const WRONG_TITLE = 0x11500;
+    memory.putString(WRONG_TITLE, 'Not This One');
+    assert.equal(fns.FindWindowA.handler([0, WRONG_TITLE]), 0);
+});
+
+test('the search ignores case, as Windows does', ()=>{
+    const { memory, fns } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+
+    const SHOUTED = 0x11400;
+    memory.putString(SHOUTED, 'MAIN');
+    assert.equal(fns.FindWindowA.handler([0, SHOUTED]), hwnd);
+});
+
+test('a destroyed window is not found', ()=>{
+    const { memory, fns } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const TITLE_QUERY = 0x11500;
+    memory.putString(TITLE_QUERY, 'Main');
+
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 1);
+    assert.equal(fns.FindWindowA.handler([0, TITLE_QUERY]), 0);
+});
+
+test('FindWindowEx searches one parent\'s children and resumes after one', ()=>{
+    const { memory, fns } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const parent = createWindow(fns, memory);
+    const first = createWindow(fns, memory, { parent, style: WS_CHILD });
+    const second = createWindow(fns, memory, { parent, style: WS_CHILD });
+
+    assert.equal(fns.FindWindowExA.handler([parent, 0, 0, 0]), first);
+    assert.equal(fns.FindWindowExA.handler([parent, first, 0, 0]), second,
+        'resuming walks the rest, which is how a caller enumerates them');
+    assert.equal(fns.FindWindowExA.handler([parent, second, 0, 0]), 0, 'and then runs out');
+    assert.equal(fns.FindWindowExA.handler([0, 0, 0, 0]), parent,
+        'a top-level search does not descend into children');
+});
+
+test('both spellings pop the stack their signature declares', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.FindWindowA.argBytes, 8);
+    assert.equal(fns.FindWindowExA.argBytes, 16);
+});

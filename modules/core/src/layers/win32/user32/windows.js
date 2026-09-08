@@ -233,6 +233,51 @@ export function createWindowFunctions(host){
         return name === undefined ? null : classes.get(name) ?? null;
     };
 
+    /**
+     * The window a FindWindow of either spelling answers with, or zero.
+     *
+     * Windows compares both names without regard to case, and searches in
+     * creation order, which is the order the records are kept in.
+     *
+     * @param {number} parent  Zero for the top-level windows.
+     * @param {number} after   Resume after this one, for a caller walking them.
+     * @param {number} classPointer  A name or an atom; zero matches any class.
+     * @param {number} namePointer   Zero matches any title.
+     */
+    const findWindow = (parent, after, classPointer, namePointer)=>{
+        const cls = classPointer === 0 ? null : classOf(classPointer);
+        if (classPointer !== 0 && !cls)
+        {
+            return 0;
+        }
+        const title = namePointer === 0
+            ? null
+            : host.readCString(namePointer, MAX_WINDOW_TEXT).toLowerCase();
+        let reached = after === 0;
+        for (const record of windows.values())
+        {
+            if (!reached)
+            {
+                reached = record.hwnd === after;
+                continue;
+            }
+            if (record.destroyed || record.parent !== parent)
+            {
+                continue;
+            }
+            if (cls !== null && record.className !== cls.name)
+            {
+                continue;
+            }
+            if (title !== null && record.title.toLowerCase() !== title)
+            {
+                continue;
+            }
+            return record.hwnd;
+        }
+        return 0;
+    };
+
     /** @param {number} hwnd @returns {any | null} */
     const live = hwnd=>{
         const record = windows.get(hwnd >>> 0);
@@ -615,6 +660,41 @@ export function createWindowFunctions(host){
                 writeWindowClassA(host, out, cls);
                 return 1;
             },
+        },
+
+        /**
+         * HWND FindWindowExA(HWND hWndParent, HWND hWndChildAfter,
+         *                   LPCSTR lpszClass, LPCSTR lpszWindow)
+         *
+         * Both names are optional and a null one matches anything, so all four
+         * combinations are askable and the one with no names at all means "the
+         * first window there is".
+         *
+         * The answer that matters most is the empty one. This is how a program
+         * discovers a copy of itself already running and how an installer
+         * refuses to run while what it installs is open, and both read "not
+         * found" as permission to continue -- so a window that is not the one
+         * asked for is a worse answer than no window at all. A class nobody
+         * registered names nothing, which is the same reasoning.
+         */
+        FindWindowExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([parent, after, className, windowName])=>
+                findWindow(parent >>> 0, after >>> 0, className >>> 0, windowName >>> 0),
+        },
+
+        /**
+         * HWND FindWindowA(LPCSTR lpClassName, LPCSTR lpWindowName)
+         *
+         * The same search over top-level windows, which is the spelling a
+         * program of this era actually calls.
+         */
+        FindWindowA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([className, windowName])=>
+                findWindow(0, 0, className >>> 0, windowName >>> 0),
         },
 
         /**
