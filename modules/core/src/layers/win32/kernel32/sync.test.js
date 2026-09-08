@@ -165,6 +165,10 @@ function fakeKernel(){
                 }
                 return held.object;
             },
+            /** @param {number} handle */
+            typeOf(handle){
+                return this.table.get(handle)?.type ?? null;
+            },
         },
     };
 }
@@ -451,4 +455,82 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.InterlockedCompareExchange.argBytes, 12);
     assert.equal(fns.WaitForMultipleObjects.argBytes, 16);
     assert.equal(fns.GetCurrentThread.argBytes, 0);
+});
+
+// --- waiting on a child process ---
+
+test('a wait on a set holding a child process is where the parent hands over', ()=>{
+    // A child never signals while its parent can look: it takes this process's
+    // place rather than running beside it. So the thread stops here for good,
+    // and the replacement is what happens instead of the wait returning. Left
+    // to the ordinary path this joins a queue on an object with no signal and
+    // is reported as a deadlock.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, INFINITE]), PARKED);
+    assert.equal(host.kernel.state.blocked.length, 1);
+    assert.match(host.kernel.state.blocked[0].reason, /child process/);
+    assert.deepEqual(host.kernel.state.timed, [],
+        'and it never went through the ordinary wait at all');
+});
+
+test('a child among other objects still hands over, waiting for all or any', ()=>{
+    // What else is in the set belongs to a process that is about to cease to
+    // exist, which is the cost this design accepted.
+    for (const all of [0, 1])
+    {
+        const host = fakeHost();
+        const fns = createSyncFunctions(host);
+        host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
+        host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+        const view = new DataView(host.bytes.buffer);
+        view.setUint32(0x400, 0x10, true);
+        view.setUint32(0x404, 0x20, true);
+
+        assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, all, INFINITE]), PARKED,
+            `bWaitAll=${all}`);
+    }
+});
+
+test('polling a set with a child says it is still running rather than blocking', ()=>{
+    // A zero timeout is a question, not a wait. Parking on it would stop a
+    // program that was only checking whether its child had finished.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x20, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT);
+    assert.equal(host.kernel.state.blocked.length, 0, 'and did not join the queue');
+});
+
+test('polling for all of a set with a child can never be satisfied', ()=>{
+    // Every other object being ready is not enough: the child is never ready,
+    // so "all of them" never is either -- and answering otherwise tells a
+    // program its child has finished.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
+    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 0x10, true);
+    view.setUint32(0x404, 0x20, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 1, 0]), WAIT_TIMEOUT);
+});
+
+test('polling for any of a set with a child still reports one that is ready', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    host.register(0x10, 'event', host.kernel.createEvent({ signalled: true }));
+    host.register(0x20, 'process', { imagePath: 'C:\\App\\war3.exe' });
+    const view = new DataView(host.bytes.buffer);
+    view.setUint32(0x400, 0x20, true);
+    view.setUint32(0x404, 0x10, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([2, 0x400, 0, 0]), WAIT_OBJECT_0,
+        'the event, which is the only thing in the set that can be');
 });

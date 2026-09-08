@@ -363,17 +363,47 @@ export function createSyncFunctions(host){
                 const view = new DataView(host.readMemory(handles >>> 0, total * 4).buffer);
                 /** @type {any[]} */
                 const objects = [];
+                /** @type {any} */
+                let child = null;
                 for (let at = 0; at < total; at++)
                 {
-                    const target = object(view.getUint32(at * 4, true));
+                    const handle = view.getUint32(at * 4, true);
+                    const target = object(handle);
                     if (!target)
                     {
                         return WAIT_FAILED;
+                    }
+                    if (kernel.handles.typeOf?.(handle) === 'process')
+                    {
+                        child = target;
+                        continue;
                     }
                     objects.push(target);
                 }
 
                 const thread = host.currentThread();
+
+                // A child process is in the set. It is never signalled while
+                // its parent can look -- it takes this process's place rather
+                // than running beside it -- so a real wait on a set containing
+                // one is the parent saying it has nothing left to do, and the
+                // thread stops here for good. What else is in the set belongs
+                // to a process that is about to cease to exist, which is the
+                // cost this design accepted: a parent does not run alongside
+                // its child.
+                if (child !== null && (timeout >>> 0) !== 0)
+                {
+                    kernel.block(thread, `child process ${child.imagePath}`);
+                    return host.park(thread);
+                }
+                // A poll is a question, not a wait, and the honest answer about
+                // a child is that it is still running. So a poll for all of a
+                // set containing one can never be satisfied, and neither can a
+                // poll for any of a set that holds nothing else.
+                if (child !== null && (waitAll !== 0 || objects.length === 0))
+                {
+                    return WAIT_TIMEOUT;
+                }
 
                 // Zero is a poll: it asks whether the set is ready now and
                 // never blocks, so a program checking is not stopped by the
