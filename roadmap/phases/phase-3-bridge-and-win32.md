@@ -1,7 +1,7 @@
-# 06 — Phase 3: the call bridge and Win32. Roadmap
+# Phase 3 — the call bridge and Win32. Roadmap
 
-> Working document for the phase. Source of truth is `00-bottlify-master-plan.md` (below: Master
-> Plan). Phase 2 is closed — its plan is `04-phase-2-threads-and-scheduler.md`.
+> Working document for the phase. Source of truth is `../00-bottlify-master-plan.md` (below: Master
+> Plan). Phase 2 is closed — its plan is `phase-2-threads-and-scheduler.md`.
 
 ## 0. What Phase 3 is
 

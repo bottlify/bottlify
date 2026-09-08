@@ -1,6 +1,6 @@
-# 11 — What is left to carry over
+# What is left to carry over
 
-`10-carried-knowledge.md` records the *lessons* taken from the earlier tree. This file records the
+`carried-knowledge.md` records the *lessons* taken from the earlier tree. This file records the
 *work*: which pieces of that tree have been rebuilt here, which are deliberately not going to be,
 and what remains. It is a checklist, not a design document, and it is expected to shrink.
 
@@ -61,7 +61,8 @@ program links whichever one it was built against, and they are not interchangeab
 
 - **Library name aliasing.** A program asks for a name that is not the one on disk, and the
   resolution rules are not obvious from the name alone.
-- **Process creation.** `09-process-creation.md` is the plan; nothing implements it yet.
+- **Process creation.** `process-creation.md` is the plan; it was being implemented when this line
+  was last checked (`kernel/internal/processes.js`, `win32/kernel32/spawn.js`).
 - **Stack cleanup derived from a decorated name.** The only way to give an unknown export a stub
   that pops the right number of bytes, and small enough to be worth doing before it is needed.
 
@@ -69,20 +70,22 @@ program links whichever one it was built against, and they are not interchangeab
 
 The frame pacer, the phase profiler, the frame-variance diagnostics, the lock tracker and the boot
 timer. Rule 6 says these are built alongside the work, not after it, and the register in
-`10-carried-knowledge.md` is unambiguous that in this domain a defect is found by measurement
+`carried-knowledge.md` is unambiguous that in this domain a defect is found by measurement
 rather than by reading code.
 
 ### 4. Diagnostics that check us against the specification
 
 An argument-size checker exists (`tools/check-argbytes.mjs`). Still missing: the interface
 validator for the drawing APIs, a metadata parser to check signatures in bulk, and the API coverage
-census over a bundle — with the caveat `10-carried-knowledge.md` attaches to it, that a census
+census over a bundle — with the caveat `carried-knowledge.md` attaches to it, that a census
 predicts nothing about whether a program will actually run.
 
 ### 5. The harness
 
-The log hub, the symbol map, breakpoints by address and by API name, and the recorder. Some of this
-exists as `tools/launch-probe.mjs`; the rest does not.
+The log hub, the symbol map, breakpoints by address and by API name, and the recorder. What exists:
+`tools/launch-probe.mjs` for everything before a device is asked for, `tools/cdp_test/game.mjs` for
+a real title in a browser with a GPU, and one journal carrying what the engine reports. Breakpoints
+by address and by API name, and the recorder, do not exist.
 
 ### 6. Runtime services
 
@@ -91,7 +94,8 @@ Windowing, input routing, the dialog bridge and the archive reader.
 ### 7. Whole packages, each its own body of work
 
 - **Container formats** — the installer readers. This is what turns a purchased copy into something
-  this engine can mount.
-- **Networking** — the relay, the room manager and the guest-side socket bridge, for titles whose
-  point is playing with somebody else.
-- **Gamepad support.**
+  this engine can mount. *Not started.* The other route to the same place is built: `@bottlify/installer`
+  runs a distribution's own installer and keeps what it wrote (`../phases/phase-8-installers.md`).
+- **Networking** — *partly built.* The guest-side socket bridge and the relay exist
+  (`../phases/phase-9-networking.md`); the room manager, DirectPlay and `WSAAsyncSelect` do not.
+- **Gamepad support.** *Done* — keyboard, mouse and gamepad reach the guest.

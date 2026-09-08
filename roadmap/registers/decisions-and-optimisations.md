@@ -1,4 +1,4 @@
-# 12 — Decisions we made, and where we could go faster
+# Decisions we made, and where we could go faster
 
 Two registers in one file, both of them things a reader should be able to find without reading the
 code that implements them.
@@ -381,7 +381,7 @@ implementation; it is a wrong one.
 host handler. Emitting them as real x86 in guest memory means a program calling `floor` in a tight
 loop pays for the arithmetic rather than for the crossing, which for a title that calls it tens of
 thousands of times a frame is the whole cost. This needs the non-preemptible rounding-mode window
-from `10-carried-knowledge.md`, and it is the single largest known win of this kind.
+from `carried-knowledge.md`, and it is the single largest known win of this kind.
 
 ### B2. The floating-point seam builds a view per call
 

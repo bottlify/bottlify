@@ -1,8 +1,15 @@
-# 05 — UI: quick start
+# UI: quick start
 
 > A small, deliberately shallow first pass at the product UI, so there is something to click while
 > the engine grows. Not a phase of the engine: it can be built and thrown away without the runtime
 > noticing, and that independence is the point.
+>
+> **Status: built, and it moved.** It lives at `ui/` in the working copy rather than in
+> `modules/ui`, is outside the npm workspaces, and is gitignored — the application ships from its own
+> place, with its own assets and their own attribution. U1 through U4 are done; the session view
+> shows a real canvas rather than the placeholder §2 described, and there is an install screen §4
+> explicitly excluded (`../phases/phase-8-installers.md`, behind `allowInstall`). The decisions in
+> §1 held; the location row below is corrected in place, and the rest is kept as written.
 
 ## 0. What this is
 
@@ -18,7 +25,7 @@ API, not a reason to reach.
 
 | decision | value | consequence |
 |---|---|---|
-| where it lives | `modules/ui` as `@bottlify/ui`, a separate package | React and MUI are dependencies of this package alone. The engine stays framework-agnostic and dependency-free; nothing here may become a runtime dependency of `@bottlify/core` |
+| where it lives | `ui/` as `@bottlify/ui`, a separate package outside the workspaces (planned as `modules/ui`; moved out so it ships from its own place) | React and MUI are dependencies of this package alone. The engine stays framework-agnostic and dependency-free; nothing here may become a runtime dependency of `@bottlify/core` |
 | how it talks to the engine | only `createApp` and the `AppController` it returns | Reaching into `modules/core/src/layers/**` from here is a boundary violation and fails the same check that guards the engine's own layers |
 | component library | MUI | Chosen for speed of a first pass. It is confined to this package, so replacing it later touches nothing else |
 | build tool | **Vite**, not webpack | The engine is plain ES modules with no build step, and Vite serves those natively in development rather than bundling them first — so what runs in the browser stays recognisably the same code that runs under the test runner. It also handles the two things this app actually needs, a worker entry point and a `.wasm` asset, without configuration. Webpack would do the job, but it buys a slower loop and a config to maintain for no property we need |

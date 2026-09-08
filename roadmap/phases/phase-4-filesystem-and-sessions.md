@@ -1,7 +1,7 @@
-# 07 — Phase 4: filesystem, bundles and sessions. Roadmap
+# Phase 4 — filesystem, bundles and sessions. Roadmap
 
-> Working document for the phase. Source of truth is `00-bottlify-master-plan.md` (below: Master
-> Plan). Phase 3 is closed — its plan is `06-phase-3-bridge-and-win32.md`.
+> Working document for the phase. Source of truth is `../00-bottlify-master-plan.md` (below: Master
+> Plan). Phase 3 is closed — its plan is `phase-3-bridge-and-win32.md`.
 
 ## 0. What Phase 4 is
 

@@ -1,6 +1,6 @@
-# 01 — Phase 0: Skeleton. Roadmap
+# Phase 0 — Skeleton. Roadmap
 
-> Phase working document. Source of truth — `00-bottlify-master-plan.md` (hereafter the Master
+> Phase working document. Source of truth — `../00-bottlify-master-plan.md` (hereafter the Master
 > Plan). Here: concrete steps, artifacts, and acceptance for Phase 0. All decisions are recorded in
 > this file, not in code comments.
 
@@ -24,7 +24,7 @@ only by editing this section, never verbally.
 | code language | vanilla ES modules (JS) + JSDoc types | no transpilation in development; types are part of the contract, checked by `tsc --checkJs` |
 | WASM | only where needed | the v86 emulator (Rust → wasm); our own code is JS until profiling proves otherwise (Master Plan §3.5) |
 | monorepo | one repository, npm workspaces | packages under `modules/*` |
-| first package | `@bottlify/core` in `modules/core/` | described in `02-phase-0-core-module.md` |
+| first package | `@bottlify/core` in `modules/core/` | described in `phase-0-core-module.md` |
 | v86 fork | https://github.com/mrwayer/v86, as a submodule at `modules/core/vendor/v86` | pinned to a commit; updating is a deliberate act, not "just pulled" |
 | core distribution | `modules/core/dist/`: core itself + all external refs | the bundle is self-contained, no CDN/network fetches at runtime |
 | module boundary | checked by the build (`check:boundaries`) | an import bypassing the interface breaks CI (Master Plan §7.5) |
@@ -50,7 +50,7 @@ another codebase; the specification answers "what should happen", never "how do 
 bottlify/
 ├── roadmap/                        # plans (this folder)
 ├── modules/
-│   └── core/                       # @bottlify/core — described in 02-phase-0-core-module.md
+│   └── core/                       # @bottlify/core — described in phase-0-core-module.md
 │       ├── package.json
 │       ├── src/
 │       │   ├── core.js             # facade: assemble the module system from configuration
@@ -72,7 +72,7 @@ bottlify/
 ### P0.1 — Monorepo, package skeleton, CI
 
 Root `package.json` with workspaces (`modules/*`), a single lockfile, the `@bottlify/core` package
-with the structure from `02-phase-0-core-module.md` (without the vendor and without dist for now). An
+with the structure from `phase-0-core-module.md` (without the vendor and without dist for now). An
 editor ESLint config, `typecheck` (`tsc --checkJs --noEmit`) from the first commit. GitHub Actions:
 one job per commit (install → typecheck → lint → test → check:boundaries), plus a separate vendor
 reproducibility job once P0.2 exists.
@@ -84,7 +84,7 @@ reproducibility job once P0.2 exists.
 As a submodule at `modules/core/vendor/v86` (fork of mrwayer/v86, branch `master`, HEAD pinned in
 this document at vendoring time). The `build:v86` script builds the artifacts (libv86.js, v86.wasm,
 BIOS) and places them in `dist/vendor/`; `verify:reproducibility` spins up a clean container and
-requires byte-for-byte identical hashes. Patch policy and upstreaming order — `02-phase-0-core-module.md`
+requires byte-for-byte identical hashes. Patch policy and upstreaming order — `phase-0-core-module.md`
 §4. `THIRD-PARTY-NOTICES.md` — from day one: v86 BSD-2-Clause with the copyright preserved
 (Master Plan, Part VIII).
 

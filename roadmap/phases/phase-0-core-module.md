@@ -1,6 +1,6 @@
-# 02 — Init Core-0: the @bottlify/core module. Description
+# Phase 0 — the @bottlify/core module. Description
 
-> The project's first major init. The phase roadmap is `01-phase-0-skeleton.md`; here is the
+> The project's first major init. The phase roadmap is `phase-0-skeleton.md`; here is the
 > specification of WHAT is being built and what the readiness criteria are. This is the init's
 > working document: technical decisions made along the way are written down here, not in chat and
 > not in code comments.
@@ -207,7 +207,7 @@ Every item is checked by a command the script/CI already knows how to run:
 4. module-system unit tests: the graph builds, cycles are caught, module absence works, stubs
    answer `NOT_IMPLEMENTED`, `diagnostics()` is assembled across every module;
 5. cdp_test: browser open, worker answers `ping`, screenshot in the report (the scenario from
-   `01-phase-0-skeleton.md` §3.5).
+   `phase-0-skeleton.md` §3.5).
 
 ## 10. What we deliberately do NOT do in this init
 

@@ -1,6 +1,6 @@
-# 14 — Defects this engine still has, found by reading an earlier attempt
+# Defects this engine still has, found by reading an earlier attempt
 
-`10-carried-knowledge.md` records mechanisms established by earlier work on this problem. This file
+`carried-knowledge.md` records mechanisms established by earlier work on this problem. This file
 is narrower and more useful: each entry is a defect the earlier work paid for **that was then checked
 against this tree's own source**, so every one of them is either a live bug here, a gap that will bite
 when the surrounding work lands, or a rule already satisfied and worth not regressing.

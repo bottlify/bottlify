@@ -1,11 +1,11 @@
-# 10 — Carried knowledge
+# Carried knowledge
 
 A register of defects and mechanisms established by earlier work on this problem, kept so they are
 not rediscovered. Each entry says what the mechanism is, how it shows itself, and what it costs to
 find again.
 
 Nothing here is a plan. Where an entry names something we have already built, it says so.
-Process creation and its three defects are in `roadmap/09-process-creation.md` and are not repeated.
+Process creation and its three defects are in `process-creation.md` and are not repeated.
 
 ---
 

@@ -1,7 +1,7 @@
-# 04 — Phase 1: CPU, memory, loader. Roadmap
+# Phase 1 — CPU, memory, loader. Roadmap
 
-> Working document for the phase. Source of truth is `00-bottlify-master-plan.md` (below: Master
-> Plan). Phase 0 is closed — its plan is `01-phase-0-skeleton.md` / `02-phase-0-core-module.md`, and the
+> Working document for the phase. Source of truth is `../00-bottlify-master-plan.md` (below: Master
+> Plan). Phase 0 is closed — its plan is `phase-0-skeleton.md` / `phase-0-core-module.md`, and the
 > directory layout conventions are `docs/core/infrastructure.md`.
 
 ## 0. What Phase 1 is

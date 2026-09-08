@@ -1,7 +1,7 @@
-# 04 — Phase 2: threads, scheduler, synchronization. Roadmap
+# Phase 2 — threads, scheduler, synchronization. Roadmap
 
-> Working document for the phase. Source of truth is `00-bottlify-master-plan.md` (below: Master
-> Plan). Phase 1 is closed — its plan is `03-phase-1-cpu-memory-loader.md`.
+> Working document for the phase. Source of truth is `../00-bottlify-master-plan.md` (below: Master
+> Plan). Phase 1 is closed — its plan is `phase-1-cpu-memory-loader.md`.
 
 ## 0. What Phase 2 is
 

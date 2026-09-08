@@ -1,8 +1,8 @@
-# 08 — Phase 5: graphics. Roadmap
+# Phase 5 — graphics. Roadmap
 
-> Working document for the phase. Source of truth is `00-bottlify-master-plan.md` (below: Master
+> Working document for the phase. Source of truth is `../00-bottlify-master-plan.md` (below: Master
 > Plan), whose §14 is the register of graphics pitfalls and is required reading before touching
-> anything here. Phase 4 is `07-phase-4-filesystem-and-sessions.md`.
+> anything here. Phase 4 is `phase-4-filesystem-and-sessions.md`.
 
 ## 0. What this phase is, and why it is organised differently
 

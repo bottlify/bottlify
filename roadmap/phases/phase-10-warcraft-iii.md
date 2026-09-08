@@ -1,4 +1,4 @@
-# 13 — Bringing up Warcraft III
+# Phase 10 — Bringing up Warcraft III
 
 > A working plan for one title, written from measurement rather than from reading the source. Every
 > claim below that begins "it stops at" or "it calls" came out of `tools/launch-probe.mjs`; anything
@@ -11,7 +11,28 @@
 
 ## Where it stands
 
-`node tools/launch-probe.mjs warcraft-iii-frozen-throne` today:
+**W1, W2 and W3 are closed. The game runs in a browser on a real GPU and draws its main menu.**
+`node tools/cdp_test/game.mjs warcraft-iii-frozen-throne` is where that is measured now; the Node
+probe below is still the right instrument for everything that happens before a device is asked for,
+and only for that.
+
+What closed each of them, because the order was not the one this plan guessed:
+
+- **W2's first item settled the other way round.** The COM calling convention was suspected wrong
+  and was: a method's arguments start where the bridge says they start, and fixing it moved every
+  COM call in the engine at once — which is exactly the blast radius the entry predicted.
+- **W2's second item** is largely done: the Direct3D 8 device answers eighty-two of its ninety-four
+  slots.
+- **W3 went the cheap route it named** — a hand-written guest program drawing one triangle on a real
+  device, checked as numbers — and then the game followed it onto the same path.
+- **W4 has started.** Keyboard, mouse and gamepad reach the guest, and sound leaves the engine.
+  Windowing and pacing under load against the §21 thresholds are not done, and no number has been
+  recorded for either.
+
+The section below is the last state of the Node probe and is kept because the instruments it
+describes are the ones to reach for next time.
+
+`node tools/launch-probe.mjs warcraft-iii-frozen-throne`:
 
 | | |
 |---|---|
@@ -23,7 +44,7 @@
 W1 is closed. The four archives open, their hash and block tables are read byte-exact into guest
 memory, the game reads its files out of them, loads `Game.dll`, calls `GameMain`, reads its
 configuration out of the registry, and asks for a Direct3D 8 device. What stopped it before was
-never the archives: it was `DllMain`'s third argument (see `12-decisions-and-optimisations.md`
+never the archives: it was `DllMain`'s third argument (see `../registers/decisions-and-optimisations.md`
 A15), which made the archive library overwrite its own hash table with one built from a different
 seed. Two other generic defects were found on the way and are recorded there as A16 and A17.
 
@@ -51,7 +72,7 @@ addresses the probe prints, and a cached Ghidra service for decompilation and st
 references. The last defect was found by decompiling a `DllMain` there and then peeking, here, at
 the table it built.
 
-## W1 — reach the archives
+## W1 — reach the archives — closed
 
 Storm reports a failure in `SFile.cpp` before opening a single archive: `CreateFileA` was called
 exactly twice in the whole run, both times for the error report it was writing. The archives are all
@@ -71,7 +92,7 @@ present in the bundle. Before that point it read the registry eight times and to
 
 **Done when** the probe shows an archive opened and read.
 
-## W2 — reach the first drawing call
+## W2 — reach the first drawing call — closed
 
 Unknown territory: nothing has observed what this program does after the archives open. Two things
 can be made ready in advance, and both are worth doing before they are needed because both are
@@ -82,9 +103,10 @@ expensive to debug from inside a failing game.
    the first argument *on the stack* — that is what makes the C `lpVtbl` bindings binary-compatible
    with the C++ call. If the bridge is wrong, every COM call in the engine reads its arguments
    shifted by one and pops four bytes too few, and DirectDraw, Direct3D, DirectSound, DirectInput and
-   ole32 are all broken identically. **Status: suspected, not verified.** No program has reached a
-   COM call yet, so nothing has failed to reveal it. Settle it against the real binaries in the
-   bundle, not against recall.
+   ole32 are all broken identically. **Status: settled — the suspicion was correct**, and the fix
+   moved every COM call in the engine at once. The paragraph is kept as written because the reasoning
+   is the reusable part: when one convention is wrong, everything above it is wrong identically, and
+   that is what makes it cheap to find and expensive to leave.
 2. **The Direct3D 8 device surface.** The seam reaches an implementation for about thirty of the
    ninety slots. Missing is what a real program touches in its first seconds:
    `GetAvailableTextureMem`, `GetCreationParameters`, `SetGammaRamp`, `SetCursorProperties`,
@@ -94,11 +116,11 @@ expensive to debug from inside a failing game.
 
 **Done when** the probe shows `comInterfaces` above zero and a draw call arriving.
 
-## W3 — the first frame on a real GPU
+## W3 — the first frame on a real GPU — closed
 
-Every one of the thirty-eight thousand lines in `graphics/` is verified against our own model and
-nothing else: no pixel has ever reached a real device. That is entry A11 of the decisions register
-and it is the largest unmeasured risk in the project.
+Written when every one of the thirty-eight thousand lines in `graphics/` was verified against our own
+model and nothing else, with no pixel having reached a real device — entry A11 of the decisions
+register, and at the time the largest unmeasured risk in the project. It is no longer unmeasured.
 
 The cheapest way to convert it into a measurement is not the game. It is a hand-written guest
 program of thirty instructions that creates a device, clears it, draws one triangle and presents,
@@ -109,7 +131,7 @@ later failure in a game is about the game's usage rather than about the path exi
 **Done when** a screenshot of the canvas has the expected colours at named coordinates, compared as
 numbers rather than looked at.
 
-## W4 — from a frame to a game
+## W4 — from a frame to a game — in progress
 
 Only reachable after the above, and listed so the order is not re-litigated later:
 
