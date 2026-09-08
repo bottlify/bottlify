@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMessageQueue } from './messages.js';
 import { MSG, RECT, WNDCLASSA, WNDCLASSEXA } from './structs.js';
-import { createWindowFunctions } from './windows.js';
+import { createWindowFunctions, watchDispatch } from './windows.js';
 
 /**
  * Guest addresses the fixtures use: far enough apart that nothing overlaps, and
@@ -1001,4 +1001,44 @@ test('both spellings pop the stack their signature declares', ()=>{
     const { fns } = setup();
     assert.equal(fns.FindWindowA.argBytes, 8);
     assert.equal(fns.FindWindowExA.argBytes, 16);
+});
+
+test('a window procedure that has not returned is named while it is inside', async()=>{
+    // The call log writes a call when it answers, so a procedure that never
+    // returns is the one call missing from it -- and it is the one holding the
+    // thread that pumps the queue, and with it the whole program.
+    /** @type {any[]} */
+    const open = [];
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const pending = new Promise(resolve=>{
+        answer = resolve;
+    });
+
+    watchDispatch({ dispatching: open }, { hwnd: 0x40b8, message: 0x1c }, pending);
+    assert.deepEqual(open.map(held=>[held.hwnd, held.message]), [[0x40b8, 0x1c]]);
+
+    answer(0);
+    await pending;
+    await Promise.resolve();
+    assert.deepEqual(open, [], 'and it is gone the moment the procedure answers');
+});
+
+test('a procedure that answered at once leaves nothing behind', ()=>{
+    // Most messages never suspend at all: the handler answers a number and the
+    // call is over before it is recorded.
+    /** @type {any[]} */
+    const open = [];
+    assert.equal(watchDispatch({ dispatching: open }, { hwnd: 1, message: 2 }, 0), 0);
+    assert.deepEqual(open, []);
+});
+
+test('a procedure that threw is not left standing for ever', async()=>{
+    /** @type {any[]} */
+    const open = [];
+    const failed = Promise.reject(new Error('the procedure faulted'));
+    watchDispatch({ dispatching: open }, { hwnd: 3, message: 4 }, failed);
+    await failed.catch(()=>{});
+    await Promise.resolve();
+    assert.deepEqual(open, []);
 });

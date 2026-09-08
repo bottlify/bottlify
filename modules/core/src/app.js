@@ -1103,10 +1103,17 @@ async function buildApp(options){
         {
             return;
         }
-        journal.write('trace', category, '{0}({1}) = {2}',
+        // Named by the thread that made it. A program of this age runs a dozen
+        // of them and the interleaving is the whole story: without this, a loop
+        // that is one thread waiting and another working reads as a single
+        // thread doing something incoherent, and a thread that has stopped
+        // calling anything at all cannot be picked out from the noise of the
+        // ones that have not.
+        journal.write('trace', category, '[{3}] {0}({1}) = {2}',
             call.name, (call.args ?? []).slice(0, 4)
                 .map((/** @type {number} */ value)=>`0x${(value >>> 0).toString(16)}`)
-                .join(', '), call.result);
+                .join(', '), call.result,
+            core.api('kernel').currentThread()?.name ?? '?');
     };
 
     const core = await assembleModules({
@@ -2599,6 +2606,20 @@ async function buildApp(options){
             ...core.diagnostics(),
             { name: 'app', version: '0.1.0', status: 'ready', metrics: events.diagnostics() },
         ],
+
+        /**
+         * Where the machine is standing, right now, asked from outside.
+         *
+         * The same report a failure carries, except that nothing has failed. A
+         * run that stops without stopping -- a call that never answers, a
+         * window procedure that never returns -- produces no error to attach a
+         * trace to, and the call log is no help either: a call is written when
+         * it returns, so the one holding everything is the one call absent from
+         * it. This is the only way to see it.
+         *
+         * @returns {string}
+         */
+        trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
         dispose(){
             // Before the graph goes: the background filler would otherwise go
             // on asking for blocks nobody can put anywhere.

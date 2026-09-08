@@ -45,7 +45,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     const callbackFrames = thread=>(thread.callbackFrames ??= []);
     /**
      * @param {any} thread
-     * @returns {{ name: string, restingStack: number, hostReturn: number }[]}
+     * @returns {{ name: string, restingStack: number, hostReturn: number, at?: number }[]}
      */
     const hostCalls = thread=>(thread.hostCalls ??= []);
 
@@ -102,7 +102,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         suspended(thread, call){
             pending++;
-            hostCalls(thread).push(call);
+            // Stamped so a report can say how long it has been waiting. A call
+            // that suspends and never answers stops the whole machine -- every
+            // thread of it -- and from outside that is indistinguishable from a
+            // machine that is merely slow.
+            hostCalls(thread).push({ ...call, at: Date.now() });
         },
 
         /**
@@ -135,7 +139,22 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: the callback sentinel was never reserved');
             }
 
-            const resting = restingStack(thread) ?? stackAtRest;
+            // The call in flight decides where the frame goes, and the callback
+            // frames only answer when there is none.
+            //
+            // The other way round is a stack corruption with no symptom at the
+            // moment it happens. A window procedure that subclasses another
+            // calls back into the guest from inside a callback, and the
+            // innermost callback frame's base is where the *outer* procedure's
+            // frame began -- which that procedure is by now standing well below,
+            // using every byte in between. Building the new frame there writes
+            // the sentinel and the arguments over its live locals and its return
+            // address. The inner call returns perfectly; the outer one then
+            // returns to whatever the overwrite left, never reaches the
+            // sentinel, and the host call waiting on it is never answered. The
+            // thread is parked for ever and the program stops with nothing to
+            // say for itself.
+            const resting = stackAtRest ?? restingStack(thread);
             if (resting === undefined)
             {
                 throw new Error('bridge: a guest callback must know where the thread\'s stack is');
@@ -210,6 +229,20 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         pendingCalls: ()=>pending,
 
-        diagnostics: ()=>({ callbacks: calls, deepestCallback: deepest, suspended: pending }),
+        diagnostics: ()=>({
+            callbacks: calls,
+            deepestCallback: deepest,
+            suspended: pending,
+            // Named, not merely counted. A count above zero says the run loop
+            // has to keep handing the thread back to the host; it does not say
+            // which call is holding the machine, and that is the only question
+            // anyone asks of it.
+            suspendedCalls: kernel.threads().flatMap((/** @type {any} */ thread)=>
+                hostCalls(thread).map(call=>({
+                    thread: thread.name,
+                    name: call.name,
+                    forMs: Date.now() - (call.at ?? Date.now()),
+                }))),
+        }),
     };
 }

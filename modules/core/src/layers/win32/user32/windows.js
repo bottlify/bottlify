@@ -48,6 +48,52 @@ const WM_SYSCHAR = 0x0106;
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
 
 /**
+ * Notes what a window procedure has been handed, until it gives it back.
+ *
+ * A procedure that never returns stops the thread pumping the queue, and with
+ * it everything the program does -- and it does so invisibly. The call log
+ * writes a call when it answers, so the one call holding the machine is the one
+ * call missing from it; the report of a stall names the thread and the function
+ * but not the message, which is the only part that says what the program was
+ * asked to do.
+ *
+ * @template T
+ * @param {Pick<WindowHost, 'dispatching'>} host
+ * @param {{ hwnd: number, message: number }} message
+ * @param {T} answer   What the procedure gave back: a promise, or a value.
+ * @returns {T}
+ */
+export function watchDispatch(host, message, answer){
+    const open = host.dispatching;
+    if (!open)
+    {
+        return answer;
+    }
+    const handed = {
+        hwnd: message.hwnd >>> 0, message: message.message >>> 0, at: Date.now(),
+    };
+    open.push(handed);
+    const done = ()=>{
+        const at = open.indexOf(handed);
+        if (at !== -1)
+        {
+            open.splice(at, 1);
+        }
+    };
+    // A procedure that answered without suspending has already returned; only a
+    // promise leaves the call open.
+    if (typeof (/** @type {any} */ (answer))?.then === 'function')
+    {
+        /** @type {any} */ (answer).then(done, done);
+    }
+    else
+    {
+        done();
+    }
+    return answer;
+}
+
+/**
  * CREATESTRUCTA, which is what WM_NCCREATE and WM_CREATE carry.
  *
  * A program reads `lpCreateParams` out of it to find whatever it passed to
@@ -164,6 +210,9 @@ function characterFor(key){
  *              close: (handle: number) => any }} handles
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue
  *           Where messages come from, including the ones the input layer posts.
+ * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
+ *           Where a window procedure that has not returned is noted, for
+ *           whoever is measuring. Absent in a build that is not.
  * @property {(wndProc: number, message: DispatchedMessage) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  * @property {() => any} park   Stops the caller; returns the parked token.
@@ -1027,7 +1076,8 @@ export function createWindowFunctions(host){
                 // Whatever the host gives back is the answer, including a
                 // promise: running a window procedure means running guest code,
                 // and the bridge suspends this call until it returns.
-                return host.dispatch(record.wndProc, message);
+                return watchDispatch(host, message,
+                    host.dispatch(record.wndProc, message));
             },
         },
 

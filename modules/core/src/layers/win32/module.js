@@ -245,6 +245,13 @@ export const win32Module = {
             trace: text=>trace(text),
         });
 
+        /**
+         * What a window procedure is inside and has not returned from.
+         *
+         * @type {{ hwnd: number, message: number, at: number }[]}
+         */
+        const dispatching = [];
+
         // Registered here rather than by the graphics layer, because a filter
         // graph is not a drawing device: a program reaches it through
         // CoCreateInstance alone, and everything it does -- events, a notify
@@ -688,6 +695,7 @@ export const win32Module = {
                 readCString,
                 handles,
                 queue,
+                dispatching,
                 dispatch: (wndProc, message)=>bridge.callGuest({
                     entry: wndProc,
                     // The four arguments a window procedure declares, in order.
@@ -877,6 +885,21 @@ export const win32Module = {
              */
             waveDevices: ()=>winmm.diagnostics(),
 
+            /**
+             * Which messages a window procedure is still inside.
+             *
+             * The same difference again, for the message loop: a procedure that
+             * does not return stops the thread that pumps the queue and with it
+             * the whole program, and the call log cannot show it -- a call is
+             * written when it answers, so the one holding everything is the one
+             * missing.
+             */
+            windowProcedures: ()=>dispatching.map(held=>({
+                hwnd: `0x${held.hwnd.toString(16)}`,
+                message: `0x${held.message.toString(16)}`,
+                forMs: Date.now() - held.at,
+            })),
+
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,
         };
@@ -901,6 +924,7 @@ export const win32Module = {
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 waveDevices: current ? current.waveDevices() : [],
+                windowProcedures: current ? current.windowProcedures() : [],
                 exitCode: current ? current.exitCode() : null,
             },
         };
