@@ -110,6 +110,7 @@ export const graphicsModule = {
                 dumpDraws: device?.dumpDraws === true,
                 maxDraws: device?.maxDraws,
                 divergence: config?.divergence,
+                skipTexture: device?.skipTexture,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless

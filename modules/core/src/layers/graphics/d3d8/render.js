@@ -41,6 +41,7 @@ import {
     dwordToFloat,
 } from './constants.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { resourceId } from '../webgpu/internal/bindings.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -956,6 +957,11 @@ const CLEAR_STRIDE = 20;
  *     did, because the region is either there or not at each cut.
  * @property {((api: string, detail: string)=>void) | null} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
+ * @property {string | null} [skipTexture]
+ *     Drop every draw that samples the texture with this dump id. A draw's
+ *     position in a frame moves between runs and its bound texture does not,
+ *     so this is what lets the same draw be removed from two runs and the
+ *     frames compared -- which is the only way to see what one draw paints.
  */
 
 /**
@@ -968,6 +974,7 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
     const divergence = options.divergence ?? null;
+    const skipTexture = options.skipTexture ?? null;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
 
     /** @type {WeakMap<object, any>} d3d8 surface -> backend surface */
@@ -1014,6 +1021,7 @@ export function createRenderer(options){
             stride: 0,
             indexFormat: 0,
             stencilRect: 0,
+            texture: 0,
         },
         /** @type {string[]} */
         failures: [],
@@ -1345,10 +1353,30 @@ export function createRenderer(options){
             // left set by one draw and inherited by the next puts a hard
             // axis-aligned edge across real geometry, at coordinates that
             // belong to neither draw's own shape.
+            // What it drew into. A frame that renders through a chain of
+            // targets composites each one as a rectangle on the screen, and a
+            // rectangle composited under the wrong alpha is indistinguishable
+            // from a draw that painted one -- unless the target is named.
+            + ` target=${describeTarget(model)}`
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
             + `@${round(model.viewport.rect.minDepth)}..${round(model.viewport.rect.maxDepth)}`
             + ` [${cascade}]${corners}`);
+    };
+
+    /**
+     * What a draw's colour target is, and whether it is a texture the frame
+     * goes on to sample. Anything but the back buffer means the frame is built
+     * in more than one place, and each place is a rectangle of its own.
+     *
+     * @param {RenderModel} model
+     * @returns {string}
+     */
+    const describeTarget = model=>{
+        const target = surfaceFor(model.renderTarget);
+        const tracked = textures.get(model.renderTarget);
+        return `s${resourceId(target)}${tracked ? `=${tracked.id}` : ''}`
+            + `${model.renderTarget === model.backBuffer ? '' : '!backbuffer'}`;
     };
 
     /**
@@ -1810,6 +1838,12 @@ export function createRenderer(options){
             return null;
         }
         const cascade = stageCascade(model, layout);
+        if (skipTexture !== null && cascade.textures.some(
+            texture=>texture && textures.get(texture)?.id === skipTexture))
+        {
+            skip('texture');
+            return null;
+        }
         const stageBindings = cascade.stages.map((stage, index)=>{
             const texture = cascade.textures[index];
             return {

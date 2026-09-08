@@ -57,7 +57,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
  *           dumpDraws?: boolean, maxDraws?: number,
- *           divergence?: (api: string, detail: string)=>void }} [options]
+ *           divergence?: (api: string, detail: string)=>void,
+ *           skipTexture?: string }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -83,6 +84,7 @@ function harness(options = {}){
         dumpDraws: options.dumpDraws ?? false,
         maxDraws: options.maxDraws,
         divergence: options.divergence,
+        skipTexture: options.skipTexture,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1426,6 +1428,8 @@ test('the frame dump says where each draw landed and is empty unless asked for',
         'where a fragment`s transparency comes from -- here the vertex`s own colour');
     assert.match(dumped[0], / texXform=- /,
         'a stage this engine does not transform coordinates for says so');
+    assert.match(dumped[0], / target=s\d+ /,
+        'what it drew into, so a frame built through more than one target says so');
     assert.match(dumped[0], / view=0,0\+640x480@0..1 /,
         'the rectangle the draw was clipped and mapped by, which a later draw inherits');
     assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
@@ -1523,4 +1527,33 @@ test('a texture transform that moves a coordinate is reported as a divergence', 
     draw(moved);
     assert.equal(said.length, 1);
     assert.match(said[0], /^Direct3D 8: a texture transform is accepted and not applied/);
+});
+
+test('every draw sampling one texture can be dropped, by the id the dump names it', async()=>{
+    // Recorded commands. A draw's index in a frame moves between runs, so an
+    // index cannot remove the same draw twice and two frames cut by index
+    // differ by whichever draw happened to land there. The texture it binds
+    // does not move, which is what makes this the selector a difference image
+    // can be built on.
+    const h = harness({ dumpDraws: true, skipTexture: 't1' });
+    const device = h.device;
+    const first = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([0, 0, 255, 255]));
+    const second = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([255, 0, 0, 255]));
+    selectTexture(device);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    for (const texture of [first, second])
+    {
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const counted = device.diagnostics();
+    assert.equal(counted.draws, 1, 'the draw that bound t1 never reached the queue');
+    assert.equal(counted.skipped.texture, 1);
+    assert.equal(counted.lastDump.length, 1, 'and the dump lists only the draw that survived');
+    assert.match(counted.lastDump[0], /:t0:/);
 });

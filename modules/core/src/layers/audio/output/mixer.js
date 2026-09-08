@@ -82,6 +82,21 @@ export function createMixer(
                 queue: [],
                 /** Frames of `queue[0]` already mixed. */
                 offset: 0,
+                /**
+                 * What each queued buffer cost the guest, in the guest's own
+                 * bytes, in the order they were mixed.
+                 *
+                 * Kept because converting frames back into guest bytes by the
+                 * rate ratio does not round-trip: the conversion floors, so a
+                 * buffer that has been played in full reports back as slightly
+                 * fewer bytes than the guest wrote. Over a stream the shortfall
+                 * is covered by the next buffer, but a program that writes one
+                 * small buffer and waits for it -- which is how a sound library
+                 * probes a device -- waits for ever.
+                 *
+                 * @type {{ frames: number, bytes: number }[]}
+                 */
+                ledger: [],
                 /** Output frames this track has contributed to the ring. */
                 mixed: 0,
                 /** Of those, the ones the device has already played. */
@@ -118,8 +133,39 @@ export function createMixer(
                     if (frames.length > 0)
                     {
                         track.queue.push(frames);
+                        track.ledger.push({
+                            frames: frames.length / OUTPUT_CHANNELS,
+                            bytes: pcm.length,
+                        });
                     }
                     return frames.length / OUTPUT_CHANNELS;
+                },
+
+                /**
+                 * Guest bytes this track has actually played.
+                 *
+                 * Exact by construction rather than reconstructed from a rate:
+                 * when the last frame a buffer became has been heard, the whole
+                 * of that buffer's byte count is credited, so a caller waiting
+                 * for a buffer to come back is never left a fraction short.
+                 */
+                playedBytes(){
+                    let remaining = track.played();
+                    let bytes = 0;
+                    for (const entry of track.ledger)
+                    {
+                        if (remaining >= entry.frames)
+                        {
+                            bytes += entry.bytes;
+                            remaining -= entry.frames;
+                            continue;
+                        }
+                        // Part-way through a buffer: credit the same share of
+                        // its bytes, so the cursor moves smoothly inside one.
+                        bytes += entry.bytes * (remaining / entry.frames);
+                        return bytes;
+                    }
+                    return bytes;
                 },
 
                 /** Frames of output this track still has to give. */
@@ -135,6 +181,7 @@ export function createMixer(
                 /** Drops everything queued; the device was stopped. */
                 reset(){
                     track.queue = [];
+                    track.ledger = [];
                     track.offset = 0;
                     track.mixed = 0;
                     track.heard = 0;

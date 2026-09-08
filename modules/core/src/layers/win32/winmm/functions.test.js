@@ -507,3 +507,56 @@ test('the notifier sends each form somewhere different', async()=>{
     assert.equal(posted.length, 1);
     assert.equal(signalled.length, 1);
 });
+
+test('a device with a real mixer retires even a very small buffer', async()=>{
+    // Miles opens a wave device and writes one tiny buffer as a probe, then
+    // waits for WOM_DONE before it will write anything else. A device that
+    // never retires that buffer leaves the program spinning for ever with
+    // nothing drawn -- which from outside is a black window, not a silent one.
+    const { createMixer } = await import('../../audio/output/mixer.js');
+    const memory = new Uint8Array(0x10000);
+    let clock = 0;
+
+    const mixer = createMixer({ sampleRate: 48000 });
+    const wave = /** @type {any} */ (createWinmmFunctions({
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        now: ()=>clock,
+        output: ()=>mixer,
+    }));
+    const winmm = wave.table;
+
+    /** @param {number} at @param {number} value */
+    const put32 = (at, value)=>memory.set(new Uint8Array([
+        value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+    ]), at);
+    // WAVEFORMATEX: PCM, stereo, 44100 Hz, 16 bits -- what a program of this
+    // era opens with, and 32 bytes of it is eight frames.
+    put32(0x100, 1 | 2 << 16);
+    put32(0x104, 44100);
+    put32(0x108, 44100 * 4);
+    put32(0x10c, 4 | 16 << 16);
+    assert.equal(winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 0);
+    const device = memory[0x200] | memory[0x201] << 8;
+
+    put32(0x300, 0x800);
+    put32(0x304, 32);
+    assert.equal(winmm.waveOutPrepareHeader.handler([device, 0x300, 32]), 0);
+    assert.equal(winmm.waveOutWrite.handler([device, 0x300, 32]), 0);
+
+    // The device plays it and the ring drains, as a running worklet would,
+    // and the driver's own tick moves the cursor between guest calls.
+    const speaker = new Float32Array(256 * 2);
+    for (let turn = 0; turn < 16; turn++)
+    {
+        mixer.pump();
+        mixer.ring.read(speaker);
+        clock += 50;
+        wave.tick();
+    }
+
+    const flags = memory[0x300 + 16] | memory[0x300 + 17] << 8;
+    assert.ok((flags & 0x00000001) !== 0, `the buffer came back (flags 0x${flags.toString(16)})`);
+});

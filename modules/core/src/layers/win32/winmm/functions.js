@@ -307,11 +307,17 @@ export function createWinmmFunctions(host){
         device.sinceMs = now;
         if (device.track)
         {
-            // What the device actually played, in the guest's own byte rate.
+            // What the device actually played, in the guest's own bytes. Asked
+            // for in those terms rather than converted from frames by the rate:
+            // that conversion floors, so a buffer played in full reports back a
+            // fraction short and never retires -- which is exactly how a sound
+            // library's one-buffer probe of a device hangs for ever.
+            //
             // Taken as a difference rather than as a position because the
             // cursor is relative to the head of the queue, which moves.
-            const played = device.track.played() * device.bytesPerSecond
-                / device.track.rate;
+            const played = device.track.playedBytes
+                ? device.track.playedBytes()
+                : device.track.played() * device.bytesPerSecond / device.track.rate;
             device.playedBytes += Math.max(0, played - device.trackBytes);
             device.trackBytes = played;
         }

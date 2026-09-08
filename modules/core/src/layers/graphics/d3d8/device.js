@@ -179,6 +179,8 @@ function isTransformType(type){
  *     Cut every frame short after this many draws. Negative keeps all of them.
  * @property {(api: string, detail: string)=>void} [divergence]
  *     Where "this call succeeded and did not do all of what it promises" goes.
+ * @property {string} [skipTexture]
+ *     Drop every draw that samples the texture with this dump id.
  */
 
 /**
@@ -258,14 +260,14 @@ function reportPresentParameters(parameters){
 export function createDirect3D8(options = {}){
     const {
         backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
-        divergence, ...caps
+        divergence, skipTexture, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
-        divergence,
+        divergence, skipTexture,
     };
     if (backend && !readMemory)
     {
@@ -493,6 +495,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             dumpDraws: services.dumpDraws === true,
             maxDraws: services.maxDraws,
             divergence: services.divergence,
+            skipTexture: services.skipTexture ?? null,
         })
         : null;
 
