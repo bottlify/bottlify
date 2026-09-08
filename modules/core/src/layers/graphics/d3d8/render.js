@@ -931,6 +931,27 @@ export function createRenderer(options){
             /** Where each draw's world matrix puts it, against the light positions. */
             /** @type {Set<string>} */
             worlds: new Set(),
+            /**
+             * Fog, split by whether the draw had a distance to fade by.
+             *
+             * A pre-transformed draw has none, and Direct3D takes its factor
+             * from the specular alpha the program supplied instead. A program
+             * that leaves fog on while drawing a two-dimensional overlay, and
+             * whose specular alpha means something else entirely, gets that
+             * overlay painted in fog -- which looks like a rectangle of haze
+             * where no haze belongs, and looks like nothing else.
+             */
+            fog: {
+                transformed: 0,
+                preTransformed: 0,
+                modes: /** @type {Set<number>} */ (new Set()),
+                /** @type {Set<string>} */
+                settings: new Set(),
+                /** @type {Set<string>} */
+                depths: new Set(),
+                /** @type {Set<string>} */
+                screenSpace: new Set(),
+            },
         },
     };
 
@@ -960,6 +981,60 @@ export function createRenderer(options){
      */
     const countLighting = (model, layout, lighting)=>{
         const tally = counters.lighting;
+        const fogMode = (model.renderStates.get(D3DRS.FOGENABLE) ?? 0) !== 0
+            ? ((model.renderStates.get(D3DRS.FOGTABLEMODE) ?? 0)
+                || (model.renderStates.get(D3DRS.FOGVERTEXMODE) ?? 0))
+            : 0;
+        if (fogMode !== 0)
+        {
+            tally.fog.modes.add(fogMode);
+            tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
+            // The numbers, because a fog whose range is the default 0..1 while
+            // the world is thousands of units across fogs everything equally
+            // and completely -- which is a wall of fog colour, not fog.
+            // How fogged this draw comes out, which is the thing a rectangle of
+            // haze is evidence of. The eye distance of the model's origin is
+            // the last element of its world-view-projection -- w of the point
+            // (0,0,0) -- and it stands in for the whole draw closely enough to
+            // separate "fogged like its neighbours" from "fogged to a solid
+            // block of fog colour", which is the only distinction wanted here.
+            const toScreen = multiplyMatrices(
+                multiplyMatrices(transformOf(model, D3DTS.WORLD), transformOf(model, D3DTS.VIEW)),
+                transformOf(model, D3DTS.PROJECTION));
+            const start = dwordToFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0);
+            const end = dwordToFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0);
+            const depth = toScreen[15];
+            const amount = end > start
+                ? Math.max(0, Math.min(1, (end - depth) / (end - start)))
+                : 1;
+            sample(tally.fog.depths, `depth=${round(depth)} amount=${round(amount)}`);
+            // A draw whose model origin sits on the camera is a screen-space
+            // quad written as ordinary geometry rather than as XYZRHW. It is
+            // rectangular by construction, so when one of these is wrong it is
+            // wrong in the shape of a rectangle -- and what makes it wrong is
+            // never the transform but what it is filled and blended with.
+            if (depth <= 1)
+            {
+                const stage = model.stageStates(0);
+                const get = (/** @type {number} */ state)=>stage?.get(state) ?? 0;
+                sample(tally.fog.screenSpace,
+                    `blend=${(model.renderStates.get(D3DRS.ALPHABLENDENABLE) ?? 0) !== 0}`
+                    + `/${model.renderStates.get(D3DRS.SRCBLEND) ?? 0}`
+                    + `,${model.renderStates.get(D3DRS.DESTBLEND) ?? 0}`
+                    + ` alphaTest=${(model.renderStates.get(D3DRS.ALPHATESTENABLE) ?? 0) !== 0}`
+                    + ` colorOp=${get(D3DTSS.COLOROP)}`
+                    + `(${get(D3DTSS.COLORARG1)},${get(D3DTSS.COLORARG2)})`
+                    + ` alphaOp=${get(D3DTSS.ALPHAOP)}`
+                    + `(${get(D3DTSS.ALPHAARG1)},${get(D3DTSS.ALPHAARG2)})`
+                    + ` textured=${(model.textures.get(0) ?? null) !== null}`);
+            }
+            sample(tally.fog.settings,
+                `colour=${((model.renderStates.get(D3DRS.FOGCOLOR) ?? 0) >>> 0)
+                    .toString(16).padStart(8, '0')}`
+                + ` start=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0))}`
+                + ` end=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGEND) ?? 0))}`
+                + ` density=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGDENSITY) ?? 0))}`);
+        }
         if (!lighting)
         {
             tally.unlit++;
@@ -1734,6 +1809,13 @@ export function createRenderer(options){
                     lightValues: [...counters.lighting.lightValues],
                     materials: [...counters.lighting.materials],
                     worlds: [...counters.lighting.worlds],
+                    fog: {
+                        ...counters.lighting.fog,
+                        modes: [...counters.lighting.fog.modes],
+                        settings: [...counters.lighting.fog.settings],
+                        depths: [...counters.lighting.fog.depths],
+                        screenSpace: [...counters.lighting.fog.screenSpace],
+                    },
                 },
                 recording: recording ? recording.commands.length : 0,
                 // What the last frame was made of, for a test that wants to

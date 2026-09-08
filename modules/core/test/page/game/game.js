@@ -72,25 +72,32 @@ function formatCall(call){
  * a program that has stopped making progress is sitting in one.
  *
  * @param {string[]} layout  As the memory layer reports it.
+ * @returns {(address: number, mask?: number) => string}
  */
-function profile(layout){
-    if (samples.length === 0)
-    {
-        return null;
-    }
+function symboliser(layout){
     const regions = layout.map(entry=>{
         const [name, extent] = entry.split(' ');
         const [base, size] = extent.split('+').map(Number);
         return { name, base, end: base + size };
     }).sort((left, right)=>left.base - right.base);
 
-    /** @param {number} address @param {number} mask */
-    const where = (address, mask)=>{
+    return (address, mask = 0xffffffff)=>{
         const region = regions.find(entry=>address >= entry.base && address < entry.end);
         return region
             ? `${region.name}+0x${((address - region.base) & mask).toString(16)}`
             : '<unmapped>';
     };
+}
+
+/**
+ * @param {string[]} layout  As the memory layer reports it.
+ */
+function profile(layout){
+    if (samples.length === 0)
+    {
+        return null;
+    }
+    const where = symboliser(layout);
     /** @param {number} mask @param {number} keep */
     const histogram = (mask, keep)=>{
         /** @type {Map<string, number>} */
@@ -483,12 +490,19 @@ async function run(request){
         byState: metrics('kernel').byState ?? {},
         waiting: metrics('kernel').waiting ?? [],
     };
+    // Resolved here rather than in the engine, because the module map lives in
+    // the memory layer and the bridge is below it. A bare address says a call
+    // came from somewhere; `Game.dll+0x63075a` says which code wanted it, which
+    // is the difference between a trace and a list of numbers.
+    const layout = metrics('memory').layout ?? [];
+    const where = symboliser(layout);
     result.bridge = {
         sequence: metrics('bridge').sequence ?? [],
         hot: metrics('bridge').hot ?? [],
-        recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls),
+        recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls)
+            .map((/** @type {any} */ call)=>({ ...call, fromName: where(call.from >>> 0) })),
     };
-    result.profile = profile(metrics('memory').layout ?? []);
+    result.profile = profile(layout);
 
     // Named rather than left to `scalars`, which keeps only numbers and strings
     // -- every metric this layer reports is an object, so all of them were

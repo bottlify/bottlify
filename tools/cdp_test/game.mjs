@@ -123,7 +123,8 @@ function formatCall(call){
         call.strings?.[index]
             ? `${JSON.stringify(call.strings[index])}@0x${(a >>> 0).toString(16)}`
             : `0x${(a >>> 0).toString(16)}`)).join(', ');
-    const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
+    const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`
+        + (call.fromName ? ` ${call.fromName}` : '');
     const left = call.error ? `  [err ${call.error}]` : '';
     return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
 }
@@ -220,6 +221,37 @@ function describe(result, context, calls){
                 say(`    lights: most=${lighting.mostLights}`
                     + ` types=[${lighting.types.join(' ')}]`
                     + ` ambient=[${lighting.ambients.join(' ')}]`);
+                for (const value of lighting.lightValues ?? [])
+                {
+                    say(`      light    ${value}`);
+                }
+                for (const value of lighting.materials ?? [])
+                {
+                    say(`      material ${value}`);
+                }
+                for (const value of lighting.worlds ?? [])
+                {
+                    say(`      world    ${value}`);
+                }
+                const withFog = lighting.fog;
+                if (withFog && (withFog.transformed > 0 || withFog.preTransformed > 0))
+                {
+                    say(`    fog: modes=[${withFog.modes.join(' ')}]`
+                        + ` transformed=${withFog.transformed}`
+                        + ` pre-transformed=${withFog.preTransformed}`);
+                    for (const value of withFog.settings ?? [])
+                    {
+                        say(`      fog      ${value}`);
+                    }
+                    for (const value of withFog.depths ?? [])
+                    {
+                        say(`      fogged   ${value}`);
+                    }
+                    for (const value of withFog.screenSpace ?? [])
+                    {
+                        say(`      screen   ${value}`);
+                    }
+                }
             }
             for (const failure of (device.failures ?? []).slice(0, 8))
             {
