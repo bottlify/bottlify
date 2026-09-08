@@ -1,6 +1,7 @@
-# 09 — Process creation
+# Process creation
 
-**Status:** decided, not implemented. This document is the decision.
+**Status:** implemented, unproven against a real title. The design below stands as
+written; what changed after building it is recorded in "What was built" at the end.
 
 ## The problem, as measured
 
@@ -188,3 +189,83 @@ shortcut on a desktop does — and it keeps working while the above is built.
 - **Whether a full dispose-and-rebuild is fast enough to be invisible.** The spike proves it works
   sequentially; it does not measure how long it takes with a real game's images and a mounted
   bundle. If it is slow, the replacement is still correct, just visible as a pause.
+
+## What was built
+
+The five steps, in order, and what each turned out to be.
+
+**1. win32's state was already instance-scoped.** The defect this document describes had been fixed
+before the rest was built: `libraries`, `exitCode`, `hive`, `queue` and `com` are closed over by
+`create()`, and only a reference to the most recent api survives at module scope, for `diagnostics()`
+alone. Nothing to do.
+
+**2. The kernel gained processes** — `layers/kernel/internal/processes.js`, reached through
+`kernel.processes`. A record holds the image path, the command line, `suspended`, a list of patches,
+an exit code that is always `STILL_ACTIVE`, and the two handles the caller opens for it. `pending()`
+is the first record that is not suspended, which is the whole of the scheduling policy. Nothing in
+that file executes anything.
+
+**3. `layers/win32/kernel32/spawn.js`** holds `CreateProcessA`, `CreateProcessW`, `WinExec` and
+`WriteProcessMemory`; `CreateProcessA`/`W`'s refusals were deleted from `kernel32/system.js`.
+`GetExitCodeProcess` there now answers for a child handle as well as for the running process.
+`WaitForSingleObject` on a `process` handle blocks the thread for good (a zero timeout polls
+`WAIT_TIMEOUT`, because a parent that is only checking must not be stopped), and `ResumeThread` on a
+`process-thread` handle clears `suspended`.
+
+Two things were settled from Win32's documented behaviour rather than from this document:
+
+- **`WinExec` returns 33 on success** and the error code itself below 32 on failure, and takes no
+  handle and no wait. `uCmdShow` is ignored.
+- **The image is found the way `CreateProcess` finds it**: a quoted first token whole; an unquoted
+  one by trying each space-separated prefix in turn (`C:\Program Files\Setup.exe /S` is otherwise
+  `C:\Program` with three arguments); `.exe` appended to a name with no extension; a bare name
+  looked for beside the running program first. The full search order — current directory, system
+  directories, `PATH` — is not implemented, and neither are inherited handles, a supplied
+  environment or a supplied current directory. Those are accepted and not acted on: the child runs
+  in this machine's volume and environment, which is the parent's.
+
+**Case folding was already free.** The pitfall this document lists as live is not: the whole
+filesystem layer folds names (`filesystem/internal/paths.js`'s `foldName`, used by `tree.js` and by
+the bundle source), so `volume.stat` finds `War3.exe` for a caller naming `war3.exe`. A test in
+`kernel32/vfs.test.js` pins it against the real filesystem rather than a fake.
+
+**4. `app.js` was split.** `buildApp` is one machine running one image; `createApp` is a facade over
+it that rebuilds on the child. The events registry and the ring of requests are created in the
+facade and handed down, so a caller's subscriptions and the record of what asked for a replacement
+both outlive the process they were made against. The run loop ends the run when a child is pending
+and either the guest exited or nothing can run — the second case is where a wait on the child's
+handle lands, and it used to be reported as a deadlock. Then: read the child's image off the volume,
+export the session, dispose, build again with the child's bytes, command line and patches, and seed
+the volume with what the parent wrote. That seeding is what a self-extracting installer needs and is
+worth naming: without it the payload goes with the machine that wrote it.
+
+`placePatches` sorts the parent's deferred writes into the ones that land inside the child's image
+and the ones that do not; the second are reported and dropped rather than written somewhere they
+would corrupt.
+
+**5. Diagnostics.** `spawned` reports every request while the calling stack still stands, with the
+guest's backtrace attached; the facade keeps the last sixteen and `app.replacements()` reads them.
+`refuseReplacement: true` throws at the handover instead of rebuilding.
+
+**`SetThreadContext` was not built.** It needs a `CONTEXT` layout to be right, nothing in the
+current corpus calls it, and the deferral machinery it would feed already exists — so it is a small
+addition when a title asks for it, and a guess until then.
+
+## What this did not unblock, measured
+
+Three runs, headless, in Node:
+
+- **Doom 3's Wise stub** (`_l*` file family, `GetTempFileNameA`) never reaches `WinExec`: it cannot
+  extract its payload, tries to `LoadLibrary` the temp file it failed to write, and exits 1. The
+  missing calls are the ones `installers.md` already lists; process creation is not what is stopping
+  it.
+- **The Warcraft III demo installer** dies in the msvcrt startup — `__set_app_type`, `_initterm`,
+  `__getmainargs`, `_controlfp` — before `main`. Also already listed.
+- **`Frozen Throne.exe`, the launcher this document was written about, never executes a host call at
+  all.** Its image maps at `0x400000`, its entry point is `0x403606`, every import resolves, and the
+  guest is then at `eip=0` with the stack walking down and every register but `eax=0xffff` clear. It
+  makes no call into anything, so `CreateProcessA` is never reached. Reproduced identically with the
+  process-creation work stashed out, so it is not caused by it. `war3.exe` from the same bundle, run
+  the same way, reaches `Direct3DCreate8` — so the harness is sound and the fault is in what the
+  launcher's first instructions do. **This is the next measurement**: until it is found, none of the
+  above can be exercised by the title it was designed for.

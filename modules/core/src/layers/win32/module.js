@@ -16,6 +16,7 @@ import { createSyncFunctions } from './kernel32/sync.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
+import { createSpawnFunctions } from './kernel32/spawn.js';
 import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createSeh } from './kernel32/seh.js';
 import { createCrtSeh } from './msvcrt/seh.js';
@@ -526,6 +527,22 @@ export const win32Module = {
                     exit: code=>{
                         exitCode = code >>> 0;
                     },
+                }),
+                ...createSpawnFunctions({
+                    kernel,
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    readWideString,
+                    setLastError: setError,
+                    /** @param {string} path */
+                    stat: path=>volume.stat(path),
+                    imagePath: ()=>modules.imagePath(),
+                    // Where the record of a replacement request goes. It has to
+                    // leave this process, because honouring one erases every
+                    // log and ring the run that asked for it produced.
+                    /** @param {any} request */
+                    spawned: request=>config?.spawned?.(request),
                 }),
                 // Placed after the throwing pair it replaces: RaiseException and
                 // RtlUnwind are defined by not returning, and now there is a

@@ -8,7 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSystemFunctions } from './system.js';
 
-const ERROR_CALL_NOT_IMPLEMENTED = 120;
 const ERROR_INVALID_HANDLE = 6;
 
 const FILE_TYPE_UNKNOWN = 0x0000;
@@ -178,16 +177,6 @@ test('an unmapped pointer is bad and a mapped one is not', ()=>{
     assert.equal(fns.IsBadCodePtr.handler([0]), 1);
 });
 
-test('starting a process fails truthfully rather than handing back nothing', ()=>{
-    // Success and a handle to nothing would have the caller wait on a process
-    // that can never signal.
-    const host = fakeHost();
-    const fns = createSystemFunctions(host);
-
-    assert.equal(fns.CreateProcessA.handler(), 0);
-    assert.deepEqual(host.errors, [ERROR_CALL_NOT_IMPLEMENTED]);
-});
-
 test('a running process reports that it is still running', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);
@@ -195,8 +184,20 @@ test('a running process reports that it is still running', ()=>{
     assert.equal(fns.GetExitCodeProcess.handler([CURRENT_PROCESS, 0x200]), 1);
     assert.equal(host.view.getUint32(0x200, true), STILL_ACTIVE);
 
-    assert.equal(fns.GetExitCodeProcess.handler([0x10, 0x200]), 0, 'and no other process exists');
+    assert.equal(fns.GetExitCodeProcess.handler([0x10, 0x200]), 0, 'and no such process exists');
     assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+});
+
+test('a child process reports its own exit code, not this process\'s', ()=>{
+    // The engine only ever answers STILL_ACTIVE for a child -- a child takes
+    // this process's place rather than running beside it -- but the value has
+    // to come off the record, or a record that ever says otherwise is ignored.
+    const host = fakeHost();
+    host.handles.set(0x40, { exitCode: 7 });
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.GetExitCodeProcess.handler([0x40, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 7);
 });
 
 test('terminating this process does not return', ()=>{
@@ -224,6 +225,6 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.GetFileType.argBytes, 4);
     assert.equal(fns.IsBadReadPtr.argBytes, 8);
     assert.equal(fns.IsBadCodePtr.argBytes, 4);
-    assert.equal(fns.CreateProcessA.argBytes, 40);
     assert.equal(fns.TerminateProcess.argBytes, 8);
+    assert.equal(fns.GetExitCodeProcess.argBytes, 8);
 });

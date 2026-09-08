@@ -11,7 +11,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupBlocks, inParallel, resolveLibraryPath, retryingFetch } from './app.js';
+import { groupBlocks, inParallel, placePatches, resolveLibraryPath, retryingFetch }
+    from './app.js';
 import { createEvents } from './events.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
@@ -201,4 +202,25 @@ test('a name that already says where it is, is taken as given', ()=>{
 test('a relative name with a directory in it still searches beside the executable', ()=>{
     assert.equal(resolveLibraryPath('plugins\\Sound.dll', IMAGE),
         'C:\\App\\plugins\\Sound.dll');
+});
+
+test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
+    // A write that falls outside the image was addressing a mapping this
+    // process does not have. Putting the bytes down anyway corrupts whatever
+    // really is at that address, and the failure then looks like the child
+    // being wrong rather than the patch being misplaced.
+    /** @param {number} address @param {number} length */
+    const at = (address, length)=>({ address, bytes: new Uint8Array(length) });
+
+    const { applied, refused } = placePatches(
+        [at(0x401000, 4), at(0x400000, 1), at(0x3fffff, 1), at(0x401ffe, 4), at(0x500000, 1)],
+        0x400000, 0x2000);
+
+    assert.deepEqual(applied.map(patch=>patch.address), [0x401000, 0x400000]);
+    assert.deepEqual(refused.map(patch=>patch.address), [0x3fffff, 0x401ffe, 0x500000],
+        'below the base, straddling the end, and past it');
+});
+
+test('nothing to patch is not a patch of nothing', ()=>{
+    assert.deepEqual(placePatches([], 0x400000, 0x2000), { applied: [], refused: [] });
 });

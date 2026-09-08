@@ -27,6 +27,7 @@ function fakeKernel(){
         waits: /** @type {any[]} */ ([]),
         released: /** @type {any[]} */ ([]),
         exited: /** @type {any[]} */ ([]),
+        blocked: /** @type {any[]} */ ([]),
         threadIds: /** @type {any[]} */ ([]),
         /** Set this to make the next wait block. */
         waitBlocks: false,
@@ -67,6 +68,8 @@ function fakeKernel(){
         resetEvent: event=>state.waits.push({ reset: event }),
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.exited.push({ thread, code }),
+        /** @param {any} thread @param {string} [reason] */
+        block: (thread, reason)=>state.blocked.push({ thread, reason }),
         handles: {
             /** @param {string} type @param {any} object */
             open(type, object){
@@ -95,6 +98,8 @@ function fakeKernel(){
                     throw new Error('Invalid handle');
                 }
             },
+            /** @param {number} handle */
+            typeOf: handle=>handles.get(handle)?.type ?? null,
             /** @param {any} object */
             holds: object=>[...handles.values()].some(entry=>entry.object === object),
         },
@@ -138,6 +143,8 @@ function setup(names){
         setLastError: code=>{
             errors.push(code);
         },
+        /** @param {number} handle */
+        handleType: handle=>kernel.handles.typeOf(handle),
     });
     return { kernel, fns, parked, current, written, errors };
 }
@@ -162,6 +169,34 @@ test('CreateThread fills in the thread id when asked, and not when not', ()=>{
 
     fns.CreateThread.handler([0, 0, 0x401000, 0, 0, 0]);
     assert.equal(kernel.state.threadIds.length, 1, 'a null pointer is not written through');
+});
+
+test('waiting on a child process is where the parent hands over', ()=>{
+    // Nothing in this process can ever signal a child: the child takes this
+    // process's place rather than running beside it. So the thread stops here
+    // for good, and the replacement is what happens instead of the wait
+    // returning. Left to the ordinary path, this would join a queue on an
+    // object with no signal and be reported as a deadlock.
+    const { kernel, fns, parked, current } = setup();
+    const child = { imagePath: 'C:\\App\\child.exe' };
+    const handle = kernel.handles.open('process', child);
+
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0xffffffff]), PARKED);
+    assert.deepEqual(parked, [current]);
+    assert.equal(kernel.state.blocked.length, 1);
+    assert.equal(kernel.state.blocked[0].thread, current);
+    assert.equal(kernel.state.waits.length, 0, 'and it never joined a wait queue');
+});
+
+test('polling a child process says it is still running', ()=>{
+    // A zero timeout is a question, not a wait. Parking on it would stop a
+    // parent that was only checking whether its child had finished.
+    const { kernel, fns, parked } = setup();
+    const handle = kernel.handles.open('process', { imagePath: 'C:\\App\\child.exe' });
+
+    assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
+    assert.deepEqual(parked, []);
+    assert.deepEqual(kernel.state.blocked, []);
 });
 
 test('a wait that succeeds returns immediately', ()=>{

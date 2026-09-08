@@ -8,6 +8,7 @@ import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
 import { ThreadState, createScheduler } from './internal/threads.js';
 import { WaitResult, createSyncObjects } from './internal/sync.js';
+import { createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 
 /**
@@ -28,6 +29,8 @@ let handles = null;
 let clock = null;
 /** @type {any} */
 let switcher = null;
+/** @type {any} */
+let processes = null;
 
 export const kernelModule = {
     name: 'kernel',
@@ -68,6 +71,7 @@ export const kernelModule = {
         });
         sync = createSyncObjects({ scheduler });
         handles = createHandleTable();
+        processes = createProcessTable();
 
         return {
             ThreadState,
@@ -305,6 +309,21 @@ export const kernelModule = {
                 holds: object=>handles.holds(object),
             },
 
+            /**
+             * Child processes, as records. Nothing here runs one: a request is
+             * recorded, and whoever drives the machine decides when the parent
+             * has nothing left to do and the child takes its place.
+             */
+            processes: {
+                /**
+                 * @param {{ imagePath: string, commandLine: string,
+                 *           suspended?: boolean }} options
+                 */
+                create: options=>processes.create(options),
+                pending: ()=>processes.pending(),
+                all: ()=>processes.all(),
+            },
+
             clock,
         };
     },
@@ -321,6 +340,7 @@ export const kernelModule = {
                     ...switcher.diagnostics(),
                     handles: handles.diagnostics(),
                     sync: sync.diagnostics(),
+                    processes: processes.diagnostics(),
                     time: clock.diagnostics(),
                 }
                 : {},
@@ -333,5 +353,6 @@ export const kernelModule = {
         handles = null;
         clock = null;
         switcher = null;
+        processes = null;
     },
 };

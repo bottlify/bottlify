@@ -33,6 +33,20 @@ test('a missing file is an answer, not an exception', async()=>{
     assert.deepEqual(vol.list('C:\\nothing\\*'), []);
 });
 
+test('a file is found however the caller spelled it', async()=>{
+    // Win32 paths do not distinguish case; the names a bundle stores do. This
+    // is what CreateProcess relies on to find `War3.exe` for a launcher that
+    // names `war3.exe` -- without it the lookup falls through and the launcher
+    // starts whatever the manifest names, which is itself.
+    const { volume: vol } = await volume();
+    const node = vol.open('C:\\War3.exe', { read: true, write: true, create: true });
+    assert.ok(node);
+    vol.close(node);
+
+    assert.equal(vol.stat('C:\\war3.exe')?.exists, true);
+    assert.equal(vol.stat('C:\\WAR3.EXE')?.exists, true);
+});
+
 test('a file written through the adapter reads back through it', async()=>{
     const { volume: vol } = await volume();
 

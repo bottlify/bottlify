@@ -458,6 +458,18 @@ export function createSyncFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([handle])=>{
+                // A child created with CREATE_SUSPENDED has a thread handle but
+                // no thread: the launcher writes into the child and resumes it,
+                // and this is the point at which the child is ready to take
+                // this process's place. It answers a suspend count of one, the
+                // count a freshly suspended child really has.
+                const child = object(handle >>> 0, 'process-thread');
+                if (child)
+                {
+                    const wasSuspended = child.suspended;
+                    child.suspended = false;
+                    return wasSuspended ? 1 : 0;
+                }
                 const thread = threadOf(handle);
                 if (!thread)
                 {

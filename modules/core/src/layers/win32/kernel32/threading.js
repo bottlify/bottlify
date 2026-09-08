@@ -213,6 +213,23 @@ export function createThreadingFunctions(host){
                 }
                 const wait = timeout >>> 0;
                 const thread = host.currentThread();
+
+                // A child process is never signalled while its parent can look:
+                // it takes this process's place rather than running beside it.
+                // So a poll says the child is still running, which is true, and
+                // a real wait is the parent saying it has nothing left to do --
+                // the thread stops here for good, and the replacement is what
+                // happens instead of the wait ever returning.
+                if (host.handleType?.(handle >>> 0) === 'process')
+                {
+                    if (wait === 0)
+                    {
+                        return WAIT_TIMEOUT;
+                    }
+                    kernel.block(thread, `child process ${target.imagePath}`);
+                    return host.park(thread);
+                }
+
                 // Zero is a poll, not a wait: it asks whether the object is
                 // available now and never blocks. Blocking on it would stop a
                 // program that was only checking.

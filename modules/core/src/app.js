@@ -62,6 +62,16 @@ import { createBlockCache, resolveBlockStore }
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
  * @property {string} [imagePath]    What the program believes it was loaded from.
+ * @property {string} [commandLine]
+ *           What the program believes it was started with. argv[0] ends at the
+ *           first space unless it is quoted, so a line composed by hand must
+ *           quote it. Defaults to the image path, quoted.
+ * @property {boolean} [refuseReplacement]
+ *           Stop rather than replace this process with a child it asked for. A
+ *           replacement erases every log and ring of the run that asked for it,
+ *           once per iteration of a loop that keeps asking, so this is how the
+ *           machine is made to stand still at the point of the request with the
+ *           evidence still in it.
  * @property {any} [device]          The GPU to draw on, when there is one.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
@@ -322,6 +332,37 @@ export async function inParallel(items, limit, work){
         }
     });
     await Promise.all(runners);
+}
+
+/**
+ * Sorts a parent's deferred writes into the ones that land in the child's image
+ * and the ones that do not.
+ *
+ * A launcher that hollows its child writes into it while it is suspended, which
+ * here is a write against an image nothing has mapped yet. The writes are kept
+ * and replayed at the addresses they name -- but only inside the image they were
+ * meant for. One outside it was addressing a mapping this process does not have,
+ * and putting those bytes down anyway would corrupt whatever really is there
+ * while looking, from the guest's side, like the child being wrong.
+ *
+ * @param {{ address: number, bytes: Uint8Array }[]} patches
+ * @param {number} base
+ * @param {number} size
+ * @returns {{ applied: { address: number, bytes: Uint8Array }[],
+ *             refused: { address: number, bytes: Uint8Array }[] }}
+ */
+export function placePatches(patches, base, size){
+    /** @type {{ address: number, bytes: Uint8Array }[]} */
+    const applied = [];
+    /** @type {{ address: number, bytes: Uint8Array }[]} */
+    const refused = [];
+    for (const patch of patches)
+    {
+        const inside = patch.address >= base
+            && patch.address + patch.bytes.length <= base + size;
+        (inside ? applied : refused).push(patch);
+    }
+    return { applied, refused };
 }
 
 /**
@@ -777,11 +818,26 @@ async function mountBundle({ options, cpu, filesystem, events }){
 }
 
 /**
- * @param {AppOptions} options
+ * One machine, running one image.
+ *
+ * `createApp` below is what a caller reaches for; this is what it builds, once
+ * per process. A child process is a second call to this against the child's
+ * image, after the first has been disposed -- so everything here belongs to the
+ * program it was built for, and nothing survives except what is passed back in.
+ *
+ * @param {AppOptions & {
+ *     events?: any,
+ *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
+ *     patches?: { address: number, bytes: Uint8Array }[],
+ *     spawned?: (request: any) => void,
+ * }} options
  * @returns {Promise<any>} an AppController
  */
-export async function createApp(options){
-    const events = createEvents();
+async function buildApp(options){
+    // Handed in across a replacement, so a caller's subscriptions outlive the
+    // process they were made against: the program has changed, the machine it
+    // is running in has not.
+    const events = options.events ?? createEvents();
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -998,6 +1054,24 @@ export async function createApp(options){
                         : null;
                 },
             },
+            commandLine: options.commandLine,
+            // Every child a program asks for, while the stack that asked is
+            // still standing. Kept by the caller above this, because honouring
+            // one of these tears the machine down and takes the logs with it.
+            /** @param {any} request */
+            spawned: request=>{
+                events.emit('process-create', {
+                    image: request.imagePath,
+                    commandLine: request.commandLine,
+                    suspended: request.suspended,
+                });
+                options.spawned?.({
+                    imagePath: request.imagePath,
+                    commandLine: request.commandLine,
+                    suspended: request.suspended,
+                    trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
+                });
+            },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
             fetchBlocks: needed=>blocks ? blocks.fetch(needed) : Promise.resolve(),
@@ -1017,6 +1091,15 @@ export async function createApp(options){
     if (seeded.length > 0)
     {
         filesystem.apply(seeded);
+    }
+
+    // And what the process this one replaces had written. A self-extracting
+    // installer unpacks its payload and then starts it; without this the
+    // payload goes with the machine that wrote it and the child is started
+    // against files that are no longer there.
+    if (options.seed && options.seed.length > 0)
+    {
+        filesystem.apply(options.seed);
     }
 
     // One way out. What the program writes is announced once the writes settle;
@@ -1052,7 +1135,7 @@ export async function createApp(options){
         'bundle-retry': 'warn',
         'bundle-prefetch-failed': 'warn',
     });
-    events.onAny((name, payload)=>{
+    events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
         journal.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
     });
 
@@ -1518,6 +1601,24 @@ export async function createApp(options){
     };
     byBase.set(image.base, mainModule);
 
+    // What the process that asked for this one wrote into it before it existed.
+    // This is the first moment at which the addresses those writes name mean
+    // anything, because it is the first moment the image is there.
+    if (options.patches && options.patches.length > 0)
+    {
+        const { applied, refused } = placePatches(
+            options.patches, image.base, mainModule.image.sizeOfImage);
+        for (const patch of applied)
+        {
+            memory.writeBytes(patch.address, patch.bytes);
+        }
+        events.emit('process-patched', {
+            applied: applied.length,
+            refused: refused.map(patch=>
+                `${patch.address.toString(16)}+${patch.bytes.length}`),
+        });
+    }
+
     const stubs = cpu.thunkImage();
     memory.register({
         // Sized to what the table may grow to rather than to what it holds
@@ -1635,7 +1736,9 @@ export async function createApp(options){
         // Quoted, and this is not cosmetic: a program is handed one string and
         // argv[0] ends at the first space, so an unquoted path with a space in
         // it hands the rest of the path to the program as its first argument.
-        commandLine: `"${options.imagePath ?? 'C:\\app.exe'}"`,
+        // A line chosen by whoever started this process wins, because a child
+        // is entitled to the arguments its parent gave it.
+        commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: 'C:\\',
         standardHandles: { input: 0, output: 0, error: 0 },
     });
@@ -1712,6 +1815,29 @@ export async function createApp(options){
         const thrown = error instanceof Error ? error : new Error(String(error));
         Object.assign(thrown, { reason, trace, traceText: text });
         return events.emit('error', { reason, error: thrown, trace, text }) ?? thrown;
+    };
+
+    /**
+     * Ends the run because a child is to take this process's place.
+     *
+     * Reached from the two places a parent can be finished: it exited, or it is
+     * waiting on a handle only the replacement could ever signal. Nothing is
+     * torn down here -- `run` returns and the caller above rebuilds, which is
+     * the one place in the engine that owns a process lifecycle.
+     *
+     * @param {any} request
+     */
+    const handOver = request=>{
+        events.emit('process-replace', {
+            image: request.imagePath,
+            commandLine: request.commandLine,
+            patches: request.patches.length,
+        });
+        if (options.refuseReplacement)
+        {
+            throw fail('process-replacement-refused', new Error(
+                `refusing to replace this process with ${request.imagePath}`));
+        }
     };
 
     return {
@@ -1804,9 +1930,19 @@ export async function createApp(options){
                     throw fail('host-call', failure);
                 }
 
+                const replacing = kernel.processes.pending();
+
                 const code = win32.exitCode();
                 if (code !== null)
                 {
+                    // A parent that exits after starting a child has handed
+                    // over; it has not finished. Saying so as an exit would
+                    // report the launcher's code as the program's.
+                    if (replacing)
+                    {
+                        handOver(replacing);
+                        return code;
+                    }
                     events.emit('exit', { code });
                     return code;
                 }
@@ -1864,9 +2000,18 @@ export async function createApp(options){
 
                 if (!step.ran)
                 {
-                    // Nobody is ready. Either everything finished without the
-                    // program exiting, or every thread is waiting on something
-                    // no one will signal -- and the diagnostics name what.
+                    // Nobody is ready. When a child is waiting to be started
+                    // that is not a deadlock but the handover: the parent's
+                    // last thread has ended, or it is blocked on the child's
+                    // own handle, which nothing in this process can signal.
+                    if (replacing)
+                    {
+                        handOver(replacing);
+                        return 0;
+                    }
+                    // Either everything finished without the program exiting,
+                    // or every thread is waiting on something no one will
+                    // signal -- and the diagnostics name what.
                     const waiting = kernel.diagnosticsSnapshot().waiting;
                     if (waiting.length > 0)
                     {
@@ -2055,6 +2200,22 @@ export async function createApp(options){
         },
 
         exitCode: ()=>win32.exitCode(),
+
+        /**
+         * The child that is to take this process's place, once `run` has
+         * returned. Null while the program is still its own.
+         */
+        replacement: ()=>kernel.processes.pending(),
+
+        /**
+         * A file off this process's volume, waited for if it is not here yet.
+         * How the caller reads a child's image before this process -- and the
+         * volume with it -- is torn down.
+         *
+         * @param {string} path
+         */
+        readImage: path=>readWholeFile(filesystem, blocks, path),
+
         diagnostics: ()=>[
             ...core.diagnostics(),
             { name: 'app', version: '0.1.0', status: 'ready', metrics: events.diagnostics() },
@@ -2066,4 +2227,110 @@ export async function createApp(options){
             return core.dispose();
         },
     };
+}
+
+/**
+ * How many replacement requests are remembered.
+ *
+ * The ring exists because a replacement erases its own evidence: the machine it
+ * was asked for in is gone, and every log and counter in it with it. A launcher
+ * that re-execs in a loop would otherwise leave nothing but its last iteration.
+ */
+const REPLACEMENT_HISTORY = 16;
+
+/**
+ * createApp — the consumer-facing entry point.
+ *
+ * One machine, one program at a time, and a process lifecycle over the top:
+ * when the program starts a child and then has nothing left to do, the machine
+ * is torn down and rebuilt on the child's image. That is what a child process
+ * is here. A parent that genuinely runs alongside its child is not covered, and
+ * the honest answer for a title that needs one is a second machine rather than
+ * a second process inside this one.
+ *
+ * @param {AppOptions} options
+ * @returns {Promise<any>} an AppController
+ */
+export async function createApp(options){
+    // Both outlive every process: subscriptions a caller made before the first
+    // child existed still have to fire for the last one, and the record of what
+    // asked for a replacement is worthless if it dies with the asker.
+    const events = createEvents();
+    /** @type {any[]} */
+    const requested = [];
+
+    /** @param {any} request */
+    const remember = request=>{
+        requested.push(request);
+        if (requested.length > REPLACEMENT_HISTORY)
+        {
+            requested.shift();
+        }
+    };
+
+    /** @type {any} */
+    let current = await buildApp({ ...options, events, spawned: remember });
+
+    /** What a caller holds. Rebound to the live process on every replacement. */
+    const facade = /** @type {any} */ ({});
+
+    const own = {
+        /**
+         * Runs the program, and whatever replaces it, to completion.
+         *
+         * @param {Object} [runOptions]
+         * @param {number} [runOptions.maxTurns]
+         * @returns {Promise<number>} the last program's exit code
+         */
+        async run(runOptions){
+            while (true)
+            {
+                const code = await current.run(runOptions);
+                const request = current.replacement();
+                if (!request)
+                {
+                    return code;
+                }
+
+                // Read before the tear-down, because the volume it comes off
+                // belongs to the process being torn down. So does everything
+                // that process wrote: an extractor that unpacked its payload
+                // and then started it has to hand that payload across, or the
+                // child is launched against files that no longer exist.
+                const child = await current.readImage(request.imagePath);
+                const carried = current.session.export();
+                await current.dispose();
+
+                if (!child)
+                {
+                    throw new Error(
+                        `cannot start ${request.imagePath}: it is not on the volume`);
+                }
+
+                current = await buildApp({
+                    ...options,
+                    events,
+                    spawned: remember,
+                    executable: child,
+                    imagePath: request.imagePath,
+                    commandLine: request.commandLine,
+                    patches: request.patches,
+                    seed: carried,
+                });
+                Object.assign(facade, current, own);
+            }
+        },
+
+        dispose: ()=>current.dispose(),
+
+        /**
+         * The last few replacement requests, each with the guest's stack at the
+         * call that made it -- kept out here so that honouring one does not
+         * take the record of it away.
+         */
+        replacements: ()=>[...requested],
+    };
+
+    Object.assign(facade, current, own);
+    return facade;
 }

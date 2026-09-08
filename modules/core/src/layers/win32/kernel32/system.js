@@ -455,34 +455,28 @@ export function createSystemFunctions(host){
         },
 
         /**
-         * BOOL CreateProcessA(...)
+         * BOOL GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode)
          *
-         * There is no second process to create. Reporting the failure is the
-         * only honest answer: returning success and a handle to nothing would
-         * have the caller wait on a process that will never signal.
+         * STILL_ACTIVE for the running process and for a child alike. A child
+         * takes this process's place rather than running beside it, so there is
+         * no moment at which a parent is alive to ask and its child has already
+         * finished -- any other answer would be a fiction the parent acts on.
          */
-        CreateProcessA: {
-            argBytes: 40,
-            handler: ()=>{
-                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
-        },
-
-        /** BOOL GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode) */
         GetExitCodeProcess: {
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, code])=>{
-                if ((handle >>> 0) !== CURRENT_PROCESS)
+                const child = (handle >>> 0) === CURRENT_PROCESS
+                    ? null
+                    : object(handle, 'process');
+                if ((handle >>> 0) !== CURRENT_PROCESS && !child)
                 {
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                // Asking a running process for its exit code is how a program
-                // tests whether it is still running, and this one is.
                 const bytes = new Uint8Array(4);
-                new DataView(bytes.buffer).setUint32(0, STILL_ACTIVE, true);
+                new DataView(bytes.buffer).setUint32(
+                    0, child ? child.exitCode : STILL_ACTIVE, true);
                 host.writeMemory(code >>> 0, bytes);
                 return 1;
             },
@@ -567,21 +561,6 @@ export function createSystemFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle])=>object(handle, 'thread') ? 1 : 0,
-        },
-
-        /**
-         * BOOL CreateProcessW(...)
-         *
-         * The same refusal as CreateProcessA, from the same place, because the
-         * two differing about whether a process can be started would be a
-         * program that succeeds through one spelling and not the other.
-         */
-        CreateProcessW: {
-            argBytes: 40,
-            handler: ()=>{
-                host.setLastError(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
         },
 
         /**

@@ -426,6 +426,21 @@ test('suspending another thread reports the count before, and resuming undoes it
     assert.equal(host.kernel.state.woken.includes(other), true, 'and it was woken exactly once');
 });
 
+test('resuming a suspended child is what arms the replacement', ()=>{
+    // CREATE_SUSPENDED, WriteProcessMemory, ResumeThread is how a launcher
+    // hollows its child. The handle names a process record rather than a
+    // thread -- there is no thread until the child is really running -- so
+    // without this it resolves as nothing and the resume is silently lost.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const child = { imagePath: 'C:\\App\\child.exe', suspended: true };
+    host.register(0x24, 'process-thread', child);
+
+    assert.equal(fns.ResumeThread.handler([0x24]), 1, 'a suspended child had a count of one');
+    assert.equal(child.suspended, false);
+    assert.equal(fns.ResumeThread.handler([0x24]), 0, 'and resuming again does nothing');
+});
+
 test('argument sizes match what the guest compiled against', ()=>{
     const fns = createSyncFunctions(fakeHost());
 
