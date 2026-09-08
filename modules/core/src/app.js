@@ -243,6 +243,28 @@ export function groupBlocks(blocks){
 }
 
 /**
+ * Where a LoadLibrary at run time actually looks.
+ *
+ * A name that already says where it is, is where it is. Windows searches for a
+ * bare name and takes a qualified one as given, and a program that has worked
+ * out an absolute path -- a runtime loading its own plug-ins out of a directory
+ * beside the executable, say -- passes one. Prefixing it again asks for
+ * C:\App\C:\App\..., which is not there, and the plug-in is reported missing
+ * while sitting exactly where it was asked for.
+ *
+ * @param {string} name        What the guest passed to LoadLibrary.
+ * @param {string} imagePath   The running executable, whose directory is searched.
+ */
+export function resolveLibraryPath(name, imagePath){
+    const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
+    if (qualified)
+    {
+        return name;
+    }
+    return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
+}
+
+/**
  * Runs `work` over `items`, at most `limit` at a time.
  *
  * Bounded rather than all at once: the point of issuing requests together is to
@@ -1287,17 +1309,7 @@ export async function createApp(options){
             return 0;
         }
         return (async()=>{
-            const path = options.imagePath ?? 'C:\\app.exe';
-            const directory = path.slice(0, path.lastIndexOf('\\') + 1);
-            // A name that already says where it is, is where it is. Windows
-            // searches for a bare name and takes a qualified one as given, and
-            // a program that has worked out an absolute path -- a runtime
-            // loading its own plug-ins out of a directory beside the
-            // executable, say -- passes one. Prefixing it again asks for
-            // C:\App\C:\App\..., which is not there, and the plug-in is
-            // reported missing while sitting exactly where it was asked for.
-            const qualified = /^[A-Za-z]:[\\/]/.test(name) || /^[\\/]/.test(name);
-            const wanted = qualified ? name : `${directory}${name}`;
+            const wanted = resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe');
             const file = await readWholeFile(filesystem, blocks, wanted);
             if (!file)
             {

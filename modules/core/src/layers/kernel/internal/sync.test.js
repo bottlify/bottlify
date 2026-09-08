@@ -186,3 +186,69 @@ test('waiting for any reports which one came through', ()=>{
     assert.deepEqual(sync.waitAny([quiet, ready], a), { index: 1, result: WaitResult.OBJECT_0 });
     assert.equal(sync.waitAny([quiet], a), null);
 });
+
+// --- a thread is a waitable object ---
+
+/**
+ * A thread record as the kernel keeps one, reduced to what waiting on it needs.
+ * `exitCode` is null while it runs, which is what "not signalled" means here.
+ *
+ * @param {string} name
+ */
+const joinable = name=>({
+    name, kind: 'thread', exitCode: /** @type {number | null} */ (null),
+    waiters: /** @type {any[]} */ ([]), waitResult: /** @type {number | null} */ (null),
+});
+
+test('waiting on a running thread blocks, and its end releases the waiter', ()=>{
+    const { scheduler, sync } = setup();
+    const worker = joinable('worker');
+    const joiner = thread('joiner');
+
+    assert.equal(sync.wait(worker, joiner), null, 'a thread that has not ended is not signalled');
+
+    worker.exitCode = 0;
+    sync.releaseAll(worker);
+
+    assert.deepEqual(scheduler.log, ['block joiner: thread "worker"', 'wake joiner']);
+    assert.equal(joiner.waitResult, WaitResult.OBJECT_0);
+});
+
+test('an ended thread stays ended, so a second join does not wait for ever', ()=>{
+    // Nothing is taken from a thread: every waiter is entitled to see that it
+    // ended, however many of them ask and however late.
+    const { sync } = setup();
+    const worker = joinable('worker');
+    worker.exitCode = 3;
+
+    assert.equal(sync.wait(worker, thread('first')), WaitResult.OBJECT_0);
+    assert.equal(sync.wait(worker, thread('second')), WaitResult.OBJECT_0);
+});
+
+test('every thread waiting on one that ends is released at once', ()=>{
+    const { scheduler, sync } = setup();
+    const worker = joinable('worker');
+    const waiters = [thread('a'), thread('b'), thread('c')];
+
+    for (const waiter of waiters)
+    {
+        sync.wait(worker, waiter);
+    }
+    worker.exitCode = 0;
+    sync.releaseAll(worker);
+
+    assert.deepEqual(scheduler.log.filter(line=>line.startsWith('wake')),
+        ['wake a', 'wake b', 'wake c'], 'unlike a set event there is nothing to take');
+    assert.equal(worker.waiters.length, 0, 'and nobody is left on the list');
+});
+
+test('releasing an object nothing waits on is not an error', ()=>{
+    // The common case: a thread ends and no one ever joined it.
+    const { scheduler, sync } = setup();
+    const worker = joinable('worker');
+    worker.exitCode = 0;
+
+    sync.releaseAll(worker);
+
+    assert.deepEqual(scheduler.log, []);
+});

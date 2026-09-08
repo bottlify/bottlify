@@ -21,6 +21,7 @@ const TITLE = 0x10200;
 const MSG_BUFFER = 0x11000;
 const RECT_BUFFER = 0x11100;
 const TEXT_BUFFER = 0x11200;
+const HEAP_BASE = 0x12000;
 
 const WNDPROC = 0x401000;
 const HINSTANCE = 0x400000;
@@ -55,7 +56,7 @@ const CW_USEDEFAULT = 0x80000000;
  * Guest memory as a flat array. The real memory layer hands back views onto the
  * same bytes, so this one does too.
  */
-function fakeMemory(size = 0x12000){
+function fakeMemory(size = 0x13000){
     const bytes = new Uint8Array(size);
     return {
         bytes,
@@ -135,7 +136,15 @@ function fakeHandles(){
 /** Stands in for the bridge's parked token: identity is all that matters. */
 const PARKED = Object.freeze({ parked: true });
 
-function setup(){
+/**
+ * @param {Object} [options]
+ * @param {boolean} [options.heap] Whether the build has guest memory to put a
+ *        CREATESTRUCT in. Without it a window is made and nothing is announced,
+ *        which is the degraded path a build with no heap takes.
+ * @param {(message: any) => any} [options.reply] What a window procedure answers,
+ *        so a test can refuse a window or make the answer arrive late.
+ */
+function setup({ heap = false, reply } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -146,6 +155,10 @@ function setup(){
     /** Resolvers for a waiting call, released a turn at a time by the test. */
     /** @type {(() => void)[]} */
     const idlers = [];
+    /** A bump allocator over the fake heap: what is freed matters, not where. */
+    let heapNext = HEAP_BASE;
+    /** @type {number[]} */
+    const released = [];
 
     const fns = createWindowFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
@@ -155,13 +168,19 @@ function setup(){
         queue,
         dispatch: (wndProc, message)=>{
             dispatched.push({ wndProc, ...message });
-            return 0x1234;
+            return reply ? reply(message) : 0x1234;
         },
         park: ()=>{
             parked.push(true);
             return PARKED;
         },
         idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
+        allocate: heap ? (/** @type {number} */ bytes)=>{
+            const at = heapNext;
+            heapNext += bytes;
+            return at;
+        } : undefined,
+        release: heap ? (/** @type {number} */ at)=>released.push(at) : undefined,
     });
 
     /** Lets every waiting call look at the queue once more. */
@@ -174,7 +193,7 @@ function setup(){
         await Promise.resolve();
     };
 
-    return { memory, handles, queue, fns, dispatched, parked, tick, idlers };
+    return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released };
 }
 
 /**
@@ -763,4 +782,139 @@ test('CreateWindowA is CreateWindowExA without the extended style', ()=>{
     assert.equal(memory.u32(RECT_BUFFER + RECT.left), 1);
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 31);
     assert.equal(fns.GetWindowLongA.handler([hwnd, GWL_STYLE]) & WS_VISIBLE, WS_VISIBLE);
+});
+
+// --- telling a new window that it exists ---
+
+/** CREATESTRUCTA, by the offsets a guest compiled against. */
+const CREATESTRUCT = Object.freeze({
+    lpCreateParams: 0x00,
+    hInstance: 0x04,
+    hMenu: 0x08,
+    hwndParent: 0x0c,
+    cy: 0x10,
+    cx: 0x14,
+    y: 0x18,
+    x: 0x1c,
+    style: 0x20,
+    lpszName: 0x24,
+    lpszClass: 0x28,
+    dwExStyle: 0x2c,
+});
+
+const WM_CREATE = 0x0001;
+const WM_NCCREATE = 0x0081;
+
+test('a new window is announced to its procedure with a CREATESTRUCT', ()=>{
+    // A procedure does its setup in WM_CREATE. A program that never receives it
+    // gets a window that looks real from every angle and does nothing, which
+    // from outside is a program waiting for something it should have started.
+    const { memory, fns, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    memory.putString(TITLE, 'Main');
+
+    const hwnd = fns.CreateWindowExA.handler(
+        [0x200, CLASS_NAME, TITLE, 0x10000000, 10, 20, 300, 200, 0, 0x77, HINSTANCE, 0x999]);
+
+    assert.equal(dispatched.length, 1);
+    const [message] = dispatched;
+    assert.equal(message.message, WM_CREATE);
+    assert.equal(message.wndProc, WNDPROC);
+    assert.equal(message.hwnd, hwnd);
+    assert.equal(message.wParam, 0);
+
+    const at = message.lParam;
+    assert.notEqual(at, 0, 'the structure lives in guest memory the procedure can read');
+    assert.equal(memory.u32(at + CREATESTRUCT.lpCreateParams), 0x999,
+        'the last argument is how a program hands its own object to its procedure');
+    assert.equal(memory.u32(at + CREATESTRUCT.hInstance), HINSTANCE);
+    assert.equal(memory.u32(at + CREATESTRUCT.hMenu), 0x77);
+    assert.equal(memory.u32(at + CREATESTRUCT.hwndParent), 0);
+    assert.equal(memory.u32(at + CREATESTRUCT.cx), 300);
+    assert.equal(memory.u32(at + CREATESTRUCT.cy), 200);
+    assert.equal(memory.u32(at + CREATESTRUCT.x), 10);
+    assert.equal(memory.u32(at + CREATESTRUCT.y), 20);
+    assert.equal(memory.u32(at + CREATESTRUCT.style), 0x10000000);
+    assert.equal(memory.u32(at + CREATESTRUCT.lpszName), TITLE);
+    assert.equal(memory.u32(at + CREATESTRUCT.lpszClass), CLASS_NAME);
+    assert.equal(memory.u32(at + CREATESTRUCT.dwExStyle), 0x200);
+});
+
+test('only WM_CREATE is sent, because sending runs guest code', ()=>{
+    // Two sends in a row from one host call would start the second while the
+    // first is still unwinding. WM_NCCREATE is the one to leave out: its default
+    // answer is TRUE and its structure arrives again a moment later.
+    const { memory, fns, dispatched } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+
+    assert.deepEqual(dispatched.map(m=>m.message), [WM_CREATE]);
+});
+
+test('the CREATESTRUCT is freed once the procedure has seen it', ()=>{
+    const { memory, fns, dispatched, released } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    createWindow(fns, memory);
+
+    assert.deepEqual(released, [dispatched[0].lParam], 'one create, one allocation, one free');
+});
+
+test('a procedure answering -1 refuses the window', ()=>{
+    // How a program refuses a window it cannot set up. The handle must not
+    // survive: a caller checks for zero and carries on with whatever it has.
+    const { memory, fns } = setup({ heap: true, reply: ()=>-1 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    const hwnd = createWindow(fns, memory);
+
+    assert.equal(hwnd, 0);
+    assert.equal(fns.IsWindow.handler([hwnd]), 0, 'and nothing is left behind');
+});
+
+test('a procedure that answers late leaves the caller a promise to park on', async()=>{
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const pending = new Promise(resolve=>{
+        answer = resolve;
+    });
+    const { memory, fns } = setup({ heap: true, reply: ()=>pending });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    const result = createWindow(fns, memory);
+    assert.equal(typeof result.then, 'function', 'sending is running guest code, which waits');
+
+    answer(0);
+    assert.notEqual(await result, 0, 'and the handle arrives when the procedure is done');
+});
+
+test('a build with no heap makes the window anyway', ()=>{
+    // Degraded, not broken: without guest memory there is nowhere to put a
+    // CREATESTRUCT, and a window nobody was told about beats no window at all.
+    const { memory, fns, dispatched } = setup();
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    assert.notEqual(createWindow(fns, memory), 0);
+    assert.equal(dispatched.length, 0);
+});
+
+test('a class with no procedure is not announced to anything', ()=>{
+    const { memory, fns, dispatched } = setup({ heap: true });
+    putClass(memory, { wndProc: 0 });
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+
+    assert.notEqual(createWindow(fns, memory), 0);
+    assert.equal(dispatched.length, 0);
+});
+
+test('DefWindowProcA answers WM_NCCREATE with TRUE', ()=>{
+    // FALSE means "do not make this window", and a default that said so would
+    // refuse every window whose procedure passes the message on.
+    const { fns } = setup();
+    assert.equal(fns.DefWindowProcA.handler([0x40, WM_NCCREATE, 0, 0]), 1);
 });

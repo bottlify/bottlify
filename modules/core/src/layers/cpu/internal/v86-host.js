@@ -109,7 +109,11 @@ export async function createV86Host(config){
             }
             if (name === 'eflags')
             {
-                return cpu.flags[0] >>> 0;
+                // Through the emulator's own accessor, not the raw field: the
+                // arithmetic flags are lazy there and are only folded in here.
+                // A CONTEXT built from the raw word tells a handler that every
+                // comparison the faulting code made came out false.
+                return cpu.get_eflags() >>> 0;
             }
             const index = REGISTERS.indexOf(name);
             if (index === -1)
@@ -129,6 +133,10 @@ export async function createV86Host(config){
             if (name === 'eflags')
             {
                 cpu.flags[0] = value | 0;
+                // The word is now literal, so the lazy arithmetic flags must
+                // stop claiming to know better -- left set, they recompute over
+                // whatever was just written the next time anything reads them.
+                cpu.flags_changed[0] = 0;
                 return;
             }
             const index = REGISTERS.indexOf(name);

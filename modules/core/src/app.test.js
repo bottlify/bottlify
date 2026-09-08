@@ -11,7 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { groupBlocks, inParallel, retryingFetch } from './app.js';
+import { groupBlocks, inParallel, resolveLibraryPath, retryingFetch } from './app.js';
 import { createEvents } from './events.js';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
@@ -178,4 +178,27 @@ test('requests overlap, but only so many at a time', async()=>{
 
     assert.equal(peak, 3, 'three at once, not eight and not one');
     assert.deepEqual(done.sort((a, b)=>a - b), [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+const IMAGE = 'C:\\App\\Game.exe';
+
+test('a bare library name is looked for beside the executable', ()=>{
+    assert.equal(resolveLibraryPath('Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
+});
+
+test('a name that already says where it is, is taken as given', ()=>{
+    // Prefixing a qualified name again asks for C:\\App\\C:\\App\\..., which is not
+    // there -- and the library is reported missing while sitting exactly where
+    // it was asked for.
+    assert.equal(resolveLibraryPath('C:\\App\\Storm.dll', IMAGE), 'C:\\App\\Storm.dll');
+    assert.equal(resolveLibraryPath('D:\\Other\\Plug.dll', IMAGE), 'D:\\Other\\Plug.dll');
+    assert.equal(resolveLibraryPath('C:/App/Storm.dll', IMAGE), 'C:/App/Storm.dll',
+        'a program is free to use forward slashes, and Windows accepts them');
+    assert.equal(resolveLibraryPath('\\App\\Storm.dll', IMAGE), '\\App\\Storm.dll',
+        'root-relative is qualified too');
+});
+
+test('a relative name with a directory in it still searches beside the executable', ()=>{
+    assert.equal(resolveLibraryPath('plugins\\Sound.dll', IMAGE),
+        'C:\\App\\plugins\\Sound.dll');
 });

@@ -144,7 +144,11 @@ export function createSyncObjects({ scheduler }){
         releaseAll(object){
             for (const waiter of object.waiters ?? [])
             {
-                scheduler.wake(waiter, WaitResult.OBJECT_0);
+                // On the thread rather than through the scheduler: the scheduler
+                // this layer holds wakes and nothing more, so a result handed to
+                // it is dropped and the waiter resumes with whatever it had.
+                waiter.waitResult = WaitResult.OBJECT_0;
+                scheduler.wake(waiter);
             }
             if (object.waiters)
             {

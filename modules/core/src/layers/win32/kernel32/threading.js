@@ -120,9 +120,16 @@ export function createThreadingFunctions(host){
         : host.readCString(pointer >>> 0, MAX_NAME) || null);
 
     /**
-     * The object this name already stands for, or null. A name taken by an
-     * object of another kind is not a match: Windows keeps one namespace, so
-     * asking for an event by a mutex's name fails rather than converting it.
+     * A live name standing for an object of some other kind. Windows keeps one
+     * namespace and does not convert between kinds, so neither a create nor an
+     * open may quietly take the name over: the call fails and the object that
+     * holds the name keeps it.
+     */
+    const TAKEN = Symbol('taken');
+
+    /**
+     * The object this name already stands for, TAKEN if another kind holds it,
+     * or null if the name is free.
      *
      * @param {string | null} name @param {string} kind
      */
@@ -147,7 +154,7 @@ export function createThreadingFunctions(host){
             named.delete(name);
             return null;
         }
-        return held.kind === kind ? held.object : null;
+        return held.kind === kind ? held.object : TAKEN;
     };
 
     /**
@@ -297,9 +304,11 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([, , namePointer])=>{
                 const mutex = existing(nameOf(namePointer), 'mutex');
-                if (!mutex)
+                if (!mutex || mutex === TAKEN)
                 {
-                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    host.setLastError(mutex === TAKEN
+                        ? ERROR_INVALID_HANDLE
+                        : ERROR_FILE_NOT_FOUND);
                     return 0;
                 }
                 return kernel.handles.open('mutex', mutex);
@@ -321,9 +330,11 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([, , namePointer])=>{
                 const event = existing(nameOf(namePointer), 'event');
-                if (!event)
+                if (!event || event === TAKEN)
                 {
-                    host.setLastError(ERROR_FILE_NOT_FOUND);
+                    host.setLastError(event === TAKEN
+                        ? ERROR_INVALID_HANDLE
+                        : ERROR_FILE_NOT_FOUND);
                     return 0;
                 }
                 return kernel.handles.open('event', event);
@@ -379,6 +390,11 @@ export function createThreadingFunctions(host){
             handler: ([, initialOwner, namePointer])=>{
                 const name = nameOf(namePointer);
                 const found = existing(name, 'mutex');
+                if (found === TAKEN)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
                 const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
                 if (initialOwner && found === null)
                 {
@@ -415,6 +431,11 @@ export function createThreadingFunctions(host){
             handler: ([, manualReset, initialState, namePointer])=>{
                 const name = nameOf(namePointer);
                 const found = existing(name, 'event');
+                if (found === TAKEN)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
                 const event = found ?? kernel.createEvent({
                     manualReset: Boolean(manualReset),
                     signalled: Boolean(initialState),

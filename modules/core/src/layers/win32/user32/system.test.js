@@ -14,8 +14,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMessageQueue } from './messages.js';
-import { PAINTSTRUCT, RECT } from './structs.js';
+import { ANY_WINDOW, WM_TIMER, createMessageQueue } from './messages.js';
+import { DEVMODEA, PAINTSTRUCT, RECT } from './structs.js';
 import { createWindowFunctions } from './windows.js';
 
 const CLASS_NAME = 0x10000;
@@ -41,6 +41,9 @@ const WS_EX_CLIENTEDGE = 0x00000200;
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 const SM_CXVIRTUALSCREEN = 78;
+
+const DISP_CHANGE_SUCCESSFUL = 0;
+const DISP_CHANGE_BADMODE = -2;
 
 /** Fills a buffer so that "wrote nothing" is distinguishable from "wrote zero". */
 const UNTOUCHED = 0xa5a5a5a5;
@@ -133,9 +136,16 @@ function fakeContexts(){
     };
 }
 
-function setup(){
+/**
+ * @param {Object} [options]
+ * @param {{ x: number, y: number }} [options.cursor] Where the host says the
+ *        pointer is, for the queries a game polls instead of reading messages.
+ * @param {(key: number) => number} [options.keyState]
+ */
+function setup({ cursor, keyState } = {}){
     const memory = fakeMemory();
-    const queue = createMessageQueue();
+    const clock = { at: 0 };
+    const queue = createMessageQueue({ now: ()=>clock.at });
     const contexts = fakeContexts();
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
@@ -149,12 +159,14 @@ function setup(){
         dispatch: ()=>0,
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
+        cursor: cursor && (()=>cursor),
+        keyState,
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts };
+    return { memory, queue, fns: table, contexts, clock };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -356,4 +368,106 @@ test('a class long is class data: every window of a class reads the same value',
 
     fns.GetClassNameA.handler([first, OUT_BUFFER, 32]);
     assert.equal(memory.readCString(OUT_BUFFER, 32), 'MainWnd');
+});
+
+// --- display mode ---
+
+/** @param {any} memory @param {number} width @param {number} height */
+function putMode(memory, width, height){
+    memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth, [width, height]);
+}
+
+test('ChangeDisplaySettingsA accepts the mode already in effect and refuses another', ()=>{
+    const { memory, fns } = setup();
+
+    putMode(memory, SCREEN.width, SCREEN.height);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_SUCCESSFUL);
+
+    putMode(memory, 640, 480);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_BADMODE,
+        'reporting a switch that did not happen makes every later metric disagree');
+
+    assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL,
+        'a null mode means what is already on the screen');
+});
+
+test('both ChangeDisplaySettings spellings pop the stack their signature declares', ()=>{
+    const { fns } = setup();
+    // An import nobody wrote gets a stub that cleans up no arguments, so the
+    // caller returns with its stack adrift and dies later in a cookie check, a
+    // long way from anything that would explain it.
+    assert.equal(fns.ChangeDisplaySettingsA.argBytes, 8);
+    assert.equal(fns.ChangeDisplaySettingsExA.argBytes, 20);
+});
+
+// --- timers ---
+
+test('SetTimer registers the timer and gives back the id the caller must kill', ()=>{
+    const { fns, clock } = setup();
+    const hwnd = 0x40;
+
+    assert.equal(fns.SetTimer.handler([hwnd, 7, 50, 0]), 7,
+        'a timer with a window keeps the id it asked for');
+    clock.at = 50;
+    assert.equal(fns.KillTimer.handler([hwnd, 7]), 1);
+    assert.equal(fns.KillTimer.handler([hwnd, 7]), 0, 'and it is gone');
+});
+
+test('a timer with no window gets an id of our choosing', ()=>{
+    const { fns } = setup();
+
+    const first = fns.SetTimer.handler([0, 0, 50, 0]);
+    const second = fns.SetTimer.handler([0, 0, 50, 0]);
+
+    assert.notEqual(first, 0, 'zero is the failure the caller checks for');
+    assert.notEqual(second, first, 'two timers are two timers');
+});
+
+test('SetTimer reaches the queue a message loop reads', ()=>{
+    // A program of this era blocks in GetMessage and a timer is the only thing
+    // that wakes it. Refusing to make one leaves it waiting for a message that
+    // cannot arrive, which from outside looks like a program with nothing to do.
+    const { fns, queue, clock } = setup();
+    fns.SetTimer.handler([0x40, 7, 50, 0]);
+
+    assert.equal(queue.nextDue(), 50);
+    clock.at = 50;
+    assert.equal(queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true })?.message,
+        WM_TIMER);
+});
+
+// --- input state ---
+
+test('GetCursorPos answers from the host rather than inventing a position', ()=>{
+    const { memory, fns } = setup({ cursor: { x: 320, y: 240 } });
+    memory.fill(OUT_BUFFER, 2);
+
+    assert.equal(fns.GetCursorPos.handler([OUT_BUFFER]), 1);
+    assert.deepEqual([memory.u32(OUT_BUFFER), memory.u32(OUT_BUFFER + 4)], [320, 240]);
+
+    assert.equal(fns.GetCursorPos.handler([0]), 0, 'and a null point is a failure');
+});
+
+test('a build with nothing feeding it reports nothing pressed', ()=>{
+    // The one safe wrong answer: a state invented here would have a program act
+    // on a press that never happened.
+    const { memory, fns } = setup();
+    memory.fill(OUT_BUFFER, 2);
+
+    assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0);
+    assert.equal(fns.GetKeyState.handler([0x41]), 0);
+    assert.equal(fns.GetCursorPos.handler([OUT_BUFFER]), 1);
+    assert.deepEqual([memory.u32(OUT_BUFFER), memory.u32(OUT_BUFFER + 4)], [0, 0]);
+});
+
+test('the key-state queries pass the key through to the host', ()=>{
+    const down = new Set([0x41]);
+    const { fns } = setup({ keyState: key=>(down.has(key) ? 0x8000 : 0) });
+
+    assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0x8000, 'the high bit is "down"');
+    assert.equal(fns.GetAsyncKeyState.handler([0x42]), 0);
+    assert.equal(fns.GetKeyState.handler([0x41]), 0x8000);
 });

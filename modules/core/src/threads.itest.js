@@ -94,6 +94,13 @@ test('the threads really did run, and really did take turns', async()=>{
 
     // Nothing is left waiting on anything.
     assert.deepEqual(byName.kernel.metrics.waiting, []);
+
+    // The guest's clock is credited from host wall time as the scheduler runs.
+    // A clock that never moves makes every program that waits for time to pass
+    // spin for ever on a deadline it can never reach, and from outside that is
+    // indistinguishable from a program that is simply slow.
+    assert.ok(byName.kernel.metrics.time.virtualMs > 0,
+        `guest time advanced (${byName.kernel.metrics.time.virtualMs} ms)`);
 });
 
 test('the answer is the same every time', async()=>{

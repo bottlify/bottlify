@@ -113,7 +113,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             // handler that runs long does not make the timer drift later and
             // later. Skipped forward when it has fallen a whole period behind,
             // because catching up on missed ticks is a backlog nobody wants.
-            timer.due = Math.max(at, timer.due + timer.elapse);
+            timer.due = Math.max(at, timer.due) + timer.elapse;
             return message;
         }
         return null;

@@ -126,3 +126,33 @@ test('registers are readable and writable from the host', async()=>{
     assert.equal(seen, 0x5150f00d, 'guest observed the value the host wrote');
     assert.equal(host.readReg32('eax'), 0x5150f00d, "host reads the guest's register back");
 });
+
+test('eip and eflags are readable by name, as a CONTEXT record needs', async()=>{
+    // Neither lives in the general-purpose file, and both are asked for by
+    // name: describing an exception to the code that will handle it means
+    // building a CONTEXT, and a register missing from it throws instead.
+    const host = await boot();
+
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0x66, 0xba, TRAP_PORT & 0xff, TRAP_PORT >>> 8 & 0xff, // mov dx, TRAP_PORT
+        0x31, 0xc0,                                     // xor eax, eax
+        0xef,                                           // out dx, eax
+        0xf4,                                           // hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    await runUntilTrap(host);
+
+    assert.equal(host.readReg32('eip'), host.eip(), 'the name and the accessor agree');
+    // xor cleared eax, so the zero flag is set. Any plausible flags word has
+    // bit 1 set as well, which is what tells a stale zero from a real read.
+    const flags = host.readReg32('eflags');
+    assert.equal(flags & 0x40, 0x40, 'ZF, after an instruction that sets it');
+    assert.equal(flags & 0x02, 0x02, 'the reserved bit x86 always keeps set');
+
+    host.writeReg32('eip', 0x1234);
+    assert.equal(host.eip(), 0x1234, 'and writing by name moves the guest');
+
+    // A written word is literal: the lazy flags must not recompute over it.
+    host.writeReg32('eflags', 0x2);
+    assert.equal(host.readReg32('eflags'), 0x2, 'ZF is gone because we said so');
+});

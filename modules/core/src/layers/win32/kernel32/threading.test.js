@@ -8,6 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadingFunctions } from './threading.js';
 
+const ERROR_SUCCESS = 0;
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_INVALID_HANDLE = 6;
+const ERROR_ALREADY_EXISTS = 183;
+
 /**
  * A kernel stand-in with the same contract as the real one, so these tests are
  * about the translation between the guest's vocabulary and the kernel's, not
@@ -90,6 +95,8 @@ function fakeKernel(){
                     throw new Error('Invalid handle');
                 }
             },
+            /** @param {any} object */
+            holds: object=>[...handles.values()].some(entry=>entry.object === object),
         },
     };
     return kernel;
@@ -98,7 +105,12 @@ function fakeKernel(){
 /** Stands in for the bridge's parked token: identity is all that matters. */
 const PARKED = Object.freeze({ parked: true });
 
-function setup(){
+/**
+ * @param {Record<number, string>} [names] What each name pointer spells, for the
+ *   tests that are about the Win32 object namespace. Every other test passes
+ *   nothing and every pointer reads as the empty name, which is no name at all.
+ */
+function setup(names){
     const kernel = fakeKernel();
     const current = { name: 'caller' };
     /** @type {any[]} */
@@ -120,8 +132,8 @@ function setup(){
         writeMemory: (address, bytes)=>{
             written.set(address, bytes);
         },
-        // No object in this fixture is named, so every name is the empty one.
-        readCString: ()=>'',
+        /** @param {number} pointer */
+        readCString: pointer=>names?.[pointer] ?? '',
         /** @param {number} code */
         setLastError: code=>{
             errors.push(code);
@@ -224,6 +236,75 @@ test('ExitThread ends the thread and parks it', ()=>{
     assert.equal(result, PARKED, 'a call that does not return has no value to return');
 });
 
+test('a second create of a live name hands back the same object', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
+
+    const first = fns.CreateMutexA.handler([0, 0, NAME]);
+    assert.equal(errors.at(-1), ERROR_SUCCESS, 'nothing held the name yet');
+
+    const second = fns.CreateMutexA.handler([0, 0, NAME]);
+    assert.notEqual(second, first, 'a create always returns a handle of its own');
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS,
+        'the single-instance idiom reads exactly this');
+});
+
+test('a name lives only as long as a handle to the object behind it', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
+
+    // The idiom in full: probe for a first copy, close the probe, then create
+    // the object for real. The second create must not be told its own probe
+    // took the name, or the program exits believing it is the second copy.
+    const probe = fns.CreateMutexA.handler([0, 0, NAME]);
+    fns.CloseHandle.handler([probe]);
+    fns.CreateMutexA.handler([0, 0, NAME]);
+
+    assert.equal(errors.at(-1), ERROR_SUCCESS);
+});
+
+test('a name taken by one kind of object is not a match for another', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns, errors } = setup({ [NAME]: 'shared' });
+
+    const mutex = fns.CreateMutexA.handler([0, 0, NAME]);
+
+    assert.equal(fns.CreateEventA.handler([0, 0, 0, NAME]), 0,
+        'the name is not the event\'s to take');
+    assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0, 'nor is the mutex openable as an event');
+    assert.equal(
+        kernel.handles.resolve(fns.OpenMutexA.handler([0, 0, NAME]), 'mutex'),
+        kernel.handles.resolve(mutex, 'mutex'),
+        'and the mutex keeps the name it holds',
+    );
+});
+
+test('OpenEventA finds an event created by name', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns } = setup({ [NAME]: 'ready' });
+
+    const created = fns.CreateEventA.handler([0, 1, 0, NAME]);
+    const opened = fns.OpenEventA.handler([0, 0, NAME]);
+
+    assert.notEqual(opened, 0);
+    assert.notEqual(opened, created, 'opening yields a second handle, not the first');
+    assert.equal(
+        kernel.handles.resolve(opened, 'event'),
+        kernel.handles.resolve(created, 'event'),
+        'both handles name one object, which is what makes the signal shared',
+    );
+});
+
+test('OpenEventA reports no such thing for a name nothing created', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'never-made' });
+
+    assert.equal(fns.OpenEventA.handler([0, 0, NAME]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND,
+        'a caller must tell this apart from a failure to open');
+});
+
 test('every function declares the stack it pops', ()=>{
     const { fns } = setup();
     // stdcall: the callee cleans up, so a wrong count corrupts the guest stack
@@ -235,4 +316,6 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.ReleaseMutex.argBytes, 4);
     assert.equal(fns.ExitThread.argBytes, 4);
     assert.equal(fns.CloseHandle.argBytes, 4);
+    assert.equal(fns.OpenEventA.argBytes, 12);
+    assert.equal(fns.OpenMutexA.argBytes, 12);
 });
