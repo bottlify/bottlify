@@ -185,8 +185,12 @@ function characterFor(key){
  *           Whether a virtual key is down, as GetAsyncKeyState reports it:
  *           the high bit set while it is held. Absent means nothing is
  *           pressed, which is the one safe wrong answer.
- *           Resolves when the machine has taken another turn, so a call that is
- *           waiting for something to arrive can look again.
+ * @property {(notice: { text: string, caption: string, type: number }) => void} [messageBox]
+ *           A message box the program put up, handed up whole. It is a program
+ *           explaining in its own words why it is about to stop, which is the
+ *           most useful sentence it will ever say, and a line in a log is where
+ *           such a sentence goes to be missed.
+ * @property {(text: string) => void} [say]  Where a program's own words go.
  */
 
 /**

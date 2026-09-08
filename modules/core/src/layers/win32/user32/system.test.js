@@ -147,6 +147,10 @@ function setup({ cursor, keyState } = {}){
     const clock = { at: 0 };
     const queue = createMessageQueue({ now: ()=>clock.at });
     const contexts = fakeContexts();
+    /** @type {any[]} */
+    const notices = [];
+    /** @type {string[]} */
+    const said = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -161,12 +165,16 @@ function setup({ cursor, keyState } = {}){
         idle: ()=>new Promise(()=>{}),
         cursor: cursor && (()=>cursor),
         keyState,
+        /** @param {any} notice */
+        messageBox: notice=>notices.push(notice),
+        /** @param {string} text */
+        say: text=>said.push(text),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock };
+    return { memory, queue, fns: table, contexts, clock, notices, said };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -470,4 +478,33 @@ test('the key-state queries pass the key through to the host', ()=>{
     assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0x8000, 'the high bit is "down"');
     assert.equal(fns.GetAsyncKeyState.handler([0x42]), 0);
     assert.equal(fns.GetKeyState.handler([0x41]), 0x8000);
+});
+
+test('a message box is handed up whole, not only written to the log', ()=>{
+    // A message box is a program explaining, in its own words, why it is about
+    // to stop -- the most useful sentence it will ever say. A line in a log is
+    // where such a sentence goes to be missed, so whoever is embedding the
+    // engine gets it as its own thing and can put it in front of a person.
+    const { memory, fns, notices, said } = setup();
+    memory.putString(TEXT_BUFFER, 'Unable to initialize DirectX.');
+    memory.putString(FORMAT_BUFFER, 'Warcraft III');
+
+    const MB_ICONERROR = 0x10;
+    assert.equal(
+        fns.MessageBoxA.handler([0, TEXT_BUFFER, FORMAT_BUFFER, MB_ICONERROR]),
+        1, 'IDOK: there is nobody to press a button');
+
+    assert.deepEqual(notices, [{
+        text: 'Unable to initialize DirectX.',
+        caption: 'Warcraft III',
+        type: MB_ICONERROR,
+    }]);
+    assert.deepEqual(said, ['Warcraft III: Unable to initialize DirectX.'],
+        'and it still reaches the log, for a reader who only has that');
+});
+
+test('a message box with neither text nor caption still reports', ()=>{
+    const { fns, notices } = setup();
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
+    assert.deepEqual(notices, [{ text: '', caption: '', type: 0 }]);
 });

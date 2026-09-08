@@ -878,10 +878,17 @@ export function createSystemFunctions({ host, live, windows, classes }){
         MessageBoxA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([, text, caption])=>{
+            handler: ([, text, caption, type])=>{
                 const IDOK = 1;
                 const body = (text >>> 0) === 0 ? '' : host.readCString(text, 0x10000);
                 const title = (caption >>> 0) === 0 ? '' : host.readCString(caption, 0x1000);
+                // Reported as its own thing as well as written to the log. A
+                // message box is a program explaining, in its own words, why it
+                // is about to stop -- the most useful sentence it will ever say
+                // -- and a line in a log is where that sentence goes to be
+                // missed. Whoever is embedding this engine is the one who can
+                // put it in front of a person.
+                host.messageBox?.({ text: body, caption: title, type: type >>> 0 });
                 host.say?.(title.length > 0 ? `${title}: ${body}` : body);
                 return IDOK;
             },

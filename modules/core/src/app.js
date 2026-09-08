@@ -937,6 +937,70 @@ async function buildApp(options){
         events.emit('divergence', { api, detail });
     };
 
+    /**
+     * Which part of the machine a host call belongs to.
+     *
+     * A program of this age reaches one engine through a dozen libraries, and
+     * the question a reader has is never "which DLL" but "what was it doing" --
+     * drawing, making a sound, reading a file, asking the processor something.
+     * So the libraries are grouped the way the work is, and the group is the
+     * journal's category, which is what makes a filter possible at all.
+     *
+     * @type {Record<string, string>}
+     */
+    const CALL_AREAS = {
+        'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
+        'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
+        'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio',
+        'quartz.dll': 'video', 'blizzard.ax': 'video',
+        'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
+        'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
+        'WININET.dll': 'net',
+    };
+
+    /**
+     * The journal category one call is written under.
+     *
+     * A COM method arrives named by its interface rather than by a library, and
+     * there is no library to look up -- so it gets its own group instead of
+     * being filed under a guess. Everything else that is not drawing, sound,
+     * video, input or the network is the processor's own business: memory,
+     * files, threads, the registry, the C runtime.
+     *
+     * @param {any} call
+     */
+    const areaOf = call=>{
+        const name = String(call?.name ?? '');
+        const at = name.indexOf('!');
+        if (at === -1)
+        {
+            return 'call.com';
+        }
+        return `call.${CALL_AREAS[name.slice(0, at)] ?? 'cpu'}`;
+    };
+
+    /**
+     * Writes one host call to the journal.
+     *
+     * Every one of them, which is why the categories start switched off: a
+     * short run makes tens of thousands of calls, and a reader who has not
+     * asked for them should pay a map lookup and a comparison rather than a
+     * formatted line. Turning one on is what a filter does.
+     *
+     * @param {any} call
+     */
+    const journalCall = call=>{
+        const category = areaOf(call);
+        if (!journal.enabled(category, journal.Level.TRACE))
+        {
+            return;
+        }
+        journal.write('trace', category, '{0}({1}) = {2}',
+            call.name, (call.args ?? []).slice(0, 4)
+                .map((/** @type {number} */ value)=>`0x${(value >>> 0).toString(16)}`)
+                .join(', '), call.result);
+    };
+
     const core = await assembleModules({
         kernel: {
             // How many guest instructions a thread runs before the next one
@@ -951,9 +1015,21 @@ async function buildApp(options){
             lastError: ()=>core.api('win32').lastError(),
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
-            onCall: options.onCall,
+            onCall: (/** @type {any} */ call)=>{
+                journalCall(call);
+                options.onCall?.(call);
+            },
         },
         log: {
+            // Every call area starts switched off. A short run makes tens of
+            // thousands of host calls; a reader who has not asked for them
+            // should pay a map lookup and a comparison, not a formatted line.
+            // A filter turning one on is what makes them appear.
+            categories: {
+                'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off',
+                'call.video': 'off', 'call.input': 'off', 'call.net': 'off',
+                'call.com': 'off',
+            },
             // The guest's clock, for the same reason the sound buffers use it:
             // a phase timed against the host and a phase timed against the
             // guest cannot be added together, and the number this layer exists
@@ -1048,6 +1124,25 @@ async function buildApp(options){
             // accepts a flag it does not act on owes the reader the same
             // warning as a Direct3D state that is stored and unused.
             divergence: reportDivergence,
+            /**
+             * A message box the program put up.
+             *
+             * Carried with the guest's own backtrace, because the sentence and
+             * the place it was said from answer different halves of the same
+             * question -- and the backtrace is only capturable at the moment of
+             * the call, since by the time anyone reads a report the stack that
+             * explains it is gone. Captured only when somebody is listening:
+             * walking the stack costs real work, and a build with no consumer
+             * would pay it for nothing.
+             *
+             * @param {{ text: string, caption: string, type: number }} notice
+             */
+            onMessageBox: notice=>events.emit('message-box', {
+                ...notice,
+                trace: events.listening('message-box')
+                    ? formatTrace(captureTrace({ cpu, memory, kernel, bridge }))
+                    : null,
+            }),
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -1176,6 +1271,9 @@ async function buildApp(options){
         'libraries-missing': 'warn',
         unimplemented: 'warn',
         divergence: 'warn',
+        // The program's own words about why it is stopping. It is not our
+        // failure, but it is never good news.
+        'message-box': 'warn',
         'bundle-retry': 'warn',
         'bundle-prefetch-failed': 'warn',
     });
@@ -2143,6 +2241,14 @@ async function buildApp(options){
             setLevel: (category, level)=>core.api('log').setLevel(category, level),
             /** @param {string | number} level */
             setDefaultLevel: level=>core.api('log').setDefaultLevel(level),
+            /**
+             * The areas a host call can be filed under, for a reader offering a
+             * filter. Named here rather than discovered from what has been
+             * logged, so a filter can offer an area before anything in it has
+             * happened.
+             */
+            areas: ()=>['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
+                .map(area=>`call.${area}`),
         },
 
         /** @param {(handle: number, text: string) => void} sink */

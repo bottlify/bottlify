@@ -1335,7 +1335,9 @@ export function createRenderer(options){
             `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
             + `/${stage.alphaOp}(${stage.alphaArg1},${stage.alphaArg2})`
             + `#${stage.texCoordIndex}`
-            + `:${describeTexture(prepared.textures[at])}`).join(' ');
+            + `:${prepared.stageBindings[at]?.placeholder
+                ? 'placeholder'
+                : describeTexture(prepared.textures[at])}`).join(' ');
         dump.push(`#${dump.length} ${where}`
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
@@ -1671,8 +1673,20 @@ export function createRenderer(options){
                 height: 1,
                 format: COLOR_FORMAT,
                 label: 'placeholder',
-                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
+                    | (dumpDraws ? TextureUsage.COPY_SRC : 0),
             });
+            if (dumpDraws)
+            {
+                uploaded.set('placeholder', {
+                    id: 'placeholder',
+                    format: 0,
+                    width: 1,
+                    height: 1,
+                    texels: new Uint8Array(4),
+                    gpu: placeholder,
+                });
+            }
         }
         return placeholder.view;
     };
@@ -1696,7 +1710,11 @@ export function createRenderer(options){
                 height: record.height,
                 format: COLOR_FORMAT,
                 label: 'texture',
-                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST,
+                // A dumping run reads these back to compare what the device
+                // holds against what was handed to it, which is the one link
+                // in the upload that reading the source cannot check.
+                usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
+                    | (dumpDraws ? TextureUsage.COPY_SRC : 0),
             });
         }
         if (record.dirty)
@@ -1722,6 +1740,7 @@ export function createRenderer(options){
                         width: record.width,
                         height: record.height,
                         texels,
+                        gpu: record.gpu,
                     });
                 }
             }
@@ -1849,6 +1868,11 @@ export function createRenderer(options){
             return {
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
                 sampler: samplerFor(model.stageStates(index)),
+                // Which of those two it was, recorded rather than inferred: a
+                // stage bound to the placeholder samples a texture nothing
+                // wrote, and every piece of state around it still names the
+                // texture the program bound.
+                placeholder: !texture,
             };
         });
         const lighting = lightingOf(model, layout);

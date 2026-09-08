@@ -703,6 +703,12 @@ export const win32Module = {
                 // it answered before, which is that nothing is pressed.
                 cursor: config?.cursor,
                 keyState: config?.keyState,
+                // A program's own explanation of why it is stopping, handed up
+                // whole rather than as a line of log, so whoever is embedding
+                // this engine can show it the way a person would have seen it.
+                /** @param {any} notice */
+                messageBox: notice=>config?.onMessageBox?.(notice),
+                say: (/** @type {string} */ text)=>trace(text),
                 // A CREATESTRUCT has to live where the guest can read it, and
                 // only for the length of the two messages that carry it.
                 /** @param {number} bytes */
