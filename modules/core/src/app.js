@@ -243,6 +243,43 @@ export function groupBlocks(blocks){
 }
 
 /**
+ * One event's payload as a line.
+ *
+ * Built now rather than left as a template argument, which is the journal's
+ * usual economy: an event carries an object, and an object read later is the
+ * object as it ended up rather than as it was reported. Events are occasional
+ * -- a library loading, a write, a failure -- so the string costs nothing that
+ * matters, and it is the difference between a log that can be read and one
+ * that says [object Object].
+ *
+ * @param {any} payload
+ * @returns {string}
+ */
+export function describeEvent(payload){
+    if (payload === null || payload === undefined)
+    {
+        return '';
+    }
+    if (typeof payload !== 'object')
+    {
+        return String(payload);
+    }
+    return Object.entries(payload)
+        .map(([key, value])=>{
+            if (value instanceof Error)
+            {
+                return `${key}=${value.message}`;
+            }
+            if (Array.isArray(value))
+            {
+                return `${key}=[${value.join(' ')}]`;
+            }
+            return `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`;
+        })
+        .join(' ');
+}
+
+/**
  * Where a LoadLibrary at run time actually looks.
  *
  * A name that already says where it is, is where it is. Windows searches for a
@@ -995,6 +1032,29 @@ export async function createApp(options){
                 });
         });
     }
+
+    // Every event the engine reports also goes to the journal, so that one
+    // ordered stream carries the whole story. A consumer that subscribes to a
+    // name still gets it exactly as before -- a watcher never answers, so it
+    // cannot take an event away from a handler that would have.
+    //
+    // The severity is the event's own: a failure the program cannot see is an
+    // error whether or not anybody was listening for it, and a library that
+    // could not be found is the warning that explains a program's next
+    // decision. Everything else is what happened, at info.
+    const journal = core.api('log');
+    const SEVERITY = /** @type {Record<string, string>} */ ({
+        error: 'error',
+        'bundle-unavailable': 'error',
+        'library-missing': 'warn',
+        'libraries-missing': 'warn',
+        unimplemented: 'warn',
+        'bundle-retry': 'warn',
+        'bundle-prefetch-failed': 'warn',
+    });
+    events.onAny((name, payload)=>{
+        journal.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
+    });
 
     const cpu = core.api('cpu');
     const memory = core.api('memory');
@@ -1869,6 +1929,32 @@ export async function createApp(options){
         on: (name, handler)=>events.on(name, handler),
         /** @param {string} name @param {(payload: any) => any} handler */
         off: (name, handler)=>events.off(name, handler),
+
+        /**
+         * The journal: everything the engine reported, in one ordered stream.
+         *
+         * Every event the engine emits is written here as it happens, under its
+         * own name as the category, so a reader that wants the whole story does
+         * not have to know the names in advance and subscribe to each. That is
+         * the point of it: a program's behaviour is the interleaving, and three
+         * separate views of three kinds of event cannot be interleaved after
+         * the fact.
+         *
+         * `drain(since, limit)` reads forward and says where to resume, which
+         * is what a live view polls with; `recent(count)` reads the tail
+         * without moving anything, which is what a snapshot of a failure wants.
+         * `setLevel` decides how much is kept, per category.
+         */
+        log: {
+            /** @param {number} [since] @param {number} [limit] */
+            drain: (since, limit)=>core.api('log').drain(since, limit),
+            /** @param {number} [count] */
+            recent: count=>core.api('log').recent(count),
+            /** @param {string} category @param {string | number} level */
+            setLevel: (category, level)=>core.api('log').setLevel(category, level),
+            /** @param {string | number} level */
+            setDefaultLevel: level=>core.api('log').setDefaultLevel(level),
+        },
 
         /** @param {(handle: number, text: string) => void} sink */
         attachLog(sink){

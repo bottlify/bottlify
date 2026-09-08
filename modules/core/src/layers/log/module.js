@@ -110,6 +110,11 @@ export const logModule = {
             flush: ()=>journal.flush(),
             /** @param {number} [count] */
             recent: count=>journal.recent(count),
+            /**
+             * @param {number} [since] @param {number} [limit]
+             * @returns {any}
+             */
+            drain: (since, limit)=>journal.drain(since, limit),
             templates: ()=>journal.templates(),
 
             /** @param {string} name @param {string} [kind] */

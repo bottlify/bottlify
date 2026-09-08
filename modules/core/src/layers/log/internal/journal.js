@@ -314,6 +314,38 @@ export function createJournal(options){
             return out;
         },
 
+        /**
+         * Everything written since `from`, with where to resume.
+         *
+         * The read a live view wants, as against `recent`: a terminal showing a
+         * running process asks again and again, and asking for "the last two
+         * hundred" each time either repeats what it already drew or misses what
+         * happened in between. The sequence is monotonic and does not depend on
+         * the clock, so resuming from the number this returns is exact.
+         *
+         * A caller that has fallen further behind than the ring is deep gets
+         * what survives, and `from` in the answer says where that actually
+         * starts -- a gap is reported rather than papered over.
+         *
+         * @param {number} [since]  The `next` of the previous read; 0 to start.
+         * @param {number} [limit]  At most this many records.
+         * @returns {{ records: FormattedRecord[], from: number, next: number,
+         *             lost: number }}
+         */
+        drain(since = 0, limit = 1000){
+            const start = Math.max(since, ring.oldest());
+            const end = Math.min(ring.written(), start + Math.max(0, limit));
+            /** @type {FormattedRecord[]} */
+            const records = [];
+            ring.each(start, (record, sequence)=>{
+                if (sequence < end)
+                {
+                    records.push(detach(record));
+                }
+            });
+            return { records, from: start, next: end, lost };
+        },
+
         /** @returns {{ message: string, category: string, level: number, count: number }[]} */
         templates: ()=>[...templates.values()].sort((one, two)=>two.count - one.count),
 

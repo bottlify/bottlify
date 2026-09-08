@@ -96,3 +96,48 @@ test('an event nobody listens for is not an error', ()=>{
     assert.equal(events.listening('nothing-here'), false);
     assert.deepEqual(events.diagnostics().emitted, { 'nothing-here': 1 });
 });
+
+test('a watcher sees every event and decides nothing', ()=>{
+    // Watching and intercepting are the same mechanism here, which makes it
+    // possible to add a watcher that accidentally answers -- and an event
+    // answered by the journal is an event a real handler never sees.
+    const events = createEvents();
+    /** @type {[string, any][]} */
+    const seen = [];
+    events.onAny((name, payload)=>{
+        seen.push([name, payload]);
+        return 'this must be ignored';
+    });
+    events.on('output', ()=>'the handler decides');
+
+    assert.equal(events.emit('output', { text: 'hi' }), 'the handler decides');
+    assert.equal(events.emit('exit', { code: 0 }), undefined);
+    assert.deepEqual(seen, [['output', { text: 'hi' }], ['exit', { code: 0 }]]);
+});
+
+test('a watcher that throws does not stop the event', ()=>{
+    const events = createEvents();
+    events.onAny(()=>{
+        throw new Error('the journal is having a bad day');
+    });
+    let reached = false;
+    events.on('exit', ()=>{
+        reached = true;
+    });
+
+    events.emit('exit', { code: 0 });
+    assert.ok(reached, 'the program\'s own handling is not the watcher\'s to break');
+});
+
+test('a watcher can be removed', ()=>{
+    const events = createEvents();
+    let count = 0;
+    const stop = events.onAny(()=>{
+        count++;
+    });
+
+    events.emit('exit', {});
+    stop();
+    events.emit('exit', {});
+    assert.equal(count, 1);
+});

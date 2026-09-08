@@ -156,3 +156,76 @@ test('a level may be written as a name, and anything else is refused', ()=>{
     assert.throws(()=>toLevel('loud'), /not a log level/);
     assert.throws(()=>toLevel(9), /not a log level/);
 });
+
+test('the journal holds a bounded amount however much is written', ()=>{
+    // The whole reason the ring exists. A program that runs for an hour reports
+    // a great many things, and a journal that kept them all would be a leak
+    // that scales with how well the engine works -- worst in exactly the runs
+    // worth journalling. What survives is the tail, and the drop is counted.
+    const journal = createJournal({ capacity: 64, now: ()=>0 });
+
+    for (let at = 0; at < 100_000; at++)
+    {
+        journal.write(Level.INFO, `category-${at % 8}`, '{0}', at);
+    }
+
+    assert.equal(journal.recent(1_000_000).length, 64, 'the ring is the whole memory');
+    assert.equal(journal.drain(0, 1_000_000).records.length, 64);
+    assert.equal(journal.diagnostics().capacity, 64, 'and it never grew');
+    assert.equal(journal.diagnostics().written, 100_000, 'while still counting everything');
+
+    // Two maps could grow without the ring doing so. One entry per template,
+    // whatever the arguments, and a category level only where one was set.
+    assert.equal(journal.diagnostics().templates, 1);
+    assert.deepEqual(journal.diagnostics().categories, {});
+});
+
+test('a drain reads forward and says where to resume', ()=>{
+    // What a live view needs, as against the tail: asking for "the last twenty"
+    // over and over either repeats what is already on screen or loses what
+    // happened in between.
+    const journal = createJournal({ capacity: 64, now: ()=>0 });
+    journal.write(Level.INFO, 'boot', 'one');
+    journal.write(Level.INFO, 'boot', 'two');
+
+    const first = journal.drain(0);
+    assert.deepEqual(first.records.map((/** @type {any} */ record)=>record.message), ['one', 'two']);
+    assert.equal(first.next, 2);
+
+    assert.deepEqual(journal.drain(first.next).records, [], 'nothing new yet');
+
+    journal.write(Level.INFO, 'boot', 'three');
+    const second = journal.drain(first.next);
+    assert.deepEqual(second.records.map((/** @type {any} */ record)=>record.message), ['three']);
+    assert.equal(second.next, 3);
+});
+
+test('a reader that falls behind the ring is told where it actually resumes', ()=>{
+    // A gap reported rather than papered over: a terminal that stopped reading
+    // for a second must not be shown the wrong hundred lines as though they
+    // followed the ones it already has.
+    const journal = createJournal({ capacity: 4, now: ()=>0 });
+    for (let at = 0; at < 10; at++)
+    {
+        journal.write(Level.INFO, 'boot', '{0}', at);
+    }
+
+    const caught = journal.drain(0);
+    assert.equal(caught.from, 6, 'the first six were lapped before anyone read them');
+    assert.equal(caught.records.length, 4);
+    assert.equal(caught.next, 10);
+});
+
+test('a drain honours its limit and resumes exactly where it stopped', ()=>{
+    const journal = createJournal({ capacity: 64, now: ()=>0 });
+    for (let at = 0; at < 10; at++)
+    {
+        journal.write(Level.INFO, 'boot', '{0}', at);
+    }
+
+    const page = journal.drain(0, 4);
+    assert.equal(page.records.length, 4);
+    assert.equal(page.next, 4);
+    assert.equal(journal.drain(page.next, 4).records.length, 4);
+    assert.equal(journal.drain(8, 4).records.length, 2, 'and runs out rather than wrapping');
+});

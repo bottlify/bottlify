@@ -41,7 +41,8 @@
  *   `write(level, category, message, a?, b?, c?, d?)`
  * - `enabled(category, level)`, `setLevel(category, level)`,
  *   `setDefaultLevel(level)`, `levelOf(category)`
- * - `addSink(sink) -> remove`, `flush()`, `recent(count?)`, `templates()`
+ * - `addSink(sink) -> remove`, `flush()`, `recent(count?)`,
+ *   `drain(since?, limit?)`, `templates()`
  * - `begin(name, kind?)`, `end(name?)`, `beginFrame()`, `endFrame()`,
  *   `frames(count?)`, `profile(worst?)`
  * - the `Level` and `PhaseKind` vocabularies
@@ -55,7 +56,10 @@
  * is explicit because a sink is I/O, and doing I/O inside a guest call turns
  * the log into the thing being measured; whoever assembles the engine decides
  * when that happens. `recent()` reads the ring without disturbing the flush
- * position, which is what a crash snapshot wants. Records lapped before a sink
+ * position, which is what a crash snapshot wants; `drain()` reads forward from
+ * a sequence number and says where to resume, which is what a live view of a
+ * running process wants -- asking for "the last hundred" repeatedly either
+ * repeats what is already on screen or loses what happened in between. Records lapped before a sink
  * saw them are counted, so a gap is reported rather than silent.
  *
  * Phases are named, nestable and tagged with a `PhaseKind` -- ours, the guest's,

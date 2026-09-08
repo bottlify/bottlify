@@ -32,6 +32,9 @@ export function createEvents(){
     const handlers = new Map();
     /** @type {Record<string, number>} */
     const counts = {};
+    /** Watchers of every event, in the order they were added. */
+    /** @type {((name: string, payload: any) => void)[]} */
+    const watchers = [];
 
     /** @param {string} name */
     const listeners = name=>{
@@ -69,12 +72,45 @@ export function createEvents(){
         },
 
         /**
+         * Watches every event, whatever its name.
+         *
+         * For a reader that wants the whole story rather than one part of it --
+         * the journal, and whatever renders it. An observer never decides
+         * anything: its answer is ignored, so adding one cannot change what a
+         * named handler would have replied, and a watcher that throws is the
+         * watcher's problem and not the emitter's.
+         *
+         * @param {(name: string, payload: any) => void} handler
+         * @returns {() => void} stops it
+         */
+        onAny(handler){
+            watchers.push(handler);
+            return ()=>{
+                const at = watchers.indexOf(handler);
+                if (at !== -1)
+                {
+                    watchers.splice(at, 1);
+                }
+            };
+        },
+
+        /**
          * @param {string} name
          * @param {any} payload
          * @returns {any} what the first handler to answer decided, or undefined
          */
         emit(name, payload){
             counts[name] = (counts[name] ?? 0) + 1;
+            for (const watcher of watchers)
+            {
+                try
+                {
+                    watcher(name, payload);
+                }
+                catch (e){
+                    void e;
+                }
+            }
             for (const handler of [...listeners(name)])
             {
                 const answer = handler(payload);
