@@ -201,5 +201,6 @@ test('a stopped device starts counting from nothing again', ()=>{
     assert.ok(track.playedBytes() > 0);
 
     track.reset();
-    assert.equal(track.playedBytes(), 0, 'what a stopped device played is not owed to the next one');
+    assert.equal(track.playedBytes(), 0,
+        'what a stopped device played is not owed to the next one');
 });
