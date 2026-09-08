@@ -21,6 +21,19 @@
 export const WM_PAINT = 0x000f;
 export const WM_QUIT = 0x0012;
 
+/**
+ * Pointer motion, which is not queued the way everything else is.
+ *
+ * Windows keeps the cursor's position in the queue's own state and builds one
+ * WM_MOUSEMOVE from it when the program asks, so however fast the hardware
+ * reports, at most one move is ever waiting. Queuing each one instead makes a
+ * backlog no program can drain: a browser reports motion at the display's rate,
+ * and a guest that pumps its loop slower than that falls further behind with
+ * every frame, working through positions the pointer left long ago. From the
+ * outside the game stops responding to the mouse entirely.
+ */
+export const WM_MOUSEMOVE = 0x0200;
+
 /** A filter that accepts messages for any window, and thread messages besides. */
 export const ANY_WINDOW = null;
 
@@ -140,6 +153,24 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     return {
         /** @param {PostedMessage} message */
         post(message){
+            if ((message.message >>> 0) === WM_MOUSEMOVE)
+            {
+                // Replaced in place rather than dropped and re-appended: a move
+                // that overtook the keystroke before it would report the button
+                // as pressed somewhere the pointer had already left.
+                const held = pending.find(entry=>entry.message === WM_MOUSEMOVE
+                    && entry.hwnd === (message.hwnd >>> 0));
+                if (held)
+                {
+                    held.wParam = message.wParam >>> 0;
+                    held.lParam = message.lParam >>> 0;
+                    held.time = (message.time ?? 0) >>> 0;
+                    held.x = (message.x ?? 0) | 0;
+                    held.y = (message.y ?? 0) | 0;
+                    posted++;
+                    return;
+                }
+            }
             pending.push({
                 hwnd: message.hwnd >>> 0,
                 message: message.message >>> 0,

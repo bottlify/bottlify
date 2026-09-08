@@ -234,3 +234,59 @@ test('a filtered peek does not synthesise a timer it did not ask for', ()=>{
     assert.equal(queue.peek({ ...ALL, first: WM_KEYDOWN, last: WM_KEYDOWN }), null);
     assert.ok(queue.peek(ALL), 'and the tick is still there for a peek that does');
 });
+
+test('a pointer that keeps moving leaves one message, not a backlog', ()=>{
+    // Windows keeps the position in the queue's state and builds a move from it
+    // on demand, so however fast the hardware reports, one is ever waiting. A
+    // browser reports motion at the display's rate and the guest pumps slower,
+    // so queuing each one makes a backlog no program can drain -- it works
+    // through positions the pointer left long ago and stops responding.
+    const queue = createMessageQueue();
+
+    for (let step = 0; step < 500; step++)
+    {
+        queue.post({ hwnd: 4, message: WM_MOUSEMOVE, wParam: 0, lParam: step, x: step, y: step });
+    }
+
+    const taken = queue.peek(ALL);
+    assert.equal(taken?.message, WM_MOUSEMOVE);
+    assert.equal(taken?.lParam, 499, 'where the pointer is now, not where it started');
+    assert.equal(taken?.x, 499);
+    assert.equal(queue.peek(ALL), null,
+        'and nothing behind it');
+});
+
+test('a move is coalesced per window, not across all of them', ()=>{
+    const queue = createMessageQueue();
+    queue.post({ hwnd: 4, message: WM_MOUSEMOVE, wParam: 0, lParam: 1 });
+    queue.post({ hwnd: 5, message: WM_MOUSEMOVE, wParam: 0, lParam: 2 });
+    queue.post({ hwnd: 4, message: WM_MOUSEMOVE, wParam: 0, lParam: 3 });
+
+    const first = queue.peek(ALL);
+    const second = queue.peek(ALL);
+    assert.deepEqual([first?.hwnd, first?.lParam], [4, 3]);
+    assert.deepEqual([second?.hwnd, second?.lParam], [5, 2]);
+    assert.equal(queue.peek(ALL), null);
+});
+
+test('a coalesced move keeps its place in the order around it', ()=>{
+    // Overtaking the messages before it would report a button as pressed
+    // somewhere the pointer had already left.
+    const queue = createMessageQueue();
+    queue.post({ hwnd: 4, message: WM_MOUSEMOVE, wParam: 0, lParam: 1 });
+    queue.post({ hwnd: 4, message: 0x0201, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 4, message: WM_MOUSEMOVE, wParam: 0, lParam: 9 });
+
+    const order = [];
+    for (;;)
+    {
+        const next = queue.peek(ALL);
+        if (!next)
+        {
+            break;
+        }
+        order.push([next.message, next.lParam]);
+    }
+    assert.deepEqual(order, [[WM_MOUSEMOVE, 9], [0x0201, 0]],
+        'the move stays where it was, carrying the latest position');
+});
