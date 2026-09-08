@@ -868,6 +868,15 @@ export const win32Module = {
              */
             ioCompletionWaits: ()=>ports.snapshot(),
 
+            /**
+             * What every open wave device is doing.
+             *
+             * The same difference as above, for sound: a program stopped
+             * because a buffer never came back is inside its own wait, and from
+             * outside the machine merely looks slow.
+             */
+            waveDevices: ()=>winmm.diagnostics(),
+
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,
         };
@@ -891,6 +900,7 @@ export const win32Module = {
                 implemented: Object.values(held)
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
+                waveDevices: current ? current.waveDevices() : [],
                 exitCode: current ? current.exitCode() : null,
             },
         };
