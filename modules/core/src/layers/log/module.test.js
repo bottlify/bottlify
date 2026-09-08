@@ -100,3 +100,43 @@ test('a phase is measured against the host clock, not the guest\'s', async()=>{
     assert.match(top, /^run guest x1 self=100\.000/, 'what it cost, not what was credited');
     await logModule.dispose();
 });
+
+test('with no clock given, phases are measured to better than a millisecond', async()=>{
+    // `Date.now` moves in whole milliseconds, so a phase entered tens of
+    // thousands of times reads as a column of zeroes and ones -- a distribution
+    // rather than a measurement, and worst on the short phases that need it
+    // most. Every environment this runs in has `performance.now`, so it is what
+    // a build that configures nothing gets.
+    const api = await logModule.create({ now: ()=>0 });
+
+    api.begin('spin', api.PhaseKind.HOST);
+    // Long enough to be measurable, far shorter than the tick `Date.now` moves
+    // in: measured against that clock this is zero almost every time.
+    const until = performance.now() + 0.2;
+    while (performance.now() < until)
+    {
+        // Deliberately empty: the point is the wall time, not the work.
+    }
+    const elapsed = api.end('spin');
+
+    assert.ok(elapsed > 0, `a fifth of a millisecond read as ${elapsed}`);
+    assert.ok(!Number.isInteger(elapsed),
+        'a whole number every time is the millisecond clock, not a measurement');
+    await logModule.dispose();
+});
+
+test('the phase table is long enough to hold the loop and the calls together', async()=>{
+    // The run loop alone opens ten or so phases per turn. A table cut to eight
+    // rows shows those and nothing else -- or the host calls and none of the
+    // loop -- and the question this instrument exists for is which of the two
+    // the time went to.
+    const { api, at } = await open({});
+    for (let phase = 0; phase < 20; phase++)
+    {
+        at(phase * 10).begin(`phase-${phase}`, api.PhaseKind.HOST);
+        at(phase * 10 + 5).end(`phase-${phase}`);
+    }
+
+    assert.equal((logModule.diagnostics().metrics?.topPhases ?? []).length, 16);
+    await logModule.dispose();
+});

@@ -117,3 +117,39 @@ test('a program with nothing to do waits instead of spinning', async()=>{
     await assert.rejects(finished, /did not finish within/);
     await app.dispose();
 });
+
+test('a machine waiting for a message still lets its own clock run', async()=>{
+    // A thread suspended on a host call is parked on `hlt` and still counts as
+    // runnable, so the scheduler never reaches the branch that jumps the clock
+    // to the next deadline; and the loop credits the guest only for the turns
+    // it actually ran. Waiting for a message is therefore time that nothing
+    // credits, and a windowed program spends most of its life there.
+    //
+    // What that costs is not a slow clock but a stalled program: every timed
+    // wait in the guest waits far longer than it asked for -- a sleep, a
+    // timeout, a WM_TIMER, a wave cursor -- including the ones that would have
+    // produced the message the machine is idling for. Measured on a real title,
+    // crediting this took a run from three presented frames to two hundred and
+    // twenty-one.
+    const [wasm, exe] = await Promise.all([
+        readFile(new URL('v86.wasm', PREBUILT)),
+        readFile(FIXTURE),
+    ]);
+    const app = await createApp({
+        executable: new Uint8Array(exe),
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+    });
+
+    await assert.rejects(app.run({ maxTurns: 600 }), /did not finish within/);
+    const kernel = app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'kernel');
+    const time = kernel.metrics.time;
+    await app.dispose();
+
+    assert.ok(time.wallMs > 0, 'the run took measurable time');
+    assert.ok(time.virtualMs > time.wallMs / 2,
+        `the guest was credited ${time.virtualMs}ms of ${time.wallMs}ms that really passed`);
+});

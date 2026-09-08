@@ -351,6 +351,50 @@ export function createMacrotask(){
 }
 
 /**
+ * Consecutive turns retiring no guest instruction at all before the run loop
+ * stops spinning on the event loop and waits on a timer instead.
+ *
+ * Both waits are needed and neither will do alone. A machine whose threads are
+ * running while one of its calls is parked has to come back at once, because
+ * the turn after this one is real work -- and a zero timeout is clamped to four
+ * milliseconds, and to more once they nest, which is that much wall clock per
+ * turn for nothing. A machine where nothing ran at all has nothing to come back
+ * to: only the host can change its mind, and spinning until it does burns a
+ * processor to arrive no sooner while starving the very I/O it is waiting on.
+ *
+ * So the loop spins while the guest is still getting work done and backs off
+ * once it stops. The count is small because of which way it is worse to be
+ * wrong: a few spare turns cost microseconds and one turn too many on a timer
+ * costs milliseconds.
+ */
+const IDLE_SPINS_BEFORE_TIMER = 4;
+
+/**
+ * What the run loop is waiting on when it cannot go straight on, and how.
+ *
+ * A range request, a message queue with nothing in it, and some other host call
+ * that has not answered are one condition from inside the loop and three
+ * different costs. Named apart, a profile says which of the three a run went
+ * into; named together it can only say that the machine waited.
+ *
+ * @param {Object} state
+ * @param {number} state.fetching   Range requests outstanding.
+ * @param {number} state.idlers     Callers parked on an empty message queue.
+ * @param {number} state.suspended  Host calls suspended on anything at all.
+ * @param {number} state.spun       Turns in a row that retired no instruction.
+ * @returns {{ phase: string, timer: boolean } | null} null to go straight on.
+ */
+export function idleWait({ fetching, idlers, suspended, spun }){
+    if (idlers === 0 && suspended === 0)
+    {
+        return null;
+    }
+    const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
+    const timer = spun >= IDLE_SPINS_BEFORE_TIMER;
+    return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
+}
+
+/**
  * Where a LoadLibrary at run time actually looks.
  *
  * A name that already says where it is, is where it is. Windows searches for a
@@ -2020,25 +2064,6 @@ async function buildApp(options){
      */
     const TURNS_PER_YIELD = 16;
 
-    /**
-     * Consecutive turns retiring no guest instruction at all before the loop
-     * stops spinning on the event loop and waits on a timer instead.
-     *
-     * Both waits are needed and neither will do on its own. A machine whose
-     * threads are running but one of whose calls is parked has to come back at
-     * once, because the turn after this one is real work -- and a clamped timer
-     * there costs milliseconds per turn for nothing. A machine where nothing
-     * ran has nothing to come back to: only the host can change its mind, and
-     * spinning until it does burns a processor to arrive no sooner, while
-     * starving the very I/O the machine is waiting on.
-     *
-     * So the loop spins while the guest is still getting work done and backs
-     * off when it stops. The count is small because the wrong side to err on is
-     * the second: a few free turns cost microseconds, and one turn too many on
-     * the timer is milliseconds.
-     */
-    const IDLE_SPINS_BEFORE_TIMER = 4;
-
     const breathe = createMacrotask();
 
     /**
@@ -2218,25 +2243,33 @@ async function buildApp(options){
                     // together. The timer is kept for the case it is right for,
                     // which is a machine that really can do nothing until the
                     // host answers.
-                    const suspended = bridge.suspended() > 0;
-                    if (idlers.length > 0 || suspended)
+                    const wait = idleWait({
+                        fetching,
+                        idlers: idlers.length,
+                        suspended: bridge.suspended(),
+                        spun,
+                    });
+                    if (wait)
                     {
-                        // Named for what is being waited on and how. A range
-                        // request, a message queue with nothing in it and some
-                        // other host call that has not answered look identical
-                        // from here and cost nothing alike, and a table that
-                        // cannot tell them apart cannot say which of the three
-                        // a run went into.
-                        const idling = spun >= IDLE_SPINS_BEFORE_TIMER;
-                        const on = fetching > 0
-                            ? 'fetch'
-                            : idlers.length > 0 ? 'message' : 'host';
-                        const phase = `idle-${on}${idling ? '-wait' : ''}`;
-                        journal.begin(phase, journal.PhaseKind.HOST);
-                        await (idling
+                        journal.begin(wait.phase, journal.PhaseKind.HOST);
+                        const idledAt = clockSource();
+                        await (wait.timer
                             ? new Promise(resolve=>setTimeout(resolve, 0))
                             : breathe());
-                        journal.end(phase);
+                        // This time passed for the guest too, and it is the only
+                        // time nothing credits. A thread suspended on a host call
+                        // is parked on `hlt` and still counts as runnable, so the
+                        // scheduler never reaches the branch that moves the clock
+                        // to the next deadline -- and the clock is otherwise
+                        // credited only for turns the guest actually ran. A
+                        // machine that idles for most of its wall time then holds
+                        // its own clock nearly still, and every timed wait in the
+                        // guest waits far longer than it asked for: a sleep, a
+                        // timeout, a WM_TIMER, a wave cursor. The wait that would
+                        // end the idling is itself the thing the idling stops
+                        // from expiring.
+                        clock.advance(Math.max(0, clockSource() - idledAt));
+                        journal.end(wait.phase);
                     }
 
                     // What the machine's state says before it is given another

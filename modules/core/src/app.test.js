@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, inParallel, placePatches, resolveLibraryPath, retryingFetch,
+    createMacrotask, groupBlocks, idleWait, inParallel, placePatches, resolveLibraryPath,
+    retryingFetch,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -304,4 +305,56 @@ test('closing a yield answers whoever was still waiting on it', async()=>{
     const pending = breathe();
     breathe.close();
     await pending;
+});
+
+/** A machine with nothing outstanding at all. @param {any} [changed] */
+const busy = (changed = {})=>(
+    { fetching: 0, idlers: 0, suspended: 0, spun: 0, ...changed });
+
+/** The wait such a machine takes, insisting that it takes one. @param {any} changed */
+function waitOn(changed){
+    const wait = idleWait(busy(changed));
+    assert.ok(wait, 'something was outstanding, so the loop had to wait for it');
+    return wait;
+}
+
+test('a machine with nothing outstanding does not wait at all', ()=>{
+    assert.equal(idleWait(busy()), null);
+    assert.equal(idleWait(busy({ spun: 1000 })), null,
+        'having retired nothing is not on its own a reason to wait');
+});
+
+test('a machine still retiring instructions never waits on a timer', ()=>{
+    // The measured cost of getting this wrong: a program in its own message
+    // loop takes this branch on most turns while running perfectly well, and a
+    // zero timeout is clamped to four milliseconds and more once they nest. It
+    // was seventy-seven seconds of an eighty-nine second run -- larger than
+    // every host call and all the emulation together.
+    for (const spun of [0, 1, 2, 3])
+    {
+        assert.equal(waitOn({ suspended: 1, spun }).timer, false,
+            `a turn that retired something ${spun} turns ago comes straight back`);
+    }
+});
+
+test('a machine that has stopped retiring anything backs off to a timer', ()=>{
+    // The other half, and it is not optional: spinning on the event loop while
+    // only the host can make progress burns a processor to arrive no sooner,
+    // and starves the very I/O being waited on. Measured: two million spins in
+    // fifteen seconds retired a fifth of the instructions the timer did.
+    assert.equal(waitOn({ suspended: 1, spun: 64 }).timer, true);
+});
+
+test('the wait is named for what is being waited on', ()=>{
+    // One condition inside the loop, three costs. A range request is the
+    // network, an empty message queue is the program having nothing to do, and
+    // anything else is a host call that has not answered -- and a table that
+    // calls all three the same thing cannot say which a run went into.
+    assert.equal(waitOn({ fetching: 1, suspended: 1 }).phase, 'idle-fetch');
+    assert.equal(waitOn({ idlers: 1 }).phase, 'idle-message');
+    assert.equal(waitOn({ suspended: 1 }).phase, 'idle-host');
+    assert.equal(waitOn({ fetching: 1, idlers: 3, suspended: 2 }).phase, 'idle-fetch',
+        'a range request outranks the message queue: it is the one with a cost');
+    assert.equal(waitOn({ suspended: 1, spun: 64 }).phase, 'idle-host-wait',
+        'and the name says which of the two waits it took');
 });

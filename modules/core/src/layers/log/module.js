@@ -23,6 +23,15 @@ import { PhaseKind, createProfiler } from './internal/profiler.js';
  * whoever assembles the engine, not of the thing being logged.
  */
 
+/**
+ * How many phases a diagnostics snapshot names.
+ *
+ * Enough that the run loop's own phases and the busiest host calls appear in
+ * the same table: the question this instrument answers is which of the two the
+ * time went to, and a list too short to hold both cannot answer it.
+ */
+const TOP_PHASES = 16;
+
 /** @type {any} */
 let journal = null;
 /** @type {any} */
@@ -72,8 +81,14 @@ export const logModule = {
         // from wall time as the scheduler runs -- so measuring against it says
         // a slice took whatever the guest was credited, not what it cost. Read
         // that way, a run of ten minutes reports sixty-eight milliseconds.
+        // `performance.now` where there is one, because `Date.now` moves in
+        // whole milliseconds: a phase entered tens of thousands of times reads
+        // as a column of zeroes and ones, which is a distribution rather than a
+        // measurement, and the short phases are exactly the ones it ruins.
         profiler = createProfiler({
-            now: config?.wallClock ?? (()=>Date.now()),
+            now: config?.wallClock ?? (typeof performance === 'undefined'
+                ? ()=>Date.now()
+                : ()=>performance.now()),
             frames: config?.frames,
         });
 
@@ -160,7 +175,7 @@ export const logModule = {
                 frames: profile.frames,
                 averageFrameMs: profile.averageFrameMs,
                 unbalancedPhases: profile.unbalanced,
-                topPhases: profile.phases.slice(0, 8).map((/** @type {any} */ row)=>
+                topPhases: profile.phases.slice(0, TOP_PHASES).map((/** @type {any} */ row)=>
                     `${row.name} ${row.kind} x${row.count} self=${row.selfMs.toFixed(3)}`
                     + ` worst=${row.worstMs.toFixed(3)}`),
             },
