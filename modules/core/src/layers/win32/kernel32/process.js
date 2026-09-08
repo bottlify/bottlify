@@ -108,8 +108,12 @@ const MAX_MODULE_NAME = 260;
  * @param {() => any} currentThread
  */
 export function createThreadState(currentThread){
-    const stateOf = ()=>{
-        const thread = currentThread();
+    /**
+     * @param {any} [thread]  Whose state. Defaults to the thread that is running.
+     *   Naming one is for an answer produced on somebody else's turn: a call
+     *   that parked has no turn of its own left in which to record its result.
+     */
+    const stateOf = (thread = currentThread())=>{
         if (!thread.kernel32)
         {
             thread.kernel32 = {

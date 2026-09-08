@@ -43,6 +43,7 @@ const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_DIRECTORY = 267;
+const ERROR_IO_DEVICE = 1117;
 
 /** The failure value of each of the four APIs that has its own. */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -199,6 +200,15 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
  *           The one handle table, shared with every other kind of object.
+ * @property {() => any} [currentThread]
+ *           Whose call this is, for an answer that arrives after the thread has
+ *           been parked -- by then the running thread is somebody else.
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
+ * @property {{ offsetOf: (overlapped: number) => number,
+ *              completed: (file: number, transferred: number, overlapped: number) => boolean,
+ *              closed: (handle: number, object: any) => void }} [ports]
+ *           Completion ports. Absent, overlapped I/O still reads and writes;
+ *           what it does not do is tell anyone it finished.
  */
 
 /** @param {number} value */
@@ -809,16 +819,21 @@ export function createFileFunctions(host){
          * BOOL ReadFile(HANDLE, LPVOID, DWORD, LPDWORD lpNumberOfBytesRead,
          *               LPOVERLAPPED)
          *
-         * The overlapped pointer is accepted and ignored; every read here
-         * completes before returning. Reading a standard handle is an immediate
-         * end of input rather than a failure -- there is no console to type at,
-         * and a program that asks gets the answer it would get from a redirected
-         * empty stream.
+         * Every read here finishes before the call answers, so an overlapped
+         * read is a synchronous one that also completes: the position comes out
+         * of the OVERLAPPED rather than the file pointer, and when it is done
+         * the structure, its event and the handle's completion port are all told.
+         * Leaving that last part out is invisible until something waits for it,
+         * and then it is a pool parked for ever on a packet nobody posts.
+         *
+         * Reading a standard handle is an immediate end of input rather than a
+         * failure -- there is no console to type at, and a program that asks
+         * gets the answer it would get from a redirected empty stream.
          */
         ReadFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, buffer, length, read])=>{
+            handler: ([handle, buffer, length, read, overlapped])=>{
                 if (isStandardHandle(handle >>> 0))
                 {
                     writeDwordIf(read >>> 0, 0);
@@ -833,27 +848,46 @@ export function createFileFunctions(host){
                 {
                     return fail(ERROR_ACCESS_DENIED);
                 }
+                const pointer = overlapped >>> 0;
+                const at = pointer !== 0 && host.ports
+                    ? host.ports.offsetOf(pointer)
+                    : file.position;
                 /** @param {Uint8Array} bytes */
                 const deliver = bytes=>{
                     if (bytes.length > 0)
                     {
                         host.writeMemory(buffer >>> 0, bytes);
                     }
-                    file.position += bytes.length;
+                    file.position = at + bytes.length;
                     // Written even when nothing was read: a program that checks
                     // it is exactly the one that has reached the end of a file.
                     writeDwordIf(read >>> 0, bytes.length);
+                    if (pointer !== 0)
+                    {
+                        host.ports?.completed(handle >>> 0, bytes.length, pointer);
+                    }
                     return 1;
                 };
 
-                const bytes = files.read(file.node, file.position, length >>> 0);
+                const bytes = files.read(file.node, at, length >>> 0);
                 // A volume backed by a bundle answers with a promise when the
                 // bytes are not here yet. The guest cannot wait, so the bridge
                 // parks it -- the same way it does for any call that has no
                 // answer at the moment it is asked.
-                return typeof (/** @type {any} */ (bytes))?.then === 'function'
-                    ? /** @type {any} */ (bytes).then(deliver)
-                    : deliver(/** @type {any} */ (bytes));
+                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                {
+                    return deliver(/** @type {any} */ (bytes));
+                }
+                const owner = host.currentThread?.() ?? null;
+                return /** @type {any} */ (bytes).then(deliver, ()=>{
+                    // A read that fails once the thread is parked answers FALSE
+                    // long after the error slot was last written, and whatever
+                    // is in it belongs to some other call. A caller reading a
+                    // stale code acts on a failure that did not happen -- and
+                    // no completion is posted either, because none was accepted.
+                    host.setLastErrorFor?.(owner, ERROR_IO_DEVICE);
+                    return 0;
+                });
             },
         },
 
@@ -868,7 +902,7 @@ export function createFileFunctions(host){
         WriteFile: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([handle, buffer, length, written])=>{
+            handler: ([handle, buffer, length, written, overlapped])=>{
                 const count = length >>> 0;
                 if (isStandardHandle(handle >>> 0))
                 {
@@ -892,11 +926,21 @@ export function createFileFunctions(host){
                 const bytes = count === 0
                     ? new Uint8Array(0)
                     : host.readMemory(buffer >>> 0, count).slice();
-                const stored = files.write(file.node, file.position, bytes);
-                file.position += stored;
+                const pointer = overlapped >>> 0;
+                const at = pointer !== 0 && host.ports
+                    ? host.ports.offsetOf(pointer)
+                    : file.position;
+                const stored = files.write(file.node, at, bytes);
+                file.position = at + stored;
                 // Written even for a zero-length write, which is how a program
                 // asks whether the handle still works.
                 writeDwordIf(written >>> 0, stored);
+                // The same debt an overlapped read owes: a save written through
+                // a pool hangs if the packet its worker waits on never arrives.
+                if (pointer !== 0)
+                {
+                    host.ports?.completed(handle >>> 0, stored, pointer);
+                }
                 return 1;
             },
         },
@@ -1072,6 +1116,12 @@ export function createFileFunctions(host){
                     {
                         files.close(closed.node);
                     }
+                    // Handle numbers are recycled, so anything keyed by this one
+                    // has to go now: a completion-port association that outlives
+                    // its handle sends the next file's packets to a port nobody
+                    // is reading, and a thread parked on a port that has just
+                    // closed waits on something nothing can reach.
+                    host.ports?.closed(handle >>> 0, closed);
                     return 1;
                 }
                 catch (e){

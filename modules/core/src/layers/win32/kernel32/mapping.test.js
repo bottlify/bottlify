@@ -37,7 +37,6 @@ function setup(){
             return address;
         },
         release: ()=>{},
-        advanceClock: ()=>{},
         handles: {
             open: (type, object)=>{
                 const handle = nextHandle;
@@ -114,30 +113,6 @@ test('a mapping with no file must be told its size', ()=>{
 test('unmapping an address nobody was given fails', ()=>{
     const { fns } = setup();
     assert.equal(fns.UnmapViewOfFile.handler([0x1234]), 0);
-});
-
-test('a completion posted to a port is the one that comes back', ()=>{
-    const { fns, bytes } = setup();
-    const port = fns.CreateIoCompletionPort.handler([INVALID_HANDLE_VALUE, 0, 0, 0]);
-
-    assert.equal(fns.PostQueuedCompletionStatus.handler([port, 42, 0xabc, 0xdef]), 1);
-    assert.equal(fns.GetQueuedCompletionStatus.handler([port, 0x100, 0x104, 0x108, 0]), 1);
-
-    assert.equal(dword(bytes, 0x100), 42);
-    assert.equal(dword(bytes, 0x104), 0xabc);
-    assert.equal(dword(bytes, 0x108), 0xdef);
-});
-
-test('an empty port clears what it hands back, rather than leaving it stale', ()=>{
-    // A caller reads lpOverlapped to tell a timeout from a failed operation. A
-    // stale pointer there is one it goes on to dereference.
-    const { fns, bytes, errors } = setup();
-    const port = fns.CreateIoCompletionPort.handler([INVALID_HANDLE_VALUE, 0, 0, 0]);
-    bytes.set([0xff, 0xff, 0xff, 0xff], 0x108);
-
-    assert.equal(fns.GetQueuedCompletionStatus.handler([port, 0x100, 0x104, 0x108, 0]), 0);
-    assert.equal(dword(bytes, 0x108), 0);
-    assert.equal(errors.at(-1), 258, 'and it is a timeout, not some other failure');
 });
 
 test('a pipe is one queue with two handles, and peeking does not consume', ()=>{

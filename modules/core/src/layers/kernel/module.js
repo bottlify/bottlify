@@ -189,10 +189,37 @@ export const kernelModule = {
                 scheduler.terminate(thread, exitCode);
             },
 
-            /** @param {any} thread @param {string} [reason] */
-            block: (thread, reason)=>scheduler.block(thread, reason),
-            /** @param {any} thread */
-            wake: thread=>scheduler.wake(thread),
+            /**
+             * @param {any} thread @param {string} [reason]
+             * @param {{ deadline?: number, result?: number }} [timed]
+             *   For a waiter the kernel does not hold a queue for -- a
+             *   completion port lives above this layer, and its wait still has
+             *   to expire in guest time like any other.
+             */
+            block: (thread, reason, timed)=>scheduler.block(thread, reason, timed),
+            /**
+             * @param {any} thread
+             * @param {number} [result]
+             *   What the blocked call answers. A waker outside the kernel's own
+             *   objects has no other way to say it: the thread resumes straight
+             *   into guest code with this value in EAX.
+             * @returns {boolean} whether the thread was blocked at all
+             */
+            wake(thread, result){
+                if (result !== undefined)
+                {
+                    thread.waitResult = result >>> 0;
+                }
+                return scheduler.wake(thread);
+            },
+
+            /**
+             * Told when a thread's timed wait ran out, so a queue kept outside
+             * the kernel can drop a thread that has stopped waiting.
+             *
+             * @param {(thread: any) => void} handler
+             */
+            onTimeout: handler=>scheduler.onTimeout(handler),
 
             createEvent: (/** @type {any} */ options)=>sync.createEvent(options),
             createMutex: (/** @type {any} */ options)=>sync.createMutex(options),

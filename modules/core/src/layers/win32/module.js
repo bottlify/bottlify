@@ -22,6 +22,7 @@ import { createCrtSeh } from './msvcrt/seh.js';
 import { createResourceFunctions } from './kernel32/resources.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
+import { createIoCompletionPorts } from './kernel32/iocp.js';
 import { createFileTimeFunctions } from './kernel32/filetime.js';
 import { createConsoleIoFunctions } from './kernel32/consoleio.js';
 import { createVolume } from './kernel32/vfs.js';
@@ -166,6 +167,51 @@ export const win32Module = {
         const hive = createHive();
         const queue = createMessageQueue();
         const com = createComRegistry();
+
+        /**
+         * The last error of a thread that is not the one running.
+         *
+         * A call that parked has no turn left in which to record its own result,
+         * so whoever wakes it writes the code for it -- the same handoff a
+         * critical section makes when the thread that leaves publishes the
+         * structure for the thread it just handed the section to.
+         *
+         * @param {any} thread @param {number} code
+         */
+        const setErrorOn = (thread, code)=>{
+            if (thread)
+            {
+                stateOf(thread).lastError = code >>> 0;
+            }
+        };
+
+        // Built before the tables because two of them need it: the completion
+        // port a program waits on, and the file calls that owe it a packet when
+        // an overlapped read or write finishes.
+        const ports = createIoCompletionPorts({
+            kernel,
+            readMemory,
+            writeMemory,
+            setLastError: setError,
+            setLastErrorFor: setErrorOn,
+            currentThread: ()=>kernel.currentThread(),
+            park: ()=>bridge.park(),
+            // A stale or mistyped hEvent is the program's mistake and not ours
+            // to fault on: resolving throws, and a completion should not stop
+            // the machine over the half of itself nobody is waiting on.
+            /** @param {number} handle */
+            signalEvent: handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            },
+            /** @param {string} text */
+            trace: text=>trace(text),
+        });
 
         // Registered here rather than by the graphics layer, because a filter
         // graph is not a drawing device: a program reaches it through
@@ -375,8 +421,6 @@ export const win32Module = {
                     allocate: bytes=>allocator.allocate(bytes),
                     /** @param {number} address */
                     release: address=>allocator.free(address),
-                    /** @param {number} ms */
-                    advanceClock: ms=>kernel.clock.advance(ms),
                     handles,
                     files: {
                         /**
@@ -396,6 +440,7 @@ export const win32Module = {
                         write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                     },
                 }),
+                ...ports.table,
                 ...createFileTimeFunctions({
                     readMemory,
                     writeMemory,
@@ -477,6 +522,16 @@ export const win32Module = {
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
                     handles,
+                    currentThread: ()=>kernel.currentThread(),
+                    setLastErrorFor: setErrorOn,
+                    ports: {
+                        /** @param {number} overlapped */
+                        offsetOf: overlapped=>ports.offsetOf(overlapped),
+                        /** @param {number} file @param {number} n @param {number} overlapped */
+                        completed: (file, n, overlapped)=>ports.completed(file, n, overlapped),
+                        /** @param {number} handle @param {any} object */
+                        closed: (handle, object)=>ports.closed(handle, object),
+                    },
                 }),
             },
 
@@ -713,6 +768,16 @@ export const win32Module = {
              */
             heap: ()=>heap,
 
+            /**
+             * Which threads are parked on a completion port, and for how long.
+             *
+             * A program whose workers are all waiting for a packet looks exactly
+             * like an idle one from outside -- nothing runs, and nothing says
+             * why. This is the difference, and reading it is also what notices a
+             * wait long enough to be a completion somebody forgot to post.
+             */
+            ioCompletionWaits: ()=>ports.snapshot(),
+
             /** Set once the guest has asked to terminate. */
             exitCode: ()=>exitCode,
         };
@@ -735,6 +800,7 @@ export const win32Module = {
                 libraries: counts,
                 implemented: Object.values(held)
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
+                ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 exitCode: current ? current.exitCode() : null,
             },
         };

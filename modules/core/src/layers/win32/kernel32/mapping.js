@@ -5,12 +5,11 @@
  */
 
 /**
- * The three things kernel32 lets a program treat as memory instead of as a
- * stream: a file mapping, a pipe, and a completion port.
+ * The two things kernel32 lets a program treat as memory instead of as a
+ * stream: a file mapping and a pipe.
  *
- * They sit together because all three are handle-shaped objects with no bytes
- * of their own, and because each is somewhere this build has to be honest about
- * a limit rather than pretend.
+ * They sit together because both are handle-shaped objects with no bytes of
+ * their own.
  *
  * A **file mapping** here is a copy, not a mapping. The bytes are read into
  * guest memory when the view is made and written back when it is closed, so one
@@ -22,26 +21,15 @@
  *
  * A **pipe** is a byte queue with two handles onto it. That is all an anonymous
  * pipe is on Windows too, so this one is not a compromise.
- *
- * A **completion port** is a queue of completed operations. Posting and getting
- * are real. What is missing is anything that completes on its own: no overlapped
- * file or socket operation in this build ever queues to a port, so a program
- * that starts an asynchronous read and waits for its completion waits for
- * something nobody will post. A program that posts its own -- which is how a
- * port is used as a work queue, and the more common of the two -- works.
  */
 
 /** Codes this surface reports. */
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
-const WAIT_TIMEOUT = 258;
 
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
-
-/** Waits with this timeout never give up. */
-const INFINITE = 0xffffffff;
 
 /** flProtect values we distinguish. Everything else is read-only. */
 const PAGE_READWRITE = 0x04;
@@ -58,7 +46,6 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * @property {(code: number) => void} setLastError
  * @property {(bytes: number) => number} allocate  Guest memory, or 0.
  * @property {(address: number) => void} release
- * @property {(milliseconds: number) => void} advanceClock
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
@@ -297,104 +284,6 @@ export function createMappingFunctions(host){
                 // An anonymous pipe is a byte stream with no messages in it, so
                 // there is never anything left of one.
                 writeDwordIf(left >>> 0, 0);
-                return 1;
-            },
-        },
-
-        /**
-         * HANDLE CreateIoCompletionPort(HANDLE FileHandle, HANDLE ExistingCompletionPort,
-         *   ULONG_PTR CompletionKey, DWORD NumberOfConcurrentThreads)
-         *
-         * Associating a file with a port is accepted and records the key, but
-         * nothing in this build ever completes an operation into a port -- see
-         * the note at the top. A program using a port as its own work queue is
-         * fully served; one waiting for an overlapped read is not.
-         */
-        CreateIoCompletionPort: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([file, existing, key])=>{
-                if ((existing >>> 0) !== 0)
-                {
-                    const port = object(existing, 'iocp');
-                    if (!port)
-                    {
-                        return fail(ERROR_INVALID_HANDLE);
-                    }
-                    port.associated.set(file >>> 0, key >>> 0);
-                    return existing >>> 0;
-                }
-                if ((file >>> 0) !== INVALID_HANDLE_VALUE && file !== 0)
-                {
-                    // A port created around a file still needs its key recorded,
-                    // because a completion would carry it.
-                    const port = { queue: [], associated: new Map([[file >>> 0, key >>> 0]]) };
-                    return host.handles.open('iocp', port);
-                }
-                return host.handles.open('iocp', { queue: [], associated: new Map() });
-            },
-        },
-
-        /**
-         * BOOL PostQueuedCompletionStatus(HANDLE CompletionPort,
-         *   DWORD dwNumberOfBytesTransferred, ULONG_PTR dwCompletionKey,
-         *   LPOVERLAPPED lpOverlapped)
-         */
-        PostQueuedCompletionStatus: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([handle, transferred, key, overlapped])=>{
-                const port = object(handle, 'iocp');
-                if (!port)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                port.queue.push({
-                    transferred: transferred >>> 0,
-                    key: key >>> 0,
-                    overlapped: overlapped >>> 0,
-                });
-                return 1;
-            },
-        },
-
-        /**
-         * BOOL GetQueuedCompletionStatus(HANDLE CompletionPort,
-         *   LPDWORD lpNumberOfBytes, PULONG_PTR lpCompletionKey,
-         *   LPOVERLAPPED *lpOverlapped, DWORD dwMilliseconds)
-         *
-         * A wait on an empty queue does not block. There is no timer in the
-         * scheduler to wake it and nothing that would post while it slept, so a
-         * real wait would be a hang; the clock is credited and the timeout is
-         * reported, which sends the caller round its loop instead. A caller with
-         * an infinite timeout is told the same thing, which is the one place
-         * this departs from Windows and is why it is written down here.
-         */
-        GetQueuedCompletionStatus: {
-            argBytes: 20,
-            /** @param {number[]} args */
-            handler: ([handle, bytes, key, overlapped, timeout])=>{
-                const port = object(handle, 'iocp');
-                if (!port)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                const completion = port.queue.shift();
-                if (!completion)
-                {
-                    const waited = (timeout >>> 0) === INFINITE ? 0 : timeout >>> 0;
-                    host.advanceClock(waited);
-                    // The out-parameters are cleared: a caller reads lpOverlapped
-                    // to tell a timeout from a failed operation, and a stale
-                    // pointer there is one it would go on to dereference.
-                    writeDwordIf(bytes >>> 0, 0);
-                    writeDwordIf(key >>> 0, 0);
-                    writeDwordIf(overlapped >>> 0, 0);
-                    return fail(WAIT_TIMEOUT);
-                }
-                writeDwordIf(bytes >>> 0, completion.transferred);
-                writeDwordIf(key >>> 0, completion.key);
-                writeDwordIf(overlapped >>> 0, completion.overlapped);
                 return 1;
             },
         },
