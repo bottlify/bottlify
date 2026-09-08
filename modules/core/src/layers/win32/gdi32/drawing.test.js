@@ -153,6 +153,11 @@ function fakeDrawing(){
                 /** @param {number} index */
                 describe: index=>index >= 1 && index <= 3 ? new Uint8Array(40).fill(index) : null,
             },
+            /** @param {number} hdc */
+            swapBuffers(hdc){
+                calls.push(['swapBuffers', hdc]);
+                return true;
+            },
         },
     };
 }
@@ -329,6 +334,28 @@ test('without a pixel-format service the calls fail rather than inventing one', 
     assert.equal(fns.ChoosePixelFormat.handler([hdc, STRUCT]), 0);
     assert.equal(fns.SetPixelFormat.handler([hdc, 1, 0]), 0);
     assert.equal(fns.DescribePixelFormat.handler([hdc, 1, 40, OUT]), 0);
+});
+
+test('SwapBuffers presents the frame through the graphics layer', ()=>{
+    // The end of every frame an OpenGL program draws, and the spelling most of
+    // them use -- wglSwapBuffers is the other half of the same operation.
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+
+    assert.equal(fns.SwapBuffers.handler([hdc]), 1);
+    assert.deepEqual(graphics.calls.at(-1), ['swapBuffers', hdc]);
+    assert.equal(fns.SwapBuffers.handler([0]), 0, 'and a handle that is not a DC fails');
+});
+
+test('SwapBuffers is exported and pops its one argument', ()=>{
+    // Missing from the table it would reach the unimplemented-import stub,
+    // which cleans up nothing, and the caller would return with its stack four
+    // bytes adrift once per frame.
+    const { fns, hdc } = setup();
+
+    assert.equal(fns.SwapBuffers.argBytes, 4);
+    assert.equal(fns.SwapBuffers.handler([hdc]), 0,
+        'a build that cannot draw fails rather than presenting nothing');
 });
 
 // --- the gamma ramp ---

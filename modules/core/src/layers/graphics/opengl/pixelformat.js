@@ -121,7 +121,14 @@ const DWORD_FIELDS = Object.freeze(['dwLayerMask', 'dwVisibleMask', 'dwDamageMas
  * @returns {PixelFormat}
  */
 export function readPixelFormatDescriptor(memory, address){
-    const bytes = memory.readMemory(address, PIXELFORMATDESCRIPTOR.SIZE);
+    return decodePixelFormat(memory.readMemory(address, PIXELFORMATDESCRIPTOR.SIZE));
+}
+
+/**
+ * @param {Uint8Array} bytes  at least PIXELFORMATDESCRIPTOR.SIZE of them
+ * @returns {PixelFormat}
+ */
+export function decodePixelFormat(bytes){
     const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
     /** @type {any} */
     const format = {
@@ -149,6 +156,19 @@ export function readPixelFormatDescriptor(memory, address){
  * @param {number} bytesAvailable
  */
 export function writePixelFormatDescriptor(memory, address, format, bytesAvailable){
+    const bytes = encodePixelFormat(format);
+    const length = Math.min(bytesAvailable, PIXELFORMATDESCRIPTOR.SIZE);
+    if (length > 0)
+    {
+        memory.writeMemory(address, bytes.subarray(0, length));
+    }
+}
+
+/**
+ * @param {PixelFormat} format
+ * @returns {Uint8Array} PIXELFORMATDESCRIPTOR.SIZE bytes
+ */
+export function encodePixelFormat(format){
     const bytes = new Uint8Array(PIXELFORMATDESCRIPTOR.SIZE);
     const view = new DataView(bytes.buffer);
     view.setUint16(PIXELFORMATDESCRIPTOR.nSize, PIXELFORMATDESCRIPTOR.SIZE, true);
@@ -161,11 +181,7 @@ export function writePixelFormatDescriptor(memory, address, format, bytesAvailab
         const value = /** @type {any} */ (format)[name] >>> 0;
         view.setUint32(PIXELFORMATDESCRIPTOR.dwLayerMask + index * 4, value, true);
     });
-    const length = Math.min(bytesAvailable, PIXELFORMATDESCRIPTOR.SIZE);
-    if (length > 0)
-    {
-        memory.writeMemory(address, bytes.subarray(0, length));
-    }
+    return bytes;
 }
 
 /**

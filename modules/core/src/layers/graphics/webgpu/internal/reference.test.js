@@ -26,9 +26,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     alphaPasses, blendChannel, clear, createReferenceSurface, fillRect,
-    runStages, sampleNearest, toBase64,
+    lightVertex, runStages, sampleNearest, toBase64,
 } from './reference.js';
-import { D3DTA, D3DTOP } from './fixedfunction.js';
+import { D3DLIGHT, D3DTA, D3DTOP } from './fixedfunction.js';
 
 /**
  * A pixel as the four bytes at its offset, lowest address first.
@@ -254,4 +254,225 @@ test('a sample outside the texture clamps rather than wrapping off the end', ()=
     clear(texture, solid(9, 9, 9));
     assert.deepEqual(sampleNearest(texture, -1, -1), { r: 9, g: 9, b: 9, a: 255 });
     assert.deepEqual(sampleNearest(texture, 2, 2), { r: 9, g: 9, b: 9, a: 255 });
+});
+
+// --- the lighting equation ---
+
+/** @param {object} over @returns {any} a D3DLIGHT8 that contributes nothing on its own */
+const light = (over = {})=>({
+    Type: D3DLIGHT.DIRECTIONAL,
+    Diffuse: { r: 0, g: 0, b: 0, a: 0 },
+    Specular: { r: 0, g: 0, b: 0, a: 0 },
+    Ambient: { r: 0, g: 0, b: 0, a: 0 },
+    Position: { x: 0, y: 0, z: 0 },
+    Direction: { x: 0, y: 0, z: 1 },
+    Range: 0,
+    Falloff: 1,
+    Attenuation0: 1,
+    Attenuation1: 0,
+    Attenuation2: 0,
+    Theta: 0,
+    Phi: 0,
+    ...over,
+});
+
+const BLACK = { r: 0, g: 0, b: 0, a: 0 };
+const WHITE = { r: 1, g: 1, b: 1, a: 1 };
+
+/** @param {object} over @returns {any} */
+const lit = (over = {})=>({
+    position: { x: 0, y: 0, z: 0 },
+    normal: { x: 0, y: 0, z: -1 },
+    eye: { x: 0, y: 0, z: -1 },
+    lights: [],
+    sources: { diffuse: BLACK, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    sceneAmbient: BLACK,
+    power: 0,
+    specular: false,
+    ...over,
+});
+
+test('lighting: a directional light is the cosine of the angle to it, and nothing else', ()=>{
+    // The one term that gives a lit scene its shape. A normal facing the light
+    // gets all of it and one facing away gets none -- not a negative amount,
+    // which would subtract light from the rest of the sum.
+    const surface = { r: 0.5, g: 0.25, b: 0.125, a: 0.75 };
+    const facing = lightVertex(lit({
+        lights: [light({ Diffuse: WHITE })],
+        sources: { diffuse: surface, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    }));
+    assert.deepEqual(facing.diffuse, surface);
+
+    const away = lightVertex(lit({
+        normal: { x: 0, y: 0, z: 1 },
+        lights: [light({ Diffuse: WHITE })],
+        sources: { diffuse: surface, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    }));
+    assert.deepEqual(away.diffuse, { r: 0, g: 0, b: 0, a: 0.75 },
+        'and the alpha is the diffuse source\'s, whatever the light did');
+
+    // A normal at forty-five degrees to the light gets one over root two of it.
+    const tilted = lightVertex(lit({
+        normal: { x: 1, y: 0, z: -1 },
+        lights: [light({ Diffuse: WHITE })],
+        sources: { diffuse: WHITE, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    }));
+    assert.equal(tilted.diffuse.r, 1 / Math.sqrt(2));
+});
+
+test('lighting: ambient light reaches the vertex through the material, not around it', ()=>{
+    // The scene's ambient and each light's own are both multiplied by the
+    // material's ambient colour. Adding either directly is what makes an
+    // unlit corner of a scene glow.
+    const value = lightVertex(lit({
+        lights: [light({ Ambient: { r: 0.125, g: 0.125, b: 0.125, a: 0 } })],
+        sources: {
+            diffuse: BLACK,
+            ambient: { r: 0.5, g: 0, b: 0, a: 0 },
+            specular: BLACK,
+            emissive: { r: 0, g: 0, b: 0.25, a: 0 },
+        },
+        sceneAmbient: { r: 0.25, g: 0.25, b: 0.25, a: 0 },
+    }));
+    assert.equal(value.diffuse.r, 0.1875, '0.5 * (0.25 + 0.125)');
+    assert.equal(value.diffuse.g, 0, 'the material has no green for the light to reach');
+    assert.equal(value.diffuse.b, 0.25, 'emissive is added on its own, unlit');
+});
+
+test('lighting: the sum is clamped once, at the end', ()=>{
+    const value = lightVertex(lit({
+        lights: [light({ Diffuse: WHITE })],
+        sources: {
+            diffuse: { r: 1, g: 0, b: 0, a: 1 },
+            ambient: BLACK,
+            specular: BLACK,
+            emissive: { r: 0.75, g: 0, b: 0, a: 0 },
+        },
+    }));
+    assert.equal(value.diffuse.r, 1, 'and not 1.75');
+});
+
+test('lighting: a point light attenuates by distance and stops at its range', ()=>{
+    /** @param {object} over */
+    const at = over=>lightVertex(lit({
+        normal: { x: 0, y: 0, z: 1 },
+        lights: [light({
+            Type: D3DLIGHT.POINT,
+            Diffuse: WHITE,
+            Position: { x: 0, y: 0, z: 10 },
+            Range: 100,
+            Attenuation0: 0,
+            Attenuation1: 0.5,
+            ...over,
+        })],
+        sources: { diffuse: WHITE, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    })).diffuse.r;
+
+    // One over (0.5 * 10). The direction to the light is its position less the
+    // vertex; the other way round lights the wrong side of everything.
+    assert.equal(at({}), 0.2);
+    assert.equal(at({ Range: 5 }), 0, 'past its range it contributes nothing at all');
+    assert.equal(at({ Attenuation1: 0 }), 1,
+        'every coefficient zero is no falloff, not a division by zero');
+});
+
+test('lighting: a spotlight is full inside its inner cone and dark outside its outer one', ()=>{
+    /** @param {object} over @param {{ x: number, y: number, z: number }} where */
+    const cone = (over, where)=>lightVertex(lit({
+        position: where,
+        // Facing the light, which is at the origin, so that the cosine of the
+        // angle to it is one and the whole answer is the cone factor.
+        normal: { x: -where.x, y: -where.y, z: -where.z },
+        lights: [light({
+            Type: D3DLIGHT.SPOT,
+            Diffuse: WHITE,
+            Position: { x: 0, y: 0, z: 0 },
+            Direction: { x: 0, y: 0, z: 1 },
+            Range: 100,
+            Theta: Math.PI / 2,
+            Phi: (2 * Math.PI) / 3,
+            ...over,
+        })],
+        sources: { diffuse: WHITE, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    })).diffuse.r;
+
+    // Straight down the axis, with the normal facing the light, so the whole
+    // answer is the cone factor.
+    assert.equal(cone({}, { x: 0, y: 0, z: 1 }), 1);
+    // Ninety degrees off an axis whose outer half-angle is sixty is outside the
+    // cone, and outside is nothing rather than a small remainder.
+    assert.equal(cone({}, { x: 1, y: 0, z: 0 }), 0);
+});
+
+test('lighting: between the cones a spotlight falls off by its exponent', ()=>{
+    // Forty-five degrees off the axis of a cone that is full to zero degrees
+    // and dark past sixty, so the factor is (cos 45 - cos 60) / (1 - cos 60).
+    /** @param {number} falloff */
+    const between = falloff=>lightVertex(lit({
+        position: { x: 1, y: 0, z: 1 },
+        normal: { x: -1, y: 0, z: -1 },
+        lights: [light({
+            Type: D3DLIGHT.SPOT,
+            Diffuse: WHITE,
+            Position: { x: 0, y: 0, z: 0 },
+            Direction: { x: 0, y: 0, z: 1 },
+            Range: 100,
+            Theta: 0,
+            Phi: (2 * Math.PI) / 3,
+            Falloff: falloff,
+        })],
+        sources: { diffuse: WHITE, ambient: BLACK, specular: BLACK, emissive: BLACK },
+    })).diffuse.r;
+
+    // (cos 45 - cos 60) / (1 - cos 60), which is root two minus one, to the
+    // precision the cosines are computed at.
+    const linear = between(1);
+    assert.equal(linear, 0.4142135623730947);
+    // That value squared: the falloff is an exponent, not a scale, which a
+    // doubled or halved factor would also fit.
+    assert.equal(between(2), 0.17157287525380968);
+});
+
+test('lighting: the specular term is a separate colour, and off unless it is enabled', ()=>{
+    const head = {
+        normal: { x: 0, y: 0, z: -1 },
+        eye: { x: 0, y: 0, z: -5 },
+        lights: [light({ Specular: { r: 1, g: 1, b: 0.5, a: 1 } })],
+        sources: {
+            diffuse: BLACK, ambient: BLACK, emissive: BLACK,
+            specular: { r: 0.5, g: 0.25, b: 1, a: 1 },
+        },
+        power: 8,
+    };
+    // Light, eye and normal all on one axis: the half vector is the normal, so
+    // the highlight is one whatever the power.
+    const on = lightVertex(lit({ ...head, specular: true }));
+    assert.deepEqual(on.specular, { r: 0.5, g: 0.25, b: 0.5, a: 0 });
+    assert.deepEqual(on.diffuse, { r: 0, g: 0, b: 0, a: 0 },
+        'and none of it is mixed into the diffuse colour');
+
+    const off = lightVertex(lit(head));
+    assert.deepEqual(off.specular, { r: 0, g: 0, b: 0, a: 0 });
+});
+
+test('lighting: the specular power is the exponent on the half-angle cosine', ()=>{
+    /** @param {number} power */
+    const highlight = power=>lightVertex(lit({
+        // The eye is off the axis, so the half vector is not the normal and
+        // the cosine is worth raising to a power.
+        normal: { x: 0, y: 0, z: -1 },
+        eye: { x: 1, y: 0, z: -1 },
+        lights: [light({ Specular: WHITE })],
+        sources: {
+            diffuse: BLACK, ambient: BLACK, emissive: BLACK, specular: WHITE,
+        },
+        power,
+        specular: true,
+    })).specular.r;
+
+    // The eye is forty-five degrees off the normal, so the half vector is
+    // twenty-two and a half degrees off it and the cosine is cos 22.5.
+    assert.equal(highlight(1), 0.9238795325112867);
+    assert.equal(highlight(2), 0.8535533905932737, 'that value squared');
+    assert.equal(highlight(0), 1, 'a power of zero is a highlight everywhere, as the formula says');
 });

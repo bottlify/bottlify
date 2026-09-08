@@ -30,6 +30,12 @@ export const GL = Object.freeze({
     STACK_UNDERFLOW: 0x0504,
     OUT_OF_MEMORY: 0x0505,
 
+    // --- the buffers glClear names ---
+    DEPTH_BUFFER_BIT: 0x00000100,
+    ACCUM_BUFFER_BIT: 0x00000200,
+    STENCIL_BUFFER_BIT: 0x00000400,
+    COLOR_BUFFER_BIT: 0x00004000,
+
     // --- primitives ---
     POINTS: 0x0000,
     LINES: 0x0001,

@@ -18,10 +18,12 @@
  * rather than through here, which is why this file is short and `d3d8.js` is
  * not.
  *
- * OpenGL has no COM at all -- its entry points are flat C functions -- so its
- * table is built from the context object directly rather than declared.
+ * OpenGL has no COM at all -- its entry points are flat C functions, several
+ * hundred of them -- so its table is built from the argument-size list that
+ * `opengl/exports.js` keeps rather than written out here.
  */
 
+import { ARGUMENT_WORDS } from '../opengl/exports.js';
 import { createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
@@ -58,7 +60,13 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Guest memory for what a callback is shown.
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.
- * @returns {{ libraries: Record<string, Record<string, any>>, diagnostics: () => any }}
+ * @returns {{ libraries: Record<string, Record<string, any>>,
+ *             opengl: { pixelFormat: { size: () => number, count: () => number,
+ *                                      choose: (bytes: Uint8Array) => number,
+ *                                      describe: (index: number, bytes: number) =>
+ *                                          Uint8Array | null },
+ *                       swapBuffers: (hdc: number) => boolean },
+ *             diagnostics: () => any }}
  */
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
@@ -106,7 +114,44 @@ export function createGraphicsLibraries(
         return DD_OK;
     };
 
+    /**
+     * OPENGL32's table, forwarding into a runtime that is not built until a
+     * program calls one of these.
+     *
+     * Every export is bound, including the ones nothing implements yet: these
+     * are stdcall, so an unbound name gets a stub that cleans the wrong number
+     * of bytes off the caller's stack and the program dies far from the call.
+     * The sizes come from `ARGUMENT_WORDS`, which is the one place they are
+     * written down.
+     */
+    /** @type {any} */
+    let opengl = null;
+    const openglRuntime = ()=>{
+        if (!opengl)
+        {
+            opengl = graphics.create('opengl', { scratch, present });
+            created.push('opengl');
+        }
+        return opengl;
+    };
+
+    /** @type {Record<string, any>} */
+    const openglTable = {};
+    for (const [words, names] of Object.entries(ARGUMENT_WORDS))
+    {
+        for (const name of names)
+        {
+            openglTable[name] = {
+                argBytes: Number(words) * 4,
+                /** @param {number[]} args */
+                handler: args=>openglRuntime().table[name].handler(args),
+            };
+        }
+    }
+
     const libraries = {
+        'OPENGL32.dll': openglTable,
+
         'D3D8.dll': {
             /**
              * IDirect3D8* Direct3DCreate8(UINT SDKVersion)
@@ -226,69 +271,31 @@ export function createGraphicsLibraries(
 
     return {
         libraries,
+
+        /**
+         * The half of OpenGL that gdi32 owns the entry points for.
+         *
+         * Through the same memoised runtime the OPENGL32 table uses: on Windows
+         * choosing a format through GDI and creating a context through WGL is
+         * one negotiation, and a second runtime here would give a program a
+         * format from one list and a context from another.
+         */
+        opengl: {
+            pixelFormat: {
+                size: ()=>openglRuntime().pixelFormat.size(),
+                count: ()=>openglRuntime().pixelFormat.count(),
+                /** @param {Uint8Array} bytes */
+                choose: bytes=>openglRuntime().pixelFormat.choose(bytes),
+                /** @param {number} index @param {number} bytes */
+                describe: (index, bytes)=>openglRuntime().pixelFormat.describe(index, bytes),
+            },
+            /** @param {number} hdc */
+            swapBuffers: hdc=>openglRuntime().swapBuffers(hdc),
+        },
+
         diagnostics: ()=>({
             created: [...created],
             interfaces: publisher.count(),
         }),
     };
-}
-
-/**
- * OpenGL's table, built from the objects that implement it.
- *
- * These are flat C functions taking dwords, so the table is derived rather than
- * transcribed: a method's declared parameter count is its argument count, and
- * four bytes each. That derivation is sound only while every argument is one
- * word wide, which is true of the functions here and is asserted beside this
- * file -- a double-precision entry point would take two words and break it
- * silently, in the way a wrong argBytes always does.
- *
- * @param {Object} sources
- * @param {any} sources.wgl      createWgl's object.
- * @param {any} sources.context  createGlContext's object, or null before one exists.
- * @returns {Record<string, any>}
- */
-export function createOpenglTable({ wgl, context }){
-    /** @type {Record<string, any>} */
-    const table = {};
-
-    /** @param {any} owner @param {string} name */
-    const add = (owner, name)=>{
-        const fn = owner[name];
-        if (typeof fn !== 'function')
-        {
-            return;
-        }
-        table[name] = {
-            argBytes: fn.length * 4,
-            /** @param {number[]} args */
-            handler: args=>{
-                const answer = fn.apply(owner, args);
-                // A GL function that answers nothing answers zero: the guest
-                // reads EAX either way, and leaving it as whatever the last
-                // call left there is a value a program may believe.
-                return typeof answer === 'number' ? answer | 0 : Number(answer ?? 0) | 0;
-            },
-        };
-    };
-
-    for (const name of Object.keys(wgl ?? {}))
-    {
-        // Only the exported spellings: the object also carries helpers, and a
-        // helper in an export table is a name a program could import and reach
-        // something that was never meant to be an entry point.
-        const exported = /^(Choose|Describe|Get|Set)PixelFormat$|^SwapBuffers$/;
-        if (name.startsWith('wgl') || exported.test(name))
-        {
-            add(wgl, name);
-        }
-    }
-    for (const name of Object.keys(context ?? {}))
-    {
-        if (name.startsWith('gl'))
-        {
-            add(context, name);
-        }
-    }
-    return table;
 }

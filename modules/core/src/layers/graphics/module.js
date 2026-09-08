@@ -9,6 +9,7 @@ import { createDirectDraw } from './ddraw/objects.js';
 import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { createGraphicsLibraries } from './seam/exports.js';
+import { createOpengl } from './opengl/exports.js';
 import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 
@@ -103,8 +104,30 @@ export const graphicsModule = {
                 // back exactly what it wrote.
                 allocate: config?.allocate,
             }),
+            // The same wiring, except that the backend is asked for only when
+            // this build has a GPU: a Direct3D 9 object made in a headless
+            // assembly still answers everything a program can ask about state,
+            // which is what "degraded, not broken" means for this layer.
             /** @returns {any} */
-            d3d9: (/** @type {any} */ caps)=>createDirect3D9(caps),
+            d3d9: (/** @type {any} */ caps)=>createDirect3D9({
+                ...caps,
+                backend: device ? api.backend() : undefined,
+                readMemory: services.readMemory,
+                createSampler: device
+                    ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
+                    : undefined,
+                allocate: config?.allocate,
+            }),
+            // OpenGL draws on the processor and asks for no device at all, so
+            // it is the one API here that a headless build can run to a
+            // finished frame.
+            /** @returns {any} */
+            opengl: (/** @type {any} */ options)=>createOpengl({
+                readMemory: services.readMemory,
+                writeMemory: services.writeMemory,
+                screen: ()=>services.screen,
+                ...options,
+            }),
         };
 
         /**
@@ -252,6 +275,13 @@ export const graphicsModule = {
              * the loader; nothing here needs a special case.
              */
             libraries: ()=>seam.libraries,
+
+            /**
+             * The pixel-format negotiation and frame presentation whose entry
+             * points GDI32 exports. win32 sits below this layer and cannot
+             * reach it, so the assembling caller hands this down.
+             */
+            opengl: ()=>seam.opengl,
         };
     },
 

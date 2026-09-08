@@ -80,6 +80,10 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  * @property {any} [pixelFormat]
  *           The pixel-format service: `choose(descriptor)`, `describe(index)`
  *           and `count()`. Absent in a build with no rendering surface.
+ * @property {(hdc: number) => boolean} [swapBuffers]
+ *           Presents the frame an OpenGL context drew into a device context.
+ *           Absent in a build that cannot draw, where SwapBuffers fails rather
+ *           than presenting nothing.
  */
 
 /** An empty rectangle, which is what a region with no extent is. */
@@ -900,6 +904,28 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 }
                 dc.pixelFormat = wanted;
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL SwapBuffers(HDC hdc)
+         *
+         * GDI's spelling of wglSwapBuffers, and the one most programs call --
+         * it is the end of every frame an OpenGL program draws. Missing from
+         * this table it would reach the unimplemented-import stub, which cleans
+         * up no arguments, so the caller would return with its stack four bytes
+         * adrift once per frame and die a long way from anything that explains
+         * it.
+         */
+        SwapBuffers: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                if (!dcOf(handle) || !services.swapBuffers)
+                {
+                    return 0;
+                }
+                return services.swapBuffers(handle >>> 0) ? 1 : 0;
             },
         },
     };

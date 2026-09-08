@@ -10,6 +10,7 @@ import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
     D3DRS, D3DSWAPEFFECT, D3DZB, D3D_OK, dwordToFloat, floatToDword,
 } from './constants.js';
+import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
 import { DEVICE_STATE, LIGHT_ENABLED, createDirect3D9 } from './device.js';
 
@@ -456,8 +457,9 @@ test('binding a resource never changes its count', ()=>{
 
     assert.equal(device.CreateTexture(32, 32, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, texture),
         D3D_OK);
-    assert.equal(device.CreateVertexBuffer(512, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
-    assert.equal(device.CreateIndexBuffer(512, 0, D3DPOOL.DEFAULT, indices), D3D_OK);
+    assert.equal(device.CreateVertexBuffer(512, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+    assert.equal(device.CreateIndexBuffer(512, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indices),
+        D3D_OK);
 
     assert.equal(device.SetTexture(0, texture.texture), D3D_OK);
     assert.equal(texture.texture.refCount, 1, 'binding is not owning');
@@ -487,7 +489,7 @@ test('an unbound stream keeps the stride and offset of the previous binding', ()
     /** @type {{ buffer?: any, offset?: number, stride?: number }} */
     const out = {};
 
-    assert.equal(device.CreateVertexBuffer(512, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
+    assert.equal(device.CreateVertexBuffer(512, 0, 0, D3DPOOL.DEFAULT, vertices), D3D_OK);
     assert.equal(device.SetStreamSource(0, vertices.buffer, 4, 32), D3D_OK);
     assert.equal(device.SetStreamSource(0, null, 0, 0), D3D_OK);
 

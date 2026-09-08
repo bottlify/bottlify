@@ -27,13 +27,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DLOCK, D3DPOOL, D3DPT, D3DRS,
-    D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3D_OK,
+    D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DMCS, D3DPOOL,
+    D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3D_OK,
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import {
-    IDENTITY, colorToFloats, expandTexels, listIndices, multiplyMatrices, transformPosition,
-    vertexCountOf,
+    IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
+    listIndices, multiplyMatrices, packLight, pipelineStateOf, transformPosition, vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
@@ -239,7 +239,7 @@ function rasterise(h, width, height){
             blend: blendOf(state),
             alphaTest: state.alphaTest,
             alphaFunc: state.alphaFunc,
-            alphaRef: Math.round(command.uniforms[32] * 255),
+            alphaRef: Math.round(command.uniforms[UNIFORM_AT.alphaRef] * 255),
         });
     }
     return surface;
@@ -479,7 +479,11 @@ test('byte-exact: known matrices in, known transformed positions out', async()=>
 
     const draw = h.device.diagnostics().lastFrame.find((/** @type {any} */ c)=>c.kind === 'draw');
     assert.deepEqual([...draw.uniforms.subarray(0, 16)], [...combined]);
-    assert.deepEqual([...draw.uniforms.subarray(16, 20)], [-1, -2, 2 / 2, -2 / 1],
+    assert.deepEqual([...draw.uniforms.subarray(UNIFORM_AT.world, UNIFORM_AT.world + 16)],
+        [...world], 'and the world matrix on its own, which is what lighting needs');
+    assert.deepEqual(
+        [...draw.uniforms.subarray(UNIFORM_AT.viewportOffset, UNIFORM_AT.viewportScale + 2)],
+        [-1, -2, 2 / 2, -2 / 1],
         'the inverse offset and extent, so that a pixel-space vertex lands where it says');
     const block = h.gpu.of('writeBuffer').find((/** @type {any} */ call)=>
         call.buffer.descriptor.label.startsWith('uniforms'));
@@ -504,7 +508,41 @@ test('byte-exact: sixteen-bit texels expand to eight with the top bits replicate
     assert.deepEqual([...expandTexels(D3DFMT.X8R8G8B8, Uint8Array.from([1, 2, 3, 4]), 1)],
         [1, 2, 3, 255], 'an X8 texel has no alpha to sample, whatever the byte held');
     assert.deepEqual([...expandTexels(D3DFMT.A8, Uint8Array.from([9]), 1)], [0, 0, 0, 9]);
+
+    // Four bits a channel, which is what a soft glyph edge is drawn with: each
+    // nibble is doubled into a byte, so the top value reaches 255 rather than
+    // 240. 0x1234 is alpha 1, red 2, green 3, blue 4.
+    assert.deepEqual([...expandTexels(D3DFMT.A4R4G4B4, Uint8Array.from([0x34, 0x12]), 1)],
+        [0x44, 0x33, 0x22, 0x11]);
+    assert.deepEqual([...expandTexels(D3DFMT.A4R4G4B4, Uint8Array.from([0xff, 0xff]), 1)],
+        [255, 255, 255, 255]);
+    assert.deepEqual([...expandTexels(D3DFMT.A4R4G4B4, Uint8Array.from([0x00, 0x80]), 1)],
+        [0, 0, 0, 0x88], 'the top nibble is alpha');
+    assert.deepEqual([...expandTexels(D3DFMT.X4R4G4B4, Uint8Array.from([0x34, 0x12]), 1)],
+        [0x44, 0x33, 0x22, 255], 'an X4 texel has no alpha to sample, whatever the nibble held');
+
     assert.throws(()=>expandTexels(D3DFMT.A2R10G10B10, new Uint8Array(4), 1), /cannot be uploaded/);
+});
+
+test('a texture with four bits of alpha is created rather than refused', ()=>{
+    // Refusing this format takes out every soft-edged glyph a program draws,
+    // and what is left is a scene with no text in it.
+    const { device } = harness();
+    for (const format of [D3DFMT.A4R4G4B4, D3DFMT.X4R4G4B4])
+    {
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK,
+            `format ${format.toString(16)} is one this engine can hold`);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        out.texture.GetSurfaceLevel(0, level);
+        /** @type {{ desc?: any }} */
+        const desc = {};
+        level.surface.GetDesc(desc);
+        assert.equal(desc.desc.Format, format, 'and it is stored as the format it was asked for');
+        level.surface.release();
+    }
 });
 
 test('byte-exact: strips and fans expand to the lists they draw, winding kept', ()=>{
@@ -1009,4 +1047,197 @@ test('recorded: a textured draw without a sampler factory fails loudly, not whit
     assert.throws(()=>device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
         /sampler factory/);
     assert.throws(()=>createDirect3D8({ backend }), /readMemory/);
+});
+
+// --- transform and lighting ---
+
+/** @param {object} over @returns {any} a D3DLIGHT8 with every field written */
+const light8 = (over = {})=>({
+    Type: D3DLIGHTTYPE.DIRECTIONAL,
+    Diffuse: { r: 1, g: 0.5, b: 0.25, a: 1 },
+    Specular: { r: 0.5, g: 0.25, b: 0.125, a: 1 },
+    Ambient: { r: 0.125, g: 0.0625, b: 0.03125, a: 1 },
+    Position: { x: 1, y: 2, z: 3 },
+    Direction: { x: 0, y: 0, z: 2 },
+    Range: 50,
+    Falloff: 1.5,
+    Attenuation0: 0.25,
+    Attenuation1: 0.5,
+    Attenuation2: 0.75,
+    Theta: 0,
+    Phi: Math.PI,
+    ...over,
+});
+
+/** @returns {any} a material with a different value in every field */
+const material8 = ()=>({
+    Diffuse: { r: 1, g: 0.5, b: 0.25, a: 0.125 },
+    Ambient: { r: 0.0625, g: 0.125, b: 0.25, a: 0.5 },
+    Specular: { r: 0.75, g: 0.5, b: 0.25, a: 1 },
+    Emissive: { r: 0.5, g: 0.25, b: 0.75, a: 0 },
+    Power: 16,
+});
+
+/** A vertex of the lit format: position, normal, D3DCOLOR. @param {number[]} at */
+const litVertexBytes = at=>{
+    const bytes = new DataView(new ArrayBuffer(28));
+    [at[0], at[1], at[2], 0, 0, -1].forEach((value, index)=>
+        bytes.setFloat32(index * 4, value, true));
+    bytes.setUint32(24, 0xffffffff, true);
+    return new Uint8Array(bytes.buffer);
+};
+
+test('the camera is the point the view matrix sends to the origin', ()=>{
+    // Lighting happens in world space, and the specular half vector needs the
+    // camera there -- which no matrix holds directly.
+    const turned = [0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 2, 3, 1];
+    assert.deepEqual(eyePosition(turned), [3, -2, -1]);
+    assert.deepEqual(eyePosition(IDENTITY), [0, 0, 0], 'an identity view looks from the origin');
+
+    // A view matrix with scale in it is where the transpose stops being the
+    // inverse: this one would put the camera at four times the distance.
+    const scaled = [2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0, 0, 0, -10, 1];
+    assert.deepEqual(eyePosition(scaled), [0, 0, 5]);
+
+    // A view matrix that collapses a dimension has no camera position at all,
+    // and inventing one is better than a block full of infinities.
+    assert.deepEqual(eyePosition(new Array(16).fill(0)), [0, 0, 0]);
+});
+
+test('a light is packed into the rows the shader declares', ()=>{
+    // Every row is read by offset. A field one row out is read as a different
+    // one, and every one of them is a plausible number.
+    const block = new Float32Array(LIGHT_FLOATS);
+    packLight(block, 0, light8({ Type: D3DLIGHTTYPE.SPOT, Theta: 0, Phi: (2 * Math.PI) / 3 }));
+
+    assert.deepEqual([...block.subarray(0, 4)], [1, 0.5, 0.25, 1], 'diffuse');
+    assert.deepEqual([...block.subarray(4, 8)], [0.5, 0.25, 0.125, 1], 'specular');
+    assert.deepEqual([...block.subarray(8, 12)], [0.125, 0.0625, 0.03125, 1], 'ambient');
+    assert.deepEqual([...block.subarray(12, 16)], [1, 2, 3, 50], 'position, and the range with it');
+    assert.deepEqual([...block.subarray(16, 20)], [0, 0, 1, 0],
+        'the direction arrives unnormalised and is normalised once, here');
+    assert.deepEqual([...block.subarray(20, 24)], [0.25, 0.5, 0.75, 0], 'the three coefficients');
+    // The cosines of the half-angles, not the angles: the shader compares them
+    // against a dot product, and the conversion belongs where it happens once.
+    assert.equal(block[24], 1, 'cos of half of theta, which is zero');
+    assert.equal(block[25], 0.5, 'cos of half of phi, which is sixty degrees');
+    assert.equal(block[26], 1.5, 'the falloff exponent');
+
+    // A direction of no length would normalise to a not-a-number, which would
+    // erase every triangle it touched rather than lighting none of them.
+    const degenerate = new Float32Array(LIGHT_FLOATS);
+    packLight(degenerate, 0, light8({ Direction: { x: 0, y: 0, z: 0 } }));
+    assert.deepEqual([...degenerate.subarray(16, 20)], [0, 0, 0, 0]);
+});
+
+test('recorded: a lit draw carries its lights, its material and the scene ambient', async()=>{
+    // The defect this pins is that all of this reached the device and stopped
+    // there: the program set sixteen lights and a material, and the draw was
+    // recorded without any of it.
+    const h = harness();
+    const { device } = h;
+    assert.equal(device.SetRenderState(D3DRS.LIGHTING, 1), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.AMBIENT, 0x00204060), D3D_OK);
+    assert.equal(device.SetMaterial(material8()), D3D_OK);
+    assert.equal(device.SetLight(2, light8({ Type: D3DLIGHTTYPE.POINT })), D3D_OK);
+    assert.equal(device.LightEnable(2, true), D3D_OK);
+    // Enabled after a higher index, to show the order is the index order.
+    assert.equal(device.SetLight(1, light8()), D3D_OK);
+    assert.equal(device.LightEnable(1, true), D3D_OK);
+    // Set but never enabled: not part of the equation and not in the shader.
+    assert.equal(device.SetLight(5, light8({ Type: D3DLIGHTTYPE.SPOT })), D3D_OK);
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE), D3D_OK);
+    const vertices = new Uint8Array(28 * 3);
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0]].forEach((at, index)=>
+        vertices.set(litVertexBytes(at), index * 28));
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, vertices, 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const draw = h.device.diagnostics().lastFrame.find((/** @type {any} */ c)=>c.kind === 'draw');
+    assert.deepEqual(draw.state.lighting, {
+        lights: [D3DLIGHTTYPE.DIRECTIONAL, D3DLIGHTTYPE.POINT],
+        colorVertex: true,
+        diffuseSource: D3DMCS.COLOR1,
+        ambientSource: D3DMCS.MATERIAL,
+        specularSource: D3DMCS.COLOR2,
+        emissiveSource: D3DMCS.MATERIAL,
+    }, 'the enabled lights in index order, and the default material sources');
+
+    assert.equal(draw.uniforms.length, UNIFORM_FLOATS + 2 * LIGHT_FLOATS,
+        'the block is exactly as long as the shader\'s array declaration');
+    assert.deepEqual([...draw.uniforms.subarray(
+        UNIFORM_AT.materialDiffuse, UNIFORM_AT.materialDiffuse + 4)], [1, 0.5, 0.25, 0.125]);
+    assert.deepEqual([...draw.uniforms.subarray(
+        UNIFORM_AT.materialEmissive, UNIFORM_AT.materialEmissive + 4)], [0.5, 0.25, 0.75, 0]);
+    assert.deepEqual([...draw.uniforms.subarray(UNIFORM_AT.ambient, UNIFORM_AT.ambient + 3)],
+        [0x20 / 255, 0x40 / 255, 0x60 / 255].map(Math.fround),
+        'D3DRS_AMBIENT is a D3DCOLOR, red first, in the block\'s own precision');
+    assert.equal(draw.uniforms[UNIFORM_AT.eye + 3], 16, 'the specular power rides with the eye');
+    // The second light is the point light, which is where its position matters.
+    const second = UNIFORM_AT.lights + LIGHT_FLOATS;
+    assert.deepEqual([...draw.uniforms.subarray(second + 12, second + 16)], [1, 2, 3, 50]);
+});
+
+test('recorded: lighting off, or no normal to light, leaves the vertex colour alone', async()=>{
+    /** @param {number} fvf @param {number} lighting */
+    const drawWith = async(fvf, lighting)=>{
+        const h = harness();
+        const { device } = h;
+        assert.equal(device.SetRenderState(D3DRS.LIGHTING, lighting), D3D_OK);
+        assert.equal(device.SetLight(0, light8()), D3D_OK);
+        assert.equal(device.LightEnable(0, true), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(fvf), D3D_OK);
+        const stride = decodeFvf(fvf).stride;
+        assert.equal(
+            device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(stride * 3), stride),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return h.device.diagnostics().lastFrame
+            .find((/** @type {any} */ c)=>c.kind === 'draw');
+    };
+
+    const lit = await drawWith(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE, 1);
+    assert.equal(lit.state.lighting.lights.length, 1);
+
+    const off = await drawWith(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE, 0);
+    assert.equal(off.state.lighting, null);
+    assert.equal(off.uniforms.length, UNIFORM_FLOATS,
+        'and no light is carried for a shader that declares none');
+
+    // Direct3D leaves a lit vertex with no normal undefined. Carrying its
+    // colour through is the reading that keeps such a draw looking as it did
+    // rather than turning it black.
+    const noNormal = await drawWith(FVF.XYZ | FVF.DIFFUSE, 1);
+    assert.equal(noNormal.state.lighting, null);
+
+    // A pre-transformed vertex is past the point where lighting happens.
+    const preTransformed = await drawWith(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    assert.equal(preTransformed.state.lighting, null);
+});
+
+test('a state with no lighting in its shape is unlit, and still reads the specular state', ()=>{
+    // The quad a partial clear draws is the colour it was given. Lighting it
+    // would multiply the clear colour by a material nobody set for it.
+    const model = /** @type {any} */ ({
+        renderStates: new Map([[D3DRS.LIGHTING, 1], [D3DRS.SPECULARENABLE, 1]]),
+        stageStates: ()=>new Map(),
+        textures: new Map(),
+        transforms: new Map(),
+        lights: new Map(),
+        material: material8(),
+    });
+    const state = pipelineStateOf(model, {
+        fvf: FVF.XYZRHW | FVF.DIFFUSE,
+        topology: 'triangle-list',
+        targetFormat: 'bgra8unorm',
+        depthFormat: undefined,
+        stages: [],
+    });
+    assert.equal(state.lighting, null, 'nothing asked for lighting, so there is none');
+    assert.equal(state.specularEnable, true, 'but the specular state is read from the device');
 });

@@ -118,6 +118,24 @@ function lookUp(table, value, what){
  */
 
 /**
+ * What transform-and-lighting the vertex stage runs, or null for a vertex that
+ * is used as it arrives.
+ *
+ * Only what changes the *shape* of the equation is here: how many lights there
+ * are and what kind each one is, and which colour each term is taken from. The
+ * light's own numbers -- its colour, its position, its attenuation -- are
+ * uniforms, because a light that moves must not compile a pipeline.
+ *
+ * @typedef {Object} LightingState
+ * @property {number[]} lights   D3DLIGHTTYPE of each enabled light, in index order.
+ * @property {boolean} colorVertex
+ * @property {number} diffuseSource   D3DMCS
+ * @property {number} ambientSource
+ * @property {number} specularSource
+ * @property {number} emissiveSource
+ */
+
+/**
  * Everything a pipeline depends on. Every field here is folded into the key.
  *
  * @typedef {Object} PipelineState
@@ -141,6 +159,8 @@ function lookUp(table, value, what){
  * @property {number} alphaFunc
  * @property {number} fogMode            D3DFOG; NONE is 0.
  * @property {StageKey[]} stages         Empty means no cascade at all.
+ * @property {boolean} [specularEnable]  D3DRS_SPECULARENABLE.
+ * @property {LightingState | null} [lighting]  Absent or null means unlit.
  */
 
 /**
@@ -190,7 +210,30 @@ export function pipelineKey(state){
         // prevented a collision, and a mutation showed it prevents none: with
         // the count removed every test still passed.
         `${state.stages.length}[${stages}]`,
+        state.specularEnable ? 1 : 0,
+        lightingKey(state.lighting),
     ].join('|');
+}
+
+/**
+ * The lighting half of a key.
+ *
+ * Unlit is one character rather than a list of defaults, so that the state
+ * every pre-transformed and every unlit draw shares folds to the same short
+ * key however the material sources happen to be set at the time.
+ *
+ * @param {LightingState | null | undefined} lighting
+ * @returns {string}
+ */
+function lightingKey(lighting){
+    if (!lighting)
+    {
+        return '-';
+    }
+    return `L${lighting.colorVertex ? 1 : 0}`
+        + `,${lighting.diffuseSource},${lighting.ambientSource}`
+        + `,${lighting.specularSource},${lighting.emissiveSource}`
+        + `[${lighting.lights.join(',')}]`;
 }
 
 /**

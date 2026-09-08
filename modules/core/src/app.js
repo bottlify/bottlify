@@ -892,6 +892,23 @@ export async function createApp(options){
             // ask rather than wait for a message. Handed down for the same
             // reason as the mixer: input is above win32 and cannot be reached
             // from it, and it does not exist yet when this is read.
+            // The pixel-format negotiation and the end of an OpenGL frame,
+            // whose entry points GDI32 exports but whose answers belong to the
+            // graphics layer above. Every call goes through a thunk for the
+            // reason the mixer does: graphics is created after win32.
+            graphics: {
+                pixelFormat: {
+                    size: ()=>core.api('graphics').opengl().pixelFormat.size(),
+                    count: ()=>core.api('graphics').opengl().pixelFormat.count(),
+                    /** @param {Uint8Array} bytes */
+                    choose: bytes=>core.api('graphics').opengl().pixelFormat.choose(bytes),
+                    /** @param {number} index @param {number} bytes */
+                    describe: (index, bytes)=>
+                        core.api('graphics').opengl().pixelFormat.describe(index, bytes),
+                },
+                /** @param {number} hdc */
+                swapBuffers: hdc=>core.api('graphics').opengl().swapBuffers(hdc),
+            },
             cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,

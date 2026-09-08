@@ -34,10 +34,12 @@
 
 import { GL } from './constants.js';
 import {
-    createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, translation,
+    createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, transform,
+    translation,
 } from './matrix.js';
 import { createShareGroup, createTextureObject, isTextureComplete } from './objects.js';
 import { createDefaultState, readState } from './state.js';
+import { createFramebuffer, fillBox, fillTriangle, toByte, wholeOf } from './raster.js';
 
 /** What this implementation answers glGetString with, absent a real backend. */
 const STRINGS = Object.freeze({
@@ -52,9 +54,14 @@ const STRINGS = Object.freeze({
  * why the rule has to be enforced rather than assumed.
  */
 const ALLOWED_IN_BEGIN = new Set([
-    'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glNormal3f',
-    'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag', 'glCallList', 'glEnd',
+    'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
+    'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
+    'glCallList', 'glEnd',
 ]);
+
+/** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
+const CLEAR_BITS = GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER_BIT
+    | GL.ACCUM_BUFFER_BIT;
 
 /**
  * The calls a display list never records. They are executed as they are
@@ -176,6 +183,8 @@ export function createGlContext(options = {}){
     /** The drawable's geometry, unknown until the context is first attached. */
     let attached = false;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
+    /** Nothing can be drawn before there is a drawable to draw into. */
+    let framebuffer = createFramebuffer(0, 0);
 
     /** @type {number} */
     let error = GL.NO_ERROR;
@@ -257,6 +266,10 @@ export function createGlContext(options = {}){
         get currentPrimitive(){
             return primitive;
         },
+        /** The colour buffer as it stands. BGRX, row zero at the top. */
+        get framebuffer(){
+            return framebuffer;
+        },
 
         /**
          * Binds the context to a drawable. The viewport and scissor box are
@@ -273,6 +286,7 @@ export function createGlContext(options = {}){
             }
             attached = true;
             state = createDefaultState(drawable);
+            framebuffer = createFramebuffer(drawable.width, drawable.height);
         },
 
         /**
@@ -444,6 +458,44 @@ export function createGlContext(options = {}){
                 return;
             }
             setState(GL.STENCIL_CLEAR_VALUE, [value | 0]);
+        },
+
+        /**
+         * Only the colour buffer is written: this context has no depth,
+         * stencil or accumulation storage yet, so naming those bits is
+         * accepted and does nothing. A bit outside the four is GL_INVALID_VALUE
+         * -- not GL_INVALID_ENUM, because the argument is a mask.
+         *
+         * @param {number} mask
+         */
+        glClear(mask){
+            if (!enter('glClear', [mask]))
+            {
+                return;
+            }
+            if ((mask & ~CLEAR_BITS) !== 0)
+            {
+                setError(GL.INVALID_VALUE);
+                return;
+            }
+            if ((mask & GL.COLOR_BUFFER_BIT) === 0)
+            {
+                return;
+            }
+            fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), scissorBox());
+        },
+
+        /**
+         * Nothing is deferred here, so both are already true when they are
+         * called. They stay entry points because a program calls them to make
+         * a frame appear and would otherwise reach a stub.
+         */
+        glFlush(){
+            enter('glFlush', []);
+        },
+
+        glFinish(){
+            enter('glFinish', []);
         },
 
         /** @param {number} source @param {number} destination */
@@ -1135,12 +1187,28 @@ export function createGlContext(options = {}){
                 return;
             }
             submitted.push(primitive);
+            draw(primitive);
             primitive = null;
+        },
+
+        /** @param {number} x @param {number} y */
+        glVertex2f(x, y){
+            context.glVertex4f(x, y, 0, 1);
         },
 
         /** @param {number} x @param {number} y @param {number} z */
         glVertex3f(x, y, z){
-            if (!enter('glVertex3f', [x, y, z]))
+            context.glVertex4f(x, y, z, 1);
+        },
+
+        /**
+         * @param {number} x
+         * @param {number} y
+         * @param {number} z
+         * @param {number} w
+         */
+        glVertex4f(x, y, z, w){
+            if (!enter('glVertex4f', [x, y, z, w]))
             {
                 return;
             }
@@ -1152,7 +1220,7 @@ export function createGlContext(options = {}){
                 return;
             }
             primitive.vertices.push({
-                position: [x, y, z, 1],
+                position: [x, y, z, w],
                 color: [...record(GL.CURRENT_COLOR).values],
                 normal: [...record(GL.CURRENT_NORMAL).values],
                 texCoord: [...record(GL.CURRENT_TEXTURE_COORDS).values],
@@ -1191,15 +1259,219 @@ export function createGlContext(options = {}){
             setState(GL.CURRENT_NORMAL, [x, y, z]);
         },
 
-        /** @param {number} s @param {number} t */
-        glTexCoord2f(s, t){
-            if (!enter('glTexCoord2f', [s, t]))
+        /**
+         * The byte-valued colour entry points, which take 0..255 where the
+         * float ones take 0..1. The state is kept normalised, so the mapping
+         * happens here rather than at every reader of GL_CURRENT_COLOR.
+         *
+         * @param {number} red @param {number} green @param {number} blue
+         */
+        glColor3ub(red, green, blue){
+            context.glColor4ub(red, green, blue, 255);
+        },
+
+        /**
+         * @param {number} red
+         * @param {number} green
+         * @param {number} blue
+         * @param {number} alpha
+         */
+        glColor4ub(red, green, blue, alpha){
+            if (!enter('glColor4ub', [red, green, blue, alpha]))
             {
                 return;
             }
-            setState(GL.CURRENT_TEXTURE_COORDS, [s, t, 0, 1]);
+            setState(GL.CURRENT_COLOR,
+                [red / 255, green / 255, blue / 255, alpha / 255]);
+        },
+
+        /** @param {number} s @param {number} t */
+        glTexCoord2f(s, t){
+            context.glTexCoord4f(s, t, 0, 1);
+        },
+
+        /** @param {number} s @param {number} t @param {number} r */
+        glTexCoord3f(s, t, r){
+            context.glTexCoord4f(s, t, r, 1);
+        },
+
+        /**
+         * @param {number} s
+         * @param {number} t
+         * @param {number} r
+         * @param {number} q
+         */
+        glTexCoord4f(s, t, r, q){
+            if (!enter('glTexCoord4f', [s, t, r, q]))
+            {
+                return;
+            }
+            setState(GL.CURRENT_TEXTURE_COORDS, [s, t, r, q]);
+        },
+
+        /**
+         * Recorded and otherwise ignored: an edge flag decides which edges of
+         * a polygon are drawn in GL_LINE polygon mode, and this rasteriser
+         * fills.
+         *
+         * @param {number} flag
+         */
+        glEdgeFlag(flag){
+            enter('glEdgeFlag', [flag]);
         },
     };
+
+    /**
+     * What the scissor test leaves of the framebuffer.
+     *
+     * @returns {import('./raster.js').Box}
+     */
+    function scissorBox(){
+        if (record(GL.SCISSOR_TEST).values[0] === 0)
+        {
+            return wholeOf(framebuffer);
+        }
+        // GL measures the box from the bottom-left corner of the drawable and
+        // the framebuffer's row zero is its top one, so the two y bounds swap
+        // as well as move.
+        const [x, y, width, height] = record(GL.SCISSOR_BOX).values;
+        return {
+            x0: x,
+            y0: framebuffer.height - (y + height),
+            x1: x + width,
+            y1: framebuffer.height - y,
+        };
+    }
+
+    /**
+     * Which vertices make which triangles, by index.
+     *
+     * ponytail: points and lines are collected and not drawn. They need a
+     * different rule from the one in `raster.js` -- a line has width and no
+     * area -- rather than a different set of indices.
+     *
+     * @param {number} mode
+     * @param {number} count
+     * @returns {number[][]}
+     */
+    function trianglesOf(mode, count){
+        /** @type {number[][]} */
+        const triangles = [];
+        if (mode === GL.TRIANGLES)
+        {
+            for (let i = 0; i + 2 < count; i += 3)
+            {
+                triangles.push([i, i + 1, i + 2]);
+            }
+        }
+        else if (mode === GL.TRIANGLE_STRIP)
+        {
+            for (let i = 0; i + 2 < count; i++)
+            {
+                // Every second triangle in a strip is wound the other way
+                // round, and two of its indices are swapped to put it back --
+                // otherwise a strip alternates facing and culling eats half
+                // of it.
+                triangles.push(i % 2 === 0 ? [i, i + 1, i + 2] : [i + 1, i, i + 2]);
+            }
+        }
+        else if (mode === GL.TRIANGLE_FAN || mode === GL.POLYGON)
+        {
+            for (let i = 1; i + 1 < count; i++)
+            {
+                triangles.push([0, i, i + 1]);
+            }
+        }
+        else if (mode === GL.QUADS)
+        {
+            for (let i = 0; i + 3 < count; i += 4)
+            {
+                triangles.push([i, i + 1, i + 2], [i, i + 2, i + 3]);
+            }
+        }
+        else if (mode === GL.QUAD_STRIP)
+        {
+            for (let i = 0; i + 3 < count; i += 2)
+            {
+                triangles.push([i, i + 1, i + 3], [i, i + 3, i + 2]);
+            }
+        }
+        return triangles;
+    }
+
+    /**
+     * @param {readonly import('./raster.js').RasterVertex[]} triangle
+     * @returns {boolean}
+     */
+    function culled(triangle){
+        if (record(GL.CULL_FACE).values[0] === 0)
+        {
+            return false;
+        }
+        const mode = record(GL.CULL_FACE_MODE).values[0];
+        if (mode === GL.FRONT_AND_BACK)
+        {
+            return true;
+        }
+        const [a, b, c] = triangle;
+        const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+        if (area === 0)
+        {
+            return true;
+        }
+        // Counter-clockwise in GL's window coordinates is clockwise in the
+        // framebuffer's, because y grows the other way.
+        const isFront = (record(GL.FRONT_FACE).values[0] === GL.CCW) === (area > 0);
+        return isFront === (mode === GL.FRONT);
+    }
+
+    /**
+     * A finished primitive, transformed and filled.
+     *
+     * The matrices are read once here rather than at each glVertex: they
+     * cannot change between a glBegin and a glEnd, so the two are equivalent
+     * and this one is a matrix product per primitive instead of per vertex.
+     *
+     * @param {{ mode: number, vertices: any[] }} assembled
+     */
+    function draw(assembled){
+        const [vx, vy, vw, vh] = record(GL.VIEWPORT).values;
+        const mvp = multiply(stacks.projection.current, stacks.modelview.current);
+        /** @type {(import('./raster.js').RasterVertex | null)[]} */
+        const points = assembled.vertices.map(vertex=>{
+            const clip = transform(mvp, vertex.position);
+            const w = clip[3];
+            if (w === 0)
+            {
+                // Nothing can be divided by it, and a vertex on the eye plane
+                // has no window position. The triangles using it are dropped.
+                return null;
+            }
+            return {
+                x: (clip[0] / w * 0.5 + 0.5) * vw + vx,
+                y: framebuffer.height - ((clip[1] / w * 0.5 + 0.5) * vh + vy),
+                colour: vertex.color.map(toByte),
+            };
+        });
+        const flat = record(GL.SHADE_MODEL).values[0] === GL.FLAT;
+        const box = scissorBox();
+        for (const [i, j, k] of trianglesOf(assembled.mode, points.length))
+        {
+            const a = points[i];
+            const b = points[j];
+            const c = points[k];
+            if (!a || !b || !c || culled([a, b, c]))
+            {
+                continue;
+            }
+            // Flat shading takes the colour of the triangle's last vertex,
+            // which is the provoking one for every mode here.
+            const triangle = flat
+                ? [a, b, c].map(point=>({ ...point, colour: c.colour }))
+                : [a, b, c];
+            fillTriangle(framebuffer, triangle, box);
+        }
+    }
 
     /** @returns {import('./matrix.js').MatrixStack} */
     function currentStack(){

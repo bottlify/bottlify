@@ -38,6 +38,19 @@ const baseState = ()=>({
     alphaFunc: 5,
     fogMode: 0,
     stages: [],
+    specularEnable: false,
+    lighting: null,
+});
+
+/** @param {object} over */
+const lighting = (over = {})=>({
+    lights: [3],
+    colorVertex: true,
+    diffuseSource: 1,
+    ambientSource: 0,
+    specularSource: 2,
+    emissiveSource: 0,
+    ...over,
 });
 
 const stage = (over = {})=>({
@@ -73,6 +86,7 @@ test('every field the descriptor reads is a field the key folds', ()=>{
         alphaTest: true,
         alphaFunc: 8,
         fogMode: 3,
+        specularEnable: true,
     };
 
     const original = pipelineKey(base);
@@ -88,7 +102,7 @@ test('the same state gives the same key, every time', ()=>{
     // Exact, because a key is compared by value and a diagnostic prints it.
     assert.equal(
         pipelineKey(baseState()),
-        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0|0[]',
+        '322|0|0|bgra8unorm|depth24plus|1|triangle-list|1|1|4|3|0|5|6|1|15|0|5|0|0[]|0|-',
     );
 });
 
@@ -106,6 +120,34 @@ test('a stage list is folded stage by stage, and its length is part of the key',
     assert.notEqual(one, sameFirst, 'a second stage is not the same as one stage');
     assert.notEqual(sameFirst, differentSecond, 'stage one\'s operation is folded');
     assert.notEqual(sameFirst, differentCoords, 'stage one\'s coordinate index is folded');
+});
+
+test('every part of the lighting state that shapes the shader is folded', ()=>{
+    // The vertex stage is unrolled per light, so two draws that differ in how
+    // many lights they have, or in what kind one of them is, need different
+    // pipelines. Sharing one would light the second draw with the first one's
+    // equation -- and the picture that produces is plausible, not broken.
+    const base = baseState();
+    const original = pipelineKey({ ...base, lighting: lighting() });
+
+    assert.notEqual(pipelineKey(base), original, 'lit and unlit are different keys');
+    for (const over of [
+        { lights: [] },
+        { lights: [1] },
+        { lights: [3, 3] },
+        { colorVertex: false },
+        { diffuseSource: 0 },
+        { ambientSource: 1 },
+        { specularSource: 0 },
+        { emissiveSource: 2 },
+    ])
+    {
+        assert.notEqual(pipelineKey({ ...base, lighting: lighting(over) }), original,
+            `${Object.keys(over)[0]} left the key alone`);
+    }
+    // A light's own numbers are uniforms, so a light that only moved must not
+    // build a second pipeline.
+    assert.equal(pipelineKey({ ...base, lighting: lighting() }), original);
 });
 
 test('no stages and one default stage are different keys', ()=>{

@@ -31,14 +31,22 @@
  * Streams and datagrams live in separate address spaces. They really do share
  * port numbers independently, and a discovery datagram arriving in a stream is
  * both wrong and a way for one protocol to corrupt the other.
+ *
+ * Reaching anything outside this runtime goes through the transport contract in
+ * transport.js. The routing rule is one line -- an address this runtime holds is
+ * served here, anything else is the transport's -- and it is what keeps a
+ * single-tab run free of every cost of being networked. Everything a transport
+ * delivers is appended to the same queues local delivery uses, so the calls
+ * above cannot tell the two apart and do not try.
  */
 
 import {
-    INADDR_ANY, INADDR_LOOPBACK, SD_BOTH, SD_RECEIVE, SD_SEND, SOCK_DGRAM, SOCK_STREAM,
+    INADDR_ANY, SD_BOTH, SD_RECEIVE, SD_SEND, SOCK_DGRAM, SOCK_STREAM,
     SO_ERROR, WSAEADDRINUSE, WSAECONNREFUSED, WSAECONNRESET, WSAEINVAL, WSAEISCONN,
     WSAENOTCONN, WSAENOTSOCK, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
 } from './constants.js';
 import { addressKey } from './sockaddr.js';
+import { TRANSPORT_LOST, asNetwork } from './transport.js';
 
 /** Where an unbound socket's port comes from. The range Windows uses. */
 const EPHEMERAL_FIRST = 49152;
@@ -52,13 +60,19 @@ const count = (/** @type {number} */ value)=>({ value });
 
 /**
  * @param {Object} deps
- * @param {import('./loopback.js').Adapter} deps.adapter
+ * @param {import('./loopback.js').Adapter
+ *         | import('./transport.js').NetworkTransport} [deps.adapter]
  * @returns {any}
  */
-export function createSocketRegistry({ adapter }){
+export function createSocketRegistry({ adapter: supplied } = {}){
+    const { adapter, transport } = asNetwork(supplied);
+
     /** @type {Map<number, any>} */
     const sockets = new Map();
+    /** Remote streams by the id this runtime gave them. */
+    const streams = new Map();
     let nextHandle = 1;
+    let nextStream = 1;
     let nextPort = EPHEMERAL_FIRST;
 
     /**
@@ -81,16 +95,37 @@ export function createSocketRegistry({ adapter }){
     const isStream = socket=>socket.type === SOCK_STREAM;
 
     /**
-     * One host, so binding to "any interface" and binding to the loopback
-     * address name the same place. Normalising here rather than at each call
-     * site is what stops a server on 0.0.0.0 being unreachable at 127.0.0.1.
+     * The one address this runtime answers to. Offline that is the loopback;
+     * with a transport it is whatever the network gave us, so a guest that
+     * publishes its own address publishes one a peer can reach.
+     */
+    const self = ()=>transport.localAddress() >>> 0;
+
+    /**
+     * Every way of naming this machine. The whole of 127/8 is the loopback and
+     * programs do use more of it than 127.0.0.1; "any interface" is this one,
+     * there being only one; and the address the transport gave us is us too.
+     *
+     * @param {number} host
+     */
+    const isSelf = host=>host === INADDR_ANY || (host >>> 24) === 127 || host === self();
+
+    /**
+     * One host, so every name for this machine binds and resolves to the same
+     * place. Collapsing them here rather than at each call site is what stops a
+     * server on 0.0.0.0 being unreachable at 127.0.0.1 -- and, once there is a
+     * transport, what stops a peer's view of us and our own view of us being two
+     * different address keys holding two different sockets.
      *
      * @param {{ host: number, port: number }} address
      */
     const normalise = address=>({
-        host: address.host === INADDR_ANY ? INADDR_LOOPBACK : address.host >>> 0,
+        host: isSelf(address.host) ? self() : address.host >>> 0,
         port: address.port & 0xffff,
     });
+
+    /** Whether this runtime serves that address itself. Normalised addresses only. */
+    const mine = (/** @type {{ host: number }} */ address)=>address.host === self();
 
     /** @param {any} socket */
     const claimPort = socket=>{
@@ -98,11 +133,17 @@ export function createSocketRegistry({ adapter }){
         {
             const port = nextPort;
             nextPort = nextPort >= EPHEMERAL_LAST ? EPHEMERAL_FIRST : nextPort + 1;
-            const address = { host: INADDR_LOOPBACK, port };
+            const address = { host: self(), port };
             if (adapter.bind(addressKey(isStream(socket), address), socket))
             {
                 socket.local = address;
                 socket.bound = true;
+                // A datagram socket that never called bind still has to hear the
+                // answer to what it sent, so its borrowed port is announced too.
+                if (!isStream(socket))
+                {
+                    transport.listen(false, port);
+                }
                 return true;
             }
         }
@@ -178,6 +219,61 @@ export function createSocketRegistry({ adapter }){
         wake(peer);
     };
 
+    /** Detaches a remote stream, so nothing arriving later finds this socket. */
+    const forget = (/** @type {any} */ socket)=>{
+        if (socket.stream !== null)
+        {
+            streams.delete(socket.stream);
+            socket.stream = null;
+        }
+    };
+
+    /**
+     * Opens a stream to somewhere outside this runtime.
+     *
+     * The id is allocated and registered before the dial is asked for, because
+     * a transport is free to deliver bytes on it the instant it answers -- and
+     * with a relay it will, the accept and the peer's first send arriving in one
+     * batch. Registering afterwards drops those.
+     *
+     * @param {any} socket @param {{ host: number, port: number }} wanted
+     */
+    const dial = (socket, wanted)=>{
+        if (!socket.bound && !claimPort(socket))
+        {
+            return failure(WSAEADDRINUSE);
+        }
+        const streamId = nextStream++;
+        socket.stream = streamId;
+        streams.set(streamId, socket);
+        return transport.connect(streamId, wanted).then((/** @type {any} */ opened)=>{
+            if (socket.closed)
+            {
+                forget(socket);
+                transport.disconnect(streamId, false);
+                return failure(WSAENOTSOCK);
+            }
+            if (opened.error)
+            {
+                forget(socket);
+                // Recorded as well as returned: a non-blocking connect learns
+                // why from getsockopt(SO_ERROR) and never sees this value.
+                socket.error = opened.error;
+                return failure(opened.error);
+            }
+            socket.remote = wanted;
+            socket.connected = true;
+            if (opened.local)
+            {
+                socket.local = opened.local;
+            }
+            // Anything the transport delivered while the dial was in flight is
+            // already queued, and a reader parked before it landed is waiting.
+            wake(socket);
+            return count(0);
+        });
+    };
+
     const api = {
         /** @param {number} handle */
         get(handle){
@@ -209,6 +305,10 @@ export function createSocketRegistry({ adapter }){
                 finished: false,
                 nonBlocking: false,
                 peer: null,
+                // The transport's name for this connection, when the other end
+                // is not in this runtime. Exactly one of `peer` and `stream` is
+                // ever set: a socket is local or it is remote, never both.
+                stream: null,
                 /** @type {any[]} */
                 rx: [],
                 /** @type {any[]} */
@@ -241,6 +341,13 @@ export function createSocketRegistry({ adapter }){
             }
             socket.local = wanted;
             socket.bound = true;
+            // A datagram socket is reachable the moment it is bound; a stream
+            // socket is not reachable until it listens, so its announcement
+            // waits for that rather than accepting on a port nobody serves.
+            if (!isStream(socket))
+            {
+                transport.listen(false, wanted.port);
+            }
             return count(0);
         },
 
@@ -255,6 +362,7 @@ export function createSocketRegistry({ adapter }){
                 return failure(WSAEADDRINUSE);
             }
             socket.listening = true;
+            transport.listen(true, socket.local.port);
             return count(0);
         },
 
@@ -280,6 +388,10 @@ export function createSocketRegistry({ adapter }){
             if (socket.connected)
             {
                 return failure(WSAEISCONN);
+            }
+            if (!mine(wanted))
+            {
+                return dial(socket, wanted);
             }
 
             const listener = adapter.find(addressKey(true, wanted));
@@ -339,16 +451,25 @@ export function createSocketRegistry({ adapter }){
             }
             if (isStream(socket))
             {
-                if (!socket.connected || !socket.peer)
+                if (!socket.connected || !(socket.peer || socket.stream !== null))
                 {
                     return failure(WSAENOTCONN);
                 }
-                if (socket.peer.closed || socket.sentFin)
+                if (socket.sentFin)
                 {
                     return failure(WSAECONNRESET);
                 }
                 // Copied, not referenced: the guest owns the buffer it handed us
                 // and is free to overwrite it the instant this returns.
+                if (socket.stream !== null)
+                {
+                    transport.send(socket.stream, bytes.slice());
+                    return count(bytes.length);
+                }
+                if (socket.peer.closed)
+                {
+                    return failure(WSAECONNRESET);
+                }
                 socket.peer.rx.push(bytes.slice());
                 wake(socket.peer);
                 return count(bytes.length);
@@ -363,7 +484,13 @@ export function createSocketRegistry({ adapter }){
             {
                 return failure(WSAEADDRINUSE);
             }
-            const peer = adapter.find(addressKey(false, normalise(target)));
+            const destination = normalise(target);
+            if (!mine(destination))
+            {
+                transport.sendTo(socket.local, destination, bytes.slice());
+                return count(bytes.length);
+            }
+            const peer = adapter.find(addressKey(false, destination));
             if (peer && !peer.closed)
             {
                 peer.rx.push({ from: socket.local, bytes: bytes.slice() });
@@ -431,6 +558,13 @@ export function createSocketRegistry({ adapter }){
             {
                 socket.sentFin = true;
                 finish(socket);
+                if (socket.stream !== null)
+                {
+                    // Half, not full: the peer has to learn this end is done
+                    // sending while this end keeps reading, which is the whole
+                    // point of the call -- a request written, then its answer.
+                    transport.disconnect(socket.stream, true);
+                }
             }
             if (how === SD_RECEIVE || how === SD_BOTH)
             {
@@ -449,6 +583,15 @@ export function createSocketRegistry({ adapter }){
             if (socket.bound)
             {
                 adapter.unbind(addressKey(isStream(socket), socket.local));
+                if (!isStream(socket) || socket.listening)
+                {
+                    transport.release(isStream(socket), socket.local.port);
+                }
+            }
+            if (socket.stream !== null)
+            {
+                transport.disconnect(socket.stream, false);
+                forget(socket);
             }
             // Anything the listener never accepted is closed with it, and each
             // of those has a client on the other end waiting to hear so.
@@ -572,6 +715,18 @@ export function createSocketRegistry({ adapter }){
             socket.options.set(option, value >>> 0);
         },
 
+        /**
+         * Names, when there is something able to answer for them.
+         *
+         * Null rather than an empty answer when there is no resolver: the caller
+         * then keeps its synchronous local reply instead of suspending a guest
+         * thread to be told what it already knew.
+         *
+         * @param {string} name
+         * @returns {Promise<number[]> | null}
+         */
+        resolve: name=>transport.resolve ? transport.resolve(name) : null,
+
         /** Every socket, for diagnostics and for closing them all at once. */
         all: ()=>[...sockets.values()],
 
@@ -579,8 +734,92 @@ export function createSocketRegistry({ adapter }){
             open: sockets.size,
             listening: [...sockets.values()].filter(socket=>socket.listening).length,
             connected: [...sockets.values()].filter(socket=>socket.connected).length,
+            remote: streams.size,
+            ...transport.diagnostics(),
         }),
     };
 
+    /**
+     * The other direction: everything the transport delivers.
+     *
+     * Each of these does the same two things -- append to a queue, wake whoever
+     * is on it -- and deliberately nothing else. A socket filled from here is
+     * indistinguishable from one filled locally, which is what lets recv,
+     * select, FIONREAD and the overlapped pair stay unaware there is a network.
+     *
+     * @type {import('./transport.js').TransportInbound}
+     */
+    const inbound = {
+        accepted(port, streamId, remote){
+            const listener = adapter.find(addressKey(true, { host: self(), port }));
+            if (!listener || !listener.listening || listener.closed)
+            {
+                transport.disconnect(streamId, false);
+                return;
+            }
+            const made = /** @type {any} */ (api.create(listener.family, SOCK_STREAM));
+            const server = sockets.get(made.value);
+            server.local = listener.local;
+            server.remote = { host: remote.host >>> 0, port: remote.port & 0xffff };
+            server.connected = true;
+            server.stream = streamId;
+            streams.set(streamId, server);
+            listener.backlog.push(server);
+            wake(listener);
+        },
+
+        received(streamId, bytes){
+            const socket = streams.get(streamId);
+            if (!socket || socket.closed)
+            {
+                return;
+            }
+            socket.rx.push(bytes);
+            wake(socket);
+        },
+
+        disconnected(streamId, error){
+            const socket = streams.get(streamId);
+            if (!socket)
+            {
+                return;
+            }
+            // The flag goes on this socket, not on a peer: there is no peer
+            // object here, and it is this socket's reads that must return zero
+            // once its queue drains.
+            //
+            // The stream stays mapped. A far end that only finished sending --
+            // shutdown(SD_SEND), which is how a request is written before its
+            // answer is read -- leaves this end still able to send, and
+            // detaching here would fail that send with WSAENOTCONN.
+            socket.finished = true;
+            if (error)
+            {
+                socket.error = error;
+            }
+            wake(socket);
+        },
+
+        datagram(port, from, bytes){
+            const socket = adapter.find(addressKey(false, { host: self(), port }));
+            if (!socket || socket.closed)
+            {
+                return;
+            }
+            socket.rx.push({ from: { host: from.host >>> 0, port: from.port & 0xffff }, bytes });
+            wake(socket);
+        },
+
+        lost(error){
+            for (const socket of [...streams.values()])
+            {
+                socket.finished = true;
+                socket.error = error || TRANSPORT_LOST;
+                wake(socket);
+            }
+        },
+    };
+
+    transport.attach(inbound);
     return api;
 }

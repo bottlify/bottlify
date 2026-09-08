@@ -19,8 +19,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { D3DFOG, D3DTA, D3DTOP, generateFixedFunction } from './fixedfunction.js';
+import { D3DFOG, D3DLIGHT, D3DMCS, D3DTA, D3DTOP, generateFixedFunction } from './fixedfunction.js';
 import { FVF, decodeFvf } from './vertexformat.js';
+
+/** The vertex format a lit draw needs at the very least. */
+const LIT_FVF = FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE;
+
+/** @param {object} over */
+const lighting = (over = {})=>({
+    lights: [D3DLIGHT.DIRECTIONAL],
+    colorVertex: true,
+    diffuseSource: D3DMCS.COLOR1,
+    ambientSource: D3DMCS.MATERIAL,
+    specularSource: D3DMCS.COLOR2,
+    emissiveSource: D3DMCS.MATERIAL,
+    ...over,
+});
 
 const baseState = (over = {})=>({
     fvf: FVF.XYZ | FVF.DIFFUSE,
@@ -56,7 +70,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), 'c6824962285a510d');
+    assert.equal(digest(first), '5e003f3ab4867f4d');
 });
 
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{
@@ -159,6 +173,156 @@ test('fog mixes towards the fog colour and leaves alpha alone', ()=>{
     assert.match(code, /mix\(uniforms\.fogColor\.rgb, current\.rgb, fogAmount\)/);
     assert.match(code, /current\.a\)/, 'alpha is not fogged');
     assert.doesNotMatch(generate(baseState()).code, /fogAmount/);
+});
+
+test('lighting off leaves the vertex colours exactly as they arrived', ()=>{
+    // This is the path every draw took before there was a lighting equation at
+    // all, and it has to keep being that path: D3DRS_LIGHTING off means the
+    // vertex colour is the colour, not a lit version of it.
+    const code = generate(baseState({ fvf: LIT_FVF })).code;
+    assert.match(code, /out\.diffuse = vertex\.diffuse\.bgra;/);
+    assert.doesNotMatch(code, /worldNormal/);
+    assert.doesNotMatch(code, /struct Light/);
+});
+
+test('a lit vertex transforms its normal by the world matrix and renormalises', ()=>{
+    // Lighting happens in world space. A normal left in object space is lit as
+    // though the model never rotated, which reads as light that follows the
+    // geometry around -- and only once something rotates.
+    const code = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.match(code,
+        /let worldNormal = normalize\(\(uniforms\.world \* vec4f\(vertex\.normal, 0\.0\)\)\.xyz\);/);
+    assert.match(code,
+        /let worldPosition = \(uniforms\.world \* vec4f\(vertex\.position, 1\.0\)\)\.xyz;/);
+    // The position still goes through the whole product, not the world matrix.
+    assert.match(code, /out\.position = uniforms\.worldViewProjection/);
+});
+
+test('a directional light is a negated direction and nothing else', ()=>{
+    // D3DLIGHT8.Direction is the direction the light travels; the equation
+    // wants the direction towards it. Missing the negation lights exactly the
+    // faces that should be dark.
+    const code = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.match(code, /let toLight = -light\.direction\.xyz;/);
+    assert.match(code, /let scale = 1\.0;/);
+    assert.doesNotMatch(code, /attenuationOf/, 'a directional light does not attenuate');
+    assert.doesNotMatch(code, /spotFactor/);
+    assert.match(code, /lights: array<Light, 1>/);
+});
+
+test('a point light attenuates by distance and a spot light also by its cone', ()=>{
+    const point = generate(
+        baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [D3DLIGHT.POINT] }) })).code;
+    assert.match(point, /let scale = attenuationOf\(light, dist\);/);
+    assert.match(point, /fn attenuationOf/);
+    assert.doesNotMatch(point, /fn spotFactor/, 'a point light has no cone');
+    // Past the range a light contributes nothing at all, which is what the
+    // range means; without the test it keeps adding its attenuated remainder.
+    assert.match(point, /if \(dist > light\.position\.w\)/);
+
+    const spot = generate(
+        baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [D3DLIGHT.SPOT] }) })).code;
+    assert.match(spot, /let scale = attenuationOf\(light, dist\) \* spotFactor\(light, toLight\);/);
+    assert.match(spot, /fn spotFactor/);
+});
+
+test('each enabled light gets its own unrolled block, in order', ()=>{
+    const code = generate(baseState({
+        fvf: LIT_FVF,
+        lighting: lighting({ lights: [D3DLIGHT.DIRECTIONAL, D3DLIGHT.POINT, D3DLIGHT.SPOT] }),
+    })).code;
+    assert.match(code, /lights: array<Light, 3>/);
+    assert.match(code, /let light = uniforms\.lights\[0\];\n\s+let toLight = -light\.direction/);
+    assert.match(code, /let light = uniforms\.lights\[1\];\n\s+let offset/);
+    assert.equal((code.match(/let light = uniforms\.lights\[/g) || []).length, 3);
+    assert.equal((code.match(/fn attenuationOf/g) || []).length, 1,
+        'the helpers are declared once however many lights call them');
+});
+
+test('lighting with no light enabled is ambient and emissive only', ()=>{
+    // Not "unlit": a program that turns lighting on with nothing enabled gets
+    // the material's own emissive and the scene's ambient, which is dark. An
+    // array of zero lights is not expressible in WGSL, so neither the struct
+    // nor the array may be declared.
+    const code = generate(
+        baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [] }) })).code;
+    assert.doesNotMatch(code, /struct Light/);
+    assert.doesNotMatch(code, /lights: array/);
+    assert.match(code, /var lightDiffuse = vec3f\(0\.0, 0\.0, 0\.0\);/);
+    assert.match(code, /sourceEmissive\.rgb \+ sourceAmbient\.rgb \* \(uniforms\.ambient\.rgb/);
+});
+
+test('a material source takes the vertex colour only when it is there to take', ()=>{
+    // D3DRS_COLORVERTEX with a source of COLOR1 means the vertex's own diffuse
+    // stands in for the material's. A program that sets it and gets the
+    // material anyway draws a scene in one flat colour.
+    const vertexLit = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.match(vertexLit, /let sourceDiffuse = vertex\.diffuse\.bgra;/);
+    assert.match(vertexLit, /let sourceAmbient = uniforms\.materialAmbient;/);
+
+    // Off, every term is the material's, whatever the sources say.
+    const materialOnly = generate(baseState({
+        fvf: LIT_FVF, lighting: lighting({ colorVertex: false }),
+    })).code;
+    assert.match(materialOnly, /let sourceDiffuse = uniforms\.materialDiffuse;/);
+
+    // And a colour the vertex does not carry is the material's too: the
+    // alternative is a shader that reads an attribute the layout has not got.
+    const noColour = generate(baseState({
+        fvf: FVF.XYZ | FVF.NORMAL, lighting: lighting(),
+    })).code;
+    assert.match(noColour, /let sourceDiffuse = uniforms\.materialDiffuse;/);
+
+    const fromSpecular = generate(baseState({
+        fvf: LIT_FVF | FVF.SPECULAR,
+        lighting: lighting({ emissiveSource: D3DMCS.COLOR2 }),
+    })).code;
+    assert.match(fromSpecular, /let sourceEmissive = vertex\.specular\.bgra;/);
+});
+
+test('a lit vertex takes its alpha from the diffuse source alone', ()=>{
+    // The equation is over the three colour channels. An alpha that picked up
+    // the lighting would make lit geometry fade as it turned away.
+    const code = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.match(code,
+        /out\.diffuse = vec4f\(clamp\(lit, vec3f\(0\.0\), vec3f\(1\.0\)\), sourceDiffuse\.a\);/);
+});
+
+test('the specular term is computed only when it is enabled, and added after the cascade', ()=>{
+    const on = generate(baseState({
+        fvf: LIT_FVF, lighting: lighting(), specularEnable: true,
+    })).code;
+    assert.match(on, /let highlight = pow\(max\(dot\(worldNormal, halfNormal\), 0\.0\),/);
+    assert.match(on, /uniforms\.eye\.w\)/, 'the exponent is the material power');
+    assert.match(on, /current = vec4f\(current\.rgb \+ input\.specular\.rgb, current\.a\);/);
+
+    const off = generate(baseState({ fvf: LIT_FVF, lighting: lighting() })).code;
+    assert.doesNotMatch(off, /highlight/);
+    assert.doesNotMatch(off, /input\.specular\.rgb/);
+    assert.match(off, /out\.specular = vec4f\(0\.0, 0\.0, 0\.0, 0\.0\);/);
+});
+
+test('the specular colour is added even when nothing was lit', ()=>{
+    // D3DRS_SPECULARENABLE is a fragment-stage decision as well: a program that
+    // supplies its own specular colour and turns lighting off still expects it
+    // on top of the texture.
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | FVF.SPECULAR, specularEnable: true,
+    })).code;
+    assert.match(code, /out\.specular = vertex\.specular\.bgra;/);
+    assert.match(code, /current = vec4f\(current\.rgb \+ input\.specular\.rgb, current\.a\);/);
+});
+
+test('a lit format without a normal, and an unknown light type, are refused', ()=>{
+    // Both would compile into something: the first into a shader reading an
+    // attribute that is not there, the second into a light that contributes
+    // nothing. A refusal is what the shader cache is for.
+    assert.throws(
+        ()=>generate(baseState({ fvf: FVF.XYZ | FVF.DIFFUSE, lighting: lighting() })),
+        /must carry a normal/);
+    assert.throws(
+        ()=>generate(baseState({ fvf: LIT_FVF, lighting: lighting({ lights: [7] }) })),
+        /Unsupported light type 7/);
 });
 
 test('an unsupported operation is refused rather than silently dropped', ()=>{

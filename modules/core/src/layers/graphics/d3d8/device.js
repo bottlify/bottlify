@@ -920,6 +920,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get transforms(){
             return transforms;
         },
+        get lights(){
+            return lights;
+        },
+        get material(){
+            return material;
+        },
         get backBuffer(){
             return backBuffers[0];
         },

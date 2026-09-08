@@ -18,12 +18,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
-import { createGraphicsLibraries, createOpenglTable } from './exports.js';
+import { createGraphicsLibraries } from './exports.js';
 import { createDirect3D8Seam } from './d3d8.js';
 import { describe, IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS } from './vtables.js';
 import { IID_IDirect3D8, IID_IDirect3DDevice8 } from './iids.js';
 import { D3DPRESENT_PARAMETERS8, D3DPRESENT_PARAMETERS9, createFields } from './structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
+import { createOpengl } from '../opengl/exports.js';
 
 const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
 
@@ -149,7 +150,7 @@ test('a program reaches Direct3D through a library, not by asking for an object'
     const { libraries } = seamed();
 
     assert.deepEqual(Object.keys(libraries.libraries).sort(),
-        ['D3D8.dll', 'D3D9.dll', 'DDRAW.dll']);
+        ['D3D8.dll', 'D3D9.dll', 'DDRAW.dll', 'OPENGL32.dll']);
     assert.equal(libraries.libraries['D3D8.dll'].Direct3DCreate8.argBytes, 4,
         'one argument, the SDK version');
 });
@@ -345,31 +346,74 @@ test('GetTexture precedes SetTexture, which is the one pair that reads backwards
     assert.ok(get >= 0 && set === get + 1, `GetTexture at ${get}, SetTexture at ${set}`);
 });
 
-test('the OpenGL table is derived only where the derivation holds', ()=>{
-    // Its argBytes come from each function's declared parameter count, which is
-    // sound only while every argument is one word. A double-precision entry
-    // point would take two and break it in the way a wrong argBytes always
-    // does: silently, on the return.
-    const table = createOpenglTable({
-        wgl: {
-            wglCreateContext: (/** @type {number} */ hdc)=>hdc + 1,
-            SwapBuffers: (/** @type {number} */ hdc)=>hdc !== 0,
-            notAnEntryPoint: ()=>0,
+test('OPENGL32 is bound entirely, and nothing is made until a program calls it', ()=>{
+    // Every export has to be bound whether or not it does anything: these are
+    // stdcall, so a name nothing binds gets a stub that cleans the wrong number
+    // of bytes off the caller's stack, and the program dies far from the call.
+    const box = machine();
+    /** @type {string[]} */
+    const made = [];
+    const seam = createGraphicsLibraries({
+        graphics: {
+            /** @param {string} name */
+            create: name=>{
+                made.push(name);
+                return createOpengl({
+                    readMemory: box.services.readMemory,
+                    writeMemory: box.services.writeMemory,
+                });
+            },
         },
-        context: {
-            glClear: (/** @type {number} */ mask)=>mask,
-            glViewport: (/** @type {number} */ x, /** @type {number} */ y,
-                /** @type {number} */ w, /** @type {number} */ h)=>x + y + w + h,
-            helper: ()=>0,
-        },
+        memory: box.services,
+        publishInterface: box.publishInterface,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
     });
 
-    assert.deepEqual(Object.keys(table).sort(),
-        ['SwapBuffers', 'glClear', 'glViewport', 'wglCreateContext']);
+    const table = seam.libraries['OPENGL32.dll'];
     assert.equal(table.glViewport.argBytes, 16, 'four words');
-    assert.equal(table.wglCreateContext.argBytes, 4);
-    assert.equal(table.glClear.handler([0x4000]), 0x4000);
-    assert.equal(table.SwapBuffers.handler([1]), 1, 'a boolean answer becomes a dword');
+    assert.equal(table.glOrtho.argBytes, 48, 'six doubles, which is twelve words');
+    assert.equal(table.glVertex3f.argBytes, 12);
+    assert.equal(table.glVertex3d.argBytes, 24, 'the same call in doubles takes twice the stack');
+    assert.equal(table.SetPixelFormat, undefined, 'that one is GDI32\'s export, not this one\'s');
+    assert.deepEqual(made, [], 'nothing was built merely by assembling the table');
+
+    assert.equal(table.glGetError.handler([]), 0);
+    assert.deepEqual(made, ['opengl'], 'and the first call built it, once');
+    assert.equal(table.glGetError.handler([]), 0);
+    assert.deepEqual(made, ['opengl']);
+});
+
+test('GDI32 and OPENGL32 negotiate over one runtime, not two', ()=>{
+    // On Windows choosing a format through GDI and creating a context through
+    // WGL is one negotiation. Two runtimes here would hand a program a format
+    // from one list and a context from another, and the frame GDI's
+    // SwapBuffers presented would not be the frame the program drew.
+    const box = machine();
+    /** @type {string[]} */
+    const made = [];
+    const seam = createGraphicsLibraries({
+        graphics: {
+            /** @param {string} name */
+            create: name=>{
+                made.push(name);
+                return createOpengl({
+                    readMemory: box.services.readMemory,
+                    writeMemory: box.services.writeMemory,
+                });
+            },
+        },
+        memory: box.services,
+        publishInterface: box.publishInterface,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
+    });
+
+    assert.deepEqual(made, [], 'the pixel-format service builds nothing either');
+    assert.ok(seam.opengl.pixelFormat.count() > 0);
+    assert.deepEqual(made, ['opengl']);
+
+    seam.libraries['OPENGL32.dll'].glGetError.handler([]);
+    seam.opengl.swapBuffers(0);
+    assert.deepEqual(made, ['opengl'], 'both halves reached the one runtime');
 });
 
 test('an object with no interfaces still answers AddRef and Release', ()=>{

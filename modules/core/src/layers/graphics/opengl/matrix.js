@@ -71,6 +71,27 @@ export function multiply(a, b){
 }
 
 /**
+ * A column vector through a column-major matrix: `m * v`.
+ *
+ * @param {ArrayLike<number>} m
+ * @param {readonly number[]} v  four components
+ * @returns {number[]} four components
+ */
+export function transform(m, v){
+    const out = [0, 0, 0, 0];
+    for (let row = 0; row < 4; row++)
+    {
+        let sum = 0;
+        for (let k = 0; k < 4; k++)
+        {
+            sum += m[k * 4 + row] * v[k];
+        }
+        out[row] = sum;
+    }
+    return out;
+}
+
+/**
  * @param {number} x
  * @param {number} y
  * @param {number} z

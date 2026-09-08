@@ -244,7 +244,9 @@ export const D3DFMT = Object.freeze({
     R5G6B5: 23,
     X1R5G5B5: 24,
     A1R5G5B5: 25,
+    A4R4G4B4: 26,
     A8: 28,
+    X4R4G4B4: 30,
     A2R10G10B10: 35,
     D32: 71,
     D24S8: 75,
@@ -269,6 +271,13 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.R5G6B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
     [D3DFMT.X1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
     [D3DFMT.A1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
+    // Four bits an channel, and worth having rather than refusing: a program of
+    // this era keeps its interface and its fonts in it, because four bits of
+    // alpha is what a soft edge needs and eight bits of colour is more than a
+    // glyph does. Refusing it does not degrade the picture, it removes the
+    // text.
+    [D3DFMT.A4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false }),
+    [D3DFMT.X4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false }),
     [D3DFMT.A8]: Object.freeze({ bytesPerPixel: 1, depth: false }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true }),

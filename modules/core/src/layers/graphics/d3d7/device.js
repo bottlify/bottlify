@@ -571,6 +571,12 @@ export function createDirect3D7(ddraw, services = {}){
             get transforms(){
                 return transforms;
             },
+            get lights(){
+                return lights;
+            },
+            get material(){
+                return material;
+            },
             get backBuffer(){
                 return targetAdapters.get(presenting) ?? targetAdapterFor(renderTarget);
             },

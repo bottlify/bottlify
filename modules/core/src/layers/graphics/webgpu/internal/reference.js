@@ -25,9 +25,15 @@
  * `0x00RRGGBB`, so the byte at the lowest address is blue. `graphics/gdi` says
  * the same thing and this agrees with it deliberately -- two conventions in one
  * engine is a bug generator.
+ *
+ * Lighting is the exception to the integer arithmetic, and deliberately so: it
+ * runs per vertex rather than per fragment, and Direct3D computes it in floats
+ * and clamps once at the end. Quantising it to bytes here would make this
+ * disagree with the shader by a level in places and would prove the wrong
+ * thing.
  */
 
-import { D3DTA, D3DTOP } from './fixedfunction.js';
+import { D3DLIGHT, D3DTA, D3DTOP } from './fixedfunction.js';
 
 /** Bytes per pixel, everywhere in this engine. */
 const BPP = 4;
@@ -304,3 +310,141 @@ export function fillRect(target, rect, options){
 
 /** @param {ReferenceSurface} surface @returns {string} */
 export const toBase64 = surface=>Buffer.from(surface.bytes).toString('base64');
+
+// --- the lighting equation, in the floats it is actually computed in ---
+
+/**
+ * @typedef {{ x: number, y: number, z: number }} Vector
+ * @typedef {{ r: number, g: number, b: number, a: number }} Colour
+ */
+
+/** @param {Vector} a @param {Vector} b @returns {number} */
+const dot = (a, b)=>a.x * b.x + a.y * b.y + a.z * b.z;
+
+/** @param {Vector} a @param {Vector} b @returns {Vector} */
+const minus = (a, b)=>({ x: a.x - b.x, y: a.y - b.y, z: a.z - b.z });
+
+/** @param {Vector} v @returns {number} */
+const length = v=>Math.sqrt(dot(v, v));
+
+/**
+ * Divided by its own length, or by the guard when that is zero -- which turns
+ * a degenerate direction into no contribution instead of a not-a-number, the
+ * same way the generated shader does.
+ *
+ * @param {Vector} v @returns {Vector}
+ */
+const unit = v=>{
+    const scale = Math.max(length(v), 1e-8);
+    return { x: v.x / scale, y: v.y / scale, z: v.z / scale };
+};
+
+/**
+ * How much of a light reaches a point, and from which direction.
+ *
+ * @param {any} light  a D3DLIGHT8
+ * @param {Vector} position  world space
+ * @returns {{ toLight: Vector, scale: number }}
+ */
+function illumination(light, position){
+    if (light.Type === D3DLIGHT.DIRECTIONAL)
+    {
+        // The direction a light travels; the equation wants the way back to it.
+        const towards = unit(light.Direction);
+        return { toLight: { x: -towards.x, y: -towards.y, z: -towards.z }, scale: 1 };
+    }
+    const offset = minus(light.Position, position);
+    const distance = length(offset);
+    const toLight = unit(offset);
+    let scale = 0;
+    if (distance <= light.Range)
+    {
+        const denominator = light.Attenuation0 + light.Attenuation1 * distance
+            + light.Attenuation2 * distance * distance;
+        scale = denominator <= 0 ? 1 : 1 / denominator;
+    }
+    if (light.Type !== D3DLIGHT.SPOT)
+    {
+        return { toLight, scale };
+    }
+    const direction = unit(light.Direction);
+    const rho = -dot(direction, toLight);
+    const inner = Math.cos(light.Theta / 2);
+    const outer = Math.cos(light.Phi / 2);
+    const cone = rho > inner
+        ? 1
+        : (rho <= outer ? 0 : Math.pow((rho - outer) / (inner - outer), light.Falloff));
+    return { toLight, scale: scale * cone };
+}
+
+/** @param {number} value */
+const clamp1 = value=>(value < 0 ? 0 : value > 1 ? 1 : value);
+
+/**
+ * @typedef {Object} LitVertex
+ * @property {Vector} position    World space, which is where lighting happens.
+ * @property {Vector} normal      World space; normalised here rather than assumed.
+ * @property {Vector} eye         The camera, in world space.
+ * @property {any[]} lights       D3DLIGHT8s, every one of them enabled.
+ * @property {{ diffuse: Colour, ambient: Colour, specular: Colour, emissive: Colour }} sources
+ *     Each term's colour, already resolved from the material or the vertex.
+ * @property {Colour} sceneAmbient  D3DRS_AMBIENT.
+ * @property {number} power         The material's specular power.
+ * @property {boolean} specular     D3DRS_SPECULARENABLE.
+ */
+
+/**
+ * The Direct3D lighting equation, for one vertex.
+ *
+ * This is the second writing of the formula the generated shader carries, and
+ * the seam between the two is the one place this arrangement is blind -- see
+ * the header. What it is here for is that the numbers are checkable: a light,
+ * a material and a normal give one answer, and it can be worked out by hand.
+ *
+ * @param {LitVertex} vertex
+ * @returns {{ diffuse: Colour, specular: Colour }}
+ */
+export function lightVertex(vertex){
+    const normal = unit(vertex.normal);
+    const toEye = unit(minus(vertex.eye, vertex.position));
+    const ambient = { r: 0, g: 0, b: 0 };
+    const diffuse = { r: 0, g: 0, b: 0 };
+    const specular = { r: 0, g: 0, b: 0 };
+
+    for (const light of vertex.lights)
+    {
+        const { toLight, scale } = illumination(light, vertex.position);
+        const lambert = Math.max(dot(normal, toLight), 0) * scale;
+        let highlight = 0;
+        if (vertex.specular)
+        {
+            const halfway = unit({
+                x: toLight.x + toEye.x, y: toLight.y + toEye.y, z: toLight.z + toEye.z,
+            });
+            highlight = Math.pow(Math.max(dot(normal, halfway), 0), vertex.power) * scale;
+        }
+        for (const channel of /** @type {const} */ (['r', 'g', 'b']))
+        {
+            ambient[channel] += light.Ambient[channel] * scale;
+            diffuse[channel] += light.Diffuse[channel] * lambert;
+            specular[channel] += light.Specular[channel] * highlight;
+        }
+    }
+
+    const sources = vertex.sources;
+    /** @param {'r'|'g'|'b'} channel */
+    const lit = channel=>clamp1(sources.emissive[channel]
+        + sources.ambient[channel] * (vertex.sceneAmbient[channel] + ambient[channel])
+        + sources.diffuse[channel] * diffuse[channel]);
+    /** @param {'r'|'g'|'b'} channel */
+    const highlightOf = channel=>clamp1(sources.specular[channel] * specular[channel]);
+
+    return {
+        // The alpha is the diffuse source's, untouched: the equation is over
+        // the three colour channels only.
+        diffuse: { r: lit('r'), g: lit('g'), b: lit('b'), a: sources.diffuse.a },
+        specular: {
+            r: highlightOf('r'), g: highlightOf('g'), b: highlightOf('b'), a: 0,
+        },
+    };
+}

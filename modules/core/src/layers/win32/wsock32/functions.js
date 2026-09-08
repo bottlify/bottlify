@@ -253,6 +253,39 @@ export function createWinsockFunctions(host){
         return until(socket, attempt).then(settle);
     };
 
+    /**
+     * Lays out a hostent and returns the pointer a caller gets back.
+     *
+     * One block holds the structure and everything it points at, so the pointers
+     * stay valid exactly as long as the structure does -- which is until the
+     * next call, the buffer being reused rather than reallocated.
+     *
+     * @param {string} name @param {number} address host order
+     */
+    const writeHostent = (name, address)=>{
+        const block = staticBuffer('hostent', HOSTENT.SIZE + 64);
+        const nameAt = block + HOSTENT.SIZE;
+        const aliasesAt = nameAt + 32;
+        const listAt = aliasesAt + 8;
+        const addressAt = listAt + 8;
+
+        host.writeMemory(nameAt, latin1(name));
+        writeDword(aliasesAt, 0);
+        writeDword(addressAt, swap32(address));
+        writeDword(listAt, addressAt);
+        writeDword(listAt + 4, 0);
+
+        const record = new Uint8Array(HOSTENT.SIZE);
+        const view = new DataView(record.buffer);
+        view.setUint32(HOSTENT.h_name, nameAt, true);
+        view.setUint32(HOSTENT.h_aliases, aliasesAt, true);
+        view.setUint16(HOSTENT.h_addrtype, AF_INET, true);
+        view.setUint16(HOSTENT.h_length, 4, true);
+        view.setUint32(HOSTENT.h_addr_list, listAt, true);
+        host.writeMemory(block, record);
+        return block >>> 0;
+    };
+
     /** fd_set is a count followed by that many handles. */
     const readFdSet = (/** @type {number} */ pointer)=>{
         if (pointer === 0)
@@ -437,8 +470,13 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT);
                 }
+                // Reaching anything outside this runtime takes a round trip, so
+                // the outcome may be a promise; the bridge parks the guest
+                // thread on one, which is what a blocking connect does anyway.
+                const settle = (/** @type {any} */ outcome)=>
+                    outcome.error ? fail(outcome.error) : ok(0);
                 const outcome = registry.connect(socket, address);
-                return outcome.error ? fail(outcome.error) : ok(0);
+                return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
             },
         },
 
@@ -790,13 +828,14 @@ export function createWinsockFunctions(host){
         },
 
         /**
-         * Resolution, honestly.
+         * Resolution.
          *
-         * There is no resolver to ask, so the only names that can be answered
-         * are the ones this host is: its own name, localhost, and anything
-         * already written as an address. Everything else fails with
-         * WSAHOST_NOT_FOUND rather than being pointed at the loopback, because
-         * a program told a name resolved will connect to it and fail somewhere
+         * The names this host can answer for itself -- its own, localhost, and
+         * anything already written as an address -- are answered here and
+         * without a round trip. Anything else is the transport's, and only if it
+         * has a resolver at all: without one the call fails with
+         * WSAHOST_NOT_FOUND rather than being pointed at the loopback, because a
+         * program told a name resolved will connect to it and fail somewhere
          * further away with less to go on.
          */
         gethostbyname: {
@@ -806,35 +845,19 @@ export function createWinsockFunctions(host){
                 const name = pointer === 0 ? HOSTNAME : host.readCString(pointer >>> 0, 256);
                 const literal = parseAddress(name);
                 const known = name === HOSTNAME || name === 'localhost';
-                if (literal === INADDR_NONE && !known)
+                if (literal !== INADDR_NONE || known)
+                {
+                    return writeHostent(
+                        name, literal === INADDR_NONE ? INADDR_LOOPBACK : literal);
+                }
+                const asked = registry.resolve(name);
+                if (!asked)
                 {
                     return fail(WSAHOST_NOT_FOUND, 0);
                 }
-                const address = literal === INADDR_NONE ? INADDR_LOOPBACK : literal;
-
-                // One block holds the structure and everything it points at, so
-                // the pointers stay valid exactly as long as the structure does.
-                const block = staticBuffer('hostent', HOSTENT.SIZE + 64);
-                const nameAt = block + HOSTENT.SIZE;
-                const aliasesAt = nameAt + 32;
-                const listAt = aliasesAt + 8;
-                const addressAt = listAt + 8;
-
-                host.writeMemory(nameAt, latin1(name));
-                writeDword(aliasesAt, 0);
-                writeDword(addressAt, swap32(address));
-                writeDword(listAt, addressAt);
-                writeDword(listAt + 4, 0);
-
-                const record = new Uint8Array(HOSTENT.SIZE);
-                const view = new DataView(record.buffer);
-                view.setUint32(HOSTENT.h_name, nameAt, true);
-                view.setUint32(HOSTENT.h_aliases, aliasesAt, true);
-                view.setUint16(HOSTENT.h_addrtype, AF_INET, true);
-                view.setUint16(HOSTENT.h_length, 4, true);
-                view.setUint32(HOSTENT.h_addr_list, listAt, true);
-                host.writeMemory(block, record);
-                return block >>> 0;
+                return asked.then((/** @type {number[]} */ found)=>found.length === 0
+                    ? fail(WSAHOST_NOT_FOUND, 0)
+                    : writeHostent(name, found[0]));
             },
         },
 
@@ -1010,8 +1033,10 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
+                const settle = (/** @type {any} */ outcome)=>
+                    outcome.error ? fail(outcome.error, 0) : 1;
                 const outcome = registry.connect(socket, address);
-                return outcome.error ? fail(outcome.error, 0) : 1;
+                return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
             },
         },
 

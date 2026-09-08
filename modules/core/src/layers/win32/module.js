@@ -284,6 +284,12 @@ export const win32Module = {
                 close: handle=>kernel.handles.close(handle),
             },
             surfaces: heap,
+            // Where pixels go, and which pixel formats exist. The graphics
+            // layer is above this one and cannot be imported from here, so the
+            // assembling caller hands it down -- and reads it lazily, because
+            // graphics is created after win32 and does not exist yet when this
+            // configuration is read.
+            graphics: config?.graphics,
         });
 
         // The transport is injected, as the GPU device and the block store are.

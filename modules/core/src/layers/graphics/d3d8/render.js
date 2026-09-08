@@ -44,6 +44,37 @@ import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
 
+/**
+ * The two lighting structures, written here rather than referenced from the
+ * device that owns them: the devices already reach this file, and a type that
+ * pointed back at one of them would close a cycle the boundary check refuses.
+ *
+ * @typedef {{ r: number, g: number, b: number, a: number }} ColourValue
+ *
+ * @typedef {Object} Material  D3DMATERIAL8.
+ * @property {ColourValue} Diffuse
+ * @property {ColourValue} Ambient
+ * @property {ColourValue} Specular
+ * @property {ColourValue} Emissive
+ * @property {number} Power
+ *
+ * @typedef {Object} Light  D3DLIGHT8.
+ * @property {number} Type          D3DLIGHTTYPE.
+ * @property {ColourValue} Diffuse
+ * @property {ColourValue} Specular
+ * @property {ColourValue} Ambient
+ * @property {{ x: number, y: number, z: number }} Position
+ * @property {{ x: number, y: number, z: number }} Direction
+ *     The direction the light travels, not the direction towards it.
+ * @property {number} Range
+ * @property {number} Falloff
+ * @property {number} Attenuation0
+ * @property {number} Attenuation1
+ * @property {number} Attenuation2
+ * @property {number} Theta         The inner cone's full angle, in radians.
+ * @property {number} Phi           The outer cone's.
+ */
+
 /** Stages a device has. Every one past the cascade's end is ignored, not an error. */
 export const STAGE_COUNT = 8;
 
@@ -253,6 +284,13 @@ const TEXEL_EXPANSION = Object.freeze({
         five(word & 0x1f), five((word >>> 5) & 0x1f), five((word >>> 10) & 0x1f),
         (word & 0x8000) !== 0 ? 0xff : 0,
     ]),
+    [D3DFMT.A4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+        four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf),
+        four(word >>> 12),
+    ]),
+    [D3DFMT.X4R4G4B4]: (pixels, count)=>expandSixteen(pixels, count, word=>[
+        four(word & 0xf), four((word >>> 4) & 0xf), four((word >>> 8) & 0xf), 0xff,
+    ]),
     [D3DFMT.A8]: (pixels, count)=>{
         const out = new Uint8Array(count * 4);
         for (let index = 0; index < count; index++)
@@ -265,6 +303,8 @@ const TEXEL_EXPANSION = Object.freeze({
 
 /** @param {number} value five bits @returns {number} eight */
 const five = value=>(value << 3) | (value >>> 2);
+/** @param {number} value four bits @returns {number} eight */
+const four = value=>(value << 4) | value;
 /** @param {number} value six bits @returns {number} eight */
 const six = value=>(value << 2) | (value >>> 4);
 
@@ -339,34 +379,159 @@ export function gpuFormatOf(format){
 const hasStencil = format=>format.endsWith('stencil8');
 
 /**
- * The uniform block the generated shader declares, laid out as WGSL lays it
- * out: a mat4x4f, two vec2f, three vec4f and an f32, padded to 16 bytes.
+ * Where each field of the uniform block begins, counted in floats.
+ *
+ * This is WGSL's own layout for the struct the generator declares, worked out
+ * once here rather than at each `set`: two mat4x4f, two vec2f, ten vec4f, an
+ * f32, and then the lights, which start at the next multiple of four floats
+ * because a uniform array is aligned to sixteen bytes. A field written at the
+ * wrong index is read as a different one, and every one of them is a plausible
+ * number, so nothing reports it.
  */
-export const UNIFORM_FLOATS = 36;
+export const UNIFORM_AT = Object.freeze({
+    worldViewProjection: 0,
+    world: 16,
+    viewportOffset: 32,
+    viewportScale: 34,
+    textureFactor: 36,
+    fogColor: 40,
+    fogFactors: 44,
+    materialDiffuse: 48,
+    materialAmbient: 52,
+    materialSpecular: 56,
+    materialEmissive: 60,
+    ambient: 64,
+    eye: 68,
+    alphaRef: 72,
+    lights: 76,
+});
+
+/** The block's own length, before any light is appended. */
+export const UNIFORM_FLOATS = UNIFORM_AT.lights;
+
+/** Floats one light occupies: the seven vec4f rows of the shader's `Light`. */
+export const LIGHT_FLOATS = 28;
+
+/** @param {{ r: number, g: number, b: number, a: number }} colour */
+const rgba = colour=>[colour.r, colour.g, colour.b, colour.a];
+
+/** @type {Material} the material a block carries when nothing lights it */
+const NO_MATERIAL = Object.freeze({
+    Diffuse: { r: 0, g: 0, b: 0, a: 0 },
+    Ambient: { r: 0, g: 0, b: 0, a: 0 },
+    Specular: { r: 0, g: 0, b: 0, a: 0 },
+    Emissive: { r: 0, g: 0, b: 0, a: 0 },
+    Power: 0,
+});
 
 /**
- * @param {Object} values
- * @param {ArrayLike<number>} values.worldViewProjection
- * @param {import('../webgpu/contract.js').ViewportState} values.viewport
- * @param {number} values.textureFactor  D3DCOLOR
- * @param {number} values.fogColor       D3DCOLOR
- * @param {number} values.alphaRef       0..255
+ * One light, written into the block where the shader's array expects it.
+ *
+ * Two things are computed here rather than per vertex because they are constant
+ * for the light: the direction is normalised (a zero-length one stays zero, so
+ * the light contributes nothing instead of a not-a-number), and the cone is
+ * carried as the cosines of its half-angles.
+ *
+ * @param {Float32Array} block
+ * @param {number} at    the first float of this light's rows
+ * @param {Light} light
+ */
+export function packLight(block, at, light){
+    block.set(rgba(light.Diffuse), at);
+    block.set(rgba(light.Specular), at + 4);
+    block.set(rgba(light.Ambient), at + 8);
+    block.set([light.Position.x, light.Position.y, light.Position.z, light.Range], at + 12);
+    const { x, y, z } = light.Direction;
+    const length = Math.sqrt(x * x + y * y + z * z);
+    block.set(length > 0 ? [x / length, y / length, z / length, 0] : [0, 0, 0, 0], at + 16);
+    block.set(
+        [light.Attenuation0, light.Attenuation1, light.Attenuation2, 0], at + 20);
+    block.set(
+        [Math.cos(light.Theta / 2), Math.cos(light.Phi / 2), light.Falloff, 0], at + 24);
+}
+
+/**
+ * @typedef {Object} UniformValues
+ * @property {ArrayLike<number>} worldViewProjection
+ * @property {import('../webgpu/contract.js').ViewportState} viewport
+ * @property {number} textureFactor  D3DCOLOR
+ * @property {number} fogColor       D3DCOLOR
+ * @property {number} alphaRef       0..255
+ * @property {ArrayLike<number>} [world]   Identity unless the draw is lit.
+ * @property {Material} [material]
+ * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
+ * @property {readonly number[]} [eye]     Camera position in world space.
+ * @property {readonly Light[]} [lights]
+ */
+
+/**
+ * @param {UniformValues} values
  * @returns {Float32Array}
  */
 export function uniformBlock(values){
-    const block = new Float32Array(UNIFORM_FLOATS);
-    block.set(values.worldViewProjection, 0);
-    block.set(values.viewport.offset, 16);
-    block.set(values.viewport.scale, 18);
-    const factor = colorToFloats(values.textureFactor);
-    block.set([factor.r, factor.g, factor.b, factor.a], 20);
-    const fog = colorToFloats(values.fogColor);
-    block.set([fog.r, fog.g, fog.b, fog.a], 24);
+    const at = UNIFORM_AT;
+    const lights = values.lights ?? [];
+    const block = new Float32Array(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
+    block.set(values.worldViewProjection, at.worldViewProjection);
+    block.set(values.world ?? IDENTITY, at.world);
+    block.set(values.viewport.offset, at.viewportOffset);
+    block.set(values.viewport.scale, at.viewportScale);
+    block.set(rgba(colorToFloats(values.textureFactor)), at.textureFactor);
+    block.set(rgba(colorToFloats(values.fogColor)), at.fogColor);
     // The generated shader mixes by a constant amount; one is "no fog", and
     // there is no distance for it to attenuate by yet.
-    block.set([1, 0, 0, 0], 28);
-    block[32] = values.alphaRef / 255;
+    block.set([1, 0, 0, 0], at.fogFactors);
+    const material = values.material ?? NO_MATERIAL;
+    block.set(rgba(material.Diffuse), at.materialDiffuse);
+    block.set(rgba(material.Ambient), at.materialAmbient);
+    block.set(rgba(material.Specular), at.materialSpecular);
+    block.set(rgba(material.Emissive), at.materialEmissive);
+    block.set(rgba(colorToFloats(values.ambient ?? 0)), at.ambient);
+    // The specular power rides in the eye row: it is one float, and a row of
+    // its own would cost sixteen bytes to carry four.
+    block.set([...(values.eye ?? [0, 0, 0]), material.Power], at.eye);
+    block[at.alphaRef] = values.alphaRef / 255;
+    lights.forEach((light, index)=>
+        packLight(block, at.lights + index * LIGHT_FLOATS, light));
     return block;
+}
+
+/**
+ * Where the camera is, in world space, which is where the lighting equation
+ * needs it and is not what any matrix holds directly.
+ *
+ * The view matrix takes world space to camera space, so the camera is the point
+ * it sends to the origin: `-translation * inverse(rotation)`. The full inverse
+ * of the upper 3x3 is computed rather than its transpose -- the transpose is
+ * only the inverse for a matrix with no scale in it, and a view matrix that
+ * mirrors or scales would otherwise put the camera somewhere else entirely.
+ *
+ * @param {ArrayLike<number>} view
+ * @returns {number[]} x, y, z
+ */
+export function eyePosition(view){
+    const a = view[0], b = view[1], c = view[2];
+    const d = view[4], e = view[5], f = view[6];
+    const g = view[8], h = view[9], i = view[10];
+    const cofactor = [e * i - f * h, f * g - d * i, d * h - e * g];
+    const determinant = a * cofactor[0] + b * cofactor[1] + c * cofactor[2];
+    if (determinant === 0)
+    {
+        return [0, 0, 0];
+    }
+    const inverse = [
+        cofactor[0], c * h - b * i, b * f - c * e,
+        cofactor[1], a * i - c * g, c * d - a * f,
+        cofactor[2], b * g - a * h, a * e - b * d,
+    ].map(value=>value / determinant);
+    const t = [view[12], view[13], view[14]];
+    return [0, 1, 2].map(column=>{
+        const along = t[0] * inverse[column] + t[1] * inverse[3 + column]
+            + t[2] * inverse[6 + column];
+        // Negating zero gives negative zero, which is the same camera and a
+        // worse thing to read in a diagnostic.
+        return along === 0 ? 0 : -along;
+    });
 }
 
 /**
@@ -384,6 +549,8 @@ export function uniformBlock(values){
  * @property {any} renderTarget
  * @property {any} depthStencil
  * @property {Map<number, Float32Array>} transforms
+ * @property {Map<number, { light: Light, enabled: boolean }>} lights
+ * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number }} stageProcessing
  */
@@ -396,19 +563,78 @@ export function uniformBlock(values){
 const transformOf = (model, type)=>model.transforms.get(type) ?? IDENTITY;
 
 /**
+ * The lights a draw is lit by: every enabled one, in index order.
+ *
+ * The order is the index order and not the order they were set, because the
+ * shader unrolls one block per light and two draws that enabled the same lights
+ * in a different order must not compile two pipelines.
+ *
  * @param {RenderModel} model
+ * @returns {Light[]}
+ */
+export function enabledLights(model){
+    return [...model.lights.entries()]
+        .filter(([, record])=>record.enabled)
+        .sort(([left], [right])=>left - right)
+        .map(([, record])=>record.light);
+}
+
+/**
+ * What the vertex stage lights this draw with, or null when it lights nothing.
+ *
+ * Three things switch lighting off, and only one of them is the render state.
+ * A pre-transformed vertex is past the point where lighting happens, and a
+ * vertex with no normal has no surface to light -- which Direct3D leaves
+ * undefined, and where carrying the vertex colour through is the reading that
+ * keeps such a draw looking like it did rather than turning it black.
+ *
+ * @param {RenderModel} model
+ * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
+ * @returns {import('../webgpu/internal/pipeline.js').LightingState | null}
+ */
+export function lightingOf(model, layout){
+    const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    const lit = rs('LIGHTING') !== 0
+        && !layout.preTransformed
+        && layout.attributes.some(attribute=>attribute.name === 'normal');
+    if (!lit)
+    {
+        return null;
+    }
+    return {
+        lights: enabledLights(model).map(light=>light.Type),
+        colorVertex: rs('COLORVERTEX') !== 0,
+        diffuseSource: rs('DIFFUSEMATERIALSOURCE'),
+        ambientSource: rs('AMBIENTMATERIALSOURCE'),
+        specularSource: rs('SPECULARMATERIALSOURCE'),
+        emissiveSource: rs('EMISSIVEMATERIALSOURCE'),
+    };
+}
+
+/**
+ * @param {RenderModel} model
+ * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [lighting]
  * @returns {Float32Array} the block an ordinary draw carries
  */
-export function uniformsOf(model){
+export function uniformsOf(model, lighting){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
+    const world = transformOf(model, D3DTS.WORLD);
+    const view = transformOf(model, D3DTS.VIEW);
     return uniformBlock({
         worldViewProjection: multiplyMatrices(
-            multiplyMatrices(transformOf(model, D3DTS.WORLD), transformOf(model, D3DTS.VIEW)),
-            transformOf(model, D3DTS.PROJECTION)),
+            multiplyMatrices(world, view), transformOf(model, D3DTS.PROJECTION)),
+        world,
         viewport: model.viewport,
         textureFactor: rs('TEXTUREFACTOR'),
         fogColor: rs('FOGCOLOR'),
         alphaRef: rs('ALPHAREF'),
+        material: model.material,
+        ambient: rs('AMBIENT'),
+        eye: eyePosition(view),
+        // The shader declares an array exactly as long as the lighting state
+        // said, so a block that carried lights it does not know about would be
+        // read past its own end.
+        lights: lighting ? enabledLights(model) : [],
     });
 }
 
@@ -480,6 +706,7 @@ export function stageCascade(model, layout){
  * @param {string} shape.targetFormat
  * @param {string | undefined} shape.depthFormat
  * @param {import('../webgpu/internal/pipeline.js').StageKey[]} shape.stages
+ * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [shape.lighting]
  * @returns {import('../webgpu/internal/pipeline.js').PipelineState}
  */
 export function pipelineStateOf(model, shape){
@@ -520,6 +747,11 @@ export function pipelineStateOf(model, shape){
         alphaFunc: rs('ALPHAFUNC'),
         fogMode,
         stages: shape.stages,
+        // Specular is a fragment-stage decision as much as a lighting one: the
+        // vertex's specular colour is added after the cascade whether lighting
+        // computed it or the program supplied it.
+        specularEnable: rs('SPECULARENABLE') !== 0,
+        lighting: shape.lighting ?? null,
     };
 }
 
@@ -930,13 +1162,15 @@ export function createRenderer(options){
                 sampler: samplerFor(model.stageStates(index)),
             };
         });
+        const lighting = lightingOf(model, layout);
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
             topology,
             ...formatsOf(model),
             stages: cascade.stages,
+            lighting,
         });
-        return { state, uniforms: uniformsOf(model), stageBindings };
+        return { state, uniforms: uniformsOf(model, lighting), stageBindings };
     };
 
     /** @param {number} format D3DFMT_INDEX @returns {{ gpu: string, bytes: number } | null} */
@@ -1156,6 +1390,10 @@ export function createRenderer(options){
                 colorWrite: (flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0,
                 alphaTest: false,
                 fogMode: D3DFOG.NONE,
+                // A clear is the colour it was given and nothing else: neither
+                // the scene's lighting nor its specular pass belongs to it.
+                specularEnable: false,
+                lighting: null,
             };
             const uniforms = uniformBlock({
                 worldViewProjection: IDENTITY,

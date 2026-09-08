@@ -1,0 +1,24 @@
+{
+  "name": "@bottlify/networking",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "Winsock relay for Bottlify: a browser transport and the server that does its socket work",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/client/index.js",
+    "./protocol": "./src/protocol.js",
+    "./server": "./src/server/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test \"src/**/*.test.js\"",
+    "typecheck": "tsc -p jsconfig.json",
+    "relay": "node src/server/cli.js"
+  }
+}

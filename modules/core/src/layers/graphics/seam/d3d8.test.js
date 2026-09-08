@@ -29,8 +29,8 @@ import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
 import {
-    D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8, D3DSURFACE_DESC8,
-    D3DVIEWPORT8, POINT, RECT, createFields,
+    D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
+    D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
 } from './structs.js';
 import {
     D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
@@ -875,6 +875,101 @@ test('every slot the device declares is there, and counts its own arguments', ()
     assert.equal(h.fields.readF32(read + D3DVIEWPORT8.MinZ), 0.25,
         'the two Z bounds are floats in dword slots');
     assert.equal(h.fields.readF32(read + D3DVIEWPORT8.MaxZ), 0.75);
+
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+/**
+ * D3DCAPS8 as `d3d8caps.h` declares it: fifty-three fields, every one of them
+ * four bytes, in this order. Written as an order rather than as a second copy
+ * of the offsets, because the defect this guards against is a field left out --
+ * and a table with a field missing has every offset after it wrong while still
+ * looking like a table of offsets.
+ */
+const D3DCAPS8_FIELDS = [
+    'DeviceType', 'AdapterOrdinal',
+    'Caps', 'Caps2', 'Caps3', 'PresentationIntervals',
+    'CursorCaps', 'DevCaps', 'PrimitiveMiscCaps', 'RasterCaps',
+    'ZCmpCaps', 'SrcBlendCaps', 'DestBlendCaps', 'AlphaCmpCaps', 'ShadeCaps',
+    'TextureCaps', 'TextureFilterCaps', 'CubeTextureFilterCaps', 'VolumeTextureFilterCaps',
+    'TextureAddressCaps', 'VolumeTextureAddressCaps', 'LineCaps',
+    'MaxTextureWidth', 'MaxTextureHeight', 'MaxVolumeExtent',
+    'MaxTextureRepeat', 'MaxTextureAspectRatio', 'MaxAnisotropy',
+    'MaxVertexW',
+    'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust',
+    'StencilCaps', 'FVFCaps', 'TextureOpCaps',
+    'MaxTextureBlendStages', 'MaxSimultaneousTextures',
+    'VertexProcessingCaps', 'MaxActiveLights', 'MaxUserClipPlanes',
+    'MaxVertexBlendMatrices', 'MaxVertexBlendMatrixIndex',
+    'MaxPointSize', 'MaxPrimitiveCount', 'MaxVertexIndex',
+    'MaxStreams', 'MaxStreamStride',
+    'VertexShaderVersion', 'MaxVertexShaderConst',
+    'PixelShaderVersion', 'MaxPixelShaderValue',
+];
+
+test('every D3DCAPS8 field is at the offset the header puts it at', ()=>{
+    // The five guard-band floats and the extents adjustment sit between the
+    // texture limits and the blend-stage counts. A table that skips them writes
+    // the maximum texture width into the repeat limit, and the real maximum
+    // then reads as zero -- which a program that halves a texture until it fits
+    // never escapes.
+    const offsets = /** @type {Record<string, number>} */ (D3DCAPS8);
+    D3DCAPS8_FIELDS.forEach((name, index)=>{
+        assert.equal(offsets[name], index * 4, `${name} is field ${index}`);
+    });
+    assert.equal(D3DCAPS8.SIZE, 0xd4, 'fifty-three four-byte fields');
+    assert.equal(Object.keys(D3DCAPS8).length, D3DCAPS8_FIELDS.length + 1,
+        'and nothing in the table that is not one of them');
+});
+
+test('the capabilities a device reports are answers, not gaps', ()=>{
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+
+    // Poisoned first, so that a field the writer never reaches fails here
+    // rather than reading back as a plausible zero.
+    const at = 0x3200;
+    h.box.services.writeMemory(at, new Uint8Array(D3DCAPS8.SIZE).fill(0xcd));
+    assert.equal(h.device(device, 'GetDeviceCaps', [at]), D3D_OK);
+
+    // The two that a program divides by, halves against, or compares a texture
+    // to. A zero read as an answer is worse than no answer at all.
+    assert.equal(h.fields.readU32(at + D3DCAPS8.MaxTextureWidth), 4096);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.MaxTextureHeight), 4096);
+    assert.equal(h.fields.readU32(at + D3DCAPS8.MaxTextureRepeat), 8192,
+        'and the repeat limit is its own field, not the width in disguise');
+
+    const caps = h.fields.readStruct(at, D3DCAPS8,
+        ['MaxVertexW', 'GuardBandLeft', 'GuardBandTop', 'GuardBandRight', 'GuardBandBottom',
+            'ExtentsAdjust', 'MaxPointSize']);
+    assert.equal(caps.DeviceType, D3DDEVTYPE.HAL, 'the first field, so the whole run starts right');
+    assert.equal(caps.MaxTextureAspectRatio, 4096);
+    assert.equal(caps.MaxAnisotropy, 16);
+    assert.equal(caps.MaxTextureBlendStages, 8);
+    assert.equal(caps.MaxSimultaneousTextures, 8);
+    assert.equal(caps.MaxActiveLights, 8);
+    assert.equal(caps.MaxUserClipPlanes, 6);
+    assert.equal(caps.MaxStreams, 16);
+    assert.equal(caps.MaxPointSize, 64, 'a float in the middle of the dwords');
+    assert.equal(caps.ExtentsAdjust, 0);
+    assert.ok(caps.MaxVertexW > 0, 'a zero here is read as no clipping headroom at all');
+    assert.ok(caps.GuardBandLeft < 0 && caps.GuardBandRight > 0);
+
+    // Both shader versions are zero deliberately: this device runs neither, and
+    // the entry points make that claim good.
+    assert.equal(caps.VertexShaderVersion, 0);
+    assert.equal(caps.PixelShaderVersion, 0);
+
+    // The bits land in the fields they belong to rather than one field over.
+    assert.equal(caps.ZCmpCaps, caps.AlphaCmpCaps, 'both comparison sets are the same set');
+    assert.equal(caps.SrcBlendCaps, caps.DestBlendCaps);
+    assert.ok((caps.TextureCaps & 0x00004000) !== 0, 'D3DPTEXTURECAPS_MIPMAP');
+    assert.ok((caps.TextureAddressCaps & 0x00000001) !== 0, 'D3DPTADDRESSCAPS_WRAP');
+    assert.ok((caps.DevCaps & 0x00010000) !== 0, 'D3DDEVCAPS_HWTRANSFORMANDLIGHT');
+    assert.equal(caps.CursorCaps, 0, 'nothing was written into the field before DevCaps');
+    assert.equal(caps.Caps3, 0, 'nor into the one before the presentation intervals');
 
     assert.equal(h.release(device), 0);
     h.release(root);
