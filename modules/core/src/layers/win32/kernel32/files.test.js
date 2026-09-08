@@ -18,6 +18,10 @@ const ERROR_NO_MORE_FILES = 18;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_NEGATIVE_SEEK = 131;
 const ERROR_ALREADY_EXISTS = 183;
+const ERROR_NOT_SUPPORTED = 50;
+
+/** What the old file family answers with when it fails. */
+const HFILE_ERROR = 0xffffffff;
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
@@ -41,6 +45,7 @@ const BUFFER = 0x200;
 const OUT_COUNT = 0x300;
 const OUT_HIGH = 0x304;
 const OUT_QWORD = 0x308;
+const OUT_PATH = 0x400;
 const OUT_PART = 0x310;
 const OUT_TEXT = 0x400;
 const FIND_DATA = 0x600;
@@ -899,4 +904,169 @@ test('GetFullPathNameW keeps a trailing separator the caller wrote', ()=>{
     }
     assert.equal(text.join(''), 'C:\\GAME\\DATA\\');
     assert.equal(written, 13);
+});
+
+// --- the file family a self-extractor uses ---
+
+test('_lopen and _lread read a file the old way', ()=>{
+    // A self-extractor of this era opens with these rather than with
+    // CreateFile, and the handle it gets back is the same kind of handle: a
+    // program that opens with _lopen and closes with CloseHandle is doing
+    // something Windows allows, and two kinds of handle would leak.
+    const { files, memory, fns, at } = setup();
+    files.put('C:\\GAME\\DATA.BIN', 'payload');
+
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\DATA.BIN'), 0]);
+    assert.notEqual(handle, HFILE_ERROR);
+    assert.equal(fns._lread.handler([handle, BUFFER, 7]), 7);
+    assert.equal(memory.string(BUFFER), 'payload');
+    assert.equal(fns._lclose.handler([handle]), 0, 'zero is success here, unlike CloseHandle');
+});
+
+test('_lopen refuses a file that is not there', ()=>{
+    const { fns, error, at } = setup();
+    assert.equal(fns._lopen.handler([at(NAME, 'C:\\GAME\\NOPE.BIN'), 0]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_FILE_NOT_FOUND);
+});
+
+test('_lcreat always truncates, which is what an unpack relies on', ()=>{
+    // A second pass over the same name must find an empty file rather than the
+    // tail of the first one.
+    const { files, memory, fns, at } = setup();
+    files.put('C:\\GAME\\OUT.BIN', 'a long previous payload');
+
+    const handle = fns._lcreat.handler([at(NAME, 'C:\\GAME\\OUT.BIN'), 0]);
+    assert.notEqual(handle, HFILE_ERROR);
+    memory.putString(BUFFER, 'new');
+    assert.equal(fns._lwrite.handler([handle, BUFFER, 3]), 3);
+    fns._lclose.handler([handle]);
+
+    assert.equal(files.text('C:\\GAME\\OUT.BIN'), 'new');
+});
+
+test('_llseek moves by all three origins and reports where it landed', ()=>{
+    const { files, memory, fns, at } = setup();
+    files.put('C:\\GAME\\DATA.BIN', '0123456789');
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\DATA.BIN'), 0]);
+
+    assert.equal(fns._llseek.handler([handle, 4, 0]), 4, 'from the beginning');
+    assert.equal(fns._lread.handler([handle, BUFFER, 2]), 2);
+    assert.equal(memory.string(BUFFER).slice(0, 2), '45');
+
+    assert.equal(fns._llseek.handler([handle, 1, 1]), 7, 'from where it stands');
+    // Backwards from the end is how a program reads a trailer, and the offset
+    // is signed -- read as unsigned it would seek past four gigabytes.
+    assert.equal(fns._llseek.handler([handle, -3, 2]), 7, 'from the end');
+    assert.equal(fns._lread.handler([handle, BUFFER, 3]), 3);
+    assert.equal(memory.string(BUFFER).slice(0, 3), '789');
+});
+
+test('_llseek before the beginning fails rather than wrapping', ()=>{
+    const { files, fns, error, at } = setup();
+    files.put('C:\\GAME\\DATA.BIN', '0123456789');
+    const handle = fns._lopen.handler([at(NAME, 'C:\\GAME\\DATA.BIN'), 0]);
+
+    assert.equal(fns._llseek.handler([handle, -1, 0]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_NEGATIVE_SEEK);
+});
+
+test('the old family refuses a handle that is not one', ()=>{
+    const { fns, error } = setup();
+    assert.equal(fns._lread.handler([0x1234, BUFFER, 4]), HFILE_ERROR);
+    assert.equal(fns._lclose.handler([0x1234]), HFILE_ERROR);
+    assert.equal(error.code, ERROR_INVALID_HANDLE);
+});
+
+// --- where a self-extractor unpacks itself ---
+
+test('GetTempFileNameA creates the file when asked to pick the name', ()=>{
+    // A zero uUnique is how a caller reserves a name against anyone else taking
+    // it, and it then opens that name expecting it to exist.
+    const { files, memory, fns, error, at } = setup();
+
+    const number = fns.GetTempFileNameA.handler(
+        [at(NAME, 'C:\\GAME'), at(NAME2, 'WZ'), 0, OUT_PATH]);
+    assert.notEqual(number, 0);
+    assert.equal(error.code, ERROR_SUCCESS);
+
+    const path = memory.string(OUT_PATH);
+    assert.match(path, /^C:\\GAME\\WZ[0-9a-f]+\.TMP$/);
+    assert.ok(files.stat(path)?.exists, 'the name was reserved by creating it');
+});
+
+test('a second GetTempFileNameA does not hand back the first name', ()=>{
+    // The whole reason a caller asks twice.
+    const { memory, fns, at } = setup();
+
+    fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME'), at(NAME2, 'WZ'), 0, OUT_PATH]);
+    const first = memory.string(OUT_PATH);
+    fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME'), at(NAME2, 'WZ'), 0, OUT_PATH]);
+
+    assert.notEqual(memory.string(OUT_PATH), first);
+});
+
+test('a chosen uUnique builds the name and creates nothing', ()=>{
+    const { files, memory, fns, at } = setup();
+
+    assert.equal(
+        fns.GetTempFileNameA.handler([at(NAME, 'C:\\GAME'), at(NAME2, 'AB'), 0x41, OUT_PATH]),
+        0x41, 'the number comes back so a caller can build the next one');
+    const path = memory.string(OUT_PATH);
+    assert.equal(path, 'C:\\GAME\\AB41.TMP');
+    assert.equal(files.stat(path)?.exists, undefined, 'nothing was created');
+});
+
+// --- putting an unpacked file in its place ---
+
+test('MoveFileExA replaces an existing file when told to', ()=>{
+    // A second install over the first replaces rather than failing, and without
+    // this it stops on the first file it already wrote.
+    const { files, fns, at } = setup();
+    files.put('C:\\GAME\\NEW.DLL', 'fresh');
+    files.put('C:\\GAME\\OLD.DLL', 'stale');
+
+    assert.equal(
+        fns.MoveFileExA.handler(
+            [at(NAME, 'C:\\GAME\\NEW.DLL'), at(NAME2, 'C:\\GAME\\OLD.DLL'), 1]),
+        1);
+    assert.equal(files.text('C:\\GAME\\OLD.DLL'), 'fresh');
+    assert.equal(files.stat('C:\\GAME\\NEW.DLL')?.exists, undefined);
+});
+
+test('MoveFileExA without the flag still refuses to overwrite', ()=>{
+    const { files, fns, error, at } = setup();
+    files.put('C:\\GAME\\NEW.DLL', 'fresh');
+    files.put('C:\\GAME\\OLD.DLL', 'stale');
+
+    assert.equal(
+        fns.MoveFileExA.handler(
+            [at(NAME, 'C:\\GAME\\NEW.DLL'), at(NAME2, 'C:\\GAME\\OLD.DLL'), 0]),
+        0);
+    assert.equal(error.code, ERROR_ALREADY_EXISTS);
+    assert.equal(files.text('C:\\GAME\\OLD.DLL'), 'stale');
+});
+
+test('a move delayed until reboot is refused, not quietly accepted', ()=>{
+    // There is no next start here. A caller told this succeeded would believe a
+    // file it still needs has been scheduled to arrive.
+    const { files, fns, error, at } = setup();
+    files.put('C:\\GAME\\NEW.DLL', 'fresh');
+
+    assert.equal(
+        fns.MoveFileExA.handler(
+            [at(NAME, 'C:\\GAME\\NEW.DLL'), at(NAME2, 'C:\\GAME\\OLD.DLL'), 4]),
+        0);
+    assert.equal(error.code, ERROR_NOT_SUPPORTED);
+});
+
+test('the installer file family declares the stack it pops', ()=>{
+    const { fns } = setup();
+    assert.equal(fns._lopen.argBytes, 8);
+    assert.equal(fns._lcreat.argBytes, 8);
+    assert.equal(fns._lread.argBytes, 12);
+    assert.equal(fns._lwrite.argBytes, 12);
+    assert.equal(fns._llseek.argBytes, 12);
+    assert.equal(fns._lclose.argBytes, 4);
+    assert.equal(fns.GetTempFileNameA.argBytes, 16);
+    assert.equal(fns.MoveFileExA.argBytes, 12);
 });

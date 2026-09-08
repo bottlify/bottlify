@@ -40,6 +40,7 @@ const ERROR_NO_MORE_FILES = 18;
 const ERROR_FILE_EXISTS = 80;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NEGATIVE_SEEK = 131;
+const ERROR_NOT_SUPPORTED = 50;
 const ERROR_DIR_NOT_EMPTY = 145;
 const ERROR_ALREADY_EXISTS = 183;
 const ERROR_DIRECTORY = 267;
@@ -107,6 +108,10 @@ const OF_CREATE = 0x1000;
 const OF_DELETE = 0x0200;
 const OF_EXIST = 0x4000;
 const HFILE_ERROR = 0xffffffff;
+
+/** MoveFileEx's flags: the two an installer actually passes. */
+const MOVEFILE_REPLACE_EXISTING = 0x0001;
+const MOVEFILE_DELAY_UNTIL_REBOOT = 0x0004;
 
 /** How much of a file to move at a time when copying one. */
 const COPY_CHUNK = 1 << 20;
@@ -597,19 +602,41 @@ export function createFileFunctions(host){
         return files.remove(path) ? 1 : fail(ERROR_ACCESS_DENIED);
     });
 
-    const moveFile = bothForms(8, ([from, to], text)=>{
-        const source = text.path(from);
-        const destination = text.path(to);
+    /**
+     * The move both spellings and the extended form share.
+     *
+     * @param {string} source @param {string} destination @param {boolean} replace
+     */
+    const renamePath = (source, destination, replace)=>{
         if (!files.stat(source)?.exists)
         {
             return fail(missing(source));
         }
         if (files.stat(destination)?.exists)
         {
-            return fail(ERROR_ALREADY_EXISTS);
+            if (!replace)
+            {
+                return fail(ERROR_ALREADY_EXISTS);
+            }
+            if (!files.remove(destination))
+            {
+                return fail(ERROR_ACCESS_DENIED);
+            }
         }
         return files.rename(source, destination) ? 1 : fail(ERROR_ACCESS_DENIED);
-    });
+    };
+
+    /**
+     * Where the next generated temporary name starts looking.
+     *
+     * Counted rather than randomised, as Windows does, and kept across calls so
+     * that a caller asking twice in a row is not handed the same name twice --
+     * which is the whole reason it asks.
+     */
+    let nextTempNumber = 1;
+
+    const moveFile = bothForms(8, ([from, to], text)=>
+        renamePath(text.path(from), text.path(to), false));
 
     const createDirectory = bothForms(8, ([name], text)=>{
         const path = text.path(name);
@@ -1233,6 +1260,111 @@ export function createFileFunctions(host){
             handler: ([size, buffer])=>writeStringTo(buffer >>> 0, size, TEMP_PATH),
         },
 
+        /**
+         * UINT GetTempFileNameA(LPCSTR lpPathName, LPCSTR lpPrefixString,
+         *                      UINT uUnique, LPSTR lpTempFileName)
+         *
+         * The name a self-extractor unpacks itself into. Two behaviours here
+         * are the program's contract rather than detail, and both are silent
+         * when wrong:
+         *
+         * - **A zero uUnique creates the file.** That is how the caller
+         *   reserves the name against anyone else taking it, and a program
+         *   that then opens it for writing expects it to exist. With a
+         *   non-zero uUnique nothing is created and the name is simply built.
+         * - **The number is returned as well as written.** A caller keeps it
+         *   to build the next name in a series without asking again.
+         *
+         * The prefix contributes at most three characters, as Windows does,
+         * because the whole name has to fit an 8.3 form.
+         */
+        GetTempFileNameA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([directory, prefix, unique, out])=>{
+                const folder = (directory >>> 0) === 0
+                    ? TEMP_PATH
+                    : pathArgument(directory);
+                const stem = ((prefix >>> 0) === 0
+                    ? ''
+                    : host.readCString(prefix >>> 0, MAX_PATH)).slice(0, 3);
+                const base = folder.endsWith(SEPARATOR) ? folder : folder + SEPARATOR;
+
+                let number = unique >>> 0;
+                let path = '';
+                if (number !== 0)
+                {
+                    path = `${base}${stem}${(number & 0xffff).toString(16)}.TMP`;
+                }
+                else
+                {
+                    // A name nothing holds. Windows counts rather than
+                    // randomises, and a caller that asks twice must not be
+                    // handed the same name -- so the file is created here,
+                    // which is what makes the second search skip it.
+                    for (number = nextTempNumber; number <= 0xffff; number++)
+                    {
+                        const candidate = `${base}${stem}${number.toString(16)}.TMP`;
+                        const entry = files.stat(candidate);
+                        if (!entry || !entry.exists)
+                        {
+                            path = candidate;
+                            break;
+                        }
+                    }
+                    if (path === '')
+                    {
+                        return fail(ERROR_ACCESS_DENIED, 0);
+                    }
+                    nextTempNumber = number + 1;
+                    const node = files.open(path,
+                        { read: true, write: true, create: true, truncate: true });
+                    if (!node)
+                    {
+                        return fail(ERROR_ACCESS_DENIED, 0);
+                    }
+                }
+
+                if ((out >>> 0) !== 0)
+                {
+                    const bytes = latin1(path.slice(0, MAX_PATH - 1));
+                    const buffer = new Uint8Array(bytes.length + 1);
+                    buffer.set(bytes);
+                    host.writeMemory(out >>> 0, buffer);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return number & 0xffff;
+            },
+        },
+
+        /**
+         * BOOL MoveFileExA(LPCSTR lpExistingFileName, LPCSTR lpNewFileName,
+         *                 DWORD dwFlags)
+         *
+         * The move an installer makes when it puts an unpacked file in its
+         * final place. MOVEFILE_REPLACE_EXISTING is the flag that matters: a
+         * second install over the first replaces rather than failing, and
+         * without honouring it the second run stops on the first file it
+         * already wrote.
+         *
+         * MOVEFILE_DELAY_UNTIL_REBOOT names a file to move when the machine
+         * next starts. There is no next start here, so it is refused rather
+         * than accepted and forgotten -- a caller told it succeeded would
+         * believe a file it still needs has been scheduled.
+         */
+        MoveFileExA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([from, to, flags])=>{
+                if ((flags >>> 0 & MOVEFILE_DELAY_UNTIL_REBOOT) !== 0)
+                {
+                    return fail(ERROR_NOT_SUPPORTED);
+                }
+                return renamePath(pathArgument(from), pathArgument(to),
+                    (flags >>> 0 & MOVEFILE_REPLACE_EXISTING) !== 0);
+            },
+        },
+
         /** HANDLE FindFirstFile(LPCSTR, LPWIN32_FIND_DATA) -- one body, both spellings. */
         FindFirstFileA: findFirstFile.ansi,
         FindFirstFileW: findFirstFile.wide,
@@ -1335,6 +1467,159 @@ export function createFileFunctions(host){
          * already locked. Succeeding is not a pretence: the guarantee the caller
          * asked for -- that nothing else writes here meanwhile -- holds.
          */
+        /**
+         * The file family a sixteen-bit program was written against, which an
+         * installer of this era is: a self-extractor writes its payload to a
+         * temporary directory with these and not with CreateFile.
+         *
+         * They are the same files and the same handles as everything else here
+         * -- an HFILE is a HANDLE, and Windows lets one be passed where the
+         * other is expected. Keeping two kinds would mean a program that opens
+         * with `_lopen` and closes with `CloseHandle` leaks, and programs do
+         * exactly that.
+         *
+         * HFILE _lopen(LPCSTR lpPathName, int iReadWrite)
+         */
+        _lopen: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name, mode])=>{
+                const path = pathArgument(name);
+                const write = (mode & OF_READWRITE) !== 0 || (mode & OF_WRITE) !== 0;
+                const entry = files.stat(path);
+                if (!entry || !entry.exists)
+                {
+                    return fail(missing(path), HFILE_ERROR);
+                }
+                const node = files.open(path, { read: true, write, create: false });
+                if (!node)
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return host.handles.open('file', { path, node, read: true, write, position: 0 });
+            },
+        },
+
+        /**
+         * HFILE _lcreat(LPCSTR lpPathName, int iAttribute)
+         *
+         * Always creates and always truncates, which is the difference from
+         * `_lopen`: a self-extractor calls this for every file it unpacks and
+         * relies on a second pass finding an empty one rather than the tail of
+         * the first.
+         */
+        _lcreat: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name])=>{
+                const path = pathArgument(name);
+                const node = files.open(path,
+                    { read: true, write: true, create: true, truncate: true });
+                if (!node)
+                {
+                    return fail(ERROR_ACCESS_DENIED, HFILE_ERROR);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return host.handles.open('file',
+                    { path, node, read: true, write: true, position: 0 });
+            },
+        },
+
+        /** UINT _lread(HFILE hFile, LPVOID lpBuffer, UINT uBytes) */
+        _lread: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, count])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                }
+                const bytes = files.read(file.node, file.position, count >>> 0);
+                // A bundle-backed volume can answer with a promise. This family
+                // has no overlapped form and no way to say "later", so the
+                // caller is parked exactly as the modern spelling parks it.
+                const deliver = (/** @type {Uint8Array} */ data)=>{
+                    host.writeMemory(buffer >>> 0, data);
+                    file.position += data.length;
+                    host.setLastError(ERROR_SUCCESS);
+                    return data.length;
+                };
+                return typeof (/** @type {any} */ (bytes))?.then === 'function'
+                    ? /** @type {any} */ (bytes).then(deliver)
+                    : deliver(/** @type {any} */ (bytes));
+            },
+        },
+
+        /** UINT _lwrite(HFILE hFile, LPCSTR lpBuffer, UINT uBytes) */
+        _lwrite: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, buffer, count])=>{
+                const file = object(handle, 'file');
+                if (!file || !file.write)
+                {
+                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                }
+                const bytes = count === 0
+                    ? new Uint8Array(0)
+                    : host.readMemory(buffer >>> 0, count >>> 0).slice();
+                const stored = files.write(file.node, file.position, bytes);
+                file.position += stored;
+                host.setLastError(ERROR_SUCCESS);
+                return stored;
+            },
+        },
+
+        /** LONG _llseek(HFILE hFile, LONG lOffset, int iOrigin) */
+        _llseek: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, offset, origin])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                }
+                // The origins are the same three values SetFilePointer uses,
+                // and the offset is signed: seeking backwards from the end is
+                // how a program reads a trailer.
+                const position = seek(file, offset | 0, origin >>> 0);
+                if (position === null)
+                {
+                    return fail(ERROR_NEGATIVE_SEEK, HFILE_ERROR);
+                }
+                file.position = position;
+                host.setLastError(ERROR_SUCCESS);
+                return position;
+            },
+        },
+
+        /**
+         * HFILE _lclose(HFILE hFile)
+         *
+         * Zero for success, which is the opposite of CloseHandle's convention
+         * and the kind of difference that is silent when got wrong: a caller
+         * that checks for zero would see every close as a failure.
+         */
+        _lclose: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                try
+                {
+                    host.handles.close(handle >>> 0);
+                    host.setLastError(ERROR_SUCCESS);
+                    return 0;
+                }
+                catch (e){
+                    void e;
+                    return fail(ERROR_INVALID_HANDLE, HFILE_ERROR);
+                }
+            },
+        },
+
         LockFile: {
             argBytes: 20,
             /** @param {number[]} args */
