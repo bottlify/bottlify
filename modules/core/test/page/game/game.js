@@ -490,6 +490,17 @@ async function run(request){
     };
     result.profile = profile(metrics('memory').layout ?? []);
 
+    // Named rather than left to `scalars`, which keeps only numbers and strings
+    // -- every metric this layer reports is an object, so all of them were
+    // dropped and a run said nothing whatever about what it drew.
+    const graphics = metrics('graphics');
+    result.graphics = {
+        created: graphics.created ?? [],
+        libraries: graphics.libraries ?? [],
+        device: graphics.seam?.device ?? null,
+        presenter: graphics.presenter ?? null,
+    };
+
     // What the program wrote. A game of this age keeps its own log, and it says
     // in plain words what it thought went wrong.
     result.files = app.session.export().map((/** @type {any} */ file)=>({

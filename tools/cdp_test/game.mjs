@@ -197,6 +197,38 @@ function describe(result, context, calls){
     }
     say('');
 
+    const graphics = result.graphics;
+    if (graphics)
+    {
+        say(`  graphics: created=[${graphics.created.join(' ')}]`);
+        const device = graphics.device;
+        if (device)
+        {
+            say(`    frames=${device.frames} draws=${device.draws} clears=${device.clears}`);
+            const skipped = Object.entries(device.skipped ?? {})
+                .filter(([, count])=>count > 0)
+                .map(([name, count])=>`${name}=${count}`).join(' ');
+            if (skipped)
+            {
+                say(`    skipped: ${skipped}`);
+            }
+            const lighting = device.lighting;
+            if (lighting)
+            {
+                say(`    lighting: lit=${lighting.lit} unlit=${lighting.unlit}`
+                    + ` no-normal=${lighting.noNormal} pre-transformed=${lighting.preTransformed}`);
+                say(`    lights: most=${lighting.mostLights}`
+                    + ` types=[${lighting.types.join(' ')}]`
+                    + ` ambient=[${lighting.ambients.join(' ')}]`);
+            }
+            for (const failure of (device.failures ?? []).slice(0, 8))
+            {
+                say(`    failed: ${failure}`);
+            }
+        }
+        say('');
+    }
+
     say(`  threads: ${JSON.stringify(result.threads?.byState ?? {})}`);
     for (const waiting of result.threads?.waiting ?? [])
     {

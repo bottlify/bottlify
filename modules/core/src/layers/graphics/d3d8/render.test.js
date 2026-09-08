@@ -1241,3 +1241,42 @@ test('a state with no lighting in its shape is unlit, and still reads the specul
     assert.equal(state.lighting, null, 'nothing asked for lighting, so there is none');
     assert.equal(state.specularEnable, true, 'but the specular state is read from the device');
 });
+
+test('the run counts what lighting it was actually asked for', async()=>{
+    // A picture that is uniformly too dark or too flat cannot be diagnosed from
+    // the frame. The question is always whether the program enabled lighting,
+    // how many lights it had on, what ambient it set, and how many draws were
+    // refused lighting for want of a normal -- and none of that was countable.
+    const h = harness();
+    const { device } = h;
+    /** @param {number} fvf @param {number} lighting */
+    const draw = (fvf, lighting)=>{
+        assert.equal(device.SetRenderState(D3DRS.LIGHTING, lighting), D3D_OK);
+        assert.equal(device.SetVertexShader(fvf), D3D_OK);
+        const stride = decodeFvf(fvf).stride;
+        assert.equal(
+            device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(stride * 3), stride),
+            D3D_OK);
+    };
+
+    assert.equal(device.SetLight(0, light8()), D3D_OK);
+    assert.equal(device.LightEnable(0, true), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.AMBIENT, 0x00203040), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    draw(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE, 1);
+    draw(FVF.XYZ | FVF.DIFFUSE, 1);
+    draw(FVF.XYZRHW | FVF.DIFFUSE, 1);
+    draw(FVF.XYZ | FVF.NORMAL | FVF.DIFFUSE, 0);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const counted = device.diagnostics().lighting;
+    assert.equal(counted.lit, 1);
+    assert.equal(counted.unlit, 3);
+    assert.equal(counted.noNormal, 1, 'lighting was on and the format carried no normal');
+    assert.equal(counted.preTransformed, 1, 'lighting was on and the vertices were past it');
+    assert.equal(counted.mostLights, 1);
+    assert.deepEqual(counted.types, [light8().Type]);
+    assert.deepEqual(counted.ambients, ['00203040'],
+        'the scene ambient a lit draw was made under, so a black one is visible as such');
+});

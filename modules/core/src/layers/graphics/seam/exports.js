@@ -296,6 +296,10 @@ export function createGraphicsLibraries(
         diagnostics: ()=>({
             created: [...created],
             interfaces: publisher.count(),
+            // The device's own counters. Nothing else reaches the renderer, so
+            // without this a run says which libraries a program opened and
+            // nothing at all about what it drew through them.
+            device: d3d8.diagnostics(),
         }),
     };
 }

@@ -117,10 +117,21 @@ export function d3dFormatOf(format){
     }
 }
 
-/** @returns {Material} */
+/**
+ * The material a fresh device has: white diffuse and ambient, no highlight and
+ * no glow.
+ *
+ * Not all zeros, which is what an unseeded structure would be. Geometry that
+ * never calls SetMaterial and carries no vertex colour takes every lighting
+ * term from here, so a black default lights the whole scene to black while
+ * every state a program reads back still says what it expects.
+ *
+ * @returns {Material}
+ */
 function defaultMaterial(){
+    const white = ()=>({ r: 1, g: 1, b: 1, a: 1 });
     const black = ()=>({ r: 0, g: 0, b: 0, a: 0 });
-    return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
+    return { Diffuse: white(), Ambient: white(), Specular: black(), Emissive: black(), Power: 0 };
 }
 
 /** @param {Material} material @returns {Material} */

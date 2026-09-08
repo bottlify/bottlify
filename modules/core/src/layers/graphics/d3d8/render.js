@@ -879,6 +879,66 @@ export function createRenderer(options){
         },
         /** @type {string[]} */
         failures: [],
+        /**
+         * What lighting a run actually asked for.
+         *
+         * A picture that is uniformly too dark or too flat cannot be diagnosed
+         * from the frame: the question is always whether the program enabled
+         * lighting at all, how many lights it had on, what ambient it set, and
+         * how many draws carried a normal to be lit by. Reading that off a
+         * counter is the difference between finding it and guessing at it.
+         */
+        lighting: {
+            lit: 0,
+            unlit: 0,
+            /** Lit was refused because the vertex format carried no normal. */
+            noNormal: 0,
+            /** Lit was refused because the vertices were already transformed. */
+            preTransformed: 0,
+            /** The largest number of lights any one draw had enabled. */
+            mostLights: 0,
+            /** Every distinct D3DRS_AMBIENT a draw was made under, in hex. */
+            /** @type {Set<string>} */
+            ambients: new Set(),
+            /** Every distinct light type enabled, by its D3DLIGHT_TYPE. */
+            /** @type {Set<number>} */
+            types: new Set(),
+        },
+    };
+
+    /**
+     * @param {RenderModel} model
+     * @param {any} layout
+     * @param {import('../webgpu/internal/pipeline.js').LightingState | null} lighting
+     */
+    const countLighting = (model, layout, lighting)=>{
+        const tally = counters.lighting;
+        if (!lighting)
+        {
+            tally.unlit++;
+            if ((model.renderStates.get(D3DRS.LIGHTING) ?? 0) !== 0)
+            {
+                // Lighting was on and we declined it, which is the case worth
+                // separating: the program believes it is lighting this draw.
+                if (layout.preTransformed)
+                {
+                    tally.preTransformed++;
+                }
+                else
+                {
+                    tally.noNormal++;
+                }
+            }
+            return;
+        }
+        tally.lit++;
+        tally.mostLights = Math.max(tally.mostLights, lighting.lights.length);
+        for (const type of lighting.lights)
+        {
+            tally.types.add(type);
+        }
+        tally.ambients.add(
+            ((model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0).toString(16).padStart(8, '0'));
     };
 
     /** @param {string} reason */
@@ -1163,6 +1223,7 @@ export function createRenderer(options){
             };
         });
         const lighting = lightingOf(model, layout);
+        countLighting(model, layout, lighting);
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
             topology,
@@ -1596,6 +1657,11 @@ export function createRenderer(options){
                 clears: counters.clears,
                 skipped: { ...counters.skipped },
                 failures: [...counters.failures],
+                lighting: {
+                    ...counters.lighting,
+                    ambients: [...counters.lighting.ambients],
+                    types: [...counters.lighting.types],
+                },
                 recording: recording ? recording.commands.length : 0,
                 // What the last frame was made of, for a test that wants to
                 // evaluate the same draws on the processor.

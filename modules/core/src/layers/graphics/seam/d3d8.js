@@ -1505,12 +1505,21 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 fields.writeU32(out >>> 0, 0);
                 return hr;
             }
+            // Held so the layer's diagnostics can reach the renderer's
+            // counters. The most recent one only: a program makes one device
+            // and remakes it on a reset, and keeping every one it ever had
+            // would hold a released device's resources alive to say nothing
+            // new about them.
+            lastDevice = held.device;
             handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8, out >>> 0);
             return D3D_OK;
         },
     };
 
     const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods)];
+
+    /** @type {any} */
+    let lastDevice = null;
 
     return {
         /**
@@ -1520,6 +1529,9 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
          * @returns {number}
          */
         publishRoot: root=>publisher.publish(root, rootInterfaces, IID_IDirect3D8),
+
+        /** What the device this program is drawing through has counted. */
+        diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
 
         /** For tests, which have no guest to call through. */
         interfaces: { root: rootInterfaces, device: deviceInterfaces,
