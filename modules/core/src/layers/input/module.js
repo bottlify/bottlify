@@ -77,6 +77,8 @@ export const inputModule = {
         const router = createInputRouter({
             /** @param {any} message */
             post: message=>queue?.post(message),
+            /** @param {number} character @param {number} lParam */
+            compose: (character, lParam)=>queue?.compose(character, lParam),
             /** @param {import('./dinput/devices.js').InputEvent} event */
             device: event=>dinput.post(event),
             now: config?.now ?? (()=>Date.now()),

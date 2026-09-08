@@ -1032,7 +1032,14 @@ export function createWindowFunctions(host){
                 }
                 const isDown = message.message === WM_KEYDOWN
                     || message.message === WM_SYSKEYDOWN;
-                const character = isDown ? characterFor(message.wParam) : null;
+                // What the host's own keyboard layout made of this press, if it
+                // made anything: that is where a layout, a dead key and an
+                // input method live, and none of them can be worked out from a
+                // virtual key here. The table below is the fallback for a host
+                // that composes nothing -- a recorded session, a test.
+                const character = isDown
+                    ? host.queue.takeComposed?.(message.lParam) ?? characterFor(message.wParam)
+                    : null;
                 if (character !== null)
                 {
                     host.queue.post({

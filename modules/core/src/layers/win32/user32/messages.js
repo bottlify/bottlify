@@ -74,6 +74,15 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     let retrieved = 0;
 
     /**
+     * Characters the host composed, waiting for the TranslateMessage that turns
+     * one into a WM_CHAR.
+     *
+     * @type {{ character: number, lParam: number }[]}
+     */
+    const composed = [];
+    const COMPOSED_LIMIT = 16;
+
+    /**
      * Timers, which are not queued messages.
      *
      * Windows never puts WM_TIMER in the queue: it makes one up when a program
@@ -151,6 +160,51 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     };
 
     return {
+        /**
+         * A character the host's keyboard layout made out of a key press.
+         *
+         * Windows composes a character inside TranslateMessage, from the layout
+         * and the state of the modifiers -- so a program that never calls
+         * TranslateMessage never sees a WM_CHAR at all, and one that does sees
+         * exactly one. Only the host knows the layout, so the host composes;
+         * only TranslateMessage may deliver, or the program is told twice.
+         *
+         * Kept against the key press it came from, because a modifier goes
+         * down without producing anything and would otherwise take the next
+         * character in the queue as its own.
+         *
+         * @param {number} character  A UTF-16 code unit.
+         * @param {number} lParam     The key press it was composed from.
+         */
+        compose(character, lParam){
+            composed.push({ character: character & 0xffff, lParam: lParam >>> 0 });
+            // A press whose TranslateMessage never came is not worth keeping:
+            // a program that translates nothing would otherwise accumulate one
+            // of these per keystroke for the length of the run.
+            if (composed.length > COMPOSED_LIMIT)
+            {
+                composed.shift();
+            }
+        },
+
+        /**
+         * The character composed for this key press, if the host made one.
+         *
+         * @param {number} lParam
+         * @returns {number | null}
+         */
+        takeComposed(lParam){
+            const at = composed.findIndex(entry=>entry.lParam === (lParam >>> 0));
+            if (at === -1)
+            {
+                return null;
+            }
+            // Everything before it belonged to a press nobody translated.
+            const [taken] = composed.splice(at, 1);
+            composed.splice(0, at);
+            return taken.character;
+        },
+
         /** @param {PostedMessage} message */
         post(message){
             if ((message.message >>> 0) === WM_MOUSEMOVE)

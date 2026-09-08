@@ -42,8 +42,12 @@ function harness({ bounds = null } = {}){
     keyboard.acquire();
     mouse.acquire();
 
+    /** @type {{ character: number, lParam: number }[]} */
+    const composed = [];
     const router = createInputRouter({
         post: message=>messages.push(message),
+        /** @param {number} character @param {number} lParam */
+        compose: (character, lParam)=>composed.push({ character, lParam }),
         device: event=>{
             raw.push(event);
             return event.kind === 'key' ? keyboard.post(event) : mouse.post(event);
@@ -74,6 +78,12 @@ function harness({ bounds = null } = {}){
         all(){
             const taken = [...messages];
             messages.length = 0;
+            return taken;
+        },
+        /** The characters handed to the queue for TranslateMessage to deliver. */
+        composed(){
+            const taken = [...composed];
+            composed.length = 0;
             return taken;
         },
     };
@@ -171,34 +181,40 @@ test('a key nothing maps is dropped rather than sent as some other key', ()=>{
     assert.equal(h.router.diagnostics().dropped, 1);
 });
 
-test('text is the character the host composed, on the last key press lParam', ()=>{
+// These three asserted that a text event posts a WM_CHAR of its own. That was
+// wrong, and the program saw every keystroke twice: Windows makes a WM_CHAR
+// inside TranslateMessage and nowhere else, so the character the host's layout
+// composed is handed over for TranslateMessage to deliver, and delivered once.
+
+test('text is composed against the key press it came from, not posted', ()=>{
     const h = harness();
     h.send({ kind: 'key', code: 'KeyA', down: true });
     h.drain();
     h.send({ kind: 'text', text: 'A' });
 
-    const [message] = h.drain();
-    assert.equal(message.message, WM.CHAR);
-    assert.equal(message.wParam, 0x41, 'the composed character, not the key');
-    assert.equal(message.lParam, 0x001e0001, 'the press it came from');
+    assert.deepEqual(h.composed(), [{ character: 0x41, lParam: 0x001e0001 }]);
+    assert.deepEqual(h.drain(), [], 'and nothing is posted, or it arrives twice');
 });
 
-test('text arriving while ALT is held is a system character', ()=>{
+test('a character outside the basic plane is composed as two code units', ()=>{
+    const h = harness();
+    assert.equal(h.send({ kind: 'text', text: '\u{1f600}' }), true);
+    assert.deepEqual(h.composed().map(entry=>entry.character), [0xd83d, 0xde00]);
+    assert.deepEqual(h.drain(), []);
+});
+
+test('whether a character is a system one is TranslateMessage\'s to decide', ()=>{
+    // It reads the message it was given: WM_SYSKEYDOWN makes a WM_SYSCHAR. The
+    // router held ALT down and decided here, which is a second place for the
+    // same decision to be made and disagree.
     const h = harness();
     h.send({ kind: 'key', code: 'AltLeft', down: true });
     h.send({ kind: 'key', code: 'KeyF', down: true });
-    h.drain();
-    h.send({ kind: 'text', text: 'f' });
-    assert.equal(h.drain()[0].message, WM.SYSCHAR);
-});
+    const [, keyDown] = h.drain();
+    assert.equal(keyDown.message, WM.SYSKEYDOWN);
 
-test('a character outside the basic plane arrives as two messages', ()=>{
-    const h = harness();
-    assert.equal(h.send({ kind: 'text', text: '\u{1f600}' }), true);
-    const posted = h.drain();
-    assert.equal(posted.length, 2);
-    assert.equal(posted[0].wParam, 0xd83d);
-    assert.equal(posted[1].wParam, 0xde00);
+    h.send({ kind: 'text', text: 'f' });
+    assert.deepEqual(h.composed().map(entry=>entry.character), [0x66]);
 });
 
 test('a pointer move packs client coordinates and reports what is held', ()=>{

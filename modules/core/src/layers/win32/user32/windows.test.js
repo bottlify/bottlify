@@ -1042,3 +1042,45 @@ test('a procedure that threw is not left standing for ever', async()=>{
     await Promise.resolve();
     assert.deepEqual(open, []);
 });
+
+test('TranslateMessage delivers the character the host composed, once', ()=>{
+    // The host knows the layout, the dead keys and the input method; this file
+    // knows only a table of virtual keys. So the host composes and this
+    // delivers -- and delivers exactly one, which is the whole contract: a
+    // character posted by whoever composed it as well would arrive twice.
+    const h = setup();
+    h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0x41, 0x001e0001, 0, 0, 0]);
+    h.queue.compose(0xe9, 0x001e0001);
+
+    assert.equal(h.fns.TranslateMessage.handler([MSG_BUFFER]), 1);
+    const posted = h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(posted?.message, WM_CHAR);
+    assert.equal(posted?.wParam, 0xe9, 'the composed character, not the virtual key');
+    assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'and only the one');
+});
+
+test('a key the host composed nothing for still translates from the table', ()=>{
+    // A recorded session and a test send key presses and no text at all.
+    const h = setup();
+    h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0x41, 0x001e0001, 0, 0, 0]);
+
+    assert.equal(h.fns.TranslateMessage.handler([MSG_BUFFER]), 1);
+    assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam, 0x61);
+});
+
+test('a modifier does not take the character meant for the key after it', ()=>{
+    // A modifier goes down producing nothing. Handing it the next character in
+    // the queue would put it on the wrong press and lose the right one.
+    const h = setup();
+    h.queue.compose(0x41, 0x001e0001);
+
+    h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0x10, 0x002a0001, 0, 0, 0]);
+    h.fns.TranslateMessage.handler([MSG_BUFFER]);
+    assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'the shift produced nothing');
+
+    h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0x41, 0x001e0001, 0, 0, 0]);
+    h.fns.TranslateMessage.handler([MSG_BUFFER]);
+    assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam, 0x41);
+});

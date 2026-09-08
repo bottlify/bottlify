@@ -110,6 +110,10 @@ const BUTTONS = Object.freeze({
  *     Where a window message goes: the thread's message queue.
  * @property {(event: import('./dinput/devices.js').InputEvent) => unknown} device
  *     Where the DirectInput reading goes.
+ * @property {(character: number, lParam: number) => void} [compose]
+ *     Where a character the host's layout produced is left for the
+ *     TranslateMessage that will turn it into a WM_CHAR. Absent in a build with
+ *     no message queue, where there is nothing to translate it for.
  * @property {() => number} [now]     The guest's clock, for a message's time.
  * @property {() => number} [target]  The window input is for.
  * @property {(() => { width: number, height: number }) | null} [bounds]
@@ -119,9 +123,10 @@ const BUTTONS = Object.freeze({
 /**
  * @param {RouterDeps} deps
  */
-export function createInputRouter({ post, device, now, target, bounds = null }){
+export function createInputRouter({ post, device, now, target, bounds = null, compose }){
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
+    const composeCharacter = compose ?? (()=>{});
 
     /** Virtual keys that are down. Indexed by VK, both the paired and the sided. */
     const keys = new Uint8Array(256);
@@ -250,10 +255,15 @@ export function createInputRouter({ post, device, now, target, bounds = null }){
         const string = event.text ?? '';
         for (let index = 0; index < string.length; index++)
         {
-            // One message per code unit, which is what a surrogate pair
-            // produces on Windows too -- the program reassembles it, if it
-            // cares, from two WM_CHARs.
-            emit(keys[VK_MENU] ? WM.SYSCHAR : WM.CHAR, string.charCodeAt(index), lastKeyLParam);
+            // Handed over, not posted. Windows makes a WM_CHAR inside
+            // TranslateMessage and nowhere else, so a program that calls it
+            // sees exactly one and a program that does not sees none. Posting
+            // here as well gave every keystroke twice: once from the host's
+            // layout and once from TranslateMessage's own table.
+            //
+            // One per code unit, which is what a surrogate pair produces on
+            // Windows too -- the program reassembles it, if it cares.
+            composeCharacter(string.charCodeAt(index), lastKeyLParam);
         }
         return string.length > 0;
     };
