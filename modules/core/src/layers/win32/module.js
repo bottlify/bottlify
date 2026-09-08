@@ -620,6 +620,16 @@ export const win32Module = {
                     resize: (address, bytes)=>allocator.resize(address, bytes),
                     systemTimeMs: ()=>kernel.clock.wallClock(),
                     now: ()=>kernel.clock.virtualTime(),
+                    // The same command line GetCommandLineA reports, because a
+                    // program is free to read either and compare them.
+                    commandLine: ()=>config?.commandLine ?? `"${modules.imagePath()}"`,
+                    // `exit` does not come back, so like ExitProcess it records
+                    // the code and parks the calling thread rather than
+                    // returning to a caller that no longer exists.
+                    exitProcess: (/** @type {number} */ code)=>{
+                        exitCode = code;
+                        return bridge.park();
+                    },
                     files: volume,
                     // The same set GetLogicalDrives reports, from the same
                     // place: a program populates its drive list from whichever

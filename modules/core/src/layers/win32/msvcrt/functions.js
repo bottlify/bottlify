@@ -29,6 +29,7 @@ import { createPathFunctions } from './paths.js';
 import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
+import { createStartupFunctions } from './startup.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -65,6 +66,11 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {any} [files]                  The volume, for the path functions.
  * @property {() => string[]} [drives]      Letters the filesystem has mounted.
  * @property {import('./float.js').FloatHost} [fpu]
+ * @property {() => string} [commandLine]
+ *           What the process was started with, as GetCommandLineA reports it.
+ * @property {(code: number) => any} [exitProcess]
+ *           Ends the process; answers with what the calling thread must return,
+ *           since `exit` does not come back.
  * @property {(message: string) => void} [abort]
  */
 
@@ -566,6 +572,23 @@ export function createMsvcrtFunctions(host){
         }),
         ...createScanFunctions(host),
         ...createCxxFunctions(host),
+
+        // The start-up runs before main and needs more of the machine than the
+        // rest of the runtime: a heap to put argv in, the command line the
+        // process was given, a way into guest code for the static constructors,
+        // and a way to end the process. Without them these stay unexported, and
+        // an unresolved import names the one that is missing -- which says more
+        // than a start-up that half runs.
+        ...(host.allocate && host.commandLine && host.exitProcess
+            ? createStartupFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                allocate: host.allocate,
+                commandLine: host.commandLine,
+                callGuest: host.callGuest,
+                exitProcess: host.exitProcess,
+            })
+            : {}),
 
         // The rest of the runtime needs seams the assembling caller may not
         // have wired. A missing one leaves the functions unexported, and an
