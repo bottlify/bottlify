@@ -1,0 +1,139 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * Adding a title by running its installer.
+ *
+ * Three steps, and only the middle one is anybody else's business. This module
+ * says what a prefix is made of and what to do with what it leaves behind; the
+ * running of the program in between belongs to whoever owns the screen it draws
+ * on, because a canvas, a device and a run loop are a launcher's concerns and
+ * not an installer's.
+ *
+ *     const options = prefixOptions(media);        // build the app with these
+ *     await app.run(...);                          // the person clicks through
+ *     const prefix = collectFrom(app, media);      // this is what it produced
+ *     await publish({ prefix, ... });              // and this is the bottle
+ *
+ * What is reachable today is the publisher's own single-process installer.
+ * A distribution that extracts a payload and starts a second program cannot
+ * run at all: `CreateProcess` refuses, deliberately, and until it does not this
+ * path stops there rather than pretending.
+ */
+
+import { REGISTRY_PATH, collect, prefixOptions } from './prefix.js';
+import { packBundle } from './pack.js';
+import { finish, partSink } from './upload.js';
+
+export { MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions }
+    from './prefix.js';
+export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
+export { PART_BYTES, finish, partSink } from './upload.js';
+
+/**
+ * The part of a running engine this module reads. Narrow on purpose: an install
+ * is over by the time any of it is called.
+ *
+ * @typedef {Object} InstalledApp
+ * @property {{ export: () => { path: string, bytes: Uint8Array }[] }} session
+ * @property {() => { toJSON: () => unknown }} registry
+ */
+
+/**
+ * @typedef {Object} PublishReport
+ * @property {'collecting' | 'packing' | 'finishing' | 'done'} stage
+ * @property {string} [detail]
+ * @property {number} [bytes]
+ */
+
+/**
+ * How much room the origin has left, or null where nothing will say.
+ *
+ * Asked before an install rather than during one: a prefix that will not fit
+ * should be refused while it is still a question, not at ninety per cent.
+ *
+ * @returns {Promise<{ quota: number, usage: number, available: number } | null>}
+ */
+export async function storageHeadroom(){
+    const estimate = await navigator.storage?.estimate?.();
+    if (!estimate)
+    {
+        return null;
+    }
+    const quota = estimate.quota ?? 0;
+    const usage = estimate.usage ?? 0;
+    return { quota, usage, available: Math.max(0, quota - usage) };
+}
+
+/**
+ * What an install left behind, taken off a machine that has finished running it.
+ *
+ * Separate from publishing it because the two are a person apart: this is what
+ * a screen shows before anybody decides to send anything, and reading it twice
+ * would mean copying the whole tree out of the volume twice.
+ *
+ * @param {InstalledApp} app
+ * @param {import('./prefix.js').InstallMedia} media
+ * @param {string} [root]  Overrides the chosen installation root.
+ * @returns {import('./prefix.js').Prefix}
+ */
+export function collectFrom(app, media, root){
+    return collect({
+        files: app.session.export(),
+        registry: app.registry().toJSON(),
+        seeded: prefixOptions(media).seeded,
+        root,
+    });
+}
+
+/**
+ * Turns a finished prefix into a bottle on a server.
+ *
+ * Packed on the way out: the blocks are compressed here and posted a part at a
+ * time, so neither the installed tree nor a second copy of it is ever written
+ * to this machine.
+ *
+ * @param {Object} options
+ * @param {import('./prefix.js').Prefix} options.prefix
+ * @param {import('./upload.js').Endpoint} options.endpoint
+ * @param {string} options.id                Names the bottle, and its directory.
+ * @param {Record<string, unknown>} [options.manifest]  Title, description, cover.
+ * @param {(report: PublishReport) => void} [options.report]
+ * @returns {Promise<{ packed: import('./pack.js').PackedSummary,
+ *                      answer: import('./upload.js').BottleAnswer }>}
+ */
+export async function publish({ prefix, endpoint, id, manifest = {}, report }){
+    // The registry is always there, so it is not evidence that anything ran.
+    if (!prefix.files.some(file=>file.path !== REGISTRY_PATH))
+    {
+        throw new Error('the installer produced no files, so there is no bottle to make');
+    }
+
+    const sink = partSink(endpoint, id, sent=>
+        report?.({ stage: 'packing', bytes: sent }));
+
+    report?.({ stage: 'packing', detail: `${prefix.files.length} files under ${prefix.root}` });
+    const packed = await packBundle({
+        files: prefix.files,
+        write: sink.write,
+        onProgress: progress=>report?.({
+            stage: 'packing',
+            detail: progress.path,
+            bytes: progress.packedTotal,
+        }),
+    });
+    await sink.flush();
+
+    report?.({ stage: 'finishing' });
+    const answer = await finish(endpoint, id, packed, {
+        title: id,
+        entry: prefix.entry,
+        ...manifest,
+    });
+
+    report?.({ stage: 'done', bytes: packed.bytes });
+    return { packed, answer };
+}

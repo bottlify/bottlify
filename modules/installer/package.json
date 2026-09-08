@@ -1,0 +1,27 @@
+{
+  "name": "@bottlify/installer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MPL-2.0",
+  "description": "Adding a title by running its installer: the temp prefix, what it leaves behind, and the way that travels to a bottle server",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": "./src/index.js",
+    "./prefix": "./src/prefix.js",
+    "./pack": "./src/pack.js",
+    "./upload": "./src/upload.js",
+    "./server": "./src/server/index.js"
+  },
+  "files": [
+    "src"
+  ],
+  "scripts": {
+    "test": "node --test \"src/**/*.test.js\"",
+    "test:integration": "node --test \"src/**/*.itest.js\"",
+    "typecheck": "tsc -p jsconfig.json",
+    "bottles": "node src/server/cli.js"
+  }
+}
