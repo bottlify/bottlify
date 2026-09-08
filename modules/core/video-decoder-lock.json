@@ -1,5 +1,7 @@
 {
-  "repo": null,
-  "tag": null,
-  "artifacts": {}
+  "repo": "mrwayer/FFmpeg",
+  "tag": "build-7f0f3d9",
+  "artifacts": {
+    "video-decoder.wasm": "sha256:d892e447842c1ca241ab77270b9b214eed75cee03e481640c940c5aa3f8c7065"
+  }
 }

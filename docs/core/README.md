@@ -112,9 +112,9 @@ Known limitations worth stating plainly:
 
 - **No video is decoded yet.** The filter graph exists and refuses, and the decoder that would let
   it stop refusing is built but not yet wired to it. The decoder's WebAssembly artifact is not in
-  git: `npm run fetch:video-decoder` downloads it against a lock file, and
-  `npm run build:video-decoder` rebuilds it in a container. A build without it comes up and reports
-  `available() === false`.
+  git: `npm run fetch:video-decoder` downloads it against a lock file
+  (`modules/core/video-decoder-lock.json`) from a release of the FFmpeg fork that builds it. A
+  build without it comes up and reports `available() === false`.
 - **A frame is presented, a game is not yet playable.** One real title boots end to end -- it maps
   its own libraries, opens its archives, creates a device and presents -- and stops short of its
   menu. That is where the work is.

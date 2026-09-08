@@ -21,3 +21,6 @@ ui/
 
 # Local reverse-engineering tools: a Ghidra install, extracted binaries, caches.
 .tools/
+
+# Game installers downloaded for bring-up testing: gigabytes of someone else's data.
+.to_install/

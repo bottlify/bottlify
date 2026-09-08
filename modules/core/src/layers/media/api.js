@@ -38,8 +38,7 @@
  * right answer to a cinematic and the wrong answer to starting up.
  *
  * Getting the binary: `npm run fetch:video-decoder` takes it from the pinned
- * release; `npm run build:video-decoder` builds it from source in a container.
- * It is a build artifact and is not in git.
+ * release. It is a build artifact and is not in git.
  *
  * The API a consumer sees:
  *

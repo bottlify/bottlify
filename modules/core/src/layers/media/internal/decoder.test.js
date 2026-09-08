@@ -12,8 +12,8 @@ import { createDecoder } from './decoder.js';
 
 /**
  * The binary is a build artifact and is not in git, so these tests say what is
- * missing and skip rather than fail on a machine that has not fetched it.
- * `npm run fetch:video-decoder`, or `npm run build:video-decoder`.
+ * missing and skip rather than fail on a machine that has not fetched it:
+ * `npm run fetch:video-decoder`.
  */
 const ARTIFACT = new URL('../../../../vendor/prebuilt/video-decoder.wasm', import.meta.url);
 

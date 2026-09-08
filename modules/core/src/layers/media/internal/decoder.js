@@ -5,9 +5,9 @@
  */
 
 /**
- * The JavaScript half of the video decoder: the C surface of
- * tools/build-video-decoder/decoder.c, wrapped so that nothing above this file
- * handles a raw pointer or an integer status.
+ * The JavaScript half of the video decoder: the C surface of the wasm module
+ * built out of the FFmpeg fork, wrapped so that nothing above this file handles
+ * a raw pointer or an integer status.
  *
  * The module is a standalone wasm binary with no JavaScript glue of its own, so
  * every import it declares has to be answered here.

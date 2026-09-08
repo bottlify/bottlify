@@ -36,26 +36,29 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ## FFmpeg — video and audio decoding
 
-- Source: https://github.com/FFmpeg/FFmpeg, release tag `n6.1` (the exact commit is recorded in
-  `video-decoder.manifest.json`, published beside the artifact it produced)
-- Build definition in this repository: `tools/build-video-decoder/`
+- Source: fork https://github.com/mrwayer/FFmpeg, branch `bottlify`, forked at upstream
+  https://github.com/FFmpeg/FFmpeg release tag `n6.1`
+- Build definition: `bottlify/` on that branch, which is also where the build runs and publishes
 - Distributed artifact: `video-decoder.wasm`, a WebAssembly build, fetched into
-  `modules/core/vendor/prebuilt/` by `npm run fetch:video-decoder`. It is a build artifact and is
-  not committed to this repository.
+  `modules/core/vendor/prebuilt/` by `npm run fetch:video-decoder` from the release pinned in
+  `modules/core/video-decoder-lock.json`. It is a build artifact and is not committed to this
+  repository.
 - License: LGPL-2.1-or-later
 
 The build passes neither `--enable-gpl` nor `--enable-nonfree`, so no GPL-licensed and no
 non-redistributable component is compiled in; the result is FFmpeg under the LGPL, distributed
 alongside this MPL-2.0 product as a separately licensed component rather than merged into it.
-Adding either flag would relicense the artifact, and `tools/build-video-decoder/build-decoder.sh`
+Adding either flag would relicense the artifact, and `bottlify/build-decoder.sh` on that branch
 says so where the flags are.
 
-The corresponding source is FFmpeg's own, at the tag above, unmodified: this repository patches
-nothing in it and adds only its own `decoder.c`, which is original work under the MPL. The
-configure flags that select the components are in the build script, so the artifact can be
-rebuilt from the upstream source by anyone who has it.
+The corresponding source obligation is met by that branch itself. FFmpeg's own code there is
+unmodified — the fork patches nothing in it and adds only a `bottlify/` directory holding the
+build definition and `decoder.c`, which is original work under the MPL. The release each artifact
+comes from is tagged after the commit that produced it, and the commit is repeated inside
+`video-decoder.manifest.json`, published beside the `.wasm`: the exact tree that was compiled is
+public and named, and rebuilding it needs only Docker.
 
-FFmpeg's full license text ships with that source tree (`COPYING.LGPLv2.1`).
+FFmpeg's full license text is in that tree (`COPYING.LGPLv2.1`).
 
 ## Wine conformance expectations — used as a specification
 
