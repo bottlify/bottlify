@@ -54,6 +54,8 @@ function machine(){
         winmm: engine.table,
         /** What the machine's driver does from outside any guest call. */
         pulse: ()=>engine.tick(),
+        /** @returns {any[]} */
+        report: ()=>engine.diagnostics(),
         /** @param {number} ms */
         tick: ms=>{
             clock += ms;
@@ -508,6 +510,58 @@ test('the notifier sends each form somewhere different', async()=>{
     assert.equal(signalled.length, 1);
 });
 
+test('the report counts a buffer out and back, and names the cursor driving it', ()=>{
+    // A program that stops because a buffer did not come back says nothing
+    // about it; from outside the machine only looks slow. `written` against
+    // `retired` is what tells a stall from a slow run, and `cursor` is what
+    // says which of the two paths ran -- a page with the sound off exercises
+    // only one of them, so a defect in the other is invisible without it.
+    const m = machine();
+    const device = opened(m);
+
+    assert.deepEqual(m.report().map((/** @type {any} */ d)=>
+        [d.handle, d.cursor, d.written, d.retired]), [[device, 'clock', 0, 0]]);
+
+    m.winmm.waveOutWrite.handler([device, header(m, device, 0x300, 176400), 32]);
+    assert.deepEqual(m.report()[0].written, 1);
+    assert.deepEqual(m.report()[0].retired, 0, 'still with the device');
+    assert.equal(m.report()[0].queued, 1);
+    assert.equal(m.report()[0].bytesWritten, 176400);
+
+    m.tick(1000);
+    m.pulse();
+    assert.equal(m.report()[0].retired, 1, 'a second of sound, and it is back');
+    assert.equal(m.report()[0].bytesRetired, 176400);
+    assert.equal(m.report()[0].queued, 0);
+});
+
+test('a callback nobody can deliver is reported as owed, not as delivered', ()=>{
+    // The buffer came back and the program has not been told. A callback is
+    // guest code and needs a thread stopped somewhere known, which a tick has
+    // not got, so it waits for the next winmm call the program makes -- and a
+    // program that made its last one is never told again. That is a real
+    // divergence from Windows, which delivers on a system thread, and this is
+    // the only place it is visible.
+    const m = machine();
+    const device = opened(m, CALLBACK_FUNCTION, 0x9000);
+    m.winmm.waveOutWrite.handler([device, header(m, device, 0x300, 176400), 32]);
+
+    m.tick(1000);
+    m.pulse();
+
+    const flags = m.get32(0x300 + 16);
+    assert.ok((flags & WHDR_DONE) !== 0, 'the flag is set from the tick');
+    assert.equal(m.done().length, 0, 'and the program has not been told');
+    assert.equal(m.report()[0].owed, 1);
+    assert.equal(m.report()[0].deferred, true, 'because only a thread can run it');
+
+    // The next call the program makes is the first moment there is one.
+    m.winmm.waveOutGetID.handler([device, 0x210]);
+    assert.equal(m.done().length, 1);
+    assert.equal(m.report()[0].owed, 0);
+    assert.equal(m.report()[0].deferred, false);
+});
+
 test('a device with a real mixer retires even a very small buffer', async()=>{
     // Miles opens a wave device and writes one tiny buffer as a probe, then
     // waits for WOM_DONE before it will write anything else. A device that
@@ -559,4 +613,8 @@ test('a device with a real mixer retires even a very small buffer', async()=>{
 
     const flags = memory[0x300 + 16] | memory[0x300 + 17] << 8;
     assert.ok((flags & 0x00000001) !== 0, `the buffer came back (flags 0x${flags.toString(16)})`);
+    // And the report says which of the two cursors did it, which is the only
+    // way to tell this path from the one a page with the sound off takes.
+    assert.equal(wave.diagnostics()[0].cursor, 'device');
+    assert.equal(wave.diagnostics()[0].retired, 1);
 });

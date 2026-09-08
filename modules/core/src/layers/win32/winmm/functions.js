@@ -184,6 +184,10 @@ export function createWinmmFunctions(host){
      * @property {number} trackBytes   Guest bytes the device had played last time.
      * @property {import('./notify.js').WaveNotice[]} pending  Owed, not yet told.
      * @property {boolean} delivering  A flush() is walking `pending` right now.
+     * @property {number} written      Buffers handed over, ever.
+     * @property {number} retired      Of those, the ones handed back.
+     * @property {number} bytesWritten
+     * @property {number} bytesRetired
      */
 
     /** @type {Map<number, WaveOut>} */
@@ -336,6 +340,8 @@ export function createWinmmFunctions(host){
             // find out which, and finding it clear would be a lie about the
             // buffer it was just handed.
             setFlags(done.header, flagsOf(done.header) & ~WHDR_INQUEUE | WHDR_DONE);
+            device.retired++;
+            device.bytesRetired += done.length;
             notice(device, MM_WOM_DONE, done.header);
         }
         if (device.queue.length === 0)
@@ -569,6 +575,10 @@ export function createWinmmFunctions(host){
                     trackBytes: 0,
                     pending: [],
                     delivering: false,
+                    written: 0,
+                    retired: 0,
+                    bytesWritten: 0,
+                    bytesRetired: 0,
                 };
                 devices.set(handle, opened);
                 // The handle reaches the caller before the open notice does: the
@@ -618,6 +628,8 @@ export function createWinmmFunctions(host){
                 device.playedBytes = 0;
             }
             device.queue.push({ header: at, length });
+            device.written++;
+            device.bytesWritten += length;
             // The bytes are copied out now rather than referred to. The buffer
             // stays the caller's and it is entitled to refill it the moment the
             // header comes back, which is long before the sound in it has been
@@ -678,6 +690,8 @@ export function createWinmmFunctions(host){
                 {
                     setFlags(queued.header,
                         flagsOf(queued.header) & ~WHDR_INQUEUE | WHDR_DONE);
+                    device.retired++;
+                    device.bytesRetired += queued.length;
                     notice(device, MM_WOM_DONE, queued.header);
                 }
                 device.queue = [];
@@ -788,5 +802,42 @@ export function createWinmmFunctions(host){
                 flush(device, MMSYSERR_NOERROR, false);
             }
         },
+
+        /**
+         * What every open device is doing, for whoever is measuring.
+         *
+         * A program that stops because a buffer did not come back is silent
+         * about it -- it is inside its own wait, and from outside the whole
+         * machine merely looks slow. These are the figures that tell the two
+         * apart, and each is here because its absence has cost time:
+         *
+         * - `cursor` says which of the two clocks is driving this device. The
+         *   two paths behave differently and only one of them is exercised by a
+         *   page with the sound off, so a defect that only appears with a real
+         *   device is invisible until this says which one ran.
+         * - `written` against `retired` is the stall itself: a program hands
+         *   over buffers and waits for them back, and a gap that stops closing
+         *   is the failure, whatever caused it.
+         * - `owed` and `deferred` say the buffer *did* come back and the
+         *   program has not been told. A callback is guest code and needs a
+         *   guest thread stopped somewhere known, which a tick has not got, so
+         *   a notice of that form waits for the next winmm call the program
+         *   makes. A program that made its last one is never told again --
+         *   Windows would have delivered on a system thread -- and `deferred`
+         *   with a growing `owed` is exactly that shape.
+         */
+        diagnostics: ()=>[...devices.values()].map(device=>({
+            handle: device.handle,
+            cursor: device.track ? 'device' : 'clock',
+            bytesPerSecond: device.bytesPerSecond,
+            paused: device.paused,
+            queued: device.queue.length,
+            written: device.written,
+            retired: device.retired,
+            bytesWritten: device.bytesWritten,
+            bytesRetired: device.bytesRetired,
+            owed: device.pending.length,
+            deferred: device.pending[0]?.kind === CALLBACK_FUNCTION,
+        })),
     };
 }
