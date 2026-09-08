@@ -7,15 +7,19 @@
 /**
  * What a DirectSound buffer is, without any of the COM around it.
  *
- * There is no audio device in this build, and this file is written so that the
- * absence changes nothing a program can observe except that nobody hears it.
- * What a program actually depends on is not sound: it is the pair of cursors.
- * It asks where playback has reached, fills the gap ahead of that, and asks
- * again. A buffer whose cursor never moves stalls it; one whose cursor jumps
- * the whole length every time it is asked spins it. So the cursor advances
- * against the guest's clock at the format's byte rate -- the same clock and the
- * same arithmetic the wave-out path already uses, because two notions of how
- * far playback has got would disagree the moment a program used both.
+ * What a program depends on is the pair of cursors. It asks where playback has
+ * reached, fills the gap ahead of that, and asks again. A buffer whose cursor
+ * never moves stalls it; one whose cursor jumps the whole length every time it
+ * is asked spins it. So the cursor advances against the guest's clock at the
+ * format's byte rate -- the same clock and the same arithmetic the wave-out
+ * path already uses, because two notions of how far playback has got would
+ * disagree the moment a program used both.
+ *
+ * The cursor is what a program watches; the bytes it moved over are what a
+ * person hears, and `drainPlayed` is where they leave. Those are separate
+ * enough that a buffer can be entirely correct in everything a program can
+ * observe and still be silent, which is what this file used to be: every
+ * cursor moved, every notification fired, and nothing was ever read out.
  *
  * Two properties of the pair are worth stating because getting either wrong
  * produces sound that is right for a while and then is not:
@@ -98,7 +102,13 @@ export function normaliseFormat(format){
  * @param {boolean} [options.primary]  A primary buffer is the mix target and
  *                                     never holds a program's own samples.
  */
-export function createSoundBuffer({ bytes, address, format, now, primary = false }){
+export function createSoundBuffer(
+    { bytes, address, format: initialFormat, now, primary = false })
+{
+    // Not a constant: a program sets the format of the primary buffer to say
+    // what the mix should run at, and everything below is in bytes derived from
+    // it. Rebinding here is what makes the rest of this file follow.
+    let format = initialFormat;
     /** Where the play cursor was when playback last started or was placed. */
     let anchorByte = 0;
     /** When that was. */
@@ -113,6 +123,8 @@ export function createSoundBuffer({ bytes, address, format, now, primary = false
     let notifications = [];
     /** Where the play cursor stood the last time notifications were tested. */
     let lastNotified = 0;
+    /** Where it stood the last time the bytes it passed were read out for mixing. */
+    let fedByte = 0;
     /** @type {{ offset: number, first: number, second: number } | null} */
     let lock = null;
 
@@ -168,6 +180,24 @@ export function createSoundBuffer({ bytes, address, format, now, primary = false
         },
         get format(){
             return format;
+        },
+
+        /**
+         * Adopts a new format. Only the primary buffer's is ever set, and only
+         * before anything has been played through it.
+         *
+         * The allocation is left alone: the primary buffer holds no samples of
+         * the program's own, so its length is a figure it reads back rather
+         * than a place anything is written.
+         *
+         * @param {SoundFormat} next
+         */
+        setFormat(next){
+            format = next;
+            frequency = next.sampleRate;
+            anchorByte = 0;
+            anchorMs = now();
+            fedByte = 0;
         },
         get primary(){
             return primary;
@@ -225,6 +255,10 @@ export function createSoundBuffer({ bytes, address, format, now, primary = false
             anchorByte = alignDown((position >>> 0) % bytes);
             anchorMs = now();
             lastNotified = anchorByte;
+            // Moved with the cursor, or the next read hands over everything
+            // between where playback used to be and where it has been put --
+            // which is most of the buffer, played at once.
+            fedByte = anchorByte;
         },
 
         /** @param {number} hz  Zero means the format's own rate. */
@@ -246,6 +280,18 @@ export function createSoundBuffer({ bytes, address, format, now, primary = false
         },
         get volume(){
             return volume;
+        },
+
+        /**
+         * That volume as a multiplier.
+         *
+         * DirectSound states attenuation in hundredths of a decibel, zero being
+         * full and -10000 being silence, so the scale is logarithmic and the
+         * number a program passes is not a fraction of anything. Treating it as
+         * one makes every quiet sound far too loud.
+         */
+        get gain(){
+            return volume <= DSBVOLUME_MIN ? 0 : 10 ** (volume / 2000);
         },
 
         /** @param {number} value */
@@ -288,6 +334,39 @@ export function createSoundBuffer({ bytes, address, format, now, primary = false
                 ? offset > from && offset <= play
                 : offset > from || offset <= play);
             return notifications.filter(entry=>passed(entry.offset)).map(entry=>entry.event);
+        },
+
+        /**
+         * The bytes playback has passed since this was last asked, as the one
+         * or two ranges a circular buffer's span becomes.
+         *
+         * This is the whole of what makes a buffer audible. A caller mixes
+         * these; a build with nobody asking is the silent one this used to be.
+         *
+         * A lap is the most that can come back at once. Falling a whole buffer
+         * behind means the machine spent longer between turns than the buffer
+         * is long -- at which point the audio for that gap is already too late
+         * to play, and handing it over would only push everything after it
+         * further behind.
+         *
+         * @returns {{ from: number, bytes: number }[]}
+         */
+        drainPlayed(){
+            const play = playCursor();
+            // Forward around the circle: a cursor that reads as behind the last
+            // one has wrapped, and the span is the rest of the buffer plus what
+            // it has covered since.
+            const covered = (play - fedByte + bytes) % bytes;
+            if (covered === 0)
+            {
+                return [];
+            }
+            const from = fedByte;
+            fedByte = play;
+            const first = Math.min(covered, bytes - from);
+            return first === covered
+                ? [{ from, bytes: covered }]
+                : [{ from, bytes: first }, { from: 0, bytes: covered - first }];
         },
 
         /**

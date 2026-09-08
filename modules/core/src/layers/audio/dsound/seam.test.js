@@ -235,15 +235,15 @@ test('every slot is present, including the ones nothing implements', ()=>{
     const buffer = createBuffer(f);
     const names = f.bridge.methodsOf(buffer).slice(3).map((/** @type {any} */ m)=>m.name);
     assert.deepEqual(names, IDIRECTSOUNDBUFFER_SLOTS.map(([name])=>name));
-    // SetFormat and Initialize are declared and unimplemented; leaving either
-    // out would shift Lock, Play and everything after it.
-    for (const missing of ['SetFormat', 'Initialize'])
-    {
-        const method = f.bridge.methodsOf(buffer).find(
-            (/** @type {any} */ m)=>m.name === missing);
-        assert.ok(method, `${missing} must occupy its slot`);
-        assert.equal(method.invoke, undefined);
-    }
+    // Initialize is declared and unimplemented; leaving it out would shift
+    // Lock, Play and everything after it. SetFormat used to be in this list,
+    // and being unimplemented was not harmless: a sound library sets the
+    // primary buffer's format to say what the mix should run at, reads the
+    // refusal as a device it cannot drive, and abandons DirectSound.
+    const method = f.bridge.methodsOf(buffer).find(
+        (/** @type {any} */ m)=>m.name === 'Initialize');
+    assert.ok(method, 'Initialize must occupy its slot');
+    assert.equal(method.invoke, undefined);
 });
 
 test('one object has one identity however many times it is published', ()=>{
@@ -696,5 +696,48 @@ test('diagnostics report what a run actually did', ()=>{
     const report = f.dsound.diagnostics();
     assert.equal(report.buffers, 1);
     assert.equal(report.playing, 1);
-    assert.equal(report.device, null, 'nothing is heard, and it says so');
+    // It used to report `device: null` -- "nothing is heard, and it says so" --
+    // which was true of the whole layer and is no longer: a playing buffer's
+    // bytes are read out and mixed. What is heard is the mixer's to report, and
+    // it does, so a second answer here could only ever disagree with it.
+    assert.equal('device' in report, false);
+});
+
+test('DSCAPS is the ninety-six bytes a program declares, not a hundred', ()=>{
+    // The literal, not the symbol: the test that used the symbol on both sides
+    // agreed with a wrong number, and every correctly-filled structure was
+    // refused. A sound library reads that refusal as no DirectSound at all.
+    assert.equal(DSCAPS.SIZE, 96);
+
+    const f = createRoot();
+    const caps = 0x1f00;
+    f.memory.setU32(caps + DSCAPS.dwSize, 96);
+    assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DS_OK);
+});
+
+test('the primary buffer takes the format a program sets on it', ()=>{
+    // This is how a program says what the mix runs at. Refusing it is read as a
+    // device that cannot be driven: the program releases everything and falls
+    // back to wave-out, and DirectSound is never used again.
+    const f = createRoot();
+    const primary = createBuffer(f, { flags: DSBCAPS_PRIMARYBUFFER, bytes: 0 });
+    const wanted = 0x2400;
+    f.memory.setU16(wanted + WAVEFORMATEX.wFormatTag, 1);
+    f.memory.setU16(wanted + WAVEFORMATEX.nChannels, 2);
+    f.memory.setU32(wanted + WAVEFORMATEX.nSamplesPerSec, 44100);
+    f.memory.setU16(wanted + WAVEFORMATEX.wBitsPerSample, 16);
+
+    assert.equal(f.bridge.call(primary, 'SetFormat', [wanted]), DS_OK);
+
+    const read = 0x2500;
+    assert.equal(f.bridge.call(primary, 'GetFormat', [read, WAVEFORMATEX.SIZE, 0]), DS_OK);
+    assert.equal(f.memory.u32(read + WAVEFORMATEX.nSamplesPerSec), 44100,
+        'and reports back what it was given');
+});
+
+test('a secondary buffer refuses to have its format set', ()=>{
+    // Its format is fixed when it is created, and DirectSound says so.
+    const f = createRoot();
+    const buffer = createBuffer(f);
+    assert.equal(f.bridge.call(buffer, 'SetFormat', [0x2000]), 0x88780032 | 0);
 });

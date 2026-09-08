@@ -42,9 +42,15 @@ const CAPACITY_FRAMES = OUTPUT_RATE / 5;
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
  * @param {number} [options.capacityFrames]
+ * @param {() => void} [options.fill]
+ *        Asked for more sound before each mix. A wave device pushes its audio
+ *        in when the program hands a buffer over, but a DirectSound buffer is a
+ *        region the program wrote into long ago and plays out of at its own
+ *        pace: somebody has to read out the part its cursor has just passed,
+ *        and the only moment that makes sense is just before mixing.
  */
 export function createMixer(
-    { sampleRate = OUTPUT_RATE, capacityFrames = CAPACITY_FRAMES } = {})
+    { sampleRate = OUTPUT_RATE, capacityFrames = CAPACITY_FRAMES, fill } = {})
 {
     const ring = createRing({
         channels: OUTPUT_CHANNELS,
@@ -60,6 +66,17 @@ export function createMixer(
         sampleRate,
         channels: OUTPUT_CHANNELS,
         ring,
+        /**
+         * How far ahead a track may run before what it is handing over is worth
+         * less than the memory it occupies.
+         *
+         * A source that pushes -- a wave device -- is bounded by the program
+         * itself, which writes a buffer and waits for it back. A source that is
+         * pulled at the rate of a clock has nothing bounding it: if the clock
+         * outruns the device, every mix leaves more behind than it took, and the
+         * queue grows for as long as the sound plays.
+         */
+        capacityFrames,
 
         /**
          * A source of sound: one wave device, or one sound buffer.
@@ -224,6 +241,7 @@ export function createMixer(
          * @returns {number} frames written
          */
         pump(frames = ring.room()){
+            fill?.();
             const room = Math.min(frames, ring.room());
             if (room <= 0 || tracks.size === 0)
             {

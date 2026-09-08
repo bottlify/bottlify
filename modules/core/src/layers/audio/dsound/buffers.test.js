@@ -256,3 +256,67 @@ test('setting the position moves the cursor and does not fire what it passed', (
     assert.deepEqual(sound.drainNotifications(), [],
         'a seek is not playback, and nothing was heard on the way');
 });
+
+test('the bytes playback passed are read out, which is what makes it audible', ()=>{
+    // Every cursor moved and every notification fired while nothing was ever
+    // read out of the buffer, so a program behaved correctly and was silent.
+    const { sound, time } = buffer();
+    sound.play(DSBPLAY_LOOPING);
+
+    assert.deepEqual(sound.drainPlayed(), [], 'nothing has been played yet');
+    time.advance(250);
+    assert.deepEqual(sound.drainPlayed(), [{ from: 0, bytes: aligned(SECOND / 4) }]);
+    assert.deepEqual(sound.drainPlayed(), [], 'and it is not handed over twice');
+});
+
+test('a span that runs off the end comes back as the two ranges it is', ()=>{
+    // The buffer is circular; one range would silently drop the wrap.
+    const { sound, time } = buffer();
+    sound.play(DSBPLAY_LOOPING);
+    time.advance(900);
+    sound.drainPlayed();
+
+    time.advance(200);
+    const ranges = sound.drainPlayed();
+    assert.equal(ranges.length, 2);
+    assert.equal(ranges[0].from + ranges[0].bytes, SECOND, 'the first runs to the end');
+    assert.equal(ranges[1].from, 0, 'and the second continues at the start');
+});
+
+test('a buffer that ran to its end hands over its tail, not nothing', ()=>{
+    // A one-shot stops and its cursor reads zero again. Comparing cursors alone
+    // would call that no progress and drop everything after the last look.
+    const { sound, time } = buffer();
+    sound.play(0);
+    time.advance(400);
+    sound.drainPlayed();
+
+    time.advance(1000);
+    assert.equal(sound.status() & DSBSTATUS_PLAYING, 0, 'it finished');
+    const [tail] = sound.drainPlayed();
+    assert.equal(tail.from, aligned(SECOND * 0.4));
+    assert.equal(tail.from + tail.bytes, SECOND, 'the rest of the buffer');
+});
+
+test('putting the cursor somewhere does not play everything in between', ()=>{
+    const { sound, time } = buffer();
+    sound.play(DSBPLAY_LOOPING);
+    time.advance(250);
+    sound.drainPlayed();
+
+    sound.setCurrentPosition(aligned(SECOND * 0.75));
+    assert.deepEqual(sound.drainPlayed(), []);
+});
+
+test('volume is decibels, and a gain is what a mixer can use', ()=>{
+    // Hundredths of a decibel, zero being full. Read as a fraction, every quiet
+    // sound plays at nearly full volume.
+    const { sound } = buffer();
+    assert.equal(sound.gain, 1);
+
+    sound.setVolume(-600);
+    assert.ok(Math.abs(sound.gain - 0.5) < 0.01, 'six decibels down is about half');
+
+    sound.setVolume(DSBVOLUME_MIN);
+    assert.equal(sound.gain, 0, 'and the floor is silence, not almost silence');
+});

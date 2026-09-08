@@ -68,7 +68,14 @@ export const audioModule = {
             return address;
         });
 
-        const mixer = createMixer({ sampleRate: config?.sampleRate });
+        // The mixer asks for sound before every mix, and that is where the
+        // DirectSound buffers are read out. Whoever drives the machine reaches
+        // the mixer directly, so hooking this anywhere else in this module
+        // would leave it never called.
+        const mixer = createMixer({
+            sampleRate: config?.sampleRate,
+            fill: ()=>feedBuffers(),
+        });
 
         const dsound = createDirectSound({
             memory: {
@@ -82,6 +89,85 @@ export const audioModule = {
             publishInterface: config?.publishInterface ?? (()=>0),
             signal: config?.signal,
         });
+
+        /**
+         * One mixer track per sound buffer, made when it first plays.
+         *
+         * Per buffer rather than per format, because each carries its own
+         * volume and a track is where a gain lives. Weak, so a buffer the
+         * program has finished with takes its track's name with it.
+         *
+         * @type {WeakMap<any, any>}
+         */
+        const tracks = new WeakMap();
+
+        /**
+         * Spans of a buffer that were never handed over because the output was
+         * already further ahead than it can play.
+         *
+         * Counted rather than silent: this is sound the program produced and
+         * nobody will hear, which is a difference from the machine it was
+         * written for and belongs in a report rather than in nothing.
+         */
+        let dropped = 0;
+
+        /**
+         * Hands every playing buffer's newly-played bytes to the mixer.
+         *
+         * DirectSound's cursors used to advance with nobody reading what they
+         * passed over, so every buffer behaved correctly in everything a
+         * program can observe and none of it was ever heard. This is the seam
+         * that was missing: the wave-out path writes into the mixer when a
+         * program hands over a buffer, and this one reads out of a buffer the
+         * program wrote into long ago, at the rate the cursor moves.
+         */
+        const feedBuffers = ()=>{
+            for (const buffer of dsound.buffers())
+            {
+                // The primary buffer is the mix target and holds no samples of
+                // the program's own; reading it would play whatever the
+                // allocator left there.
+                if (buffer.primary)
+                {
+                    continue;
+                }
+                const ranges = buffer.drainPlayed();
+                if (ranges.length === 0)
+                {
+                    continue;
+                }
+                let track = tracks.get(buffer);
+                if (!track)
+                {
+                    track = mixer.open({
+                        // The rate playback actually runs at, which a program
+                        // may have retuned away from the format's own.
+                        sampleRate: buffer.frequency,
+                        channels: buffer.format.channels,
+                        bitsPerSample: buffer.format.bitsPerSample,
+                    });
+                    tracks.set(buffer, track);
+                }
+                track.gain = buffer.gain;
+                // A track this far ahead is not behind on work, it is holding
+                // audio whose moment has passed: the cursor is driven by the
+                // guest's clock and the ring drains at the speed of a real
+                // device, so anything the clock produces beyond the ring's own
+                // depth would only ever be played late, and later still the
+                // next time. Dropped and counted rather than queued, because a
+                // queue with nothing bounding it grows for as long as the sound
+                // plays.
+                if (track.pending() > mixer.capacityFrames)
+                {
+                    dropped++;
+                    continue;
+                }
+                for (const range of ranges)
+                {
+                    track.write(memory.readBytes(buffer.address + range.from, range.bytes));
+                }
+            }
+        };
 
         current = {
             /**
@@ -117,6 +203,9 @@ export const audioModule = {
             buffers: ()=>dsound.buffers(),
 
             dsound: ()=>dsound,
+
+            /** Spans the output was too far ahead to take. */
+            dropped: ()=>dropped,
         };
         return current;
     },
@@ -131,6 +220,7 @@ export const audioModule = {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dsound().diagnostics() : {}),
                 ...(current ? current.output().diagnostics() : {}),
+                droppedSpans: current ? current.dropped() : 0,
             },
         };
     },

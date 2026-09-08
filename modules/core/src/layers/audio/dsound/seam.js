@@ -91,7 +91,14 @@ export const DSBCAPS = Object.freeze({
     SIZE: 0x14,
 });
 
-/** DSCAPS. Only the first few fields are filled; the rest exist to place them. */
+/**
+ * DSCAPS. Only the first few fields are filled; the rest exist to place them.
+ *
+ * Twenty-four dwords, which is ninety-six bytes and not a hundred. The size is
+ * the one field a program fills in before the call, and it is checked against
+ * this: too large a figure here refuses every correctly-filled structure, which
+ * is what a sound library reads as "there is no DirectSound on this machine".
+ */
 export const DSCAPS = Object.freeze({
     dwSize: 0x00,
     dwFlags: 0x04,
@@ -99,7 +106,7 @@ export const DSCAPS = Object.freeze({
     dwMaxSecondarySampleRate: 0x0c,
     dwPrimaryBuffers: 0x10,
     dwMaxHwMixingAllBuffers: 0x14,
-    SIZE: 0x64,
+    SIZE: 0x60,
 });
 
 /** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
@@ -454,6 +461,30 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             return DS_OK;
         },
 
+        /**
+         * HRESULT SetFormat(LPCWAVEFORMATEX)
+         *
+         * How a program says what the mix should run at, and it is asked of the
+         * primary buffer alone -- a secondary one's format is fixed when it is
+         * created, and DirectSound refuses this on one. Refusing it on the
+         * primary as well is what a sound library reads as a device it cannot
+         * drive: it releases everything and falls back to wave-out, which is
+         * how a game ends up with no DirectSound at all.
+         */
+        SetFormat(buffer, [format]){
+            if (!buffer.primary)
+            {
+                return DSERR_INVALIDCALL;
+            }
+            const wanted = readFormat(format);
+            if (!wanted)
+            {
+                return DSERR_INVALIDPARAM;
+            }
+            buffer.setFormat(wanted);
+            return DS_OK;
+        },
+
         /** HRESULT GetFormat(LPWAVEFORMATEX, DWORD size, LPDWORD written) */
         GetFormat(buffer, [format, size, written]){
             if ((format >>> 0) !== 0)
@@ -705,9 +736,6 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             buffers: buffers.length,
             playing: buffers.filter(buffer=>(buffer.status() & 1) !== 0).length,
             published: publisher.count(),
-            // No device, and saying so is the point: everything above behaves
-            // and nothing is heard.
-            device: null,
         }),
     };
 }
