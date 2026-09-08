@@ -1244,6 +1244,26 @@ test('a transform never written is the identity, and a written one reads back', 
     assertFullyReleased(device);
 });
 
+test('a fresh device has a white material, not a black one', ()=>{
+    // Geometry that never calls SetMaterial and carries no vertex colour takes
+    // every lighting term from here. All zeros -- which is what an unseeded
+    // structure holds -- lights such a model to black, and it disappears while
+    // every state a program reads back still says what it expects.
+    const device = createDevice();
+    /** @type {{ material?: any }} */
+    const out = {};
+
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.deepEqual(out.material.Diffuse, { r: 1, g: 1, b: 1, a: 1 });
+    assert.deepEqual(out.material.Ambient, { r: 1, g: 1, b: 1, a: 1 });
+    assert.deepEqual(out.material.Specular, { r: 0, g: 0, b: 0, a: 0 },
+        'no highlight until a program asks for one');
+    assert.deepEqual(out.material.Emissive, { r: 0, g: 0, b: 0, a: 0 }, 'and no glow');
+    assert.equal(out.material.Power, 0);
+
+    assertFullyReleased(device);
+});
+
 test('the material reads back as a copy of what was set', ()=>{
     const device = createDevice();
     /** @type {{ material?: any }} */
@@ -1257,7 +1277,7 @@ test('the material reads back as a copy of what was set', ()=>{
     };
 
     assert.equal(device.GetMaterial(out), D3D_OK);
-    assert.equal(out.material.Power, 0, 'a fresh device has a black material');
+    assert.equal(out.material.Power, 0);
     assert.equal(device.SetMaterial(material), D3D_OK);
     material.Power = 16;
     assert.equal(device.GetMaterial(out), D3D_OK);

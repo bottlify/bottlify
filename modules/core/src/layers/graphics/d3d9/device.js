@@ -133,10 +133,21 @@ function defaultLight(){
  * @property {number} Power
  */
 
-/** @returns {Material} the material a fresh device has: everything zero */
+/**
+ * The material a fresh device has: white diffuse and ambient, no highlight and
+ * no glow.
+ *
+ * Not all zeros, which is what an unseeded structure would be and what this
+ * used to return. Geometry that never calls SetMaterial and carries no vertex
+ * colour takes every term from here, so a black default lights it to black --
+ * and the whole model disappears while every state a program can read back
+ * still says what it expects. The ambient term costs nothing by default because
+ * D3DRS_AMBIENT starts black; it matters the moment a program sets one.
+ */
 function defaultMaterial(){
+    const white = ()=>({ r: 1, g: 1, b: 1, a: 1 });
     const black = ()=>({ r: 0, g: 0, b: 0, a: 0 });
-    return { Diffuse: black(), Ambient: black(), Specular: black(), Emissive: black(), Power: 0 };
+    return { Diffuse: white(), Ambient: white(), Specular: black(), Emissive: black(), Power: 0 };
 }
 
 /** @param {Material} material @returns {Material} */

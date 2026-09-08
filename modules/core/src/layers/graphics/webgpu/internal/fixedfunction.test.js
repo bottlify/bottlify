@@ -250,6 +250,14 @@ test('lighting with no light enabled is ambient and emissive only', ()=>{
     assert.doesNotMatch(code, /lights: array/);
     assert.match(code, /var lightDiffuse = vec3f\(0\.0, 0\.0, 0\.0\);/);
     assert.match(code, /sourceEmissive\.rgb \+ sourceAmbient\.rgb \* \(uniforms\.ambient\.rgb/);
+
+    // And with the specular term on there is still nothing to reflect, so the
+    // eye vector and the accumulator are not emitted either.
+    const withSpecular = generate(baseState({
+        fvf: LIT_FVF, lighting: lighting({ lights: [] }), specularEnable: true,
+    })).code;
+    assert.doesNotMatch(withSpecular, /toEye/);
+    assert.match(withSpecular, /out\.specular = vec4f\(0\.0, 0\.0, 0\.0, 0\.0\);/);
 });
 
 test('a material source takes the vertex colour only when it is there to take', ()=>{

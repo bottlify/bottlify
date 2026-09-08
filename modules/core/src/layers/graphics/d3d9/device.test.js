@@ -526,3 +526,23 @@ test('a leaked resource keeps the device alive, which is how a leak is noticed',
     assert.equal(out.surface.release(), 0);
     assert.equal(device.refCount, 0);
 });
+
+test('a fresh device has a white material, not a black one', ()=>{
+    // Geometry that never calls SetMaterial and carries no vertex colour takes
+    // every lighting term from here. All zeros -- which is what an unseeded
+    // structure holds -- lights such a model to black, and it disappears while
+    // every state a program reads back still says what it expects.
+    const device = createDevice();
+    /** @type {{ material?: any }} */
+    const out = {};
+
+    assert.equal(device.GetMaterial(out), D3D_OK);
+    assert.deepEqual(out.material.Diffuse, { r: 1, g: 1, b: 1, a: 1 });
+    assert.deepEqual(out.material.Ambient, { r: 1, g: 1, b: 1, a: 1 });
+    assert.deepEqual(out.material.Specular, { r: 0, g: 0, b: 0, a: 0 },
+        'no highlight until a program asks for one');
+    assert.deepEqual(out.material.Emissive, { r: 0, g: 0, b: 0, a: 0 }, 'and no glow');
+    assert.equal(out.material.Power, 0);
+
+    assertFullyReleased(device);
+});

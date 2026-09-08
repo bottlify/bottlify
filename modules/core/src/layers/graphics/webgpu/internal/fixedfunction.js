@@ -310,25 +310,29 @@ function lightContribution(index, type, specular){
  * @returns {string}
  */
 function lightingBody(lighting, has, specular){
+    // With no light enabled the specular sum is zero however it is written, and
+    // emitting the terms anyway would leave the shader carrying an eye vector
+    // and an accumulator nothing reads.
+    const highlights = specular && lighting.lights.length > 0;
     /** @type {string[]} */
     const lines = [
         '    let worldPosition = (uniforms.world * vec4f(vertex.position, 1.0)).xyz;',
         '    let worldNormal = normalize((uniforms.world * vec4f(vertex.normal, 0.0)).xyz);',
     ];
-    if (specular)
+    if (highlights)
     {
         lines.push('    let toEye = normalize(uniforms.eye.xyz - worldPosition);');
     }
     lines.push(
         '    var lightAmbient = vec3f(0.0, 0.0, 0.0);',
         '    var lightDiffuse = vec3f(0.0, 0.0, 0.0);');
-    if (specular)
+    if (highlights)
     {
         lines.push('    var lightSpecular = vec3f(0.0, 0.0, 0.0);');
     }
     for (const [index, type] of lighting.lights.entries())
     {
-        lines.push(lightContribution(index, type, specular));
+        lines.push(lightContribution(index, type, highlights));
     }
 
     const diffuse = termColour(lighting, has, lighting.diffuseSource, 'materialDiffuse');
@@ -345,7 +349,7 @@ function lightingBody(lighting, has, specular){
             + ' + sourceDiffuse.rgb * lightDiffuse;',
         // The alpha is the diffuse source's, untouched by any of the above.
         '    out.diffuse = vec4f(clamp(lit, vec3f(0.0), vec3f(1.0)), sourceDiffuse.a);');
-    if (specular)
+    if (highlights)
     {
         const specularSource =
             termColour(lighting, has, lighting.specularSource, 'materialSpecular');
