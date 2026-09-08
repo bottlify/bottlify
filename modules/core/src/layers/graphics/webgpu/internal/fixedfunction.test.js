@@ -170,9 +170,56 @@ test('the alpha test discards, and never means never', ()=>{
 
 test('fog mixes towards the fog colour and leaves alpha alone', ()=>{
     const code = generate(baseState({ fogMode: D3DFOG.LINEAR })).code;
-    assert.match(code, /mix\(uniforms\.fogColor\.rgb, current\.rgb, fogAmount\)/);
+    assert.match(code,
+        /mix\(uniforms\.fogColor\.rgb, current\.rgb, clamp\(input\.fogAmount, 0\.0, 1\.0\)\)/);
     assert.match(code, /current\.a\)/, 'alpha is not fogged');
     assert.doesNotMatch(generate(baseState()).code, /fogAmount/);
+});
+
+test('each fog mode gets its own curve, and only its own', ()=>{
+    // The mode shapes the shader rather than riding in a uniform, so a build
+    // that emitted the wrong curve would be wrong for every draw that ever used
+    // that mode and right for the rest -- which reads as some geometry fading
+    // and some not.
+    const linear = generate(baseState({ fogMode: D3DFOG.LINEAR })).code;
+    assert.match(linear, /\(end - dist\) \/ \(end - start\)/);
+    assert.doesNotMatch(linear, /exp\(/);
+
+    const exponential = generate(baseState({ fogMode: D3DFOG.EXP })).code;
+    assert.match(exponential, /exp\(-uniforms\.fogFactors\.z \* dist\)/);
+
+    const squared = generate(baseState({ fogMode: D3DFOG.EXP2 })).code;
+    assert.match(squared, /exp\(-scaled \* scaled\)/);
+
+    assert.doesNotMatch(generate(baseState()).code, /fogFactorOf/,
+        'and a shader with no fog carries no curve at all');
+});
+
+test('fog fades by eye distance, which is the clip-space w', ()=>{
+    // Direct3D defines fog against eye-space depth, and for a perspective
+    // projection that is exactly the w the transform produces. Fading by the
+    // depth buffer's z instead compresses the whole scene into the far end of
+    // the curve, where everything is equally fogged.
+    const code = generate(baseState({ fogMode: D3DFOG.LINEAR })).code;
+    assert.match(code, /out\.fogAmount = fogFactorOf\(out\.position\.w\);/);
+});
+
+test('a pre-transformed vertex takes its fog factor from the specular alpha', ()=>{
+    // Such a vertex is already on the screen and has no eye to be far from.
+    // Direct3D has the program supply the factor instead, and a format that
+    // carries no specular has nothing to fog by -- fading it by the depth of
+    // whatever is behind it would fog a two-dimensional overlay.
+    const withSpecular = generate(baseState({
+        fvf: FVF.XYZRHW | FVF.DIFFUSE | FVF.SPECULAR,
+        fogMode: D3DFOG.LINEAR,
+    })).code;
+    assert.match(withSpecular, /out\.fogAmount = vertex\.specular\.a;/);
+
+    const without = generate(baseState({
+        fvf: FVF.XYZRHW | FVF.DIFFUSE,
+        fogMode: D3DFOG.LINEAR,
+    })).code;
+    assert.match(without, /out\.fogAmount = 1\.0;/, 'which is "not fogged"');
 });
 
 test('lighting off leaves the vertex colours exactly as they arrived', ()=>{

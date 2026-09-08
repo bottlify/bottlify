@@ -109,6 +109,38 @@ const LIGHT_STRUCT = `struct Light {
 `;
 
 /**
+ * How much of the fragment's own colour survives, by distance.
+ *
+ * One for "fully visible" and zero for "entirely fog", which is the direction
+ * Direct3D defines and the direction the mix below expects. Linear fog is the
+ * only mode with an end: the two exponential ones fade for ever and reach zero
+ * only in the limit.
+ */
+const FOG_FUNCTIONS = Object.freeze({
+    [D3DFOG.LINEAR]: `fn fogFactorOf(dist: f32) -> f32 {
+    let start = uniforms.fogFactors.x;
+    let end = uniforms.fogFactors.y;
+    // A range of nothing is a program asking for a step at that distance, not
+    // a division by zero that erases the frame.
+    if (end <= start)
+    {
+        return select(1.0, 0.0, dist >= end);
+    }
+    return clamp((end - dist) / (end - start), 0.0, 1.0);
+}
+`,
+    [D3DFOG.EXP]: `fn fogFactorOf(dist: f32) -> f32 {
+    return clamp(exp(-uniforms.fogFactors.z * dist), 0.0, 1.0);
+}
+`,
+    [D3DFOG.EXP2]: `fn fogFactorOf(dist: f32) -> f32 {
+    let scaled = uniforms.fogFactors.z * dist;
+    return clamp(exp(-scaled * scaled), 0.0, 1.0);
+}
+`,
+});
+
+/**
  * Distance attenuation, which a directional light does not have and the other
  * two share.
  *
@@ -414,6 +446,11 @@ export function generateFixedFunction(state, layout){
         assignments.push(`    out.texCoord${set} = vertex.texCoord${set}.xy;`);
     }
 
+    if (state.fogMode !== D3DFOG.NONE)
+    {
+        varyings.push(`    @location(${location}) fogAmount: f32,`);
+    }
+
     const inputs = layout.attributes
         .map(attribute=>`    @location(${attribute.shaderLocation}) `
             + `${attribute.name}: ${wgslType(attribute.format)},`)
@@ -428,6 +465,28 @@ export function generateFixedFunction(state, layout){
             + '    out.position = vec4f(screen.x - 1.0, screen.y + 1.0, '
             + 'vertex.position.z, 1.0);'
         : '    out.position = uniforms.worldViewProjection * vec4f(vertex.position, 1.0);';
+
+    // How much of the fragment survives the fog, computed per vertex and
+    // interpolated across the triangle.
+    //
+    // The distance it fades by is the clip-space w, which for a perspective
+    // projection is the eye-space depth -- the distance Direct3D's fog is
+    // defined against. A pre-transformed vertex has no eye to be far from: it
+    // is already on the screen, and Direct3D takes its fog factor straight
+    // from the specular alpha the program supplied. Where such a format carries
+    // no specular there is nothing to fog by, and inventing a distance would
+    // fade a two-dimensional overlay by how deep the scene behind it happens
+    // to be.
+    //
+    // Per vertex rather than per pixel, which is what D3DRS_FOGVERTEXMODE asks
+    // for and an approximation of D3DRS_FOGTABLEMODE. The two differ only where
+    // a triangle is large enough for the curve to bend across it, and the
+    // interpolated factor is exact for linear fog either way.
+    const fogAmount = state.fogMode === D3DFOG.NONE
+        ? []
+        : [layout.preTransformed
+            ? `    out.fogAmount = ${has('specular') ? 'vertex.specular.a' : '1.0'};`
+            : '    out.fogAmount = fogFactorOf(out.position.w);'];
 
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
@@ -453,9 +512,8 @@ export function generateFixedFunction(state, layout){
 
     const fog = state.fogMode === D3DFOG.NONE
         ? ''
-        : '\n    let fogAmount = clamp(uniforms.fogFactors.x, 0.0, 1.0);'
-            + '\n    current = vec4f(mix(uniforms.fogColor.rgb, current.rgb, fogAmount),'
-            + ' current.a);';
+        : '\n    current = vec4f(mix(uniforms.fogColor.rgb, current.rgb,'
+            + ' clamp(input.fogAmount, 0.0, 1.0)), current.a);';
 
     // The test discards rather than returning a transparent pixel: a discarded
     // fragment writes no depth, and one blended to zero alpha still does, which
@@ -485,7 +543,7 @@ export function generateFixedFunction(state, layout){
     lights: array<Light, ${lightCount}>,`}
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-${functionDeclarations(lighting)}${samplerDeclarations(state.stages.length)}
+${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length)}
 struct VertexIn {
 ${inputs}
 };
@@ -499,7 +557,7 @@ ${varyings.join('\n')}
 fn vertexMain(vertex: VertexIn) -> VertexOut {
     var out: VertexOut;
 ${position}
-${assignments.join('\n')}
+${[...assignments, ...fogAmount].join('\n')}
     return out;
 }
 
@@ -524,16 +582,22 @@ ${stages}${specular}${fog}${alphaTest}
  * function nothing checked.
  *
  * @param {import('./pipeline.js').LightingState | null} lighting
+ * @param {number} fogMode  D3DFOG; NONE is 0.
  * @returns {string}
  */
-function functionDeclarations(lighting){
+function functionDeclarations(lighting, fogMode){
+    // Only for geometry that has a distance to fog by: a pre-transformed vertex
+    // carries its factor already and would leave this declared and uncalled.
+    const curves = /** @type {Record<number, string>} */ (FOG_FUNCTIONS);
+    const fog = fogMode === D3DFOG.NONE ? '' : curves[fogMode] ?? '';
     if (lighting === null)
     {
-        return '';
+        return fog;
     }
     const attenuates = lighting.lights.some(
         type=>type === D3DLIGHT.POINT || type === D3DLIGHT.SPOT);
-    return (attenuates ? ATTENUATION_FUNCTION : '')
+    return fog
+        + (attenuates ? ATTENUATION_FUNCTION : '')
         + (lighting.lights.includes(D3DLIGHT.SPOT) ? SPOT_FUNCTION : '');
 }
 

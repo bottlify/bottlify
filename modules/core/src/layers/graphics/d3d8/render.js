@@ -38,6 +38,7 @@
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS,
     D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3DZB, D3D_OK, FORMAT_INFO,
+    dwordToFloat,
 } from './constants.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 
@@ -459,6 +460,7 @@ export function packLight(block, at, light){
  * @property {number} alphaRef       0..255
  * @property {ArrayLike<number>} [world]   Identity unless the draw is lit.
  * @property {Material} [material]
+ * @property {number[]} [fogFactors] Fog start, end and density, as floats.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -478,9 +480,9 @@ export function uniformBlock(values){
     block.set(values.viewport.scale, at.viewportScale);
     block.set(rgba(colorToFloats(values.textureFactor)), at.textureFactor);
     block.set(rgba(colorToFloats(values.fogColor)), at.fogColor);
-    // The generated shader mixes by a constant amount; one is "no fog", and
-    // there is no distance for it to attenuate by yet.
-    block.set([1, 0, 0, 0], at.fogFactors);
+    // Start, end and density, which is everything the three fog curves need;
+    // which curve is in force shaped the shader and is not carried here.
+    block.set([...values.fogFactors ?? [0, 1, 1], 0], at.fogFactors);
     const material = values.material ?? NO_MATERIAL;
     block.set(rgba(material.Diffuse), at.materialDiffuse);
     block.set(rgba(material.Ambient), at.materialAmbient);
@@ -627,6 +629,15 @@ export function uniformsOf(model, lighting){
         viewport: model.viewport,
         textureFactor: rs('TEXTUREFACTOR'),
         fogColor: rs('FOGCOLOR'),
+        // Held as DWORDs like every other render state, and floats to everyone
+        // who uses them. A fog that fades over the wrong distance is the same
+        // picture as no fog at all when the range is huge, and a white frame
+        // when it is tiny.
+        fogFactors: [
+            dwordToFloat(rs('FOGSTART')),
+            dwordToFloat(rs('FOGEND')),
+            dwordToFloat(rs('FOGDENSITY')),
+        ],
         alphaRef: rs('ALPHAREF'),
         material: model.material,
         ambient: rs('AMBIENT'),
@@ -903,7 +914,43 @@ export function createRenderer(options){
             /** Every distinct light type enabled, by its D3DLIGHT_TYPE. */
             /** @type {Set<number>} */
             types: new Set(),
+            /**
+             * The numbers themselves, deduplicated.
+             *
+             * Knowing that five point lights were on says nothing about why a
+             * scene is dark: a range of zero, an attenuation that divides the
+             * light away, or a black diffuse all count the same and look the
+             * same. A handful of the actual structures is what separates them,
+             * and a program sets few enough distinct ones for this to be cheap.
+             *
+             * @type {Set<string>}
+             */
+            lightValues: new Set(),
+            /** @type {Set<string>} */
+            materials: new Set(),
+            /** Where each draw's world matrix puts it, against the light positions. */
+            /** @type {Set<string>} */
+            worlds: new Set(),
         },
+    };
+
+    /** Enough of a set of values to tell them apart, and no more. */
+    const SAMPLE_LIMIT = 12;
+
+    /** @param {number} value */
+    const round = value=>Math.round(value * 1000) / 1000;
+
+    /** @param {any} colour */
+    const colourText = colour=>colour
+        ? `${round(colour.r)},${round(colour.g)},${round(colour.b)},${round(colour.a)}`
+        : '-';
+
+    /** @param {Set<string>} into @param {string} text */
+    const sample = (into, text)=>{
+        if (into.size < SAMPLE_LIMIT)
+        {
+            into.add(text);
+        }
     };
 
     /**
@@ -939,6 +986,29 @@ export function createRenderer(options){
         }
         tally.ambients.add(
             ((model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0).toString(16).padStart(8, '0'));
+        for (const light of enabledLights(model))
+        {
+            sample(tally.lightValues, `type=${light.Type} range=${round(light.Range)}`
+                + ` atten=${round(light.Attenuation0)}/${round(light.Attenuation1)}`
+                + `/${round(light.Attenuation2)}`
+                + ` at=${round(light.Position.x)},${round(light.Position.y)}`
+                + `,${round(light.Position.z)}`
+                + ` diffuse=${colourText(light.Diffuse)} ambient=${colourText(light.Ambient)}`);
+        }
+        // A light lives in world space and a vertex reaches it through the
+        // world matrix. A program that leaves the world matrix at identity and
+        // puts the model transform in the view matrix -- which is common, and
+        // legal -- has its geometry nowhere near its lights, and every
+        // attenuated light then falls off to nothing. Comparing the two
+        // translations is what tells that apart from a light that is simply
+        // dim, and nothing else in a frame does.
+        const world = transformOf(model, D3DTS.WORLD);
+        sample(tally.worlds, `origin=${round(world[12])},${round(world[13])},${round(world[14])}`
+            + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
+        const material = model.material;
+        sample(tally.materials, `diffuse=${colourText(material?.Diffuse)}`
+            + ` ambient=${colourText(material?.Ambient)}`
+            + ` emissive=${colourText(material?.Emissive)}`);
     };
 
     /** @param {string} reason */
@@ -1661,6 +1731,9 @@ export function createRenderer(options){
                     ...counters.lighting,
                     ambients: [...counters.lighting.ambients],
                     types: [...counters.lighting.types],
+                    lightValues: [...counters.lighting.lightValues],
+                    materials: [...counters.lighting.materials],
+                    worlds: [...counters.lighting.worlds],
                 },
                 recording: recording ? recording.commands.length : 0,
                 // What the last frame was made of, for a test that wants to
