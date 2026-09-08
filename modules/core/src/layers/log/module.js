@@ -64,7 +64,18 @@ export const logModule = {
             level: config?.level === undefined ? undefined : toLevel(config.level),
             categories,
         });
-        profiler = createProfiler({ now, frames: config?.frames });
+        // The profiler is given the *host's* clock, not the guest's.
+        //
+        // A journal entry is stamped with guest time, because that is the time
+        // the program itself would quote. A phase is measured to answer how
+        // long something took us, and the guest's clock is credited in lumps
+        // from wall time as the scheduler runs -- so measuring against it says
+        // a slice took whatever the guest was credited, not what it cost. Read
+        // that way, a run of ten minutes reports sixty-eight milliseconds.
+        profiler = createProfiler({
+            now: config?.wallClock ?? (()=>Date.now()),
+            frames: config?.frames,
+        });
 
         for (const sink of config?.sinks ?? [])
         {

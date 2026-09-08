@@ -57,6 +57,11 @@ const DETAIL_RING = 4096;
  *        The running thread's last error, for the trace. Injected because it
  *        belongs to a layer above this one.
  * @param {boolean} [deps.traceStrings]
+ * @param {{ begin: (name: string, kind?: string) => void,
+ *            end: (name?: string) => number }} [deps.profiler]
+ *        Where a host call's time is accounted. Optional: this layer is
+ *        testable without one, and a phase nobody reads is work nobody asked
+ *        for.
  * @param {(record: any) => void} [deps.onCall]
  *        Read the text an argument points at while the call is being made
  *        rather than when the trace is read. Off by default: it costs a scan
@@ -72,6 +77,13 @@ export function createDispatcher(deps){
     // made up its mind thousands of calls earlier. A sink keeps all of it, for
     // whoever is willing to pay for the file.
     const onCall = deps.onCall ?? null;
+    /**
+     * Where a host call's time is accounted, when the caller wired one.
+     *
+     * Optional because this layer is testable without one, and because a phase
+     * that nobody reads is work nobody asked for.
+     */
+    const profiler = deps.profiler ?? null;
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /**
@@ -275,6 +287,7 @@ export function createDispatcher(deps){
                 error: 0,
             };
             detailed[detailAt++ % DETAIL_RING] = record;
+            profiler?.begin(fn.name, 'host');
             try
             {
                 result = fn.handler(args);
@@ -293,6 +306,7 @@ export function createDispatcher(deps){
             }
             finally
             {
+                profiler?.end(fn.name);
                 parking.endCall();
                 // What this call left in the thread's last error. A program
                 // reports a code long after whatever produced it returned, and

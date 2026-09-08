@@ -189,6 +189,35 @@ namespace.gpu = opened.then(handle=>({
     adapter: handle.adapter,
 }));
 
+/**
+ * The same pixels with the first and third byte of each exchanged.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {Uint8Array}
+ */
+function swapRedAndBlue(bytes){
+    const swapped = new Uint8Array(bytes);
+    for (let at = 0; at < swapped.length; at += 4)
+    {
+        const first = swapped[at];
+        swapped[at] = swapped[at + 2];
+        swapped[at + 2] = first;
+    }
+    return swapped;
+}
+
+/** @param {Uint8Array} bytes @returns {string} */
+function toBase64(bytes){
+    let binary = '';
+    // In chunks: `apply` on a whole texture's worth of arguments overflows the
+    // call stack, and does so only for the large textures.
+    for (let at = 0; at < bytes.length; at += 0x8000)
+    {
+        binary += String.fromCharCode.apply(null, [...bytes.subarray(at, at + 0x8000)]);
+    }
+    return btoa(binary);
+}
+
 /** @param {string} text @returns {Uint8Array} */
 function fromBase64(text){
     const binary = atob(text);
@@ -291,6 +320,34 @@ function census(image){
         .sort((left, right)=>right[1] - left[1])
         .slice(0, 6)
         .map(([colour, count])=>({ rgb: colour, count }));
+}
+
+/**
+ * How opaque the presented frame is.
+ *
+ * A back buffer whose Direct3D format carries no alpha still has one in the
+ * texture it is rendered into, and whatever the draws left there decides how
+ * much of the page shows through when the frame is painted. A frame that is
+ * not fully opaque is being composited against something the program never
+ * knew about, and nothing in the colours says so.
+ *
+ * @param {{ pixels: Uint8Array }} image
+ */
+function opacity(image){
+    let low = 255;
+    let high = 0;
+    let belowFull = 0;
+    for (let at = 3; at < image.pixels.length; at += 4)
+    {
+        const alpha = image.pixels[at];
+        low = Math.min(low, alpha);
+        high = Math.max(high, alpha);
+        if (alpha < 255)
+        {
+            belowFull++;
+        }
+    }
+    return { low, high, belowFull, of: image.pixels.length / 4 };
 }
 
 /** @param {{ width: number, height: number, pixels: Uint8Array }} image */
@@ -426,6 +483,17 @@ async function run(request){
         device: {
             device: handle.device,
             queue: handle.device.queue,
+            // Where every draw of the last frame landed, when the run asked
+            // for it. A frame is the only thing that says which draw painted a
+            // given patch of the picture, and working that out costs a
+            // transform of every vertex -- so it is off unless asked for.
+            dumpDraws: Boolean(request.dumpDraws),
+            // Cutting a frame short is what turns "one of these draws painted
+            // this" into "this one did": the region is either there or not.
+            maxDraws: request.maxDraws ?? -1,
+            // A draw's index in a frame moves between runs; the texture it
+            // binds does not, so this is what removes the same draw twice.
+            skipTexture: request.skipTexture ?? null,
             /** @param {any} frame */
             presentTo: frame=>{
                 presented = frame;
@@ -477,6 +545,7 @@ async function run(request){
             format: presented.surface.format,
         };
         result.colours = census(image);
+        result.opacity = opacity(image);
     }
     result.presents = presents;
 
@@ -507,11 +576,48 @@ async function run(request){
     // Named rather than left to `scalars`, which keeps only numbers and strings
     // -- every metric this layer reports is an object, so all of them were
     // dropped and a run said nothing whatever about what it drew.
+    // Named rather than left to `scalars`, for the same reason the graphics
+    // metrics are: the phase totals are an array, and an array is what a
+    // question about where a frame went is answered with.
+    const timing = metrics('log');
+    result.phases = {
+        hostShare: timing.hostShare ?? null,
+        frames: timing.frames ?? null,
+        top: timing.topPhases ?? [],
+    };
+
     const graphics = metrics('graphics');
     result.graphics = {
         created: graphics.created ?? [],
         libraries: graphics.libraries ?? [],
-        device: graphics.seam?.device ?? null,
+        // `lastFrame` is dropped: it is the recorded commands, kept for a test
+        // that replays them here, and it holds backend objects and a uniform
+        // block per draw. Neither survives the trip out and both are megabytes.
+        device: graphics.seam?.device
+            ? {
+                ...graphics.seam.device,
+                lastFrame: undefined,
+                // Bytes do not survive JSON, so they leave as base64 and are
+                // written out as images by whoever is driving.
+                textures: await Promise.all(
+                    (graphics.seam.device.textures ?? []).map(
+                        async(/** @type {any} */ texture)=>({
+                            ...texture,
+                            texels: undefined,
+                            gpu: undefined,
+                            bgra: toBase64(texture.texels),
+                            // What the device holds, against what it was
+                            // given. `readBack` hands back RGBA whatever the
+                            // storage order was, so it is put back into the
+                            // engine's own BGRA before it travels -- one order
+                            // in the report, or a red/blue swap reads as a
+                            // difference that is not there.
+                            deviceBgra: toBase64(
+                                swapRedAndBlue((await readBack(handle.device, texture.gpu))
+                                    .pixels)),
+                        }))),
+            }
+            : null,
         presenter: graphics.presenter ?? null,
     };
 

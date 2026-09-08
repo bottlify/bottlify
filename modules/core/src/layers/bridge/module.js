@@ -100,6 +100,11 @@ export const bridgeModule = {
             cpu, memory, parking, suspend, lastError: config?.lastError,
             traceStrings: config?.traceStrings ?? false,
             onCall: config?.onCall,
+            // Where the time a host call takes is accounted. Nested inside the
+            // guest phase the driver opens, so what is left as the guest's own
+            // self time is the emulator executing and this is our code -- which
+            // is the only division that answers a question about speed.
+            profiler: /** @type {any} */ (host.requireApi('log')),
         });
 
         // Claimed here rather than by whoever assembles the process: a trap that

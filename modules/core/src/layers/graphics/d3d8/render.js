@@ -37,8 +37,8 @@
 
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS,
-    D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3DZB, D3D_OK, FORMAT_INFO,
-    dwordToFloat,
+    COLORWRITEENABLE_ALPHA, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3DZB, D3D_OK,
+    FORMAT_INFO, dwordToFloat,
 } from './constants.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
@@ -813,6 +813,8 @@ export function stageCascade(model, layout){
  * @param {number} shape.fvf
  * @param {string} shape.topology
  * @param {string} shape.targetFormat
+ * @param {boolean} [shape.targetHasAlpha]
+ *     Whether the target's Direct3D format has an alpha channel at all.
  * @param {string | undefined} shape.depthFormat
  * @param {import('../webgpu/internal/pipeline.js').StageKey[]} shape.stages
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [shape.lighting]
@@ -851,7 +853,13 @@ export function pipelineStateOf(model, shape){
         srcBlend,
         destBlend,
         blendOp: rs('BLENDOP'),
-        colorWrite: rs('COLORWRITEENABLE'),
+        // A target whose format has no alpha channel must not be written with
+        // one. Every backend renders into four channels because three-channel
+        // targets do not exist, so the channel the program was told is absent
+        // is physically there -- and a blend that touches it decides how
+        // opaque the presented frame is, which nothing in the picture explains.
+        colorWrite: rs('COLORWRITEENABLE')
+            & (shape.targetHasAlpha === false ? ~COLORWRITEENABLE_ALPHA : ~0),
         alphaTest: rs('ALPHATESTENABLE') !== 0,
         alphaFunc: rs('ALPHAFUNC'),
         fogMode,
@@ -1787,6 +1795,7 @@ export function createRenderer(options){
     /** @param {RenderModel} model */
     const formatsOf = model=>({
         targetFormat: surfaceFor(model.renderTarget).format,
+        targetHasAlpha: FORMAT_INFO[describe(model.renderTarget).Format].alpha !== false,
         depthFormat: model.depthStencil ? surfaceFor(model.depthStencil).format : undefined,
     });
 
@@ -2111,7 +2120,8 @@ export function createRenderer(options){
                 blend: false,
                 srcBlend: D3DBLEND.ONE,
                 destBlend: D3DBLEND.ZERO,
-                colorWrite: (flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0,
+                colorWrite: ((flags & D3DCLEAR.TARGET) !== 0 ? 0xf : 0)
+                    & (formatsOf(model).targetHasAlpha ? ~0 : ~COLORWRITEENABLE_ALPHA),
                 alphaTest: false,
                 fogMode: D3DFOG.NONE,
                 // A clear is the colour it was given and nothing else: neither

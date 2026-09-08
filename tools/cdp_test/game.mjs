@@ -17,7 +17,7 @@
  * put in a repository. Without that bundle it says so and stops.
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS]
- *                                  [--dump-draws]
+ *                                  [--dump-draws] [--skip-texture tN]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -123,6 +123,11 @@ function parse(argv){
         dumpDraws: argv.includes('--dump-draws'),
         // Draws per frame, for bisecting which one painted a region.
         maxDraws: number('--max-draws', -1),
+        // A texture id from a draws dump, e.g. "t4". Every draw sampling it is
+        // dropped, so two runs differ by that draw and nothing else.
+        skipTexture: argv.includes('--skip-texture')
+            ? argv[argv.indexOf('--skip-texture') + 1]
+            : null,
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -265,6 +270,17 @@ function describe(result, context, calls){
     }
     say('');
 
+    const phases = result.phases;
+    if (phases && phases.top.length > 0)
+    {
+        say(`  where the time went (self time, milliseconds):`);
+        for (const row of phases.top)
+        {
+            say(`    ${row}`);
+        }
+        say('');
+    }
+
     const graphics = result.graphics;
     if (graphics)
     {
@@ -368,6 +384,7 @@ function describe(result, context, calls){
     {
         say(`  frame: ${JSON.stringify(result.frame)}`);
         say(`  colours: ${JSON.stringify(result.colours)}`);
+        say(`  opacity: ${JSON.stringify(result.opacity)}`);
     }
     say('');
 
@@ -510,6 +527,7 @@ export async function game(options){
             log: Boolean(options.log),
             dumpDraws: options.dumpDraws,
             maxDraws: options.maxDraws,
+            skipTexture: options.skipTexture,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
@@ -582,9 +600,14 @@ export async function game(options){
         // sampled, and only the texture itself tells those apart.
         for (const texture of result.graphics?.device?.textures ?? [])
         {
-            writeFileSync(
-                join(REPORTS_DIR, `game-${stamp}-${texture.id}-fmt${texture.format}.png`),
+            const name = `game-${stamp}-${texture.id}-fmt${texture.format}`;
+            writeFileSync(join(REPORTS_DIR, `${name}.png`),
                 toPng(texture.width, texture.height, Buffer.from(texture.bgra, 'base64')));
+            if (texture.deviceBgra)
+            {
+                writeFileSync(join(REPORTS_DIR, `${name}-device.png`), toPng(
+                    texture.width, texture.height, Buffer.from(texture.deviceBgra, 'base64')));
+            }
         }
 
         return {

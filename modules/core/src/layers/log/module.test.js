@@ -11,7 +11,11 @@ import { logModule } from './module.js';
 /** @param {any} [config] */
 async function open(config){
     let time = 0;
-    const api = await logModule.create({ now: ()=>time, ...config });
+    // Both clocks, and deliberately the same one here: a journal entry is
+    // stamped with guest time and a phase is measured against the host's, and
+    // a test that could only move one of them could not check the other at all.
+    const api = await logModule.create(
+        { now: ()=>time, wallClock: ()=>time, ...config });
     return { api, at: (/** @type {number} */ to)=>{ time = to; return api; } };
 }
 
@@ -72,4 +76,27 @@ test('diagnostics carry the share the thresholds watch', async()=>{
 
     await logModule.dispose();
     assert.equal(logModule.diagnostics().status, 'created');
+});
+
+test('a phase is measured against the host clock, not the guest\'s', async()=>{
+    // The guest's clock is credited in lumps from wall time as the scheduler
+    // runs, so a phase measured against it reports what the guest was credited
+    // rather than what the work cost. Read that way a run of ten minutes
+    // reported sixty-eight milliseconds, and every question about where the
+    // time went had no answer.
+    let guest = 0;
+    let wall = 0;
+    const api = await logModule.create({ now: ()=>guest, wallClock: ()=>wall });
+
+    api.beginFrame();
+    api.begin('run', api.PhaseKind.GUEST);
+    // A hundred milliseconds pass, and the guest is credited with one.
+    wall = 100;
+    guest = 1;
+    api.end('run');
+    api.endFrame();
+
+    const [top] = logModule.diagnostics().metrics?.topPhases ?? [];
+    assert.match(top, /^run guest x1 self=100\.000/, 'what it cost, not what was credited');
+    await logModule.dispose();
 });

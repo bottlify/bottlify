@@ -873,7 +873,11 @@ test('recorded: a whole clear is a clearing pass, a partial clear a scissored qu
     const descriptor = gpu.of('createRenderPipeline')[0].descriptor;
     assert.equal(descriptor.depthStencil.depthWriteEnabled, true);
     assert.equal(descriptor.depthStencil.depthCompare, 'always');
-    assert.equal(descriptor.fragment.targets[0].writeMask, 0xf);
+    // Colour only. This asserted 0xf and was wrong: the target is X8R8G8B8 and
+    // has no alpha channel, so nothing may write one -- and the clear above
+    // already relies on that, having put an opaque alpha there for the frame
+    // to be presented with.
+    assert.equal(descriptor.fragment.targets[0].writeMask, 0x7);
     assert.equal(h.device.diagnostics().clears, 2);
 });
 
@@ -1556,4 +1560,33 @@ test('every draw sampling one texture can be dropped, by the id the dump names i
     assert.equal(counted.skipped.texture, 1);
     assert.equal(counted.lastDump.length, 1, 'and the dump lists only the draw that survived');
     assert.match(counted.lastDump[0], /:t0:/);
+});
+
+test('a target whose format has no alpha channel is never written with one', async()=>{
+    // Recorded commands. Every backend renders into four channels, because a
+    // three-channel target does not exist -- so the channel Direct3D calls
+    // undefined for an X8 format is physically there, and a blend that touches
+    // it decides how opaque the presented frame is. Nothing in the colours
+    // says so, and the picture that results is a hard-edged rectangle of the
+    // blending draw's own extent.
+    /** @param {number} format */
+    const writeMaskOf = async format=>{
+        const h = harness({ format });
+        const { device, gpu } = h;
+        assert.equal(device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.SRCBLEND, D3DBLEND.SRCALPHA), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.DESTBLEND, D3DBLEND.ONE), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(
+            D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], argb(255, 0, 0, 128)), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return gpu.of('createRenderPipeline')[0].descriptor.fragment.targets[0].writeMask;
+    };
+
+    assert.equal(await writeMaskOf(D3DFMT.X8R8G8B8), 0x7,
+        'colour only, so the opaque alpha the clear left cannot be blended away');
+    assert.equal(await writeMaskOf(D3DFMT.A8R8G8B8), 0xf,
+        'a format that does have the channel keeps it');
 });

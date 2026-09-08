@@ -37,6 +37,10 @@ import { createBlockCache, resolveBlockStore }
  * @property {Object} v86                 Emulator artifacts.
  * @property {string} v86.moduleUrl
  * @property {ArrayBuffer} v86.wasmBytes
+ * @property {Object} [media]             Video decoding, when this build has it.
+ * @property {ArrayBuffer} [media.wasmBytes]
+ *           The decoder binary. Absent, the media layer comes up and reports
+ *           that nothing can be played, which is what a build without it is.
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
@@ -1020,6 +1024,13 @@ async function buildApp(options){
                 options.onCall?.(call);
             },
         },
+        media: {
+            // The decoder, handed down the same way the emulator's binary is:
+            // this layer is one module over one wasm blob, and which blob is
+            // the assembling caller's decision rather than something to fetch
+            // from inside a worker. Absent, the layer comes up and says so.
+            wasmBytes: options.media?.wasmBytes,
+        },
         log: {
             // Every call area starts switched off. A short run makes tens of
             // thousands of host calls; a reader who has not asked for them
@@ -1610,6 +1621,23 @@ async function buildApp(options){
         {
             return 0;
         }
+        // A library already here is handed back rather than loaded again, which
+        // is what Windows does: LoadLibrary on a loaded module raises its
+        // reference count and returns the handle it already has.
+        //
+        // Loading it twice is not merely wasteful. A program that asks for the
+        // same library in a loop -- and they do, because asking is how a
+        // program checks something is there -- gets a second copy of the image
+        // at a second address every time: its exports resolve to code whose
+        // globals are not the ones the first copy's callers hold, the address
+        // space fills until there is no room left, and re-reading, re-parsing,
+        // re-mapping and re-binding a megabyte of library is most of what the
+        // machine then does with its time.
+        const loaded = findModule(name);
+        if (loaded)
+        {
+            return loaded.base;
+        }
         return (async()=>{
             const wanted = resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe');
             const file = await readWholeFile(filesystem, blocks, wanted);
@@ -1919,11 +1947,29 @@ async function buildApp(options){
     /**
      * A macrotask, so everything the host has queued gets a turn.
      *
-     * `setTimeout` rather than a message channel or an immediate: it is the one
-     * spelling that exists in a worker, in a page and in Node, and this file
-     * runs in all three.
+     * Through a message channel rather than a timer, and the difference is not
+     * small: a browser clamps a zero timeout to four milliseconds and more once
+     * they nest, so a loop that yields this way pays that clamp every time --
+     * measured at eight milliseconds a yield, which was the largest single cost
+     * in a run and larger than the emulation it was interrupting. A channel
+     * message is delivered on the same macrotask turn without the clamp.
+     *
+     * A timer is still the fallback: this file has to run in a worker, in a
+     * page and under the test runner, and only some of those have a channel.
      */
-    const breathe = ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const breathe = typeof MessageChannel === 'function'
+        ? (()=>{
+            const channel = new MessageChannel();
+            /** @type {(() => void)[]} */
+            const waiting = [];
+            channel.port1.onmessage = ()=>waiting.shift()?.();
+            channel.port1.start?.();
+            return ()=>new Promise(resolve=>{
+                waiting.push(/** @type {() => void} */ (resolve));
+                channel.port2.postMessage(0);
+            });
+        })()
+        : ()=>new Promise(resolve=>setTimeout(resolve, 0));
 
     /**
      * Pausing is a gate rather than a flag polled in a loop: a paused caller
@@ -2021,13 +2067,17 @@ async function buildApp(options){
                 // going round the event loop does not show.
                 if (turn % TURNS_PER_YIELD === 0)
                 {
+                    journal.begin('yield', journal.PhaseKind.HOST);
                     await breathe();
+                    journal.end('yield');
                 }
 
                 // Sound is written ahead here rather than on demand: the device
                 // reads on a thread of its own and must never find the ring
                 // empty because the emulator was inside a long instruction.
+                journal.begin('pump', journal.PhaseKind.HOST);
                 sound?.pump();
+                journal.end('pump');
 
                 // And devices that keep a cursor are moved on, whether or not
                 // the guest asked anything. A program is entitled to hand a
@@ -2038,7 +2088,9 @@ async function buildApp(options){
                 // and the spin is then forever: the machine is running, the
                 // clock is running, and the one thing that would end it is
                 // waiting for a call that will not come.
+                journal.begin('waveTick', journal.PhaseKind.HOST);
                 win32.waveTick?.();
+                journal.end('waveTick');
 
                 // And a turn is also when anything waiting for something to
                 // arrive -- a message loop with an empty queue -- gets to look
@@ -2106,6 +2158,12 @@ async function buildApp(options){
                 const startedAt = clockSource();
                 try
                 {
+                    // The one measurement that separates emulation from our own
+                    // code. Host calls trap out from inside this and open their
+                    // own phase, so what is left as this phase's self time is
+                    // the guest actually executing -- which is the number every
+                    // question about speed starts from.
+                    journal.begin('guest', journal.PhaseKind.GUEST);
                     step = kernel.runOnce();
                     // Where the guest stood when its slice ran out. Sampled
                     // here because this is the only boundary the host owns: a
@@ -2121,8 +2179,10 @@ async function buildApp(options){
                     // A fault inside the guest, or inside a host function
                     // answering it. Either way the program cannot be told, and
                     // the state that explains it is about to be lost.
+                    journal.end('guest');
                     throw fail('guest', e);
                 }
+                journal.end('guest');
 
                 // The guest ran for real, so its clock moves. Nothing else in
                 // the engine does this, and without it the clock only ever

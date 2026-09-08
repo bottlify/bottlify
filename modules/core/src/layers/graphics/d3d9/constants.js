@@ -262,30 +262,48 @@ export const D3DFMT = Object.freeze({
  * Block-compressed formats are deliberately absent: their lock arithmetic
  * counts blocks rather than pixels, and nothing here does that yet.
  *
- * @type {Readonly<Record<number, { bytesPerPixel: number, depth: boolean }>>}
+ * `alpha` says whether the format has an alpha channel at all. A format whose
+ * name begins with X does not, and Direct3D says what lies in those bits is
+ * undefined and never read -- so a target of one must never be written with an
+ * alpha, whatever the surface it is really rendered into happens to carry.
+ *
+ * @type {Readonly<Record<number,
+ *     { bytesPerPixel: number, depth: boolean, alpha: boolean }>>}
  */
 export const FORMAT_INFO = Object.freeze({
-    [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false }),
-    [D3DFMT.X8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false }),
-    [D3DFMT.A2R10G10B10]: Object.freeze({ bytesPerPixel: 4, depth: false }),
-    [D3DFMT.R5G6B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
-    [D3DFMT.X1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
-    [D3DFMT.A1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false }),
+    [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
+    [D3DFMT.X8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: false }),
+    [D3DFMT.A2R10G10B10]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
+    [D3DFMT.R5G6B5]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false }),
+    [D3DFMT.X1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false }),
+    [D3DFMT.A1R5G5B5]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: true }),
     // Four bits an channel, and worth having rather than refusing: a program of
     // this era keeps its interface and its fonts in it, because four bits of
     // alpha is what a soft edge needs and eight bits of colour is more than a
     // glyph does. Refusing it does not degrade the picture, it removes the
     // text.
-    [D3DFMT.A4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false }),
-    [D3DFMT.X4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false }),
-    [D3DFMT.A8]: Object.freeze({ bytesPerPixel: 1, depth: false }),
-    [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true }),
-    [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true }),
-    [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true }),
-    [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true }),
+    [D3DFMT.A4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: true }),
+    [D3DFMT.X4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false }),
+    [D3DFMT.A8]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: true }),
+    [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
+    [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),
 });
 
 const reinterpret = new DataView(new ArrayBuffer(4));
+
+/**
+ * D3DCOLORWRITEENABLE's alpha bit.
+ *
+ * A format whose name begins with X has no alpha channel: Direct3D says what
+ * lies there is undefined and never read, so a target of one must never be
+ * written with an alpha at all. Rendering into a four-channel surface anyway
+ * -- which every backend does, because three-channel targets are not a thing
+ * -- turns that undefined channel into a real one, and whatever the draws
+ * leave in it then decides how opaque the frame is.
+ */
+export const COLORWRITEENABLE_ALPHA = 8;
 
 /**
  * @param {number} value
