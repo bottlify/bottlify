@@ -27,8 +27,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DMCS, D3DPOOL,
-    D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3D_OK,
+    D3DBLEND, D3DCLEAR, D3DCMP, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLIGHTTYPE, D3DLOCK, D3DMCS,
+    D3DPOOL, D3DPT, D3DRS, D3DSWAPEFFECT, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
+    D3D_OK, floatToDword,
 } from './constants.js';
 import { createDirect3D8 } from './device.js';
 import {
@@ -1279,4 +1280,36 @@ test('the run counts what lighting it was actually asked for', async()=>{
     assert.deepEqual(counted.types, [light8().Type]);
     assert.deepEqual(counted.ambients, ['00203040'],
         'the scene ambient a lit draw was made under, so a black one is visible as such');
+});
+
+test('a screen-space draw is recorded with what fills it', ()=>{
+    // A draw whose model origin sits on the camera is a screen-space quad
+    // written as ordinary geometry rather than as XYZRHW. It is rectangular by
+    // construction, so when one is wrong it is wrong in the shape of a
+    // rectangle -- and what makes it wrong is what fills and blends it, never
+    // the transform. With no transform set at all the matrices are identity,
+    // which puts the origin exactly there.
+    const h = harness();
+    const { device } = h;
+
+    assert.equal(device.SetRenderState(D3DRS.FOGENABLE, 1), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGSTART, floatToDword(0)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.FOGEND, floatToDword(7000)), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    const fvf = FVF.XYZ | FVF.DIFFUSE;
+    assert.equal(device.SetVertexShader(fvf), D3D_OK);
+    const stride = decodeFvf(fvf).stride;
+    assert.equal(
+        device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(stride * 3), stride),
+        D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+
+    const { fog } = device.diagnostics().lighting;
+    assert.equal(fog.transformed, 1);
+    assert.deepEqual(fog.depths, ['depth=1 amount=1'], 'on the camera, so not fogged');
+    assert.equal(fog.screenSpace.length, 1, 'and recorded as a screen-space draw');
+    assert.match(fog.screenSpace[0], /^blend=true/);
+    assert.match(fog.screenSpace[0], /textured=false/);
 });
