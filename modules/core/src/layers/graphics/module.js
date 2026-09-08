@@ -103,6 +103,13 @@ export const graphicsModule = {
                 // memory the guest can write through, because the unlock reads
                 // back exactly what it wrote.
                 allocate: config?.allocate,
+                // Rides on the device handle because that object reaches this
+                // layer exactly as the assembling caller wrote it, and a
+                // per-draw account of a frame is a thing only that caller can
+                // decide it wants: it costs a transform of every vertex.
+                dumpDraws: device?.dumpDraws === true,
+                maxDraws: device?.maxDraws,
+                divergence: config?.divergence,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless

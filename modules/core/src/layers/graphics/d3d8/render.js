@@ -76,6 +76,18 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * @property {number} Phi           The outer cone's.
  */
 
+/** The matrix elements a two-dimensional texture coordinate passes through. */
+const PLANAR_ROWS = Object.freeze([0, 1, 4, 5, 12, 13]);
+
+/** What those elements hold when the transform moves nothing. */
+const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 1, 0, 0]);
+
+/** D3DTTFF_COUNT2: two coordinates through the matrix, and no projection. */
+const TTFF_COUNT2 = 2;
+
+/** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
+const TEXTURE_DUMP_LIMIT = 24;
+
 /** Stages a device has. Every one past the cascade's end is ignored, not an error. */
 export const STAGE_COUNT = 8;
 
@@ -135,6 +147,91 @@ export function transformPosition(m, point){
         x * m[2] + y * m[6] + z * m[10] + m[14],
         x * m[3] + y * m[7] + z * m[11] + m[15],
     ];
+}
+
+/**
+ * Where a draw lands on its target, in target pixels.
+ *
+ * The extent of its vertices, not their coverage: the box the transformed
+ * corners span. That is what answers "which draw painted this patch of the
+ * frame", and it costs one transform per vertex rather than a rasteriser.
+ *
+ * A vertex whose clip w is not positive is behind the eye and has no screen
+ * position; dividing by it anyway throws the box out to either infinity and
+ * swallows every other vertex in it, so those are counted and dropped.
+ *
+ * @typedef {Object} ScreenDraw
+ * @property {ArrayLike<number>} worldViewProjection
+ * @property {import('../webgpu/contract.js').ViewportState} viewport
+ * @property {boolean} preTransformed  Already in target pixels.
+ * @property {Uint8Array} vertices     From the first vertex the draw reads.
+ * @property {number} stride
+ * @property {ArrayLike<number> | null} indices  Relative to that first vertex.
+ */
+
+/**
+ * @param {ScreenDraw} draw
+ * @returns {{ points: number[][], behind: number }}
+ */
+export function screenPositions(draw){
+    const { rect } = draw.viewport;
+    const bytes = draw.vertices;
+    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const total = draw.indices
+        ? draw.indices.length
+        : Math.floor(bytes.byteLength / draw.stride);
+    /** @type {number[][]} */
+    const points = [];
+    let behind = 0;
+    for (let index = 0; index < total; index++)
+    {
+        const at = (draw.indices ? draw.indices[index] : index) * draw.stride;
+        if (at < 0 || at + 12 > bytes.byteLength)
+        {
+            continue;
+        }
+        let x = view.getFloat32(at, true);
+        let y = view.getFloat32(at + 4, true);
+        if (!draw.preTransformed)
+        {
+            const clip = transformPosition(draw.worldViewProjection,
+                [x, y, view.getFloat32(at + 8, true)]);
+            if (!(clip[3] > 0))
+            {
+                behind++;
+                continue;
+            }
+            x = rect.x + (clip[0] / clip[3] * 0.5 + 0.5) * rect.width;
+            y = rect.y + (0.5 - clip[1] / clip[3] * 0.5) * rect.height;
+        }
+        // The vertex it came from rides along: a caller matching a corner
+        // against what the vertex carried there cannot recover it otherwise,
+        // because vertices behind the eye leave no gap in this list.
+        points.push([x, y, at]);
+    }
+    return { points, behind };
+}
+
+/**
+ * The box those positions span, in whole pixels.
+ *
+ * @param {ScreenDraw} draw
+ * @returns {{ x0: number, y0: number, x1: number, y1: number, behind: number }
+ *           | null}
+ */
+export function screenExtent(draw){
+    const { points, behind } = screenPositions(draw);
+    if (points.length === 0)
+    {
+        return null;
+    }
+    return {
+        x0: Math.round(Math.min(...points.map(point=>point[0]))),
+        y0: Math.round(Math.min(...points.map(point=>point[1]))),
+        x1: Math.round(Math.max(...points.map(point=>point[0]))),
+        y1: Math.round(Math.max(...points.map(point=>point[1]))),
+        behind,
+    };
 }
 
 /**
@@ -848,6 +945,17 @@ const CLEAR_STRIDE = 20;
  *     The backend has no sampler of its own yet, so one is borrowed from
  *     whoever assembled the device. A textured draw without it is refused
  *     loudly rather than drawn white.
+ * @property {boolean} [dumpDraws]
+ *     Record where every draw of the last frame landed and what state it ran
+ *     under. Off by default: it transforms every vertex of every draw a second
+ *     time on the processor, which is a cost an ordinary run must not pay.
+ * @property {number} [maxDraws]
+ *     Record only this many draws of each frame and drop the rest. Negative --
+ *     the default -- keeps all of them. A frame dump says which draws could
+ *     have painted a region; cutting the frame short is what says which one
+ *     did, because the region is either there or not at each cut.
+ * @property {((api: string, detail: string)=>void) | null} [divergence]
+ *     Where "this call succeeded and did not do all of what it promises" goes.
  */
 
 /**
@@ -857,6 +965,9 @@ const CLEAR_STRIDE = 20;
 export function createRenderer(options){
     const { backend, readMemory } = options;
     const createSampler = options.createSampler ?? null;
+    const dumpDraws = options.dumpDraws === true;
+    const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
+    const divergence = options.divergence ?? null;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
 
     /** @type {WeakMap<object, any>} d3d8 surface -> backend surface */
@@ -867,6 +978,16 @@ export function createRenderer(options){
     const textures = new WeakMap();
     /** @type {Map<string, any>} */
     const samplers = new Map();
+    /**
+     * The texels of each texture as they were last uploaded, when a run asked
+     * for them. A rectangle in the picture is either something a draw put
+     * there or something already in the texture it sampled, and no amount of
+     * per-draw state separates those two -- only the image does.
+     *
+     * @type {Map<string, any>}
+     */
+    const uploaded = new Map();
+    let nextTextureId = 0;
     /** @type {any} */
     let placeholder = null;
 
@@ -876,6 +997,12 @@ export function createRenderer(options){
     let chain = Promise.resolve();
     /** @type {any[]} the commands of the frame most recently replayed */
     let lastFrame = [];
+    /** @type {string[]} one line per draw of the frame being recorded */
+    let dump = [];
+    /** @type {string[]} the same, for the frame most recently presented */
+    let lastDump = [];
+    /** Draws kept in the frame being recorded, against `maxDraws`. */
+    let kept = 0;
 
     const counters = {
         frames: 0,
@@ -983,8 +1110,41 @@ export function createRenderer(options){
         }
         const entry = textures.get(texture);
         return entry
-            ? `${entry.format}@${entry.width}x${entry.height}`
+            ? `${entry.id}:${entry.format}@${entry.width}x${entry.height}${entry.census ?? ''}`
             : 'untracked';
+    };
+
+    /**
+     * What a texture's texels actually are, once expanded.
+     *
+     * A sprite drawn additively is transparent where it is black and a sprite
+     * drawn through alpha is transparent where its alpha is low; either way the
+     * rectangle it is stored in is only invisible because most of it is one of
+     * those. So "how much of this texture is neither" is the difference
+     * between a decode that produced a picture and one that produced a slab,
+     * and no other piece of state around the draw distinguishes them.
+     *
+     * @param {Uint8Array} texels  b, g, r, a
+     * @returns {string}
+     */
+    const censusOf = texels=>{
+        let opaque = 0;
+        let bright = 0;
+        for (let at = 0; at < texels.length; at += 4)
+        {
+            if (texels[at + 3] >= 4)
+            {
+                opaque++;
+            }
+            if (Math.max(texels[at], texels[at + 1], texels[at + 2]) >= 8)
+            {
+                bright++;
+            }
+        }
+        const texelCount = texels.length / 4;
+        return `{a>0=${Math.round(opaque / texelCount * 100)}%`
+            + ` rgb>0=${Math.round(bright / texelCount * 100)}%`
+            + ` [0]=${texels[2]},${texels[1]},${texels[0]},${texels[3]}}`;
     };
 
     /** @param {Set<string>} into @param {string} text */
@@ -1115,6 +1275,245 @@ export function createRenderer(options){
         sample(tally.materials, `diffuse=${colourText(material?.Diffuse)}`
             + ` ambient=${colourText(material?.Ambient)}`
             + ` emissive=${colourText(material?.Emissive)}`);
+    };
+
+    /**
+     * One draw as a line: where it landed and what it ran under.
+     *
+     * A counter says a frame had sixteen hundred draws and a picture says one
+     * patch of it is wrong; neither says which draw painted that patch. This
+     * is the join between them, and the screen extent is the only part of it
+     * that cannot be read straight off the recorded state.
+     *
+     * @param {RenderModel} model
+     * @param {any} prepared      what `prepare` returned
+     * @param {Uint8Array} vertices
+     * @param {number} stride
+     * @param {ArrayLike<number> | null} indices
+     */
+    const dumpDraw = (model, prepared, vertices, stride, indices)=>{
+        const state = prepared.state;
+        const geometry = {
+            worldViewProjection: prepared.uniforms.subarray(
+                UNIFORM_AT.worldViewProjection, UNIFORM_AT.worldViewProjection + 16),
+            viewport: model.viewport,
+            preTransformed: prepared.layout.preTransformed,
+            vertices,
+            stride,
+            indices,
+        };
+        const box = screenExtent(geometry);
+        const where = box
+            ? `${box.x0},${box.y0}..${box.x1},${box.y1}`
+                + ` (${box.x1 - box.x0}x${box.y1 - box.y0})`
+                + (box.behind > 0 ? ` behind=${box.behind}` : '')
+            : 'nowhere';
+        // A draw of a handful of quads has its own corners, and the union of
+        // them is not one of them: an artefact bounded by one quad of six is
+        // invisible in the box and obvious in the list.
+        const drawn = indices ? indices.length : Math.floor(vertices.byteLength / stride);
+        const texCoord = prepared.layout.attributes.find(
+            (/** @type {any} */ entry)=>entry.name === 'texCoord0');
+        const view = new DataView(vertices.buffer, vertices.byteOffset, vertices.byteLength);
+        const corners = box && drawn <= 64
+            ? ` at=${[...new Set(screenPositions(geometry).points.map(point=>
+                `${Math.round(point[0])},${Math.round(point[1])}`
+                + (texCoord
+                    ? `@${round(view.getFloat32(point[2] + texCoord.offset, true))}`
+                        + `,${round(view.getFloat32(point[2] + texCoord.offset + 4, true))}`
+                    : '')))].join(' ')}`
+            : '';
+        const cascade = state.stages.map((/** @type {any} */ stage, /** @type {number} */ at)=>
+            `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
+            + `/${stage.alphaOp}(${stage.alphaArg1},${stage.alphaArg2})`
+            + `#${stage.texCoordIndex}`
+            + `:${describeTexture(prepared.textures[at])}`).join(' ');
+        dump.push(`#${dump.length} ${where}`
+            + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
+            + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
+            + ` fog=${state.fogMode} spec=${state.specularEnable ? 1 : 0}`
+            + ` z=${state.depthTest ? state.depthFunc : '-'}/${state.depthWrite ? 1 : 0}`
+            + ` cull=${state.cullMode}`
+            + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
+            + ` aTest=${state.alphaTest
+                ? `${state.alphaFunc}/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}`
+                : '-'}`
+            + ` ${transparencyOf(model, prepared, vertices, stride, indices)}`
+            + ` sampler=${Object.values(samplerDescriptorOf(model.stageStates(0))).join(',')}`
+            + ` texXform=${textureTransformOf(model, 0)}`
+            // The rectangle the draw was clipped and mapped by. A viewport
+            // left set by one draw and inherited by the next puts a hard
+            // axis-aligned edge across real geometry, at coordinates that
+            // belong to neither draw's own shape.
+            + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
+            + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
+            + `@${round(model.viewport.rect.minDepth)}..${round(model.viewport.rect.maxDepth)}`
+            + ` [${cascade}]${corners}`);
+    };
+
+    /**
+     * The texture transform a stage asks for, which this engine accepts and
+     * does not apply. A program that scrolls, scales or projects a coordinate
+     * set through D3DTS_TEXTURE0 gets the untransformed coordinate instead --
+     * a sprite sampled over the wrong part of its own texture, with every
+     * other piece of state around it reading correct. So the flags and the
+     * matrix are printed whenever either is set, and nothing at all when the
+     * stage genuinely wants the coordinate as it lies.
+     *
+     * @param {RenderModel} model
+     * @param {number} stage
+     * @returns {string}
+     */
+    const textureTransformOf = (model, stage)=>{
+        const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        const matrix = model.transforms.get(D3DTS.TEXTURE0 + stage);
+        if (flags === 0 && !matrix)
+        {
+            return '-';
+        }
+        // The rows a two-dimensional texture coordinate actually travels
+        // through: the two it is scaled and sheared by, and the one it is
+        // offset by. The rest of the matrix cannot reach it.
+        return `${flags}:${(matrix ? PLANAR_ROWS.map(at=>matrix[at]) : PLANAR_IDENTITY)
+            .map(round).join(',')}`;
+    };
+
+    /**
+     * Whether a stage's transform would move a coordinate at all.
+     *
+     * A program that asks for two-dimensional coordinates through an identity
+     * matrix -- which is the common case, and what a fixed-function pipeline
+     * does by default once the flag is set -- gets the same texel either way,
+     * so calling that a divergence would put a warning on every frame of every
+     * title and say nothing.
+     *
+     * @param {RenderModel} model @param {number} stage
+     */
+    const transformMoves = (model, stage)=>{
+        const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        if (flags === 0)
+        {
+            return false;
+        }
+        if (flags !== TTFF_COUNT2)
+        {
+            // Three or four coordinates, or a projected divide: none of which
+            // this engine does, whatever the matrix holds.
+            return true;
+        }
+        const matrix = model.transforms.get(D3DTS.TEXTURE0 + stage);
+        return matrix !== undefined
+            && PLANAR_ROWS.some((at, index)=>matrix[at] !== PLANAR_IDENTITY[index]);
+    };
+
+    /**
+     * Where this draw's transparency comes from, and what it samples with.
+     *
+     * A rectangle that should not be visible is a fragment that should have
+     * been transparent and was not, and there are only three places that can
+     * come from: the alpha the vertex carries, the alpha the material lends it
+     * when the vertex carries none, and the texel the coordinates land on. All
+     * three look ordinary in the state and are only distinguished by their
+     * values, so the values are what is printed.
+     *
+     * @param {RenderModel} model
+     * @param {any} prepared
+     * @param {Uint8Array} vertices
+     * @param {number} stride
+     * @param {ArrayLike<number> | null} indices
+     * @returns {string}
+     */
+    const transparencyOf = (model, prepared, vertices, stride, indices)=>{
+        /** @param {string} name */
+        const attribute = name=>prepared.layout.attributes.find(
+            (/** @type {any} */ entry)=>entry.name === name);
+        const diffuse = attribute('diffuse');
+        const texCoord = attribute('texCoord0');
+        const view = new DataView(vertices.buffer, vertices.byteOffset, vertices.byteLength);
+        let alphaLow = 256, alphaHigh = -1;
+        let uLow = Infinity, uHigh = -Infinity, vLow = Infinity, vHigh = -Infinity;
+        const total = indices ? indices.length : Math.floor(vertices.byteLength / stride);
+        for (let index = 0; index < total; index++)
+        {
+            const at = (indices ? indices[index] : index) * stride;
+            if (at < 0 || at + stride > vertices.byteLength)
+            {
+                continue;
+            }
+            if (diffuse)
+            {
+                const alpha = vertices[at + diffuse.offset + 3];
+                alphaLow = Math.min(alphaLow, alpha);
+                alphaHigh = Math.max(alphaHigh, alpha);
+            }
+            if (texCoord)
+            {
+                const u = view.getFloat32(at + texCoord.offset, true);
+                const v = view.getFloat32(at + texCoord.offset + 4, true);
+                uLow = Math.min(uLow, u);
+                uHigh = Math.max(uHigh, u);
+                vLow = Math.min(vLow, v);
+                vHigh = Math.max(vHigh, v);
+            }
+        }
+        return `alpha=${alphaHigh < 0
+            ? `material:${round(model.material?.Diffuse?.a ?? -1)}`
+            : `vertex:${alphaLow}..${alphaHigh}`}`
+            + ` uv=${texCoord && uLow !== Infinity
+                ? `${round(uLow)}..${round(uHigh)},${round(vLow)}..${round(vHigh)}`
+                : '-'}`;
+    };
+
+    /**
+     * The same, for an indexed draw out of a vertex buffer: the indices say
+     * which vertices, so the span they reach over is what has to be read back
+     * from guest memory to be transformed.
+     *
+     * @param {RenderModel} model
+     * @param {any} prepared
+     * @param {ArrayLike<number>} order
+     */
+    const dumpIndexed = (model, prepared, order)=>{
+        const stream = model.stream;
+        let most = 0;
+        for (let at = 0; at < order.length; at++)
+        {
+            most = Math.max(most, order[at]);
+        }
+        const skipped = model.baseVertexIndex * stream.stride;
+        const wanted = Math.min((most + 1) * stream.stride, stream.buffer.length - skipped);
+        dumpDraw(model, prepared,
+            wanted > 0 ? readMemory(stream.buffer.base + skipped, wanted) : new Uint8Array(0),
+            stream.stride, order);
+    };
+
+    /**
+     * Says once that a stage asked for a texture transform and did not get one.
+     *
+     * The state is accepted -- refusing SetTransform or the stage state would
+     * change what a program does -- and then not acted on, which is the defect
+     * class that shows up as a picture rather than an error. Reported per draw
+     * because that is where it is observable; the reporter deduplicates.
+     *
+     * @param {RenderModel} model
+     * @param {number} stages  How many the cascade runs.
+     */
+    const reportTextureTransform = (model, stages)=>{
+        if (!divergence)
+        {
+            return;
+        }
+        for (let stage = 0; stage < stages; stage++)
+        {
+            if (transformMoves(model, stage))
+            {
+                divergence('Direct3D 8',
+                    'a texture transform is accepted and not applied'
+                    + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
+                    + ' coordinates are sampled as the vertex carries them');
+                return;
+            }
+        }
     };
 
     /** @param {string} reason */
@@ -1276,13 +1675,28 @@ export function createRenderer(options){
         {
             const count = record.width * record.height;
             const bytes = readMemory(record.base, count * FORMAT_INFO[record.format].bytesPerPixel);
+            const texels = expandTexels(record.format, bytes, count);
             backend.uploadTexture({
                 texture: record.gpu.texture,
                 format: COLOR_FORMAT,
                 width: record.width,
                 height: record.height,
-                data: expandTexels(record.format, bytes, count),
+                data: texels,
             });
+            if (dumpDraws)
+            {
+                record.census = censusOf(texels);
+                if (uploaded.has(record.id) || uploaded.size < TEXTURE_DUMP_LIMIT)
+                {
+                    uploaded.set(record.id, {
+                        id: record.id,
+                        format: record.format,
+                        width: record.width,
+                        height: record.height,
+                        texels,
+                    });
+                }
+            }
             record.dirty = false;
         }
         return record.gpu;
@@ -1356,6 +1770,11 @@ export function createRenderer(options){
      * @param {any} geometry
      */
     const record = (model, state, uniforms, stageBindings, geometry)=>{
+        if (maxDraws >= 0 && kept >= maxDraws)
+        {
+            return;
+        }
+        kept++;
         const frame = ensureViewport(model);
         const pipeline = frame.pipelines.length;
         frame.pipelines.push(backend.pipelineFor(state));
@@ -1399,6 +1818,7 @@ export function createRenderer(options){
             };
         });
         const lighting = lightingOf(model, layout);
+        reportTextureTransform(model, cascade.stages.length);
         countLighting(model, layout, lighting);
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
@@ -1407,7 +1827,13 @@ export function createRenderer(options){
             stages: cascade.stages,
             lighting,
         });
-        return { state, uniforms: uniformsOf(model, lighting), stageBindings };
+        // `layout` and `textures` are the frame dump's, and are handed back
+        // rather than worked out again there: both are already in hand and
+        // neither can be recovered from the recorded command.
+        return {
+            state, uniforms: uniformsOf(model, lighting), stageBindings,
+            layout, textures: cascade.textures,
+        };
     };
 
     /** @param {number} format D3DFMT_INDEX @returns {{ gpu: string, bytes: number } | null} */
@@ -1510,7 +1936,10 @@ export function createRenderer(options){
             const top = {};
             texture.GetSurfaceLevel(0, top);
             top.surface.release();
-            const entry = { gpu: null, dirty: true, base: top.surface.base, ...desc };
+            const entry = {
+                gpu: null, dirty: true, base: top.surface.base,
+                id: `t${nextTextureId++}`, ...desc,
+            };
             textures.set(texture, entry);
             // Reachable by the level's surface as well, because a copy names
             // that rather than the texture it belongs to.
@@ -1690,6 +2119,13 @@ export function createRenderer(options){
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
             });
+            if (dumpDraws)
+            {
+                dumpDraw(model, prepared,
+                    readMemory(stream.buffer.base + startVertex * stream.stride,
+                        count * stream.stride),
+                    stream.stride, null);
+            }
         },
 
         /**
@@ -1729,6 +2165,12 @@ export function createRenderer(options){
                     first: 0,
                     baseVertex: model.baseVertexIndex,
                 });
+                if (dumpDraws)
+                {
+                    dumpIndexed(model, prepared, indicesFrom(
+                        readMemory(model.indices.base + byteOffset, count * format.bytes),
+                        format.bytes));
+                }
                 return;
             }
             // The strip's order is in guest memory, where the program left it.
@@ -1738,6 +2180,10 @@ export function createRenderer(options){
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex),
             });
+            if (dumpDraws)
+            {
+                dumpIndexed(model, prepared, order);
+            }
         },
 
         /**
@@ -1762,6 +2208,10 @@ export function createRenderer(options){
                 : { indices: null, count, first: 0 };
             record(model, prepared.state, prepared.uniforms, prepared.stageBindings,
                 { vertices, ...geometry });
+            if (dumpDraws)
+            {
+                dumpDraw(model, prepared, vertexData.subarray(0, count * stride), stride, null);
+            }
         },
 
         /**
@@ -1804,6 +2254,11 @@ export function createRenderer(options){
                     }
                     : expandedGeometry(type, indices, 0)),
             });
+            if (dumpDraws)
+            {
+                dumpDraw(model, prepared, vertexData.subarray(0, numVertices * stride),
+                    stride, indices);
+            }
         },
 
         /**
@@ -1817,6 +2272,9 @@ export function createRenderer(options){
         present(model){
             const recorded = ensureFrame();
             recording = null;
+            lastDump = dump;
+            dump = [];
+            kept = 0;
             const surface = surfaceFor(model.backBuffer);
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
@@ -1852,6 +2310,9 @@ export function createRenderer(options){
                 // What the last frame was made of, for a test that wants to
                 // evaluate the same draws on the processor.
                 lastFrame,
+                // Empty unless the build asked for it; see `dumpDraws`.
+                lastDump,
+                textures: [...uploaded.values()],
             };
         },
     };

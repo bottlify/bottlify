@@ -172,6 +172,13 @@ function isTransformType(type){
  *     it writes through and the unlock reads those bytes back, so it has to be
  *     memory the guest can reach. Absent, addresses are invented -- which works
  *     exactly until something reads one.
+ * @property {boolean} [dumpDraws]
+ *     Ask the renderer for a per-draw account of the last frame. Off by
+ *     default: it costs a transform of every vertex of every draw.
+ * @property {number} [maxDraws]
+ *     Cut every frame short after this many draws. Negative keeps all of them.
+ * @property {(api: string, detail: string)=>void} [divergence]
+ *     Where "this call succeeded and did not do all of what it promises" goes.
  */
 
 /**
@@ -249,11 +256,17 @@ function reportPresentParameters(parameters){
  * @param {Partial<DeviceCaps> & DeviceServices} [options]
  */
 export function createDirect3D8(options = {}){
-    const { backend, readMemory, createSampler, allocate: guestMemory, ...caps } = options;
+    const {
+        backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
+        divergence, ...caps
+    } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
-    const services = { backend, readMemory, createSampler, allocate: guestMemory };
+    const services = {
+        backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
+        divergence,
+    };
     if (backend && !readMemory)
     {
         throw new Error('graphics/d3d8: a device that draws needs readMemory as well as a backend');
@@ -477,6 +490,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
             createSampler: services.createSampler ?? null,
+            dumpDraws: services.dumpDraws === true,
+            maxDraws: services.maxDraws,
+            divergence: services.divergence,
         })
         : null;
 

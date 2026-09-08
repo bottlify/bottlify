@@ -34,11 +34,13 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    listIndices, multiplyMatrices, packLight, pipelineStateOf, transformPosition, vertexCountOf,
+    listIndices, multiplyMatrices, packLight, pipelineStateOf, screenExtent, transformPosition,
+    vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
+import { viewportState } from '../webgpu/internal/viewport.js';
 import {
     clear as referenceClear, createReferenceSurface, fillRect, toBase64,
 } from '../webgpu/internal/reference.js';
@@ -53,7 +55,9 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
 /**
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
- * @param {{ width?: number, height?: number, format?: number, depth?: boolean }} [options]
+ * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
+ *           dumpDraws?: boolean, maxDraws?: number,
+ *           divergence?: (api: string, detail: string)=>void }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -76,6 +80,9 @@ function harness(options = {}){
             samplers.push(sampler);
             return sampler;
         },
+        dumpDraws: options.dumpDraws ?? false,
+        maxDraws: options.maxDraws,
+        divergence: options.divergence,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1312,4 +1319,208 @@ test('a screen-space draw is recorded with what fills it', ()=>{
     assert.equal(fog.screenSpace.length, 1, 'and recorded as a screen-space draw');
     assert.match(fog.screenSpace[0], /^blend=true/);
     assert.match(fog.screenSpace[0], /texture=none/, 'nothing bound, said as such');
+});
+
+test('a draw`s screen extent is the box its transformed vertices span', ()=>{
+    // Unit. The projection is identity, so a vertex is already in clip space
+    // with a w of one and the only arithmetic left is the viewport map: x from
+    // -1..1 across the width, y from 1..-1 down the height. Those two
+    // conventions disagree in sign, which is exactly the mistake that gives a
+    // plausible box in the wrong half of the frame.
+    const viewport = viewportState({ x: 0, y: 0, width: 640, height: 480 });
+    const vertices = new DataView(new ArrayBuffer(24));
+    vertices.setFloat32(0, -1, true);
+    vertices.setFloat32(4, 1, true);
+    vertices.setFloat32(8, 0, true);
+    vertices.setFloat32(12, 0.5, true);
+    vertices.setFloat32(16, -2, true);
+    vertices.setFloat32(20, 0, true);
+
+    assert.deepEqual(screenExtent({
+        worldViewProjection: IDENTITY,
+        viewport,
+        preTransformed: false,
+        vertices: new Uint8Array(vertices.buffer),
+        stride: 12,
+        indices: null,
+    }), { x0: 0, y0: 0, x1: 480, y1: 720, behind: 0 });
+
+    // The same bytes read as pre-transformed are target pixels already, which
+    // is a different box entirely and is why the flag is carried.
+    assert.deepEqual(screenExtent({
+        worldViewProjection: IDENTITY,
+        viewport,
+        preTransformed: true,
+        vertices: new Uint8Array(vertices.buffer),
+        stride: 12,
+        indices: null,
+    }), { x0: -1, y0: -2, x1: 1, y1: 1, behind: 0 });
+});
+
+test('a vertex behind the eye is counted rather than divided by its own w', ()=>{
+    // Unit. A clip w at or below zero has no screen position: dividing by it
+    // throws the box out to an infinity that swallows every other vertex, so
+    // the box would claim the draw covered the whole frame and name it as a
+    // candidate for every patch of it. This matrix makes w the z.
+    const projection = [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 1,
+        0, 0, 0, 0,
+    ];
+    const vertices = new DataView(new ArrayBuffer(24));
+    vertices.setFloat32(0, 2, true);
+    vertices.setFloat32(4, 2, true);
+    vertices.setFloat32(8, 2, true);
+    vertices.setFloat32(12, 0, true);
+    vertices.setFloat32(16, 0, true);
+    vertices.setFloat32(20, -1, true);
+
+    assert.deepEqual(screenExtent({
+        worldViewProjection: projection,
+        viewport: viewportState({ x: 0, y: 0, width: 640, height: 480 }),
+        preTransformed: false,
+        vertices: new Uint8Array(vertices.buffer),
+        stride: 12,
+        indices: null,
+    }), { x0: 640, y0: 0, x1: 640, y1: 0, behind: 1 });
+});
+
+test('the frame dump says where each draw landed and is empty unless asked for', async()=>{
+    // Recorded commands. A counter says a frame had many draws and a picture
+    // says one patch of it is wrong; only this joins the two.
+    const quiet = harness({ width: 640, height: 480 });
+    assert.equal(quiet.device.BeginScene(), D3D_OK);
+    assert.equal(quiet.device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(quiet.device.DrawPrimitiveUP(
+        D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+    assert.equal(quiet.device.EndScene(), D3D_OK);
+    await quiet.present();
+    assert.deepEqual(quiet.device.diagnostics().lastDump, [],
+        'a run that did not ask for the dump pays nothing for it');
+
+    const h = harness({ width: 640, height: 480, dumpDraws: true });
+    const device = h.device;
+    assert.equal(device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.SRCBLEND, D3DBLEND.SRCALPHA), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.DESTBLEND, D3DBLEND.INVSRCALPHA), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.ALPHATESTENABLE, 1), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.ALPHAFUNC, D3DCMP.GREATEREQUAL), D3D_OK);
+    assert.equal(device.SetRenderState(D3DRS.ALPHAREF, 128), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(
+        D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const dumped = device.diagnostics().lastDump;
+    assert.equal(dumped.length, 1);
+    assert.match(dumped[0], /^#0 10,20\.\.110,70 \(100x50\) /,
+        'the box a pre-transformed quad covers, in target pixels');
+    assert.match(dumped[0], / n=6 /);
+    assert.match(dumped[0], / lit=- /, 'a pre-transformed draw is past lighting');
+    assert.match(dumped[0], new RegExp(` blend=${D3DBLEND.SRCALPHA},${D3DBLEND.INVSRCALPHA} `));
+    assert.match(dumped[0], new RegExp(` aTest=${D3DCMP.GREATEREQUAL}/128 `));
+    assert.match(dumped[0], / alpha=vertex:255\.\.255 /,
+        'where a fragment`s transparency comes from -- here the vertex`s own colour');
+    assert.match(dumped[0], / texXform=- /,
+        'a stage this engine does not transform coordinates for says so');
+    assert.match(dumped[0], / view=0,0\+640x480@0..1 /,
+        'the rectangle the draw was clipped and mapped by, which a later draw inherits');
+    assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
+    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70$/,
+        'the corners themselves, because the union of a draw`s quads is not one of them');
+});
+
+test('a frame can be cut short after a given number of draws', async()=>{
+    // Recorded commands. A dump says which draws could have painted a region;
+    // only cutting the frame at each of them in turn says which one did, so
+    // the cut has to drop the draw rather than hide it.
+    const h = harness({ width: 640, height: 480, maxDraws: 2 });
+    const device = h.device;
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    for (let at = 0; at < 5; at++)
+    {
+        assert.equal(device.DrawPrimitiveUP(
+            D3DPT.TRIANGLELIST, 2, quad([at, 0, at + 10, 10], argb(255, 0, 0)), 20), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.equal(device.diagnostics().draws, 2, 'the rest never reached the queue');
+});
+
+test('the dump reports a texture transform this engine accepts and does not apply', async()=>{
+    // Recorded commands. A stage that transforms its coordinates and a stage
+    // that does not are indistinguishable in every other field of a draw, and
+    // this engine samples the untransformed coordinate either way -- so the
+    // dump has to say which one a draw asked for, or the difference cannot be
+    // seen at all.
+    const h = harness({ width: 640, height: 480, dumpDraws: true });
+    const device = h.device;
+    assert.equal(device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
+    assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
+        0.5, 0, 0, 0,
+        0, 0.25, 0, 0,
+        0, 0, 1, 0,
+        0.125, 0.375, 0, 1,
+    ]), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(
+        D3DPT.TRIANGLELIST, 2, quad([0, 0, 10, 10], argb(255, 0, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.match(device.diagnostics().lastDump[0],
+        / texXform=2:0.5,0,0,0.25,0.125,0.375 /,
+        'the flags and the rows a coordinate travels through');
+});
+
+test('a texture transform that moves a coordinate is reported as a divergence', async()=>{
+    // Recorded commands. The state is accepted and not acted on, which is the
+    // one case that has to speak: refusing it would change what the program
+    // does, and accepting it in silence is what produces a picture instead of
+    // an error. An identity transform moves nothing and must stay quiet, or
+    // the warning lands on every frame of every title and says nothing.
+    /** @type {string[]} */
+    const said = [];
+    const quiet = harness({
+        dumpDraws: true,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    // Textured, because a transform on a stage the cascade never runs moves
+    // nothing and should stay as quiet as an identity one.
+    const draw = (/** @type {any} */ h)=>{
+        const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8,
+            Uint8Array.from([0, 0, 255, 255]));
+        assert.equal(h.device.SetTexture(0, texture), D3D_OK);
+        selectTexture(h.device);
+        assert.equal(h.device.BeginScene(), D3D_OK);
+        assert.equal(h.device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(h.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+        assert.equal(h.device.EndScene(), D3D_OK);
+    };
+    assert.equal(quiet.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
+    assert.equal(quiet.device.SetTransform(D3DTS.TEXTURE0, [...IDENTITY]), D3D_OK);
+    draw(quiet);
+    assert.equal(said.length, 0, 'two coordinates through an identity matrix move nothing');
+
+    const moved = harness({
+        dumpDraws: true,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    assert.equal(moved.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
+    assert.equal(moved.device.SetTransform(D3DTS.TEXTURE0, [
+        2, 0, 0, 0,
+        0, 2, 0, 0,
+        0, 0, 1, 0,
+        0, 0, 0, 1,
+    ]), D3D_OK);
+    draw(moved);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /^Direct3D 8: a texture transform is accepted and not applied/);
 });

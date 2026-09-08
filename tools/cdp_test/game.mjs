@@ -17,8 +17,10 @@
  * put in a repository. Without that bundle it says so and stops.
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS]
+ *                                  [--dump-draws]
  */
 
+import { deflateSync } from 'node:zlib';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -36,6 +38,65 @@ const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
 /** Lines per round trip when draining the call log. */
 const LOG_CHUNK = 20000;
+
+/**
+ * A BGRA buffer as a PNG, so a texture the engine uploaded can simply be
+ * opened. Written here rather than pulled in: the engine's pixels are already
+ * one fixed format, and this is thirty lines of it.
+ *
+ * @param {number} width @param {number} height @param {Buffer} bgra
+ * @returns {Buffer}
+ */
+function toPng(width, height, bgra){
+    const stride = width * 4 + 1;
+    const raw = Buffer.alloc(stride * height);
+    for (let y = 0; y < height; y++)
+    {
+        for (let x = 0; x < width; x++)
+        {
+            const from = (y * width + x) * 4;
+            const to = y * stride + 1 + x * 4;
+            raw[to] = bgra[from + 2];
+            raw[to + 1] = bgra[from + 1];
+            raw[to + 2] = bgra[from];
+            raw[to + 3] = bgra[from + 3];
+        }
+    }
+    /** @param {string} type @param {Buffer} body */
+    const chunk = (type, body)=>{
+        const head = Buffer.alloc(8);
+        head.writeUInt32BE(body.length, 0);
+        head.write(type, 4, 'latin1');
+        const crc = Buffer.alloc(4);
+        crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), body])) >>> 0, 0);
+        return Buffer.concat([head, body, crc]);
+    };
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(width, 0);
+    header.writeUInt32BE(height, 4);
+    header[8] = 8;
+    header[9] = 6;
+    return Buffer.concat([
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        chunk('IHDR', header),
+        chunk('IDAT', deflateSync(raw)),
+        chunk('IEND', Buffer.alloc(0)),
+    ]);
+}
+
+/** @param {Buffer} bytes @returns {number} */
+function crc32(bytes){
+    let crc = ~0;
+    for (const byte of bytes)
+    {
+        crc ^= byte;
+        for (let bit = 0; bit < 8; bit++)
+        {
+            crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+        }
+    }
+    return ~crc;
+}
 
 /** @param {string[]} argv */
 function parse(argv){
@@ -56,6 +117,12 @@ function parse(argv){
         // Every host call written to a file. The ring in a report holds the end
         // of a run, and what a program decided it decided long before that.
         log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
+        // Where every draw of the last frame landed, and under what state.
+        // Off unless asked for: it transforms every vertex of every draw a
+        // second time on the processor.
+        dumpDraws: argv.includes('--dump-draws'),
+        // Draws per frame, for bisecting which one painted a region.
+        maxDraws: number('--max-draws', -1),
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -441,6 +508,8 @@ export async function game(options){
             maxTurns: options.turns,
             quantum: options.quantum,
             log: Boolean(options.log),
+            dumpDraws: options.dumpDraws,
+            maxDraws: options.maxDraws,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
@@ -499,6 +568,25 @@ export async function game(options){
         }, options.calls);
         writeFileSync(reportPath, text);
 
+        // A file of its own: one line per draw is thousands of lines, which is
+        // a thing to grep rather than a thing to read past.
+        const drawn = result.graphics?.device?.lastDump ?? [];
+        let drawsPath = null;
+        if (drawn.length > 0)
+        {
+            drawsPath = join(REPORTS_DIR, `game-${stamp}-draws.txt`);
+            writeFileSync(drawsPath, `${drawn.join('\n')}\n`);
+        }
+        // The texels behind those draws, as images. A rectangle in a frame is
+        // either something a draw put there or something already in what it
+        // sampled, and only the texture itself tells those apart.
+        for (const texture of result.graphics?.device?.textures ?? [])
+        {
+            writeFileSync(
+                join(REPORTS_DIR, `game-${stamp}-${texture.id}-fmt${texture.format}.png`),
+                toPng(texture.width, texture.height, Buffer.from(texture.bgra, 'base64')));
+        }
+
         return {
             ok: result.ok === true,
             measured: true,
@@ -506,6 +594,7 @@ export async function game(options){
             pageUrl,
             report: text,
             reportPath,
+            drawsPath,
             screenshot: shotPath,
             events: thrown,
         };
@@ -534,6 +623,10 @@ try
         console.log(answer.report);
     }
     console.log(`report:     ${answer.reportPath ?? '-'}`);
+    if (answer.drawsPath)
+    {
+        console.log(`draws:      ${answer.drawsPath}`);
+    }
     console.log(`screenshot: ${answer.screenshot ?? '-'}`);
     for (const line of answer.events ?? [])
     {

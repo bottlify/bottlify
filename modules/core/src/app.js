@@ -903,6 +903,40 @@ async function buildApp(options){
     /** What the program is told its display is, where it was told anything. */
     const display = options.screen ?? null;
 
+    /**
+     * Divergences already reported, so each is said once.
+     *
+     * A layer notices a divergence where it happens, which for a graphics state
+     * is every draw. Reported per call it would fill a frame's journal with one
+     * repeated line and bury everything else; reported once it is a short list
+     * of what this build does differently, which is what a reader wants.
+     *
+     * @type {Set<string>}
+     */
+    const divergences = new Set();
+
+    /**
+     * Says that a call succeeded but did not do all of what it promises.
+     *
+     * Not a failure: a program is entitled to make the call, and refusing it
+     * changes what the program does -- usually by stopping it. But accepting a
+     * state and not honouring it is the defect class that produces a picture
+     * rather than an error, and the only thing separating it from correct
+     * behaviour is somebody saying so.
+     *
+     * @param {string} api      Which surface diverged, as a program names it.
+     * @param {string} detail   What was accepted and not acted on.
+     */
+    const reportDivergence = (api, detail)=>{
+        const key = `${api}: ${detail}`;
+        if (divergences.has(key))
+        {
+            return;
+        }
+        divergences.add(key);
+        events.emit('divergence', { api, detail });
+    };
+
     const core = await assembleModules({
         kernel: {
             // How many guest instructions a thread runs before the next one
@@ -969,6 +1003,11 @@ async function buildApp(options){
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of.
             allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
+            // Where "this call succeeded and did not do all of what it
+            // promises" goes. Every drawing API has states it accepts and does
+            // not honour yet, and a state accepted in silence is the defect
+            // class that produces a picture rather than an error.
+            divergence: reportDivergence,
         },
         win32: {
             // Sound leaves through the audio layer's mixer, and win32 sits
@@ -1005,6 +1044,10 @@ async function buildApp(options){
             cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
+            // The same reporter the graphics layer gets: a Win32 function that
+            // accepts a flag it does not act on owes the reader the same
+            // warning as a Direct3D state that is stored and unused.
+            divergence: reportDivergence,
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */
@@ -1132,6 +1175,7 @@ async function buildApp(options){
         'library-missing': 'warn',
         'libraries-missing': 'warn',
         unimplemented: 'warn',
+        divergence: 'warn',
         'bundle-retry': 'warn',
         'bundle-prefetch-failed': 'warn',
     });
