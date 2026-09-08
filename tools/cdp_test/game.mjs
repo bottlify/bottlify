@@ -34,6 +34,9 @@ const PACKAGE_DIR = join(REPO_ROOT, 'modules', 'core');
 const BUNDLES_DIR = join(REPO_ROOT, 'bundles');
 const REPORTS_DIR = join(TOOL_ROOT, 'reports');
 
+/** Lines per round trip when draining the call log. */
+const LOG_CHUNK = 20000;
+
 /** @param {string[]} argv */
 function parse(argv){
     const id = argv.find(argument=>!argument.startsWith('--'));
@@ -50,6 +53,9 @@ function parse(argv){
         // how it is doing while it runs.
         waitMs: number('--wait', 900) * 1000,
         calls: number('--calls', 40),
+        // Every host call written to a file. The ring in a report holds the end
+        // of a run, and what a program decided it decided long before that.
+        log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -370,6 +376,7 @@ export async function game(options){
             imagePath: `C:\\App\\${manifest.entry}`,
             maxTurns: options.turns,
             quantum: options.quantum,
+            log: Boolean(options.log),
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
@@ -385,6 +392,29 @@ export async function game(options){
         const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
+
+        // The whole call stream, when one was asked for, drained in pieces:
+        // a quarter of a million lines is more than one evaluation carries.
+        if (options.log)
+        {
+            const lines = [];
+            for (let at = 0; ; at += LOG_CHUNK)
+            {
+                const piece = await cdp.send('Runtime.evaluate', {
+                    expression:
+                        `window.__bottlify__.drainLog(${at}, ${LOG_CHUNK})`,
+                    returnByValue: true,
+                }, sessionId);
+                const text = piece.result?.value ?? '';
+                if (text === '')
+                {
+                    break;
+                }
+                lines.push(text);
+            }
+            writeFileSync(options.log, lines.join(String.fromCharCode(10)));
+            console.log(`call log: ${options.log}`);
+        }
 
         // Everything the program wrote, kept as files rather than as excerpts.
         // A game's own crash report is its account of what went wrong and beats

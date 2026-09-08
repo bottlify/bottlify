@@ -187,6 +187,10 @@ export const kernelModule = {
                 // half-written; the next owner has to be told (§ abandoned mutex).
                 sync.abandonMutexesOwnedBy(thread);
                 scheduler.terminate(thread, exitCode);
+                // And a thread is itself something a program waits on. Whoever
+                // joined it is released now and stays released: the object is
+                // signalled by having ended, not by handing anything over.
+                sync.releaseAll(thread);
             },
 
             /**

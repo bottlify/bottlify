@@ -21,8 +21,8 @@ const E_NOTIMPL = 0x80004001 | 0;
 const E_POINTER = 0x80004003 | 0;
 const E_ABORT = 0x80004004 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
-const VFW_E_CANNOT_RENDER = 0x80040218 | 0;
 const VFW_E_WRONG_STATE = 0x80040227 | 0;
+const EC_COMPLETE = 1;
 const EC_ERRORABORT = 3;
 
 /** Somewhere to point an out-parameter at. */
@@ -169,27 +169,29 @@ test('a slot nothing implements keeps its place and answers E_NOTIMPL', ()=>{
     assert.equal(reconnect.invoke, undefined, 'and the bridge answers E_NOTIMPL for it');
 });
 
-test('RenderFile reports that nothing here can render the file', ()=>{
+test('RenderFile builds a graph, empty though it is', ()=>{
+    // Nothing is decoded yet, so what it builds contains no filters and has no
+    // length. That is a real state and it succeeds; refusing instead is worse,
+    // because a program that handles the refusal correctly releases the graph
+    // and its own timer then reads the pointer it has just released.
     const { object } = createObject();
-    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [0x2000, 0]),
-        VFW_E_CANNOT_RENDER);
-    assert.equal(call(object, IID_IMEDIA_CONTROL, 'RenderFile', [0x2000]),
-        VFW_E_CANNOT_RENDER);
+    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [0x2000, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_CONTROL, 'RenderFile', [0x2000]), S_OK);
 });
 
-test('Run succeeds and leaves an EC_ERRORABORT for the program to collect', ()=>{
+test('Run on an empty graph completes at once', ()=>{
     const { object, host } = createObject();
-    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [0x2000, 0]),
-        VFW_E_CANNOT_RENDER);
+    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [0x2000, 0]), S_OK);
     assert.equal(call(object, IID_IMEDIA_CONTROL, 'Run'), S_OK);
     assert.equal(call(object, IID_IMEDIA_CONTROL, 'GetState', [0, OUT]), S_OK);
     assert.equal(host.i32(OUT), 2, 'State_Running');
 
+    // A presentation of no length has reached its end, which is the same event
+    // a whole film ends with -- and the path every program is written for.
     assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
-    assert.equal(host.i32(OUT), EC_ERRORABORT);
-    assert.equal(host.i32(OUT + 4), VFW_E_CANNOT_RENDER, 'lParam1 is why it aborted');
+    assert.equal(host.i32(OUT), EC_COMPLETE);
     assert.equal(host.i32(OUT + 8), 0);
-    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'FreeEventParams', [EC_ERRORABORT, 0, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'FreeEventParams', [EC_COMPLETE, 0, 0]), S_OK);
 });
 
 test('GetEvent empties the queue and then reports there is nothing more', ()=>{

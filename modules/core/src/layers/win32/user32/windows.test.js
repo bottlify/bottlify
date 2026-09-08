@@ -679,13 +679,16 @@ test('DefWindowProcA closes a window by destroying it', ()=>{
     assert.equal(fns.IsWindow.handler([hwnd]), 0);
 });
 
-test('DefWindowProcA turns the end of a window into the end of the program', ()=>{
-    const { fns, memory, queue, hwnd } = withWindow();
+test('DefWindowProcA does not end the program when a window ends', ()=>{
+    // Windows' default procedure does nothing with WM_DESTROY, and the
+    // difference is not academic: a program of any size destroys windows all
+    // the time -- a dialog, a tooltip, a splash screen -- and passes their
+    // WM_DESTROY here because it has nothing to add. Quitting on each one ends
+    // the process the first time any of them closes.
+    const { fns, queue, hwnd } = withWindow();
 
     assert.equal(fns.DefWindowProcA.handler([hwnd, WM_DESTROY, 0, 0]), 0);
-    assert.ok(queue.quitPending());
-    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 0);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_QUIT);
+    assert.equal(queue.quitPending(), false);
 });
 
 test('DefWindowProcA does nothing at all with a message it has no opinion on', ()=>{

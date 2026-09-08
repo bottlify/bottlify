@@ -34,10 +34,34 @@ const LIMITS = {
     // are at the top of the file, which is exactly what a tail throws away.
     file: 1 << 20,
     samples: 200000,
+    log: 400000,
 };
 
 /** Every instruction pointer the sampler saw, in order. @type {number[]} */
 const samples = [];
+
+/** Written out rather than escaped, so no tooling can mangle it. */
+const NEWLINE = String.fromCharCode(10);
+
+/** Every host call, formatted, when one was asked for. @type {string[]} */
+const callLog = [];
+
+/**
+ * One host call as a line, the same shape the command-line probe prints.
+ *
+ * @param {any} call
+ * @returns {string}
+ */
+function formatCall(call){
+    const args = (call.args ?? []).map((/** @type {number} */ value,
+        /** @type {number} */ index)=>(
+        call.strings?.[index]
+            ? `${JSON.stringify(call.strings[index])}@0x${(value >>> 0).toString(16)}`
+            : `0x${(value >>> 0).toString(16)}`)).join(', ');
+    const from = `0x${(call.from >>> 0).toString(16).padStart(8, '0')}`;
+    const left = call.error ? `  [err ${call.error}]` : '';
+    return `${from}  ${call.name}(${args}) = ${call.result}${left}`;
+}
 
 /**
  * Where the guest spent its instructions, by module and offset.
@@ -85,6 +109,18 @@ function profile(layout){
 
 /** @type {any} */
 const namespace = { errors: [] };
+
+/**
+ * Hands the call log out in pieces.
+ *
+ * A quarter of a million lines is twenty megabytes, which is more than one
+ * evaluation can carry back, so the driver asks repeatedly until it is told
+ * there is no more.
+ *
+ * @param {number} from @param {number} count
+ */
+namespace.drainLog = (from, count)=>callLog.slice(from, from + count).join(NEWLINE);
+namespace.logLines = ()=>callLog.length;
 /** @type {any} */ (window).__bottlify__ = namespace;
 
 window.addEventListener('error', event=>{
@@ -353,6 +389,20 @@ async function run(request){
         imagePath: request.imagePath,
         // A run is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
+        // Every call, not the last two hundred. What a program decided is
+        // decided early, and by the time it stops the ring that would have
+        // shown it has been overwritten many times over. Kept as formatted
+        // lines rather than objects: the only thing anyone does with them is
+        // read them, and a quarter of a million objects is memory this page
+        // has better uses for.
+        onCall: request.log
+            ? (/** @type {any} */ call)=>{
+                if (callLog.length < LIMITS.log)
+                {
+                    callLog.push(formatCall(call));
+                }
+            }
+            : undefined,
         // Sampled guest execution, when asked for. A program that decides
         // something inside its own code makes no host call to record, and the
         // instruction pointer is then the only account of what it was doing --

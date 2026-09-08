@@ -43,13 +43,81 @@ export const ANY_WINDOW = null;
  * @property {boolean} remove      Whether retrieving it takes it out of the queue.
  */
 
-export function createMessageQueue(){
+/** WM_TIMER, which is synthesised rather than queued -- see `timers` below. */
+export const WM_TIMER = 0x0113;
+
+/**
+ * @param {Object} [options]
+ * @param {() => number} [options.now]
+ *        The guest's clock, in milliseconds. A timer is due against the clock
+ *        the program itself reads, never the host's.
+ */
+export function createMessageQueue({ now = ()=>0 } = {}){
     /** @type {import('./structs.js').MessageFields[]} */
     const pending = [];
     /** @type {number | null} */
     let quitCode = null;
     let posted = 0;
     let retrieved = 0;
+
+    /**
+     * Timers, which are not queued messages.
+     *
+     * Windows never puts WM_TIMER in the queue: it makes one up when a program
+     * asks for a message, finds nothing else, and a timer is due. That is why a
+     * slow handler does not build a backlog of ticks -- there is no backlog to
+     * build, only a due time that has passed. Modelling it as a posted message
+     * gets that wrong in the direction that hurts: a program whose frame takes
+     * longer than its timer would find the queue full of stale ticks and never
+     * reach anything else.
+     *
+     * @type {Map<string, { hwnd: number, id: number, elapse: number,
+     *                      proc: number, due: number }>}
+     */
+    const timers = new Map();
+
+    /**
+     * The timer that is due, as the message it becomes.
+     *
+     * Its due time moves on whether or not the caller removes it, because a
+     * peek that left it due would hand the same tick out for ever and a program
+     * that peeks in a loop would see nothing else.
+     *
+     * @param {MessageFilter} filter
+     */
+    const takeTimer = filter=>{
+        const at = now();
+        for (const timer of timers.values())
+        {
+            if (timer.due > at)
+            {
+                continue;
+            }
+            const message = {
+                hwnd: timer.hwnd,
+                message: WM_TIMER,
+                wParam: timer.id,
+                // A TIMERPROC travels in lParam, and DispatchMessage calls it
+                // instead of the window procedure. That is the contract, not a
+                // convenience: a timer with no window has nowhere else to go.
+                lParam: timer.proc,
+                time: at >>> 0,
+                x: 0,
+                y: 0,
+            };
+            if (!accepts(message, filter))
+            {
+                continue;
+            }
+            // Against the moment it came due rather than against now, so a
+            // handler that runs long does not make the timer drift later and
+            // later. Skipped forward when it has fallen a whole period behind,
+            // because catching up on missed ticks is a backlog nobody wants.
+            timer.due = Math.max(at, timer.due + timer.elapse);
+            return message;
+        }
+        return null;
+    };
 
     /**
      * @param {import('./structs.js').MessageFields} entry
@@ -90,6 +158,58 @@ export function createMessageQueue(){
         },
 
         /**
+         * Starts or restarts a timer. Setting one that exists changes its
+         * period rather than making a second, which is what a program relies on
+         * when it retunes a timer it already owns.
+         *
+         * @param {number} hwnd @param {number} id @param {number} elapse
+         * @param {number} proc  A TIMERPROC, or zero for a queued WM_TIMER.
+         */
+        setTimer(hwnd, id, elapse, proc){
+            // Windows clamps to its own resolution rather than firing a zero
+            // period continuously, and a program that asks for zero means "as
+            // often as you can".
+            const period = Math.max(10, elapse >>> 0);
+            timers.set(`${hwnd >>> 0}:${id >>> 0}`, {
+                hwnd: hwnd >>> 0, id: id >>> 0, elapse: period, proc: proc >>> 0,
+                due: now() + period,
+            });
+        },
+
+        /** @param {number} hwnd @param {number} id */
+        killTimer(hwnd, id){
+            return timers.delete(`${hwnd >>> 0}:${id >>> 0}`);
+        },
+
+        /** Every timer belonging to a window that has gone. @param {number} hwnd */
+        killTimersFor(hwnd){
+            for (const [key, timer] of timers)
+            {
+                if (timer.hwnd === (hwnd >>> 0))
+                {
+                    timers.delete(key);
+                }
+            }
+        },
+
+        /**
+         * When the earliest timer is due, or null. Whoever is idling the
+         * process reads this so that a thread waiting for a message wakes at
+         * the right moment rather than at whatever else happens to happen.
+         */
+        nextDue(){
+            let earliest = null;
+            for (const timer of timers.values())
+            {
+                if (earliest === null || timer.due < earliest)
+                {
+                    earliest = timer.due;
+                }
+            }
+            return earliest;
+        },
+
+        /**
          * The one retrieval path: PeekMessage and GetMessage differ in what they
          * do with the answer, never in how they find it.
          *
@@ -107,6 +227,13 @@ export function createMessageQueue(){
                     retrieved++;
                 }
                 return entry;
+            }
+            // Nothing queued: a due timer is made up now. After the queue and
+            // before the quit, which is the order Windows retrieves in.
+            const due = takeTimer(filter);
+            if (due)
+            {
+                return due;
             }
             if (quitCode === null)
             {

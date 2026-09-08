@@ -52,6 +52,7 @@ const VFW_E_WRONG_STATE = 0x80040227;
 const VFW_E_CANNOT_LOAD_SOURCE_FILTER = 0x80040241;
 
 /** Event codes. All three end a playback loop; only the reason differs. */
+const EC_COMPLETE = 0x01;
 const EC_ERRORABORT = 0x03;
 
 /** OAFilterState, which GetState reports. */
@@ -117,15 +118,28 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
 /**
  * The one decision about whether media can be played.
  *
- * Nothing here decodes anything yet, so every file is a file this machine has
- * no filter for -- which is a state Windows itself is regularly in and reports
- * exactly this way. A decoder arriving replaces this function's answer; every
+ * Nothing here decodes anything yet, so a graph is built with no filters in it
+ * at all: it renders a presentation of no length, which finishes the instant it
+ * is run. That is a real state, not a pretence -- an empty graph is exactly
+ * what Windows leaves you with when every stream in a file has been rendered to
+ * nothing -- and `Run` reports it the way that state is reported, with
+ * EC_COMPLETE.
+ *
+ * Refusing outright was tried first and is worse, for a reason worth recording.
+ * A program that plays optional media checks RenderFile, releases the graph it
+ * cannot use, and carries on -- and then its own hundred-millisecond caption
+ * timer, armed unconditionally a moment earlier, reads the pointer it has just
+ * released. A refusal that is handled correctly by the program still ends in
+ * the program dereferencing nothing. Completing at once takes the same path
+ * that finishing a real film takes, which is a path the program is written for.
+ *
+ * A decoder arriving replaces this function's answer with a real one; every
  * method below reads it rather than repeating it.
  *
  * @returns {{ loaded: boolean, failure: number }}
  */
 function openMedia(){
-    return { loaded: false, failure: VFW_E_CANNOT_RENDER };
+    return { loaded: true, failure: S_OK };
 }
 
 /** @returns {FilterGraphState} */
@@ -286,7 +300,15 @@ export function createQuartz(host){
      */
     const run = graph=>{
         graph.state = STATE_RUNNING;
-        if (!graph.loaded)
+        // A graph with nothing in it has already reached the end of what it
+        // had to present, so it says so at once. A graph that failed to render
+        // says that instead; both are events the program's own pump is written
+        // to treat identically -- close the window and carry on.
+        if (graph.loaded)
+        {
+            raise(graph, EC_COMPLETE, S_OK, 0);
+        }
+        else
         {
             raise(graph, EC_ERRORABORT, graph.failure, 0);
         }

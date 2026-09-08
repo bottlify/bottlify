@@ -16,7 +16,7 @@
  * class asked for, and the queue behaves the way a message loop expects.
  */
 
-import { ANY_WINDOW, WM_PAINT, WM_QUIT } from './messages.js';
+import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
 import { createPaintFunctions } from './paint.js';
 import { createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
@@ -34,6 +34,8 @@ import {
 
 /** Messages this layer has an opinion about. */
 const WM_DESTROY = 0x0002;
+const WM_NCCREATE = 0x0081;
+const WM_CREATE = 0x0001;
 const WM_CLOSE = 0x0010;
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
@@ -44,6 +46,30 @@ const WM_SYSCHAR = 0x0106;
 
 /** TranslateMessage answers for exactly these, translated or not. */
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
+
+/**
+ * CREATESTRUCTA, which is what WM_NCCREATE and WM_CREATE carry.
+ *
+ * A program reads `lpCreateParams` out of it to find whatever it passed to
+ * CreateWindowEx, and that is routinely the object the window belongs to --
+ * so a procedure that gets the message without the structure is worse off
+ * than one that gets no message at all.
+ */
+const CREATESTRUCTA = Object.freeze({
+    lpCreateParams: 0x00,
+    hInstance: 0x04,
+    hMenu: 0x08,
+    hwndParent: 0x0c,
+    cy: 0x10,
+    cx: 0x14,
+    y: 0x18,
+    x: 0x1c,
+    style: 0x20,
+    lpszName: 0x24,
+    lpszClass: 0x28,
+    dwExStyle: 0x2c,
+    SIZE: 0x30,
+});
 
 /** The one style bit that changes what a window is rather than how it looks. */
 const WS_VISIBLE = 0x10000000;
@@ -146,6 +172,11 @@ function characterFor(key){
  *           loader behind it, which answers as a module with no string table.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory for a CREATESTRUCT. Absent in a build with no heap,
+ *           and then a window is made without telling its procedure -- which
+ *           is what this used to do always.
+ * @property {(address: number) => void} [release]
  * @property {() => Promise<void>} idle
  * @property {() => { x: number, y: number }} [cursor]
  *           Where the pointer is. Absent in a build with no input, and then
@@ -261,6 +292,9 @@ export function createWindowFunctions(host){
             return 0;
         }
         host.queue.purge(record.hwnd);
+        // Its timers go with it. Windows destroys them, and one left behind
+        // would go on making WM_TIMER for a window that no longer exists.
+        host.queue.killTimersFor?.(record.hwnd);
         // Windows *sends* WM_DESTROY, which means running the window procedure
         // before this call returns, and that road goes through the bridge.
         // Queuing it preserves the order the program observes and keeps the
@@ -426,7 +460,89 @@ export function createWindowFunctions(host){
         // Telling the host here is the only way it can know a handle it never
         // saw created.
         host.created?.(record.hwnd);
-        return record.hwnd;
+        return announce(record, args);
+    };
+
+    /**
+     * Tells a new window's procedure that it exists.
+     *
+     * This is not a courtesy. A window procedure does its setup in WM_CREATE --
+     * it builds the object the window stands for, starts its timers, and hangs
+     * that object off the window. A program whose procedure never receives it
+     * gets a window that looks real from every angle and does nothing, and what
+     * that looks like from outside is a program waiting patiently for something
+     * it was supposed to have started itself.
+     *
+     * Both messages are *sent*, which means running guest code and answering
+     * with a promise the bridge parks the caller on. WM_NCCREATE answering
+     * FALSE and WM_CREATE answering -1 each mean the window must not exist, and
+     * both are how a program refuses a window it cannot set up.
+     *
+     * @param {any} record @param {number[]} args
+     */
+    const announce = (record, args)=>{
+        const [exStyle, className, windowName, style, x, y, width, height,
+            parent, menu, instance, params] = args;
+        if (!host.allocate || record.wndProc === 0)
+        {
+            return record.hwnd;
+        }
+        const create = host.allocate(CREATESTRUCTA.SIZE);
+        if (create === 0)
+        {
+            return record.hwnd;
+        }
+        const bytes = new Uint8Array(CREATESTRUCTA.SIZE);
+        const view = new DataView(bytes.buffer);
+        /** @param {number} at @param {number} value */
+        const put = (at, value)=>view.setUint32(at, value >>> 0, true);
+        put(CREATESTRUCTA.lpCreateParams, params ?? 0);
+        put(CREATESTRUCTA.hInstance, instance);
+        put(CREATESTRUCTA.hMenu, menu);
+        put(CREATESTRUCTA.hwndParent, parent);
+        put(CREATESTRUCTA.cy, record.height);
+        put(CREATESTRUCTA.cx, record.width);
+        put(CREATESTRUCTA.y, record.y);
+        put(CREATESTRUCTA.x, record.x);
+        put(CREATESTRUCTA.style, style);
+        put(CREATESTRUCTA.lpszName, windowName);
+        put(CREATESTRUCTA.lpszClass, className);
+        put(CREATESTRUCTA.dwExStyle, exStyle);
+        host.writeMemory(create, bytes);
+        void width;
+        void height;
+        void x;
+        void y;
+
+        /** @param {number} message */
+        const send = message=>host.dispatch(record.wndProc, {
+            hwnd: record.hwnd, message, wParam: 0, lParam: create,
+        });
+        /** @param {any} value @param {(answer: number) => any} then */
+        const after = (value, then)=>(typeof value?.then === 'function'
+            ? value.then(then)
+            : then(value));
+        /** @param {number} handle */
+        const done = handle=>{
+            host.release?.(create);
+            return handle;
+        };
+
+        // Only WM_CREATE, and deliberately: sending is running guest code, and
+        // running it twice in a row from one host call means the second starts
+        // while the first is still unwinding. WM_NCCREATE is the message a
+        // procedure is least likely to need -- its default answer is TRUE and
+        // the structure it carries arrives again a moment later with
+        // WM_CREATE -- so it is the one to leave out until a program is seen to
+        // want it and the bridge can send two.
+        return after(send(WM_CREATE), created=>{
+            if ((created | 0) === -1)
+            {
+                destroyWindow(record.hwnd);
+                return done(0);
+            }
+            return done(record.hwnd);
+        });
     };
 
     // user32 is one table to the guest and five files only because the subjects
@@ -805,6 +921,18 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([msg])=>{
                 const message = readMessage(host, msg);
+                // A timer that named a TIMERPROC is called instead of the
+                // window procedure, and that is the whole reason a timer may
+                // have no window at all: the procedure is where it goes.
+                if (message.message === WM_TIMER && message.lParam !== 0)
+                {
+                    return host.dispatch(message.lParam >>> 0, {
+                        ...message,
+                        // A TIMERPROC takes the tick count where a window
+                        // procedure takes the lParam.
+                        lParam: /** @type {any} */ (message).time ?? 0,
+                    });
+                }
                 // Not `live`: a WM_DESTROY still has to reach the procedure of
                 // the window it is telling about its own end.
                 const record = windows.get(message.hwnd);
@@ -825,14 +953,28 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, message])=>{
                 switch (message >>> 0){
+                    // TRUE, and it has to be: a procedure that does not handle
+                    // WM_NCCREATE passes it here, and answering FALSE would
+                    // refuse every window such a program tries to make.
+                    case WM_NCCREATE:
+                        return 1;
                     case WM_CLOSE:
                         destroyWindow(hwnd);
                         return 0;
-                    case WM_DESTROY:
-                        // The idiom a program writes itself; a program whose
-                        // procedure falls through to us has no other way to end.
-                        host.queue.postQuit(0);
-                        return 0;
+                    // WM_DESTROY is deliberately not handled, and that is the
+                    // whole of it: Windows' default procedure does nothing with
+                    // it. Ending the message loop is the program's own
+                    // decision, made by calling PostQuitMessage from the window
+                    // procedure of the one window it considers its main one.
+                    //
+                    // Posting a quit here instead looks harmless and is not. A
+                    // program of any size destroys windows all the time -- a
+                    // dialog, a tooltip, a splash screen -- and passes their
+                    // WM_DESTROY to the default procedure because it has
+                    // nothing to add. Every one of those then ends the process:
+                    // a real title was measured closing an auxiliary window
+                    // after loading its textures, and shutting itself down
+                    // cleanly and inexplicably a moment later.
                     default:
                         return 0;
                 }

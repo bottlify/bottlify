@@ -165,7 +165,9 @@ export const win32Module = {
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
         const hive = createHive();
-        const queue = createMessageQueue();
+        // The guest's clock, because a timer is due against the clock the
+        // program itself reads.
+        const queue = createMessageQueue({ now: ()=>kernel.clock.virtualTime() });
         const com = createComRegistry();
 
         /**
@@ -636,6 +638,12 @@ export const win32Module = {
                 // it answered before, which is that nothing is pressed.
                 cursor: config?.cursor,
                 keyState: config?.keyState,
+                // A CREATESTRUCT has to live where the guest can read it, and
+                // only for the length of the two messages that carry it.
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                /** @param {number} address */
+                release: address=>heap.free(address),
             }),
 
             'ADVAPI32.dll': createRegistryFunctions({

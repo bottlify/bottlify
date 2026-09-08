@@ -159,6 +159,10 @@ const REFRESH_HZ = 60;
  * @param {Map<string, any>} options.classes  Registered classes, by name.
  */
 export function createSystemFunctions({ host, live, windows, classes }){
+    // Ids handed to a timer with no window, kept clear of the small numbers a
+    // program picks for its own.
+    let nextTimerId = 0x1000;
+
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
     /** The window that has the mouse, shared by SetCapture and ReleaseCapture. */
@@ -1083,21 +1087,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * UINT_PTR SetTimer(HWND hWnd, UINT_PTR nIDEvent, UINT uElapse,
          *                  TIMERPROC lpTimerFunc)
          *
-         * Not implemented: a timer that never fires is a program waiting for a
-         * WM_TIMER that never arrives, and one that fires immediately is a
-         * program running its timer handler at the speed of the loop. Neither is
-         * defensible, so this reports that the timer could not be created and
-         * lets the program find out at the point it asked.
+         * A program of this era drives itself from here: its message loop
+         * blocks in GetMessage and a timer is the only thing that wakes it.
+         * Refusing to make one -- which this used to do -- leaves such a
+         * program waiting for a message that cannot arrive, which from outside
+         * is indistinguishable from a program with nothing to do.
+         *
+         * A timer with no window gets an id of our choosing, as Windows does;
+         * one with a window keeps the id it asked for.
          */
         SetTimer: {
             argBytes: 16,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, elapse, proc])=>{
+                const window = hwnd >>> 0;
+                const timerId = window === 0 ? nextTimerId++ : id >>> 0;
+                host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
+                return timerId;
+            },
         },
 
         /** BOOL KillTimer(HWND hWnd, UINT_PTR uIDEvent) */
         KillTimer: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([hwnd, id])=>(host.queue.killTimer(hwnd >>> 0, id >>> 0) ? 1 : 0),
         },
 
         /**

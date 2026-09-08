@@ -44,6 +44,97 @@ import { D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
 
+/**
+ * The capability bits reported by GetDeviceCaps.
+ *
+ * Named from d3d8caps.h rather than written as one hexadecimal blob, because a
+ * blob is unreviewable: nobody can tell a claim we can honour from one we
+ * cannot, and every one of these is a claim a program acts on.
+ */
+const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
+const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
+
+const D3DPRESENT_INTERVAL_ONE = 0x00000001;
+const D3DPRESENT_INTERVAL_IMMEDIATE = 0x80000000;
+
+const D3DDEVCAPS_EXECUTESYSTEMMEMORY = 0x00000010;
+const D3DDEVCAPS_TEXTUREVIDEOMEMORY = 0x00000800;
+const D3DDEVCAPS_DRAWPRIMTLVERTEX = 0x00001000;
+const D3DDEVCAPS_HWTRANSFORMANDLIGHT = 0x00010000;
+const D3DDEVCAPS_DRAWPRIMITIVES2 = 0x00002000;
+const D3DDEVCAPS_DRAWPRIMITIVES2EX = 0x00008000;
+const D3DDEVCAPS_TEXTURENONLOCALVIDMEM = 0x00000200;
+const D3DDEVCAPS_HWRASTERIZATION = 0x00080000;
+
+const D3DPMISCCAPS_MASKZ = 0x00000002;
+const D3DPMISCCAPS_CULLNONE = 0x00000010;
+const D3DPMISCCAPS_CULLCW = 0x00000020;
+const D3DPMISCCAPS_CULLCCW = 0x00000040;
+const D3DPMISCCAPS_COLORWRITEENABLE = 0x00000080;
+const D3DPMISCCAPS_BLENDOP = 0x00000800;
+
+const D3DPRASTERCAPS_DITHER = 0x00000001;
+const D3DPRASTERCAPS_ZTEST = 0x00000010;
+const D3DPRASTERCAPS_FOGVERTEX = 0x00000080;
+const D3DPRASTERCAPS_FOGTABLE = 0x00000100;
+const D3DPRASTERCAPS_MIPMAPLODBIAS = 0x00002000;
+const D3DPRASTERCAPS_ZBIAS = 0x00004000;
+const D3DPRASTERCAPS_ANISOTROPY = 0x00020000;
+const D3DPRASTERCAPS_ZFOG = 0x00100000;
+
+/** NEVER, LESS, EQUAL, LESSEQUAL, GREATER, NOTEQUAL, GREATEREQUAL, ALWAYS. */
+const ALL_COMPARE_CAPS = 0x000000ff;
+
+/**
+ * Every source and destination blend factor D3D8 names, including the two
+ * BOTH* forms. The renderer maps each onto its own; a factor left unclaimed
+ * makes a program pick a worse path for an effect we can draw exactly.
+ */
+const ALL_BLEND_CAPS = 0x00003fff;
+
+const D3DPSHADECAPS_COLORGOURAUDRGB = 0x00000008;
+const D3DPSHADECAPS_SPECULARGOURAUDRGB = 0x00000200;
+const D3DPSHADECAPS_ALPHAGOURAUDBLEND = 0x00004000;
+const D3DPSHADECAPS_FOGGOURAUD = 0x00080000;
+
+const D3DPTEXTURECAPS_PERSPECTIVE = 0x00000001;
+const D3DPTEXTURECAPS_ALPHA = 0x00000004;
+const D3DPTEXTURECAPS_PROJECTED = 0x00000400;
+const D3DPTEXTURECAPS_CUBEMAP = 0x00000800;
+const D3DPTEXTURECAPS_MIPMAP = 0x00004000;
+const D3DPTEXTURECAPS_MIPCUBEMAP = 0x00010000;
+const D3DPTEXTURECAPS_ALPHAPALETTE = 0x00000080;
+
+/** Point, linear and anisotropic, for minification, magnification and mip. */
+const ALL_FILTER_CAPS = 0x07070700 | 0x00000700;
+
+const D3DPTADDRESSCAPS_WRAP = 0x00000001;
+const D3DPTADDRESSCAPS_MIRROR = 0x00000002;
+const D3DPTADDRESSCAPS_CLAMP = 0x00000004;
+const D3DPTADDRESSCAPS_BORDER = 0x00000008;
+const D3DPTADDRESSCAPS_INDEPENDENTUV = 0x00000010;
+const D3DPTADDRESSCAPS_MIRRORONCE = 0x00000020;
+
+const D3DLINECAPS_TEXTURE = 0x00000001;
+const D3DLINECAPS_ZTEST = 0x00000002;
+const D3DLINECAPS_BLEND = 0x00000004;
+const D3DLINECAPS_ALPHACMP = 0x00000008;
+const D3DLINECAPS_FOG = 0x00000010;
+
+/** Keep, zero, replace, incr/decr saturating and wrapping, invert. */
+const ALL_STENCIL_CAPS = 0x000001ff;
+
+/** Every texture-stage operation d3d8caps.h defines, which is bits 1..25. */
+const ALL_TEXTURE_OP_CAPS = 0x03ffffff;
+
+const D3DFVFCAPS_PSIZE = 0x00100000;
+
+const D3DVTXPCAPS_TEXGEN = 0x00000001;
+const D3DVTXPCAPS_MATERIALSOURCE7 = 0x00000002;
+const D3DVTXPCAPS_DIRECTIONALLIGHTS = 0x00000008;
+const D3DVTXPCAPS_POSITIONALLIGHTS = 0x00000010;
+const D3DVTXPCAPS_LOCALVIEWER = 0x00000020;
+
 const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c | 0;
 
@@ -1235,7 +1326,22 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         });
     };
 
-    /** @param {number} address @param {any} caps */
+    /**
+     * What this device says it can do.
+     *
+     * Every number here is a claim something acts on, and the ones that read as
+     * zero are the dangerous half: a program takes zero as an answer, not as a
+     * gap. The maximum texture size is the clearest case -- a program that
+     * halves a texture until it fits the maximum halves it for ever against a
+     * maximum of zero, and what that looks like from outside is a machine that
+     * is running perfectly and getting nowhere.
+     *
+     * The values describe what the renderer behind this actually does: fixed
+     * function only, no shaders, two texture stages combined per pass, and
+     * filtering and addressing a GPU of any generation has.
+     *
+     * @param {number} address @param {any} caps
+     */
     const writeCaps = (address, caps)=>{
         // Zeroed first: the structure is long, a caller allocates all of it,
         // and every field this does not set has to read as "not supported"
@@ -1245,16 +1351,75 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         memory.writeMemory(address, new Uint8Array(D3DCAPS8.SIZE));
         fields.writeStruct(address, D3DCAPS8, {
             DeviceType: D3DDEVTYPE.HAL,
-            MaxTextureWidth: caps.maxTextureWidth ?? 2048,
-            MaxTextureHeight: caps.maxTextureHeight ?? 2048,
+            // D3DCAPS_READ_SCANLINE is not claimed: there is no scanline.
+            Caps2: D3DCAPS2_CANRENDERWINDOWED | D3DCAPS2_FULLSCREENGAMMA,
+            PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+            DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
+                | D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2
+                | D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_EXECUTESYSTEMMEMORY
+                | D3DDEVCAPS_TEXTUREVIDEOMEMORY | D3DDEVCAPS_TEXTURENONLOCALVIDMEM,
+            PrimitiveMiscCaps: D3DPMISCCAPS_CULLNONE | D3DPMISCCAPS_CULLCW
+                | D3DPMISCCAPS_CULLCCW | D3DPMISCCAPS_MASKZ
+                | D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_BLENDOP,
+            RasterCaps: D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_ZTEST
+                | D3DPRASTERCAPS_FOGVERTEX | D3DPRASTERCAPS_FOGTABLE
+                | D3DPRASTERCAPS_MIPMAPLODBIAS | D3DPRASTERCAPS_ZBIAS
+                | D3DPRASTERCAPS_ANISOTROPY | D3DPRASTERCAPS_ZFOG,
+            // Every comparison a depth test can ask for; the backend maps them
+            // one to one onto its own.
+            ZCmpCaps: ALL_COMPARE_CAPS,
+            SrcBlendCaps: ALL_BLEND_CAPS,
+            DestBlendCaps: ALL_BLEND_CAPS,
+            AlphaCmpCaps: ALL_COMPARE_CAPS,
+            ShadeCaps: D3DPSHADECAPS_COLORGOURAUDRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB
+                | D3DPSHADECAPS_ALPHAGOURAUDBLEND | D3DPSHADECAPS_FOGGOURAUD,
+            TextureCaps: D3DPTEXTURECAPS_PERSPECTIVE | D3DPTEXTURECAPS_ALPHA
+                | D3DPTEXTURECAPS_PROJECTED | D3DPTEXTURECAPS_CUBEMAP
+                | D3DPTEXTURECAPS_MIPMAP | D3DPTEXTURECAPS_MIPCUBEMAP
+                | D3DPTEXTURECAPS_ALPHAPALETTE,
+            TextureFilterCaps: ALL_FILTER_CAPS,
+            CubeTextureFilterCaps: ALL_FILTER_CAPS,
+            TextureAddressCaps: D3DPTADDRESSCAPS_WRAP | D3DPTADDRESSCAPS_MIRROR
+                | D3DPTADDRESSCAPS_CLAMP | D3DPTADDRESSCAPS_BORDER
+                | D3DPTADDRESSCAPS_INDEPENDENTUV | D3DPTADDRESSCAPS_MIRRORONCE,
+            LineCaps: D3DLINECAPS_TEXTURE | D3DLINECAPS_ZTEST | D3DLINECAPS_BLEND
+                | D3DLINECAPS_ALPHACMP | D3DLINECAPS_FOG,
+            MaxTextureWidth: caps.maxTextureWidth ?? 4096,
+            MaxTextureHeight: caps.maxTextureHeight ?? 4096,
+            MaxVolumeExtent: caps.maxVolumeExtent ?? 256,
+            MaxTextureRepeat: caps.maxTextureRepeat ?? 8192,
+            MaxTextureAspectRatio: caps.maxTextureAspectRatio ?? 4096,
+            MaxAnisotropy: caps.maxAnisotropy ?? 16,
+            StencilCaps: ALL_STENCIL_CAPS,
+            FVFCaps: D3DFVFCAPS_PSIZE | 8,
+            TextureOpCaps: ALL_TEXTURE_OP_CAPS,
             MaxTextureBlendStages: caps.maxTextureBlendStages ?? 8,
             MaxSimultaneousTextures: caps.maxSimultaneousTextures ?? 8,
+            VertexProcessingCaps: D3DVTXPCAPS_TEXGEN | D3DVTXPCAPS_MATERIALSOURCE7
+                | D3DVTXPCAPS_DIRECTIONALLIGHTS | D3DVTXPCAPS_POSITIONALLIGHTS
+                | D3DVTXPCAPS_LOCALVIEWER,
             MaxActiveLights: caps.maxActiveLights ?? 8,
-            MaxStreams: caps.maxStreams ?? 16,
+            MaxUserClipPlanes: caps.maxUserClipPlanes ?? 6,
+            MaxVertexBlendMatrices: caps.maxVertexBlendMatrices ?? 4,
+            MaxVertexBlendMatrixIndex: caps.maxVertexBlendMatrixIndex ?? 0,
             MaxPrimitiveCount: caps.maxPrimitiveCount ?? 0xffff,
+            MaxVertexIndex: caps.maxVertexIndex ?? 0xffff,
+            MaxStreams: caps.maxStreams ?? 16,
+            MaxStreamStride: caps.maxStreamStride ?? 256,
         });
-        fields.writeStruct(address, D3DCAPS8, { MaxPointSize: caps.maxPointSize ?? 64 },
-            ['MaxPointSize']);
+        // The floats, which the same writer cannot place without being told.
+        // MaxVertexW is the largest homogeneous W a vertex may carry; a zero
+        // there is read as "no clipping headroom at all".
+        fields.writeStruct(address, D3DCAPS8, {
+            MaxPointSize: caps.maxPointSize ?? 64,
+            MaxVertexW: caps.maxVertexW ?? 1e10,
+            GuardBandLeft: -1e9,
+            GuardBandTop: -1e9,
+            GuardBandRight: 1e9,
+            GuardBandBottom: 1e9,
+            ExtentsAdjust: 0,
+        }, ['MaxPointSize', 'MaxVertexW', 'GuardBandLeft', 'GuardBandTop',
+            'GuardBandRight', 'GuardBandBottom', 'ExtentsAdjust']);
     };
 
     const rootMethods = {

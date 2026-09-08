@@ -100,6 +100,17 @@ export async function createV86Host(config){
 
         /** @param {string} name @returns {number} */
         readReg32(name){
+            // Not in the general-purpose file, and both are asked for by name:
+            // a CONTEXT record carries them, and building one is how an
+            // exception is described to the code that will handle it.
+            if (name === 'eip')
+            {
+                return cpu.instruction_pointer[0] >>> 0;
+            }
+            if (name === 'eflags')
+            {
+                return cpu.flags[0] >>> 0;
+            }
             const index = REGISTERS.indexOf(name);
             if (index === -1)
             {
@@ -110,6 +121,16 @@ export async function createV86Host(config){
 
         /** @param {string} name @param {number} value */
         writeReg32(name, value){
+            if (name === 'eip')
+            {
+                cpu.instruction_pointer[0] = value | 0;
+                return;
+            }
+            if (name === 'eflags')
+            {
+                cpu.flags[0] = value | 0;
+                return;
+            }
             const index = REGISTERS.indexOf(name);
             if (index === -1)
             {

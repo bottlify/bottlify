@@ -27,6 +27,11 @@ export const SyncKind = {
     EVENT: 'event',
     MUTEX: 'mutex',
     SEMAPHORE: 'semaphore',
+    // Not created here and never taken: a thread becomes signalled when it
+    // ends and stays so for ever. It is in this list because a program joins a
+    // thread by waiting on its handle, and a wait that did not know about it
+    // would fail on the one object every program waits on.
+    THREAD: 'thread',
 };
 
 /**
@@ -70,6 +75,8 @@ export function createSyncObjects({ scheduler }){
                 return object.owner === null;
             case SyncKind.SEMAPHORE:
                 return object.count > 0;
+            case SyncKind.THREAD:
+                return object.exitCode !== null;
             default:
                 throw new Error(`Unknown sync object: ${object.kind}`);
         }
@@ -115,12 +122,36 @@ export function createSyncObjects({ scheduler }){
                 object.count--;
                 return WaitResult.OBJECT_0;
 
+            // Nothing is taken from a thread. It ended, it stays ended, and
+            // every waiter is entitled to see that -- taking it would make a
+            // second join on the same thread wait for ever.
+            case SyncKind.THREAD:
+                return WaitResult.OBJECT_0;
+
             default:
                 throw new Error(`Unknown sync object: ${object.kind}`);
         }
     };
 
     const api = {
+        /**
+         * Wakes everything waiting on an object that has just become signalled
+         * for good -- a thread that ended. Unlike a set event there is nothing
+         * to take and nothing to reset, so every waiter goes at once.
+         *
+         * @param {any} object
+         */
+        releaseAll(object){
+            for (const waiter of object.waiters ?? [])
+            {
+                scheduler.wake(waiter, WaitResult.OBJECT_0);
+            }
+            if (object.waiters)
+            {
+                object.waiters.length = 0;
+            }
+        },
+
         /**
          * @param {Object} options
          * @param {boolean} [options.manualReset]

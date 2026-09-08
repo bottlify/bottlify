@@ -112,6 +112,14 @@ export function createScheduler(options){
                 exitCode: null,
                 /** What it is waiting for, when blocked; for diagnostics. */
                 waitingOn: null,
+                // A thread is a waitable object in its own right: a program
+                // joins one by waiting on its handle, and it becomes signalled
+                // when it ends and stays that way. Carried here rather than in
+                // a parallel table so that the thing a handle resolves to is
+                // the thing a wait examines.
+                kind: 'thread',
+                /** @type {any[]} */
+                waiters: [],
             };
             threads.push(thread);
             return thread;

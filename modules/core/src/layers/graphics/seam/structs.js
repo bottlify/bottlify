@@ -230,12 +230,15 @@ export const D3DSURFACE_DESC8 = Object.freeze({
 });
 
 /**
- * Where D3DCAPS8's few interesting fields sit.
+ * D3DCAPS8, every field of it.
  *
- * The structure is long and almost all of it is capability bits a program
- * either tests or ignores; only the handful listed are ever written with
- * anything but zero here. The size is what a caller allocates, so it has to be
- * right even where the contents are not.
+ * Written out in full rather than as the handful anyone fills in, because a
+ * partial table is where the offsets go wrong: five guard-band floats and an
+ * adjustment sit between the texture limits and the blend-stage counts, and a
+ * table that skips them puts every later field somewhere else. That is not a
+ * missing capability, it is a wrong one -- a maximum texture size written into
+ * the repeat limit leaves the real maximum reading as zero, and a program that
+ * halves a texture until it fits a maximum of zero halves it for ever.
  */
 export const D3DCAPS8 = Object.freeze({
     DeviceType: 0x00,
@@ -244,22 +247,55 @@ export const D3DCAPS8 = Object.freeze({
     Caps2: 0x0c,
     Caps3: 0x10,
     PresentationIntervals: 0x14,
+    CursorCaps: 0x18,
     DevCaps: 0x1c,
-    MaxTextureWidth: 0x64,
-    MaxTextureHeight: 0x68,
-    MaxTextureBlendStages: 0x84,
-    MaxSimultaneousTextures: 0x88,
-    MaxActiveLights: 0x94,
-    MaxUserClipPlanes: 0x9c,
-    MaxVertexBlendMatrices: 0xa0,
+    PrimitiveMiscCaps: 0x20,
+    RasterCaps: 0x24,
+    ZCmpCaps: 0x28,
+    SrcBlendCaps: 0x2c,
+    DestBlendCaps: 0x30,
+    AlphaCmpCaps: 0x34,
+    ShadeCaps: 0x38,
+    TextureCaps: 0x3c,
+    TextureFilterCaps: 0x40,
+    CubeTextureFilterCaps: 0x44,
+    VolumeTextureFilterCaps: 0x48,
+    TextureAddressCaps: 0x4c,
+    VolumeTextureAddressCaps: 0x50,
+    LineCaps: 0x54,
+    MaxTextureWidth: 0x58,
+    MaxTextureHeight: 0x5c,
+    MaxVolumeExtent: 0x60,
+    MaxTextureRepeat: 0x64,
+    MaxTextureAspectRatio: 0x68,
+    MaxAnisotropy: 0x6c,
+    MaxVertexW: 0x70,
+    GuardBandLeft: 0x74,
+    GuardBandTop: 0x78,
+    GuardBandRight: 0x7c,
+    GuardBandBottom: 0x80,
+    ExtentsAdjust: 0x84,
+    StencilCaps: 0x88,
+    FVFCaps: 0x8c,
+    TextureOpCaps: 0x90,
+    MaxTextureBlendStages: 0x94,
+    MaxSimultaneousTextures: 0x98,
+    VertexProcessingCaps: 0x9c,
+    MaxActiveLights: 0xa0,
+    MaxUserClipPlanes: 0xa4,
+    MaxVertexBlendMatrices: 0xa8,
+    MaxVertexBlendMatrixIndex: 0xac,
     MaxPointSize: 0xb0,
     MaxPrimitiveCount: 0xb4,
+    MaxVertexIndex: 0xb8,
     MaxStreams: 0xbc,
+    MaxStreamStride: 0xc0,
     VertexShaderVersion: 0xc4,
+    MaxVertexShaderConst: 0xc8,
     PixelShaderVersion: 0xcc,
+    MaxPixelShaderValue: 0xd0,
     SIZE: 0xd4,
 });
-
 /** RECT, as DirectDraw's Blt and Lock take it: four longs. */
 export const RECT = Object.freeze({ left: 0x00, top: 0x04, right: 0x08, bottom: 0x0c, SIZE: 0x10 });
 
