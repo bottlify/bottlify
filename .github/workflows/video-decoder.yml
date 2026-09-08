@@ -1,0 +1,86 @@
+# Copyright © 2026 Bottlify Project
+# Licensed under the Mozilla Public License, version 2.0
+# See LICENSE for details
+#
+# The video decoder build, kept out of `ci` on purpose and for the same reason
+# `vendor` is: it compiles FFmpeg to WebAssembly in a container, which costs
+# twenty minutes of a runner to answer one question -- do the pinned inputs
+# still produce the artifact the lock names. That answer cannot change unless
+# the pin, the build definition or the base image moves, so this runs when its
+# own inputs change, on a monthly schedule that would catch the image drifting,
+# and on demand.
+#
+# What it publishes is what every development machine then consumes:
+# `npm run fetch:video-decoder` downloads these assets and verifies them against
+# modules/core/video-decoder-lock.json. Nobody needs Emscripten locally, and the
+# .wasm never enters git.
+name: video-decoder
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/build-video-decoder/**'
+      - 'modules/core/scripts/fetch-video-decoder.mjs'
+      - 'modules/core/video-decoder-lock.json'
+      - '.github/workflows/video-decoder.yml'
+  pull_request:
+    paths:
+      - 'tools/build-video-decoder/**'
+      - 'modules/core/scripts/fetch-video-decoder.mjs'
+      - 'modules/core/video-decoder-lock.json'
+      - '.github/workflows/video-decoder.yml'
+  schedule:
+    - cron: '0 5 1 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  decoder:
+    name: video-decoder (FFmpeg to wasm in a container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:video-decoder
+
+      # The reproducibility assertion: a lock that already pins bytes must still
+      # describe what this build produced. It says so and passes when nothing is
+      # pinned yet, which is the state before the first release exists.
+      - name: verify against the lock
+        run: >
+          node modules/core/scripts/fetch-video-decoder.mjs
+          --check modules/core/vendor/prebuilt/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-decoder
+          path: |
+            modules/core/vendor/prebuilt/video-decoder.wasm
+            modules/core/vendor/prebuilt/SHA256SUMS
+            modules/core/vendor/prebuilt/video-decoder.manifest.json
+
+      # Only from main: a pull request proves the build, it does not publish it.
+      # The tag names the commit that produced the bytes, which is what the lock
+      # then pins with `fetch-video-decoder.mjs --update <tag>`.
+      - name: publish the release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="video-decoder-$(git rev-parse --short HEAD)"
+          cd modules/core/vendor/prebuilt
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" \
+            --notes "FFmpeg (LGPL-2.1-or-later) compiled to WebAssembly by tools/build-video-decoder." \
+            video-decoder.wasm SHA256SUMS video-decoder.manifest.json \
+            || gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber \
+               video-decoder.wasm SHA256SUMS video-decoder.manifest.json

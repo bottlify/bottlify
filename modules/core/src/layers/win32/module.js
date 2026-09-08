@@ -44,6 +44,7 @@ import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions } from './ole32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComRegistry } from './ole32/objects.js';
+import { registerQuartzClasses } from './quartz/graph.js';
 
 /**
  * win32 — the API surface the guest was compiled against.
@@ -164,6 +165,16 @@ export const win32Module = {
         const hive = createHive();
         const queue = createMessageQueue();
         const com = createComRegistry();
+
+        // Registered here rather than by the graphics layer, because a filter
+        // graph is not a drawing device: a program reaches it through
+        // CoCreateInstance alone, and everything it does -- events, a notify
+        // window, a state machine -- is already in reach from this layer.
+        registerQuartzClasses(com, {
+            writeMemory,
+            /** @param {import('./user32/messages.js').PostedMessage} message */
+            post: message=>queue.post(message),
+        });
 
         // One allocator over the whole arena. Everything the guest is handed
         // memory from -- the heap it asks for, the bits of a DIB section, COM
