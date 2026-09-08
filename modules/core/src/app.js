@@ -294,6 +294,63 @@ export function describeEvent(payload){
 }
 
 /**
+ * A yield to the macrotask queue, so everything the host has queued gets a turn.
+ *
+ * Through a message channel rather than a timer, and the difference is not
+ * small: a browser clamps a zero timeout to four milliseconds and more once
+ * they nest, so a loop yielding that way pays the clamp every time -- measured
+ * at eight milliseconds a yield and fifteen seconds in one run, larger than the
+ * emulation it was interrupting. A channel message is delivered on the same
+ * macrotask turn without the clamp.
+ *
+ * A timer is still the fallback, because this file has to run in a worker, in a
+ * page and under a test runner, and not all of them have a channel.
+ *
+ * The ports are the machine's for as long as it runs, so the yield carries its
+ * own `close`: an open port is a live handle, and a host that counts them --
+ * Node does, and will not exit while one is open -- never sees the end of a
+ * process that only dropped its reference to it.
+ *
+ * @returns {(() => Promise<void>) & { close: () => void }}
+ */
+export function createMacrotask(){
+    if (typeof MessageChannel !== 'function')
+    {
+        return Object.assign(
+            ()=>new Promise(resolve=>{
+                setTimeout(resolve, 0);
+            }),
+            { close: ()=>{} });
+    }
+    const channel = new MessageChannel();
+    /** @type {(() => void)[]} */
+    const waiting = [];
+    // One channel for the life of the process rather than one per yield: a
+    // channel is a pair of ports the host has to keep, and making one per turn
+    // is the cost this was meant to remove.
+    channel.port1.onmessage = ()=>waiting.shift()?.();
+    channel.port1.start?.();
+    return Object.assign(
+        ()=>new Promise(resolve=>{
+            waiting.push(/** @type {() => void} */ (resolve));
+            channel.port2.postMessage(0);
+        }),
+        {
+            close(){
+                channel.port1.close();
+                channel.port2.close();
+                // Whoever was mid-yield is owed an answer: the port that would
+                // have delivered it is gone, and a caller left awaiting it
+                // would hold the run loop open for ever.
+                while (waiting.length > 0)
+                {
+                    waiting.shift()?.();
+                }
+            },
+        });
+}
+
+/**
  * Where a LoadLibrary at run time actually looks.
  *
  * A name that already says where it is, is where it is. Windows searches for a
@@ -899,6 +956,9 @@ async function buildApp(options){
     /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void } | null} */
     let blocks = null;
 
+    /** Range requests outstanding: what a parked guest thread is really on. */
+    let fetching = 0;
+
     // A call that is waiting -- a message loop with an empty queue -- is let go
     // once per scheduler turn to look again.
     /** @type {(() => void)[]} */
@@ -1223,7 +1283,23 @@ async function buildApp(options){
             },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
-            fetchBlocks: needed=>blocks ? blocks.fetch(needed) : Promise.resolve(),
+            /** @param {any[]} needed */
+            fetchBlocks: needed=>{
+                if (!blocks)
+                {
+                    return Promise.resolve();
+                }
+                // Counted, because from the run loop every parked thread looks
+                // the same and they are not: a thread waiting on a range
+                // request is waiting on the network, and a thread waiting on
+                // its own message queue is waiting on nothing at all. Told
+                // apart, one of them is a number to reduce and the other is a
+                // loop to stop taking so seriously.
+                fetching++;
+                return blocks.fetch(needed).finally(()=>{
+                    fetching--;
+                });
+            },
             /** @param {number} hwnd */
             created: hwnd=>{
                 foreground = hwnd;
@@ -1945,31 +2021,25 @@ async function buildApp(options){
     const TURNS_PER_YIELD = 16;
 
     /**
-     * A macrotask, so everything the host has queued gets a turn.
+     * Consecutive turns retiring no guest instruction at all before the loop
+     * stops spinning on the event loop and waits on a timer instead.
      *
-     * Through a message channel rather than a timer, and the difference is not
-     * small: a browser clamps a zero timeout to four milliseconds and more once
-     * they nest, so a loop that yields this way pays that clamp every time --
-     * measured at eight milliseconds a yield, which was the largest single cost
-     * in a run and larger than the emulation it was interrupting. A channel
-     * message is delivered on the same macrotask turn without the clamp.
+     * Both waits are needed and neither will do on its own. A machine whose
+     * threads are running but one of whose calls is parked has to come back at
+     * once, because the turn after this one is real work -- and a clamped timer
+     * there costs milliseconds per turn for nothing. A machine where nothing
+     * ran has nothing to come back to: only the host can change its mind, and
+     * spinning until it does burns a processor to arrive no sooner, while
+     * starving the very I/O the machine is waiting on.
      *
-     * A timer is still the fallback: this file has to run in a worker, in a
-     * page and under the test runner, and only some of those have a channel.
+     * So the loop spins while the guest is still getting work done and backs
+     * off when it stops. The count is small because the wrong side to err on is
+     * the second: a few free turns cost microseconds, and one turn too many on
+     * the timer is milliseconds.
      */
-    const breathe = typeof MessageChannel === 'function'
-        ? (()=>{
-            const channel = new MessageChannel();
-            /** @type {(() => void)[]} */
-            const waiting = [];
-            channel.port1.onmessage = ()=>waiting.shift()?.();
-            channel.port1.start?.();
-            return ()=>new Promise(resolve=>{
-                waiting.push(/** @type {() => void} */ (resolve));
-                channel.port2.postMessage(0);
-            });
-        })()
-        : ()=>new Promise(resolve=>setTimeout(resolve, 0));
+    const IDLE_SPINS_BEFORE_TIMER = 4;
+
+    const breathe = createMacrotask();
 
     /**
      * Pausing is a gate rather than a flag polled in a loop: a paused caller
@@ -2044,6 +2114,11 @@ async function buildApp(options){
          * @returns {Promise<number>} the guest's exit code
          */
         async run({ maxTurns = 200000 } = {}){
+            // How many turns in a row have retired nothing. This is what tells
+            // a machine waiting on its own next instruction from one waiting on
+            // the host, which are the same shape from here and want opposite
+            // waits.
+            let spun = 0;
             for (let turn = 0; turn < maxTurns; turn++)
             {
                 if (paused)
@@ -2051,176 +2126,237 @@ async function buildApp(options){
                     await paused.gate;
                 }
 
-                // One yield per turn, so a host function suspended on a guest
-                // callback can make progress between them. Without it the loop
-                // never returns to the event loop on its normal path and such a
-                // handler would be resumed exactly never.
-                await Promise.resolve();
-
-                // And a real one now and then, because that one is a microtask
-                // and microtasks do not let anything else happen. A program
-                // running hot never leaves the microtask queue, so nothing
-                // outside gets a turn: a click on a pause button is not
-                // delivered, a timer does not fire, and a page looks hung while
-                // the guest is working perfectly. Every few turns is enough to
-                // keep the outside responsive and rare enough that the cost of
-                // going round the event loop does not show.
-                if (turn % TURNS_PER_YIELD === 0)
-                {
-                    journal.begin('yield', journal.PhaseKind.HOST);
-                    await breathe();
-                    journal.end('yield');
-                }
-
-                // Sound is written ahead here rather than on demand: the device
-                // reads on a thread of its own and must never find the ring
-                // empty because the emulator was inside a long instruction.
-                journal.begin('pump', journal.PhaseKind.HOST);
-                sound?.pump();
-                journal.end('pump');
-
-                // And devices that keep a cursor are moved on, whether or not
-                // the guest asked anything. A program is entitled to hand a
-                // buffer to a device and then spin on the flag the device sets
-                // in it -- the flag is the contract, and a real device honours
-                // it from its own clock. A cursor advanced only when the guest
-                // calls in is a cursor that never advances for such a program,
-                // and the spin is then forever: the machine is running, the
-                // clock is running, and the one thing that would end it is
-                // waiting for a call that will not come.
-                journal.begin('waveTick', journal.PhaseKind.HOST);
-                win32.waveTick?.();
-                journal.end('waveTick');
-
-                // And a turn is also when anything waiting for something to
-                // arrive -- a message loop with an empty queue -- gets to look
-                // again. Taken as a batch: a waiter that goes back to waiting
-                // must not be released twice by its own turn.
-                if (idlers.length > 0)
-                {
-                    const waiting = idlers;
-                    idlers = [];
-                    for (const release of waiting)
-                    {
-                        release();
-                    }
-                    await Promise.resolve();
-                }
-
-                // Still waiting after being let look, or a host call suspended
-                // on something outside the microtask queue -- a fetch, a file
-                // read -- means the machine has nothing to do until the host
-                // gets a turn. A microtask does not give it one, so this is the
-                // one place the loop hands it back, and it costs nothing
-                // precisely because the guest is not running.
-                if (idlers.length > 0 || bridge.suspended() > 0)
-                {
-                    await new Promise(resolve=>setTimeout(resolve, 0));
-                }
-
-                const failure = bridge.failure();
-                if (failure)
-                {
-                    throw fail('host-call', failure);
-                }
-
-                const replacing = kernel.processes.pending();
-
-                const code = win32.exitCode();
-                if (code !== null)
-                {
-                    // A parent that exits after starting a child has handed
-                    // over; it has not finished. Saying so as an exit would
-                    // report the launcher's code as the program's.
-                    if (replacing)
-                    {
-                        handOver(replacing);
-                        return code;
-                    }
-                    events.emit('exit', { code });
-                    return code;
-                }
-
-                // A processor exception stops the machine rather than raising
-                // anything: the report cannot be thrown from where it is
-                // noticed, so it is left here to be found. Checked before the
-                // next turn, because from outside a halted processor and a
-                // program that finished look exactly alike.
-                const fault = cpu.fault();
-                if (fault)
-                {
-                    const error = new Error(fault.text);
-                    Object.assign(error, { code: 'GUEST_FAULT', fault });
-                    throw fail('guest-fault', error);
-                }
-
-                let step;
-                const startedAt = clockSource();
+                // A turn is a phase, and everything inside it is a phase of its
+                // own. Not decoration: a region nobody opened a phase around
+                // measures nothing, so unaccounted time reads as no cost at all
+                // and the largest item in a run can be the one item nobody
+                // bracketed. `turn` is what the rest is checked against -- the
+                // sum of its occurrences is the run -- and its own self time is
+                // the loop's overhead and nothing else.
+                journal.begin('turn', journal.PhaseKind.HOST);
                 try
                 {
-                    // The one measurement that separates emulation from our own
-                    // code. Host calls trap out from inside this and open their
-                    // own phase, so what is left as this phase's self time is
-                    // the guest actually executing -- which is the number every
-                    // question about speed starts from.
-                    journal.begin('guest', journal.PhaseKind.GUEST);
-                    step = kernel.runOnce();
-                    // Where the guest stood when its slice ran out. Sampled
-                    // here because this is the only boundary the host owns: a
-                    // program that decides something inside its own code makes
-                    // no call to record, and the instruction pointer is the
-                    // only thing that says which code that was.
-                    if (options.sample && step.ran)
+                    // One yield per turn, so a host function suspended on a
+                    // guest callback can make progress between them. Without it
+                    // the loop never returns to the event loop on its normal
+                    // path and such a handler would be resumed exactly never.
+                    //
+                    // Bracketed because that handler runs here: whatever a
+                    // resumed host call then does is this turn's cost, and it is
+                    // charged to nothing if nobody opened a phase around it.
+                    journal.begin('microtasks', journal.PhaseKind.HOST);
+                    await Promise.resolve();
+                    journal.end('microtasks');
+
+                    // And a real one now and then, because that one is a
+                    // microtask and microtasks do not let anything else happen.
+                    // A program running hot never leaves the microtask queue, so
+                    // nothing outside gets a turn: a click on a pause button is
+                    // not delivered, a timer does not fire, and a page looks hung
+                    // while the guest is working perfectly. Every few turns is
+                    // enough to keep the outside responsive and rare enough that
+                    // the cost of going round the event loop does not show.
+                    if (turn % TURNS_PER_YIELD === 0)
                     {
-                        options.sample(cpu.eip());
+                        journal.begin('yield', journal.PhaseKind.HOST);
+                        await breathe();
+                        journal.end('yield');
                     }
-                }
-                catch (e){
-                    // A fault inside the guest, or inside a host function
-                    // answering it. Either way the program cannot be told, and
-                    // the state that explains it is about to be lost.
+
+                    // Sound is written ahead here rather than on demand: the
+                    // device reads on a thread of its own and must never find the
+                    // ring empty because the emulator was inside a long
+                    // instruction.
+                    journal.begin('pump', journal.PhaseKind.HOST);
+                    sound?.pump();
+                    journal.end('pump');
+
+                    // And devices that keep a cursor are moved on, whether or not
+                    // the guest asked anything. A program is entitled to hand a
+                    // buffer to a device and then spin on the flag the device sets
+                    // in it -- the flag is the contract, and a real device honours
+                    // it from its own clock. A cursor advanced only when the guest
+                    // calls in is a cursor that never advances for such a program,
+                    // and the spin is then forever: the machine is running, the
+                    // clock is running, and the one thing that would end it is
+                    // waiting for a call that will not come.
+                    journal.begin('waveTick', journal.PhaseKind.HOST);
+                    win32.waveTick?.();
+                    journal.end('waveTick');
+
+                    // And a turn is also when anything waiting for something to
+                    // arrive -- a message loop with an empty queue -- gets to look
+                    // again. Taken as a batch: a waiter that goes back to waiting
+                    // must not be released twice by its own turn.
+                    if (idlers.length > 0)
+                    {
+                        journal.begin('idlers', journal.PhaseKind.HOST);
+                        const waiting = idlers;
+                        idlers = [];
+                        for (const release of waiting)
+                        {
+                            release();
+                        }
+                        await Promise.resolve();
+                        journal.end('idlers');
+                    }
+
+                    // Still waiting after being let look, or a host call
+                    // suspended on something outside the microtask queue -- a
+                    // fetch, a file read -- means the machine has nothing to do
+                    // until the host gets a turn. A microtask does not give it
+                    // one, so this is the one place the loop hands it back.
+                    //
+                    // Through the unclamped yield while the guest is still
+                    // getting work done, and on a timer once it has stopped.
+                    // A program sitting in its own message loop takes this
+                    // branch on most turns while running perfectly well, and a
+                    // zero timeout is clamped to four milliseconds and more once
+                    // they nest -- so this branch, the one for a machine with
+                    // nothing to do, was the largest cost in a run by far,
+                    // bigger than every host call and all the emulation
+                    // together. The timer is kept for the case it is right for,
+                    // which is a machine that really can do nothing until the
+                    // host answers.
+                    const suspended = bridge.suspended() > 0;
+                    if (idlers.length > 0 || suspended)
+                    {
+                        // Named for what is being waited on and how. A range
+                        // request, a message queue with nothing in it and some
+                        // other host call that has not answered look identical
+                        // from here and cost nothing alike, and a table that
+                        // cannot tell them apart cannot say which of the three
+                        // a run went into.
+                        const idling = spun >= IDLE_SPINS_BEFORE_TIMER;
+                        const on = fetching > 0
+                            ? 'fetch'
+                            : idlers.length > 0 ? 'message' : 'host';
+                        const phase = `idle-${on}${idling ? '-wait' : ''}`;
+                        journal.begin(phase, journal.PhaseKind.HOST);
+                        await (idling
+                            ? new Promise(resolve=>setTimeout(resolve, 0))
+                            : breathe());
+                        journal.end(phase);
+                    }
+
+                    // What the machine's state says before it is given another
+                    // slice: a failed host call, a pending replacement, an exit,
+                    // a fault. Each is a call across a layer boundary and there
+                    // are four of them per turn, so they are worth a phase of
+                    // their own rather than an unmeasured constant.
+                    journal.begin('poll', journal.PhaseKind.HOST);
+                    const failure = bridge.failure();
+                    const replacing = kernel.processes.pending();
+                    const code = win32.exitCode();
+                    const fault = cpu.fault();
+                    journal.end('poll');
+
+                    if (failure)
+                    {
+                        throw fail('host-call', failure);
+                    }
+
+                    if (code !== null)
+                    {
+                        // A parent that exits after starting a child has handed
+                        // over; it has not finished. Saying so as an exit would
+                        // report the launcher's code as the program's.
+                        if (replacing)
+                        {
+                            handOver(replacing);
+                            return code;
+                        }
+                        events.emit('exit', { code });
+                        return code;
+                    }
+
+                    // A processor exception stops the machine rather than raising
+                    // anything: the report cannot be thrown from where it is
+                    // noticed, so it is left here to be found. Checked before the
+                    // next turn, because from outside a halted processor and a
+                    // program that finished look exactly alike.
+                    if (fault)
+                    {
+                        const error = new Error(fault.text);
+                        Object.assign(error, { code: 'GUEST_FAULT', fault });
+                        throw fail('guest-fault', error);
+                    }
+
+                    let step;
+                    const startedAt = clockSource();
+                    try
+                    {
+                        // The one measurement that separates emulation from our
+                        // own code. Host calls trap out from inside this and open
+                        // their own phase, so what is left as this phase's self
+                        // time is the guest actually executing -- which is the
+                        // number every question about speed starts from.
+                        journal.begin('guest', journal.PhaseKind.GUEST);
+                        step = kernel.runOnce();
+                        // Where the guest stood when its slice ran out. Sampled
+                        // here because this is the only boundary the host owns: a
+                        // program that decides something inside its own code makes
+                        // no call to record, and the instruction pointer is the
+                        // only thing that says which code that was.
+                        if (options.sample && step.ran)
+                        {
+                            options.sample(cpu.eip());
+                        }
+                    }
+                    catch (e){
+                        // A fault inside the guest, or inside a host function
+                        // answering it. Either way the program cannot be told, and
+                        // the state that explains it is about to be lost.
+                        journal.end('guest');
+                        throw fail('guest', e);
+                    }
                     journal.end('guest');
-                    throw fail('guest', e);
+
+                    spun = step.instructions === 0 ? spun + 1 : 0;
+
+                    // The guest ran for real, so its clock moves. Nothing else in
+                    // the engine does this, and without it the clock only ever
+                    // advanced when a program waited -- so a program that does not
+                    // wait sees no time pass at all. That is not a small error: a
+                    // frame loop concludes its frame took no time, a timed wait
+                    // never expires, and a device whose cursor runs on the clock
+                    // never finishes a buffer, which strands a program spinning on
+                    // the flag that buffer would have set.
+                    //
+                    // Credited from the host's wall clock rather than from retired
+                    // instructions, because what a program is measuring is how long
+                    // its own work took, and on a machine this slow that really is
+                    // the wall time. A slow machine is a slow machine; a machine
+                    // where no time passes is a broken one.
+                    clock.advance(Math.max(0, clockSource() - startedAt));
+
+                    if (!step.ran)
+                    {
+                        // Nobody is ready. When a child is waiting to be started
+                        // that is not a deadlock but the handover: the parent's
+                        // last thread has ended, or it is blocked on the child's
+                        // own handle, which nothing in this process can signal.
+                        if (replacing)
+                        {
+                            handOver(replacing);
+                            return 0;
+                        }
+                        // Either everything finished without the program exiting,
+                        // or every thread is waiting on something no one will
+                        // signal -- and the diagnostics name what.
+                        const waiting = kernel.diagnosticsSnapshot().waiting;
+                        if (waiting.length > 0)
+                        {
+                            throw fail('deadlock',
+                                new Error(`deadlock: ${waiting.join('; ')}`));
+                        }
+                        throw fail('no-threads',
+                            new Error('every thread ended without the process exiting'));
+                    }
                 }
-                journal.end('guest');
-
-                // The guest ran for real, so its clock moves. Nothing else in
-                // the engine does this, and without it the clock only ever
-                // advanced when a program waited -- so a program that does not
-                // wait sees no time pass at all. That is not a small error: a
-                // frame loop concludes its frame took no time, a timed wait
-                // never expires, and a device whose cursor runs on the clock
-                // never finishes a buffer, which strands a program spinning on
-                // the flag that buffer would have set.
-                //
-                // Credited from the host's wall clock rather than from retired
-                // instructions, because what a program is measuring is how long
-                // its own work took, and on a machine this slow that really is
-                // the wall time. A slow machine is a slow machine; a machine
-                // where no time passes is a broken one.
-                clock.advance(Math.max(0, clockSource() - startedAt));
-
-                if (!step.ran)
+                finally
                 {
-                    // Nobody is ready. When a child is waiting to be started
-                    // that is not a deadlock but the handover: the parent's
-                    // last thread has ended, or it is blocked on the child's
-                    // own handle, which nothing in this process can signal.
-                    if (replacing)
-                    {
-                        handOver(replacing);
-                        return 0;
-                    }
-                    // Either everything finished without the program exiting,
-                    // or every thread is waiting on something no one will
-                    // signal -- and the diagnostics name what.
-                    const waiting = kernel.diagnosticsSnapshot().waiting;
-                    if (waiting.length > 0)
-                    {
-                        throw fail('deadlock', new Error(`deadlock: ${waiting.join('; ')}`));
-                    }
-                    throw fail('no-threads',
-                        new Error('every thread ended without the process exiting'));
+                    journal.end('turn');
                 }
             }
             throw fail('runaway',
@@ -2434,6 +2570,7 @@ async function buildApp(options){
             // Before the graph goes: the background filler would otherwise go
             // on asking for blocks nobody can put anywhere.
             blocks?.stop();
+            breathe.close();
             return core.dispose();
         },
     };
