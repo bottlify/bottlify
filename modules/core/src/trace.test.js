@@ -19,8 +19,9 @@ const STACK = 0x2f0000;
  * @param {Object} [options]
  * @param {Record<number, number>} [options.stack]  What the guest stack holds.
  * @param {Record<string, number>} [options.registers]
+ * @param {string[]} [options.waiting]  What each blocked thread is waiting on.
  */
-function machine({ stack = {}, registers = {} } = {}){
+function machine({ stack = {}, registers = {}, waiting = [] } = {}){
     const regions = [
         { name: 'image', base: IMAGE, size: 0x2000, kind: 'image' },
         { name: 'thunks', base: THUNKS, size: 0x100, kind: 'thunk_code' },
@@ -58,7 +59,7 @@ function machine({ stack = {}, registers = {} } = {}){
         },
         kernel: {
             currentThread: ()=>({ id: 1, name: 'main', state: 'running' }),
-            diagnosticsSnapshot: ()=>({ threads: 1, waiting: [] }),
+            diagnosticsSnapshot: ()=>({ threads: 1, waiting }),
         },
         bridge: {
             /** @param {number} address */
@@ -142,4 +143,18 @@ test('the rendered form leads with the answer', ()=>{
     assert.match(text, /thread main \(running\)/);
     assert.match(text, /inside: msvcrt\.dll!qsort/);
     assert.match(text, /last calls: KERNEL32\.dll!GetStdHandle, msvcrt\.dll!qsort/);
+    assert.doesNotMatch(text, /^waiting:/m, 'and says nothing about waiting when nobody is');
+});
+
+test('a stalled machine names every blocked thread and what it waits on', ()=>{
+    // The one report that could not be read: a parked thread's registers
+    // describe the park loop and nothing else, so the list of what nobody is
+    // signalling is the only part that names the failure.
+    const text = formatTrace(captureTrace(machine({
+        waiting: ['thread-3: WaitForSingleObject on 0x1c', 'thread-5: message queue'],
+    })));
+
+    assert.match(text, /^waiting:$/m);
+    assert.match(text, /^ {2}thread-3: WaitForSingleObject on 0x1c$/m);
+    assert.match(text, /^ {2}thread-5: message queue$/m);
 });

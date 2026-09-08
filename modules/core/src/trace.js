@@ -343,6 +343,19 @@ export function formatTrace(trace){
     {
         lines.push(`last calls: ${trace.recentCalls.join(', ')}`);
     }
+    // Every blocked thread and what it is waiting on. This was captured all
+    // along and never rendered, which made the report of a stalled machine the
+    // one report that could not be read: a parked thread's registers describe
+    // the park loop and nothing else, so the only thing that names the failure
+    // is the list of what nobody is signalling.
+    if (trace.threads?.waiting?.length > 0)
+    {
+        lines.push('waiting:');
+        for (const entry of trace.threads.waiting)
+        {
+            lines.push(`  ${entry}`);
+        }
+    }
     if (trace.stack?.length > 0)
     {
         lines.push(...trace.stack);
