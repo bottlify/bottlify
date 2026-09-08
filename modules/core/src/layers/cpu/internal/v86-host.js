@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { buildBootRom, ROM_BASE } from './boot-rom.js';
+import { buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE } from './boot-rom.js';
 
 /**
  * The only place in the codebase that knows the emulator underneath is v86.
@@ -34,6 +34,16 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /** How much to pull out of a zstd frame at a time. */
 const ZSTD_CHUNK = 1 << 16;
+
+/**
+ * How many slices bring-up may take before it is declared broken.
+ *
+ * The ROM is eighteen instructions and the emulator stops on a basic block
+ * rather than exactly one instruction, so this is generous by an order of
+ * magnitude. It is a bound, not a budget: reaching it means the ROM did not
+ * arrive where it says it does, and that has to be loud.
+ */
+const BRING_UP_SLICES = 64;
 
 /**
  * Boots an emulator instance with our own ROM and returns the cpu layer's
@@ -66,6 +76,40 @@ export async function createV86Host(config){
     await new Promise(resolve=>emulator.add_listener('emulator-ready', resolve));
 
     const cpu = emulator.v86.cpu;
+
+    // The mode switch happens here, not on the first `run()`.
+    //
+    // Whoever drives this machine may never call `run()` at all: a scheduler
+    // moves the CPU by restoring a thread's context and running a slice, and
+    // that context is a copy of the machine as it stood when the thread was
+    // created. Created before the ROM had run, it is a snapshot of a processor
+    // at reset -- real mode, 16-bit segments, CS based at the ROM -- and every
+    // thread then starts in real mode at a 32-bit address, which decodes as
+    // whatever the bytes happen to mean and executes memory at random.
+    //
+    // So the ROM is driven here, through its own park, and the machine is then
+    // left standing on the jump into guest code -- which `run()` still performs
+    // for a caller that boots by writing an entry vector.
+    emulator.write_memory(
+        new Uint8Array([BRING_UP_PARK & 0xff, BRING_UP_PARK >>> 8 & 0xff,
+            BRING_UP_PARK >>> 16 & 0xff, BRING_UP_PARK >>> 24 & 0xff]),
+        config.entryVector);
+    for (let slice = 0; slice < BRING_UP_SLICES; slice++)
+    {
+        if ((cpu.instruction_pointer[0] >>> 0) === BRING_UP_PARK)
+        {
+            break;
+        }
+        cpu.run_slice(1);
+    }
+    if ((cpu.cr[0] & 1) !== 1 || (cpu.instruction_pointer[0] >>> 0) !== BRING_UP_PARK)
+    {
+        throw new Error('cpu: the boot ROM did not reach protected mode'
+            + ` (eip 0x${(cpu.instruction_pointer[0] >>> 0).toString(16)},`
+            + ` cr0 0x${(cpu.cr[0] >>> 0).toString(16)})`);
+    }
+    cpu.instruction_pointer[0] = GUEST_JUMP;
+
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
 
@@ -83,7 +127,10 @@ export async function createV86Host(config){
     );
 
     return {
-        /** Starts execution at the reset vector; the ROM transitions to protected mode. */
+        /**
+         * Lets the machine run. The mode switch is already done, so this
+         * resumes at the ROM's jump into whatever the entry vector holds.
+         */
         run: ()=>emulator.run(),
         stop: ()=>emulator.stop(),
 

@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBootRom, ROM_BASE, ROM_SIZE, SEL_CODE32, SEL_DATA32 } from './boot-rom.js';
+import {
+    BRING_UP_PARK, GUEST_JUMP, buildBootRom, ROM_BASE, ROM_SIZE, SEL_CODE32, SEL_DATA32,
+} from './boot-rom.js';
 
 const ENTRY_VECTOR = 0x7000;
 const INITIAL_STACK = 0x200000;
@@ -73,6 +75,22 @@ test('protected-mode entry sets a stack and jumps indirectly through the entry v
     assert.notEqual(jmp, -1, 'indirect jmp present');
     assert.equal(readU32(image, pm + jmp + 2), ENTRY_VECTOR);
     assert.ok(movEsp < jmp, 'stack is set before control leaves the ROM');
+});
+
+test('GUEST_JUMP names the jump into guest code, and BRING_UP_PARK a spin', ()=>{
+    // Bring-up leaves the machine standing on that jump, in protected mode with
+    // its segments and stack already set. A GUEST_JUMP that pointed anywhere
+    // else would leave the mode switch half-done, and every thread context
+    // captured afterwards would carry real mode into the guest.
+    const image = rom();
+    assert.deepEqual([...image.subarray(GUEST_JUMP - ROM_BASE, GUEST_JUMP - ROM_BASE + 2)],
+        [0xff, 0x25], 'jmp dword [entryVector]');
+    assert.equal(readU32(image, GUEST_JUMP - ROM_BASE + 2), ENTRY_VECTOR);
+
+    // And the park it reaches that jump through has to be a self-jump, so that
+    // landing there costs nothing and changes nothing.
+    assert.deepEqual([...image.subarray(BRING_UP_PARK - ROM_BASE, BRING_UP_PARK - ROM_BASE + 2)],
+        [0xeb, 0xfe], 'jmp $');
 });
 
 test('the entry vector is data, so two ROMs differ only where the vector does', ()=>{

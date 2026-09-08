@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from './v86-host.js';
+import { GUEST_JUMP } from './boot-rom.js';
 
 const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 const TRAP_PORT = 0xb077;
@@ -53,6 +54,34 @@ function runUntilTrap(host, timeoutMs = 4000){
         host.run();
     });
 }
+
+test('protected mode is on before anyone is handed the machine', async()=>{
+    // Not on the first `run()`: a scheduler never calls it. It moves the CPU by
+    // restoring a thread context and running a slice, and that context is a
+    // copy of the machine taken when the thread was created. Taken before the
+    // mode switch it is a processor at reset, so every thread starts in real
+    // mode at a 32-bit address, decodes whatever the bytes happen to mean, and
+    // runs memory at random -- with no fault and no halt to say so.
+    const host = await boot();
+
+    assert.ok(host.inProtectedMode(), 'the ROM has already switched modes');
+    assert.equal(host.eip(), GUEST_JUMP, 'parked on the jump into guest code');
+    assert.equal(host.readReg32('esp'), INITIAL_STACK, 'and the ROM has set the stack');
+
+    // Segments are flat 32-bit, which is what makes a captured context usable:
+    // a guest address is a linear address.
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0x66, 0xba, TRAP_PORT & 0xff, TRAP_PORT >>> 8 & 0xff, // mov dx, TRAP_PORT
+        0xa1, ...u32(0x9000),                                 // mov eax, [0x9000]
+        0xef,                                                 // out dx, eax
+        0xf4,                                                 // hlt
+    ]));
+    host.writePhysical(0x9000, new Uint8Array(u32(0xfeedface)));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+
+    assert.equal(await runUntilTrap(host), 0xfeedface,
+        'a flat DS, so an absolute address means itself');
+});
 
 test('boots without a BIOS and reaches guest code in protected mode', async()=>{
     const host = await boot();

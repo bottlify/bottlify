@@ -35,6 +35,7 @@ const OFF_INIT16 = 0x000;
 const OFF_GDT = 0x100;
 const OFF_GDT_PTR = 0x120;
 const OFF_PM_ENTRY = 0x200;
+const OFF_PARK = 0x300;
 const OFF_IDT = 0x400;
 const OFF_IDT_PTR = 0x600;
 const OFF_FAULT_STUBS = 0x700;
@@ -64,6 +65,35 @@ export const FAULT_TRAP_BASE = 0xf000;
 
 /** Where a fault's stub sits, so a caller can tell one from ordinary code. */
 export const FAULT_STUBS_BASE = ROM_BASE + OFF_FAULT_STUBS;
+
+/**
+ * Bytes of the protected-mode entry before its last instruction: one `mov eax,
+ * imm32`, five segment loads, one `mov esp, imm32`.
+ */
+const PM_PROLOGUE_SIZE = 5 + 5 * 2 + 5;
+
+/**
+ * The ROM's last instruction: the jump into guest code.
+ *
+ * Named because it is where bring-up has to leave the machine. Every guest
+ * thread inherits its segments, flags and control words from whatever the
+ * machine looks like when its context is first captured, and a context taken
+ * before the mode switch carries real mode into every thread that will ever
+ * run. Parked here, protected mode is established, the segments are flat and
+ * the stack is set, and no guest instruction has been executed.
+ */
+export const GUEST_JUMP = ROM_BASE + OFF_PM_ENTRY + PM_PROLOGUE_SIZE;
+
+/**
+ * A two-byte `jmp $` for bring-up to land in.
+ *
+ * The emulator runs whole basic blocks, so there is no stopping *before* the
+ * jump into guest code -- the shortest slice that reaches it takes it. Pointing
+ * the entry vector here first makes that jump land somewhere harmless and
+ * recognisable, from which the instruction pointer is put back on the jump.
+ * A spin rather than a `hlt`, so nothing has to be un-halted afterwards.
+ */
+export const BRING_UP_PARK = ROM_BASE + OFF_PARK;
 
 /** Selectors in the GDT built below. */
 export const SEL_CODE32 = 0x08;
@@ -164,6 +194,8 @@ export function buildBootRom({ entryVector, initialStack, trapPort }){
         0xbc, ...u32(initialStack), // mov esp, initialStack
         0xff, 0x25, ...u32(entryVector), // jmp dword [entryVector]
     ]);
+
+    put(OFF_PARK, [0xeb, 0xfe]); // jmp $
 
     // Reset vector: the CPU starts at F000:FFF0, which is this far jump.
     put(OFF_RESET, [0xea, ...u16(OFF_INIT16), ...u16(ROM_BASE >>> 4)]); // jmp far F000:OFF_INIT16
