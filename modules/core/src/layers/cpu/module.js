@@ -7,7 +7,7 @@
 import { createV86Host } from './internal/v86-host.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable } from './internal/thunks.js';
-import { FAULT_TRAP_BASE } from './internal/boot-rom.js';
+import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
 
 /**
@@ -102,6 +102,14 @@ export const cpuModule = {
                 // chosen without it is a guess about how much memory the
                 // machine was given, and a wrong guess writes past the end.
                 memorySize: settings.memorySize,
+                // Where our own boot ROM sits. Worth registering as a region
+                // by whoever lays out memory: a fault leaves the processor
+                // standing in the stub behind its vector, and a report that
+                // cannot name that address calls the engine's own code
+                // unmapped -- which is the one place a reader should not be
+                // sent to look for a guest's bug.
+                romBase: ROM_BASE,
+                romSize: ROM_SIZE,
             },
 
             /**

@@ -46,6 +46,14 @@ const hex = value=>`0x${(value >>> 0).toString(16).padStart(8, '0')}`;
  * @property {any} memory
  * @property {any} kernel
  * @property {any} bridge
+ * @property {any} [fault]
+ *           The frame the processor pushed, when the machine stopped on an
+ *           exception. Without it a fault report describes the wrong place
+ *           entirely: by the time anyone asks, the processor is sitting in the
+ *           ROM stub behind the vector, so the live EIP is our own code, the
+ *           live ESP points at the exception frame rather than at the guest's
+ *           stack, and EAX and EDX hold the trap number and the port the stub
+ *           wrote. The frame is the only record of where the guest was.
  */
 
 /**
@@ -225,12 +233,23 @@ function walkStack(sources, esp, ebp){
  */
 export function captureTrace(sources){
     const { cpu, kernel, bridge } = sources;
+    const fault = sources.fault ?? null;
     const trace = /** @type {any} */ ({});
 
     try
     {
-        trace.eip = cpu.eip();
+        // The guest's own address when there was a fault, and the live one
+        // otherwise. Reported apart rather than blended: the stub the processor
+        // is standing in is a fact worth keeping, and passing it off as the
+        // guest's is how a report sends a reader to disassemble our own ROM.
+        const stoppedAt = cpu.eip();
+        trace.eip = fault ? fault.eip >>> 0 : stoppedAt;
         trace.at = describeAddress(sources, trace.eip);
+        if (fault)
+        {
+            trace.fault = fault;
+            trace.stoppedAt = describeAddress(sources, stoppedAt);
+        }
         // What a register points at, when it points at anything nameable. A
         // register holding a function's address is the whole answer to "what
         // was it about to call", and reading that out of a hexadecimal number
@@ -245,6 +264,7 @@ export function captureTrace(sources){
         // was expecting, which is the question a wild pointer raises.
         trace.peek = Object.fromEntries([
             ['eip', peekBytes(sources, trace.eip, 16)],
+            ...fault ? [['stoppedAt', peekBytes(sources, stoppedAt, 16)]] : [],
             ...Object.keys(trace.pointing)
                 .map(name=>[name, peekBytes(sources, Number(trace.registers[name]))]),
         ].filter(([, lines])=>lines !== null));
@@ -305,6 +325,18 @@ export function formatTrace(trace){
     if (trace.thread)
     {
         lines.push(`thread ${trace.thread.name} (${trace.thread.state})`);
+    }
+    // Which of what follows is the guest's and which is ours. The stub behind
+    // the vector wrote the trap number to a port before anything else ran, so
+    // EAX and EDX are its own; ESP points at the frame the processor pushed,
+    // not at where the guest's stack was; and everything else is still the
+    // guest's. Saying so is the difference between a report and a wild goose
+    // chase through our own ROM.
+    if (trace.fault)
+    {
+        lines.push(`stopped in ${trace.stoppedAt}`);
+        lines.push('  eax and edx are the fault stub\'s; esp points at the exception frame;'
+            + ' the rest are the guest\'s');
     }
     if (trace.registers)
     {

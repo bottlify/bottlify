@@ -1481,6 +1481,14 @@ async function buildApp(options){
         name: 'heap', base: HEAP_BASE, size: HEAP_SIZE,
         kind: memory.RegionKind.THUNK_DATA, access: memory.Access.READ_WRITE,
     });
+    // Our own boot ROM, so that a report can name it. A fault leaves the
+    // processor standing in the stub behind its vector, and until this was here
+    // that address came back as unmapped -- which sent every reader of a crash
+    // looking for a guest bug at an address belonging to the engine.
+    memory.register({
+        name: 'boot-rom', base: cpu.layout.romBase, size: cpu.layout.romSize,
+        kind: memory.RegionKind.LOW_MEM, access: memory.Access.READ_EXECUTE,
+    });
 
     // Every system module exists in guest memory before the program's first
     // instruction, not when something first asks for it. An address taken early
@@ -2115,7 +2123,11 @@ async function buildApp(options){
      * @returns {any}
      */
     const fail = (reason, error)=>{
-        const trace = captureTrace({ cpu, memory, kernel, bridge });
+        // The exception frame, when there is one. Without it the report names
+        // the ROM stub the processor is standing in rather than the instruction
+        // that faulted, and every register it prints is read from a machine
+        // that has already left the scene.
+        const trace = captureTrace({ cpu, memory, kernel, bridge, fault: cpu.fault?.() ?? null });
         const text = formatTrace(trace);
         const thrown = error instanceof Error ? error : new Error(String(error));
         Object.assign(thrown, { reason, trace, traceText: text });

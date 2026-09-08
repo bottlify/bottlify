@@ -146,6 +146,36 @@ test('the rendered form leads with the answer', ()=>{
     assert.doesNotMatch(text, /^waiting:/m, 'and says nothing about waiting when nobody is');
 });
 
+test('a fault is reported where the guest was, not where the stub is', ()=>{
+    // The report used to read the live processor, which by then is standing in
+    // the ROM stub behind the vector: it named our own code as the place the
+    // program crashed, showed the trap number as EAX, and could not even read
+    // the bytes there. The only record of where the guest was is the frame the
+    // processor pushed.
+    const sources = machine();
+    // Where the stub reports from, which is what the live processor says.
+    sources.cpu.eip = ()=>0x000f07db;
+    const trace = captureTrace({
+        ...sources,
+        fault: { vector: 13, name: 'general protection', eip: IMAGE + 0x1200, errorCode: 0x10 },
+    });
+
+    assert.equal(trace.eip, IMAGE + 0x1200);
+    assert.match(trace.at, /image\+0x00001200/, 'the instruction that faulted');
+    assert.match(trace.stoppedAt, /0x000f07db/, 'and the stub, kept and named apart');
+
+    const text = formatTrace(trace);
+    assert.match(text, /^at 0x00401200 image/);
+    assert.match(text, /stopped in 0x000f07db/);
+    assert.match(text, /eax and edx are the fault stub's/);
+});
+
+test('with no fault the report is simply where the processor is', ()=>{
+    const text = formatTrace(captureTrace(machine()));
+    assert.doesNotMatch(text, /stopped in/);
+    assert.doesNotMatch(text, /fault stub/);
+});
+
 test('a stalled machine names every blocked thread and what it waits on', ()=>{
     // The one report that could not be read: a parked thread's registers
     // describe the park loop and nothing else, so the list of what nobody is
