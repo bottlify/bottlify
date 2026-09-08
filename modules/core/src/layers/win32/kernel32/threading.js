@@ -48,6 +48,10 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
+ * @property {() => number} [threadReturn]
+ *           Where a start routine returns to. A thread that returns has ended,
+ *           and if nothing notices it stays runnable for ever, is picked every
+ *           turn, retires nothing, and keeps whatever it was holding.
  * @property {(handle: number) => string | null} [handleType]
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
@@ -174,6 +178,11 @@ export function createThreadingFunctions(host){
                     entry: start >>> 0,
                     stackSize: stackSize >>> 0,
                     parameter: parameter >>> 0,
+                    // Returning from the start routine is how most threads end,
+                    // and it means exactly what calling ExitThread with the
+                    // same value means. Somewhere has to notice; this is where
+                    // it returns to.
+                    returnTo: host.threadReturn?.(),
                 });
                 if (threadIdOut !== 0)
                 {

@@ -87,8 +87,15 @@ export const kernelModule = {
              * @param {number} [options.stackTop]  Overrides the pool, for the first thread.
              * @param {number} [options.tebAddress]
              * @param {string} [options.name]
+             * @param {number} [options.returnTo]
+             *   Where the start routine returns to. A thread that returns has
+             *   ended, and something has to notice: left at the park loop it
+             *   stays runnable for ever, is picked every turn, retires no
+             *   instructions, and keeps whatever it was holding. The default is
+             *   that loop, for a caller with nothing better -- but a caller
+             *   that can end the thread should pass somewhere that does.
              */
-            createThread({ entry, parameter = 0, stackTop, tebAddress, name }){
+            createThread({ entry, parameter = 0, stackTop, tebAddress, name, returnTo }){
                 // A stack from the pool unless the caller brought its own (the
                 // first thread runs on the one the process was given).
                 const allocateStack = ()=>{
@@ -103,9 +110,14 @@ export const kernelModule = {
                     stacks.issued++;
                     return base + stacks.size;
                 };
-                const top = (stackTop ?? allocateStack()) - 8;
+                // Sixteen rather than the eight the frame needs: a thread that
+                // returns pops its return address and then the stub it returns
+                // into pops again, and a stack pointer that lands exactly on
+                // the top of the region is outside it. The headroom keeps every
+                // pointer the thread can reach inside the memory it was given.
+                const top = (stackTop ?? allocateStack()) - 16;
                 memory.writeU32(top + 4, parameter);
-                memory.writeU32(top, cpu.parkAddress());
+                memory.writeU32(top, returnTo ?? cpu.parkAddress());
 
                 const thread = scheduler.create({
                     entry,

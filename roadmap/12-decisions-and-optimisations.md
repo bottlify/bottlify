@@ -293,6 +293,86 @@ the program never asks -- would have been a lie about the filesystem to work aro
 something else.
 
 
+### A21. The guest's clock runs while the guest does
+
+Nothing credited it. `advance` was reached from two waiting paths and
+`suspend`/`resume` from nowhere at all, so virtual time only moved when a
+program waited -- and a program that does not wait saw no time pass whatsoever.
+A frame loop concluded its frame took no time, a timed wait never expired, and a
+device whose cursor runs on that clock never finished a buffer, stranding a real
+title spinning on the flag the buffer would have set. The run loop now credits
+the clock with the wall time each slice really took. Wall time rather than
+retired instructions, because what a program measures is how long its own work
+took, and on a machine this slow that is the wall time.
+
+### A22. A window is told that it exists
+
+A window procedure does its setup in `WM_CREATE`: it builds the object the
+window stands for, arms its timers, and hangs that object off the window. We
+made windows without ever sending it, so a program got a window that looked real
+from every angle and did nothing -- and then waited for something it was
+supposed to have started itself.
+
+`WM_NCCREATE` is deliberately still not sent. Sending is running guest code, and
+running it twice from one host call means the second starts while the first is
+unwinding. The default answer to it is TRUE and the structure it carries arrives
+again a moment later with `WM_CREATE`, so it is the one to leave out until a
+program is seen to want it.
+
+### A23. DefWindowProc does nothing with WM_DESTROY
+
+Ours posted a quit, on the reasoning that a program whose procedure falls
+through has no other way to end. Windows does nothing, and the difference is not
+academic: a program of any size destroys windows constantly -- a dialog, a
+tooltip, a splash screen -- and passes their `WM_DESTROY` to the default
+procedure because it has nothing to add. Every one of those ended the process.
+Ending the message loop is the program's own decision, made by calling
+`PostQuitMessage` from the procedure of the one window it considers its main
+one.
+
+### A24. A timer is due against the guest's clock, and WM_TIMER is made up
+
+`SetTimer` refused to make a timer, on the grounds that one that never fires and
+one that fires continuously are both indefensible. Both halves were true when
+there was no clock. There is one now. A timer is due against the guest's own
+clock, and `WM_TIMER` is synthesised when a program asks for a message and finds
+nothing else -- which is how Windows does it, and is why a handler that runs
+long does not leave a backlog of ticks behind it. A program of this era drives
+itself from here: its loop blocks in `GetMessage` and a timer is the only thing
+that wakes it.
+
+### A25. A graph with nothing to play finishes at once
+
+Refusing to render was tried first and is worse. A program that plays optional
+media checks `RenderFile`, releases the graph it cannot use, and carries on --
+and then its own caption timer, armed unconditionally a moment earlier, reads
+the pointer it has just released. A refusal handled entirely correctly still
+ends with the program dereferencing nothing.
+
+So a graph is built with no filters in it, which renders a presentation of no
+length, and running it reports `EC_COMPLETE` at once. That is a real state
+rather than a pretence, and it takes the same path finishing a real film takes
+-- the path the program is written for. A decoder arriving replaces the one
+function that decides this.
+
+### A26. A thread is an object a program waits on
+
+`WaitForSingleObject` on a thread handle is how a program joins one, and ours
+failed on it because a thread carried no kind a wait could recognise. A thread
+is now signalled by having ended and stays signalled: nothing is taken from it,
+because a second join must not wait for ever.
+
+### A27. A structure's offsets are written out in full or they are wrong
+
+`D3DCAPS8` was tabulated as the handful of fields anyone fills in, and every one
+of them was in the wrong place: five guard-band floats and an adjustment sit
+between the texture limits and the blend-stage counts. The maximum texture size
+went into the repeat limit, and the real maximum read as zero -- so a program
+halving a texture until it fits halved it for ever, which is 97 per cent of a
+measured profile sitting on one instruction. A partial table is not a partial
+implementation; it is a wrong one.
+
+
 ## B. Where we could go faster
 
 ### B1. The x87 helpers, emitted as guest code

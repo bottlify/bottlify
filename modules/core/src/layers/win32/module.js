@@ -168,6 +168,34 @@ export const win32Module = {
         // The guest's clock, because a timer is due against the clock the
         // program itself reads.
         const queue = createMessageQueue({ now: ()=>kernel.clock.virtualTime() });
+
+        /**
+         * Where a thread's start routine returns to.
+         *
+         * Returning is how most threads end, and it means what calling
+         * ExitThread with the same value means -- the routine's answer is the
+         * thread's exit code, which is why the stub keeps EAX. Without
+         * somewhere that notices, a returned thread sits on the park loop,
+         * stays runnable for ever, is chosen every turn, retires no
+         * instructions and never lets go of anything it holds.
+         *
+         * @type {number | null}
+         */
+        let threadReturnStub = null;
+        const threadReturnAddress = ()=>{
+            threadReturnStub ??= bridge.register('<thread-returned>', {
+                argBytes: 0,
+                // Reached by a `ret`, so the answer is already in EAX and the
+                // trap needs EAX for itself; the stub moves it to ECX first.
+                preserveResult: true,
+                handler: ()=>{
+                    const thread = kernel.currentThread();
+                    kernel.exitThread(thread, cpuRegisters.read('ecx') >>> 0);
+                    return bridge.park(thread);
+                },
+            });
+            return threadReturnStub ?? 0;
+        };
         const com = createComRegistry();
 
         /**
@@ -348,6 +376,10 @@ export const win32Module = {
                     setLastError: setError,
                     currentThread: ()=>kernel.currentThread(),
                     park: (/** @type {any} */ thread)=>bridge.park(thread),
+                    // Where a start routine returns to. Registered once, the
+                    // first time a thread is made, because registering it costs
+                    // a stub and a build that never makes a thread needs none.
+                    threadReturn: ()=>threadReturnAddress(),
                     /** @param {number} handle */
                     handleType: handle=>kernel.handles.typeOf(handle),
                 }),

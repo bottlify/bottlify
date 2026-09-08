@@ -848,6 +848,12 @@ export async function createApp(options){
                 core.api('bridge').publishInterface(object, iid),
             device: options.device ?? null,
             screen: options.screen,
+            // Where a locked surface or vertex buffer's bytes live. A lock
+            // hands the program an address it writes through and the unlock
+            // reads those bytes back, so it has to be memory the guest can
+            // reach -- an address invented for the purpose is one the program
+            // writes into nothing and we read nothing out of.
+            allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
         },
         win32: {
             // Sound leaves through the audio layer's mixer, and win32 sits

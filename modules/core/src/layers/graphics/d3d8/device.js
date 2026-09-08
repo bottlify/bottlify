@@ -156,6 +156,11 @@ function isTransformType(type){
  * @property {any} [backend]         The rendering backend.
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  * @property {(descriptor: any)=>any} [createSampler]
+ * @property {(bytes: number)=>number} [allocate]
+ *     Guest memory for a resource's bytes. A lock hands the program an address
+ *     it writes through and the unlock reads those bytes back, so it has to be
+ *     memory the guest can reach. Absent, addresses are invented -- which works
+ *     exactly until something reads one.
  */
 
 /**
@@ -233,11 +238,11 @@ function reportPresentParameters(parameters){
  * @param {Partial<DeviceCaps> & DeviceServices} [options]
  */
 export function createDirect3D8(options = {}){
-    const { backend, readMemory, createSampler, ...caps } = options;
+    const { backend, readMemory, createSampler, allocate: guestMemory, ...caps } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
-    const services = { backend, readMemory, createSampler };
+    const services = { backend, readMemory, createSampler, allocate: guestMemory };
     if (backend && !readMemory)
     {
         throw new Error('graphics/d3d8: a device that draws needs readMemory as well as a backend');
@@ -386,6 +391,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
     let inScene = false;
+    /**
+     * Where storage goes when nobody gave us real memory to put it in.
+     *
+     * A locked surface or buffer hands the program an address it writes
+     * through, and the unlock reads those bytes back -- so the address has to
+     * be memory the guest can actually reach. Fabricating one works only until
+     * something reads it, which is the moment a program stops merely creating
+     * resources and starts filling them.
+     */
     let nextAddress = 0x40000000;
     const softwareVertexProcessing =
         (behaviourFlags & D3DCREATE.SOFTWARE_VERTEXPROCESSING) !== 0;
@@ -478,6 +492,18 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {number} bytes
      */
     const allocate = bytes=>{
+        // Real guest memory when the assembling caller supplied a way to get
+        // some. Not freed on release yet: a resource's storage outlives it
+        // here, which costs address space and is the next thing to fix if a
+        // program is seen to churn through surfaces.
+        if (services.allocate)
+        {
+            const address = services.allocate(Math.max(bytes, 1));
+            if (address !== 0)
+            {
+                return address;
+            }
+        }
         const address = nextAddress;
         // Aligned generously: a lock's reported pitch is the row stride, and
         // nothing here should ever depend on two surfaces being adjacent.

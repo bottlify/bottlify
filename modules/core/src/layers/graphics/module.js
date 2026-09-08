@@ -98,6 +98,10 @@ export const graphicsModule = {
                 readMemory: services.readMemory,
                 createSampler: (/** @type {any} */ descriptor)=>
                     device.device.createSampler(descriptor),
+                // Where a locked surface or buffer's bytes live. It has to be
+                // memory the guest can write through, because the unlock reads
+                // back exactly what it wrote.
+                allocate: config?.allocate,
             }),
             /** @returns {any} */
             d3d9: (/** @type {any} */ caps)=>createDirect3D9(caps),
