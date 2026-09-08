@@ -97,6 +97,18 @@ export function createMixer(
                  * @type {{ frames: number, bytes: number }[]}
                  */
                 ledger: [],
+                /**
+                 * What the ledger no longer holds.
+                 *
+                 * The cursor only moves forward, so an entry behind it is never
+                 * read again. Dropping those and carrying their totals is what
+                 * keeps `playedBytes` from walking every buffer the program has
+                 * ever written -- and it is called from every winmm entry point,
+                 * so a ledger that only grew made a game that streams sound get
+                 * steadily slower for as long as it played.
+                 */
+                retiredFrames: 0,
+                retiredBytes: 0,
                 /** Output frames this track has contributed to the ring. */
                 mixed: 0,
                 /** Of those, the ones the device has already played. */
@@ -150,22 +162,21 @@ export function createMixer(
                  * for a buffer to come back is never left a fraction short.
                  */
                 playedBytes(){
-                    let remaining = track.played();
-                    let bytes = 0;
-                    for (const entry of track.ledger)
+                    let remaining = track.played() - track.retiredFrames;
+                    while (track.ledger.length > 0
+                        && remaining >= track.ledger[0].frames)
                     {
-                        if (remaining >= entry.frames)
-                        {
-                            bytes += entry.bytes;
-                            remaining -= entry.frames;
-                            continue;
-                        }
-                        // Part-way through a buffer: credit the same share of
-                        // its bytes, so the cursor moves smoothly inside one.
-                        bytes += entry.bytes * (remaining / entry.frames);
-                        return bytes;
+                        const done = /** @type {{ frames: number, bytes: number }} */
+                            (track.ledger.shift());
+                        track.retiredFrames += done.frames;
+                        track.retiredBytes += done.bytes;
+                        remaining -= done.frames;
                     }
-                    return bytes;
+                    const head = track.ledger[0];
+                    // Part-way through a buffer: credit the same share of its
+                    // bytes, so the cursor moves smoothly inside one.
+                    return track.retiredBytes
+                        + (head ? head.bytes * (remaining / head.frames) : 0);
                 },
 
                 /** Frames of output this track still has to give. */
@@ -182,6 +193,8 @@ export function createMixer(
                 reset(){
                     track.queue = [];
                     track.ledger = [];
+                    track.retiredFrames = 0;
+                    track.retiredBytes = 0;
                     track.offset = 0;
                     track.mixed = 0;
                     track.heard = 0;

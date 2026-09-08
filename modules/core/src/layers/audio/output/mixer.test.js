@@ -152,3 +152,54 @@ test('a full ring refuses the rest instead of holding a guest thread', ()=>{
     drain(mixer, 16);
     assert.equal(mixer.pump(), 16, 'which it then gets');
 });
+
+test('a buffer that has been played reports back every byte the guest wrote', ()=>{
+    // The figure a waveOut cursor is built on. Converting frames back to bytes
+    // by the rate ratio floors, so a buffer played in full reports a fraction
+    // short and never retires -- which is how a sound library's one-buffer
+    // probe of a device waits for ever.
+    const mixer = createMixer();
+    const track = mixer.open(DIRECT);
+
+    const written = pcm16([1000, -1000, 2000, -2000]);
+    track.write(written);
+    mixer.pump();
+    mixer.ring.read(new Float32Array(2 * mixer.channels));
+
+    assert.equal(track.playedBytes(), written.length);
+});
+
+test('the ledger does not grow with everything the program has ever played', ()=>{
+    // It is walked from `settle`, which every winmm entry point reaches, so a
+    // ledger that only grew made a game that streams sound get steadily slower
+    // for as long as it played -- with the cost falling on the guest thread.
+    const mixer = createMixer();
+    const track = mixer.open(DIRECT);
+
+    let expected = 0;
+    for (let buffer = 0; buffer < 200; buffer++)
+    {
+        const written = pcm16([100, -100, 200, -200]);
+        track.write(written);
+        expected += written.length;
+        mixer.pump();
+        mixer.ring.read(new Float32Array(2 * mixer.channels));
+        assert.equal(track.playedBytes(), expected, `after buffer ${buffer}`);
+    }
+
+    assert.ok(track.ledger.length <= 1,
+        `nothing behind the cursor is kept, held ${track.ledger.length}`);
+});
+
+test('a stopped device starts counting from nothing again', ()=>{
+    const mixer = createMixer();
+    const track = mixer.open(DIRECT);
+
+    track.write(pcm16([500, -500]));
+    mixer.pump();
+    mixer.ring.read(new Float32Array(mixer.channels));
+    assert.ok(track.playedBytes() > 0);
+
+    track.reset();
+    assert.equal(track.playedBytes(), 0, 'what a stopped device played is not owed to the next one');
+});
