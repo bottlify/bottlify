@@ -1311,5 +1311,5 @@ test('a screen-space draw is recorded with what fills it', ()=>{
     assert.deepEqual(fog.depths, ['depth=1 amount=1'], 'on the camera, so not fogged');
     assert.equal(fog.screenSpace.length, 1, 'and recorded as a screen-space draw');
     assert.match(fog.screenSpace[0], /^blend=true/);
-    assert.match(fog.screenSpace[0], /textured=false/);
+    assert.match(fog.screenSpace[0], /texture=none/, 'nothing bound, said as such');
 });

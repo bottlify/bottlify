@@ -966,6 +966,27 @@ export function createRenderer(options){
         ? `${round(colour.r)},${round(colour.g)},${round(colour.b)},${round(colour.a)}`
         : '-';
 
+    /**
+     * What is bound to a stage, by format and size.
+     *
+     * The format is the half of a sprite that decides whether it has a shape
+     * at all: a texture whose alpha channel is dropped in the decode draws as
+     * the rectangle it is stored in rather than as the thing it depicts, and
+     * every other piece of state around it looks correct while it does.
+     *
+     * @param {any} texture
+     */
+    const describeTexture = texture=>{
+        if (!texture)
+        {
+            return 'none';
+        }
+        const entry = textures.get(texture);
+        return entry
+            ? `${entry.format}@${entry.width}x${entry.height}`
+            : 'untracked';
+    };
+
     /** @param {Set<string>} into @param {string} text */
     const sample = (into, text)=>{
         if (into.size < SAMPLE_LIMIT)
@@ -1026,7 +1047,17 @@ export function createRenderer(options){
                     + `(${get(D3DTSS.COLORARG1)},${get(D3DTSS.COLORARG2)})`
                     + ` alphaOp=${get(D3DTSS.ALPHAOP)}`
                     + `(${get(D3DTSS.ALPHAARG1)},${get(D3DTSS.ALPHAARG2)})`
-                    + ` textured=${(model.textures.get(0) ?? null) !== null}`);
+                    + ` texture=${describeTexture(model.textures.get(0) ?? null)}`
+                    // Where this draw's transparency is supposed to come from.
+                    // A sprite fades by its alpha, and that alpha has three
+                    // possible sources -- the texture, the vertex, the material
+                    // -- of which lighting decides which two are even consulted.
+                    + ` lit=${lighting !== null}`
+                    + ` alphaFunc=${model.renderStates.get(D3DRS.ALPHAFUNC) ?? 0}`
+                    + `/${model.renderStates.get(D3DRS.ALPHAREF) ?? 0}`
+                    + ` materialAlpha=${round(model.material?.Diffuse?.a ?? -1)}`
+                    + ` diffuseSource=${model.renderStates.get(D3DRS.DIFFUSEMATERIALSOURCE) ?? 0}`
+                    + ` colorVertex=${(model.renderStates.get(D3DRS.COLORVERTEX) ?? 0) !== 0}`);
             }
             sample(tally.fog.settings,
                 `colour=${((model.renderStates.get(D3DRS.FOGCOLOR) ?? 0) >>> 0)
