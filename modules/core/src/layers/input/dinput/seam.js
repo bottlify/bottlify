@@ -337,7 +337,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
          * note at the top of this file for why the description itself is not
          * walked, and for what a program with an unfamiliar one is told.
          */
-        SetDataFormat(device, [, format]){
+        SetDataFormat(device, [format]){
             if ((format >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -363,13 +363,13 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         },
 
         /** HRESULT SetEventNotification(HANDLE) */
-        SetEventNotification(device, [, handle]){
+        SetEventNotification(device, [handle]){
             device.setNotification(handle);
             return DI_OK;
         },
 
         /** HRESULT SetProperty(REFGUID, LPCDIPROPHEADER) */
-        SetProperty(device, [, guid, header]){
+        SetProperty(device, [guid, header]){
             if ((header >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -388,7 +388,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         },
 
         /** HRESULT GetProperty(REFGUID, LPDIPROPHEADER) */
-        GetProperty(device, [, guid, header]){
+        GetProperty(device, [guid, header]){
             if ((header >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -408,7 +408,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
          * it set: a program that set a mouse format and asks for 256 bytes has
          * a bug, and filling 256 bytes would hide it behind a smashed stack.
          */
-        GetDeviceState(device, [, size, data]){
+        GetDeviceState(device, [size, data]){
             if ((data >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -460,7 +460,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
          * `count`, and confusing them loses every event a program was told
          * about but never asked for.
          */
-        GetDeviceData(device, [, size, array, count, flags]){
+        GetDeviceData(device, [size, array, count, flags]){
             if ((count >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -502,7 +502,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         },
 
         /** HRESULT GetCapabilities(LPDIDEVCAPS) */
-        GetCapabilities(device, [, caps]){
+        GetCapabilities(device, [caps]){
             if ((caps >>> 0) === 0 || readU32(caps + DIDEVCAPS.dwSize) < DIDEVCAPS.SIZE)
             {
                 return DIERR_INVALIDPARAM;
@@ -560,7 +560,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const rootMethods = {
         /** HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN) */
-        CreateDevice(root, [, guid, out]){
+        CreateDevice(root, [guid, out]){
             if ((out >>> 0) === 0 || (guid >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -583,7 +583,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
          * rather than ignored: a program asking for IDirectInputDevice8 and
          * given an IDirectInputDevice calls slot 20 of a table with fifteen.
          */
-        CreateDeviceEx(root, [, guid, iid, out]){
+        CreateDeviceEx(root, [guid, iid, out]){
             if ((out >>> 0) === 0 || (guid >>> 0) === 0 || (iid >>> 0) === 0)
             {
                 return DIERR_INVALIDPARAM;
@@ -618,7 +618,7 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         },
 
         /** HRESULT GetDeviceStatus(REFGUID) */
-        GetDeviceStatus(root, [, guid]){
+        GetDeviceStatus(root, [guid]){
             const known = (guid >>> 0) !== 0
                 && deviceFor(guidAt(guid)) !== null;
             return known ? DI_OK : DIERR_DEVICENOTREG;

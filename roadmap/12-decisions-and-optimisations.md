@@ -251,6 +251,48 @@ lands in the middle of an earlier allocation and the header read from it is what
 The cost of honouring it is address space, which is the thing this engine has most of.
 
 
+### A18. A device's cursor advances on its own, not when the guest asks
+
+A program is entitled to hand a buffer to a wave device and then spin on the `WHDR_DONE` flag the
+device sets in that buffer's own header. The flag is the contract; a real device honours it from its
+own clock and never learns whether anyone is watching. Our wave-out cursor advanced only inside a
+`winmm` entry point, so for a program that spins rather than polls through an API the cursor never
+moved at all -- the machine ran, the guest clock ran, and the one event that would have ended the
+spin was waiting for a call that by construction would not come. Eighty per cent of one real title's
+instructions were measured sitting on that single `test`/`je` pair.
+
+So the run loop settles the devices every few turns, alongside mixing ahead into the audio ring.
+The generalisation is worth stating: anything in this engine that a guest can wait on without making
+a call has to be driven from the scheduler rather than from the call that would have driven it.
+
+### A19. A COM method receives its arguments with the interface pointer already removed
+
+`bridge/internal/vtable.js` strips the `this` pointer before calling an implementation, and says so
+in its typedef. Two seams were written as though it did not, destructuring a leading hole and so
+reading every argument one slot late. Nothing caught it because their test fixtures passed the
+pointer too, which made the fixture agree with the bug instead of with the bridge -- so DirectSound
+and DirectInput had never once worked, and a real sound engine was measured getting `E_INVALIDARG`
+from `GetCaps` and `CreateSoundBuffer` and falling back to the wave API.
+
+The rule that follows is about tests, not about arguments: a fixture that stands in for the bridge
+has to call the way the bridge calls. Both seams now have a test that drives the real vtable
+publisher by slot number over a flat buffer, pushing the interface pointer exactly as a guest does,
+so the fixture can no longer disagree with the thing it stands for.
+
+### A20. DirectShow answers, and answers that it cannot render
+
+A program that plays a cinematic builds a filter graph, asks it to render a file, runs it, and then
+sits in a modal message loop until the graph reports that the video finished, was aborted, or
+failed. With no graph at all there is no event and the loop has no exit -- the program is not
+crashed, it is waiting correctly for something that can never arrive.
+
+So the graph exists and refuses: `RenderFile` answers `VFW_E_CANNOT_RENDER` and `Run` queues
+`EC_ERRORABORT`. That is what a real machine without a decoder for the format does, and a program
+written against Windows already has the path. The alternative -- making the file appear absent so
+the program never asks -- would have been a lie about the filesystem to work around a gap in
+something else.
+
+
 ## B. Where we could go faster
 
 ### B1. The x87 helpers, emitted as guest code

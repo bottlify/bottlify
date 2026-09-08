@@ -1662,6 +1662,17 @@ export async function createApp(options){
                 // empty because the emulator was inside a long instruction.
                 sound?.pump();
 
+                // And devices that keep a cursor are moved on, whether or not
+                // the guest asked anything. A program is entitled to hand a
+                // buffer to a device and then spin on the flag the device sets
+                // in it -- the flag is the contract, and a real device honours
+                // it from its own clock. A cursor advanced only when the guest
+                // calls in is a cursor that never advances for such a program,
+                // and the spin is then forever: the machine is running, the
+                // clock is running, and the one thing that would end it is
+                // waiting for a call that will not come.
+                win32.tick?.();
+
                 // And a turn is also when anything waiting for something to
                 // arrive -- a message loop with an empty queue -- gets to look
                 // again. Taken as a batch: a waiter that goes back to waiting

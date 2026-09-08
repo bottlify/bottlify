@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import { writeGuid } from '../../win32/ole32/guid.js';
 import {
@@ -95,14 +96,20 @@ function fakeBridge(){
             byPointer.set(pointer, { object, id, methods: record.methods });
             return pointer;
         },
-        /** @param {number} pointer @param {string} name @param {number[]} args */
+        /**
+         * Calls a method the way the bridge does: the interface pointer the
+         * guest pushed identifies the object and is *not* passed on, so `args`
+         * begins at the method's first declared argument.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
         call(pointer, name, args = []){
             const entry = byPointer.get(pointer);
             assert.ok(entry, `nothing published at ${pointer}`);
             const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
             assert.ok(method, `${entry.id} has no ${name}`);
             assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
-            return method.invoke(entry.object, [pointer, ...args]) | 0;
+            return method.invoke(entry.object, args) | 0;
         },
         /** @param {number} pointer */
         methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
@@ -597,6 +604,104 @@ test('the publisher keeps one adapter per object and can find it again', ()=>{
     const pointer = publisher.publish(object, interfaces, IID_IDirectInputA);
     assert.equal(publisher.objectAt(pointer), object);
     assert.equal(publisher.objectAt(0), null);
+});
+
+/**
+ * The seam behind the bridge's own vtable publisher, over the same flat memory
+ * and called by slot number -- which is the one path a guest actually takes.
+ *
+ * The fixture above stands in for the bridge and can therefore disagree with
+ * it. This cannot: the publisher is the real one, so where a method's arguments
+ * land is decided by the code that decides it in a running program.
+ */
+function guestMachine(){
+    const memory = guestMemory();
+    /** @type {Map<number, any>} */
+    const traps = new Map();
+    let nextTrap = 1;
+    let heapNext = 0x8000;
+    const vtables = createVtables({
+        memory: {
+            /** @param {number} at @param {number} length */
+            readBytes: (at, length)=>memory.bytes.slice(at, at + length),
+            /** @param {number} at @param {Uint8Array} value */
+            writeBytes: (at, value)=>memory.bytes.set(value, at),
+            /** @param {number} at */
+            readU32: at=>memory.u32(at),
+            /** @param {number} at @param {number} value */
+            writeU32: (at, value)=>memory.setU32(at, value),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            const trap = nextTrap++;
+            traps.set(trap, fn);
+            return trap;
+        },
+        heap: {
+            /** @param {number} size */
+            allocate: size=>{
+                const at = heapNext;
+                heapNext += size + 16 & ~15;
+                return at;
+            },
+        },
+    });
+
+    const dinput = createDirectInput({
+        memory,
+        now: ()=>5000,
+        publishInterface: (object, id)=>vtables.publish(object, id),
+    });
+
+    return {
+        memory,
+        dinput,
+        /**
+         * A call as the guest makes it: the interface pointer is pushed like
+         * any other argument, and the publisher is what decides it is not one.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         */
+        call(pointer, index, args = []){
+            const entry = traps.get(memory.u32(memory.u32(pointer) + index * 4));
+            assert.ok(entry, `slot ${index} has an implementation`);
+            return entry.handler([pointer, ...args]) | 0;
+        },
+    };
+}
+
+/** @param {[string, number][]} slots @param {string} name */
+const slotOf = (slots, name)=>{
+    const index = slots.findIndex(([entry])=>entry === name);
+    assert.ok(index >= 0, `${name} is a slot`);
+    return 3 + index;
+};
+
+test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
+    const g = guestMachine();
+    assert.equal(g.dinput.libraries['DINPUT.dll']
+        .DirectInputCreateA.handler([0, 0x0700, AT.out, 0]), DI_OK);
+    const root = g.memory.u32(AT.out);
+    assert.notEqual(root, 0);
+
+    writeGuid(g.memory, AT.guid, GUID_SysKeyboard);
+    assert.equal(g.call(root, slotOf(IDIRECTINPUT_SLOTS, 'CreateDevice'),
+        [AT.guid, AT.out, 0]), DI_OK);
+    const device = g.memory.u32(AT.out);
+    assert.notEqual(device, 0);
+
+    // SetDataFormat takes one argument, and reading the slot above it would
+    // find nothing a program ever pushed there.
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'SetDataFormat'),
+        [dataFormat(g.memory, 256)]), DI_OK);
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'Acquire')), DI_OK);
+
+    // GetDeviceState(size, data): two adjacent arguments, so reading them one
+    // late takes the pointer for the size and refuses every call.
+    g.dinput.post({ kind: 'key', code: DIK_A, down: true });
+    assert.equal(g.call(device, slotOf(IDIRECTINPUTDEVICE_SLOTS, 'GetDeviceState'),
+        [256, AT.state]), DI_OK);
+    assert.equal(g.memory.bytes[AT.state + DIK_A], KEY_DOWN);
 });
 
 test('diagnostics report what a run actually did', ()=>{

@@ -91,34 +91,36 @@ keeps the dependency graph cleaner for non-React consumers.
 
 | layer | state |
 |---|---|
-| `cpu` | real. Boots the guest with our own ROM instead of a BIOS, straight into 32-bit protected mode; runs, stops, registers, physical memory, and the I/O-port trap channel the guest calls out through. |
-| `memory` | real. Region map (overlap-checked, permissioned, `protect()`) plus typed accessors; every host access to guest memory goes through it. |
-| `loader` | real. Maps a PE32 image, applies relocations, binds imports, registers the region it occupies. |
-| `kernel` | real. Threads with a stack and a context each, a round-robin scheduler whose quantum is counted in retired guest instructions, one context-switch primitive, events/mutexes/semaphores, the handle table, and a virtual clock. |
-| `bridge` | real. The trap channel's host half: a call is marshalled by its calling convention (stdcall, cdecl, thiscall), invoked, and its result placed — or the caller is parked and says so with a token nothing else can produce. It also calls the other way, into guest code, and puts COM interfaces into guest memory. |
-| `loader` (synthesis) | real. A system library is a genuine PE image in guest memory with an export directory and JMP trampolines, so a program that resolves a name at runtime or walks exports itself finds our implementations. |
-| `win32` | kernel32 (console, threads and synchronisation, heap, TLS, last error, modules, tracing), msvcrt (cdecl, including `qsort` through a guest comparator), user32 (window classes, windows, the message queue), gdi32's bookkeeping half (device contexts, GDI objects, metrics), advapi32 with the registry, ole32 (GUIDs, apartments, class registry, task memory). |
-| `log`, `filesystem`, `graphics`, `audio`, `input` | still stubs: every method throws `NOT_IMPLEMENTED` and `diagnostics()` reports `status: "stub"`. |
+| `cpu` | Boots the guest with our own ROM instead of a BIOS, straight into 32-bit protected mode; runs, stops, registers, physical memory, the FPU, and the I/O-port trap channel the guest calls out through. |
+| `memory` | Region map (overlap-checked, permissioned, `protect()`) plus typed accessors; every host access to guest memory goes through it. |
+| `loader` | Maps a PE32 image, applies relocations, binds the import and the delay-load directories, and synthesises a real in-guest module per system library -- export directory and trampolines -- so a program that resolves a name at run time finds our implementation at the address its import was bound to. |
+| `kernel` | Threads with a stack and a context each, a round-robin scheduler whose quantum is retired guest instructions, one context-switch primitive, events, mutexes and semaphores with timed waits, the handle table, and a virtual clock credited with the time the guest really ran. |
+| `bridge` | The trap channel's host half: a call is marshalled by its calling convention, invoked, and its result placed -- or the caller is parked and says so with a token nothing else can produce. It calls the other way too, into guest code, and publishes COM interfaces into guest memory. |
+| `filesystem` | A tree with a bundle behind it: a game's installation is read on demand, block by block, and a read whose blocks are not resident yet answers with a promise the bridge parks the guest on. |
+| `win32` | kernel32, msvcrt, user32 (classes, windows, the message queue), gdi32's bookkeeping half, advapi32 with the registry, ole32, winmm, wsock32, imm32, shell32, comctl32, comdlg32, version, wininet, ntdll, and a DirectShow filter graph that reports honestly that it cannot render a format nothing here decodes. |
+| `graphics` | Draws. DirectDraw, Direct3D 7 and Direct3D 8 seams over a WebGPU backend; a guest program's triangle is rendered on a real GPU and checked byte-for-byte against named pixels. |
+| `audio` | The wave-out surface feeds a mixer, which converts every source to one format and writes ahead into a ring in shared memory; a WebAudio worklet reads the other end, and its read index is what a program's play cursor is built on. DirectSound models its buffers and their cursors but does not yet reach the mixer. |
+| `input` | Keyboard, mouse and gamepad, routed into both readings a Win32 program takes at once -- the window message queue and DirectInput's polled state. |
+| `media` | An FFmpeg build compiled to WebAssembly, wrapped as open/decode/pull: one clip at a time, video frames as BGRA and audio as signed 16-bit. It is its own layer because a clip is both at once and belongs to neither the drawing nor the sound API. |
+| `log` | Ring buffers, a phase profiler, and guest CPU attribution. |
 
-A stub is a valid state, not a gap to route around: a build without a layer comes up and reports
-itself. Implementing one means replacing its `module.js` behind the same `name`/`requires` contract —
-the registry, host scoping and boundary checker do not change.
+A stub is still a valid state, not a gap to route around: a build with a layer disabled comes up and
+reports itself. Implementing one means replacing its `module.js` behind the same `name`/`requires`
+contract -- the registry, host scoping and boundary checker do not change.
 
 Known limitations worth stating plainly:
 
-- **Nothing draws.** `gdi32`'s drawing half and every DirectX interface belong to the graphics
-  layer; what exists here is the state they will draw from.
-- **No files.** The filesystem layer is a stub, so anything file-shaped in the API surface has no
-  backing store yet.
-- **Waits are untimed.** `WaitForSingleObject` implements `INFINITE` and a zero timeout; anything
-  else is refused loudly, because a timeout that never expires produces a program that looks fine
-  until it hangs. Timed waits need the clock to drive expiry.
+- **No video is decoded yet.** The filter graph exists and refuses, and the decoder that would let
+  it stop refusing is built but not yet wired to it. The decoder's WebAssembly artifact is not in
+  git: `npm run fetch:video-decoder` downloads it against a lock file, and
+  `npm run build:video-decoder` rebuilds it in a container. A build without it comes up and reports
+  `available() === false`.
+- **A frame is presented, a game is not yet playable.** One real title boots end to end -- it maps
+  its own libraries, opens its archives, creates a device and presents -- and stops short of its
+  menu. That is where the work is.
 - **The preemption point is one page wide.** A slice is bounded by retired instructions, but the
   emulator compiles per 4 KiB page and a hot loop inside one compiled block runs to the end of that
   block regardless of the quantum asked for.
-- **Relocations are untested against a real image.** The code path exists and is covered for the
-  refusal case, but the current fixture has no `.reloc`, so the `delta != 0` path has never run on a
-  real binary.
 - **The image is mapped as one span** with the widest access its sections ask for; per-section
   permissions wait until something other than the loader writes there.
 - **Module state is per-process, not per-build.** `diagnostics()` is part of the module contract and
@@ -126,13 +128,13 @@ Known limitations worth stating plainly:
   build in one process would collide.
 
 The only concrete engine dependency wired in is the vendored v86 submodule
-(`modules/core/vendor/v86`, pinned by commit) — reachable, by construction (`check:boundaries`),
+(`modules/core/vendor/v86`, pinned by commit) -- reachable, by construction (`check:boundaries`),
 only from `src/layers/cpu/`.
 
-## Toolchain gotchas found during Phase 0 review
+## Toolchain gotchas worth keeping
 
-Kept here because they're generic enough to bite other npm-workspaces + `tsc --checkJs` projects,
-not just this one:
+Kept here because they are generic enough to bite other npm-workspaces + `tsc --checkJs`
+projects, not just this one:
 
 - **A transitive devDependency can break `tsc --checkJs` on unrelated files.** `@types/node`'s
   `process.d.ts` contains `typeof import("punycode")` (typing `process.getBuiltinModule`). Its own

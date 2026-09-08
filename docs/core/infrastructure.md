@@ -33,6 +33,9 @@ modules/core/src/layers/
 ├── loader/                # PE: headers, relocations, imports, TLS, in-guest module synthesis
 ├── log/                   # ✦ levels, categories, ring buffers, sinks
 ├── filesystem/            # ✦ VFS, OPFS, CoW overlay, sessions, registry
+├── media/                 # ✦ cinematics: containers and codecs decoded to BGRA frames + PCM
+│                          #   (requires log only — a clip carries video and audio at once, so this
+│                          #    sits beside filesystem rather than inside graphics or audio)
 │
 ├── win32/                 # guest-visible ABI — one directory per DLL
 │   ├── kernel32/

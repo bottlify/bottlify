@@ -6,6 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import {
     createDirectSound, createPublisher, describe,
@@ -91,8 +92,11 @@ function fakeBridge(){
             return this.publishInterface(entry.object, id);
         },
         /**
-         * Calls a method the way the bridge does: `this` is the first argument
-         * and the object is passed alongside.
+         * Calls a method the way the bridge does: the interface pointer the
+         * guest pushed identifies the object and is *not* passed on, so `args`
+         * begins at the method's first declared argument. A fixture that hands
+         * the pointer through as well shifts every argument by one and agrees
+         * with an implementation that reads them at the wrong offsets.
          *
          * @param {number} pointer @param {string} name @param {number[]} args
          */
@@ -102,7 +106,7 @@ function fakeBridge(){
             const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
             assert.ok(method, `${entry.id} has no ${name}`);
             assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
-            return method.invoke(entry.object, [pointer, ...args]) | 0;
+            return method.invoke(entry.object, args) | 0;
         },
         /** @param {number} pointer */
         methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
@@ -575,6 +579,114 @@ test('the publisher keeps one adapter per object and can find it again', ()=>{
     assert.equal(publisher.objectAt(second), object);
     assert.equal(publisher.objectAt(0), null, 'a null pointer is a legitimate argument');
     assert.equal(publisher.count(), 2);
+});
+
+/**
+ * The seam behind the bridge's own vtable publisher, over the same flat memory
+ * and called by slot number -- which is the one path a guest actually takes.
+ *
+ * The fixture above stands in for the bridge and can therefore disagree with
+ * it. This cannot: the publisher is the real one, so where a method's arguments
+ * land is decided by the code that decides it in a running program.
+ */
+function guestMachine(){
+    const memory = guestMemory();
+    /** @type {Map<number, any>} */
+    const traps = new Map();
+    let nextTrap = 1;
+    let heapNext = 0x8000;
+    const vtables = createVtables({
+        memory: {
+            /** @param {number} at @param {number} length */
+            readBytes: (at, length)=>memory.bytes.slice(at, at + length),
+            /** @param {number} at @param {Uint8Array} value */
+            writeBytes: (at, value)=>memory.bytes.set(value, at),
+            /** @param {number} at */
+            readU32: at=>memory.u32(at),
+            /** @param {number} at @param {number} value */
+            writeU32: (at, value)=>memory.setU32(at, value),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            const trap = nextTrap++;
+            traps.set(trap, fn);
+            return trap;
+        },
+        heap: {
+            /** @param {number} size */
+            allocate: size=>{
+                const at = heapNext;
+                heapNext += size + 16 & ~15;
+                return at;
+            },
+        },
+    });
+
+    let storage = 0x60000;
+    const dsound = createDirectSound({
+        memory,
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = storage;
+            storage += bytes + 0xfff & ~0xfff;
+            return at;
+        },
+        now: ()=>1000,
+        publishInterface: (object, id)=>vtables.publish(object, id),
+    });
+
+    return {
+        memory,
+        dsound,
+        /**
+         * A call as the guest makes it: the interface pointer is pushed like
+         * any other argument, and the publisher is what decides it is not one.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         */
+        call(pointer, index, args = []){
+            const entry = traps.get(memory.u32(memory.u32(pointer) + index * 4));
+            assert.ok(entry, `slot ${index} has an implementation`);
+            return entry.handler([pointer, ...args]) | 0;
+        },
+    };
+}
+
+/** @param {[string, number][]} slots @param {string} name */
+const slotOf = (slots, name)=>{
+    const index = slots.findIndex(([entry])=>entry === name);
+    assert.ok(index >= 0, `${name} is a slot`);
+    return 3 + index;
+};
+
+test('a method reaches the arguments the guest pushed, at the offsets it pushed them', ()=>{
+    const g = guestMachine();
+    const out = 0x1000;
+    assert.equal(
+        g.dsound.libraries['DSOUND.dll'].DirectSoundCreate.handler([0, out, 0]), DS_OK);
+    const root = g.memory.u32(out);
+    assert.notEqual(root, 0);
+
+    // GetCaps(LPDSCAPS) takes one argument and it is the last one pushed, so a
+    // handler reading one slot further along finds whatever is above it.
+    const caps = 0x1200;
+    g.memory.setU32(caps + DSCAPS.dwSize, DSCAPS.SIZE);
+    assert.equal(g.call(root, slotOf(IDIRECTSOUND_SLOTS, 'GetCaps'), [caps]), DS_OK);
+    assert.equal(g.memory.u32(caps + DSCAPS.dwPrimaryBuffers), 1);
+
+    // CreateSoundBuffer(desc, out, outer): three arguments, and reading them
+    // one late takes the descriptor for the buffer the caller asked for.
+    const descriptor = describeBuffer(g.memory, { bytes: 8192 });
+    const buffer = 0x1300;
+    assert.equal(g.call(root, slotOf(IDIRECTSOUND_SLOTS, 'CreateSoundBuffer'),
+        [descriptor, buffer, 0]), DS_OK);
+    assert.notEqual(g.memory.u32(buffer), 0);
+    assert.equal(g.dsound.buffers()[0].bytes, 8192);
+
+    const bufferCaps = 0x1400;
+    g.memory.setU32(bufferCaps + DSBCAPS.dwSize, DSBCAPS.SIZE);
+    assert.equal(g.call(g.memory.u32(buffer),
+        slotOf(IDIRECTSOUNDBUFFER_SLOTS, 'GetCaps'), [bufferCaps]), DS_OK);
+    assert.equal(g.memory.u32(bufferCaps + DSBCAPS.dwBufferBytes), 8192);
 });
 
 test('diagnostics report what a run actually did', ()=>{

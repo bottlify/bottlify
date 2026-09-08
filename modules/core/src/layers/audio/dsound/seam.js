@@ -354,7 +354,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const notifyMethods = {
         /** HRESULT SetNotificationPositions(DWORD count, LPCDSBPOSITIONNOTIFY) */
-        SetNotificationPositions(buffer, [, count, array]){
+        SetNotificationPositions(buffer, [count, array]){
             const wanted = count >>> 0;
             if (wanted > 0 && (array >>> 0) === 0)
             {
@@ -377,7 +377,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const bufferMethods = {
         /** HRESULT GetCurrentPosition(LPDWORD play, LPDWORD write) */
-        GetCurrentPosition(buffer, [, play, write]){
+        GetCurrentPosition(buffer, [play, write]){
             deliver(buffer);
             const { play: at, write: ahead } = buffer.cursors();
             writeU32(play, at);
@@ -386,7 +386,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetStatus(LPDWORD status) */
-        GetStatus(buffer, [, status]){
+        GetStatus(buffer, [status]){
             deliver(buffer);
             if ((status >>> 0) === 0)
             {
@@ -397,7 +397,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT Play(DWORD reserved, DWORD priority, DWORD flags) */
-        Play(buffer, [, , , flags]){
+        Play(buffer, [, , flags]){
             buffer.play(flags >>> 0);
             return DS_OK;
         },
@@ -410,7 +410,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT SetCurrentPosition(DWORD position) */
-        SetCurrentPosition(buffer, [, position]){
+        SetCurrentPosition(buffer, [position]){
             buffer.setCurrentPosition(position);
             return DS_OK;
         },
@@ -419,7 +419,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
          * HRESULT Lock(DWORD offset, DWORD bytes, LPVOID* p1, LPDWORD n1,
          *              LPVOID* p2, LPDWORD n2, DWORD flags)
          */
-        Lock(buffer, [, offset, bytes, p1, n1, p2, n2, flags]){
+        Lock(buffer, [offset, bytes, p1, n1, p2, n2, flags]){
             if ((p1 >>> 0) === 0 || (n1 >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -442,7 +442,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetCaps(LPDSBCAPS caps) */
-        GetCaps(buffer, [, caps]){
+        GetCaps(buffer, [caps]){
             if ((caps >>> 0) === 0 || readU32(caps + DSBCAPS.dwSize) < DSBCAPS.SIZE)
             {
                 return DSERR_INVALIDPARAM;
@@ -455,7 +455,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetFormat(LPWAVEFORMATEX, DWORD size, LPDWORD written) */
-        GetFormat(buffer, [, format, size, written]){
+        GetFormat(buffer, [format, size, written]){
             if ((format >>> 0) !== 0)
             {
                 if ((size >>> 0) < WAVEFORMATEX.SIZE)
@@ -469,7 +469,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetVolume(LPLONG) */
-        GetVolume(buffer, [, out]){
+        GetVolume(buffer, [out]){
             if ((out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -478,12 +478,12 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             return DS_OK;
         },
         /** HRESULT SetVolume(LONG) */
-        SetVolume(buffer, [, value]){
+        SetVolume(buffer, [value]){
             buffer.setVolume(value | 0);
             return DS_OK;
         },
         /** HRESULT GetPan(LPLONG) */
-        GetPan(buffer, [, out]){
+        GetPan(buffer, [out]){
             if ((out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -492,12 +492,12 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             return DS_OK;
         },
         /** HRESULT SetPan(LONG) */
-        SetPan(buffer, [, value]){
+        SetPan(buffer, [value]){
             buffer.setPan(value | 0);
             return DS_OK;
         },
         /** HRESULT GetFrequency(LPDWORD) */
-        GetFrequency(buffer, [, out]){
+        GetFrequency(buffer, [out]){
             if ((out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -506,7 +506,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             return DS_OK;
         },
         /** HRESULT SetFrequency(DWORD) */
-        SetFrequency(buffer, [, hz]){
+        SetFrequency(buffer, [hz]){
             buffer.setFrequency(hz >>> 0);
             return DS_OK;
         },
@@ -531,7 +531,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
     /** @type {Record<string, (target: any, args: number[]) => number>} */
     const soundMethods = {
         /** HRESULT CreateSoundBuffer(LPCDSBUFFERDESC, LPDIRECTSOUNDBUFFER*, IUnknown*) */
-        CreateSoundBuffer(root, [, descriptor, out]){
+        CreateSoundBuffer(root, [descriptor, out]){
             if ((descriptor >>> 0) === 0 || (out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -569,7 +569,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT DuplicateSoundBuffer(LPDIRECTSOUNDBUFFER, LPDIRECTSOUNDBUFFER*) */
-        DuplicateSoundBuffer(root, [, original, out]){
+        DuplicateSoundBuffer(root, [original, out]){
             const source = publisher.objectAt(original);
             if (!source || (out >>> 0) === 0)
             {
@@ -601,7 +601,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetCaps(LPDSCAPS) */
-        GetCaps(root, [, caps]){
+        GetCaps(root, [caps]){
             if ((caps >>> 0) === 0 || readU32(caps + DSCAPS.dwSize) < DSCAPS.SIZE)
             {
                 return DSERR_INVALIDPARAM;
@@ -620,7 +620,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         },
 
         /** HRESULT GetSpeakerConfig(LPDWORD) */
-        GetSpeakerConfig(root, [, out]){
+        GetSpeakerConfig(root, [out]){
             if ((out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
