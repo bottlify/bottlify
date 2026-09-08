@@ -35,6 +35,7 @@ import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions } from './winmm/functions.js';
+import { createWaveNotifier } from './winmm/notify.js';
 import { createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { createVersionFunctions } from './version/functions.js';
@@ -220,6 +221,46 @@ export const win32Module = {
             currentThread: ()=>kernel.currentThread(),
             registry: createSocketRegistry({
                 adapter: config?.network ?? createLoopbackAdapter(),
+            }),
+        });
+
+        // Built here rather than with the other tables because two things need
+        // it: the library a program links against, and whoever drives the
+        // machine, which has to move the play cursor from outside a guest call.
+        const winmm = createWinmmFunctions({
+            readMemory,
+            writeMemory,
+            // The guest's clock, never the host's. A frame loop that timed an
+            // interval with one and read it with another would disagree with
+            // itself about how long its own frame took.
+            now: ()=>kernel.clock.virtualTime(),
+            // Where the samples go, when anything is listening. The audio layer
+            // is above this one and cannot be imported from here, so the
+            // assembling caller hands it down -- as a thunk, because audio is
+            // built after win32 and does not exist yet when this configuration
+            // is read.
+            output: config?.output,
+            // Honouring what waveOutOpen was asked for. A program that asked to
+            // be called back does not poll the flags, so accepting the request
+            // and never delivering it leaves it waiting for something that
+            // cannot arrive.
+            notify: createWaveNotifier({
+                callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
+                /** @param {import('./user32/messages.js').PostedMessage} message */
+                post: message=>queue.post(message),
+                // A stale or mistyped handle is the program's mistake and not
+                // ours to fault on: resolving throws, and nothing an audio
+                // device does should stop the machine.
+                /** @param {number} handle */
+                signal: handle=>{
+                    try
+                    {
+                        kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                    }
+                    catch (e){
+                        void e;
+                    }
+                },
             }),
         });
 
@@ -488,20 +529,7 @@ export const win32Module = {
             'WS2_32.dll': winsock.sockets,
             'MSWSOCK.dll': winsock.extensions,
 
-            'WINMM.dll': createWinmmFunctions({
-                readMemory,
-                writeMemory,
-                // The guest's clock, never the host's. A frame loop that timed
-                // an interval with one and read it with another would disagree
-                // with itself about how long its own frame took.
-                now: ()=>kernel.clock.virtualTime(),
-                // Where the samples go, when anything is listening. The audio
-                // layer is above this one and cannot be imported from here, so
-                // the assembling caller hands it down -- as a thunk, because
-                // audio is built after win32 and does not exist yet when this
-                // configuration is read.
-                output: config?.output,
-            }),
+            'WINMM.dll': winmm.table,
 
             'COMCTL32.dll': createComctlFunctions({ readMemory, writeMemory }),
 
@@ -645,6 +673,17 @@ export const win32Module = {
              * and so does whoever is driving the machine.
              */
             queue: ()=>queue,
+
+            /**
+             * Moves every open wave device's play cursor.
+             *
+             * Called by whoever drives the machine, on its own schedule, because
+             * nothing inside the guest will: the cursor advances only while a
+             * winmm entry point is running, and a program waiting for a buffer
+             * by spinning on WHDR_DONE in its own header calls nothing at all.
+             * Without this that wait cannot end.
+             */
+            waveTick: ()=>winmm.tick(),
 
             /** The registry, whose contents outlive the process (§9). */
             registry: ()=>hive,

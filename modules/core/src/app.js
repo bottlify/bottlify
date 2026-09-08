@@ -1562,6 +1562,10 @@ export async function createApp(options){
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;
 
+    /** The guest's own clock, and the host clock it is credited from. */
+    const clock = core.api('kernel').clock;
+    const clockSource = ()=>Date.now();
+
     /**
      * How often the run loop leaves the microtask queue entirely.
      *
@@ -1671,7 +1675,7 @@ export async function createApp(options){
                 // and the spin is then forever: the machine is running, the
                 // clock is running, and the one thing that would end it is
                 // waiting for a call that will not come.
-                win32.tick?.();
+                win32.waveTick?.();
 
                 // And a turn is also when anything waiting for something to
                 // arrive -- a message loop with an empty queue -- gets to look
@@ -1726,6 +1730,7 @@ export async function createApp(options){
                 }
 
                 let step;
+                const startedAt = clockSource();
                 try
                 {
                     step = kernel.runOnce();
@@ -1745,6 +1750,22 @@ export async function createApp(options){
                     // the state that explains it is about to be lost.
                     throw fail('guest', e);
                 }
+
+                // The guest ran for real, so its clock moves. Nothing else in
+                // the engine does this, and without it the clock only ever
+                // advanced when a program waited -- so a program that does not
+                // wait sees no time pass at all. That is not a small error: a
+                // frame loop concludes its frame took no time, a timed wait
+                // never expires, and a device whose cursor runs on the clock
+                // never finishes a buffer, which strands a program spinning on
+                // the flag that buffer would have set.
+                //
+                // Credited from the host's wall clock rather than from retired
+                // instructions, because what a program is measuring is how long
+                // its own work took, and on a machine this slow that really is
+                // the wall time. A slow machine is a slow machine; a machine
+                // where no time passes is a broken one.
+                clock.advance(Math.max(0, clockSource() - startedAt));
 
                 if (!step.ran)
                 {

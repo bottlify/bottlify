@@ -13,6 +13,8 @@
     "build": "npm run build -w @bottlify/core",
     "build:v86": "npm run build:v86 -w @bottlify/core --",
     "fetch:v86": "npm run fetch:v86 -w @bottlify/core",
+    "build:video-decoder": "node tools/build-video-decoder/build.mjs",
+    "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
     "typecheck": "npm run typecheck -w @bottlify/core",
     "lint": "eslint . --max-warnings 0",

@@ -34,6 +34,29 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## FFmpeg — video and audio decoding
+
+- Source: https://github.com/FFmpeg/FFmpeg, release tag `n6.1` (the exact commit is recorded in
+  `video-decoder.manifest.json`, published beside the artifact it produced)
+- Build definition in this repository: `tools/build-video-decoder/`
+- Distributed artifact: `video-decoder.wasm`, a WebAssembly build, fetched into
+  `modules/core/vendor/prebuilt/` by `npm run fetch:video-decoder`. It is a build artifact and is
+  not committed to this repository.
+- License: LGPL-2.1-or-later
+
+The build passes neither `--enable-gpl` nor `--enable-nonfree`, so no GPL-licensed and no
+non-redistributable component is compiled in; the result is FFmpeg under the LGPL, distributed
+alongside this MPL-2.0 product as a separately licensed component rather than merged into it.
+Adding either flag would relicense the artifact, and `tools/build-video-decoder/build-decoder.sh`
+says so where the flags are.
+
+The corresponding source is FFmpeg's own, at the tag above, unmodified: this repository patches
+nothing in it and adds only its own `decoder.c`, which is original work under the MPL. The
+configure flags that select the components are in the build script, so the artifact can be
+rebuilt from the upstream source by anyone who has it.
+
+FFmpeg's full license text ships with that source tree (`COPYING.LGPLv2.1`).
+
 ## Wine conformance expectations — used as a specification
 
 Wine and the Win32 specifications are used only as a source of knowledge about API behavior;

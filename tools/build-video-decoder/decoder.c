@@ -18,6 +18,7 @@
  */
 
 #include <stdint.h>
+#include <stdio.h>   /* SEEK_SET / SEEK_CUR / SEEK_END, for the seek callback */
 #include <stdlib.h>
 #include <string.h>
 
@@ -283,6 +284,7 @@ int32_t media_open(uint8_t *data, int32_t size){
     }
     if (!data || size <= 0)
     {
+        free(data);
         return MEDIA_ERR_FORMAT;
     }
 
@@ -297,6 +299,7 @@ int32_t media_open(uint8_t *data, int32_t size){
     }
     if (id < 0)
     {
+        free(data);
         return MEDIA_ERR_LIMIT;
     }
 

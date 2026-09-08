@@ -13,6 +13,7 @@ import { inputModule } from './input/module.js';
 import { kernelModule } from './kernel/module.js';
 import { loaderModule } from './loader/module.js';
 import { logModule } from './log/module.js';
+import { mediaModule } from './media/module.js';
 import { memoryModule } from './memory/module.js';
 import { win32Module } from './win32/module.js';
 
@@ -30,6 +31,7 @@ export function defaultModules(){
         bridgeModule,
         loaderModule,
         filesystemModule,
+        mediaModule,
         win32Module,
         graphicsModule,
         audioModule,

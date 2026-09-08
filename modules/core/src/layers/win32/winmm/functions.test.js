@@ -7,6 +7,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createWinmmFunctions } from './functions.js';
+import { createWaveNotifier } from './notify.js';
+
+const MM_WOM_OPEN = 0x3bb;
+const MM_WOM_CLOSE = 0x3bc;
+const MM_WOM_DONE = 0x3bd;
+
+const CALLBACK_WINDOW = 0x00010000;
+const CALLBACK_FUNCTION = 0x00030000;
+const CALLBACK_EVENT = 0x00050000;
 
 /** 44.1 kHz, 16 bit, stereo: 176400 bytes a second, which is the arithmetic below. */
 const BYTES_PER_SECOND = 176400;
@@ -18,15 +27,17 @@ function machine(){
     /** @type {any[]} */
     const notices = [];
 
-    const host = {
+    const host = /** @type {import('./functions.js').WinmmHost} */ ({
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>memory.slice(address, address + length),
         /** @param {number} address @param {Uint8Array} bytes */
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         now: ()=>clock,
         /** @param {any} notice */
-        notify: (/** @type {any} */ notice)=>notices.push(notice),
-    };
+        notify: notice=>{
+            notices.push(notice);
+        },
+    });
 
     /** @param {number} at @param {number} value */
     const put32 = (at, value)=>memory.set(new Uint8Array([
@@ -36,25 +47,35 @@ function machine(){
     const get32 = at=>(memory[at] | memory[at + 1] << 8
         | memory[at + 2] << 16 | memory[at + 3] << 24) >>> 0;
 
+    const engine = /** @type {any} */ (createWinmmFunctions(host));
+
     return {
         memory, host, notices, put32, get32,
-        winmm: /** @type {any} */ (createWinmmFunctions(host)),
+        winmm: engine.table,
+        /** What the machine's driver does from outside any guest call. */
+        pulse: ()=>engine.tick(),
         /** @param {number} ms */
         tick: ms=>{
             clock += ms;
         },
+        /** Only the buffer-came-back ones; open and close are notices too. */
+        done: ()=>notices.filter((/** @type {any} */ n)=>n.message === MM_WOM_DONE),
         at: ()=>clock,
     };
 }
 
 /** A WAVEFORMATEX at 0x100 and an opened device. @param {any} m */
-function opened(m, flags = 0){
+function opened(m, flags = 0, callback = 0){
     m.put32(0x100, 16 | 2 << 16); // wFormatTag = PCM, nChannels = 2
     m.put32(0x104, 44100);
     m.put32(0x108, BYTES_PER_SECOND);
     m.put32(0x10c, 4 | 16 << 16); // nBlockAlign, wBitsPerSample
 
-    assert.equal(m.winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, flags]), 0);
+    // A callback form is owed MM_WOM_OPEN, and delivering that means running
+    // guest code -- so the answer may be a promise. The handle is written
+    // before either way, which is the point of the ordering.
+    const answer = m.winmm.waveOutOpen.handler([0x200, 0, 0x100, callback, 0x1234, flags]);
+    assert.ok(answer === 0 || typeof answer?.then === 'function', 'the device opened');
     return m.get32(0x200);
 }
 
@@ -108,8 +129,8 @@ test('a buffer comes back after the time its own bytes take', ()=>{
     m.winmm.waveOutGetID.handler([device, 0x210]);
     assert.equal(m.get32(at + 16) & WHDR_DONE, WHDR_DONE);
     assert.equal(m.get32(at + 16) & WHDR_INQUEUE, 0, 'and the device has let it go');
-    assert.equal(m.notices.length, 1, 'the caller was told once');
-    assert.equal(m.notices[0].param, at, 'and told which buffer');
+    assert.equal(m.done().length, 1, 'the caller was told once');
+    assert.equal(m.done()[0].param, at, 'and told which buffer');
 });
 
 test('the cursor does not run while nothing is queued', ()=>{
@@ -162,7 +183,7 @@ test('two buffers come back in the order they were written', ()=>{
     m.tick(110);
     m.winmm.waveOutGetID.handler([device, 0x210]);
     assert.equal(m.get32(second + 16) & WHDR_DONE, WHDR_DONE);
-    assert.deepEqual(m.notices.map((/** @type {any} */ n)=>n.param), [first, second]);
+    assert.deepEqual(m.done().map((/** @type {any} */ n)=>n.param), [first, second]);
 });
 
 test('an unprepared buffer is refused, and a queued one cannot be unprepared', ()=>{
@@ -255,4 +276,234 @@ test('a device with no byte rate in its format is refused, not stalled', ()=>{
     }
     assert.equal(m.winmm.waveOutOpen.handler([0x200, 0, 0x100, 0, 0, 0]), 11,
         'MMSYSERR_INVALPARAM');
+});
+
+test('a driven device retires buffers without the program asking anything', ()=>{
+    // The one that matters. A program may wait for a buffer by spinning on
+    // WHDR_DONE in its own header -- on Windows another thread sets it -- and
+    // while it spins it calls nothing at all. Nothing inside the guest would
+    // ever move the cursor, so without a tick from outside the wait is a
+    // deadlock by construction.
+    const m = machine();
+    const device = opened(m);
+    const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, at, 32]);
+
+    m.tick(150);
+    m.pulse();
+    assert.equal(m.get32(at + 16) & WHDR_DONE, WHDR_DONE,
+        'the flag the program is spinning on was set with no call from it');
+    assert.equal(m.done().length, 1, 'and the notification went out too');
+});
+
+test('a tick on a device with nothing queued costs nothing', ()=>{
+    const m = machine();
+    const device = opened(m);
+    m.tick(5000);
+    m.pulse();
+    m.pulse();
+
+    const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, at, 32]);
+    m.tick(1);
+    m.pulse();
+    assert.equal(m.get32(at + 16) & WHDR_DONE, 0,
+        'five seconds of ticking through silence bought the buffer nothing');
+});
+
+test('the open and close of a device are notices of their own', ()=>{
+    const m = machine();
+    const device = opened(m);
+    assert.deepEqual(m.notices.map((/** @type {any} */ n)=>n.message), [MM_WOM_OPEN]);
+    assert.equal(m.notices[0].device, device, 'and it names the handle just handed out');
+
+    assert.equal(m.winmm.waveOutClose.handler([device]), 0);
+    assert.deepEqual(m.notices.map((/** @type {any} */ n)=>n.message),
+        [MM_WOM_OPEN, MM_WOM_CLOSE]);
+});
+
+test('reset returns every queued buffer, in order, with a notice each', ()=>{
+    const m = machine();
+    const device = opened(m);
+    const first = header(m, device, 0x300, BYTES_PER_SECOND);
+    const second = header(m, device, 0x340, BYTES_PER_SECOND);
+    m.winmm.waveOutWrite.handler([device, first, 32]);
+    m.winmm.waveOutWrite.handler([device, second, 32]);
+
+    assert.equal(m.winmm.waveOutReset.handler([device]), 0);
+    assert.deepEqual(m.done().map((/** @type {any} */ n)=>n.param), [first, second]);
+});
+
+test('a build with no notify behaves exactly as it did', ()=>{
+    // The flags are the contract; the notification is on top of it. A host that
+    // cannot reach guest code is not a broken one, and a program that polls
+    // must not be able to tell the difference.
+    const memory = new Uint8Array(0x1000);
+    let clock = 1000;
+    const winmm = /** @type {any} */ (createWinmmFunctions({
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        now: ()=>clock,
+    })).table;
+
+    /** @param {number} at @param {number} value */
+    const put32 = (at, value)=>memory.set(new Uint8Array([
+        value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+    ]), at);
+    put32(0x100, 16 | 2 << 16);
+    put32(0x104, 44100);
+    put32(0x108, BYTES_PER_SECOND);
+    put32(0x10c, 4 | 16 << 16);
+    assert.equal(winmm.waveOutOpen.handler([0x200, 0, 0x100, 0x9000, 0, CALLBACK_FUNCTION]), 0);
+
+    const device = memory[0x200] | memory[0x201] << 8;
+    put32(0x300, 0x800);
+    put32(0x304, BYTES_PER_SECOND / 10);
+    put32(0x310, 0);
+    assert.equal(winmm.waveOutPrepareHeader.handler([device, 0x300, 32]), 0);
+    assert.equal(winmm.waveOutWrite.handler([device, 0x300, 32]), 0,
+        'a plain number, not a promise');
+
+    clock += 150;
+    assert.equal(winmm.waveOutGetID.handler([device, 0x210]), 0);
+    assert.equal(memory[0x310] & WHDR_DONE, WHDR_DONE, 'and the flag still arrives');
+});
+
+test('a callback that runs guest code parks the entry point that retired the buffer', async()=>{
+    // The callback form is the only one that cannot answer at once: running
+    // guest code means stopping the thread that called, which a handler can
+    // only do by returning a promise.
+    const m = machine();
+    /** @type {any[]} */
+    const calls = [];
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    m.host.notify = (/** @type {any} */ notice)=>{
+        calls.push(notice);
+        return new Promise(resolve=>{
+            answer = resolve;
+        });
+    };
+
+    const device = opened(m, CALLBACK_FUNCTION, 0x38230b0);
+    assert.equal(calls.length, 1, 'the open notice went first');
+    answer(0);
+    await Promise.resolve();
+
+    const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, at, 32]);
+    m.tick(150);
+
+    const pending = m.winmm.waveOutGetID.handler([device, 0x210]);
+    assert.equal(typeof pending.then, 'function', 'the entry point is waiting');
+    assert.equal(m.get32(at + 16) & WHDR_DONE, WHDR_DONE,
+        'and the flag was set before the callback was entered, not after');
+    answer(0);
+    assert.equal(await pending, 0, 'then it answers what it always would have');
+});
+
+test('several buffers retiring at once are delivered one at a time, in order', async()=>{
+    const m = machine();
+    /** @type {number[]} */
+    const entered = [];
+    /** @type {(() => void)[]} */
+    const waiting = [];
+    m.host.notify = (/** @type {any} */ notice)=>{
+        if (notice.message !== MM_WOM_DONE)
+        {
+            return;
+        }
+        entered.push(notice.param);
+        return new Promise(resolve=>waiting.push(()=>resolve(0)));
+    };
+
+    const device = opened(m, CALLBACK_FUNCTION, 0x9000);
+    const first = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    const second = header(m, device, 0x340, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, first, 32]);
+    m.winmm.waveOutWrite.handler([device, second, 32]);
+
+    m.tick(500);
+    const pending = m.winmm.waveOutGetID.handler([device, 0x210]);
+    assert.deepEqual(entered, [first],
+        'the second is not entered while the first is still running');
+
+    waiting.shift()?.();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.deepEqual(entered, [first, second], 'and then it is');
+    waiting.shift()?.();
+    assert.equal(await pending, 0);
+});
+
+test('a tick defers the callback form and delivers the rest', async()=>{
+    // A tick has no guest thread stopped anywhere, so it cannot run guest code.
+    // The flag is still set -- that is what a spinning program needs -- and the
+    // callback goes out from the next entry point, which does have a thread.
+    const m = machine();
+    /** @type {any[]} */
+    const calls = [];
+    m.host.notify = (/** @type {any} */ notice)=>{
+        calls.push(notice);
+        return notice.kind === CALLBACK_FUNCTION ? Promise.resolve(0) : undefined;
+    };
+
+    const device = opened(m, CALLBACK_FUNCTION, 0x9000);
+    await new Promise(resolve=>setTimeout(resolve, 0));
+    calls.length = 0;
+    const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, at, 32]);
+
+    m.tick(150);
+    m.pulse();
+    assert.equal(m.get32(at + 16) & WHDR_DONE, WHDR_DONE, 'the flag is set anyway');
+    assert.equal(calls.length, 0, 'and nothing was called with no thread to call on');
+
+    await m.winmm.waveOutGetID.handler([device, 0x210]);
+    assert.deepEqual(calls.map((/** @type {any} */ n)=>n.param), [at],
+        'the notice was kept and delivered at the first chance');
+});
+
+test('the notifier sends each form somewhere different', async()=>{
+    /** @type {any[]} */
+    const posted = [];
+    /** @type {number[]} */
+    const signalled = [];
+    /** @type {any[]} */
+    const called = [];
+    const notify = createWaveNotifier({
+        callGuest: (entry, args)=>{
+            called.push({ entry, args });
+            return Promise.resolve(0);
+        },
+        post: message=>posted.push(message),
+        signal: handle=>signalled.push(handle),
+    });
+
+    const notice = {
+        instance: 0x1234, device: 0x1000, message: MM_WOM_DONE, param: 0x300,
+    };
+
+    notify({ ...notice, kind: CALLBACK_WINDOW, target: 0x77 });
+    assert.deepEqual(posted, [{
+        hwnd: 0x77, message: MM_WOM_DONE, wParam: 0x1000, lParam: 0x300,
+    }], 'the window form carries the device and the header, and no instance');
+
+    notify({ ...notice, kind: CALLBACK_EVENT, target: 0x88 });
+    assert.deepEqual(signalled, [0x88], 'the event form says only that something happened');
+    assert.equal(posted.length, 1, 'and posts nothing');
+
+    assert.equal(await notify({ ...notice, kind: CALLBACK_FUNCTION, target: 0x99 }), 0);
+    assert.deepEqual(called, [{
+        entry: 0x99,
+        // waveOutProc(hwo, uMsg, dwInstance, dwParam1, dwParam2)
+        args: [0x1000, MM_WOM_DONE, 0x1234, 0x300, 0],
+    }]);
+
+    notify({ ...notice, kind: 0, target: 0x99 });
+    assert.equal(called.length, 1, 'CALLBACK_NULL is owed nothing');
+    assert.equal(posted.length, 1);
+    assert.equal(signalled.length, 1);
 });

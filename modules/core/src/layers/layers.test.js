@@ -16,6 +16,7 @@ const ALL_LAYERS = [
     'bridge',
     'loader',
     'filesystem',
+    'media',
     'win32',
     'graphics',
     'audio',
@@ -24,8 +25,8 @@ const ALL_LAYERS = [
 
 /** Layers with a real implementation; the rest are still stubs. */
 const IMPLEMENTED = [
-    'log', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'win32', 'graphics',
-    'audio', 'input',
+    'log', 'cpu', 'memory', 'kernel', 'bridge', 'loader', 'filesystem', 'media', 'win32',
+    'graphics', 'audio', 'input',
 ];
 
 test('a default build contains every layer, in dependency order', async()=>{

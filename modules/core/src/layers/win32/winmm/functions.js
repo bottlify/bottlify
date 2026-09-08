@@ -110,6 +110,23 @@ const WAVE_SUPPORT = 0x0001 | 0x0008 | 0x0002;
 /** How the caller asked to be told. The low word of the flags is unrelated. */
 const CALLBACK_TYPEMASK = 0x00070000;
 
+/**
+ * The one form that is not host-side bookkeeping: it runs guest code, so it can
+ * only be delivered from somewhere a guest thread is stopped. Named here rather
+ * than left to `notify` because deferring it is this file's decision -- see
+ * `tick`.
+ */
+const CALLBACK_FUNCTION = 0x00030000;
+
+/**
+ * What a wave-out device says about itself. A window form is posted one of
+ * these, a callback form is called with it, an event form ignores it and is
+ * signalled.
+ */
+const MM_WOM_OPEN = 0x03bb;
+const MM_WOM_CLOSE = 0x03bc;
+const MM_WOM_DONE = 0x03bd;
+
 /** MMTIME's wType values. Milliseconds is 1, not 0 -- zero is no unit at all. */
 const TIME_MS = 0x0001;
 const TIME_BYTES = 0x0004;
@@ -121,12 +138,14 @@ const TIME_BYTES = 0x0004;
  * @property {() => number} now
  *           Guest milliseconds since boot -- the same clock the rest of the
  *           engine reads, never the host's.
- * @property {(notice: { kind: number, target: number, message: number,
- *                       instance: number, param: number }) => void} [notify]
+ * @property {(notice: import('./notify.js').WaveNotice) =>
+ *               void | Promise<any>} [notify]
  *           Tells the caller a buffer came back, through whichever of the
- *           window, callback or event forms it asked for. Absent in a build
- *           that cannot reach guest code; the flags still behave, and a program
- *           that polls them still works.
+ *           window, thread, callback or event forms it asked for. Answering
+ *           with a promise means guest code is running and the notice is not
+ *           delivered until it settles. Absent in a build that cannot reach
+ *           guest code; the flags still behave, and a program that polls them
+ *           still works.
  * @property {() => any} [output]
  *           Where the samples go. Handed down rather than reached for: the
  *           audio layer sits above this one and cannot be imported from here.
@@ -152,6 +171,7 @@ const dword = value=>new Uint8Array([
 export function createWinmmFunctions(host){
     /**
      * @typedef {Object} WaveOut
+     * @property {number} handle
      * @property {number} bytesPerSecond
      * @property {number} callbackKind
      * @property {number} callbackTarget
@@ -162,6 +182,8 @@ export function createWinmmFunctions(host){
      * @property {boolean} paused
      * @property {any} track           The mixer's source, or null.
      * @property {number} trackBytes   Guest bytes the device had played last time.
+     * @property {import('./notify.js').WaveNotice[]} pending  Owed, not yet told.
+     * @property {boolean} delivering  A flush() is walking `pending` right now.
      */
 
     /** @type {Map<number, WaveOut>} */
@@ -178,6 +200,90 @@ export function createWinmmFunctions(host){
     /** @param {number} header @param {number} flags */
     const setFlags = (header, flags)=>
         host.writeMemory(header + WAVEHDR.dwFlags, dword(flags >>> 0));
+
+    /**
+     * Records that the caller is owed a notification.
+     *
+     * Queued rather than delivered, because delivering may mean running guest
+     * code and this is called from `settle`, which several entry points reach
+     * through a synchronous helper. Only the entry point itself can wait for
+     * guest code -- by returning a promise -- so only the entry point delivers.
+     *
+     * @param {WaveOut} device @param {number} message @param {number} param
+     */
+    const notice = (device, message, param)=>device.pending.push({
+        kind: device.callbackKind,
+        target: device.callbackTarget,
+        instance: device.callbackInstance,
+        device: device.handle,
+        message,
+        param,
+    });
+
+    /**
+     * Delivers what `notice` queued, then answers what the entry point was
+     * going to answer.
+     *
+     * The answer is a plain number while nothing has to wait and a promise once
+     * something does. That shape is forced: the callback form runs guest code,
+     * the bridge can only run guest code by parking the calling thread on a
+     * promise, and a handler parks by *returning* one. The window, thread and
+     * event forms are host-side bookkeeping and never wait, so a program using
+     * one of those pays nothing and no thread is held at all.
+     *
+     * One notice at a time is the contract rather than an implementation
+     * detail: a callback re-entered while it is still running would see a
+     * program half way through refilling the buffer it was told about. A notice
+     * queued by a nested call -- a callback that writes another buffer, which is
+     * the usual shape -- is drained by the loop already running instead of
+     * starting a second one, which also keeps that nested call from waiting on
+     * the callback it is itself inside.
+     *
+     * @param {WaveOut} device @param {number} result
+     * @param {boolean} [canRunGuest]  False from `tick`, which has no thread.
+     * @returns {number | Promise<number>}
+     */
+    const flush = (device, result, canRunGuest = true)=>{
+        const notify = host.notify;
+        if (!notify || device.delivering)
+        {
+            return result;
+        }
+        device.delivering = true;
+        for (;;)
+        {
+            const next = device.pending[0];
+            // Stopping rather than skipping: these are delivered in the order
+            // they happened, and a later one overtaking a deferred callback
+            // would tell a program about the second buffer first.
+            if (!next || (!canRunGuest && next.kind === CALLBACK_FUNCTION))
+            {
+                device.delivering = false;
+                return result;
+            }
+            device.pending.shift();
+            const answer = notify(next);
+            if (typeof (/** @type {any} */ (answer))?.then === 'function')
+            {
+                return (async()=>{
+                    try
+                    {
+                        await answer;
+                        for (let more = device.pending.shift(); more;
+                            more = device.pending.shift())
+                        {
+                            await notify(more);
+                        }
+                    }
+                    finally
+                    {
+                        device.delivering = false;
+                    }
+                    return result;
+                })();
+            }
+        }
+    };
 
     /**
      * Advances the play cursor to now, and returns whatever finished.
@@ -219,16 +325,12 @@ export function createWinmmFunctions(host){
             const done = /** @type {{ header: number, length: number }} */
                 (device.queue.shift());
             device.playedBytes -= done.length;
+            // The flag is set before the notice is queued, and so before any
+            // callback runs: a program told a buffer is back reads the flag to
+            // find out which, and finding it clear would be a lie about the
+            // buffer it was just handed.
             setFlags(done.header, flagsOf(done.header) & ~WHDR_INQUEUE | WHDR_DONE);
-            host.notify?.({
-                kind: device.callbackKind,
-                target: device.callbackTarget,
-                // MM_WOM_DONE. A window form is posted it; a callback form is
-                // called with it; an event form ignores it and is signalled.
-                message: 0x03bd,
-                instance: device.callbackInstance,
-                param: done.header,
-            });
+            notice(device, MM_WOM_DONE, done.header);
         }
         if (device.queue.length === 0)
         {
@@ -240,15 +342,30 @@ export function createWinmmFunctions(host){
         }
     };
 
-    /** Every entry point that touches a device settles it first. @param {number} handle */
-    const settled = handle=>{
-        const device = deviceOf(handle);
-        if (device)
-        {
+    /**
+     * An entry point whose first argument is a device handle, and which settles
+     * that device before doing anything else.
+     *
+     * Settling is what retires a buffer, and a retired buffer owes its caller a
+     * notification -- so every one of these answers through `flush`, and every
+     * one of them may therefore answer with a promise rather than a number.
+     *
+     * @param {number} argBytes
+     * @param {(device: WaveOut, args: number[]) => number} body
+     */
+    const onDevice = (argBytes, body)=>({
+        argBytes,
+        /** @param {number[]} args */
+        handler: args=>{
+            const device = deviceOf(args[0]);
+            if (!device)
+            {
+                return MMSYSERR_INVALHANDLE;
+            }
             settle(device);
-        }
-        return device;
-    };
+            return flush(device, body(device, args));
+        },
+    });
 
     /** The header-preparing pair, which differs between wave in and out only in name. */
     const prepare = {
@@ -268,25 +385,17 @@ export function createWinmmFunctions(host){
         },
     };
 
-    const unprepare = {
-        argBytes: 12,
-        /** @param {number[]} args */
-        handler: ([handle, header])=>{
-            if (!settled(handle))
-            {
-                return MMSYSERR_INVALHANDLE;
-            }
-            const flags = flagsOf(header >>> 0);
-            if ((flags & WHDR_INQUEUE) !== 0)
-            {
-                // Unpreparing a buffer the device still owns would let the
-                // caller reuse memory that is about to be read.
-                return WAVERR_STILLPLAYING;
-            }
-            setFlags(header >>> 0, flags & ~WHDR_PREPARED);
-            return MMSYSERR_NOERROR;
-        },
-    };
+    const unprepare = onDevice(12, (device, [, header])=>{
+        const flags = flagsOf(header >>> 0);
+        if ((flags & WHDR_INQUEUE) !== 0)
+        {
+            // Unpreparing a buffer the device still owns would let the caller
+            // reuse memory that is about to be read.
+            return WAVERR_STILLPLAYING;
+        }
+        setFlags(header >>> 0, flags & ~WHDR_PREPARED);
+        return MMSYSERR_NOERROR;
+    });
 
     /** Devices this build does not have. @param {number} argBytes @param {number} error */
     const noDevice = (argBytes, error)=>({ argBytes, handler: ()=>error });
@@ -294,7 +403,7 @@ export function createWinmmFunctions(host){
     /** @param {number} argBytes */
     const noDevices = argBytes=>({ argBytes, handler: ()=>0 });
 
-    return {
+    const table = {
         /**
          * DWORD timeGetTime(void)
          *
@@ -367,18 +476,10 @@ export function createWinmmFunctions(host){
         },
 
         /** MMRESULT waveOutGetID(HWAVEOUT hwo, LPUINT puDeviceID) */
-        waveOutGetID: {
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([handle, out])=>{
-                if (!settled(handle))
-                {
-                    return MMSYSERR_INVALHANDLE;
-                }
-                host.writeMemory(out >>> 0, dword(0));
-                return MMSYSERR_NOERROR;
-            },
-        },
+        waveOutGetID: onDevice(8, (device, [, out])=>{
+            host.writeMemory(out >>> 0, dword(0));
+            return MMSYSERR_NOERROR;
+        }),
 
         /**
          * MMRESULT waveOutGetPosition(HWAVEOUT hwo, LPMMTIME pmmt, UINT cbmmt)
@@ -388,30 +489,21 @@ export function createWinmmFunctions(host){
          * all -- there is no interrupt here, so time is credited to the device
          * whenever the device is asked about.
          */
-        waveOutGetPosition: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle, time, size])=>{
-                const device = settled(handle);
-                if (!device)
-                {
-                    return MMSYSERR_INVALHANDLE;
-                }
-                if ((size >>> 0) < 8)
-                {
-                    return MMSYSERR_INVALPARAM;
-                }
-                const wanted = u32(host.readMemory(time >>> 0, 4), 0);
-                const bytes = Math.floor(device.playedBytes);
-                host.writeMemory(time >>> 0, dword(wanted === TIME_BYTES
-                    ? TIME_BYTES
-                    : TIME_MS));
-                host.writeMemory((time >>> 0) + 4, dword(wanted === TIME_BYTES
-                    ? bytes
-                    : Math.floor(bytes * 1000 / device.bytesPerSecond)));
-                return MMSYSERR_NOERROR;
-            },
-        },
+        waveOutGetPosition: onDevice(12, (device, [, time, size])=>{
+            if ((size >>> 0) < 8)
+            {
+                return MMSYSERR_INVALPARAM;
+            }
+            const wanted = u32(host.readMemory(time >>> 0, 4), 0);
+            const bytes = Math.floor(device.playedBytes);
+            host.writeMemory(time >>> 0, dword(wanted === TIME_BYTES
+                ? TIME_BYTES
+                : TIME_MS));
+            host.writeMemory((time >>> 0) + 4, dword(wanted === TIME_BYTES
+                ? bytes
+                : Math.floor(bytes * 1000 / device.bytesPerSecond)));
+            return MMSYSERR_NOERROR;
+        }),
 
         /**
          * MMRESULT waveOutOpen(LPHWAVEOUT phwo, UINT_PTR uDeviceID,
@@ -452,7 +544,9 @@ export function createWinmmFunctions(host){
 
                 const handle = nextHandle++;
                 const mixer = host.output?.() ?? null;
-                devices.set(handle, {
+                /** @type {WaveOut} */
+                const opened = {
+                    handle,
                     bytesPerSecond,
                     callbackKind: (flags >>> 0) & CALLBACK_TYPEMASK,
                     callbackTarget: callback >>> 0,
@@ -467,9 +561,17 @@ export function createWinmmFunctions(host){
                         bitsPerSample: u16(header, WAVEFORMATEX.wBitsPerSample) || 16,
                     }) ?? null,
                     trackBytes: 0,
-                });
+                    pending: [],
+                    delivering: false,
+                };
+                devices.set(handle, opened);
+                // The handle reaches the caller before the open notice does: the
+                // callback is handed that same handle and a program may use it
+                // straight away, so the variable it is going to read had better
+                // already hold it.
                 host.writeMemory(out >>> 0, dword(handle));
-                return MMSYSERR_NOERROR;
+                notice(opened, MM_WOM_OPEN, 0);
+                return flush(opened, MMSYSERR_NOERROR);
             },
         },
 
@@ -484,71 +586,53 @@ export function createWinmmFunctions(host){
          * unprepared header is not pedantry -- preparing is what tells the
          * caller its memory is about to be read by something else.
          */
-        waveOutWrite: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle, header, size])=>{
-                const device = settled(handle);
-                if (!device)
-                {
-                    return MMSYSERR_INVALHANDLE;
-                }
-                if ((size >>> 0) < WAVEHDR.size)
-                {
-                    return MMSYSERR_INVALPARAM;
-                }
+        waveOutWrite: onDevice(12, (device, [, header, size])=>{
+            if ((size >>> 0) < WAVEHDR.size)
+            {
+                return MMSYSERR_INVALPARAM;
+            }
 
-                const at = header >>> 0;
-                const flags = flagsOf(at);
-                if ((flags & WHDR_PREPARED) === 0)
-                {
-                    return WAVERR_UNPREPARED;
-                }
-                if ((flags & WHDR_INQUEUE) !== 0)
-                {
-                    return WAVERR_STILLPLAYING;
-                }
+            const at = header >>> 0;
+            const flags = flagsOf(at);
+            if ((flags & WHDR_PREPARED) === 0)
+            {
+                return WAVERR_UNPREPARED;
+            }
+            if ((flags & WHDR_INQUEUE) !== 0)
+            {
+                return WAVERR_STILLPLAYING;
+            }
 
-                const length = u32(host.readMemory(at + WAVEHDR.dwBufferLength, 4), 0);
-                setFlags(at, flags & ~WHDR_DONE | WHDR_INQUEUE);
-                if (device.queue.length === 0)
-                {
-                    // The cursor starts now, not whenever the device was opened.
-                    device.sinceMs = host.now();
-                    device.playedBytes = 0;
-                }
-                device.queue.push({ header: at, length });
-                // The bytes are copied out now rather than referred to. The
-                // buffer stays the caller's and it is entitled to refill it the
-                // moment the header comes back, which is long before the sound
-                // in it has been heard.
-                if (device.track && length > 0)
-                {
-                    const data = u32(host.readMemory(at + WAVEHDR.lpData, 4), 0);
-                    device.track.write(host.readMemory(data, length));
-                }
-                return MMSYSERR_NOERROR;
-            },
-        },
+            const length = u32(host.readMemory(at + WAVEHDR.dwBufferLength, 4), 0);
+            setFlags(at, flags & ~WHDR_DONE | WHDR_INQUEUE);
+            if (device.queue.length === 0)
+            {
+                // The cursor starts now, not whenever the device was opened.
+                device.sinceMs = host.now();
+                device.playedBytes = 0;
+            }
+            device.queue.push({ header: at, length });
+            // The bytes are copied out now rather than referred to. The buffer
+            // stays the caller's and it is entitled to refill it the moment the
+            // header comes back, which is long before the sound in it has been
+            // heard.
+            if (device.track && length > 0)
+            {
+                const data = u32(host.readMemory(at + WAVEHDR.lpData, 4), 0);
+                device.track.write(host.readMemory(data, length));
+            }
+            return MMSYSERR_NOERROR;
+        }),
 
         /** MMRESULT waveOutPause / waveOutRestart */
-        waveOutPause: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                const device = settled(handle);
-                if (!device)
-                {
-                    return MMSYSERR_INVALHANDLE;
-                }
-                device.paused = true;
-                if (device.track)
-                {
-                    device.track.paused = true;
-                }
-                return MMSYSERR_NOERROR;
-            },
-        },
+        waveOutPause: onDevice(4, device=>{
+            device.paused = true;
+            if (device.track)
+            {
+                device.track.paused = true;
+            }
+            return MMSYSERR_NOERROR;
+        }),
         waveOutRestart: {
             argBytes: 4,
             /** @param {number[]} args */
@@ -588,44 +672,33 @@ export function createWinmmFunctions(host){
                 {
                     setFlags(queued.header,
                         flagsOf(queued.header) & ~WHDR_INQUEUE | WHDR_DONE);
-                    host.notify?.({
-                        kind: device.callbackKind,
-                        target: device.callbackTarget,
-                        message: 0x03bd,
-                        instance: device.callbackInstance,
-                        param: queued.header,
-                    });
+                    notice(device, MM_WOM_DONE, queued.header);
                 }
                 device.queue = [];
                 device.playedBytes = 0;
                 device.trackBytes = 0;
                 device.track?.reset();
                 device.sinceMs = host.now();
-                return MMSYSERR_NOERROR;
+                // The whole queue comes back at once, so this is where a
+                // callback form is held longest -- one guest call per buffer,
+                // in order, before the reset answers.
+                return flush(device, MMSYSERR_NOERROR);
             },
         },
 
         /** MMRESULT waveOutClose(HWAVEOUT hwo) */
-        waveOutClose: {
-            argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([handle])=>{
-                const device = settled(handle);
-                if (!device)
-                {
-                    return MMSYSERR_INVALHANDLE;
-                }
-                if (device.queue.length > 0)
-                {
-                    // Documented, and a program depends on it: it closes, sees
-                    // this, resets, and closes again.
-                    return WAVERR_STILLPLAYING;
-                }
-                device.track?.close();
-                devices.delete(handle >>> 0);
-                return MMSYSERR_NOERROR;
-            },
-        },
+        waveOutClose: onDevice(4, (device, [handle])=>{
+            if (device.queue.length > 0)
+            {
+                // Documented, and a program depends on it: it closes, sees
+                // this, resets, and closes again.
+                return WAVERR_STILLPLAYING;
+            }
+            device.track?.close();
+            devices.delete(handle >>> 0);
+            notice(device, MM_WOM_CLOSE, 0);
+            return MMSYSERR_NOERROR;
+        }),
 
         /**
          * Recording. There is no capture device, and saying so is what lets a
@@ -677,5 +750,37 @@ export function createWinmmFunctions(host){
         joyGetNumDevs: noDevices(0),
         joyGetDevCapsA: { argBytes: 12, handler: ()=>JOYERR_PARMS },
         joyGetPosEx: { argBytes: 8, handler: ()=>JOYERR_PARMS },
+    };
+
+    return {
+        table,
+
+        /**
+         * Moves every open device's cursor, from outside any guest call.
+         *
+         * This is what a device driver's interrupt does and there is nothing
+         * here that does it otherwise: the cursor only advances inside `settle`,
+         * and `settle` is only reached from an entry point. A program that waits
+         * for a buffer by spinning on WHDR_DONE in its own header -- which is a
+         * normal thing to write, because on Windows the flag is set by somebody
+         * else's thread -- calls nothing while it spins, so without this the
+         * flag it is waiting for can never be set and the wait is a deadlock by
+         * construction. Whoever drives the machine calls this on its own
+         * schedule; the cost is one pass over the open devices.
+         *
+         * The flag is set here; the notification is not necessarily delivered
+         * here. The window and event forms are host-side and go out at once, but
+         * the callback form runs guest code, which needs a guest thread stopped
+         * somewhere known -- and a tick, by definition, has none. Those stay
+         * queued in order and go out from the next entry point the program
+         * calls, which is the first moment there is a thread to run them on.
+         */
+        tick(){
+            for (const device of devices.values())
+            {
+                settle(device);
+                flush(device, MMSYSERR_NOERROR, false);
+            }
+        },
     };
 }
