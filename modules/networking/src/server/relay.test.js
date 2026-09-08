@@ -18,7 +18,8 @@ import test from 'node:test';
 
 import {
     BROADCAST, FLAG_HALF, FLAG_REJECT, FLAG_STREAM, Op, PROTOCOL_VERSION, Wsa,
-    decodeControl, decodeFrame, encodeControl, encodeFrame, parseIp, unpackError,
+    decodeControl, decodeFrame, encodeControl, encodeFrame, formatIp, parseIp, unpackAddresses,
+    unpackError,
 } from '../protocol.js';
 import { createRelay } from './relay.js';
 
@@ -478,7 +479,17 @@ test('localhost resolves, and the answer is usable as an address', async()=>{
     client.send({ op: Op.RESOLVE, tag: 4, payload: new TextEncoder().encode('localhost') });
 
     const answer = await waitFor(()=>client.first(Op.RESOLVED));
-    assert.equal(answer.payload.length, 4);
+    // A count is the wrong thing to assert: a name resolves to a list, and how
+    // long that list is belongs to the host running the relay -- a machine whose
+    // hosts file names loopback twice answers with two, and the test read that
+    // as a defect. What the caller needs is that each answer is whole and
+    // usable, which is what a hostent's address list promises.
+    const addresses = unpackAddresses(answer.payload);
+    assert.ok(addresses.length > 0, 'localhost resolved to something');
+    for (const address of addresses)
+    {
+        assert.equal(address >>> 24, 127, `${formatIp(address)} is loopback`);
+    }
 });
 
 /**
