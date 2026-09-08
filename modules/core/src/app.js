@@ -50,6 +50,11 @@ import { createBlockCache, resolveBlockStore }
  *     puts a watch in front of that function, so a call from one guest module
  *     into another shows up in the trace like a call into ours. This is the only
  *     way to see them, and a game's own libraries are where its decisions live.
+ * @property {{ categories?: Record<string, string>, capacity?: number }} [log]
+ *     Which call areas are recorded from the first instruction, and how much of
+ *     the journal is kept. Everything a program decides about a device it
+ *     decides while starting up, so a category switched on once the engine
+ *     exists is switched on too late to see any of it.
  * @property {{ drained?: boolean, sampleRate?: number }} [audio]
  *     Sound leaves through a ring in shared memory. `drained` says that
  *     something on the other side of it is really reading -- a WebAudio
@@ -1147,11 +1152,21 @@ async function buildApp(options){
             // thousands of host calls; a reader who has not asked for them
             // should pay a map lookup and a comparison, not a formatted line.
             // A filter turning one on is what makes them appear.
+            //
+            // A caller may ask for some of them on from the first instruction,
+            // and has to be able to: everything a program decides about a
+            // device it decides while starting up, and a category switched on
+            // once the engine exists is switched on after that has happened.
             categories: {
                 'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off',
                 'call.video': 'off', 'call.input': 'off', 'call.net': 'off',
                 'call.com': 'off',
+                ...options.log?.categories,
             },
+            // Likewise the ring: a run whose interesting part is its first
+            // second needs it no bigger, and one that has to hold a whole
+            // startup needs it much bigger.
+            capacity: options.log?.capacity,
             // The guest's clock, for the same reason the sound buffers use it:
             // a phase timed against the host and a phase timed against the
             // guest cannot be added together, and the number this layer exists
