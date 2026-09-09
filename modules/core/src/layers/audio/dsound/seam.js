@@ -106,8 +106,67 @@ export const DSCAPS = Object.freeze({
     dwMaxSecondarySampleRate: 0x0c,
     dwPrimaryBuffers: 0x10,
     dwMaxHwMixingAllBuffers: 0x14,
+    dwMaxHwMixingStaticBuffers: 0x18,
+    dwMaxHwMixingStreamingBuffers: 0x1c,
+    dwFreeHwMixingAllBuffers: 0x20,
+    dwFreeHwMixingStaticBuffers: 0x24,
+    dwFreeHwMixingStreamingBuffers: 0x28,
+    dwMaxHw3DAllBuffers: 0x2c,
+    dwMaxHw3DStaticBuffers: 0x30,
+    dwMaxHw3DStreamingBuffers: 0x34,
+    dwFreeHw3DAllBuffers: 0x38,
+    dwFreeHw3DStaticBuffers: 0x3c,
+    dwFreeHw3DStreamingBuffers: 0x40,
+    dwTotalHwMemBytes: 0x44,
+    dwFreeHwMemBytes: 0x48,
+    dwMaxContigFreeHwMemBytes: 0x4c,
+    dwUnlockTransferRateHwBuffers: 0x50,
+    dwPlayCpuOverheadSwBuffers: 0x54,
+    dwReserved1: 0x58,
+    dwReserved2: 0x5c,
     SIZE: 0x60,
 });
+
+/**
+ * DSCAPS.dwFlags -- what the device says it can play.
+ *
+ * A program reads these before it decides how to open anything, so a device
+ * that names none of them has said it can play neither mono nor stereo,
+ * neither eight bits nor sixteen. There is nothing left for a caller to ask
+ * for, and a sound library reads that as a device it cannot drive.
+ */
+export const DSCAPS_FLAGS = Object.freeze({
+    PRIMARYMONO: 0x00000001,
+    PRIMARYSTEREO: 0x00000002,
+    PRIMARY8BIT: 0x00000004,
+    PRIMARY16BIT: 0x00000008,
+    CONTINUOUSRATE: 0x00000010,
+    EMULDRIVER: 0x00000020,
+    CERTIFIED: 0x00000040,
+    SECONDARYMONO: 0x00000100,
+    SECONDARYSTEREO: 0x00000200,
+    SECONDARY8BIT: 0x00000400,
+    SECONDARY16BIT: 0x00000800,
+});
+
+/**
+ * The DSCAPS fields this device reports as zero.
+ *
+ * Everything about hardware mixing and hardware sound memory: there is none,
+ * and a program that asks is entitled to be told so rather than to read
+ * whatever its own stack happened to hold.
+ */
+const ZEROED_CAPS = Object.freeze([
+    DSCAPS.dwMaxHwMixingAllBuffers, DSCAPS.dwMaxHwMixingStaticBuffers,
+    DSCAPS.dwMaxHwMixingStreamingBuffers, DSCAPS.dwFreeHwMixingAllBuffers,
+    DSCAPS.dwFreeHwMixingStaticBuffers, DSCAPS.dwFreeHwMixingStreamingBuffers,
+    DSCAPS.dwMaxHw3DAllBuffers, DSCAPS.dwMaxHw3DStaticBuffers,
+    DSCAPS.dwMaxHw3DStreamingBuffers, DSCAPS.dwFreeHw3DAllBuffers,
+    DSCAPS.dwFreeHw3DStaticBuffers, DSCAPS.dwFreeHw3DStreamingBuffers,
+    DSCAPS.dwTotalHwMemBytes, DSCAPS.dwFreeHwMemBytes,
+    DSCAPS.dwMaxContigFreeHwMemBytes, DSCAPS.dwUnlockTransferRateHwBuffers,
+    DSCAPS.dwPlayCpuOverheadSwBuffers, DSCAPS.dwReserved1, DSCAPS.dwReserved2,
+]);
 
 /** DSBPOSITIONNOTIFY, one per position a program wants to be told about. */
 export const DSBPOSITIONNOTIFY = Object.freeze({
@@ -301,6 +360,11 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
     /** @type {any[]} */
     const buffers = [];
+    /**
+     * The last level a program asked for. DSSCL_NORMAL is 1, and the levels
+     * above it are what Windows requires before the primary format may be set.
+     */
+    let cooperativeLevel = 0;
 
     /**
      * Delivers whatever notifications a buffer's cursor has passed.
@@ -495,7 +559,13 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
                 }
                 writeFormat(format, buffer.format);
             }
-            writeU32(written, WAVEFORMATEX.SIZE);
+            // Optional, and a caller that wants only the structure passes null
+            // for it -- which is what Miles passes. Writing through it anyway
+            // puts four bytes at address zero.
+            if ((written >>> 0) !== 0)
+            {
+                writeU32(written, WAVEFORMATEX.SIZE);
+            }
             return DS_OK;
         },
 
@@ -627,7 +697,15 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
          * Which program owns the device, on a machine where only one program
          * runs. Recorded and otherwise inert.
          */
-        SetCooperativeLevel(){
+        SetCooperativeLevel(root, [, level]){
+            cooperativeLevel = level >>> 0;
+            // Recorded and not enforced. Windows refuses SetFormat on the
+            // primary buffer below DSSCL_PRIORITY and this does not: a program
+            // that sets the mix format without asking for the right to gets it
+            // anyway. Nothing here is shared with another program, so the
+            // permission it is really asking for is not ours to withhold -- but
+            // it is a difference from the real thing, and this layer has no
+            // reporter to say so through yet.
             return DS_OK;
         },
 
@@ -637,11 +715,34 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             {
                 return DSERR_INVALIDPARAM;
             }
-            writeU32(caps + DSCAPS.dwFlags, 0);
+            // What this device can play, which is everything: the mixer behind
+            // it converts whatever a program opens. Naming none of these -- as
+            // this did -- says the opposite, that it can play neither mono nor
+            // stereo and neither eight bits nor sixteen, and a sound library
+            // reading that has nothing left to ask for. Miles asked, was told
+            // there was nothing, and went away without opening a single buffer.
+            writeU32(caps + DSCAPS.dwFlags,
+                DSCAPS_FLAGS.PRIMARYMONO | DSCAPS_FLAGS.PRIMARYSTEREO
+                | DSCAPS_FLAGS.PRIMARY8BIT | DSCAPS_FLAGS.PRIMARY16BIT
+                | DSCAPS_FLAGS.SECONDARYMONO | DSCAPS_FLAGS.SECONDARYSTEREO
+                | DSCAPS_FLAGS.SECONDARY8BIT | DSCAPS_FLAGS.SECONDARY16BIT
+                // Any rate, because resampling is what the mixer does anyway.
+                | DSCAPS_FLAGS.CONTINUOUSRATE
+                // Mixed in software, and saying so is not a weakness: a program
+                // that knows it reaches for hardware voices differently, and one
+                // told it has hardware it has not is worse off.
+                | DSCAPS_FLAGS.EMULDRIVER);
             writeU32(caps + DSCAPS.dwMinSecondarySampleRate, 100);
             writeU32(caps + DSCAPS.dwMaxSecondarySampleRate, 100000);
             writeU32(caps + DSCAPS.dwPrimaryBuffers, 1);
-            writeU32(caps + DSCAPS.dwMaxHwMixingAllBuffers, 0);
+            // Every remaining field written, because a field left alone is one
+            // the caller reads out of its own uninitialised memory. Zero is the
+            // honest answer to all of them: nothing here is mixed in hardware,
+            // so there are no hardware voices and no sound memory to report.
+            for (const field of ZEROED_CAPS)
+            {
+                writeU32(caps + field, 0);
+            }
             return DS_OK;
         },
 
@@ -700,6 +801,9 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         /** For tests and for whoever wants to look at a buffer without a guest. */
         buffers: ()=>buffers,
 
+        /** What a program last asked for, for whoever is measuring. */
+        cooperativeLevel: ()=>cooperativeLevel,
+
         libraries: {
             'DSOUND.dll': {
                 /** HRESULT DirectSoundCreate(LPCGUID, LPDIRECTSOUND*, IUnknown*) */
@@ -734,6 +838,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         diagnostics: ()=>({
             buffers: buffers.length,
+            cooperativeLevel,
             playing: buffers.filter(buffer=>(buffer.status() & 1) !== 0).length,
             published: publisher.count(),
         }),

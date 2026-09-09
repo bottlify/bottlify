@@ -10,7 +10,7 @@ import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 import {
     createDirectSound, createPublisher, describe,
-    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSBPOSITIONNOTIFY,
+    DS_OK, WAVEFORMATEX, DSBUFFERDESC, DSBCAPS, DSCAPS, DSCAPS_FLAGS, DSBPOSITIONNOTIFY,
     IID_IDirectSound, IID_IDirectSound8, IID_IDirectSoundBuffer,
     IID_IDirectSoundBuffer8, IID_IDirectSoundNotify, IID_IDirectSound3DBuffer,
     IDIRECTSOUND_SLOTS, IDIRECTSOUNDBUFFER_SLOTS, IDIRECTSOUNDBUFFER8_SLOTS,
@@ -530,6 +530,58 @@ test('the device reports caps only into a header that declares its size', ()=>{
     f.memory.setU32(caps + DSCAPS.dwSize, DSCAPS.SIZE);
     assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DS_OK);
     assert.equal(f.memory.u32(caps + DSCAPS.dwPrimaryBuffers), 1);
+});
+
+test('the device says what it can play, or a program has nothing to ask for', ()=>{
+    // This is where Warcraft III's sound library stopped. It created the
+    // device, asked what it could do, was told nothing at all -- neither mono
+    // nor stereo, neither eight bits nor sixteen -- read the primary format
+    // out of politeness, released everything and never opened a buffer. Four
+    // times over, and then the game ran in silence.
+    const f = createRoot();
+    const caps = 0x1f00;
+    f.memory.setU32(caps + DSCAPS.dwSize, DSCAPS.SIZE);
+    assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DS_OK);
+
+    const flags = f.memory.u32(caps + DSCAPS.dwFlags);
+    for (const [name, bit] of Object.entries(DSCAPS_FLAGS))
+    {
+        if (name === 'CERTIFIED')
+        {
+            continue;
+        }
+        assert.ok((flags & bit) !== 0, `the device claims ${name}`);
+    }
+});
+
+test('every field of DSCAPS is written, not only the ones anyone thought of', ()=>{
+    // A field left alone is one the caller reads out of its own uninitialised
+    // memory, and hardware voice counts are exactly what a sound library
+    // consults before it decides how to open anything.
+    const f = createRoot();
+    const caps = 0x1f00;
+    for (let at = 0; at < DSCAPS.SIZE; at += 4)
+    {
+        f.memory.setU32(caps + at, 0xdeadbeef);
+    }
+    f.memory.setU32(caps + DSCAPS.dwSize, DSCAPS.SIZE);
+    assert.equal(f.bridge.call(f.root, 'GetCaps', [caps]), DS_OK);
+
+    for (let at = 4; at < DSCAPS.SIZE; at += 4)
+    {
+        assert.notEqual(f.memory.u32(caps + at), 0xdeadbeef,
+            `DSCAPS+0x${at.toString(16)} was left as the caller found it`);
+    }
+});
+
+test('GetFormat leaves a null size pointer alone', ()=>{
+    // The size written back is optional and a caller that wants only the
+    // structure passes null -- which is what Miles passes. Writing through it
+    // anyway puts four bytes at address zero.
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    assert.equal(f.bridge.call(buffer, 'GetFormat', [0x2000, WAVEFORMATEX.SIZE, 0]), DS_OK);
+    assert.equal(f.memory.u32(0), 0, 'nothing was written at the null pointer');
 });
 
 test('the library exports the entry points a program links against', ()=>{
