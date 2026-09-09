@@ -18,7 +18,7 @@
  * frame rather than anything this tool imposes.
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
- *                                    [--video]
+ *                                    [--video] [--no-trace]
  */
 
 import { existsSync } from 'node:fs';
@@ -56,6 +56,10 @@ function parse(argv){
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
+        // Without the per-call string peeks the report's trace would otherwise
+        // carry: they read guest memory on every host call, which is a cost
+        // the engine outside this harness does not pay.
+        trace: !argv.includes('--no-trace'),
         // The emulator's compiler budgets, as "index=value,index=value".
         jit: (()=>{
             const at = argv.indexOf('--jit');
@@ -384,6 +388,7 @@ try
         quantum: options.quantum || undefined,
         jit: options.jit || undefined,
         profile: options.profile || undefined,
+        trace: options.trace,
     })}); null`);
 
     /** Waits until the page has a report and answers with it. */

@@ -490,6 +490,15 @@ function scalars(layers){
             // dropping it is how a counter added to a layer never appears in
             // any report. What this refuses is the thing it was written to
             // refuse: a ring buffer, a table, anything with a shape.
+            // A short list of names or numbers is a measurement too: which
+            // phases were unbalanced, which stacks were escaped. What is still
+            // refused is a list long enough to be a log.
+            if (Array.isArray(value) && value.length <= 16
+                && value.every(held=>typeof held === 'number' || typeof held === 'string'))
+            {
+                metrics[name] = /** @type {any} */ (value);
+                continue;
+            }
             if (value !== null && typeof value === 'object' && !Array.isArray(value))
             {
                 const entries = Object.entries(value);
@@ -509,7 +518,7 @@ function scalars(layers){
  * Runs one title and reports what came out of it.
  *
  * @param {{ exe: string, bundleUrl: string, imagePath: string,
- *           maxTurns?: number }} request
+ *           maxTurns?: number, trace?: boolean }} request
  * @returns {Promise<any>}
  */
 async function run(request){
@@ -624,7 +633,7 @@ async function run(request){
         media: decoder ? { wasmBytes: decoder } : undefined,
         imagePath: request.imagePath,
         // A run is read afterwards, which is exactly when a stack string is gone.
-        traceStrings: true,
+        traceStrings: request.trace !== false,
         // Every call, not the last two hundred. What a program decided is
         // decided early, and by the time it stops the ring that would have
         // shown it has been overwritten many times over. Kept as formatted

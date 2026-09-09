@@ -167,9 +167,15 @@ test('a slice the emulator ran past is counted, not assumed away', ()=>{
     // nothing about it, and the only symptom is a frame rate with no
     // explanation. So this cpu ignores the slice, the way one really can.
     let ran = 1000;
+    let eip = 0x4242;
     const cpu = {
         ...fakeCpu(),
-        runSlice: ()=>ran,
+        // The slice moves the thread: it ends somewhere else than it began.
+        runSlice: ()=>{
+            eip = ran === 4200 ? 0x5000 : 0x4242;
+            return ran;
+        },
+        eip: ()=>eip,
     };
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
     sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
@@ -185,4 +191,7 @@ test('a slice the emulator ran past is counted, not assumed away', ()=>{
     const report = sched.diagnostics();
     assert.equal(report.overruns, 2);
     assert.equal(report.worstSlice, 4200, 'and the worst is what a frame actually paid for');
+    assert.equal(report.worstSliceAt, 0x5000, 'and where it ended is named');
+    assert.equal(report.worstSliceFrom, 0x4242, 'and where it began');
+    assert.equal(report.worstSliceOn, 'main', 'on which thread');
 });

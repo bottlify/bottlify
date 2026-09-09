@@ -42,6 +42,15 @@ export function createScheduler(options){
     /** Turns where the emulator ran past the slice it was given, and the worst. */
     let overruns = 0;
     let worstSlice = 0;
+    /**
+     * Where the worst one ended and on which thread. A number alone says the
+     * slice was overrun; an address says which code did it.
+     */
+    let worstSliceAt = 0;
+    /** And where it began, which is the code that ran for all of it. */
+    let worstSliceFrom = 0;
+    /** @type {string | null} */
+    let worstSliceOn = null;
     /** @type {any[]} */
     const threads = [];
     /** @type {any} */
@@ -275,6 +284,7 @@ export function createScheduler(options){
             // slice ends in a fault belongs to the fault stub, and reading that
             // would report every faulting thread as having left its stack.
             watchStack(next);
+            const from = cpu.eip?.() ?? 0;
             const instructions = cpu.runSlice(quantum);
             next.instructions += instructions;
             turns++;
@@ -290,7 +300,13 @@ export function createScheduler(options){
             if (instructions > quantum)
             {
                 overruns++;
-                worstSlice = Math.max(worstSlice, instructions);
+                if (instructions > worstSlice)
+                {
+                    worstSlice = instructions;
+                    worstSliceAt = cpu.eip?.() ?? 0;
+                    worstSliceFrom = from;
+                    worstSliceOn = next.name ?? null;
+                }
             }
 
             if (next.state === ThreadState.RUNNING)
@@ -379,6 +395,9 @@ export function createScheduler(options){
                 // Zero is the answer everyone assumes and nobody had checked.
                 overruns,
                 worstSlice,
+                worstSliceAt,
+                worstSliceFrom,
+                worstSliceOn,
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
                 // Empty in a healthy run: a thread's stack pointer belongs
