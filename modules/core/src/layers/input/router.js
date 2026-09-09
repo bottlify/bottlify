@@ -123,6 +123,12 @@ const BUTTONS = Object.freeze({
  * @param {RouterDeps} deps
  */
 export function createInputRouter({ post, device, now, target, bounds = null, compose }){
+    // Where the cursor may go. The configured screen until something wires a
+    // viewport to the machine, and that viewport's own pixels afterwards: the
+    // picture a person is looking at is the space they are pointing into, and
+    // confining the cursor to a different one leaves a strip of the picture
+    // that cannot be reached however far the mouse is moved.
+    let confinedTo = bounds;
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
@@ -277,7 +283,7 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
 
     /** @param {HostInputEvent} event */
     const move = event=>{
-        const box = bounds?.() ?? null;
+        const box = confinedTo?.() ?? null;
         // Relative motion is what DirectInput reports and absolute is what a
         // message carries, and a host knows one, the other, or both: a locked
         // pointer has no position, a touch has no delta. Whichever is missing
@@ -407,6 +413,16 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
          * do anything is owed this once -- and it is never taken back, whatever
          * the page's focus does afterwards.
          */
+        /**
+         * Confines the cursor to the viewport now showing the program, in that
+         * viewport's own pixels.
+         *
+         * @param {(() => { width: number, height: number }) | null} viewport
+         */
+        confineTo(viewport){
+            confinedTo = viewport ?? bounds;
+        },
+
         arm(){
             if (activated)
             {

@@ -99,18 +99,12 @@ const PIXELS_PER_NOTCH = 100;
  *     Whether pressing a mouse button asks for the pointer. Off by default: a
  *     lock is a thing done to a person, and a program that does not need
  *     relative motion should not take their cursor away.
- * @property {(() => { width: number, height: number }) | null} [guest]
- *     The program's own screen. A position in the box the canvas is drawn in
- *     becomes a position in this, which is not the same as a position in the
- *     canvas's backing store whenever a program presents at a size other than
- *     the screen it was told about. Absent, the backing store is assumed to be
- *     the screen, which is right for a caller that sizes it that way.
  */
 
 /**
  * @param {DomInputOptions} options
  */
-export function createDomInput({ canvas, send, pointerLock = false, guest = null }){
+export function createDomInput({ canvas, send, pointerLock = false }){
     /** @type {[string, (event: any) => void, boolean][]} */
     const listeners = [];
     let focused = false;
@@ -136,12 +130,11 @@ export function createDomInput({ canvas, send, pointerLock = false, guest = null
      * How a position in the box the canvas is drawn in becomes a position in
      * the program's own screen.
      *
-     * The ratio is the guest's screen against the drawn size, not the canvas's
-     * backing store against it. Those are two different numbers whenever the
-     * program presents at a size other than the screen it was told about, and
-     * taking the wrong one puts the cursor somewhere the person is not
-     * pointing: everything above the guest's width is clamped to its edge, so
-     * a whole strip of the picture becomes unreachable.
+     * The ratio is the canvas's own pixels against the size it is really drawn
+     * at on the page. Those pixels are the picture the person is looking at, so
+     * they are the space a cursor lives in -- whatever the program's window was
+     * configured to be. Taking a configured size instead puts the cursor where
+     * nobody is pointing whenever the program presents at another one.
      *
      * Read on every move rather than remembered, because a canvas is routinely
      * displayed at a size that is not its resolution and that size changes
@@ -149,11 +142,10 @@ export function createDomInput({ canvas, send, pointerLock = false, guest = null
      */
     const projection = ()=>{
         const rect = canvas.getBoundingClientRect();
-        const screen = guest?.() ?? { width: canvas.width, height: canvas.height };
         return {
             rect,
-            x: rect.width > 0 ? screen.width / rect.width : 1,
-            y: rect.height > 0 ? screen.height / rect.height : 1,
+            x: rect.width > 0 ? canvas.width / rect.width : 1,
+            y: rect.height > 0 ? canvas.height / rect.height : 1,
         };
     };
 

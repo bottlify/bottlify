@@ -84,7 +84,6 @@ function harness(/** @type {any} */ options = {}){
         canvas: /** @type {any} */ (canvas),
         send: event=>events.push(event),
         pointerLock: options.pointerLock ?? false,
-        guest: options.guest ?? null,
     });
     return {
         canvas,
@@ -301,40 +300,37 @@ test('polling reads the pad only while the game has focus', ()=>{
 });
 
 test('a pointer lands where it points, whatever size the canvas is drawn at', ()=>{
-    // The ratio is the program's own screen against the size the canvas is
-    // drawn at -- not the canvas's backing store against it. Those differ
-    // whenever a program presents at a size other than the screen its bottle
-    // was configured with, and taking the wrong one clamps everything past the
-    // guest's width to the edge: a strip of the picture becomes unreachable.
+    // The ratio is the canvas's own pixels against the size it is really drawn
+    // at on the page. Those pixels are the picture the person is looking at, so
+    // they are the space the cursor lives in -- and the drawn size changes
+    // whenever a panel opens or the window is dragged, which is why it is read
+    // on every move rather than remembered.
     const h = harness({
-        // Drawn half size, as it is whenever a panel takes part of the width.
-        canvas: { width: 800, height: 600, rect: { left: 20, top: 10, width: 320, height: 240 } },
-        guest: ()=>({ width: 640, height: 480 }),
+        // Drawn at half size, as it is whenever a panel takes part of the width.
+        canvas: { width: 800, height: 600, rect: { left: 20, top: 10, width: 400, height: 300 } },
     });
     h.canvas.fire('focus', {});
     h.drain();
 
-    h.canvas.fire('pointermove', { clientX: 20 + 160, clientY: 10 + 120 });
+    h.canvas.fire('pointermove', { clientX: 20 + 200, clientY: 10 + 150 });
     const [middle] = h.drain();
-    assert.deepEqual([middle.x, middle.y], [320, 240],
-        'the middle of the drawn box is the middle of the guest screen');
+    assert.deepEqual([middle.x, middle.y], [400, 300],
+        'the middle of the drawn box is the middle of the picture');
 
-    h.canvas.fire('pointermove', { clientX: 20 + 320, clientY: 10 + 240 });
+    h.canvas.fire('pointermove', { clientX: 20 + 400, clientY: 10 + 300 });
     const [corner] = h.drain();
-    assert.deepEqual([corner.x, corner.y], [640, 480],
-        'and the far corner is the far corner, not the backing store one');
+    assert.deepEqual([corner.x, corner.y], [800, 600],
+        'and its far corner is the picture’s far corner');
 });
 
-test('with no screen given, the canvas is taken to be the screen', ()=>{
-    // A caller that sizes the canvas to the guest's screen -- which is what
-    // this project's own launcher does -- must keep working untouched.
+test('a canvas drawn larger than its pixels maps back down', ()=>{
     const h = harness({
-        canvas: { width: 640, height: 480, rect: { left: 0, top: 0, width: 320, height: 240 } },
+        canvas: { width: 320, height: 240, rect: { left: 0, top: 0, width: 960, height: 720 } },
     });
     h.canvas.fire('focus', {});
     h.drain();
 
-    h.canvas.fire('pointermove', { clientX: 160, clientY: 120 });
+    h.canvas.fire('pointermove', { clientX: 480, clientY: 360 });
     const [seen] = h.drain();
-    assert.deepEqual([seen.x, seen.y], [320, 240]);
+    assert.deepEqual([seen.x, seen.y], [160, 120]);
 });

@@ -443,3 +443,27 @@ test('every message carries the guest clock it happened at', ()=>{
     h.send({ kind: 'key', code: 'Space', down: true });
     assert.equal(h.drain()[0].time, 4321);
 });
+
+test('the cursor is confined to the viewport showing the program, not a configured size', ()=>{
+    // The picture a person is looking at is the space they are pointing into.
+    // Confining the cursor to a different one -- the size a bottle was
+    // configured with, say, when the program presents at another -- leaves a
+    // strip of the picture that cannot be reached however far the mouse moves.
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    h.send({ kind: 'pointerMove', x: 700, y: 500 });
+    h.drain();
+    assert.deepEqual(h.router.diagnostics().cursor, { x: 639, y: 479 },
+        'the configured screen holds until a viewport says otherwise');
+
+    h.router.confineTo(()=>({ width: 1024, height: 768 }));
+    h.send({ kind: 'pointerMove', x: 700, y: 500 });
+    h.drain();
+    assert.deepEqual(h.router.diagnostics().cursor, { x: 700, y: 500 },
+        'and the viewport is what holds once one is wired');
+
+    h.router.confineTo(null);
+    h.send({ kind: 'pointerMove', x: 700, y: 500 });
+    h.drain();
+    assert.deepEqual(h.router.diagnostics().cursor, { x: 639, y: 479 },
+        'detaching gives the configured screen back');
+});

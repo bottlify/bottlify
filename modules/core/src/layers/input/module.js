@@ -130,21 +130,22 @@ export const inputModule = {
                 // Wiring input to a window is when the program becomes the
                 // active one, and it stays active for the rest of the run.
                 router.arm();
+                // The canvas's own pixels are the picture, so they are both
+                // what a pointer position is measured in and what the cursor
+                // may not leave. One number rather than two.
+                router.confineTo(()=>({ width: canvas.width, height: canvas.height }));
                 attached = createDomInput({
                     canvas,
                     /** @param {import('./router.js').HostInputEvent} event */
                     send: event=>router.send(event),
                     pointerLock: options?.pointerLock ?? false,
-                    // The same screen the router confines the cursor to, so the
-                    // position a pointer maps to and the position a program is
-                    // allowed to have are one number rather than two.
-                    guest: config?.bounds ?? null,
                 });
                 return attached;
             },
             detach(){
                 attached?.detach();
                 attached = null;
+                router.confineTo(null);
             },
 
             /**
