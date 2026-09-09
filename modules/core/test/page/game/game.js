@@ -453,6 +453,14 @@ async function run(request){
     const wasm = await fetch(new URL('../../../vendor/prebuilt/v86.wasm', import.meta.url))
         .then(response=>response.arrayBuffer());
 
+    // Optional, and asked for anyway: without it a program's cinematic is a
+    // graph with nothing in it, which is a real state of a machine and not the
+    // one worth measuring. A build that has no decoder to fetch runs as before.
+    const decoder = await fetch(
+        new URL('../../../vendor/prebuilt/video-decoder.wasm', import.meta.url))
+        .then(response=>response.ok ? response.arrayBuffer() : null)
+        .catch(()=>null);
+
     /** @type {any} */
     let presented = null;
     let presents = 0;
@@ -465,6 +473,7 @@ async function run(request){
             moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
             wasmBytes: wasm,
         },
+        media: decoder ? { wasmBytes: decoder } : undefined,
         imagePath: request.imagePath,
         // A run is read afterwards, which is exactly when a stack string is gone.
         traceStrings: true,
