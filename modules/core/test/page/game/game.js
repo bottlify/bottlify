@@ -510,6 +510,11 @@ async function run(request){
                 ms: frame.ms, byKind: frame.byKind,
             })),
             messages: layers.win32?.messages ?? null,
+            // What reached the screen, and what was refused on the way. A film
+            // that decodes and is never seen is the difference between these
+            // two and nothing else.
+            presenter: layers.graphics?.presenter ?? null,
+            media: layers.media ?? null,
             instructions: layers.cpu?.instructions ?? 0,
             presents: presents,
             graphics: layers.graphics?.seam?.device

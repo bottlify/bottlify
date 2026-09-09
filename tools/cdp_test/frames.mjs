@@ -142,6 +142,24 @@ function describe(before, after, windowMs){
         say('');
     }
 
+    if (after.presenter)
+    {
+        const shown = after.presenter;
+        say(`what reached the screen: ${shown.presents} presented`
+            + `, ${shown.uploads} uploaded, ${shown.shownByOwner} shown by their owner`);
+        if ((shown.failures ?? []).length > 0)
+        {
+            say(`  refused: ${shown.failures.slice(0, 3).join('; ')}`);
+        }
+        say('');
+    }
+    if (after.media && after.media.configured)
+    {
+        say(`the film: ${after.media.opened ?? 0} opened`
+            + `, ${after.media.frames ?? 0} frames decoded`);
+        say('');
+    }
+
     say('the slowest frames, and what they were made of:');
     for (const frame of after.worstFrames.slice(0, 5))
     {
