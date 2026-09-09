@@ -54,16 +54,8 @@ export function createSyncObjects({ scheduler }){
                 object.waiters.splice(at, 1);
             }
         }
+        thread.waitSet = null;
     });
-
-    /**
-     * Waiters in arrival order. Windows does not promise FIFO, but choosing an
-     * order and keeping it makes a multithreaded program reproducible, which is
-     * worth more here than matching an unspecified detail.
-     *
-     * @param {any} object
-     */
-    const nextWaiter = object=>object.waiters.shift() ?? null;
 
     /** @param {any} object */
     const isSignalled = object=>{
@@ -133,6 +125,90 @@ export function createSyncObjects({ scheduler }){
         }
     };
 
+    /** @param {any} object @param {any} thread */
+    const owns = (object, thread)=>
+        object.kind === SyncKind.MUTEX && object.owner === thread;
+
+    /** @param {any} thread @param {any} object  What woke it, when it waited alone. */
+    const leaveQueues = (thread, object)=>{
+        for (const one of thread.waitSet?.objects ?? [object])
+        {
+            const at = one.waiters.indexOf(thread);
+            if (at >= 0)
+            {
+                one.waiters.splice(at, 1);
+            }
+        }
+        thread.waitSet = null;
+    };
+
+    /**
+     * Hands a signalled object to the first waiter that can take it.
+     *
+     * Two things a queue of single waiters does not have to think about, and a
+     * thread waiting on a set does:
+     *
+     * - **Which object released it is half the answer.** A wait on several
+     *   objects reports the index of the one that came, and a thread told the
+     *   first every time takes whatever branch belongs to whatever happens to
+     *   be listed first -- which is how a program's own service thread reads a
+     *   mutex it was handed as its shutdown signal and exits.
+     * - **A thread waiting for *all* of a set cannot take one of them.**
+     *   Nothing is taken until everything is available, so such a waiter is
+     *   passed over and the object goes to whoever can use it.
+     *
+     * And whoever is released leaves the queues of the rest of its set: a queue
+     * that still holds a thread that has stopped waiting hands the object to it
+     * later, and whoever is still waiting never gets it.
+     *
+     * @param {any} object
+     * @returns {any | null} the thread woken, if any
+     */
+    const releaseTo = object=>{
+        // Arrival order. Windows does not promise FIFO, but choosing an order
+        // and keeping it makes a multithreaded program reproducible, which is
+        // worth more here than matching an unspecified detail. Over a copy,
+        // because whoever takes it leaves the queue as it goes.
+        for (const thread of [...object.waiters])
+        {
+            const set = thread.waitSet;
+            const all = set?.all === true;
+            if (all && !set.objects.every(
+                (/** @type {any} */ one)=>isSignalled(one) || owns(one, thread)))
+            {
+                continue;
+            }
+            leaveQueues(thread, object);
+            if (all)
+            {
+                let result = WaitResult.OBJECT_0;
+                for (const one of set.objects)
+                {
+                    if (api.wait(one, thread) === WaitResult.ABANDONED)
+                    {
+                        result = WaitResult.ABANDONED;
+                    }
+                }
+                thread.waitResult = result;
+            }
+            else
+            {
+                // The base is what acquiring said -- OBJECT_0, or ABANDONED for
+                // a mutex whose owner died -- and the index is added to it,
+                // which is what makes both of them bases rather than values.
+                const index = set ? set.objects.indexOf(object) : 0;
+                thread.waitResult = (acquire(object, thread) + index) >>> 0;
+            }
+            scheduler.wake(thread);
+            return thread;
+        }
+        return null;
+    };
+
+    /** @param {any[]} objects_ */
+    const describeSet = objects_=>objects_
+        .map(object=>`${object.kind} "${object.name}"`).join(', ');
+
     const api = {
         /**
          * Wakes everything waiting on an object that has just become signalled
@@ -142,17 +218,12 @@ export function createSyncObjects({ scheduler }){
          * @param {any} object
          */
         releaseAll(object){
-            for (const waiter of object.waiters ?? [])
+            // Everyone who can take it. A thread waiting for all of a set is
+            // not released by this one alone, so it stays queued rather than
+            // being woken with a wait it has not finished.
+            while (releaseTo(object))
             {
-                // On the thread rather than through the scheduler: the scheduler
-                // this layer holds wakes and nothing more, so a result handed to
-                // it is dropped and the waiter resumes with whatever it had.
-                waiter.waitResult = WaitResult.OBJECT_0;
-                scheduler.wake(waiter);
-            }
-            if (object.waiters)
-            {
-                object.waiters.length = 0;
+                // Each release takes its thread out of the queue, so this ends.
             }
         },
 
@@ -228,6 +299,7 @@ export function createSyncObjects({ scheduler }){
                 return acquire(object, thread);
             }
 
+            thread.waitSet = null;
             object.waiters.push(thread);
             scheduler.block(thread, `${object.kind} "${object.name}"`, timed);
             return null;
@@ -250,6 +322,7 @@ export function createSyncObjects({ scheduler }){
                 isSignalled(object) || (object.kind === SyncKind.MUTEX && object.owner === thread));
             if (!ready)
             {
+                thread.waitSet = { objects: objects_, all: true };
                 for (const object of objects_)
                 {
                     if (!object.waiters.includes(thread))
@@ -257,7 +330,9 @@ export function createSyncObjects({ scheduler }){
                         object.waiters.push(thread);
                     }
                 }
-                scheduler.block(thread, `all of ${objects_.length} objects`, timed);
+                // Named rather than counted: "all of 2 objects" is the one thing
+                // a report of a stalled thread cannot be read without.
+                scheduler.block(thread, `all of ${describeSet(objects_)}`, timed);
                 return null;
             }
 
@@ -291,11 +366,15 @@ export function createSyncObjects({ scheduler }){
                     return { index: i, result: /** @type {number} */ (api.wait(object, thread)) };
                 }
             }
+            // Kept on the thread, because the answer to a wait on a set is the
+            // index of the object that came -- and by the time one does, the
+            // call that named the set has long since returned.
+            thread.waitSet = { objects: objects_, all: false };
             for (const object of objects_)
             {
                 object.waiters.push(thread);
             }
-            scheduler.block(thread, `any of ${objects_.length} objects`, timed);
+            scheduler.block(thread, `any of ${describeSet(objects_)}`, timed);
             return null;
         },
 
@@ -311,20 +390,18 @@ export function createSyncObjects({ scheduler }){
             const woken = [];
             if (object.manualReset)
             {
-                while (object.waiters.length > 0)
+                for (let thread = releaseTo(object); thread; thread = releaseTo(object))
                 {
-                    const thread = nextWaiter(object);
-                    thread.waitResult = acquire(object, thread);
-                    scheduler.wake(thread);
                     woken.push(thread);
                 }
             }
-            else if (object.waiters.length > 0)
+            else
             {
-                const thread = nextWaiter(object);
-                thread.waitResult = acquire(object, thread);
-                scheduler.wake(thread);
-                woken.push(thread);
+                const thread = releaseTo(object);
+                if (thread)
+                {
+                    woken.push(thread);
+                }
             }
             return woken;
         },
@@ -353,12 +430,7 @@ export function createSyncObjects({ scheduler }){
                 return true;
             }
             object.owner = null;
-            const next = nextWaiter(object);
-            if (next)
-            {
-                next.waitResult = acquire(object, next);
-                scheduler.wake(next);
-            }
+            releaseTo(object);
             return true;
         },
 
@@ -376,12 +448,7 @@ export function createSyncObjects({ scheduler }){
                     object.owner = null;
                     object.recursion = 0;
                     object.abandoned = true;
-                    const next = nextWaiter(object);
-                    if (next)
-                    {
-                        next.waitResult = acquire(object, next);
-                        scheduler.wake(next);
-                    }
+                    releaseTo(object);
                 }
             }
         },
@@ -398,11 +465,9 @@ export function createSyncObjects({ scheduler }){
             }
             const previous = object.count;
             object.count += count;
-            while (object.count > 0 && object.waiters.length > 0)
+            while (object.count > 0 && releaseTo(object))
             {
-                const thread = nextWaiter(object);
-                thread.waitResult = acquire(object, thread);
-                scheduler.wake(thread);
+                // Each release takes one count and one waiter, so this ends.
             }
             return previous;
         },

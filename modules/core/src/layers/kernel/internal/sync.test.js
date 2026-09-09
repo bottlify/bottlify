@@ -187,6 +187,89 @@ test('waiting for any reports which one came through', ()=>{
     assert.equal(sync.waitAny([quiet], a), null);
 });
 
+test('a blocked wait for any reports the index of the object that came', ()=>{
+    // The defect this pins: a set was only ever indexed on the path where
+    // something was already signalled. A thread that had to block was woken
+    // with a bare WAIT_OBJECT_0 however far down the set the object sat, so a
+    // program watching a shutdown handle first read every other object in its
+    // set as the shutdown and stopped.
+    const { sync } = setup();
+    const quit = sync.createEvent({ name: 'quit' });
+    const work = sync.createEvent({ name: 'work' });
+    const a = thread('a');
+
+    assert.equal(sync.waitAny([quit, work], a), null, 'neither is ready, so a blocks');
+    sync.setEvent(work);
+
+    assert.equal(a.waitResult, WaitResult.OBJECT_0 + 1, 'the second object is index one');
+});
+
+test('a blocked wait for any adds its index to whichever base applies', ()=>{
+    const { sync } = setup();
+    const quit = sync.createEvent({ name: 'quit' });
+    const guard = sync.createMutex({ name: 'guard' });
+    const owner = thread('owner');
+    const a = thread('a');
+
+    sync.wait(guard, owner);
+    assert.equal(sync.waitAny([quit, guard], a), null);
+    sync.abandonMutexesOwnedBy(owner);
+
+    assert.equal(a.waitResult, WaitResult.ABANDONED + 1,
+        'an abandoned mutex is reported as abandoned AND as which one it was');
+});
+
+test('a thread released from a set leaves the queues of the rest of it', ()=>{
+    // A queue that still holds a thread which has stopped waiting hands the
+    // object to it later: the signal is spent on nobody and whoever is still
+    // waiting never gets it.
+    const { sync } = setup();
+    const first = sync.createEvent({ name: 'first' });
+    const second = sync.createEvent({ name: 'second' });
+    const a = thread('a');
+    const b = thread('b');
+
+    sync.waitAny([first, second], a);
+    sync.wait(first, b);
+
+    sync.setEvent(second);
+    const woken = sync.setEvent(first);
+
+    assert.deepEqual(woken.map(t=>t.name), ['b'],
+        'a is no longer waiting on first, so first goes to b');
+    assert.equal(b.waitResult, WaitResult.OBJECT_0);
+});
+
+test('one object of a set does not release a thread waiting for all of them', ()=>{
+    const { scheduler, sync } = setup();
+    const first = sync.createEvent({ manualReset: true, name: 'first' });
+    const second = sync.createEvent({ manualReset: true, name: 'second' });
+    const a = thread('a');
+
+    assert.equal(sync.waitAll([first, second], a), null);
+    assert.deepEqual(sync.setEvent(first), [], 'one of two is not the set');
+    assert.equal(a.waitResult, null, 'and nothing was reported to it');
+
+    assert.deepEqual(sync.setEvent(second).map(t=>t.name), ['a'], 'both, and it goes');
+    assert.equal(a.waitResult, WaitResult.OBJECT_0);
+    assert.ok(scheduler.log.includes('block a: all of event "first", event "second"'),
+        'a stalled thread names the objects it is waiting on, not how many');
+});
+
+test('a thread waiting for all of a set is passed over rather than starving the queue', ()=>{
+    const { sync } = setup();
+    const first = sync.createEvent({ name: 'first' });
+    const second = sync.createEvent({ name: 'second' });
+    const greedy = thread('greedy');
+    const single = thread('single');
+
+    sync.waitAll([first, second], greedy);
+    sync.wait(first, single);
+
+    assert.deepEqual(sync.setEvent(first).map(t=>t.name), ['single'],
+        'the one that can take it does, rather than the signal being spent on nobody');
+});
+
 // --- a thread is a waitable object ---
 
 /**

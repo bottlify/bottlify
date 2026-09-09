@@ -49,6 +49,22 @@ export function createScheduler(options){
     let nextId = 1;
     let turns = 0;
     let expiries = 0;
+    /**
+     * Threads whose stack pointer has been seen outside the stack they were
+     * given, and the worst one.
+     *
+     * A stack that overflows into whatever is under it corrupts silently: the
+     * thread below loses its locals and its return addresses, and what fails is
+     * that thread, later, at an address holding no code. Nothing said how much
+     * of its stack a thread was using, so a run that ended in a wild stack
+     * pointer offered no way to tell an overflow from a corrupted frame. This
+     * is that fact, measured once a turn.
+     *
+     * @type {string[]}
+     */
+    const escaped = [];
+    /** @type {Map<any, number>} */
+    const lowWater = new Map();
     /** @type {((thread: any) => void)[]} */
     const onExpiry = [];
 
@@ -60,6 +76,34 @@ export function createScheduler(options){
     // host time instead of guest time.
     const ready = ()=>threads.filter(thread=>
         thread.state === ThreadState.READY && !thread.awaitingHost);
+
+    /**
+     * Where a thread's stack pointer stood at the end of its slice.
+     *
+     * Read once a turn rather than per instruction: an overflow is not a moment
+     * but a direction of travel, and a turn's resolution is enough to see it.
+     *
+     * @param {any} thread
+     */
+    const watchStack = thread=>{
+        if (thread.stackTop === undefined || thread.stackLimit === undefined)
+        {
+            return;
+        }
+        const esp = cpu.readReg32('esp') >>> 0;
+        const low = lowWater.get(thread);
+        if (low === undefined || esp < low)
+        {
+            lowWater.set(thread, esp);
+        }
+        if ((esp < thread.stackLimit || esp > thread.stackTop)
+            && !escaped.some(entry=>entry.startsWith(`${thread.name}:`)))
+        {
+            escaped.push(`${thread.name}: esp 0x${esp.toString(16)} outside`
+                + ` 0x${(thread.stackLimit >>> 0).toString(16)}`
+                + `..0x${(thread.stackTop >>> 0).toString(16)}`);
+        }
+    };
 
     /** The soonest deadline any blocked thread is waiting on, or null. */
     const soonest = ()=>threads.reduce((best, thread)=>(
@@ -227,6 +271,10 @@ export function createScheduler(options){
             current = next;
             next.state = ThreadState.RUNNING;
 
+            // Before the slice, not after: the value on the processor when a
+            // slice ends in a fault belongs to the fault stub, and reading that
+            // would report every faulting thread as having left its stack.
+            watchStack(next);
             const instructions = cpu.runSlice(quantum);
             next.instructions += instructions;
             turns++;
@@ -305,6 +353,19 @@ export function createScheduler(options){
             }
         },
 
+        /**
+         * How far down its own stack a thread has been, and whether it left it.
+         *
+         * @param {any} thread
+         */
+        stackUse(thread){
+            return {
+                lowest: lowWater.get(thread) ?? null,
+                limit: thread.stackLimit ?? null,
+                top: thread.stackTop ?? null,
+            };
+        },
+
         diagnostics(){
             /** @type {Record<string, number>} */
             const byState = {};
@@ -320,6 +381,17 @@ export function createScheduler(options){
                 worstSlice,
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
+                // Empty in a healthy run: a thread's stack pointer belongs
+                // inside the stack it was given, and anywhere else is memory
+                // somebody else owns. Strings rather than a list, because a
+                // report keeps the flat metrics and drops the shaped ones.
+                stackEscapes: escaped.length,
+                stackEscaped: escaped.join('; '),
+                deepestStackUse: [...lowWater]
+                    .filter(([thread])=>thread.stackTop !== undefined)
+                    .map(([thread, low])=>`${thread.name} ${
+                        thread.stackTop - low}/${thread.stackTop - thread.stackLimit}`)
+                    .join(' '),
                 threads: threads.length,
                 byState,
                 current: current ? current.name : null,
