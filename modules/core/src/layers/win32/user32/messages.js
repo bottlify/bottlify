@@ -237,6 +237,29 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             posted++;
         },
 
+        /**
+         * When the soonest timer comes due, in guest time, or null for none.
+         *
+         * A thread waiting on an empty queue is waiting for exactly two things:
+         * something posted from outside, and a timer of its own. The first
+         * nobody can predict; the second is written down right here, and
+         * without it whoever drives the machine has to keep looking to find out
+         * -- on a timeout a browser clamps, several thousand times a run.
+         *
+         * @returns {number | null}
+         */
+        nextTimerDue(){
+            let soonest = null;
+            for (const timer of timers.values())
+            {
+                if (soonest === null || timer.due < soonest)
+                {
+                    soonest = timer.due;
+                }
+            }
+            return soonest;
+        },
+
         /** @param {number} code  The value the program exits with. */
         postQuit(code){
             quitCode = code | 0;

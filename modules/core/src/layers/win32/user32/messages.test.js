@@ -290,3 +290,22 @@ test('a coalesced move keeps its place in the order around it', ()=>{
     assert.deepEqual(order, [[WM_MOUSEMOVE, 9], [0x0201, 0]],
         'the move stays where it was, carrying the latest position');
 });
+
+test('the queue says when its next timer comes due', ()=>{
+    // A caller on an empty queue waits for two things: something posted from
+    // outside, which nobody can predict, and a timer of its own -- whose due
+    // time is written down right here. Without asking, whoever drives the
+    // machine has to keep looking to find out.
+    const { clock, queue } = timed();
+    assert.equal(queue.nextTimerDue(), null, 'no timers, nothing to wait for');
+
+    clock.at = 100;
+    queue.setTimer(0x40, 1, 250, 0);
+    queue.setTimer(0x40, 2, 40, 0);
+    assert.equal(queue.nextTimerDue(), 140, 'the soonest of them, in guest time');
+
+    queue.killTimer(0x40, 2);
+    assert.equal(queue.nextTimerDue(), 350);
+    queue.killTimer(0x40, 1);
+    assert.equal(queue.nextTimerDue(), null);
+});

@@ -2463,6 +2463,21 @@ async function buildApp(options){
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
                         const idledAt = clockSource();
+                        // A caller sitting on an empty message queue is waiting
+                        // for two things: something posted from outside, which
+                        // nobody can predict, and a timer of its own, whose due
+                        // time is written down in the queue. Moving the clock to
+                        // it -- never past the host's, as everywhere else -- is
+                        // the difference between finding out and looking to see.
+                        // Looking cost several thousand clamped timeouts a run.
+                        const due = wait.timer && fetching === 0
+                            ? win32.queue?.()?.nextTimerDue?.() ?? null
+                            : null;
+                        if (due !== null && clock.skipTo(due) > 0)
+                        {
+                            journal.end(wait.phase);
+                            continue;
+                        }
                         // Whichever comes first: the range request answering,
                         // or the timer coming round again.
                         //
@@ -2612,7 +2627,9 @@ async function buildApp(options){
                         // do is let real time reach the deadline. That is a
                         // machine waiting, not a machine stuck, and the two look
                         // identical from here without asking.
-                        if (kernel.nextDeadline() !== null)
+                        const waitingOnTime = kernel.nextDeadline() !== null
+                            || (win32.queue?.()?.nextTimerDue?.() ?? null) !== null;
+                        if (waitingOnTime)
                         {
                             journal.begin('idle-deadline', journal.PhaseKind.HOST);
                             await breathe();
