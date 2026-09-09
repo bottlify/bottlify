@@ -128,16 +128,21 @@ export function createSyncFunctions(host){
      * Writes what a section's structure says about itself, from what the kernel
      * says about the mutex behind it.
      *
-     * LockCount does not count the threads queued behind the owner. A thread
-     * that cannot take the section blocks in the kernel rather than spinning on
-     * this field, so nothing in this build can observe the difference; a guest
-     * reading it only ever needs to tell held from free.
+     * LockCount is Windows' own encoding: minus one while nobody holds it, and
+     * otherwise one less than the number of threads that want it -- zero for an
+     * owner alone, one for an owner with somebody queued behind. Writing zero
+     * whatever the queue held was enough while every acquisition crossed into
+     * the host, because the host could see the queue for itself. It stops being
+     * enough the moment a release is allowed to happen in the guest: a release
+     * that cannot tell whether anyone is waiting either wakes nobody, and the
+     * queue stalls, or crosses every time, and there was no point.
      *
      * @param {number} address @param {any} mutex
      */
     const publish = (address, mutex)=>{
         const owner = mutex.owner;
-        writeI32(address + CS_LOCK_COUNT, owner ? 0 : CS_UNLOCKED);
+        const queued = mutex.waiters ? mutex.waiters.length : 0;
+        writeI32(address + CS_LOCK_COUNT, owner ? queued : CS_UNLOCKED);
         writeI32(address + CS_RECURSION_COUNT, owner ? mutex.recursion : 0);
         writeI32(address + CS_OWNING_THREAD, owner ? owner.id : 0);
     };
@@ -268,9 +273,12 @@ export function createSyncFunctions(host){
                 const taken = kernel.wait(mutex, host.currentThread());
                 if (taken === null)
                 {
-                    // Blocked. The structure is not ours to write now -- it
-                    // still describes the thread that holds it, and the one
-                    // that leaves will write it for us.
+                    // Blocked. The owner and the recursion still describe the
+                    // thread that holds it, and the one that leaves will write
+                    // them for us -- but the count of who wants it has just
+                    // changed, and this is the only moment anything knows.
+                    writeI32(address + CS_LOCK_COUNT,
+                        mutex.waiters ? mutex.waiters.length : 0);
                     return host.park();
                 }
                 publish(address, mutex);

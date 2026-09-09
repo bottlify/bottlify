@@ -270,6 +270,12 @@ test('a thread that cannot take a section is parked, and told when it wins', ()=
     assert.equal(fns.EnterCriticalSection.handler([section]), PARKED);
     assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.first.id,
         'the structure still describes the thread that holds it');
+    // Windows' own encoding: one less than the number of threads that want it,
+    // so an owner alone reads zero and an owner with somebody queued reads one.
+    // A release that happens without crossing into the host has no other way to
+    // learn that it owes somebody a wake.
+    assert.equal(host.readI32(section + CS_LOCK_COUNT), 1,
+        'and says that a second thread is waiting behind it');
 
     // The leaving thread writes the structure for whoever the kernel handed it
     // to: the winner's own call has already returned and cannot do it.
