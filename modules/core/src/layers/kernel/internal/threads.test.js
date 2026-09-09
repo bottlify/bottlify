@@ -158,3 +158,31 @@ test('a thread parked on a host call is not a candidate for a turn', ()=>{
     assert.equal(turn.ran?.name, 'waiter', 'the clock moved and the waiter woke');
     assert.equal(clock, 50, 'to exactly the deadline it was waiting for');
 });
+
+test('a slice the emulator ran past is counted, not assumed away', ()=>{
+    // The quantum is how long one thread may hold the machine before anything
+    // else -- another thread, a message, a frame -- gets a look, and nothing
+    // checked that it was honoured. An emulator that runs four times the
+    // instructions asked for holds the machine four times as long and says
+    // nothing about it, and the only symptom is a frame rate with no
+    // explanation. So this cpu ignores the slice, the way one really can.
+    let ran = 1000;
+    const cpu = {
+        ...fakeCpu(),
+        runSlice: ()=>ran,
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+
+    sched.runOnce();
+    assert.equal(sched.diagnostics().overruns, 0, 'a slice that fits is not an overrun');
+
+    ran = 4200;
+    sched.runOnce();
+    ran = 2500;
+    sched.runOnce();
+
+    const report = sched.diagnostics();
+    assert.equal(report.overruns, 2);
+    assert.equal(report.worstSlice, 4200, 'and the worst is what a frame actually paid for');
+});

@@ -130,6 +130,17 @@ function describe(before, after, windowMs){
     }
     say('');
 
+    const slices = after.slices ?? null;
+    if (slices && slices.quantum > 0)
+    {
+        const turns = slices.turns - (before.slices?.turns ?? 0);
+        const past = slices.overruns - (before.slices?.overruns ?? 0);
+        say(`the slice: ${slices.quantum} instructions asked for`
+            + `, ${past} of ${turns} turns ran past it`
+            + `${slices.worst > 0 ? `, worst ${slices.worst}` : ''}`);
+        say('');
+    }
+
     const messages = after.messages ?? null;
     if (messages)
     {

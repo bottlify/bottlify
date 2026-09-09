@@ -514,6 +514,15 @@ async function run(request){
                 ms: frame.ms, byKind: frame.byKind,
             })),
             messages: layers.win32?.messages ?? null,
+            // Whether the emulator honoured the slice it was given. A quantum
+            // that is not kept is time one thread holds the machine while a
+            // frame waits, and it is invisible in every other number here.
+            slices: {
+                quantum: layers.kernel?.quantum ?? 0,
+                turns: layers.kernel?.turns ?? 0,
+                overruns: layers.kernel?.overruns ?? 0,
+                worst: layers.kernel?.worstSlice ?? 0,
+            },
             // What reached the screen, and what was refused on the way. A film
             // that decodes and is never seen is the difference between these
             // two and nothing else.

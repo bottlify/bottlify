@@ -39,6 +39,9 @@ export const ThreadState = {
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    /** Turns where the emulator ran past the slice it was given, and the worst. */
+    let overruns = 0;
+    let worstSlice = 0;
     /** @type {any[]} */
     const threads = [];
     /** @type {any} */
@@ -227,6 +230,20 @@ export function createScheduler(options){
             const instructions = cpu.runSlice(quantum);
             next.instructions += instructions;
             turns++;
+            // Whether the slice we asked for is the slice we got.
+            //
+            // A quantum is how long a thread may hold the machine before
+            // anything else -- another thread, a message, a frame -- gets a
+            // look. Nothing checked that the emulator honoured it, so an
+            // emulator that ran four times the instructions asked for would
+            // hold the machine four times as long and say nothing, and the only
+            // symptom would be a frame rate nobody could account for. Asking is
+            // not knowing; this is the knowing.
+            if (instructions > quantum)
+            {
+                overruns++;
+                worstSlice = Math.max(worstSlice, instructions);
+            }
 
             if (next.state === ThreadState.RUNNING)
             {
@@ -298,6 +315,9 @@ export function createScheduler(options){
             return {
                 quantum,
                 turns,
+                // Zero is the answer everyone assumes and nobody had checked.
+                overruns,
+                worstSlice,
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
                 threads: threads.length,
