@@ -288,12 +288,10 @@ export async function createV86Host(config){
         instructionCount: ()=>emulator.get_instruction_counter() >>> 0,
 
         /**
-         * How many compiled entry points the emulator is holding.
-         *
-         * Zero means every guest instruction is being interpreted, which is
-         * correct and several times slower -- and indistinguishable from a
-         * healthy machine in every test we have, because a test asserts what
-         * the guest computed and an interpreter computes the same answers.
+         * How many compiled entry points the emulator is holding, when it will
+         * say. A release build compiles this counter out and answers zero
+         * always, so a caller must read `jit.compiledSteps` instead and this
+         * exists only for a build that carries the profiler.
          */
         jitCacheSize: ()=>{
             try

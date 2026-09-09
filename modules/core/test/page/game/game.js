@@ -596,8 +596,7 @@ async function run(request){
             wave: layers.win32?.waveDevices ?? null,
             film: layers.app?.film ?? null,
             instructions: layers.cpu?.instructions ?? 0,
-            // Zero here means every guest instruction is interpreted.
-            jitCache: layers.cpu?.jitCache ?? 0,
+
             traps: layers.cpu?.traps ?? 0,
             trapCapacity: layers.cpu?.trapCapacity ?? 0,
             jit: layers.cpu?.jit ?? null,

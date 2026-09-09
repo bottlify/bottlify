@@ -386,15 +386,19 @@ export const cpuModule = {
                 protectedMode: host ? host.inProtectedMode() : false,
                 traps: thunks ? thunks.size : 0,
                 trapCapacity: thunks ? thunks.capacity : 0,
-                // Whether the emulator is compiling guest code at all.
+                // Whether the emulator is compiling guest code at all, and
+                // how much of it runs compiled rather than interpreted.
                 //
                 // Every test this project has passes on a dead compiler: they
                 // assert what the guest computed, and an interpreter computes
                 // the same answers several times slower. So the one thing that
                 // separates a machine running at its speed from one running at
-                // a seventh of it is invisible to all of them, and this is the
-                // number that says which we are looking at.
-                jitCache: host ? host.jitCacheSize() : 0,
+                // a seventh of it is invisible to all of them.
+                //
+                // Not the emulator's own cache size: that counter is compiled
+                // out of a release build and answers zero always, which reads
+                // as a dead compiler on a healthy machine. Counted where the
+                // instructions are actually retired instead.
                 jit: host ? host.jitState() : null,
             },
         };

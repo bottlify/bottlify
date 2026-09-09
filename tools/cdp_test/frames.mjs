@@ -101,8 +101,6 @@ function describe(before, after, windowMs){
     say(`  ${(frames / seconds).toFixed(1)} frames per second`
         + `, ${asMs(frames > 0 ? windowMs / frames : 0)} per frame`);
     say(`  ${(instructions / seconds / 1e6).toFixed(1)}M guest instructions per second`);
-    say(`  ${after.jitCache ?? 0} compiled entry points`
-        + `${(after.jitCache ?? 0) === 0 ? '  <- nothing compiled; this is the interpreter' : ''}`);
     if (after.jit && after.jit.compiledSteps >= 0)
     {
         const was = before.jit ?? {};
