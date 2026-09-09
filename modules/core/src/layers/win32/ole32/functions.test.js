@@ -89,6 +89,9 @@ function fakeHeap(base = 0x8000){
 
 function fakeHost(){
     const bytes = new Uint8Array(0x10000);
+    /** Everything the host was told it accepted and did not honour. */
+    /** @type {string[]} */
+    const reported = [];
     const threads = {
         first: /** @type {any} */ ({ id: 0x100 }),
         second: /** @type {any} */ ({ id: 0x104 }),
@@ -171,6 +174,11 @@ function fakeHost(){
             }
             return text;
         },
+        /** @param {number} address @param {number} count */
+        reported,
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
+
         /** @param {number} address @param {number} count */
         fill(address, count){
             for (let index = 0; index < count; index++)
@@ -305,6 +313,20 @@ test('an unregistered class and one that cannot be made fail differently', ()=>{
     host.fill(PPV, 1);
     assert.equal(createInstance(fns), CLASS_E_CLASSNOTAVAILABLE);
     assert.equal(host.u32(PPV), 0);
+});
+
+test('a class this build does not have is named, not only refused', ()=>{
+    // The code alone says "not registered" and nothing else, and which class a
+    // program wanted is the difference between a component nobody has built and
+    // a filter the game brought with it. A program that is refused takes a
+    // different path, usually a quieter one.
+    const { host, fns } = setup();
+    fns.CoInitialize.handler();
+    host.putGuid(CLSID_ARG, IID_ABSENT);
+
+    assert.equal(createInstance(fns), REGDB_E_CLASSNOTREG);
+    assert.ok(host.reported.some((/** @type {string} */ line)=>line.includes(IID_ABSENT)),
+        'the report names the class that was asked for');
 });
 
 test('a class that does not support the interface releases what it made', ()=>{

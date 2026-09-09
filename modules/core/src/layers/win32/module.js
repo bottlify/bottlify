@@ -741,6 +741,7 @@ export const win32Module = {
                 currentThread: ()=>kernel.currentThread(),
                 heap,
                 registry: com,
+                divergence: config?.divergence,
                 vtables: {
                     /** @param {any} object @param {string} interfaceId */
                     publish: (object, interfaceId)=>

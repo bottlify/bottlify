@@ -65,6 +65,10 @@ const COINIT_APARTMENTTHREADED = 0x2;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => any} currentThread  The record apartment state hangs on.
  * @property {OleHeap} heap             Where task memory comes from.
+ * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ *           Where a class this build does not have is named. A program asking
+ *           for one is asking for a component it shipped or expects installed,
+ *           and the code it gets back says only "not registered".
  * @property {import('./objects.js').ComRegistry} registry
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
@@ -256,6 +260,13 @@ export function createOleFunctions(host){
                 }
                 if (!host.registry.isRegistered(clsid))
                 {
+                    // Named, because the number alone is the whole question. A
+                    // program that asks for a class and is refused takes a
+                    // different path -- often a quieter one -- and which class
+                    // it wanted is the difference between "a component we have
+                    // not built" and "a filter the game brought with it".
+                    host.divergence?.('COM',
+                        `no class ${clsid} is registered, so CoCreateInstance refused it`);
                     return REGDB_E_CLASSNOTREG;
                 }
 
