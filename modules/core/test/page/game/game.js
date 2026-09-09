@@ -494,6 +494,10 @@ async function run(request){
             .map((/** @type {any} */ layer)=>[layer.name, layer.metrics ?? {}]));
         return JSON.stringify({
             ready: true,
+            // What has already gone wrong, if anything. Asked for while the run
+            // is still going: a tool driving the page needs to know at the step
+            // that caused a failure, not when the whole run finally answers.
+            failure: collected.failures.at(-1) ?? null,
             frames: seen.frames,
             averageFrameMs: seen.averageFrameMs,
             hostShare: seen.hostShare,

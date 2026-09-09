@@ -50,7 +50,37 @@ export const bridgeModule = {
         const memory = host.requireApi('memory');
 
         failure = null;
-        parking = createParking({ kernel });
+
+        // What actually happened at this seam, in order, so that a session can
+        // be replayed later without the machine it came from. A crash here is
+        // almost never a wrong value: it is an order of events -- a handler
+        // that awaited, a turn that went elsewhere, a callback built on what
+        // that turn left. Values can be reasoned about from a report; an order
+        // cannot, and this is the only place it exists.
+        /** @type {any[]} */
+        const events = [];
+        const recording = config?.record ?? 0;
+        /** @param {any} event */
+        const record = event=>{
+            if (recording === 0)
+            {
+                return;
+            }
+            events.push(event);
+            if (events.length > recording)
+            {
+                events.shift();
+            }
+        };
+
+        parking = createParking({
+            kernel,
+            /** @param {any} frame */
+            onBegin: frame=>record({
+                t: 'call', name: frame.name, thread: frame.thread?.name,
+                freeStack: frame.freeStack, restingStack: frame.restingStack,
+            }),
+        });
 
         /**
          * @param {string} name
@@ -71,6 +101,7 @@ export const bridgeModule = {
          */
         const suspend = (answer, frame)=>{
             const thread = kernel.currentThread();
+            record({ t: 'park', name: frame.name, thread: thread?.name });
             // Where it returns to was read before the handler ran: a handler
             // that called the guest back has since written over that part of
             // the stack, so reading it now would find an argument.
@@ -81,7 +112,10 @@ export const bridgeModule = {
                 hostReturn: frame.hostReturn,
             });
             answer.then(
-                value=>callbacks.finish(thread, value | 0),
+                value=>{
+                    record({ t: 'finish', name: frame.name, thread: thread?.name });
+                    callbacks.finish(thread, value | 0);
+                },
                 // Nothing above is waiting on this promise, so a handler that
                 // throws would otherwise vanish and leave the guest parked
                 // forever. Whoever is driving the machine asks for this.
@@ -116,6 +150,7 @@ export const bridgeModule = {
                 // its answer: the sentinel stub is about to `ret` into whatever
                 // the callback left on the stack, which is not code.
                 kernel.holdThread();
+                record({ t: 'returned', thread: kernel.currentThread()?.name });
                 callbacks.returned(kernel.currentThread());
                 return;
             }
@@ -234,6 +269,10 @@ export const bridgeModule = {
                     throw new Error('bridge: a guest callback made after an await must name'
                         + ' the thread whose call it answers');
                 }
+                record({
+                    t: 'guest', entry: entry >>> 0, thread: runOn?.name,
+                    by: parking.chain().at(-1) ?? null, named: thread !== undefined,
+                });
                 return callbacks.call({
                     thread: runOn,
                     entry,
@@ -303,10 +342,27 @@ export const bridgeModule = {
             recentlyStarted: ()=>callbacks.recentlyStarted(),
 
             /**
+             * The recorded session: every event at this seam, in order.
+             *
+             * Empty unless the build was configured to record. Written out, it
+             * is what `replaySession` takes -- a failure that took a person a
+             * minute of clicking to produce becomes a file that reproduces it
+             * in a test, with no browser and no game.
+             */
+            recorded: ()=>events.slice(),
+
+            /**
              * An error thrown by a suspended handler, which nothing above was
              * waiting on. Null unless one happened.
              */
             failure: ()=>failure,
+
+            /**
+             * The trap a guest callback returns through. Needed by anything
+             * driving this layer without a processor under it -- a replay of a
+             * recorded session -- which has to raise it by hand.
+             */
+            sentinelTrap: ()=>callbacks.sentinel(),
 
             /**
              * What is on our side of the boundary right now, for a failure

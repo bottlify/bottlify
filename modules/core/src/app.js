@@ -45,6 +45,9 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {number} [record]
+ *     How many events at the bridge to keep, so a run that went wrong can be
+ *     saved and replayed in a test. Zero, the default, records nothing.
  * @property {(dll: string, name: string | null, ordinal: number | null)
  *     => ({ args: number } | null)} [watchImport]
  *     Asked about every import as it is bound. Answering with an argument count
@@ -1162,6 +1165,7 @@ async function buildApp(options){
             lastError: ()=>core.api('win32').lastError(),
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
+            record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
                 options.onCall?.(call);
@@ -2719,6 +2723,28 @@ async function buildApp(options){
 
         /** The program's first thread. */
         mainThread,
+
+        /**
+         * The run as a session that can be replayed, when one was recorded.
+         *
+         * Everything `replaySession` needs and nothing else: the order of
+         * events at the bridge, and the threads with the stacks they were
+         * given. Written to a file, this is a failure that took a person a
+         * minute of clicking turned into a test that runs in a second.
+         */
+        /** @returns {{ threads: any[], events: any[] }} */
+        recordedSession(){
+            const recorded = bridge.recorded();
+            const named = new Set(recorded.map((/** @type {any} */ one)=>one.thread));
+            return {
+                threads: kernel.threads()
+                    .filter((/** @type {any} */ one)=>named.has(one.name))
+                    .map((/** @type {any} */ one)=>({
+                        name: one.name, stackTop: one.stackTop, stackLimit: one.stackLimit,
+                    })),
+                events: recorded,
+            };
+        },
 
         /**
          * Stops handing out turns without ending anything; `resume` continues

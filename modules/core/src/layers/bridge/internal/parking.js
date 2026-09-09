@@ -45,8 +45,10 @@ export function isParkedCall(value){
 /**
  * @param {Object} deps
  * @param {any} deps.kernel  The kernel layer's API.
+ * @param {(frame: CallFrame) => void} [deps.onBegin]
+ *        Told as each call starts, for a recording of the order of events.
  */
-export function createParking({ kernel }){
+export function createParking({ kernel, onBegin }){
     // Depth rather than a flag: a guest callback can trap into another host
     // function, and that one is as much in flight as its caller.
     /** @type {CallFrame[]} */
@@ -61,6 +63,7 @@ export function createParking({ kernel }){
             // tell its own thread's stack from somebody else's.
             frame.thread = kernel.currentThread();
             inFlight.push(frame);
+            onBegin?.(frame);
         },
         endCall(){
             inFlight.pop();
