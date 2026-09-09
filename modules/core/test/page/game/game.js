@@ -415,6 +415,21 @@ function scalars(layers){
             if (typeof value === 'number' || typeof value === 'string')
             {
                 metrics[name] = value;
+                continue;
+            }
+            // A small flat structure of numbers is a measurement too, and
+            // dropping it is how a counter added to a layer never appears in
+            // any report. What this refuses is the thing it was written to
+            // refuse: a ring buffer, a table, anything with a shape.
+            if (value !== null && typeof value === 'object' && !Array.isArray(value))
+            {
+                const entries = Object.entries(value);
+                if (entries.length <= 12
+                    && entries.every(([, held])=>typeof held === 'number'
+                        || typeof held === 'string'))
+                {
+                    metrics[name] = /** @type {any} */ (value);
+                }
             }
         }
         return { name: layer.name, status: layer.status, metrics };
