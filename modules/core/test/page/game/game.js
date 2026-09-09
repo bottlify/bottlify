@@ -456,7 +456,7 @@ async function run(request){
     // Optional, and asked for anyway: without it a program's cinematic is a
     // graph with nothing in it, which is a real state of a machine and not the
     // one worth measuring. A build that has no decoder to fetch runs as before.
-    const decoder = await fetch(
+    const decoder = request.video === false ? null : await fetch(
         new URL('../../../vendor/prebuilt/video-decoder.wasm', import.meta.url))
         .then(response=>response.ok ? response.arrayBuffer() : null)
         .catch(()=>null);

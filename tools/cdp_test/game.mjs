@@ -17,7 +17,7 @@
  * put in a repository. Without that bundle it says so and stops.
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS]
- *                                  [--dump-draws] [--skip-texture tN]
+ *                                  [--dump-draws] [--skip-texture tN] [--no-video]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -120,6 +120,11 @@ function parse(argv){
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
+        // A run measured through a two-minute cinematic measures the
+        // cinematic. Not a switch inside the guest: the engine is simply
+        // assembled without a decoder, which is an ordinary machine and the
+        // one every run had before there was one.
+        video: !argv.includes('--no-video'),
         dumpDraws: argv.includes('--dump-draws'),
         // Draws per frame, for bisecting which one painted a region.
         maxDraws: number('--max-draws', -1),
@@ -530,6 +535,7 @@ export async function game(options){
             maxTurns: options.turns,
             quantum: options.quantum,
             log: Boolean(options.log),
+            video: options.video,
             dumpDraws: options.dumpDraws,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
