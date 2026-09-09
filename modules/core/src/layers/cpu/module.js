@@ -385,6 +385,7 @@ export const cpuModule = {
                 instructions: host ? host.instructionCount() : 0,
                 protectedMode: host ? host.inProtectedMode() : false,
                 traps: thunks ? thunks.size : 0,
+                trapCapacity: thunks ? thunks.capacity : 0,
                 // Whether the emulator is compiling guest code at all.
                 //
                 // Every test this project has passes on a dead compiler: they

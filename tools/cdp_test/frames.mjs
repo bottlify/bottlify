@@ -218,6 +218,15 @@ function describe(before, after, windowMs){
         }
         say('');
     }
+    if (after.trapCapacity > 0)
+    {
+        const taken = after.traps - (before.traps ?? 0);
+        const share = after.traps / after.trapCapacity * 100;
+        say(`trap slots: ${after.traps} of ${after.trapCapacity} taken`
+            + ` (${share.toFixed(1)}%), ${taken} in this window`);
+        say('');
+    }
+
     const wave = after.wave ?? null;
     if (wave && wave.length > 0)
     {

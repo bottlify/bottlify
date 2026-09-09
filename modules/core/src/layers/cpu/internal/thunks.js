@@ -179,6 +179,18 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
             return entries.length;
         },
 
+        /**
+         * How many slots there are in total.
+         *
+         * Every published COM interface takes one per method and none are ever
+         * given back, so this is a budget a long run spends. How close it is to
+         * spent decides whether a program that keeps making objects meets a
+         * refusal, and nothing could see it.
+         */
+        get capacity(){
+            return slots;
+        },
+
         /** @returns {Uint8Array} the whole table, ready to write at `base` */
         image(){
             const bytes = new Uint8Array(entries.length * STUB_SIZE);
