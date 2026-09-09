@@ -102,14 +102,13 @@ export const audioModule = {
         const tracks = new WeakMap();
 
         /**
-         * Spans of a buffer that were never handed over because the output was
-         * already further ahead than it can play.
+         * Times a track's backlog was thrown away for being past its moment.
          *
-         * Counted rather than silent: this is sound the program produced and
-         * nobody will hear, which is a difference from the machine it was
-         * written for and belongs in a report rather than in nothing.
+         * A count above zero is a machine that fell behind its own sound, which
+         * a person hears as a break. It belongs in a report rather than in
+         * nothing.
          */
-        let dropped = 0;
+        let behind = 0;
 
         /**
          * Hands every playing buffer's newly-played bytes to the mixer.
@@ -140,12 +139,12 @@ export const audioModule = {
                 {
                     continue;
                 }
+                let track = tracks.get(buffer);
                 const ranges = buffer.drainPlayed();
                 if (ranges.length === 0)
                 {
                     continue;
                 }
-                let track = tracks.get(buffer);
                 if (!track)
                 {
                     track = mixer.open({
@@ -157,20 +156,22 @@ export const audioModule = {
                     });
                     tracks.set(buffer, track);
                 }
-                track.gain = buffer.gain;
-                // A track this far ahead is not behind on work, it is holding
-                // audio whose moment has passed: the cursor is driven by the
-                // guest's clock and the ring drains at the speed of a real
-                // device, so anything the clock produces beyond the ring's own
-                // depth would only ever be played late, and later still the
-                // next time. Dropped and counted rather than queued, because a
-                // queue with nothing bounding it grows for as long as the sound
-                // plays.
+                // Too far ahead to be worth playing: the cursor is driven by the
+                // guest's clock and the ring drains at the pace of a real
+                // device, so a queue past the ring's own depth is audio whose
+                // moment has gone.
+                //
+                // What goes is the backlog, not the span just read. Refusing the
+                // new span instead leaves the old one queued in front of it, so
+                // the machine plays a fixed lateness for ever and never catches
+                // up -- and the sound a program is making *now* is the one it
+                // meant to be heard.
                 if (track.pending() > mixer.capacityFrames)
                 {
-                    dropped++;
-                    continue;
+                    track.reset();
+                    behind++;
                 }
+                track.gain = buffer.gain;
                 for (const range of ranges)
                 {
                     track.write(memory.readBytes(buffer.address + range.from, range.bytes));
@@ -213,8 +214,8 @@ export const audioModule = {
 
             dsound: ()=>dsound,
 
-            /** Spans the output was too far ahead to take. */
-            dropped: ()=>dropped,
+            /** Turns a buffer was left unread because its track was full. */
+            behind: ()=>behind,
         };
         return current;
     },
@@ -229,7 +230,7 @@ export const audioModule = {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dsound().diagnostics() : {}),
                 ...(current ? current.output().diagnostics() : {}),
-                droppedSpans: current ? current.dropped() : 0,
+                behindTurns: current ? current.behind() : 0,
             },
         };
     },

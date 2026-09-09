@@ -202,23 +202,85 @@ test('the mixer asks for sound itself, so whoever pumps it need not know how', a
         'pumping the mixer alone is enough to pull the buffer');
 });
 
-test('a clock that outruns the device drops sound rather than hoarding it', async()=>{
-    // The cursor is driven by the guest's clock and the ring drains at the pace
-    // of a real device. Nothing bounds the difference, so a queue that simply
-    // accepted everything grew for as long as the sound played -- seconds of
-    // audio held in memory, every frame of it already too late to be heard.
-    const f = await playing();
-    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+test('a stall costs the machine time, not the sound it had not read yet', ()=>{
+    // The old expectation here was that a backlog is dropped, and it was wrong
+    // in the way that matters: reading a span moves the point the next read
+    // starts from, so draining one and then refusing it does not postpone that
+    // sound, it destroys it. Every machine stalls -- fetching a block takes as
+    // long as it takes -- and a stall left the queue over its depth, after
+    // which each turn discarded exactly the span that would have let it drain
+    // back under. The sound stopped and never came back.
+    //
+    // What has to be bounded is the backlog, and leaving the bytes where they
+    // are bounds it just as well: the read point lags and catches up.
+    return playing().then(f=>{
+        f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
 
-    // Far more guest time than the ring can ever hold.
-    for (let turn = 0; turn < 40; turn++)
-    {
-        f.advance(200);
+        // A stall of the length a block fetch takes. Long enough that what it
+        // leaves queued is past the depth the output can hold even after the
+        // ring has taken its fill, and short enough that the cursor has not
+        // lapped the buffer -- a lap really is gone, and `drainPlayed` says so.
+        f.advance(800);
         f.api.pump();
-    }
 
-    const mixed = f.api.output().diagnostics();
-    assert.ok(mixed.queuedFrames <= f.api.output().capacityFrames * 2,
-        `the backlog stayed bounded, and was ${mixed.queuedFrames}`);
-    assert.ok(f.api.dropped() > 0, 'and what was dropped is counted, not silent');
+        // The device, doing what a device does: it takes the sound the time
+        // that has passed is worth, and not a frame more. Reading the ring dry
+        // every turn is what hid this -- the queue drained faster than the
+        // stall could refill it, and nothing was ever refused twice running.
+        const block = new Float32Array(1024 * 2);
+        let produced = 0;
+        for (let turn = 0; turn < 200; turn++)
+        {
+            f.advance(10);
+            f.api.pump();
+            for (let owed = 10 * 48; owed > 0;)
+            {
+                const read = f.api.output().ring.read(block.subarray(0, Math.min(owed, 1024) * 2));
+                if (read === 0)
+                {
+                    break;
+                }
+                produced += read;
+                owed -= read;
+            }
+        }
+
+        const mixed = f.api.output().diagnostics();
+        assert.ok(f.api.behind() > 0, 'the machine says it fell behind its own sound');
+
+        // The whole point. Throwing away the span just read leaves the stale
+        // one queued in front of it, and the machine then plays a fixed
+        // lateness for ever -- a backlog that sat at better than twice the
+        // output's depth and never came down. What a program is playing now is
+        // what it meant to be heard.
+        assert.ok(mixed.queuedFrames <= f.api.output().capacityFrames,
+            `the machine caught up, and was ${mixed.queuedFrames} frames behind`);
+
+        // And it is still playing: a recovery that goes quiet is not one.
+        assert.ok(produced > 90000, `heard ${produced} frames after the stall`);
+    });
+});
+
+test('the span read on the turn the machine falls behind is the one it plays', ()=>{
+    // Reading a span moves the point the next read starts from, so a turn that
+    // reads one and then refuses it has destroyed it -- and what stays queued
+    // in front is the older sound. Whichever way the policy goes, the span just
+    // read is the one a program meant to be heard now, so it is the backlog
+    // that goes and the fresh span that plays.
+    return playing().then(f=>{
+        f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+        f.advance(800);
+        f.api.pump();
+        assert.equal(f.api.behind(), 0, 'nothing refused yet');
+
+        const before = f.api.output().diagnostics().queuedFrames;
+        f.advance(10);
+        f.api.pump();
+
+        assert.ok(f.api.behind() > 0, 'this is the turn it fell behind');
+        const after = f.api.output().diagnostics().queuedFrames;
+        assert.ok(after < before,
+            `the backlog went, and did not grow: ${before} -> ${after}`);
+        assert.ok(after > 0, 'and the span just read stayed, rather than being the one dropped');
+    });
 });
