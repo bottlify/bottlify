@@ -122,6 +122,15 @@ export const audioModule = {
          * program wrote into long ago, at the rate the cursor moves.
          */
         const feedBuffers = ()=>{
+            // Nothing is reading the other end, so everything read out here
+            // would be mixed and thrown away. The cursors still advance -- that
+            // is DirectSound's own business and the program watches them -- but
+            // the samples they pass over have nowhere to go, and this runs on
+            // every mix of every turn.
+            if (!drained)
+            {
+                return;
+            }
             for (const buffer of dsound.buffers())
             {
                 // The primary buffer is the mix target and holds no samples of

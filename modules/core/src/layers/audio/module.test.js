@@ -62,6 +62,10 @@ function fixture(){
         config: {
             now: ()=>ms,
             sampleRate: 48000,
+            // A build with a device on the other end of the ring, which is what
+            // every test here is about. Without one there is nothing to hear
+            // and nothing to read out for.
+            drained: true,
             allocate: (/** @type {number} */ size)=>{
                 const address = nextAddress;
                 nextAddress += (size + 0xfff) & ~0xfff;
@@ -92,9 +96,9 @@ function fixture(){
 }
 
 /** A module with one playing sound buffer full of something to hear. */
-async function playing({ silent = false } = {}){
+async function playing({ silent = false, drained = true } = {}){
     const f = fixture();
-    const api = await audioModule.create(f.config, {
+    const api = await audioModule.create({ ...f.config, drained }, {
         requireApi: (/** @type {string} */ name)=>{
             assert.equal(name, 'memory');
             return f.memory;
@@ -138,6 +142,20 @@ test('a playing sound buffer reaches the ring', async()=>{
     const mixed = f.api.output().diagnostics();
     assert.equal(mixed.tracks, 1, 'the buffer opened a track of its own');
     assert.ok(mixed.produced > 0, 'and its samples reached the ring');
+});
+
+test('a build with nothing draining the ring does not read a buffer out', async()=>{
+    // Every sample read out here would be mixed and then thrown away, and this
+    // runs on every mix of every turn. The cursors still move -- that is
+    // DirectSound's own business and the program watches them -- but there is
+    // nothing on the other end for the sound to reach.
+    const f = await playing({ drained: false });
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    f.api.pump();
+
+    assert.equal(f.api.output().diagnostics().tracks, 0, 'no track was opened');
+    assert.equal(f.api.output().diagnostics().produced, 0, 'and nothing was mixed');
 });
 
 test('a buffer nobody played contributes nothing', async()=>{
