@@ -2206,6 +2206,15 @@ async function buildApp(options){
     /** @type {{ track: any, sampleRate: number, channels: number } | null} */
     let filmTrack = null;
 
+    /**
+     * Why a decoded frame did not reach the screen.
+     *
+     * One counter per way out, because "the film decoded and nothing was shown"
+     * is four different faults wearing the same face, and a report that only
+     * says nothing arrived cannot tell them apart.
+     */
+    const film = { ticks: 0, frames: 0, silent: 0, noScreen: 0, noRoom: 0, shown: 0 };
+
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
      *            audio: Int16Array[], sampleRate: number, channels: number } | null} shown */
     const showVideoFrame = shown=>{
@@ -2213,6 +2222,7 @@ async function buildApp(options){
         {
             return;
         }
+        film.ticks++;
         if (shown.audio.length > 0 && sound)
         {
             // A film carries its own rate and its own channel count, and they
@@ -2237,9 +2247,16 @@ async function buildApp(options){
                     block.buffer, block.byteOffset, block.byteLength));
             }
         }
-        const screen = core.api('graphics');
-        if (!shown.bgra || !screen?.present)
+        if (!shown.bgra)
         {
+            film.silent++;
+            return;
+        }
+        film.frames++;
+        const screen = core.api('graphics');
+        if (!screen?.present)
+        {
+            film.noScreen++;
             return;
         }
         const needed = shown.width * shown.height * 4;
@@ -2248,10 +2265,12 @@ async function buildApp(options){
             const address = win32.heap().allocate(needed);
             if (address === 0)
             {
+                film.noRoom++;
                 return;
             }
             filmSurface = { address, bytes: needed };
         }
+        film.shown++;
         memory.writeBytes(filmSurface.address, shown.bgra.subarray(0, needed));
         screen.present({
             buffer: filmSurface.address,
@@ -2893,6 +2912,7 @@ async function buildApp(options){
                 metrics: {
                     ...events.diagnostics(),
                     bundle: { ...bundleReads, distinct: blocksSeen.size },
+                    film: { ...film },
                 },
             },
         ],

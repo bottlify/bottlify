@@ -515,6 +515,7 @@ async function run(request){
             // two and nothing else.
             presenter: layers.graphics?.presenter ?? null,
             media: layers.media ?? null,
+            film: layers.app?.film ?? null,
             instructions: layers.cpu?.instructions ?? 0,
             presents: presents,
             graphics: layers.graphics?.seam?.device

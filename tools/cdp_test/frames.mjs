@@ -157,6 +157,15 @@ function describe(before, after, windowMs){
     {
         say(`the film: ${after.media.opened ?? 0} opened`
             + `, ${after.media.frames ?? 0} frames decoded`);
+        if (after.film)
+        {
+            const held = after.film;
+            say(`  ${held.ticks} ticks carried something, ${held.frames} carried a picture`);
+            say(`  shown ${held.shown}`
+                + `, no picture ${held.silent}`
+                + `, nowhere to show it ${held.noScreen}`
+                + `, no room for it ${held.noRoom}`);
+        }
         say('');
     }
 
