@@ -1821,6 +1821,10 @@ async function buildApp(options){
      * @returns {number | Promise<number>}
      */
     const loadLibraryAtRuntime = name=>{
+        // Read now, before anything is awaited: this is the thread whose
+        // LoadLibrary call is being answered, and it is the one whose stack the
+        // library's entry point has to run on.
+        const asked = kernel.currentThread();
         const key = name.toLowerCase().replace(/\.dll$/, '');
         if (absentLibraries.has(key))
         {
@@ -1919,9 +1923,15 @@ async function buildApp(options){
 
             if (held.entryPoint && held.entryPoint !== base)
             {
+                // On the thread that asked for the library, which by now is not
+                // the one on the processor: mapping it awaited a file and a
+                // range request, and the loop gave every other thread its turns
+                // while that was outstanding. Running a DllMain on whoever
+                // happens to be current builds its frame on a stranger's stack.
                 await bridge.callGuest({
                     entry: held.entryPoint,
                     args: [base, DLL_PROCESS_ATTACH, 0],
+                    thread: asked,
                 });
             }
             events.emit('library-loaded', { name, base });

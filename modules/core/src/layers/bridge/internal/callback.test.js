@@ -129,3 +129,20 @@ test('every thread is looked at, not only the one on the processor', ()=>{
     assert.deepEqual(made.diagnostics().suspendedCalls.map((/** @type {any} */ c)=>c.name),
         ['WINMM.dll!waveOutWrite', 'KERNEL32.dll!ReadFile']);
 });
+
+test('a callback runs on the thread whose call it answers, not whoever is current', ()=>{
+    // A host call that awaits anything -- a file, a range request -- lets go of
+    // the processor, and the loop gives every other thread its turns while it
+    // waits. By the time it resumes, the thread on the processor is somebody
+    // else, and building the callback's frame there puts it on a stranger's
+    // stack. The caller has to say whose call it is answering.
+    const asked = thread('main');
+    const other = thread('thread-3');
+    const { made, resumed } = callbacks([asked, other]);
+    made.reserve();
+
+    made.call({ thread: asked, entry: 0x400000, args: [1], stackAtRest: 0x2ff000 });
+
+    assert.deepEqual(resumed.map(([name])=>name), ['main'],
+        'the frame was built for the thread that asked, whoever is running now');
+});

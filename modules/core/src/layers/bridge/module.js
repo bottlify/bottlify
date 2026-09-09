@@ -206,12 +206,20 @@ export const bridgeModule = {
              * @param {Object} call
              * @param {number} call.entry
              * @param {number[]} [call.args]
+             * @param {any} [call.thread]
+             *   Whose stack to build the frame on. Defaults to the thread on
+             *   the processor, which is right only while the host call that is
+             *   doing this has not let go of it. A handler that awaited
+             *   anything -- a file, a range request -- has: the loop kept
+             *   turning and gave other threads their turns, and by the time it
+             *   resumes the thread on the processor is somebody else. A caller
+             *   in that position has to remember whose call it is answering.
              * @returns {Promise<number>}
              */
-            callGuest({ entry, args = [] }){
+            callGuest({ entry, args = [], thread }){
                 const frame = parking.current();
                 return callbacks.call({
-                    thread: kernel.currentThread(),
+                    thread: thread ?? kernel.currentThread(),
                     entry,
                     args,
                     stackAtRest: frame ? frame.freeStack : undefined,
