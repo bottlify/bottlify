@@ -28,6 +28,9 @@ jobs:
       - run: npm run check:boundaries
       # Integration tests drive a real v86 build, fetched from our fork's release.
       - run: npm run fetch:v86
+      # The build refuses to make a package that cannot boot, so the decoder has
+      # to be here too -- and the release test packs and installs the result.
+      - run: npm run fetch:video-decoder
       - run: npm run test:integration
       - run: npm run build
 

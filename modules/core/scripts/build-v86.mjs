@@ -27,6 +27,7 @@ const IMAGE = 'bottlify-v86-builder:0.1';
 /** @typedef {{ src: string, out: string }} ArtifactSpec */
 const ARTIFACTS = [
     { src: 'build/libv86.js', out: 'libv86.js' },
+    { src: 'build/libv86.mjs', out: 'libv86.mjs' },
     { src: 'build/v86.wasm', out: 'v86.wasm' },
     { src: 'bios/seabios.bin', out: 'seabios.bin' },
     { src: 'bios/vgabios.bin', out: 'vgabios.bin' },

@@ -29,11 +29,20 @@ const MANIFEST_FILE = join(OUT, 'manifest.json');
 /** @returns {Record<string, string>} map file name → expected sha256 hex */
 function readManifest(){
     const raw = JSON.parse(readFileSync(MANIFEST_FILE, 'utf8'));
+    // A packaging manifest also lists artifacts built elsewhere (the video
+    // decoder comes off a different fork), which this container cannot produce.
+    // It names the subset that is ours to rebuild; a manifest written by the
+    // v86 build itself names none, and every artifact in it is rebuilt.
+    const covered = raw.reproducible ?? null;
     /** @type {Record<string, string>} */
     const expected = {};
     for (const [rel, hash] of Object.entries(raw.artifacts))
     {
         const name = rel.replace(/^\.\//, '');
+        if (covered && !covered.includes(name))
+        {
+            continue;
+        }
         const prefix = 'sha256:';
         if (!hash.startsWith(prefix))
         {
