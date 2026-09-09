@@ -343,8 +343,16 @@ export const win32Module = {
             // be called back does not poll the flags, so accepting the request
             // and never delivering it leaves it waiting for something that
             // cannot arrive.
+            // Whose call is being answered. Read before anything is awaited and
+            // carried through, because a notice delivered after one goes to
+            // whoever is current then -- and a callback built on a stranger's
+            // stack is a crash with no author.
+            currentThread: ()=>kernel.currentThread(),
             notify: createWaveNotifier({
-                callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
+                /**
+                 * @param {number} entry @param {number[]} args @param {any} [thread]
+                 */
+                callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 /** @param {import('./user32/messages.js').PostedMessage} message */
                 post: message=>queue.post(message),
                 // A stale or mistyped handle is the program's mistake and not

@@ -138,7 +138,12 @@ const TIME_BYTES = 0x0004;
  * @property {() => number} now
  *           Guest milliseconds since boot -- the same clock the rest of the
  *           engine reads, never the host's.
- * @property {(notice: import('./notify.js').WaveNotice) =>
+ * @property {(() => any) | undefined} [currentThread]
+ *           Whose call is being answered. Read before anything is awaited: a
+ *           notice delivered after one would otherwise go to whoever is on the
+ *           processor then, and a callback built on a stranger's stack is a
+ *           crash with no author.
+ * @property {(notice: import('./notify.js').WaveNotice, thread?: any) =>
  *               void | Promise<any>} [notify]
  *           Tells the caller a buffer came back, through whichever of the
  *           window, thread, callback or event forms it asked for. Answering
@@ -254,6 +259,10 @@ export function createWinmmFunctions(host){
             return result;
         }
         device.delivering = true;
+        // Read now, before the first notice suspends anything: every notice in
+        // this burst belongs to the call being answered, and after an await the
+        // thread on the processor is somebody else.
+        const asked = host.currentThread?.() ?? null;
         for (;;)
         {
             const next = device.pending[0];
@@ -266,7 +275,7 @@ export function createWinmmFunctions(host){
                 return result;
             }
             device.pending.shift();
-            const answer = notify(next);
+            const answer = notify(next, asked);
             if (typeof (/** @type {any} */ (answer))?.then === 'function')
             {
                 return (async()=>{
@@ -276,7 +285,7 @@ export function createWinmmFunctions(host){
                         for (let more = device.pending.shift(); more;
                             more = device.pending.shift())
                         {
-                            await notify(more);
+                            await notify(more, asked);
                         }
                     }
                     finally

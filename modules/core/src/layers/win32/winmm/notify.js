@@ -43,15 +43,15 @@ const CALLBACK_EVENT = 0x00050000;
 
 /**
  * @param {Object} deps
- * @param {(entry: number, args: number[]) => Promise<number>} deps.callGuest
+ * @param {(entry: number, args: number[], thread?: any) => Promise<number>} deps.callGuest
  *        Calls a guest routine and answers when it returns.
  * @param {(message: { hwnd: number, message: number,
  *                     wParam: number, lParam: number }) => void} deps.post
  * @param {(handle: number) => void} deps.signal  Sets an event, by handle.
- * @returns {(notice: WaveNotice) => void | Promise<number>}
+ * @returns {(notice: WaveNotice, thread?: any) => void | Promise<number>}
  */
 export function createWaveNotifier({ callGuest, post, signal }){
-    return notice=>{
+    return (notice, thread)=>{
         switch (notice.kind)
         {
             case CALLBACK_WINDOW:
@@ -82,8 +82,15 @@ export function createWaveNotifier({ callGuest, post, signal }){
             case CALLBACK_FUNCTION:
                 // void CALLBACK waveOutProc(HWAVEOUT, UINT, DWORD_PTR dwInstance,
                 //                           DWORD_PTR dwParam1, DWORD_PTR dwParam2)
+                //
+                // On the thread whose call is being answered, which after the
+                // first notice of a burst is no longer the one on the
+                // processor: delivering one means running guest code, the
+                // caller is parked on a promise while it does, and the loop
+                // gives everyone else their turns in the meantime.
                 return callGuest(notice.target,
-                    [notice.device, notice.message, notice.instance, notice.param, 0]);
+                    [notice.device, notice.message, notice.instance, notice.param, 0],
+                    thread);
 
             case CALLBACK_EVENT:
                 // The event form says nothing about which buffer: a program that

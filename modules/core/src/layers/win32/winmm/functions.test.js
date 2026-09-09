@@ -618,3 +618,37 @@ test('a device with a real mixer retires even a very small buffer', async()=>{
     assert.equal(wave.diagnostics()[0].cursor, 'device');
     assert.equal(wave.diagnostics()[0].retired, 1);
 });
+
+test('every notice of a burst is delivered on the thread whose call it answers', async()=>{
+    // Delivering one means running guest code: the caller parks on a promise
+    // while it does, and the loop gives every other thread its turns. By the
+    // time the next notice goes out the thread on the processor is somebody
+    // else -- and a callback frame built on a stranger's stack is a crash with
+    // no author, which is exactly how one arrived.
+    const m = machine();
+    /** @type {{ message: number, thread: string | undefined }[]} */
+    const delivered = [];
+    /** @type {((value: number) => void)[]} */
+    const waiting = [];
+    let current = { name: 'main' };
+    m.host.currentThread = ()=>current;
+    /** @param {any} notice @param {any} thread */
+    m.host.notify = (notice, thread)=>{
+        delivered.push({ message: notice.message, thread: thread?.name });
+        return new Promise(resolve=>waiting.push(resolve));
+    };
+
+    const device = opened(m, CALLBACK_FUNCTION, 0x38230b0);
+    assert.deepEqual(delivered.map(one=>one.thread), ['main'],
+        'the open notice went out on the thread that opened');
+
+    // The loop handed the processor to somebody else while that was running.
+    current = { name: 'thread-7' };
+    waiting.shift()?.(0);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    assert.ok(delivered.every(one=>one.thread === 'main'),
+        'and every notice after it still belongs to the thread whose call it answers');
+    assert.ok(device > 0);
+});
