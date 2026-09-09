@@ -18,7 +18,7 @@ import { createDispatcher } from './dispatch.js';
  * @param {number} [options.esp]
  * @param {number[]} [options.args]
  */
-function machine({ esp = 0x3000, args = [] } = {}){
+function machine({ esp = 0x3000, args = [], profiler } = {}){
     /** @type {Map<number, number>} */
     const cells = new Map([[esp, 0x401234]]);
     args.forEach((value, index)=>cells.set(esp + 4 + index * 4, value));
@@ -57,7 +57,7 @@ function machine({ esp = 0x3000, args = [] } = {}){
     };
 
     const parking = createParking({ kernel });
-    const dispatcher = createDispatcher({ cpu, memory, parking });
+    const dispatcher = createDispatcher({ cpu, memory, parking, profiler });
     return { cpu, memory, registers, parking, dispatcher, parkedThreads, current };
 }
 
@@ -214,4 +214,33 @@ test('the call log is bounded, and a long run does not grow it', ()=>{
     assert.equal(dispatcher.calls().length, 4096, 'but only the recent ones are kept');
     assert.equal(dispatcher.recent(3).length, 3);
     assert.equal(dispatcher.diagnostics().lastCall, 'Tick');
+});
+
+test('the crossing is timed apart from the handler it carries', ()=>{
+    // A title's menu makes about thirty thousand of these a second while every
+    // handler in a report costs a fraction of a millisecond a frame. Without
+    // the boundary timed on its own there is no way to tell a machine slowed by
+    // its own emulation from one slowed by leaving it so often -- and the two
+    // want opposite fixes.
+    /** @type {string[]} */
+    const opened = [];
+    const built = machine({
+        profiler: {
+            /** @param {string} name */
+            begin: name=>opened.push(`begin ${name}`),
+            /** @param {string} name */
+            end: name=>opened.push(`end ${name}`),
+        },
+    });
+    built.dispatcher.register(1, {
+        name: 'TEST.dll!Something', convention: 'stdcall', argBytes: 0, handler: ()=>7,
+    });
+    built.dispatcher.dispatch(1);
+
+    assert.deepEqual(opened, [
+        'begin trap',
+        'begin TEST.dll!Something',
+        'end TEST.dll!Something',
+        'end trap',
+    ], 'the handler runs inside the crossing, so the crossing keeps only its own time');
 });

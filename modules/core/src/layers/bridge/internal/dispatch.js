@@ -237,6 +237,34 @@ export function createDispatcher(deps){
          * @param {number} id
          */
         dispatch(id){
+            // Everything a crossing costs that is not the handler itself:
+            // reading the frame, marshalling the arguments, the bookkeeping a
+            // trace needs, and the return. Opened around the whole of it, so
+            // what is left as this phase's own time -- the handler runs inside
+            // it and takes its own -- is the price of the boundary.
+            //
+            // It is the number that decides where speed is lost. A title's menu
+            // makes about thirty thousand of these a second while every handler
+            // in the report costs a fraction of a millisecond a frame, and
+            // until this existed there was no way to tell a machine slowed by
+            // its own emulation from one slowed by leaving it so often.
+            profiler?.begin('trap', 'host');
+            try
+            {
+                this.dispatchNow(id);
+            }
+            finally
+            {
+                profiler?.end('trap');
+            }
+        },
+
+        /**
+         * The crossing itself, with the phase above already open.
+         *
+         * @param {number} id
+         */
+        dispatchNow(id){
             const fn = functions.get(id);
             if (!fn)
             {
