@@ -1017,6 +1017,18 @@ async function buildApp(options){
     /** @type {() => void} */
     let arrived = ()=>{};
 
+    /**
+     * What the guest has waited on the network for, and how much of it twice.
+     *
+     * A block asked for a second time is one the cache had and let go, and
+     * there is no other way to tell that apart from a program simply reading
+     * more of its own archives -- both look like a run that spends its time
+     * fetching. One is a bound to raise; the other is nothing to do with us.
+     */
+    const bundleReads = { requests: 0, blocks: 0, bytes: 0, again: 0, againBytes: 0 };
+    /** @type {Set<number>} */
+    const blocksSeen = new Set();
+
     // A call that is waiting -- a message loop with an empty queue -- is let go
     // once per scheduler turn to look again.
     /** @type {(() => void)[]} */
@@ -1370,6 +1382,21 @@ async function buildApp(options){
                 // its own message queue is waiting on nothing at all. Told
                 // apart, one of them is a number to reduce and the other is a
                 // loop to stop taking so seriously.
+                bundleReads.requests++;
+                for (const block of needed)
+                {
+                    bundleReads.blocks++;
+                    bundleReads.bytes += block.packed;
+                    if (blocksSeen.has(block.index))
+                    {
+                        bundleReads.again++;
+                        bundleReads.againBytes += block.packed;
+                    }
+                    else
+                    {
+                        blocksSeen.add(block.index);
+                    }
+                }
                 fetching++;
                 if (fetching === 1)
                 {
@@ -2671,7 +2698,15 @@ async function buildApp(options){
 
         diagnostics: ()=>[
             ...core.diagnostics(),
-            { name: 'app', version: '0.1.0', status: 'ready', metrics: events.diagnostics() },
+            {
+                name: 'app',
+                version: '0.1.0',
+                status: 'ready',
+                metrics: {
+                    ...events.diagnostics(),
+                    bundle: { ...bundleReads, distinct: blocksSeen.size },
+                },
+            },
         ],
 
         /**

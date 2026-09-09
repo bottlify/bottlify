@@ -264,8 +264,13 @@ function describe(result, context, calls){
 
     for (const layer of result.layers ?? [])
     {
+        // A metric that is a structure prints as its own JSON rather than as
+        // "[object Object]", which is what a nested one used to come out as --
+        // a line that looks like a measurement and carries none.
         const metrics = Object.entries(layer.metrics ?? {})
-            .map(([name, value])=>`${name}=${value}`).join(' ');
+            .map(([name, value])=>`${name}=${
+                value !== null && typeof value === 'object' ? JSON.stringify(value) : value}`)
+            .join(' ');
         say(`  ${layer.name} [${layer.status}] ${metrics}`);
     }
     say('');
