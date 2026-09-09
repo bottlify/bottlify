@@ -315,6 +315,66 @@ export async function createV86Host(config){
             }
         },
 
+        /**
+         * The emulator's own account of where the guest ran, by address,
+         * weighted by instructions: every compiled block counts itself on
+         * entry, and the interpreter every instruction. A build without it
+         * answers that it is absent, and starting it then does nothing.
+         */
+        profile: {
+            available: ()=>typeof cpu.wm.exports.profile_set === 'function',
+            /** @returns {boolean} whether the account is being kept */
+            start(){
+                const exports = cpu.wm.exports;
+                if (typeof exports.profile_set !== 'function')
+                {
+                    return false;
+                }
+                exports.profile_reset();
+                exports.profile_set(1);
+                // A block compiled before now carries no count.
+                exports.jit_clear_cache_js();
+                return true;
+            },
+            stop(){
+                const exports = cpu.wm.exports;
+                if (typeof exports.profile_set === 'function')
+                {
+                    exports.profile_set(0);
+                    exports.jit_clear_cache_js();
+                }
+            },
+            /**
+             * @returns {{ entries: { address: number, instructions: number, hits: number }[],
+             *     dropped: number } | null}
+             */
+            read(){
+                const exports = cpu.wm.exports;
+                if (typeof exports.profile_slots !== 'function')
+                {
+                    return null;
+                }
+                const slots = exports.profile_slots() >>> 0;
+                const memory = exports.memory.buffer;
+                const keys = new Uint32Array(memory, exports.profile_keys_ptr() >>> 0, slots);
+                const weights = new Uint32Array(memory, exports.profile_weights_ptr() >>> 0, slots);
+                const hits = new Uint32Array(memory, exports.profile_hits_ptr() >>> 0, slots);
+                const entries = [];
+                for (let slot = 0; slot < slots; slot++)
+                {
+                    if (keys[slot] !== 0)
+                    {
+                        entries.push({
+                            address: (keys[slot] - 1) >>> 0,
+                            instructions: weights[slot],
+                            hits: hits[slot],
+                        });
+                    }
+                }
+                return { entries, dropped: exports.profile_dropped() >>> 0 };
+            },
+        },
+
         /** What the emulator's compiler was configured with, and how it is doing. */
         jitState: ()=>{
             try

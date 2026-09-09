@@ -135,6 +135,51 @@ function profile(layout){
     };
 }
 
+/**
+ * The emulator's own account of where the guest ran, when one was kept:
+ * the hottest blocks by instructions, and the same by page.
+ *
+ * @param {any} app  The running application, or nothing yet.
+ * @param {string[]} layout  As the memory layer reports it.
+ */
+function exactProfile(app, layout){
+    const account = app?.guestProfile?.read();
+    if (!account || account.entries.length === 0)
+    {
+        return null;
+    }
+    const where = symboliser(layout);
+    let retired = 0;
+    /** @type {Map<string, number>} */
+    const pages = new Map();
+    for (const entry of account.entries)
+    {
+        retired += entry.instructions;
+        const page = where(entry.address, ~0xfff);
+        pages.set(page, (pages.get(page) ?? 0) + entry.instructions);
+    }
+    const share = (/** @type {number} */ count)=>count / Math.max(1, retired);
+    return {
+        blocks: account.entries.length,
+        retired,
+        dropped: account.dropped,
+        pages: [...pages].sort((left, right)=>right[1] - left[1]).slice(0, 16)
+            .map(([at, count])=>({ at, count, share: share(count) })),
+        hot: [...account.entries].sort((left, right)=>right.instructions - left.instructions)
+            .slice(0, 32)
+            .map(entry=>({
+                at: where(entry.address),
+                instructions: entry.instructions,
+                hits: entry.hits,
+                share: share(entry.instructions),
+                // The bytes at the block, for a reader with a disassembler:
+                // an address alone says where, not what.
+                bytes: Array.from(app.debug.read(entry.address, 48))
+                    .map((/** @type {number} */ byte)=>byte.toString(16).padStart(2, '0')).join(' '),
+            })),
+    };
+}
+
 /** @type {any} */
 const namespace = { errors: [] };
 
@@ -581,6 +626,7 @@ async function run(request){
             // there is of a program's own code, which makes no host call to
             // record what it decided.
             profile: profile(layers.memory?.layout ?? []),
+            exact: exactProfile(running, layers.memory?.layout ?? []),
             // Whether the emulator honoured the slice it was given. A quantum
             // that is not kept is time one thread holds the machine while a
             // frame waits, and it is invisible in every other number here.
@@ -708,6 +754,14 @@ async function run(request){
     // Published before the run, not after: the whole point of the frame report
     // is to be asked while the frames are still happening.
     running = app;
+    if (request.exact)
+    {
+        // Kept by the emulator itself rather than sampled, so it costs the
+        // guest a call per block; asked for, never on by default.
+        namespace.exactStarted = app.guestProfile.start();
+    }
+    /** Begins the account afresh, so a window measures itself and not the loading before it. */
+    namespace.exactRestart = ()=>Boolean(running?.guestProfile.start());
 
     const started = performance.now();
     try
@@ -763,6 +817,7 @@ async function run(request){
             .map((/** @type {any} */ call)=>({ ...call, fromName: where(call.from >>> 0) })),
     };
     result.profile = profile(layout);
+    result.exact = exactProfile(running, layout);
 
     // Named rather than left to `scalars`, which keeps only numbers and strings
     // -- every metric this layer reports is an object, so all of them were

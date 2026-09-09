@@ -53,6 +53,10 @@ function parse(argv){
         video: argv.includes('--video'),
         // Sample where the guest's instruction pointer is, once a turn.
         profile: argv.includes('--profile'),
+        // The emulator's own account instead: every compiled block counts
+        // itself, so the attribution is by the code that ran and not by
+        // where the turn happened to stop.
+        exact: argv.includes('--exact'),
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
@@ -184,6 +188,31 @@ function describe(before, after, windowMs){
         for (const row of after.profile.pages.slice(0, 12))
         {
             say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
+        }
+        say('');
+    }
+
+    if (after.exact)
+    {
+        const exact = after.exact;
+        say(`where the guest ran, by the emulator's own count`
+            + ` (${exact.blocks} blocks, ${exact.retired} instructions`
+            + `${exact.dropped ? `, ${exact.dropped} dropped for want of room` : ''}):`);
+        for (const row of exact.pages.slice(0, 12))
+        {
+            say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
+        }
+        say('the hottest blocks, by instructions, with how often each was entered:');
+        for (const row of exact.hot)
+        {
+            say(`  ${(row.share * 100).toFixed(2).padStart(6)}%`
+                + `  ${String(row.instructions).padStart(11)}`
+                + `  x${String(row.hits).padEnd(9)}  ${row.at}`);
+        }
+        say('the bytes at the hottest, for a disassembler:');
+        for (const row of exact.hot.slice(0, 12))
+        {
+            say(`  ${row.at}: ${row.bytes}`);
         }
         say('');
     }
@@ -388,11 +417,14 @@ try
         quantum: options.quantum || undefined,
         jit: options.jit || undefined,
         profile: options.profile || undefined,
+        exact: options.exact || undefined,
         trace: options.trace,
     })}); null`);
 
     /** Waits until the page has a report and answers with it. */
     const read = async()=>{
+        /** @type {string | null} */
+        let lastError = null;
         for (let tries = 0; tries < 300; tries++)
         {
             try
@@ -410,16 +442,24 @@ try
             }
             catch (e){
                 // The page is holding its own thread inside the guest, which is
-                // the ordinary case here rather than a failure.
-                void e;
+                // the ordinary case here rather than a failure -- but the last
+                // thing it said is kept, because a report that never comes is
+                // otherwise indistinguishable from a page that threw.
+                lastError = e instanceof Error ? e.message : String(e);
             }
             await sleep(1000);
         }
-        throw new Error('the page never produced a frame report');
+        throw new Error('the page never produced a frame report'
+            + (lastError ? `; the last attempt said: ${lastError}` : ''));
     };
 
     console.log(`letting ${manifest.title} settle for ${options.settle}s`);
     await sleep(options.settle * 1000);
+    if (options.exact)
+    {
+        // The account is kept from boot; the window wants only itself.
+        await evaluate('window.__bottlify__.exactRestart && window.__bottlify__.exactRestart()');
+    }
     const before = await read();
     const startedAt = Date.now();
     console.log(`watching for ${options.seconds}s`);

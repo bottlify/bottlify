@@ -3067,6 +3067,26 @@ async function buildApp(options){
         off: (name, handler)=>events.off(name, handler),
 
         /**
+         * The emulator's account of where the guest ran, by the address of
+         * every compiled block and interpreted instruction, weighted by the
+         * instructions retired there. A sample taken where a turn stops lands
+         * on whatever stopped it; this is kept by the code as it runs, and is
+         * the only honest answer to "which of the program's own instructions
+         * is the time going to". Costs a call per block while it is kept, so
+         * it is started for a measurement and stopped after.
+         */
+        guestProfile: {
+            available: ()=>Boolean(core.api('cpu').profile?.available()),
+            start: ()=>Boolean(core.api('cpu').profile?.start()),
+            stop: ()=>core.api('cpu').profile?.stop(),
+            /**
+             * @returns {{ entries: { address: number, instructions: number, hits: number }[],
+             *     dropped: number } | null}
+             */
+            read: ()=>core.api('cpu').profile?.read() ?? null,
+        },
+
+        /**
          * The journal: everything the engine reported, in one ordered stream.
          *
          * Every event the engine emits is written here as it happens, under its

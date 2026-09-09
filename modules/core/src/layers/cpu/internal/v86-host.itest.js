@@ -127,6 +127,52 @@ test('the instruction count carries on past the emulator\'s own word', async()=>
     host.stop();
 });
 
+test('the emulator\'s account of where the guest ran adds up to what it retired', async()=>{
+    const host = await boot();
+    assert.ok(host.profile.available(), 'the build carries the account');
+
+    // A loop, so that the same addresses are entered many times: a long
+    // stretch run once and a short stretch run often read apart in it.
+    const LOOP = GUEST_CODE + 5;
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(2000),        // mov ecx, 2000
+        0x49,                      // loop: dec ecx
+        0x75, 0xfd,                // jnz loop
+        0xf4,                      // hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+
+    assert.ok(host.profile.start());
+    const before = host.instructionCount();
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    // The compiler gets its chance: the loop is hot after the first slice, and
+    // the block it compiles counts itself the same way the interpreter did.
+    for (let slice = 0; slice < 20 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(500);
+        await new Promise(resolve=>setTimeout(resolve, 0));
+    }
+    const retired = host.instructionCount() - before;
+    const account = host.profile.read();
+    host.profile.stop();
+
+    assert.ok(account, 'an account was kept');
+    const counted = account.entries.reduce((sum, entry)=>sum + entry.instructions, 0);
+    assert.ok(retired >= 4000, `the loop ran (${retired} retired)`);
+    assert.equal(counted + account.dropped, retired,
+        `every instruction is accounted to an address (${counted} of ${retired})`);
+    const inLoop = account.entries.filter(entry=>
+        entry.address >= LOOP && entry.address < LOOP + 3);
+    const loopShare = inLoop.reduce((sum, entry)=>sum + entry.instructions, 0) / retired;
+    assert.ok(loopShare > 0.99, `the loop is where the time went (${loopShare})`);
+    assert.ok(inLoop.some(entry=>entry.hits >= 100), 'and it was entered many times');
+    assert.ok(account.entries.every(entry=>
+        entry.address >= GUEST_CODE && entry.address < GUEST_CODE + 9),
+    'nothing is accounted to an address that never ran');
+    host.stop();
+});
+
 test('the guest stack is the one the ROM set up', async()=>{
     const host = await boot();
 

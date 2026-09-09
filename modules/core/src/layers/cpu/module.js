@@ -364,6 +364,17 @@ export const cpuModule = {
                 started().decompressZstd(packed, expectedLength),
 
             instructionCount: ()=>started().instructionCount(),
+            /**
+             * The emulator's account of where the guest ran, by address and
+             * weighted by instructions. Kept only between start and stop, and
+             * only by a build that carries it.
+             */
+            profile: {
+                available: ()=>started().profile.available(),
+                start: ()=>started().profile.start(),
+                stop: ()=>started().profile.stop(),
+                read: ()=>started().profile.read(),
+            },
             inProtectedMode: ()=>started().inProtectedMode(),
             eip: ()=>started().eip(),
 
