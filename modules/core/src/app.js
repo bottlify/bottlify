@@ -50,6 +50,11 @@ import { createBlockCache, resolveBlockStore }
  *     puts a watch in front of that function, so a call from one guest module
  *     into another shows up in the trace like a call into ours. This is the only
  *     way to see them, and a game's own libraries are where its decisions live.
+ * @property {number} [maxFps]
+ *     The most frames a second that may reach the screen. Sixty unless said
+ *     otherwise; zero delivers at whatever rate the caller's scheduler offers.
+ *     A frame shown faster than a display can show it is a read of the surface
+ *     and an upload that nobody sees.
  * @property {{ categories?: Record<string, string>, capacity?: number }} [log]
  *     Which call areas are recorded from the first instruction, and how much of
  *     the journal is kept. Everything a program decides about a device it
@@ -1234,6 +1239,11 @@ async function buildApp(options){
             // and nothing ever told it where a frame ends, so every report said
             // it had seen none -- and "where did the frame go" could not be
             // asked at all, only "where did the run go".
+            // How often a frame may reach the screen at most. A guest presents
+            // whenever its own loop finishes, which can be far more often than
+            // any display shows -- and every one of those costs a read of the
+            // surface out of guest memory and an upload.
+            maxFps: options.maxFps,
             device: options.device
                 ? {
                     ...options.device,

@@ -108,3 +108,45 @@ test('diagnostics report what a program asked for, not what was on offer', async
     await graphicsModule.dispose();
     assert.equal(graphicsModule.diagnostics().status, 'created');
 });
+
+test('a caller outside the drawing libraries can show a surface', async()=>{
+    // Presentation is this layer's own responsibility and was reachable only
+    // from inside it: the drawing libraries were handed a way to present and
+    // nothing else was. A film a filter graph decoded had nowhere to send its
+    // pixels, and asking found nothing to call -- which reads exactly like a
+    // decoder that produced nothing.
+    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+    assert.equal(typeof api.present, 'function',
+        'the layer that owns presentation offers it');
+    await graphicsModule.dispose();
+});
+
+test('a frame is not delivered faster than the cap the caller set', async()=>{
+    // A guest presents whenever its own loop finishes, which can be far more
+    // often than any display shows, and every one of those costs a read of the
+    // surface out of guest memory and an upload nobody sees.
+    let clock = 0;
+    /** @type {(() => void)[]} */
+    const armed = [];
+    const api = await graphicsModule.create({
+        now: ()=>clock,
+        /** @param {() => void} tick */
+        schedule: tick=>armed.push(tick),
+        maxFps: 60,
+    }, hostWith(fakeMemory()));
+
+    const shown = [];
+    api.present({ buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null });
+    armed.shift()?.();
+    shown.push(clock);
+
+    // A second frame a fraction of a refresh later waits for the cap rather
+    // than going straight out.
+    clock = 4;
+    api.present({ buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null });
+    armed.shift()?.();
+    assert.ok(armed.length > 0 || clock >= 1000 / 60,
+        'it was held rather than delivered inside the cap');
+
+    await graphicsModule.dispose();
+});

@@ -175,6 +175,20 @@ export const graphicsModule = {
             available: ()=>device !== null,
 
             /**
+             * Shows a surface the guest owns.
+             *
+             * Presentation is this layer's own responsibility and was reachable
+             * only from inside it: the drawing libraries were handed a way to
+             * present and nothing else was. Anything else that has pixels for
+             * the screen -- a film a filter graph decoded, a surface another
+             * layer composed -- had nowhere to send them, and asking silently
+             * found nothing to call.
+             *
+             * @param {any} surface
+             */
+            present: surface=>presenter?.present(surface),
+
+            /**
              * Makes one of the APIs a program may have been written against.
              * Named rather than exported directly, so that adding one does not
              * change this module's shape.
@@ -205,8 +219,18 @@ export const graphicsModule = {
         // loop happens to finish, the display refreshes on its own schedule,
         // and without pacing the result stutters visibly while the average
         // frame rate looks healthy.
+        // The cap belongs here rather than anywhere further in: this is the one
+        // place that decides when a frame is delivered, and a frame delivered
+        // faster than a display can show it is work nobody sees. Sixty unless
+        // the caller says otherwise; zero means whatever the scheduler offers.
+        const maxFps = config?.maxFps ?? 60;
         pacer = config?.schedule && config?.now
-            ? createPacer({ now: config.now, schedule: config.schedule })
+            ? createPacer({
+                now: config.now,
+                schedule: config.schedule,
+                minIntervalMs: maxFps > 0 ? 1000 / maxFps : 0,
+                targetFps: maxFps > 0 ? maxFps : undefined,
+            })
             : null;
 
         // The backend is asked for on the first present rather than now, so a
