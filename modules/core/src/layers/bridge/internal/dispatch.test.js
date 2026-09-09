@@ -17,6 +17,8 @@ import { createDispatcher } from './dispatch.js';
  * @param {Object} [options]
  * @param {number} [options.esp]
  * @param {number[]} [options.args]
+ * @param {{ begin: (name: string, kind?: string) => void,
+ *           end: (name?: string) => number }} [options.profiler]
  */
 function machine({ esp = 0x3000, args = [], profiler } = {}){
     /** @type {Map<number, number>} */
@@ -228,7 +230,7 @@ test('the crossing is timed apart from the handler it carries', ()=>{
         profiler: {
             /** @param {string} name */
             begin: name=>opened.push(`begin ${name}`),
-            /** @param {string} name */
+            /** @param {string} [name] */
             end: name=>opened.push(`end ${name}`),
         },
     });

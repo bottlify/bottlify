@@ -1454,3 +1454,36 @@ test('the device reports memory it will not take back', ()=>{
         'and it stays positive in a caller that treats a DWORD as signed');
     assertFullyReleased(device);
 });
+
+test('setting a matrix that is already set does nothing, and is counted', ()=>{
+    // Measured on a real title's menu: three and a half transform sets per
+    // draw, most of them the value already there. Setting it again is
+    // observably nothing -- but it was two copies of sixteen floats every time,
+    // one of them built for a state block that was not recording.
+    const device = createDevice();
+    const matrix = Float32Array.from({ length: 16 }, (unused, at)=>at);
+
+    assert.equal(device.SetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    assert.equal(device.diagnostics().redundantTransforms, 0, 'the first one is real work');
+
+    assert.equal(device.SetTransform(D3DTS.WORLD, matrix), D3D_OK);
+    assert.equal(device.SetTransform(D3DTS.WORLD, Float32Array.from(matrix)), D3D_OK,
+        'a different array holding the same numbers is the same matrix');
+    assert.equal(device.diagnostics().redundantTransforms, 2);
+
+    // And what a program reads back is unchanged by any of it.
+    /** @type {{ matrix?: Float32Array }} */
+    const out = {};
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.deepEqual([...(out.matrix ?? [])], [...matrix]);
+
+    // One number different is not the same matrix.
+    const moved = Float32Array.from(matrix);
+    moved[12] = 99;
+    assert.equal(device.SetTransform(D3DTS.WORLD, moved), D3D_OK);
+    assert.equal(device.diagnostics().redundantTransforms, 2, 'a real change is not skipped');
+    device.GetTransform(D3DTS.WORLD, out);
+    assert.equal(out.matrix?.[12], 99);
+
+    assertFullyReleased(device);
+});

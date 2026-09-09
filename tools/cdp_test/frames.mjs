@@ -218,6 +218,21 @@ function describe(before, after, windowMs){
         }
         say('');
     }
+    const sent = after.uploads ?? null;
+    if (sent && (sent.bufferUploads ?? 0) > 0)
+    {
+        const sentBefore = before.uploads ?? {};
+        const uploads = (sent.bufferUploads ?? 0) - (sentBefore.bufferUploads ?? 0);
+        const bytes = (sent.bufferUploadBytes ?? 0) - (sentBefore.bufferUploadBytes ?? 0);
+        say(`to the card: ${uploads} buffer upload(s)`
+            + `, ${(bytes / 1024 / 1024).toFixed(1)} MiB`
+            + `, ${(bytes / 1024 / Math.max(1, frames)).toFixed(0)} KiB per frame`);
+        const textures = (sent.textureUploadBytes ?? 0) - (sentBefore.textureUploadBytes ?? 0);
+        say(`  textures: ${(sent.textureUploads ?? 0) - (sentBefore.textureUploads ?? 0)} upload(s)`
+            + `, ${(textures / 1024 / 1024).toFixed(1)} MiB`);
+        say('');
+    }
+
     if (after.trapCapacity > 0)
     {
         const taken = after.traps - (before.traps ?? 0);

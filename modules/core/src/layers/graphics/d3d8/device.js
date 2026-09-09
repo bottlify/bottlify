@@ -501,6 +501,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     const stateBlocks = new Map();
     /** @type {StateBlock | null} The block being recorded, if one is. */
     let recording = null;
+    // How many times a program set a matrix it had already set. A large share
+    // says the saving is worth chasing further -- into a stub the guest can run
+    // without leaving the machine at all, which is the only way the crossing
+    // itself goes away too.
+    let redundantTransforms = 0;
     let nextStateBlock = 1;
 
     const count = createReferenceCount();
@@ -722,6 +727,27 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * @param {(block: StateBlock) => Map<number, T>} pick
      * @param {number} key
      * @param {T} value
+     */
+    /**
+     * Whether a matrix a program is setting is the one already there.
+     *
+     * @param {Float32Array} held @param {ArrayLike<number>} given
+     */
+    const sameMatrix = (held, given)=>{
+        for (let at = 0; at < 16; at++)
+        {
+            if (held[at] !== given[at])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * @param {(block: any) => Map<any, any>} pick
+     * @param {any} key
+     * @param {any} value
      */
     const recordState = (pick, key, value)=>{
         if (recording)
@@ -1178,7 +1204,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
         /** What the renderer has done and declined to do. Null without a backend. */
         diagnostics(){
-            return renderer ? renderer.diagnostics() : null;
+            const drawn = renderer ? renderer.diagnostics() : null;
+            // Reported whether or not this build draws: a program setting the
+            // same matrix over and over is doing it for its own reasons, and
+            // that is worth knowing before anyone builds a stub to spare it.
+            return { ...drawn, redundantTransforms };
         },
 
         BeginScene(){
@@ -1306,8 +1336,25 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            transforms.set(type, Float32Array.from(matrix));
-            recordState(block=>block.transforms, type, Float32Array.from(matrix));
+            // A program of this era sets the same matrix again constantly --
+            // measured at three and a half sets per draw on a real title's
+            // menu, most of them the value already there. Setting it again is
+            // observably nothing, and doing nothing costs nothing: the copy is
+            // the expensive part, and there were two of them on every call,
+            // including one built for a state block that was not recording.
+            //
+            // Only while nothing is recording, because a block captures what a
+            // program set rather than what changed, and a block applied later
+            // when another matrix is current must still put this one back.
+            const held = transforms.get(type);
+            if (!recording && held && sameMatrix(held, matrix))
+            {
+                redundantTransforms++;
+                return D3D_OK;
+            }
+            const taken = Float32Array.from(matrix);
+            transforms.set(type, taken);
+            recordState(block=>block.transforms, type, taken);
             return D3D_OK;
         },
 

@@ -602,6 +602,11 @@ async function run(request){
             trapCapacity: layers.cpu?.trapCapacity ?? 0,
             jit: layers.cpu?.jit ?? null,
             presents: presents,
+            // What we send to the card against what the program actually
+            // wrote. A buffer uploaded whole for a lock of a few hundred bytes
+            // is traffic nobody asked for, and it scales with the buffer rather
+            // than with the change.
+            uploads: layers.graphics?.backend ?? null,
             graphics: layers.graphics?.seam?.device
                 ? {
                     frames: layers.graphics.seam.device.frames,
