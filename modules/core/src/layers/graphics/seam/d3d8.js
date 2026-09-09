@@ -43,6 +43,7 @@ import { D3DDEVTYPE, D3DFMT_INDEX } from '../d3d8/constants.js';
 import { D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
+import { createShadow, setRenderStateCode, setTransformCode } from './shadow.js';
 
 /**
  * The capability bits reported by GetDeviceCaps.
@@ -158,9 +159,37 @@ const S_FALSE = 1;
  * @param {any} deps.publisher   From createPublisher.
  * @param {any} deps.memory      readMemory/writeMemory.
  * @param {() => any} deps.screen  The display this build is configured for.
+ * @param {(bytes: number) => number} [deps.allocate]
+ *        Guest memory for the state a program sets without crossing into the
+ *        host; without it every setter stays a trap.
+ * @param {(api: string, detail: string) => void} [deps.divergence]
+ *        Where a value set in the guest that the device refuses is reported.
  */
-export function createDirect3D8Seam({ publisher, memory, screen }){
+export function createDirect3D8Seam({ publisher, memory, screen, allocate, divergence }){
     const fields = createFields(memory);
+
+    /**
+     * Each device's block of state the guest sets without crossing, and the
+     * host's side of it. Only with somewhere to put one: a build without an
+     * allocator keeps every setter a trap.
+     *
+     * @type {WeakMap<any, ReturnType<typeof createShadow>>}
+     */
+    const shadows = new WeakMap();
+    /** @param {any} device */
+    const shadowOf = device=>shadows.get(device) ?? null;
+    /** @param {(at: number) => Uint8Array} code */
+    const placeCode = code=>{
+        if (!allocate)
+        {
+            return 0;
+        }
+        // Sized by a throwaway rendering: the bytes depend on where they
+        // land only through relative jumps, never in length.
+        const at = allocate(code(0).length);
+        memory.writeMemory(at, code(at));
+        return at;
+    };
 
     /**
      * A resource, published as whichever interface it is.
@@ -535,6 +564,9 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             const next = readPresentParameters(parameters >>> 0);
             const hr = device.Reset(next);
             writePresentParameters(parameters >>> 0, next);
+            // The block is brought to what the device now holds, not to what
+            // it held before: a reset is the host changing state on its own.
+            shadowOf(device)?.remirror();
             return hr;
         },
 
@@ -1140,13 +1172,23 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         // --- state blocks ---
 
         /** @param {any} device */
-        BeginStateBlock: (/** @type {any} */ device)=>device.BeginStateBlock(),
+        BeginStateBlock: (/** @type {any} */ device)=>{
+            const hr = device.BeginStateBlock();
+            if (hr === D3D_OK)
+            {
+                // A block captures what the program set, not what changed, so
+                // every setter crosses while one is recording.
+                shadowOf(device)?.slowPath(true);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         EndStateBlock: (device, [out])=>{
             /** @type {{ handle?: number }} */
             const held = {};
             const hr = device.EndStateBlock(held);
+            shadowOf(device)?.slowPath(false);
             if (hr === D3D_OK && (out >>> 0) !== 0)
             {
                 fields.writeU32(out >>> 0, held.handle ?? 0);
@@ -1155,7 +1197,11 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         },
 
         /** @param {any} device @param {number[]} args */
-        ApplyStateBlock: (device, [handle])=>device.ApplyStateBlock(handle >>> 0),
+        ApplyStateBlock: (device, [handle])=>{
+            const hr = device.ApplyStateBlock(handle >>> 0);
+            shadowOf(device)?.remirror();
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         CaptureStateBlock: (device, [handle])=>device.CaptureStateBlock(handle >>> 0),
@@ -1300,8 +1346,25 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
         DeletePixelShader: (device, [handle])=>device.DeletePixelShader(handle >>> 0),
     };
 
+    // Every method of the device adopts what the guest set on its way in, so
+    // a read, a draw or a present sees the state the program set last --
+    // through the same setters a trap would have called, which is where
+    // validation and invalidation live.
+    /** @type {Record<string, (device: any, args: number[]) => number | Promise<number>>} */
+    const syncedMethods = Object.fromEntries(Object.entries(deviceMethods)
+        .map(([name, method])=>[name, (/** @type {any} */ device, /** @type {number[]} */ args)=>{
+            shadowOf(device)?.sync();
+            return method(device, args);
+        }]));
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const deviceGuests = allocate
+        ? {
+            SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
+            SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
+        }
+        : {};
     const deviceInterfaces = [
-        describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, deviceMethods),
+        describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests),
     ];
 
     /** @param {number} address */
@@ -1532,6 +1595,24 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 fields.writeU32(out >>> 0, 0);
                 return hr;
             }
+            if (allocate)
+            {
+                // The device's block, which the guest methods find one word
+                // past the interface pointer. Made before the interface is
+                // published, because publishing is when that word is written:
+                // a device given out first would carry a zero there, and the
+                // guest methods would keep the program's state at address
+                // zero, out of the host's sight.
+                const shadow = createShadow({
+                    allocate,
+                    readMemory: memory.readMemory,
+                    writeMemory: memory.writeMemory,
+                    device: held.device,
+                    divergence,
+                });
+                shadows.set(held.device, shadow);
+                held.device.guestState = ()=>shadow.address();
+            }
             const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8,
                 out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             if (result === D3D_OK)
@@ -1564,6 +1645,9 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
 
         /** What the device this program is drawing through has counted. */
         diagnostics: ()=>lastDevice?.diagnostics?.() ?? null,
+
+        /** What the guest set without crossing, for the most recent device. */
+        shadow: ()=>(lastDevice ? shadowOf(lastDevice)?.diagnostics() ?? null : null),
 
         /** For tests, which have no guest to call through. */
         interfaces: { root: rootInterfaces, device: deviceInterfaces,

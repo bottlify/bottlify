@@ -43,14 +43,20 @@
  * @param {string} id
  * @param {[string, number][]} slots
  * @param {Record<string, (target: any, args: number[]) => number | Promise<number>>} [implemented]
+ * @param {Record<string, (builder: { trap: number }) => number>} [guests]
+ *        Methods that run in the guest, by name; each answers the address of
+ *        its code, built with the method's own trap to fall back to.
  * @returns {import('./com.js').InterfaceDescriptor}
  */
-export function describe(id, slots, implemented = {}){
+export function describe(id, slots, implemented = {}, guests = {}){
     return {
         id,
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,
+            // A method that runs in the guest: its builder is handed the
+            // method's own trap to fall back to, and answers the slot.
+            guest: guests[name],
             // The descriptor's own type says a number; a promise is what the
             // bridge suspends on, and it passes through the adapter untouched.
             invoke: /** @type {any} */ (implemented[name]),

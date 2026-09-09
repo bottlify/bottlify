@@ -43,10 +43,22 @@ import { Convention } from './conventions.js';
 const WORD = 4;
 
 /**
+ * What a method that runs in the guest is built with: its own trap to fall
+ * back to, and the means to register more.
+ *
+ * @typedef {Object} GuestSlotBuilder
+ * @property {number} trap
+ * @property {(name: string, fn: any) => number} register
+ */
+
+/**
  * @typedef {Object} InterfaceMethod
  * @property {string} name
  * @property {number} argBytes            Counting the interface pointer.
  * @property {Function} [invoke]          Called as (object, args) with `this` removed.
+ * @property {(builder: GuestSlotBuilder) => number} [guest]
+ *           Guest code for the slot instead of a trap: given the method's own
+ *           trap to fall back to, answers the address the slot should hold.
  * @property {string} [builtin]           IUnknown's three, which we implement here.
  */
 
@@ -88,9 +100,8 @@ export function createVtables({ memory, register, heap }){
         let slots;
         try
         {
-            slots = table.map((method, index)=>register(
-                `${interfaceId}::${method.name}`,
-                {
+            slots = table.map((method, index)=>{
+                const trap = register(`${interfaceId}::${method.name}`, {
                     convention: Convention.STDCALL,
                     argBytes: method.argBytes,
                     /** @param {number[]} args */
@@ -102,7 +113,11 @@ export function createVtables({ memory, register, heap }){
                         const [, ...rest] = args;
                         return dispatch(object, interfaceId, index, method, rest);
                     },
-                }));
+                });
+                // A method that runs in the guest keeps its trap: that is
+                // what its code falls back to for the cases it does not take.
+                return method.guest ? method.guest({ trap, register }) : trap;
+            });
         }
         catch (e){
             // A method needs a stub the guest can call, and the table stubs
@@ -117,9 +132,12 @@ export function createVtables({ memory, register, heap }){
         }
         methods += slots.length;
 
-        // The vtable and the one word pointing at it, allocated together: they
-        // have the same lifetime and nothing else may sit between them.
-        const block = heap.allocate(WORD + slots.length * WORD);
+        // The vtable, the word pointing at it and the object's state word,
+        // allocated together: they have the same lifetime and nothing else
+        // may sit between them. The state word is where a method that runs
+        // in the guest finds the memory it works on, one word past `this`;
+        // a program sees only the vtable pointer and assumes nothing after it.
+        const block = heap.allocate(2 * WORD + slots.length * WORD);
         if (block === 0)
         {
             // Nothing left in the arena. Carrying on writes the table over
@@ -129,8 +147,9 @@ export function createVtables({ memory, register, heap }){
             // unchecked allocation. Refusing is the answer a caller can act on.
             return 0;
         }
-        const vtable = block + WORD;
+        const vtable = block + 2 * WORD;
         memory.writeU32(block, vtable);
+        memory.writeU32(block + WORD, (object.guestState?.() ?? 0) >>> 0);
         slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
 
         byInterface.set(interfaceId, block);

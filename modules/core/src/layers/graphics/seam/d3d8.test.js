@@ -25,6 +25,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
+import { SHADOW } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
@@ -108,6 +109,16 @@ function machine(){
     const registered = new Map();
     let nextTrap = 1;
     let arenaEmpty = false;
+    /** @param {number} size */
+    const allocate = size=>{
+        if (arenaEmpty)
+        {
+            return 0;
+        }
+        const at = next;
+        next += size + 16 & ~15;
+        return at;
+    };
     const vtables = createVtables({
         memory,
         /** @param {string} name @param {any} fn */
@@ -116,22 +127,12 @@ function machine(){
             registered.set(id, { name, fn });
             return id;
         },
-        heap: {
-            /** @param {number} size */
-            allocate: size=>{
-                if (arenaEmpty)
-                {
-                    return 0;
-                }
-                const at = next;
-                next += size + 16 & ~15;
-                return at;
-            },
-        },
+        heap: { allocate },
     });
 
     return {
         memory,
+        allocate,
         /** Leaves nowhere to lay another vtable, the way a long run ends up. */
         exhaustArena(){
             arenaEmpty = true;
@@ -156,9 +157,16 @@ function machine(){
     };
 }
 
-/** The whole assembly, as a program reaches it: D3D8.dll and what it leads to. */
-function seamed(){
+/**
+ * The whole assembly, as a program reaches it: D3D8.dll and what it leads to.
+ *
+ * @param {{ shadow?: boolean }} [options]  Whether the device keeps a block in
+ *     guest memory, as it does under a running processor.
+ */
+function seamed({ shadow = false } = {}){
     const box = machine();
+    /** @type {string[]} */
+    const divergences = [];
     /** @type {any[]} */
     const roots = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
@@ -180,6 +188,9 @@ function seamed(){
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
         publisher,
+        allocate: shadow ? box.allocate : undefined,
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
     });
     const fields = createFields(box.services);
 
@@ -188,6 +199,8 @@ function seamed(){
         fields,
         publisher,
         roots,
+        libraries,
+        divergences,
         /** The IDirect3D8 a program gets from the entry point. */
         create(){
             const pointer = libraries.libraries['D3D8.dll'].Direct3DCreate8.handler([32]);
@@ -1015,4 +1028,32 @@ test('a create with nowhere to put the interface fails instead of answering succ
         [64, 0, 101, D3DPOOL.MANAGED, out]), D3DERR_OUTOFVIDEOMEMORY, 'D3DFMT_INDEX16');
     assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), E_OUTOFMEMORY);
     assert.equal(h.box.memory.readU32(out), 0);
+});
+
+test('a device is handed out with its block already in place, and reads what the guest wrote', ()=>{
+    // The guest methods find the block one word past the interface pointer,
+    // and that word is written when the interface is published. A device
+    // published before it had a block carries a zero there: the guest keeps
+    // the program's state at address zero, the host never sees it, and the
+    // program draws with the state it started with.
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+
+    const block = h.box.memory.readU32(device + 4);
+    assert.notEqual(block, 0, 'the state word names the block');
+    assert.equal(h.libraries.shadow().placed, 1);
+    // D3DRS_CULLMODE is 22.
+    const cull = 22;
+    const out = 0xe000;
+    assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(block + SHADOW.RENDER_STATES + cull * 4),
+        h.box.memory.readU32(out), 'mirrored as the device holds it');
+
+    // What the guest method does: write the state, count the call.
+    h.box.memory.writeU32(block + SHADOW.RENDER_STATES + cull * 4, 1);
+    h.box.memory.writeU32(block + SHADOW.RENDER_STATE_CALLS, 1);
+    assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), 1, 'the host answers from the block');
+    assert.equal(h.libraries.shadow().renderStateCalls, 1);
+    assert.deepEqual(h.divergences, []);
 });

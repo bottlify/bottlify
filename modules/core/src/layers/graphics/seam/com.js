@@ -32,7 +32,8 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  * @typedef {Object} InterfaceDescriptor
  * @property {string} id
  * @property {{ name: string, argBytes: number,
- *              invoke?: (target: any, args: number[]) => number }[]} methods
+ *              invoke?: (target: any, args: number[]) => number,
+ *              guest?: (builder: { trap: number }) => number }[]} methods
  *           In vtable order, after IUnknown's three. `target` is the API object,
  *           not the adapter: an implementation never sees this file.
  */
@@ -48,6 +49,9 @@ function adapt(api, interfaces, onGone){
 
     const adapter = {
         api,
+        // Where a method that runs in the guest finds the object's memory:
+        // the object's own answer, or nothing for an object that keeps none.
+        guestState: ()=>(typeof api.guestState === 'function' ? api.guestState() : 0),
         /**
          * Every pointer this object has been published as, so the map back can
          * be given up all at once when the object dies.
@@ -74,6 +78,7 @@ function adapt(api, interfaces, onGone){
                     ...descriptor.methods.map(method=>({
                         name: method.name,
                         argBytes: method.argBytes,
+                        guest: method.guest,
                         invoke: method.invoke
                             ? (/** @type {any} */ unused, /** @type {number[]} */ args)=>
                                 method.invoke?.(api, args) ?? 0

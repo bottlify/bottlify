@@ -62,23 +62,27 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Guest memory for what a callback is shown.
  * @param {() => import('../d3d7/device.js').RenderServices} [deps.render]
  *        What a Direct3D 7 device draws with, reached when one is first made.
+ * @param {(bytes: number) => number} [deps.allocate]
+ *        Guest memory for the state a program sets without crossing into the host.
+ * @param {(api: string, detail: string) => void} [deps.divergence]
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
  *                                      describe: (index: number, bytes: number) =>
  *                                          Uint8Array | null },
  *                       swapBuffers: (hdc: number) => boolean },
- *             diagnostics: () => any }}
+ *             diagnostics: () => any,
+ *             shadow: () => any }}
  */
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
         currentThread,
-        scratch, render },
+        scratch, render, allocate, divergence },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
-    const d3d8 = createDirect3D8Seam({ publisher, memory, screen });
+    const d3d8 = createDirect3D8Seam({ publisher, memory, screen, allocate, divergence });
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
     });
@@ -306,5 +310,11 @@ export function createGraphicsLibraries(
             // nothing at all about what it drew through them.
             device: d3d8.diagnostics(),
         }),
+
+        /**
+         * What the guest set without crossing, and how much of it. Flat, so a
+         * report prints it beside the crossings it stands in for.
+         */
+        shadow: ()=>d3d8.shadow(),
     };
 }

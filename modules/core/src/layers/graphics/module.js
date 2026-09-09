@@ -260,6 +260,11 @@ export const graphicsModule = {
         seam = createGraphicsLibraries({
             graphics: api,
             memory: services,
+            // Guest memory for the state a program sets without crossing,
+            // and where to say when what it set there is not what the device
+            // would have accepted.
+            allocate: config?.allocate,
+            divergence: config?.divergence,
             // Absent in a build with no bridge behind it -- a test, an
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.
@@ -348,6 +353,9 @@ export const graphicsModule = {
                 // what the build could have offered.
                 created,
                 seam: seam ? seam.diagnostics() : null,
+                // State the program set in the guest, and the calls that never
+                // crossed: the saving is a number here, not a belief.
+                shadow: seam ? seam.shadow() : null,
                 backend: backend ? backend.diagnostics() : null,
                 // Counted separately from the backend's own: a surface shown
                 // through DirectDraw never enters a drawing pass, so nothing

@@ -103,3 +103,57 @@ test('an interface that fits is published once and answers the same pointer afte
     assert.equal(table.diagnostics().comMethods, 5, 'IUnknown\'s three and its own two');
     assert.equal(table.diagnostics().comInterfacesRefused, 0);
 });
+
+test('a method that runs in the guest takes its slot, and keeps its trap to fall back to', ()=>{
+    // The object's state word sits one word past the vtable pointer, which is
+    // where such a method finds the memory it works on.
+    /** @type {string[]} */
+    const registered = [];
+    /** @type {Map<number, string>} */
+    const memory = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>memory.set(address, String(value)),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        /** @param {string} name */
+        register: name=>{
+            registered.push(name);
+            return 0x1000 + registered.length * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+    });
+    /** @type {any} */
+    let given = null;
+    const guestObject = {
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods: [
+            ...METHODS.slice(0, 3),
+            { name: 'Draw', argBytes: 8, guest: (/** @type {any} */ builder)=>{
+                given = builder;
+                return 0x7000;
+            } },
+            { name: 'Present', argBytes: 4 },
+        ] } : null),
+        addRef: ()=>1,
+        release: ()=>0,
+        guestState: ()=>0x9abc,
+    };
+
+    const pointer = table.publish(guestObject, IID);
+
+    assert.equal(memory.get(pointer), String(pointer + 8), 'the vtable follows the two words');
+    assert.equal(memory.get(pointer + 4), '39612', 'the state word, 0x9abc');
+    assert.equal(memory.get(pointer + 8 + 3 * 4), '28672', 'the slot holds the code, 0x7000');
+    assert.equal(given.trap, 0x1000 + 4 * 0x10, 'built with Draw\'s own trap to fall back to');
+    assert.equal(registered.filter(name=>name.endsWith('::Draw')).length, 1, 'which is registered');
+    assert.equal(memory.get(pointer + 8 + 4 * 4), String(0x1000 + 5 * 0x10),
+        'Present is a trap');
+});
