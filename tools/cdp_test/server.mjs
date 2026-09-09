@@ -126,6 +126,13 @@ export async function serveStatic({ sandboxDir, srcDir, extra = [] }){
 
     return {
         port,
-        close: ()=>new Promise(resolveClose=>server.close(()=>resolveClose())),
+        // The browser's renderers outlive the process that was killed and keep
+        // their keep-alive sockets open, and close() waits for every one of
+        // them: measured at four minutes after a report that took two. The
+        // sockets are dropped first, so closing takes as long as closing.
+        close: ()=>new Promise(resolveClose=>{
+            server.closeAllConnections();
+            server.close(()=>resolveClose());
+        }),
     };
 }
