@@ -43,7 +43,7 @@
 import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
-    D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
+    D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
@@ -233,6 +233,10 @@ function normalisePresentParameters(parameters){
         backBufferFormat: parameters.backBufferFormat ?? D3DFMT.X8R8G8B8,
         enableAutoDepthStencil: parameters.enableAutoDepthStencil ?? false,
         autoDepthStencilFormat: parameters.autoDepthStencilFormat ?? D3DFMT.D24S8,
+        // Rebuilt field by field, so anything left out here is dropped however
+        // faithfully it was read in. The flags decide what the swap chain will
+        // allow at all, which is not a detail to lose in transit.
+        flags: parameters.flags ?? 0,
     };
 }
 
@@ -607,7 +611,12 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format: presentParameters.backBufferFormat ?? D3DFMT.X8R8G8B8,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.RENDERTARGET,
-                lockable: false,
+                // A back buffer is lockable exactly when the program asked for
+                // one, and a program that asked reads it back every frame. The
+                // flag was parsed out of the parameters and then never looked
+                // at, so every such read was refused.
+                lockable: ((presentParameters.flags ?? 0)
+                    & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
                 base: allocate(0x100000),
                 count: implicitCount(),
             }));

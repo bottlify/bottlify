@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
     D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DORDER, D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
-    D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS, D3DUSAGE, D3D_OK,
+    D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
+    D3DUSAGE, D3D_OK,
     dwordToFloat, floatToDword, isShaderHandle,
 } from './constants.js';
 import { DEFAULT_STAGE_STATES } from './stagestates.js';
@@ -1396,4 +1397,31 @@ test('Clear refuses a depth or stencil clear it has no buffer for', ()=>{
     assert.equal(device.SetRenderTarget(null, null), D3D_OK);
     depth.surface.release();
     assertFullyReleased(device);
+});
+
+test('a back buffer is lockable exactly when the program asked for one', ()=>{
+    // The flag was read out of the parameters and then looked at by nothing, so
+    // a program that asked to read its own back buffer was refused every frame
+    // -- with D3DERR_INVALIDCALL, which is what a program that never asked
+    // should get and a lie to one that did.
+    const refused = createDevice();
+    /** @type {{ surface?: any }} */
+    const plain = {};
+    assert.equal(refused.GetBackBuffer(0, 0, plain), D3D_OK);
+    assert.equal(plain.surface.LockRect({}, null, 0), D3DERR_INVALIDCALL,
+        'no flag, no lock, which is the real rule');
+    refused.release();
+
+    const asked = createDevice({
+        parameters: { flags: D3DPRESENTFLAG.LOCKABLE_BACKBUFFER },
+    });
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(asked.GetBackBuffer(0, 0, held), D3D_OK);
+    /** @type {any} */
+    const locked = {};
+    assert.equal(held.surface.LockRect(locked, null, 0), D3D_OK);
+    assert.ok(locked.pBits > 0, 'and it hands out somewhere to read');
+    assert.equal(held.surface.UnlockRect(), D3D_OK);
+    asked.release();
 });

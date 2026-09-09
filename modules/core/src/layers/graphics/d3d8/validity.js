@@ -104,6 +104,8 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [backBufferWidth]
  * @property {number} [backBufferHeight]
  * @property {number} [backBufferFormat]
+ * @property {number} [flags]  D3DPRESENTFLAG_*, which decide what the swap
+ *           chain itself will allow -- locking the back buffer, above all.
  */
 
 /**

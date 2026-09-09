@@ -93,6 +93,18 @@ export const D3DSWAPEFFECT = Object.freeze({
 });
 
 /**
+ * D3DPRESENTFLAG. What a program asks of the swap chain itself.
+ *
+ * LOCKABLE_BACKBUFFER is the one that changes what a program may then do: a
+ * back buffer is not lockable unless it was asked for, and a program that did
+ * ask reads it back every frame.
+ */
+export const D3DPRESENTFLAG = Object.freeze({
+    LOCKABLE_BACKBUFFER: 0x00000001,
+    DISCARD_DEPTHSTENCIL: 0x00000002,
+});
+
+/**
  * D3DDEVTYPE. What a program asked CreateDevice for, and what the device
  * reports back as its own kind -- the two are the same number, because a
  * device that answered with a different kind than it was asked for would be a
