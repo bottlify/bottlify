@@ -13,6 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pageIsHidden, placePatches,
+    withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
 } from './app.js';
@@ -164,6 +165,36 @@ test('a small gap is downloaded again rather than paid for in a round trip', ()=
         { index: 9, offset: 1000 + (512 << 10), packed: 1000 },
     ];
     assert.equal(groupBlocks(far).length, 2, 'half a mebibyte is not');
+});
+
+test('a miss reaches ahead through the blocks that follow it', ()=>{
+    // A program reading an archive forward misses one block at a time, and each
+    // miss was one round trip. Reaching past the last wanted block turns the
+    // run into a few requests; what is already here is stepped over, not asked
+    // for again.
+    const layout = run(0, 40, 256 << 10);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 40 };
+    const resident = (/** @type {number} */ index)=>index === 6;
+
+    const reached = withReadAhead(layout.slice(3, 5), bundle, resident, [9, 3], 1 << 20);
+
+    assert.deepEqual(reached.map(block=>block.index), [3, 4, 5, 7, 8],
+        'four blocks of reach past the last wanted one, minus the resident one');
+    assert.ok(reached.slice(2).every(block=>block.ahead === true));
+    assert.equal(reached[2].offset, 5 * (256 << 10), 'with the container offsets');
+});
+
+test('read-ahead stops at the end of the bundle and adds nothing to nothing', ()=>{
+    const layout = run(0, 4, 256 << 10);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 4 };
+
+    assert.deepEqual(withReadAhead([layout[2]], bundle, ()=>false, [2]).map(block=>block.index),
+        [2, 3]);
+    assert.deepEqual(withReadAhead([], bundle, ()=>false, [0]), []);
+    assert.deepEqual(withReadAhead([layout[3]], bundle, ()=>false, [3]), [layout[3]],
+        'the last block has nothing after it');
+    assert.deepEqual(withReadAhead([layout[2]], bundle, ()=>false, [0, 7]), [layout[2]],
+        'a miss that does not continue the last fetch is left alone');
 });
 
 test('requests overlap, but only so many at a time', async()=>{

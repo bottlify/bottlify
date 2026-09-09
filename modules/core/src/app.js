@@ -277,6 +277,63 @@ export function groupBlocks(blocks){
 }
 
 /**
+ * How far past what a read wants a request reaches: the blocks that follow in
+ * container order, up to this many packed bytes, when nothing holds them yet.
+ *
+ * A program reading an archive forward misses one block at a time, and one
+ * block is one round trip: measured on a real title, thirty-five requests
+ * brought in under ten megabytes, each paid for in latency rather than
+ * bandwidth. Reaching this far past the miss turns a run of them into a few.
+ * Two mebibytes is small against a request's ceiling and large against a
+ * block, and a program that touches one block of a region it never returns to
+ * pays for this much extra at most.
+ */
+const READ_AHEAD_BYTES = 2 << 20;
+
+/**
+ * Extends a miss with the blocks that follow it in the container.
+ *
+ * Only when the miss continues where the last fetch stopped: that is a program
+ * reading forward, and reaching past it turns the run into a few requests.
+ * Measured on a real title's cinematic, one block a request for two hundred
+ * and forty blocks. A miss anywhere else is left alone -- an archive's index
+ * and the files it points to are read all over the container, and reaching
+ * past every one of those fetched five times the bytes for a third fewer
+ * requests. Blocks already resident count against the reach but are not asked
+ * for again.
+ *
+ * @param {any[]} absent  Wanted and not resident, ascending by offset.
+ * @param {{ block: (index: number) => any, blockCount: number }} bundle
+ * @param {(index: number) => boolean} resident
+ * @param {number[]} expected
+ *        The blocks a forward reader would want next: one per recent fetch,
+ *        because a program streams one file while it reads another, and the
+ *        two runs take turns at missing.
+ * @param {number} [bytes]
+ * @returns {any[]} the same blocks, then the ones reached, ascending
+ */
+export function withReadAhead(absent, bundle, resident, expected, bytes = READ_AHEAD_BYTES){
+    if (absent.length === 0 || !expected.includes(absent[0].index))
+    {
+        return absent;
+    }
+    const last = absent[absent.length - 1];
+    /** @type {any[]} */
+    const reached = [];
+    let reach = 0;
+    for (let index = last.index + 1; index < bundle.blockCount && reach < bytes; index++)
+    {
+        const block = bundle.block(index);
+        reach += block.packed;
+        if (!resident(index))
+        {
+            reached.push({ index, offset: block.offset, packed: block.packed, ahead: true });
+        }
+    }
+    return reached.length === 0 ? absent : [...absent, ...reached];
+}
+
+/**
  * One event's payload as a line.
  *
  * Built now rather than left as a template argument, which is the journal's
@@ -742,7 +799,7 @@ function expectIndex(expected){
  *
  * @param {any} deps
  * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
- *                     stop: () => void } | null>}
+ *                     stop: () => void, ahead: () => number } | null>}
  */
 async function mountBundle({ options, cpu, filesystem, events }){
     if (!options.bundle?.fetch)
@@ -874,6 +931,16 @@ async function mountBundle({ options, cpu, filesystem, events }){
     // than any block nobody has asked for.
     let waiting = 0;
     let stopped = false;
+    /** Blocks brought in ahead of a read, ever. */
+    let ahead = 0;
+    /**
+     * The block after each of the last few fetches: where a forward reader's
+     * next miss lands. A few rather than one, because two files streamed at
+     * once take turns at missing and each turn would otherwise start over.
+     */
+    /** @type {number[]} */
+    const expected = [];
+    const EXPECTED_KEPT = 4;
 
     /** @param {any[]} needed */
     const demand = async needed=>{
@@ -882,10 +949,20 @@ async function mountBundle({ options, cpu, filesystem, events }){
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
+        const reaching = withReadAhead(absent, bundle, index=>cache.has(index), expected);
+        ahead += reaching.length - absent.length;
+        if (reaching.length > 0)
+        {
+            expected.push(reaching[reaching.length - 1].index + 1);
+            if (expected.length > EXPECTED_KEPT)
+            {
+                expected.shift();
+            }
+        }
         waiting++;
         try
         {
-            await inParallel(groupBlocks(absent), MAX_CONCURRENT_REQUESTS, fetchGroup);
+            await inParallel(groupBlocks(reaching), MAX_CONCURRENT_REQUESTS, fetchGroup);
         }
         finally
         {
@@ -969,6 +1046,8 @@ async function mountBundle({ options, cpu, filesystem, events }){
     fill();
     return {
         fetch: demand,
+        /** How many blocks were brought in ahead of a read, ever. */
+        ahead: ()=>ahead,
         stop(){
             stopped = true;
         },
@@ -1060,10 +1139,12 @@ async function buildApp(options){
     // Where input goes when nobody says otherwise: the most recently created
     // window, which is what a person would be looking at.
     let foreground = 0;
+    /** Whether a frame is open in the journal: the first present opens one, the rest close and reopen. */
+    let framed = false;
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
-    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void } | null} */
+    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number } | null} */
     let blocks = null;
 
     /** Range requests outstanding: what a parked guest thread is really on. */
@@ -1332,9 +1413,17 @@ async function buildApp(options){
                     ...options.device,
                     /** @param {any} frame */
                     presentTo: frame=>{
-                        journal.endFrame();
+                        // A frame runs from one present to the next, so the
+                        // first present has none to close. Closing one anyway
+                        // is counted as an imbalance and was the one this
+                        // engine reported on every run.
+                        if (framed)
+                        {
+                            journal.endFrame();
+                        }
                         options.device.presentTo?.(frame);
                         journal.beginFrame();
+                        framed = true;
                     },
                 }
                 : null,
@@ -3117,7 +3206,9 @@ async function buildApp(options){
                 status: 'ready',
                 metrics: {
                     ...events.diagnostics(),
-                    bundle: { ...bundleReads, distinct: blocksSeen.size },
+                    bundle: {
+                        ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
+                    },
                     film: { ...film },
                 },
             },
