@@ -113,9 +113,12 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     /**
      * The timer that is due, as the message it becomes.
      *
-     * Its due time moves on whether or not the caller removes it, because a
-     * peek that left it due would hand the same tick out for ever and a program
-     * that peeks in a loop would see nothing else.
+     * Its due time moves on only when the caller takes the message. A look that
+     * does not remove leaves the tick where it is, because that is what Windows
+     * does and because a pump written the ordinary way -- look first, retrieve
+     * second -- otherwise loses every tick to its own look: the first call
+     * consumes it, the second finds an empty queue, and the program settles
+     * down to wait for a tick it has already been handed and thrown away.
      *
      * @param {MessageFilter} filter
      */
@@ -150,10 +153,11 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             {
                 continue;
             }
-            // Against the moment it came due rather than against now, so a
-            // handler that runs long does not make the timer drift later and
-            // later. Skipped forward when it has fallen a whole period behind,
-            // because catching up on missed ticks is a backlog nobody wants.
+            // A look that does not remove leaves the tick exactly where it is.
+            if (!filter.remove)
+            {
+                return message;
+            }
             // How late this tick was handed over. A program that paces itself
             // by a timer runs at the rate the timer is actually delivered at,
             // not the rate it asked for, and lateness here is a frame rate lost
@@ -166,6 +170,10 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 worstTimerLateMs = Math.max(worstTimerLateMs, late);
             }
             timerTicks++;
+            // Against the moment it came due rather than against now, so a
+            // handler that runs long does not make the timer drift later and
+            // later. Skipped forward when it has fallen a whole period behind,
+            // because catching up on missed ticks is a backlog nobody wants.
             timer.due = Math.max(at, timer.due) + timer.elapse;
             return message;
         }

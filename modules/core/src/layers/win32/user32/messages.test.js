@@ -367,3 +367,29 @@ test('a timer says how late its ticks were delivered', ()=>{
     assert.equal(report.worstTimerLateMs, 20, 'due at 32, taken at 52');
     assert.deepEqual(report.timerIntervals, [16], 'and what it asked for is reported too');
 });
+
+test('looking at a timer without taking it leaves the tick where it is', ()=>{
+    // The pump written the ordinary way looks first and retrieves second. With
+    // the look consuming the tick, the retrieve found an empty queue and the
+    // program settled down to wait for something it had already been handed and
+    // thrown away -- so a menu paced by a fifty-millisecond timer ran at a
+    // fraction of twenty frames a second, and two fifths of every frame went
+    // into waiting.
+    let clock = 0;
+    const queue = createMessageQueue({ now: ()=>clock });
+    queue.setTimer(0x40, 7, 50, 0);
+    clock = 50;
+
+    const looked = queue.peek({ ...ALL, remove: false });
+    assert.equal(looked?.message, WM_TIMER, 'the look sees the tick');
+    assert.equal(queue.diagnostics().timerTicks, 0, 'and does not count as taking it');
+
+    const taken = queue.peek(ALL);
+    assert.equal(taken?.message, WM_TIMER, 'and the tick is still there to retrieve');
+    assert.equal(queue.diagnostics().timerTicks, 1);
+
+    // Taken, so the next one is a period away rather than immediately due.
+    assert.equal(queue.peek(ALL), null);
+    clock = 100;
+    assert.equal(queue.peek(ALL)?.message, WM_TIMER);
+});
