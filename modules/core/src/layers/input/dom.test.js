@@ -84,6 +84,7 @@ function harness(/** @type {any} */ options = {}){
         canvas: /** @type {any} */ (canvas),
         send: event=>events.push(event),
         pointerLock: options.pointerLock ?? false,
+        guest: options.guest ?? null,
     });
     return {
         canvas,
@@ -297,4 +298,43 @@ test('polling reads the pad only while the game has focus', ()=>{
     {
         delete navigator.getGamepads;
     }
+});
+
+test('a pointer lands where it points, whatever size the canvas is drawn at', ()=>{
+    // The ratio is the program's own screen against the size the canvas is
+    // drawn at -- not the canvas's backing store against it. Those differ
+    // whenever a program presents at a size other than the screen its bottle
+    // was configured with, and taking the wrong one clamps everything past the
+    // guest's width to the edge: a strip of the picture becomes unreachable.
+    const h = harness({
+        // Drawn half size, as it is whenever a panel takes part of the width.
+        canvas: { width: 800, height: 600, rect: { left: 20, top: 10, width: 320, height: 240 } },
+        guest: ()=>({ width: 640, height: 480 }),
+    });
+    h.canvas.fire('focus', {});
+    h.drain();
+
+    h.canvas.fire('pointermove', { clientX: 20 + 160, clientY: 10 + 120 });
+    const [middle] = h.drain();
+    assert.deepEqual([middle.x, middle.y], [320, 240],
+        'the middle of the drawn box is the middle of the guest screen');
+
+    h.canvas.fire('pointermove', { clientX: 20 + 320, clientY: 10 + 240 });
+    const [corner] = h.drain();
+    assert.deepEqual([corner.x, corner.y], [640, 480],
+        'and the far corner is the far corner, not the backing store one');
+});
+
+test('with no screen given, the canvas is taken to be the screen', ()=>{
+    // A caller that sizes the canvas to the guest's screen -- which is what
+    // this project's own launcher does -- must keep working untouched.
+    const h = harness({
+        canvas: { width: 640, height: 480, rect: { left: 0, top: 0, width: 320, height: 240 } },
+    });
+    h.canvas.fire('focus', {});
+    h.drain();
+
+    h.canvas.fire('pointermove', { clientX: 160, clientY: 120 });
+    const [seen] = h.drain();
+    assert.deepEqual([seen.x, seen.y], [320, 240]);
 });

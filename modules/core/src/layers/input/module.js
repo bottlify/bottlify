@@ -135,6 +135,10 @@ export const inputModule = {
                     /** @param {import('./router.js').HostInputEvent} event */
                     send: event=>router.send(event),
                     pointerLock: options?.pointerLock ?? false,
+                    // The same screen the router confines the cursor to, so the
+                    // position a pointer maps to and the position a program is
+                    // allowed to have are one number rather than two.
+                    guest: config?.bounds ?? null,
                 });
                 return attached;
             },

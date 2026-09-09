@@ -99,12 +99,18 @@ const PIXELS_PER_NOTCH = 100;
  *     Whether pressing a mouse button asks for the pointer. Off by default: a
  *     lock is a thing done to a person, and a program that does not need
  *     relative motion should not take their cursor away.
+ * @property {(() => { width: number, height: number }) | null} [guest]
+ *     The program's own screen. A position in the box the canvas is drawn in
+ *     becomes a position in this, which is not the same as a position in the
+ *     canvas's backing store whenever a program presents at a size other than
+ *     the screen it was told about. Absent, the backing store is assumed to be
+ *     the screen, which is right for a caller that sizes it that way.
  */
 
 /**
  * @param {DomInputOptions} options
  */
-export function createDomInput({ canvas, send, pointerLock = false }){
+export function createDomInput({ canvas, send, pointerLock = false, guest = null }){
     /** @type {[string, (event: any) => void, boolean][]} */
     const listeners = [];
     let focused = false;
@@ -127,16 +133,27 @@ export function createDomInput({ canvas, send, pointerLock = false }){
     };
 
     /**
-     * Where the canvas's own pixels are, relative to the box it is drawn in.
-     * A canvas is routinely displayed at a size that is not its resolution, and
-     * a program told the CSS position would put its cursor somewhere else.
+     * How a position in the box the canvas is drawn in becomes a position in
+     * the program's own screen.
+     *
+     * The ratio is the guest's screen against the drawn size, not the canvas's
+     * backing store against it. Those are two different numbers whenever the
+     * program presents at a size other than the screen it was told about, and
+     * taking the wrong one puts the cursor somewhere the person is not
+     * pointing: everything above the guest's width is clamped to its edge, so
+     * a whole strip of the picture becomes unreachable.
+     *
+     * Read on every move rather than remembered, because a canvas is routinely
+     * displayed at a size that is not its resolution and that size changes
+     * whenever a panel opens or the window is dragged.
      */
     const projection = ()=>{
         const rect = canvas.getBoundingClientRect();
+        const screen = guest?.() ?? { width: canvas.width, height: canvas.height };
         return {
             rect,
-            x: rect.width > 0 ? canvas.width / rect.width : 1,
-            y: rect.height > 0 ? canvas.height / rect.height : 1,
+            x: rect.width > 0 ? screen.width / rect.width : 1,
+            y: rect.height > 0 ? screen.height / rect.height : 1,
         };
     };
 
