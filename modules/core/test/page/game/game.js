@@ -34,6 +34,10 @@ const LIMITS = {
     // are at the top of the file, which is exactly what a tail throws away.
     file: 1 << 20,
     samples: 200000,
+    // The head of a run, because what a program decides it decides early. A
+    // caller after something that happens later says how much more to keep:
+    // the cap is what stops a long run turning into hundreds of megabytes of
+    // text, not a judgement about which end matters.
     log: 400000,
 };
 
@@ -485,7 +489,7 @@ async function run(request){
         // has better uses for.
         onCall: request.log
             ? (/** @type {any} */ call)=>{
-                if (callLog.length < LIMITS.log)
+                if (callLog.length < (request.logLines || LIMITS.log))
                 {
                     callLog.push(formatCall(call));
                 }

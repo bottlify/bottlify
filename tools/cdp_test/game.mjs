@@ -117,6 +117,10 @@ function parse(argv){
         // Every host call written to a file. The ring in a report holds the end
         // of a run, and what a program decided it decided long before that.
         log: argv.includes('--log') ? argv[argv.indexOf('--log') + 1] : null,
+        // How many of them to keep. The default holds the head of a run, which
+        // is where a program makes its decisions; something that only happens
+        // once a title is up needs more than that.
+        logLines: number('--log-lines', 0),
         // Where every draw of the last frame landed, and under what state.
         // Off unless asked for: it transforms every vertex of every draw a
         // second time on the processor.
@@ -535,6 +539,7 @@ export async function game(options){
             maxTurns: options.turns,
             quantum: options.quantum,
             log: Boolean(options.log),
+            logLines: options.logLines,
             video: options.video,
             dumpDraws: options.dumpDraws,
             maxDraws: options.maxDraws,
