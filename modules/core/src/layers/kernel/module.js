@@ -52,6 +52,11 @@ export const kernelModule = {
         const stacks = {
             base: config?.stacks?.base ?? 0x00400000 - 0x00100000,
             size: config?.stacks?.size ?? 0x10000,
+            // Where the pool ends. Without one it grows into whatever follows
+            // it, and a stack overlapping the heap corrupts by writing rather
+            // than by failing -- which is the hardest kind of fault to read
+            // back to its cause.
+            limit: config?.stacks?.limit ?? Infinity,
             issued: 0,
         };
 
@@ -114,6 +119,12 @@ export const kernelModule = {
                 // first thread runs on the one the process was given).
                 const allocateStack = ()=>{
                     const base = stacks.base + stacks.issued * stacks.size;
+                    if (base + stacks.size > stacks.limit)
+                    {
+                        throw new Error('kernel: no room for another thread stack'
+                            + ` (${stacks.issued} of ${stacks.size} bytes from`
+                            + ` 0x${stacks.base.toString(16)})`);
+                    }
                     memory.register({
                         name: `stack-${stacks.issued + 1}`,
                         base,

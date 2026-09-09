@@ -1015,6 +1015,19 @@ async function buildApp(options){
     // allocation.
     const MODULE_BASE = 0x02000000;
     const MODULE_STRIDE = 0x00100000;
+    // Where a thread that is not the first gets its stack. Above the space
+    // libraries are mapped into and below the heap, because a stack of the size
+    // a program was linked for is a megabyte or more and the megabyte under the
+    // image will not hold several of them.
+    const STACK_POOL_BASE = 0x08000000;
+    const STACK_POOL_SIZE = 0x04000000;
+    // What each of them gets: what the image was linked to expect, floored so a
+    // program that asks for almost nothing still has room to make a call, and
+    // capped so that a program asking for an enormous stack cannot leave the
+    // pool with room for only one thread.
+    const threadStackSize = Math.min(
+        Math.max(parsePe(options.executable).stackReserve, 0x10000),
+        Math.floor(STACK_POOL_SIZE / 16));
     const HEAP_BASE = 0x0c000000;
     const HEAP_SIZE = options.heapSize ?? 0x14000000;
 
@@ -1196,6 +1209,17 @@ async function buildApp(options){
             // gets a turn. Lowering it is how a sampled profile gets enough
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
+            // Every thread gets the stack the image was linked to expect, the
+            // way Windows does -- not a fixed small one. A program that recurses
+            // in a worker thread, or builds a large structure on its stack,
+            // sizes that against SizeOfStackReserve and has no reason to expect
+            // less; measured on a real title, a worker was already using three
+            // quarters of a sixty-four kilobyte stack.
+            stacks: {
+                base: STACK_POOL_BASE,
+                size: threadStackSize,
+                limit: STACK_POOL_BASE + STACK_POOL_SIZE,
+            },
         },
         cpu: { jit: options.jit },
         bridge: {
