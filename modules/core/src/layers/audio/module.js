@@ -60,6 +60,8 @@ export const audioModule = {
         // Whether the other end of the ring is being read. Told from outside,
         // because only the assembling caller knows whether it opened a device.
         const drained = config?.drained ?? false;
+        const signal = config?.signal ?? null;
+        let notified = 0;
         // The whole path a sound takes, counted at each stage. Without these a
         // silent run and a working one produce the same report, and the first
         // question -- did anything come out of a buffer at all -- has no answer.
@@ -130,6 +132,26 @@ export const audioModule = {
          */
         const feedBuffers = ()=>{
             fills++;
+            // Told first, and told whatever else happens here.
+            //
+            // A program that streams into a sound buffer does not poll it: it
+            // asks to be woken at positions and waits on an event, and the
+            // thread that refills the buffer is that wait. Nothing ever tested
+            // those positions, so the wake never came, the refill never
+            // happened, and a program that had set its sound up correctly sat
+            // in silence with several threads blocked for ever.
+            //
+            // Deliberately before the check below, because this is owed whether
+            // or not anything is listening to the result. A build with no sound
+            // device must still not hang the program that asked for one.
+            for (const buffer of dsound.buffers())
+            {
+                for (const event of buffer.drainNotifications())
+                {
+                    notified++;
+                    signal?.(event);
+                }
+            }
             // Nothing is reading the other end, so everything read out here
             // would be mixed and thrown away. The cursors still advance -- that
             // is DirectSound's own business and the program watches them -- but
@@ -222,6 +244,7 @@ export const audioModule = {
                 sink: drained,
                 fills,
                 refusedFills,
+                notified,
                 fedRanges,
                 fedBytes,
                 tracksOpen: openTracks,

@@ -218,6 +218,27 @@ function describe(before, after, windowMs){
         }
         say('');
     }
+    const wave = after.wave ?? null;
+    if (wave && wave.length > 0)
+    {
+        say(`wave devices: ${wave.length}`);
+        for (const device of wave)
+        {
+            say(`  handle ${device.handle}: ${device.written} buffer(s) written`
+                + `, ${((device.bytesWritten ?? 0) / 1024).toFixed(0)} KiB`
+                + `, ${device.retired} retired, ${device.queued} queued`
+                + `, ${device.owed} notice(s) owed`
+                + `${device.paused ? ', PAUSED' : ''}`
+                + `, cursor from the ${device.cursor}`);
+        }
+        say('');
+    }
+    else if (wave)
+    {
+        say('wave devices: none opened');
+        say('');
+    }
+
     const heard = after.audio ?? null;
     if (heard)
     {

@@ -1258,6 +1258,20 @@ async function buildApp(options){
             // opened a device, and it decides whether a program's play cursor
             // follows the sound or the clock.
             drained: options.audio?.drained ?? false,
+            // Setting an event belongs to the kernel, which sits below this
+            // layer and cannot be reached from it, so it is handed down the way
+            // the wave notifier's is. A stale handle is the program's mistake
+            // and not ours to fault on.
+            signal: (/** @type {number} */ handle)=>{
+                try
+                {
+                    const kernel = core.api('kernel');
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            },
             sampleRate: options.audio?.sampleRate,
         },
         input: {

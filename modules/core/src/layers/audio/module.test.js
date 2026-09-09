@@ -17,7 +17,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
-import { WAVEFORMATEX, DSBUFFERDESC, DS_OK } from './dsound/seam.js';
+import {
+    WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
+} from './dsound/seam.js';
 
 const FORMAT_AT = 0x100;
 const DESC_AT = 0x200;
@@ -84,6 +86,15 @@ function fixture(){
                 return pointer;
             },
         },
+        /**
+         * The object behind a published pointer, so a test can ask it for a
+         * second interface the way the bridge does.
+         *
+         * @param {number} pointer
+         */
+        objectAt(pointer){
+            return byPointer.get(pointer)?.object;
+        },
         /** @param {number} pointer @param {string} name @param {number[]} args */
         call(pointer, name, args = []){
             const entry = byPointer.get(pointer);
@@ -98,7 +109,14 @@ function fixture(){
 /** A module with one playing sound buffer full of something to hear. */
 async function playing({ silent = false, drained = true } = {}){
     const f = fixture();
-    const api = await audioModule.create({ ...f.config, drained }, {
+    /** @type {number[]} */
+    const signalled = [];
+    const api = await audioModule.create({
+        ...f.config,
+        drained,
+        /** @param {number} handle */
+        signal: handle=>signalled.push(handle),
+    }, {
         requireApi: (/** @type {string} */ name)=>{
             assert.equal(name, 'memory');
             return f.memory;
@@ -128,7 +146,7 @@ async function playing({ silent = false, drained = true } = {}){
     {
         f.bytes.fill(0x40, held.address, held.address + BUFFER_BYTES);
     }
-    return { ...f, api, buffer, held };
+    return { ...f, api, buffer, held, signalled };
 }
 
 test('a playing sound buffer reaches the ring', async()=>{
@@ -283,4 +301,51 @@ test('the span read on the turn the machine falls behind is the one it plays', (
             `the backlog went, and did not grow: ${before} -> ${after}`);
         assert.ok(after > 0, 'and the span just read stayed, rather than being the one dropped');
     });
+});
+
+/** Somewhere to put a DSBPOSITIONNOTIFY the guest would have filled in. */
+const NOTIFY_AT = 0x400;
+
+/** @param {any} f @param {number} event */
+function askToBeWokenHalfWay(f, event){
+    f.view.setUint32(NOTIFY_AT, BUFFER_BYTES / 2, true);
+    f.view.setUint32(NOTIFY_AT + 4, event, true);
+    const notify = f.config.publishInterface(f.objectAt(f.buffer), IID_IDirectSoundNotify);
+    assert.ok(notify !== 0, 'the buffer offers the notify interface');
+    assert.equal(f.call(notify, 'SetNotificationPositions', [1, NOTIFY_AT]), DS_OK);
+}
+
+test('a position a program asked to be woken at wakes it', async()=>{
+    // A program that streams into a sound buffer does not poll it: it asks to be
+    // told when playback reaches a position and waits on an event, and the
+    // thread that refills the buffer is that wait. Nothing ever tested those
+    // positions, so the wake never came, the refill never happened, and a title
+    // that had set its sound up correctly sat in silence with several threads
+    // blocked for ever.
+    const f = await playing();
+    const EVENT = 0x4058;
+    askToBeWokenHalfWay(f, EVENT);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+
+    f.advance(1);
+    f.api.pump();
+    assert.deepEqual(f.signalled, [], 'not before playback reaches it');
+
+    // Past the half-second mark the position sits at.
+    f.advance(600);
+    f.api.pump();
+    assert.deepEqual(f.signalled, [EVENT], 'and exactly once when it does');
+});
+
+test('a program is woken even when nothing is listening to the sound', async()=>{
+    // The wake is owed whether or not anything drains the ring. A build with no
+    // sound device must not hang the program that asked for one.
+    const f = await playing({ drained: false });
+    const EVENT = 0x4060;
+    askToBeWokenHalfWay(f, EVENT);
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(600);
+    f.api.pump();
+
+    assert.deepEqual(f.signalled, [EVENT]);
 });

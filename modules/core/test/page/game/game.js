@@ -589,6 +589,11 @@ async function run(request){
             // The whole path a sound takes, stage by stage. A silent run and a
             // working one used to produce the same report.
             audio: layers.audio ?? null,
+            // The other way a program makes a sound. A title of this era plays
+            // its music through a middleware library that writes wave buffers,
+            // not through DirectSound, so a report that shows only the second
+            // one can say "silent" about a machine that is playing.
+            wave: layers.win32?.waveDevices ?? null,
             film: layers.app?.film ?? null,
             instructions: layers.cpu?.instructions ?? 0,
             // Zero here means every guest instruction is interpreted.
