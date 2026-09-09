@@ -342,9 +342,11 @@ export function createDispatcher(deps){
                 record.error = lastError ? lastError() : 0;
                 if (onCall)
                 {
-                    onCall(record.strings
-                        ? record
-                        : { ...record, strings: record.args.map(peekString) });
+                    // As recorded, strings included only when tracing asked
+                    // for them. Peeking every argument for a sink that does
+                    // not read the strings cost more than the whole dispatch:
+                    // measured at 1.6 of 2.3 microseconds per call.
+                    onCall(record);
                 }
             }
 

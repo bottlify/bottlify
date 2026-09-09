@@ -246,3 +246,36 @@ test('the crossing is timed apart from the handler it carries', ()=>{
         'end trap',
     ], 'the handler runs inside the crossing, so the crossing keeps only its own time');
 });
+
+test('a call sink is handed the record as recorded, with nothing peeked for it', ()=>{
+    // Peeking every argument for a string, for a sink that does not read
+    // strings, cost more than the rest of the dispatch together. With tracing
+    // off the sink gets the arguments and no strings, and guest memory is not
+    // read past the arguments themselves.
+    const m = machine({ args: [0x5000, 0x6000] });
+    /** @type {number[]} */
+    const reads = [];
+    /** @type {any} */
+    const memory = {
+        ...m.memory,
+        /** @param {number} address */
+        readU8: address=>{
+            reads.push(address);
+            return 0;
+        },
+    };
+    /** @type {any[]} */
+    const seen = [];
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory, parking: m.parking,
+        onCall: (/** @type {any} */ call)=>seen.push(call),
+    });
+    dispatcher.register(3, { name: 'X.dll!F', convention: 'stdcall', argBytes: 8, handler: ()=>1 });
+
+    dispatcher.dispatch(3);
+
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0].args, [0x5000, 0x6000]);
+    assert.equal(seen[0].strings, null, 'no strings without tracing');
+    assert.deepEqual(reads, [], 'and no byte of guest memory was peeked');
+});
