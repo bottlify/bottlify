@@ -151,6 +151,13 @@ const TIME_BYTES = 0x0004;
  *           delivered until it settles. Absent in a build that cannot reach
  *           guest code; the flags still behave, and a program that polls them
  *           still works.
+ * @property {(notice: import('./notify.js').WaveNotice) => void} [deliverDone]
+ *           Runs a callback-form WOM_DONE on a thread of its own, the way the
+ *           device's driver would, and never on the thread whose call retired
+ *           the buffer. A build without one falls back to `notify`, which
+ *           parks the caller and runs the callback on its stack -- and a
+ *           program whose write path and callback take the same lock recurses
+ *           there until the stack runs out.
  * @property {() => any} [output]
  *           Where the samples go. Handed down rather than reached for: the
  *           audio layer sits above this one and cannot be imported from here.
@@ -218,16 +225,29 @@ export function createWinmmFunctions(host){
      * through a synchronous helper. Only the entry point itself can wait for
      * guest code -- by returning a promise -- so only the entry point delivers.
      *
+     * A callback-form WOM_DONE is the exception: it goes straight to the
+     * thread that exists for it, which is where Windows delivers it, and never
+     * waits for an entry point. The open and close notices stay on the caller,
+     * because on Windows they are delivered inside the call that caused them.
+     *
      * @param {WaveOut} device @param {number} message @param {number} param
      */
-    const notice = (device, message, param)=>device.pending.push({
-        kind: device.callbackKind,
-        target: device.callbackTarget,
-        instance: device.callbackInstance,
-        device: device.handle,
-        message,
-        param,
-    });
+    const notice = (device, message, param)=>{
+        const owed = {
+            kind: device.callbackKind,
+            target: device.callbackTarget,
+            instance: device.callbackInstance,
+            device: device.handle,
+            message,
+            param,
+        };
+        if (host.deliverDone && message === MM_WOM_DONE && owed.kind === CALLBACK_FUNCTION)
+        {
+            host.deliverDone(owed);
+            return;
+        }
+        device.pending.push(owed);
+    };
 
     /**
      * Delivers what `notice` queued, then answers what the entry point was
@@ -797,12 +817,11 @@ export function createWinmmFunctions(host){
          * construction. Whoever drives the machine calls this on its own
          * schedule; the cost is one pass over the open devices.
          *
-         * The flag is set here; the notification is not necessarily delivered
-         * here. The window and event forms are host-side and go out at once, but
-         * the callback form runs guest code, which needs a guest thread stopped
-         * somewhere known -- and a tick, by definition, has none. Those stay
-         * queued in order and go out from the next entry point the program
-         * calls, which is the first moment there is a thread to run them on.
+         * The flag is set here, and so is the notification: the window and
+         * event forms are host-side, and a callback-form WOM_DONE has a thread
+         * of its own to run on. Only a build without that thread has to hold a
+         * callback back, because then the one place it can run is inside the
+         * next entry point the program calls.
          */
         tick(){
             for (const device of devices.values())
@@ -828,12 +847,11 @@ export function createWinmmFunctions(host){
          *   over buffers and waits for them back, and a gap that stops closing
          *   is the failure, whatever caused it.
          * - `owed` and `deferred` say the buffer *did* come back and the
-         *   program has not been told. A callback is guest code and needs a
-         *   guest thread stopped somewhere known, which a tick has not got, so
-         *   a notice of that form waits for the next winmm call the program
-         *   makes. A program that made its last one is never told again --
-         *   Windows would have delivered on a system thread -- and `deferred`
-         *   with a growing `owed` is exactly that shape.
+         *   program has not been told. With the notice thread this is only
+         *   ever the open and close notices between a call and its answer.
+         *   Without it a callback waits for the next winmm call the program
+         *   makes, a program that made its last one is never told again, and
+         *   `deferred` with a growing `owed` is exactly that shape.
          */
         diagnostics: ()=>[...devices.values()].map(device=>({
             handle: device.handle,

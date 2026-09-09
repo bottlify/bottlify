@@ -38,6 +38,7 @@ import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions } from './winmm/functions.js';
 import { createWaveNotifier } from './winmm/notify.js';
+import { createNoticeThread } from './winmm/thread.js';
 import { createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { createVersionFunctions } from './version/functions.js';
@@ -332,6 +333,25 @@ export const win32Module = {
             }),
         });
 
+        // The thread a wave device's WOM_DONE callbacks run on. Made on first
+        // use: a build whose program never asks for the callback form pays for
+        // no thread, no stub and no code.
+        const waveNotices = createNoticeThread({
+            /** @param {number} bytes */
+            allocate: bytes=>heap.allocate(bytes),
+            writeMemory,
+            register: (name, fn)=>bridge.register(name, fn),
+            /** @param {{ entry: number, name: string }} options */
+            createThread: options=>kernel.createThread(options),
+            currentThread: ()=>kernel.currentThread(),
+            /** @param {any} thread @param {string} reason */
+            block: (thread, reason)=>kernel.block(thread, reason),
+            /** @param {any} thread @param {number} result */
+            wake: (thread, result)=>kernel.wake(thread, result),
+            /** @param {any} thread */
+            park: thread=>bridge.park(thread),
+        });
+
         // Built here rather than with the other tables because two things need
         // it: the library a program links against, and whoever drives the
         // machine, which has to move the play cursor from outside a guest call.
@@ -357,6 +377,10 @@ export const win32Module = {
             // whoever is current then -- and a callback built on a stranger's
             // stack is a crash with no author.
             currentThread: ()=>kernel.currentThread(),
+            // The one notice that must not run on the caller. The routine's
+            // five arguments, in the order it declares them.
+            deliverDone: notice=>waveNotices.deliver(notice.target,
+                [notice.device, notice.message, notice.instance, notice.param, 0]),
             notify: createWaveNotifier({
                 /**
                  * @param {number} entry @param {number[]} args @param {any} [thread]
@@ -938,6 +962,8 @@ export const win32Module = {
              * outside the machine merely looks slow.
              */
             waveDevices: ()=>winmm.diagnostics(),
+            /** The thread those devices call back on: whether it exists, and what it is doing. */
+            waveThread: ()=>waveNotices.diagnostics(),
 
             /**
              * What the program's message loop is pumping, and what it is
@@ -987,6 +1013,7 @@ export const win32Module = {
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 waveDevices: current ? current.waveDevices() : [],
+                waveThread: current ? current.waveThread() : null,
                 messages: current ? current.messages() : {},
                 // What is left of the one arena everything the guest is handed
                 // comes out of. A program sizes its own caches from this, so a

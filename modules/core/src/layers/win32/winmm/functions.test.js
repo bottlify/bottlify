@@ -652,3 +652,32 @@ test('every notice of a burst is delivered on the thread whose call it answers',
         'and every notice after it still belongs to the thread whose call it answers');
     assert.ok(device > 0);
 });
+
+test('a callback-form WOM_DONE goes to the notice thread, never to the caller', ()=>{
+    // The device's driver delivers WOM_DONE from a thread of its own. A program
+    // is written against that: its write path and its callback take one lock,
+    // which is a recursion on the caller's stack and a handoff on two threads.
+    const m = machine();
+    /** @type {any[]} */
+    const threaded = [];
+    m.host.deliverDone = (/** @type {any} */ notice)=>threaded.push(notice);
+
+    const device = opened(m, CALLBACK_FUNCTION, 0x38230b0);
+    assert.equal(m.notices.length, 1, 'the open notice still goes out on the caller');
+    assert.equal(m.notices[0].message, MM_WOM_OPEN);
+
+    const at = header(m, device, 0x300, BYTES_PER_SECOND / 10);
+    m.winmm.waveOutWrite.handler([device, at, 32]);
+    m.tick(150);
+    m.pulse();
+
+    assert.equal(m.get32(at + 16) & WHDR_DONE, WHDR_DONE, 'the flag is set first');
+    assert.deepEqual(threaded.map((/** @type {any} */ n)=>[n.message, n.param, n.target]),
+        [[MM_WOM_DONE, at, 0x38230b0]], 'and the done notice went to the thread, from the tick');
+    assert.equal(m.notices.length, 1, 'not to the caller');
+    assert.equal(m.report()[0].owed, 0, 'nothing is held back');
+    assert.equal(m.report()[0].deferred, false);
+
+    const answer = m.winmm.waveOutGetID.handler([device, 0x210]);
+    assert.equal(answer, 0, 'and no entry point is parked for it');
+});
