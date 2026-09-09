@@ -39,6 +39,7 @@ export function isParkedCall(value){
  * @property {number} freeStack     Below this is free to write while the stub still holds ESP.
  * @property {number} restingStack  Where the stack will be once the stub has returned.
  * @property {number} hostReturn    Where the stub was going to return to.
+ * @property {any} [thread]        Whose call this is. Stamped when it begins.
  */
 
 /**
@@ -55,6 +56,10 @@ export function createParking({ kernel }){
     return {
         /** @param {CallFrame} frame */
         beginCall(frame){
+            // Whose stack this frame describes. Without it the frame is a
+            // stack address with no owner, and a reader of `current()` cannot
+            // tell its own thread's stack from somebody else's.
+            frame.thread = kernel.currentThread();
             inFlight.push(frame);
         },
         endCall(){
@@ -63,6 +68,26 @@ export function createParking({ kernel }){
 
         /** @returns {CallFrame | null} the call being handled right now */
         current: ()=>inFlight.length > 0 ? inFlight[inFlight.length - 1] : null,
+
+        /**
+         * Where it is safe to write below, on a given thread's stack -- and
+         * nothing at all when the call in flight is not that thread's.
+         *
+         * The distinction is the whole reason this exists. A handler that
+         * awaits anything has already had its call ended, the loop has turned,
+         * and the frame standing here belongs to whichever thread trapped
+         * next. Its `freeStack` points into that thread's stack, and building a
+         * callback frame there writes over another thread's live locals. The
+         * damage is silent: the callback runs, returns, and the thread it
+         * trampled fails much later at an address that holds no code.
+         *
+         * @param {any} thread
+         * @returns {number | undefined}
+         */
+        freeStackFor(thread){
+            const frame = inFlight.length > 0 ? inFlight[inFlight.length - 1] : null;
+            return frame && frame.thread === thread ? frame.freeStack : undefined;
+        },
 
         /** @returns {string[]} every call being handled, outermost first */
         chain: ()=>inFlight.map(frame=>frame.name),

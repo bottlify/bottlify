@@ -1,0 +1,240 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The one rule that three separate defects have each broken: a host handler
+ * that calls guest code must build the callback's frame on the stack of the
+ * thread whose call it is answering, and on no other.
+ *
+ * These go through the assembled bridge rather than its parts, because the
+ * defect is never visible in a part. Each time it has been the seam between
+ * them -- a handler awaits, the dispatcher ends its call, the loop gives other
+ * threads their turns, and the piece that decides where the frame goes is asked
+ * a question whose answer has quietly changed underneath it. Testing the pieces
+ * one at a time is what let the same bug be fixed twice and come back.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { bridgeModule } from './module.js';
+
+/** Two stacks far enough apart that a write to the wrong one is unmistakable. */
+const MAIN = { top: 0x00300000, limit: 0x00200000 };
+const WORKER = { top: 0x00700000, limit: 0x00600000 };
+
+/**
+ * As much of a machine as the bridge touches: registers, a sparse memory, a
+ * trap table and two threads with stacks of their own. Nothing executes -- what
+ * is under test is where the bridge decides to write, and that is decided
+ * before any guest instruction runs.
+ */
+async function bridge(){
+    /** @type {Record<string, number>} */
+    const regs = { esp: 0, ecx: 0, eax: 0 };
+    /** @type {Map<number, number>} */
+    const cells = new Map();
+    /** @type {((id: number) => void) | null} */
+    let onTrap = null;
+    let nextTrap = 1;
+
+    /** @param {string} name @param {{ top: number, limit: number }} stack */
+    const thread = (name, stack)=>({ name, stackTop: stack.top, stackLimit: stack.limit });
+    const main = thread('main', MAIN);
+    const worker = thread('thread-3', WORKER);
+    /** @type {any} */
+    let running = main;
+    /** @type {any[]} */
+    const resumed = [];
+
+    /** @type {any} */
+    const apis = {
+        cpu: {
+            /** @param {string} which */
+            readReg32: which=>regs[which] ?? 0,
+            /** @param {string} which @param {number} value */
+            writeReg32: (which, value)=>{
+                regs[which] = value >>> 0;
+            },
+            registerTrap: ()=>{
+                const id = nextTrap++;
+                return { id, address: 0x00900000 + id * 16 };
+            },
+            /** @param {any} fn */
+            onTrap: fn=>{
+                onTrap = fn;
+            },
+        },
+        kernel: {
+            currentThread: ()=>running,
+            threads: ()=>[main, worker],
+            holdThread: ()=>{},
+            parkThread: ()=>{},
+            /** @param {any} which @param {any} where */
+            scheduleResume: (which, where)=>resumed.push({ thread: which.name, ...where }),
+        },
+        memory: {
+            /** @param {number} at */
+            readU32: at=>cells.get(at >>> 0) ?? 0,
+            /** @param {number} at @param {number} value */
+            writeU32: (at, value)=>cells.set(at >>> 0, value >>> 0),
+            readBytes: ()=>new Uint8Array(0),
+        },
+        log: { begin: ()=>{}, end: ()=>{} },
+    };
+
+    const api = await bridgeModule.create({}, /** @type {any} */ ({
+        /** @param {string} name */
+        requireApi: name=>apis[name],
+    }));
+
+    return {
+        api,
+        main,
+        worker,
+        resumed,
+        /** Runs a registered function the way a guest `call` would. */
+        /** @param {number} id @param {any} on @param {number} esp */
+        trap: (id, on, esp)=>{
+            running = on;
+            regs.esp = esp;
+            cells.set(esp, 0x00401000);
+            /** @type {any} */ (onTrap)(id);
+        },
+        /** Which trap id the last `register` took. */
+        lastTrap: ()=>nextTrap - 1,
+    };
+}
+
+/** Lets the microtask queue drain, which is where an awaited handler resumes. */
+const settle = ()=>new Promise(done=>setTimeout(done, 0));
+
+test('a handler holding the processor calls back onto its own thread', async()=>{
+    const machine = await bridge();
+    /** @type {number[]} */
+    const seen = [];
+    machine.api.register('TEST.dll!CallsBack', {
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([value])=>{
+            seen.push(value);
+            return machine.api.callGuest({ entry: 0x00402000, args: [value] });
+        },
+    });
+    machine.trap(machine.lastTrap(), machine.main, MAIN.top - 0x100);
+    await settle();
+
+    assert.deepEqual(seen, [0]);
+    const built = machine.resumed.at(-1);
+    assert.equal(built.thread, 'main');
+    assert.ok(built.esp < MAIN.top && built.esp > MAIN.limit,
+        `the frame at 0x${built.esp.toString(16)} is on main's own stack`);
+});
+
+test('a handler that awaited is refused a callback it has not named a thread for', async()=>{
+    // This is the class, stated once. Every instance of it so far has been a
+    // handler that awaited a file, a range request or a mixer, resumed on a turn
+    // that belonged to another thread, and called the guest back as though
+    // nothing had moved. There is no answer this can give that is right: the
+    // thread on the processor is a stranger, and the call in flight is the
+    // stranger's. So it refuses and says so, instead of writing a frame onto
+    // whichever stack is nearest.
+    const machine = await bridge();
+    /** @type {unknown} */
+    let refused = null;
+    machine.api.register('TEST.dll!AwaitsThenCallsBack', {
+        argBytes: 4,
+        handler: async()=>{
+            await settle();
+            try
+            {
+                return await machine.api.callGuest({ entry: 0x00402000, args: [1] });
+            }
+            catch (e){
+                refused = e;
+                return 0;
+            }
+        },
+    });
+    const id = machine.lastTrap();
+    machine.trap(id, machine.main, MAIN.top - 0x100);
+    // While it waits, another thread traps: that is the turn its continuation
+    // lands on, and the stack it would otherwise have taken for its own.
+    machine.trap(id, machine.worker, WORKER.top - 0x100);
+    await settle();
+    await settle();
+    await settle();
+
+    assert.match(String(refused), /must name the thread whose call it answers/);
+    assert.ok(!machine.resumed.some(frame=>frame.thread === 'thread-3' && frame.eip === 0x00402000),
+        'and nothing was built on the stranger\'s stack');
+});
+
+test('a handler that awaited and named its thread builds on that thread\'s stack', async()=>{
+    const machine = await bridge();
+    machine.api.register('TEST.dll!AnswersLater', {
+        argBytes: 4,
+        handler: async()=>{
+            const asked = machine.main;
+            await settle();
+            return machine.api.callGuest({ entry: 0x00402000, args: [1], thread: asked });
+        },
+    });
+    const id = machine.lastTrap();
+    machine.trap(id, machine.main, MAIN.top - 0x100);
+    machine.trap(id, machine.worker, WORKER.top - 0x100);
+    await settle();
+    await settle();
+    await settle();
+
+    const built = machine.resumed.filter(frame=>frame.eip === 0x00402000);
+    assert.ok(built.length > 0, 'the callback was started');
+    for (const frame of built)
+    {
+        assert.equal(frame.thread, 'main');
+        assert.ok(frame.esp < MAIN.top && frame.esp > MAIN.limit,
+            `0x${frame.esp.toString(16)} is on main's stack, not the worker's`);
+    }
+});
+
+test('a frame that would land off its thread\'s stack is refused, whatever led there', async()=>{
+    // The backstop under the rule above. Wherever a resting position comes from
+    // -- a frame, a suspended call, a caller that worked one out -- a callback
+    // frame belongs on the stack of the thread that will run it, and anything
+    // else is a corruption that says nothing at the time. This is what makes a
+    // fourth instance of the defect announce itself where it happens.
+    const machine = await bridge();
+    /** @type {unknown} */
+    let refused = null;
+    // The worker is stopped inside a call of its own, and its resting position
+    // was recorded from a stack that is not the worker's -- which is exactly the
+    // state every one of these defects produced.
+    machine.api.register('TEST.dll!Suspends', {
+        argBytes: 4,
+        handler: ()=>new Promise(()=>{}),
+    });
+    const suspends = machine.lastTrap();
+    machine.api.register('TEST.dll!Wild', {
+        argBytes: 4,
+        handler: ()=>{
+            try
+            {
+                return machine.api.callGuest({
+                    entry: 0x00402000, args: [], thread: machine.worker,
+                });
+            }
+            catch (e){
+                refused = e;
+                return 0;
+            }
+        },
+    });
+    const wild = machine.lastTrap();
+    machine.trap(suspends, machine.worker, MAIN.top - 0x200);
+    machine.trap(wild, machine.main, MAIN.top - 0x100);
+    await settle();
+
+    assert.match(String(refused), /callback frame for thread-3 .* is outside its stack/);
+});

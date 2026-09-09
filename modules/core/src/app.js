@@ -2192,6 +2192,7 @@ async function buildApp(options){
     const mainThread = kernel.createThread({
         entry: start,
         stackTop: initialStack,
+        stackLimit: initialStack - stackSize,
         tebAddress: mainBlock.teb,
         name: 'main',
     });

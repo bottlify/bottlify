@@ -104,17 +104,21 @@ export function createScheduler(options){
          * @param {Object} options
          * @param {number} options.entry
          * @param {number} options.stackTop
+         * @param {number} [options.stackLimit]  The low end of the same stack, when known.
          * @param {number} options.tebAddress
          * @param {string} [options.name]
          * @returns {any} the thread
          */
-        create({ entry, stackTop, tebAddress, name }){
+        create({ entry, stackTop, stackLimit, tebAddress, name }){
             const thread = {
                 id: nextId++,
                 name: name ?? `thread-${nextId - 1}`,
                 state: ThreadState.READY,
                 tebAddress,
                 stackTop,
+                // Both ends, so anything writing on this thread's behalf can
+                // check that what it wrote landed on this thread's stack.
+                stackLimit,
                 entry,
                 context: cpu.newContext({ entry, stackTop }),
                 instructions: 0,

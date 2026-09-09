@@ -218,11 +218,30 @@ export const bridgeModule = {
              */
             callGuest({ entry, args = [], thread }){
                 const frame = parking.current();
+                // Whose call this answers, and never "whoever is running". A
+                // handler still holding the processor is answering the call in
+                // flight, and that call knows its own thread. A handler that
+                // awaited anything has let the processor go -- its call has
+                // ended, the loop has turned, and the thread standing here is
+                // somebody else, whose stack a frame built now would be written
+                // onto. Three separate defects have been exactly that, each
+                // silent where it happened and fatal much later, so a caller in
+                // that position is made to say whose call it is answering
+                // rather than being given a plausible wrong answer.
+                const runOn = thread ?? frame?.thread ?? null;
+                if (!runOn)
+                {
+                    throw new Error('bridge: a guest callback made after an await must name'
+                        + ' the thread whose call it answers');
+                }
                 return callbacks.call({
-                    thread: thread ?? kernel.currentThread(),
+                    thread: runOn,
                     entry,
                     args,
-                    stackAtRest: frame ? frame.freeStack : undefined,
+                    // Only a call still holding the processor describes this
+                    // thread's stack; otherwise the thread's own suspended call
+                    // is the record of where it came to rest.
+                    stackAtRest: parking.freeStackFor(runOn),
                 });
             },
 

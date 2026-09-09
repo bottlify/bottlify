@@ -176,6 +176,23 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             // its arguments above that. Built below everything already in use,
             // so an outer frame is still intact when this one unwinds.
             const frameBase = resting - 4 * (args.length + 1);
+            // And it has to land on this thread's own stack. Three separate
+            // defects have written a callback frame onto a stack belonging to
+            // another thread -- each time because the resting position was read
+            // from something that had moved on while a handler awaited -- and
+            // every one of them was silent at the moment it happened, surfacing
+            // much later as a return into an address that holds no code. There
+            // is no legitimate reason for a frame to be anywhere else, so the
+            // fourth instance stops here and says whose stack it was about to
+            // write on instead of corrupting it.
+            if (thread.stackLimit !== undefined
+                && (frameBase < thread.stackLimit || frameBase > thread.stackTop))
+            {
+                throw new Error(`bridge: a callback frame for ${thread.name} at`
+                    + ` 0x${(frameBase >>> 0).toString(16)} is outside its stack`
+                    + ` (0x${(thread.stackLimit >>> 0).toString(16)}`
+                    + `..0x${(thread.stackTop >>> 0).toString(16)})`);
+            }
             memory.writeU32(frameBase, sentinelAddress);
             args.forEach((value, index)=>memory.writeU32(frameBase + 4 + index * 4, value));
 

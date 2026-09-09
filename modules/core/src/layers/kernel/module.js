@@ -92,6 +92,9 @@ export const kernelModule = {
              * @param {number} options.entry
              * @param {number} [options.parameter]
              * @param {number} [options.stackTop]  Overrides the pool, for the first thread.
+             * @param {number} [options.stackLimit]
+             *   The low end of that stack. Only meaningful beside `stackTop`;
+             *   a stack from the pool knows its own.
              * @param {number} [options.tebAddress]
              * @param {string} [options.name]
              * @param {number} [options.returnTo]
@@ -102,7 +105,11 @@ export const kernelModule = {
              *   that loop, for a caller with nothing better -- but a caller
              *   that can end the thread should pass somewhere that does.
              */
-            createThread({ entry, parameter = 0, stackTop, tebAddress, name, returnTo }){
+            createThread(
+                { entry, parameter = 0, stackTop, stackLimit, tebAddress, name, returnTo })
+            {
+                /** @type {number | undefined} */
+                let low = stackLimit;
                 // A stack from the pool unless the caller brought its own (the
                 // first thread runs on the one the process was given).
                 const allocateStack = ()=>{
@@ -115,6 +122,7 @@ export const kernelModule = {
                         access: memory.Access.READ_WRITE,
                     });
                     stacks.issued++;
+                    low = base;
                     return base + stacks.size;
                 };
                 // Sixteen rather than the eight the frame needs: a thread that
@@ -129,6 +137,7 @@ export const kernelModule = {
                 const thread = scheduler.create({
                     entry,
                     stackTop: top,
+                    stackLimit: low,
                     tebAddress: tebAddress ?? 0,
                     name,
                 });
