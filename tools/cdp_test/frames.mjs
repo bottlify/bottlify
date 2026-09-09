@@ -51,6 +51,9 @@ function parse(argv){
         settle: number('--settle', 20),
         // A cinematic is minutes long and is not the steady state either.
         video: argv.includes('--video'),
+        // Guest instructions per scheduler turn. Worth varying: it is the one
+        // number that decides how long a thread may hold the machine.
+        quantum: number('--quantum', 0),
     };
 }
 
@@ -267,6 +270,7 @@ try
         imagePath: `C:\\App\\${manifest.entry}`,
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
+        quantum: options.quantum || undefined,
     })}); null`);
 
     /** Waits until the page has a report and answers with it. */
