@@ -25,8 +25,15 @@
  * event is owed a completion event whichever way the graph ends.
  *
  * There is exactly one place that decides whether media can be opened, and
- * everything else reads its answer: adding a decoder means changing
- * `openMedia`, not the interfaces or the state machine around them.
+ * everything else reads its answer: `openMedia`. Handed a decoder it opens the
+ * file and the graph carries a real clip -- its size, its length, its position;
+ * handed none it keeps answering the way a machine with no filter for the
+ * format answers, which is the paragraph above.
+ *
+ * Nothing here presents anything. `tick` decodes as far as the clock says and
+ * hands the frame back; where it goes is the caller's business, because win32
+ * may not reach the graphics layer and a filter graph has no opinion about
+ * where a window's pixels live.
  */
 
 import {
@@ -78,6 +85,24 @@ const VOLUME_MAX = 0;
 const DEFAULT_VIDEO_WIDTH = 640;
 const DEFAULT_VIDEO_HEIGHT = 480;
 
+/** A file name no longer than Windows would hand a filter graph. */
+const MAX_PATH = 260;
+
+/**
+ * How many frames one tick may decode, and how many decoder steps it may take
+ * to find them.
+ *
+ * ponytail: a fixed catch-up budget rather than dropping frames to keep the
+ * clock. A run that stalls for a second falls behind and the film plays slower
+ * instead of skipping; correcting that needs a decoder that can seek, and this
+ * one decodes forward only.
+ */
+const FRAMES_PER_TICK = 4;
+const STEPS_PER_TICK = 16;
+
+/** A REFERENCE_TIME is a hundred nanoseconds. */
+const TICKS_PER_SECOND = 10_000_000;
+
 /** IVideoWindow's long properties, each with a put_ and a get_ slot. */
 const WINDOW_PROPERTIES = [
     'WindowStyle', 'WindowStyleEx', 'AutoShow', 'WindowState', 'BackgroundPalette',
@@ -87,6 +112,25 @@ const WINDOW_PROPERTIES = [
 
 /** IBasicAudio's, the same shape. */
 const AUDIO_PROPERTIES = ['Volume', 'Balance'];
+
+/**
+ * @typedef {Object} VideoClip
+ * @property {number} width
+ * @property {number} height
+ * @property {number} fps
+ * @property {number} frameCount
+ * @property {boolean} hasVideo
+ * @property {boolean} hasAudio
+ * @property {number} sampleRate  The film's own rate, not the device's.
+ * @property {number} channels
+ * @property {() => 'frame' | 'audio' | 'end'} decode
+ * @property {() => Uint8Array | null} frame
+ *           The current frame as BGRA. A view into the decoder's own memory,
+ *           valid until the next call into it.
+ * @property {(() => Int16Array | null) | undefined} [readAudio]
+ *           What `decode` stopped early for, when this build decodes sound.
+ * @property {() => void} close
+ */
 
 /**
  * @typedef {Object} GraphEvent
@@ -113,6 +157,13 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {Record<string, number>} window
  * @property {Record<string, number>} audio
  * @property {{ width: number, height: number }} video
+ * @property {VideoClip | null} clip   What RenderFile opened, when it opened one.
+ * @property {number} shown            Frames decoded and handed over so far.
+ * @property {number | null} startedAt
+ *           Host milliseconds the present run began, moved forward by whatever
+ *           a pause or a decode that could not keep up cost. Null until the
+ *           first tick after Run, so that Run needs no clock of its own.
+ * @property {boolean} finished        Whether EC_COMPLETE has been raised.
  */
 
 /**
@@ -133,13 +184,18 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * the program dereferencing nothing. Completing at once takes the same path
  * that finishing a real film takes, which is a path the program is written for.
  *
- * A decoder arriving replaces this function's answer with a real one; every
- * method below reads it rather than repeating it.
+ * With a decoder the answer is a real one, and the empty-graph reasoning above
+ * applies only to what it cannot open.
  *
- * @returns {{ loaded: boolean, failure: number }}
+ * @param {QuartzHost} host
+ * @param {number} path  Guest address of the wide file name, or zero.
+ * @returns {VideoClip | Promise<VideoClip | null> | null}
  */
-function openMedia(){
-    return { loaded: true, failure: S_OK };
+function openMedia(host, path){
+    const name = host.video && (path >>> 0) !== 0
+        ? host.readWideString?.(path >>> 0, MAX_PATH) ?? ''
+        : '';
+    return name === '' ? null : host.video?.open(name) ?? null;
 }
 
 /** @returns {FilterGraphState} */
@@ -162,6 +218,10 @@ function newGraphState(){
         },
         audio: Object.fromEntries(AUDIO_PROPERTIES.map(name=>[name, 0])),
         video: { width: DEFAULT_VIDEO_WIDTH, height: DEFAULT_VIDEO_HEIGHT },
+        clip: null,
+        shown: 0,
+        startedAt: null,
+        finished: false,
     };
 }
 
@@ -176,7 +236,10 @@ function newGraphState(){
  * @template S
  * @param {string} id
  * @param {[string, number][]} slots
- * @param {Record<string, (state: S, args: number[]) => number>} [implemented]
+ * @param {Record<string, (state: S, args: number[]) => number | Promise<number>>} [implemented]
+ *        A method may answer with a promise: the bridge parks the calling
+ *        thread until it settles, which is what building a graph over a file
+ *        that has to be fetched needs.
  * @returns {import('../ole32/objects.js').ComInterfaceDescriptor}
  */
 function describe(id, slots, implemented = {}){
@@ -199,6 +262,15 @@ function describe(id, slots, implemented = {}){
  *                        wParam: number, lParam: number }) => void} post
  *           Puts a message in the thread's queue, which is how a graph reaches
  *           the window a program gave it.
+ * @property {((address: number, maxLength: number) => string) | undefined}
+ *           [readWideString]  The file name RenderFile was given.
+ * @property {{ open: (path: string) => VideoClip | Promise<VideoClip | null> | null }
+ *           | undefined} [video]
+ *           Where a file becomes a clip. Absent in a build assembled without a
+ *           decoder, and then every graph is the empty one.
+ * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ *           Where "this call succeeded and did not do all of what it promises"
+ *           goes, once per distinct difference.
  */
 
 /**
@@ -242,6 +314,9 @@ export function createQuartz(host){
         host.writeMemory(address >>> 0, bytes);
         return S_OK;
     };
+
+    /** @param {number} seconds @returns {number} the same in REFERENCE_TIME units */
+    const reference = seconds=>Math.round(seconds * TICKS_PER_SECOND);
 
     /**
      * Several out-parameters at once, the shape most of the getters below have.
@@ -291,6 +366,40 @@ export function createQuartz(host){
         }
     };
 
+    /** Graphs with a clip that are running, so `tick` knows what to advance. */
+    /** @type {Set<FilterGraphState>} */
+    const playing = new Set();
+
+    /** @param {FilterGraphState} graph @returns {number} seconds, zero without a clip */
+    const duration = graph=>(graph.clip && graph.clip.fps > 0
+        ? graph.clip.frameCount / graph.clip.fps
+        : 0);
+
+    /** @param {FilterGraphState} graph @returns {number} seconds shown so far */
+    const position = graph=>(graph.clip && graph.clip.fps > 0
+        ? graph.shown / graph.clip.fps
+        : 0);
+
+    /**
+     * The one event a playback loop is owed, raised once.
+     *
+     * DirectShow hands each event out exactly once and a program drains the
+     * queue with `while (SUCCEEDED(GetEvent))`; raising completion again on the
+     * next tick would refill the queue as fast as the program empties it and
+     * the loop would never end.
+     *
+     * @param {FilterGraphState} graph
+     */
+    const complete = graph=>{
+        if (graph.finished)
+        {
+            return;
+        }
+        graph.finished = true;
+        playing.delete(graph);
+        raise(graph, EC_COMPLETE, S_OK, 0);
+    };
+
     /**
      * Running is where a graph that could not be built has to say so: building
      * it failed earlier, and a program that ignored that HRESULT is still owed
@@ -300,18 +409,24 @@ export function createQuartz(host){
      */
     const run = graph=>{
         graph.state = STATE_RUNNING;
-        // A graph with nothing in it has already reached the end of what it
-        // had to present, so it says so at once. A graph that failed to render
-        // says that instead; both are events the program's own pump is written
-        // to treat identically -- close the window and carry on.
-        if (graph.loaded)
-        {
-            raise(graph, EC_COMPLETE, S_OK, 0);
-        }
-        else
+        if (!graph.loaded)
         {
             raise(graph, EC_ERRORABORT, graph.failure, 0);
+            return S_OK;
         }
+        if (graph.clip)
+        {
+            // The clock starts at the first tick rather than here, so that Run
+            // needs no clock of its own and a graph run before anything drives
+            // it does not lose the time in between.
+            graph.startedAt = null;
+            playing.add(graph);
+            return S_OK;
+        }
+        // A graph with nothing in it has already reached the end of what it
+        // had to present, so it says so at once -- the same event a whole film
+        // ends with, and the path every program is written for.
+        complete(graph);
         return S_OK;
     };
 
@@ -322,11 +437,142 @@ export function createQuartz(host){
         return result;
     };
 
-    /** @param {FilterGraphState} graph */
-    const render = graph=>{
-        const { loaded, failure } = openMedia();
-        graph.loaded = loaded;
-        return loaded ? S_OK : recordFailure(graph, failure);
+    /** @param {FilterGraphState} graph @param {number} path */
+    const render = (graph, path)=>{
+        graph.clip?.close();
+        graph.loaded = true;
+        graph.clip = null;
+        graph.shown = 0;
+        graph.startedAt = null;
+        graph.finished = false;
+
+        /** @param {VideoClip | null} clip */
+        const took = clip=>{
+            graph.clip = clip;
+            if (clip)
+            {
+                graph.video.width = clip.width;
+                graph.video.height = clip.height;
+                graph.window.Width = clip.width;
+                graph.window.Height = clip.height;
+            }
+            return S_OK;
+        };
+
+        // Opening reads a file, and reading one may mean waiting for it: a
+        // bundle answers in blocks over the network. The bridge parks the
+        // calling thread on a promise the same way it does for any other call
+        // that cannot answer yet, and a real graph is no quicker -- building
+        // one opens the file and reads its headers before it returns.
+        const opened = openMedia(host, path);
+        return typeof (/** @type {any} */ (opened))?.then === 'function'
+            ? /** @type {Promise<VideoClip | null>} */ (opened).then(took, ()=>took(null))
+            : took(/** @type {VideoClip | null} */ (opened));
+    };
+
+    /**
+     * Stopping ends the presentation and lets the clip go.
+     *
+     * Rewinding is what a real graph does here, and this decoder only reads
+     * forward: a program that stops and runs again gets what is left, which is
+     * usually nothing. Said out loud rather than silently replayed from the
+     * middle.
+     *
+     * @param {FilterGraphState} graph
+     */
+    const stopGraph = graph=>{
+        graph.state = STATE_STOPPED;
+        playing.delete(graph);
+        if (graph.clip && graph.shown > 0 && !graph.finished)
+        {
+            host.divergence?.('DirectShow',
+                'IMediaControl::Stop cannot rewind: this decoder reads forward only,'
+                + ' so running the same graph again resumes rather than restarting');
+        }
+        return S_OK;
+    };
+
+    /**
+     * Advances every running clip to where the clock says it should be.
+     *
+     * Driven from outside because a filter graph has no thread here and win32
+     * may not reach the layer that would show a frame. What comes back is the
+     * newest frame decoded this tick -- a view into the decoder's memory, good
+     * until the next call into it -- and whatever sound came with it.
+     *
+     * @param {number} nowMs  The host clock, which is what a film plays against.
+     * @returns {{ hwnd: number, width: number, height: number,
+     *             bgra: Uint8Array | null, audio: Int16Array[],
+     *             sampleRate: number, channels: number } | null}
+     */
+    const tick = nowMs=>{
+        /** @type {ReturnType<typeof tick>} */
+        let shown = null;
+        for (const graph of [...playing])
+        {
+            const clip = graph.clip;
+            if (!clip)
+            {
+                playing.delete(graph);
+                continue;
+            }
+            if (graph.startedAt === null)
+            {
+                graph.startedAt = nowMs;
+            }
+            const want = Math.floor((nowMs - graph.startedAt) * clip.fps / 1000);
+            /** @type {Int16Array[]} */
+            const audio = [];
+            /** @type {Uint8Array | null} */
+            let frame = null;
+            let decoded = 0;
+            let steps = 0;
+            while (graph.shown < want && decoded < FRAMES_PER_TICK && steps++ < STEPS_PER_TICK)
+            {
+                const what = clip.decode();
+                if (what === 'frame')
+                {
+                    graph.shown++;
+                    decoded++;
+                    frame = clip.frame();
+                    continue;
+                }
+                if (what === 'audio')
+                {
+                    const block = clip.readAudio?.() ?? null;
+                    if (block)
+                    {
+                        audio.push(block);
+                    }
+                    continue;
+                }
+                complete(graph);
+                break;
+            }
+            // Whatever the budget could not reach is time the film does not get
+            // to have: the clock is moved up to what was actually shown, so a
+            // stall slows playback rather than throwing frames away.
+            if (graph.shown < want)
+            {
+                graph.startedAt = nowMs - (graph.shown * 1000 / clip.fps);
+            }
+            if (frame || audio.length > 0)
+            {
+                shown = {
+                    hwnd: graph.window.Owner >>> 0,
+                    width: clip.width,
+                    height: clip.height,
+                    bgra: frame,
+                    audio,
+                    // The film's own rate, which is its own and not the
+                    // device's: whoever plays it has to open a track for it
+                    // rather than assume the mixer's.
+                    sampleRate: clip.sampleRate,
+                    channels: clip.channels,
+                };
+            }
+        }
+        return shown;
     };
 
     /**
@@ -336,10 +582,11 @@ export function createQuartz(host){
      * @param {string[]} names
      * @param {(graph: FilterGraphState) => Record<string, number>} bag
      * @param {(name: string, value: number) => number} [validate]
-     * @returns {Record<string, (graph: FilterGraphState, args: number[]) => number>}
+     * @returns {Record<string,
+     *           (graph: FilterGraphState, args: number[]) => number | Promise<number>>}
      */
     const properties = (names, bag, validate)=>{
-        /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+        /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
         const table = {};
         for (const name of names)
         {
@@ -357,7 +604,7 @@ export function createQuartz(host){
         return table;
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const graphBuilder = {
         /** HRESULT EnumFilters(IEnumFilters **ppEnum) */
         EnumFilters: (graph, [out])=>refuse(out, E_NOTIMPL),
@@ -375,7 +622,7 @@ export function createQuartz(host){
         Render: graph=>recordFailure(graph, VFW_E_CANNOT_RENDER),
 
         /** HRESULT RenderFile(LPCWSTR lpcwstrFile, LPCWSTR lpcwstrPlayList) */
-        RenderFile: graph=>render(graph),
+        RenderFile: (graph, [path])=>render(graph, path),
 
         /** HRESULT AddSourceFilter(LPCWSTR, LPCWSTR, IBaseFilter **ppFilter) */
         AddSourceFilter: (graph, [, , out])=>
@@ -393,34 +640,34 @@ export function createQuartz(host){
         ShouldOperationContinue: ()=>S_FALSE,
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaControl = {
         /** HRESULT Run(void) */
         Run: graph=>run(graph),
 
-        /** HRESULT Pause(void) */
+        /**
+         * HRESULT Pause(void)
+         *
+         * Taken out of the playing set rather than flagged: what stops is the
+         * clock, and the frames already decoded stay where they are.
+         */
         Pause: graph=>{
             graph.state = STATE_PAUSED;
+            playing.delete(graph);
             return S_OK;
         },
 
         /** HRESULT Stop(void) */
-        Stop: graph=>{
-            graph.state = STATE_STOPPED;
-            return S_OK;
-        },
+        Stop: graph=>stopGraph(graph),
 
         /** HRESULT StopWhenReady(void) */
-        StopWhenReady: graph=>{
-            graph.state = STATE_STOPPED;
-            return S_OK;
-        },
+        StopWhenReady: graph=>stopGraph(graph),
 
         /** HRESULT GetState(LONG msTimeout, OAFilterState *pfs) */
         GetState: (graph, [, out])=>writeLong(out, graph.state),
 
-        /** HRESULT RenderFile(BSTR strFilename) */
-        RenderFile: graph=>render(graph),
+        /** HRESULT RenderFile(BSTR strFilename) — a BSTR is wide, like the other one. */
+        RenderFile: (graph, [path])=>render(graph, path),
 
         /** HRESULT AddSourceFilter(BSTR strFilename, IDispatch **ppUnk) */
         AddSourceFilter: (graph, [, out])=>
@@ -433,7 +680,7 @@ export function createQuartz(host){
         get_RegFilterCollection: (graph, [out])=>refuse(out, E_NOTIMPL),
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaEvent = {
         /**
          * HRESULT GetEventHandle(OAEVENT *hEvent)
@@ -533,7 +780,7 @@ export function createQuartz(host){
         [width, graph.video.width], [height, graph.video.height],
     ]);
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const videoWindow = {
         ...properties(WINDOW_PROPERTIES, graph=>graph.window),
 
@@ -584,7 +831,7 @@ export function createQuartz(host){
         IsCursorHidden: (graph, [out])=>writeLong(out, 0),
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const basicVideo = {
         /** HRESULT get_VideoWidth(long *pVideoWidth) */
         get_VideoWidth: (graph, [out])=>writeLong(out, graph.video.width),
@@ -602,28 +849,48 @@ export function createQuartz(host){
         IsUsingDefaultDestination: ()=>S_OK,
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const basicAudio = properties(AUDIO_PROPERTIES, graph=>graph.audio,
         // Both are defined over the same range, and a value outside it is the
         // one documented failure either setter has.
         (name, value)=>(value >= VOLUME_MIN && value <= VOLUME_MAX ? S_OK : E_INVALIDARG));
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaPosition = {
         /** HRESULT get_Duration(REFTIME *plength) */
-        get_Duration: (graph, [out])=>writeDouble(out, 0),
+        get_Duration: (graph, [out])=>writeDouble(out, duration(graph)),
 
-        /** HRESULT get_CurrentPosition(REFTIME *pllTime) */
-        get_CurrentPosition: (graph, [out])=>writeDouble(out, 0),
+        /**
+         * HRESULT get_CurrentPosition(REFTIME *pllTime)
+         *
+         * Counted in frames handed over rather than in wall clock: a program
+         * that waits for the position to reach the duration is waiting for the
+         * film to have been shown, not for the time to have passed.
+         */
+        get_CurrentPosition: (graph, [out])=>writeDouble(out, position(graph)),
 
         /** HRESULT get_StopTime(REFTIME *pllTime) */
-        get_StopTime: (graph, [out])=>writeDouble(out, 0),
+        get_StopTime: (graph, [out])=>writeDouble(out, duration(graph)),
 
         /** HRESULT get_PrerollTime(REFTIME *pllTime) */
         get_PrerollTime: (graph, [out])=>writeDouble(out, 0),
 
-        /** HRESULT put_CurrentPosition(REFTIME llTime) */
-        put_CurrentPosition: ()=>S_OK,
+        /**
+         * HRESULT put_CurrentPosition(REFTIME llTime)
+         *
+         * Accepted and not acted on: this decoder reads forward only. Refusing
+         * would be worse -- a program seeking to zero before playing is asking
+         * for what it is about to get anyway -- but it is not a seek.
+         */
+        put_CurrentPosition: graph=>{
+            if (graph.clip)
+            {
+                host.divergence?.('DirectShow',
+                    'IMediaPosition::put_CurrentPosition is accepted and does not seek:'
+                    + ' this decoder reads forward only');
+            }
+            return S_OK;
+        },
 
         /** HRESULT put_StopTime(REFTIME llTime) */
         put_StopTime: ()=>S_OK,
@@ -631,8 +898,16 @@ export function createQuartz(host){
         /** HRESULT put_PrerollTime(REFTIME llTime) */
         put_PrerollTime: ()=>S_OK,
 
-        /** HRESULT put_Rate(double dRate) */
-        put_Rate: ()=>S_OK,
+        /** HRESULT put_Rate(double dRate) — accepted; a clip plays at its own rate. */
+        put_Rate: graph=>{
+            if (graph.clip)
+            {
+                host.divergence?.('DirectShow',
+                    'IMediaPosition::put_Rate is accepted and ignored:'
+                    + ' a clip is decoded at the rate it was recorded at');
+            }
+            return S_OK;
+        },
 
         /** HRESULT get_Rate(double *pdRate) */
         get_Rate: (graph, [out])=>writeDouble(out, 1),
@@ -644,7 +919,7 @@ export function createQuartz(host){
         CanSeekBackward: (graph, [out])=>writeLong(out, 0),
     };
 
-    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number>} */
+    /** @type {Record<string, (graph: FilterGraphState, args: number[]) => number | Promise<number>>} */
     const mediaSeeking = {
         /**
          * HRESULT GetCapabilities(DWORD *pCapabilities)
@@ -655,20 +930,20 @@ export function createQuartz(host){
         GetCapabilities: (graph, [out])=>writeLong(out, 0),
 
         /** HRESULT GetDuration(LONGLONG *pDuration) */
-        GetDuration: (graph, [out])=>writeLongLong(out, 0),
+        GetDuration: (graph, [out])=>writeLongLong(out, reference(duration(graph))),
 
         /** HRESULT GetStopPosition(LONGLONG *pStop) */
-        GetStopPosition: (graph, [out])=>writeLongLong(out, 0),
+        GetStopPosition: (graph, [out])=>writeLongLong(out, reference(duration(graph))),
 
         /** HRESULT GetCurrentPosition(LONGLONG *pCurrent) */
-        GetCurrentPosition: (graph, [out])=>writeLongLong(out, 0),
+        GetCurrentPosition: (graph, [out])=>writeLongLong(out, reference(position(graph))),
 
         /** HRESULT GetPreroll(LONGLONG *pllPreroll) */
         GetPreroll: (graph, [out])=>writeLongLong(out, 0),
 
         /** HRESULT GetPositions(LONGLONG *pCurrent, LONGLONG *pStop) */
-        GetPositions: (graph, [current, stop])=>
-            writeEach(writeLongLong, [[current, 0], [stop, 0]]),
+        GetPositions: (graph, [current, stop])=>writeEach(writeLongLong,
+            [[current, reference(position(graph))], [stop, reference(duration(graph))]]),
 
         /** HRESULT SetPositions(LONGLONG *pCurrent, DWORD, LONGLONG *pStop, DWORD) */
         SetPositions: ()=>S_OK,
@@ -735,7 +1010,7 @@ export function createQuartz(host){
         interfaces: [describe(IID_IFILTER_MAPPER2, IFILTER_MAPPER2_SLOTS, filterMapper)],
     });
 
-    return { filterGraph, filterMapper2 };
+    return { filterGraph, filterMapper2, tick };
 }
 
 /**
@@ -745,12 +1020,18 @@ export function createQuartz(host){
  * worker thread. There is no thread either way here, so it answers with the
  * same class rather than being a CLSID a program is told does not exist.
  *
+ * `tick` comes back because a filter graph has no thread of its own here and
+ * nothing inside win32 may reach the layer that would show a frame. Whoever
+ * assembles the process drives it and decides where the picture goes.
+ *
  * @param {import('../ole32/objects.js').ComRegistry} registry
  * @param {QuartzHost} host
+ * @returns {{ tick: (nowMs: number) => ReturnType<ReturnType<typeof createQuartz>['tick']> }}
  */
 export function registerQuartzClasses(registry, host){
     const quartz = createQuartz(host);
     registry.registerClass(CLSID_FILTER_GRAPH, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_GRAPH_NO_THREAD, quartz.filterGraph);
     registry.registerClass(CLSID_FILTER_MAPPER2, quartz.filterMapper2);
+    return { tick: quartz.tick };
 }

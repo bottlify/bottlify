@@ -1275,6 +1275,35 @@ async function buildApp(options){
                 /** @param {number} hdc */
                 swapBuffers: hdc=>core.api('graphics').opengl().swapBuffers(hdc),
             },
+            // What a filter graph plays. Handed down rather than reached for:
+            // win32 sits below the media layer and may not import it, and the
+            // file the graph is asked for is read through the same volume every
+            // other file goes through -- which for a bundle means waiting for
+            // blocks, so this answers with a promise and the graph's own
+            // RenderFile parks the calling thread on it.
+            video: {
+                /** @param {string} path */
+                open: async path=>{
+                    const media = core.api('media');
+                    if (!media?.available?.())
+                    {
+                        return null;
+                    }
+                    try
+                    {
+                        const bytes = await readWholeFile(filesystem, blocks, path);
+                        return await media.open(bytes);
+                    }
+                    catch (e){
+                        // A film that cannot be read or cannot be decoded is an
+                        // ordinary state of a machine -- a codec nobody
+                        // installed -- and the graph already answers for it.
+                        events.emit('debug', { text: `video: ${path} could not be opened: ${
+                            e instanceof Error ? e.message : String(e)}` });
+                        return null;
+                    }
+                },
+            },
             cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
@@ -2145,6 +2174,80 @@ async function buildApp(options){
     /** The mixer, when this build has one. Read once; it does not change. */
     const sound = core.api('audio')?.output?.() ?? null;
 
+    /**
+     * Where a film's frames go, and its sound.
+     *
+     * The graph decodes and hands a frame back; showing one is this layer's
+     * business because win32 may not reach graphics. The pixels are copied into
+     * guest memory rather than handed over as a view: presenting takes a
+     * surface the guest owns, which is also what a real video renderer writes
+     * into -- the window's own bits.
+     *
+     * @type {{ address: number, bytes: number } | null}
+     */
+    let filmSurface = null;
+
+    /** The track a film's sound goes to, opened at the film's own rate. */
+    /** @type {{ track: any, sampleRate: number, channels: number } | null} */
+    let filmTrack = null;
+
+    /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
+     *            audio: Int16Array[], sampleRate: number, channels: number } | null} shown */
+    const showVideoFrame = shown=>{
+        if (!shown)
+        {
+            return;
+        }
+        if (shown.audio.length > 0 && sound)
+        {
+            // A film carries its own rate and its own channel count, and they
+            // are not the device's: a track opened at the wrong one plays the
+            // whole cinematic at the wrong pitch.
+            if (!filmTrack || filmTrack.sampleRate !== shown.sampleRate
+                || filmTrack.channels !== shown.channels)
+            {
+                filmTrack = {
+                    track: sound.open({
+                        sampleRate: shown.sampleRate,
+                        channels: shown.channels,
+                        bitsPerSample: 16,
+                    }),
+                    sampleRate: shown.sampleRate,
+                    channels: shown.channels,
+                };
+            }
+            for (const block of shown.audio)
+            {
+                filmTrack.track.write(new Uint8Array(
+                    block.buffer, block.byteOffset, block.byteLength));
+            }
+        }
+        const screen = core.api('graphics');
+        if (!shown.bgra || !screen?.present)
+        {
+            return;
+        }
+        const needed = shown.width * shown.height * 4;
+        if (!filmSurface || filmSurface.bytes < needed)
+        {
+            const address = win32.heap().allocate(needed);
+            if (address === 0)
+            {
+                return;
+            }
+            filmSurface = { address, bytes: needed };
+        }
+        memory.writeBytes(filmSurface.address, shown.bgra.subarray(0, needed));
+        screen.present({
+            buffer: filmSurface.address,
+            width: shown.width,
+            height: shown.height,
+            pitch: shown.width * 4,
+            bitCount: 32,
+            palette: null,
+        });
+    };
+
     /** The guest's own clock, and the host clock it is credited from. */
     const clock = core.api('kernel').clock;
     const clockSource = ()=>Date.now();
@@ -2307,6 +2410,14 @@ async function buildApp(options){
                     journal.begin('waveTick', journal.PhaseKind.HOST);
                     win32.waveTick?.();
                     journal.end('waveTick');
+
+                    // And a film, for the same reason: nothing inside the guest
+                    // advances one. A program that plays a cinematic hands the
+                    // graph a file and then sits in its message loop until it is
+                    // told the film ended.
+                    journal.begin('videoTick', journal.PhaseKind.HOST);
+                    showVideoFrame(win32.videoTick?.(clockSource()));
+                    journal.end('videoTick');
 
                     // And a turn is also when anything waiting for something to
                     // arrive -- a message loop with an empty queue -- gets to look

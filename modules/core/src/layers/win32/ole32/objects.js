@@ -43,7 +43,10 @@ export const IID_IUNKNOWN = '{00000000-0000-0000-C000-000000000046}';
  * @property {'queryInterface' | 'addRef' | 'release'} [builtin]
  *           Set on IUnknown's three slots. Their implementation needs guest
  *           pointers, so whoever publishes the vtable supplies it.
- * @property {(object: ComObject, args: number[]) => number} [invoke]
+ * @property {(object: ComObject, args: number[]) => number | Promise<number>} [invoke]
+ *           A promise is a legitimate answer: the bridge parks the calling
+ *           thread until it settles, which is what a method that has to read a
+ *           file before it can answer needs.
  */
 
 /**

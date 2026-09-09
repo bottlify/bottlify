@@ -28,15 +28,88 @@ const EC_ERRORABORT = 3;
 /** Somewhere to point an out-parameter at. */
 const OUT = 0x1000;
 
-function createHost(){
+/**
+ * A clip that hands out `frameCount` frames and then ends, with a block of
+ * sound before the first one -- which is the order a decoder that stops early
+ * to drain its audio produces.
+ *
+ * @param {{ frameCount?: number, fps?: number, width?: number, height?: number }} [shape]
+ */
+function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
+    let given = 0;
+    let sound = 1;
+    return {
+        width, height, fps, frameCount, hasVideo: true, hasAudio: true,
+        sampleRate: 44100, channels: 2,
+        closed: false,
+        decode(){
+            if (sound > 0)
+            {
+                sound--;
+                return 'audio';
+            }
+            if (given >= frameCount)
+            {
+                return 'end';
+            }
+            given++;
+            return 'frame';
+        },
+        frame: ()=>Uint8Array.of(given, 0, 0, 0xff),
+        readAudio: ()=>Int16Array.of(0x1234, -0x1234),
+        close(){
+            this.closed = true;
+        },
+    };
+}
+
+/** @param {{ clip?: ReturnType<typeof fakeClip> | null }} [options] */
+function createHost({ clip } = {}){
     const bytes = new Uint8Array(0x4000);
     const view = new DataView(bytes.buffer);
     /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
     const posted = [];
+    /** @type {string[]} */
+    const reported = [];
+    /** @type {string[]} */
+    const opened = [];
     return {
         posted,
+        reported,
+        opened,
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
+        /** @param {number} address @param {number} maxLength */
+        readWideString(address, maxLength){
+            let text = '';
+            for (let at = 0; at < maxLength; at++)
+            {
+                const unit = view.getUint16(address + at * 2, true);
+                if (unit === 0)
+                {
+                    break;
+                }
+                text += String.fromCharCode(unit);
+            }
+            return text;
+        },
+        /** @param {number} address @param {string} text */
+        putWide(address, text){
+            for (let at = 0; at < text.length; at++)
+            {
+                view.setUint16(address + at * 2, text.charCodeAt(at), true);
+            }
+            view.setUint16(address + text.length * 2, 0, true);
+        },
+        video: clip === undefined ? undefined : {
+            /** @param {string} path */
+            open(path){
+                opened.push(path);
+                return clip ?? null;
+            },
+        },
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>reported.push(`${api}: ${detail}`),
         /** @param {{ hwnd: number, message: number, wParam: number, lParam: number }} m */
         post: m=>{
             posted.push(m);
@@ -50,15 +123,22 @@ function createHost(){
     };
 }
 
-/** @param {string} clsid */
-function createObject(clsid = CLSID_FILTER_GRAPH){
-    const host = createHost();
+/**
+ * @param {string} clsid
+ * @param {{ clip?: ReturnType<typeof fakeClip> | null }} [options]
+ */
+function createObject(clsid = CLSID_FILTER_GRAPH, options = {}){
+    const host = createHost(options);
     const registry = createComRegistry();
-    registerQuartzClasses(registry, host);
+    const { tick } = registerQuartzClasses(registry, host);
     const object = registry.create(clsid);
     assert.ok(object, `${clsid} produced no object`);
-    return { host, registry, object };
+    return { host, registry, object, tick };
 }
+
+/** The path a program hands RenderFile, and where the test writes it. */
+const PATH = 0x2000;
+const MOVIE = String.raw`C:\App\Movies\TutorialIn.mpq`;
 
 /** @param {import('../ole32/objects.js').ComObject} object @param {string} iid */
 function methodsOf(object, iid){
@@ -75,7 +155,10 @@ function call(object, iid, name, args = []){
     const method = methodsOf(object, iid).find(entry=>entry.name === name);
     assert.ok(method, `${iid} has no ${name}`);
     assert.ok(method.invoke, `${iid}::${name} is not implemented`);
-    return method.invoke(object, args) | 0;
+    // A method may answer with a promise -- RenderFile has to read a file --
+    // and a test that wants the number awaits it itself.
+    const answer = method.invoke(object, args);
+    return typeof answer === 'number' ? answer | 0 : answer;
 }
 
 test('CoCreateInstance finds the filter graph under both of its class ids', ()=>{
@@ -356,4 +439,133 @@ test('two graphs keep their own state', ()=>{
     call(first, IID_IMEDIA_CONTROL, 'Run');
     assert.equal(call(second, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
         E_ABORT);
+});
+
+test('RenderFile opens the file it was given and the graph takes the clip\'s size', ()=>{
+    // A program sizes its window from IBasicVideo before a frame exists, so
+    // these have to be the clip's and not the placeholder they used to be.
+    const { object, host } = createObject(CLSID_FILTER_GRAPH, { clip: fakeClip() });
+    host.putWide(PATH, MOVIE);
+
+    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]), S_OK);
+    assert.deepEqual(host.opened, [MOVIE], 'the name reached the decoder as written');
+
+    assert.equal(call(object, IID_IBASIC_VIDEO, 'get_VideoWidth', [OUT]), S_OK);
+    assert.equal(host.i32(OUT), 800);
+    assert.equal(call(object, IID_IBASIC_VIDEO, 'get_VideoHeight', [OUT]), S_OK);
+    assert.equal(host.i32(OUT), 368);
+});
+
+test('a clip has the length its frames add up to, not zero', ()=>{
+    // A program that waits for the position to reach the duration waits for
+    // ever when both are zero, which is what a graph with nothing in it says.
+    const { object, host } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 30, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_Duration', [OUT]), S_OK);
+    assert.equal(host.f64(OUT), 3, 'thirty frames at ten a second');
+    assert.equal(call(object, IID_IMEDIA_SEEKING, 'GetDuration', [OUT]), S_OK);
+    assert.equal(host.i64(OUT), 30000000n, 'and the same in REFERENCE_TIME units');
+});
+
+test('Run with a clip plays it instead of completing at once', ()=>{
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 3, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IVIDEO_WINDOW, 'put_Owner', [0x40b4]);
+
+    assert.equal(call(object, IID_IMEDIA_CONTROL, 'Run'), S_OK);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT, 'a film that has not been shown is not over');
+
+    // The clock starts at the first tick, so this one is where time zero is.
+    assert.equal(tick(1000), null, 'nothing is owed yet at the moment it starts');
+    const shown = tick(1100);
+    assert.ok(shown, 'a tenth of a second later, one frame');
+    assert.equal(shown.hwnd, 0x40b4, 'addressed to the window the program owns it with');
+    assert.deepEqual([shown.width, shown.height], [800, 368]);
+    assert.ok(shown.bgra, 'and carries the picture');
+    assert.deepEqual(shown.audio.map(block=>[...block]), [[0x1234, -0x1234]],
+        'with whatever sound came with it');
+
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+    assert.equal(host.f64(OUT), 0.1, 'the position is what has been shown');
+});
+
+test('EC_COMPLETE arrives when the clip ends, exactly once', ()=>{
+    // Once, because a program drains the queue with while (SUCCEEDED(GetEvent))
+    // and an event that keeps coming back is a loop that never ends.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 2, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_EVENT_EX, 'SetNotifyWindow', [0x40, 0x8001, 0xabcd]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    tick(0);
+    tick(10000);
+    assert.deepEqual(host.posted,
+        [{ hwnd: 0x40, message: 0x8001, wParam: 0, lParam: 0xabcd }]);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(host.i32(OUT), EC_COMPLETE);
+
+    tick(20000);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]),
+        E_ABORT, 'and the queue stays empty however long it is ticked');
+});
+
+test('a paused graph stops advancing, and a stopped one is dropped', ()=>{
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 100, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(0);
+    assert.ok(tick(200), 'running, so it advances');
+
+    call(object, IID_IMEDIA_CONTROL, 'Pause');
+    assert.equal(tick(400), null, 'paused, so it does not');
+
+    call(object, IID_IMEDIA_CONTROL, 'Stop');
+    assert.equal(tick(600), null);
+    assert.ok(host.reported.some(line=>line.includes('cannot rewind')),
+        'and says that stopping is not the rewind a real graph would do');
+});
+
+test('a build with no decoder behaves exactly as it did before', ()=>{
+    // The empty graph is not a stub: it is what a machine with no filter for
+    // the format does, and a build assembled without media must keep doing it.
+    const { object, host, tick } = createObject();
+    host.putWide(PATH, MOVIE);
+    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_CONTROL, 'Run'), S_OK);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(host.i32(OUT), EC_COMPLETE, 'completing at once, as it always has');
+    assert.equal(tick(1000), null, 'and there is nothing to drive');
+});
+
+test('a file the decoder cannot open leaves the empty graph, not a failure', ()=>{
+    // "No filter for this format" is an ordinary state of a Windows machine and
+    // the program is written for it; the graph that results is the empty one.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH, { clip: null });
+    host.putWide(PATH, MOVIE);
+    assert.equal(call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]), S_OK);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(host.i32(OUT), EC_COMPLETE);
+    assert.equal(tick(1000), null);
+});
+
+test('seeking and retiming are accepted and say they did nothing', ()=>{
+    const { object, host } = createObject(CLSID_FILTER_GRAPH, { clip: fakeClip() });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'put_CurrentPosition', [0, 0]), S_OK);
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'put_Rate', [0, 0]), S_OK);
+    assert.ok(host.reported.some(line=>line.includes('does not seek')));
+    assert.ok(host.reported.some(line=>line.includes('put_Rate')));
 });

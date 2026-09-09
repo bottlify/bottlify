@@ -256,10 +256,18 @@ export const win32Module = {
         // graph is not a drawing device: a program reaches it through
         // CoCreateInstance alone, and everything it does -- events, a notify
         // window, a state machine -- is already in reach from this layer.
-        registerQuartzClasses(com, {
+        // The graph keeps the state machine and the COM surface; what decodes
+        // and what shows a frame belong to layers this one may not reach, so
+        // both arrive as thunks and `tick` goes back out to whoever drives the
+        // machine.
+        const quartz = registerQuartzClasses(com, {
             writeMemory,
             /** @param {import('./user32/messages.js').PostedMessage} message */
             post: message=>queue.post(message),
+            /** @param {number} address @param {number} maxLength */
+            readWideString: (address, maxLength)=>readWideString(address, maxLength),
+            video: config?.video,
+            divergence: config?.divergence,
         });
 
         // One allocator over the whole arena. Everything the guest is handed
@@ -838,6 +846,19 @@ export const win32Module = {
              * Without this that wait cannot end.
              */
             waveTick: ()=>winmm.tick(),
+
+            /**
+             * Moves every playing filter graph to `nowMs` and hands back the
+             * frame to show, with whatever sound came with it.
+             *
+             * Out here rather than inside, for the same reason the wave cursor
+             * is: nothing in the guest advances a film, and what a frame is
+             * shown on belongs to the graphics layer, which this one may not
+             * reach.
+             *
+             * @param {number} nowMs
+             */
+            videoTick: nowMs=>quartz.tick(nowMs),
 
             /** The registry, whose contents outlive the process (§9). */
             registry: ()=>hive,
