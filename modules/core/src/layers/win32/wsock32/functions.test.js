@@ -506,3 +506,33 @@ test('the ordinals a real program imports all resolve', ()=>{
         assert.ok(name in fx.winsock.sockets, `ordinal ${ordinal} names ${name}`);
     }
 });
+
+test('WSAIoctl is ioctlsocket with buffers, and refuses the extension lookup', ()=>{
+    const fx = fixture();
+    const handle = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    const FLAG = 0x900;
+    const COUNT = 0x910;
+    const RETURNED = 0x920;
+    const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
+
+    fx.setDword(FLAG, 1);
+    assert.equal(fx.call('WSAIoctl', [handle, FIONBIO, FLAG, 4, 0, 0, 0, 0, 0]), 0);
+    assert.equal(fx.registry.get(handle).nonBlocking, true, 'the flag came from the input buffer');
+
+    assert.equal(fx.call('WSAIoctl', [handle, FIONREAD, 0, 0, COUNT, 4, RETURNED, 0, 0]), 0);
+    assert.equal(fx.dword(COUNT), 0, 'nothing waiting on a fresh socket');
+    assert.equal(fx.dword(RETURNED), 4, 'and the count is a DWORD');
+    assert.equal(fx.call('WSAIoctl', [handle, FIONREAD, 0, 0, COUNT, 2, RETURNED, 0, 0]),
+        SOCKET_ERROR, 'a buffer too small for the count');
+
+    assert.equal(fx.call('WSAIoctl',
+        [handle, SIO_GET_EXTENSION_FUNCTION_POINTER, 0x930, 16, 0x940, 4, RETURNED, 0, 0]),
+    SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), 10045,
+        'WSAEOPNOTSUPP sends a program to the plain calls');
+
+    assert.equal(fx.call('WSAIoctl', [handle, 0x12345, 0, 0, 0, 0, 0, 0, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), 10022, 'WSAEINVAL for a command it has not got');
+    assert.equal(fx.call('WSAIoctl', [0x7777, FIONBIO, FLAG, 4, 0, 0, 0, 0, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), 10038, 'WSAENOTSOCK');
+});

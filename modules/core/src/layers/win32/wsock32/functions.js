@@ -34,7 +34,7 @@
 import {
     AF_INET, FIONBIO, FIONREAD, HOSTENT, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
     SOCKET_ERROR, SOL_SOCKET, SO_TYPE, WSADATA, WSADESCRIPTION, WSASYSSTATUS,
-    WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEWOULDBLOCK,
+    WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WSOCK32_ORDINALS, WS2_32_ORDINALS,
 } from './constants.js';
 import {
@@ -43,6 +43,9 @@ import {
 
 /** The name this host answers to, and the only one it can resolve to itself. */
 const HOSTNAME = 'bottlify';
+
+/** The one extension lookup a program makes before it settles for the plain calls. */
+const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
 
 /**
  * @typedef {Object} WinsockHost
@@ -331,6 +334,40 @@ export function createWinsockFunctions(host){
      * program is concerned: a socket made through either is usable through the
      * other, and on Windows they are the same sockets for the same reason.
      */
+    /**
+     * What ioctlsocket and WSAIoctl both do with a command: the argument is
+     * read or written in place, so the buffered form hands in whichever of its
+     * two buffers the command uses.
+     *
+     * @param {number} handle @param {number} command @param {number} argument
+     */
+    const ioctl = (handle, command, argument)=>{
+        const socket = socketOf(handle);
+        if (!socket)
+        {
+            return fail(WSAENOTSOCK);
+        }
+        if ((command >>> 0) === FIONBIO)
+        {
+            if (argument === 0)
+            {
+                return fail(WSAEFAULT);
+            }
+            socket.nonBlocking = readDword(argument) !== 0;
+            return ok(0);
+        }
+        if ((command >>> 0) === FIONREAD)
+        {
+            if (argument === 0)
+            {
+                return fail(WSAEFAULT);
+            }
+            writeDword(argument, registry.available(socket));
+            return ok(0);
+        }
+        return fail(WSAEINVAL);
+    };
+
     const table = {
         WSAStartup: {
             argBytes: 8,
@@ -698,33 +735,54 @@ export function createWinsockFunctions(host){
         ioctlsocket: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, command, argument])=>{
-                const socket = socketOf(handle);
-                if (!socket)
+            handler: ([handle, command, argument])=>ioctl(handle, command, argument),
+        },
+
+        /**
+         * int WSAIoctl(SOCKET s, DWORD dwIoControlCode, LPVOID lpvInBuffer,
+         *              DWORD cbInBuffer, LPVOID lpvOutBuffer, DWORD cbOutBuffer,
+         *              LPDWORD lpcbBytesReturned, LPWSAOVERLAPPED lpOverlapped,
+         *              LPWSAOVERLAPPED_COMPLETION_ROUTINE lpCompletionRoutine)
+         *
+         * The two commands ioctlsocket takes, in the buffered form: FIONBIO
+         * reads its flag from the input buffer, FIONREAD writes its count to
+         * the output one. The extension-function lookup is refused as not
+         * supported, which is what a stack without those extensions says and
+         * what sends a program to the plain calls it also has.
+         */
+        WSAIoctl: {
+            argBytes: 36,
+            /** @param {number[]} args */
+            handler: ([handle, command, input, , output, outputSize, returned])=>{
+                if (!socketOf(handle))
                 {
                     return fail(WSAENOTSOCK);
                 }
+                if ((command >>> 0) === SIO_GET_EXTENSION_FUNCTION_POINTER)
+                {
+                    return fail(WSAEOPNOTSUPP);
+                }
                 if ((command >>> 0) === FIONBIO)
                 {
-                    if (argument === 0)
-                    {
-                        return fail(WSAEFAULT);
-                    }
-                    socket.nonBlocking = readDword(argument) !== 0;
-                    return ok(0);
+                    return ioctl(handle, command, input);
                 }
                 if ((command >>> 0) === FIONREAD)
                 {
-                    if (argument === 0)
+                    if ((outputSize >>> 0) < 4)
                     {
                         return fail(WSAEFAULT);
                     }
-                    writeDword(argument, registry.available(socket));
-                    return ok(0);
+                    const result = ioctl(handle, command, output);
+                    if (result === 0 && returned !== 0)
+                    {
+                        writeDword(returned, 4);
+                    }
+                    return result;
                 }
                 return fail(WSAEINVAL);
             },
         },
+
 
         select: {
             argBytes: 20,

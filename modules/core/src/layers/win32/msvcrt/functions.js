@@ -184,7 +184,39 @@ export function createMsvcrtFunctions(host){
         return Array.from({ length: VA_LIST_SLOTS }, (unused, slot)=>view.getInt32(slot * 4, true));
     };
 
+    /**
+     * Where the runtime would report a fatal error. Nothing here reports one,
+     * so the mode is only ever handed back to whoever set it.
+     */
+    let errorMode = 0;
+
     const table = {
+        /**
+         * int _set_error_mode(int mode)
+         *
+         * _REPORT_ERRMODE asks; the three output modes set. Anything else is
+         * refused with -1, which is what the runtime answers for a mode it
+         * does not have.
+         */
+        _set_error_mode: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([mode])=>{
+                if ((mode | 0) === 3)
+                {
+                    return errorMode;
+                }
+                if ((mode | 0) < 0 || (mode | 0) > 2)
+                {
+                    return -1 >>> 0;
+                }
+                const previous = errorMode;
+                errorMode = mode | 0;
+                return previous;
+            },
+        },
+
         /** size_t strlen(const char *str) */
         strlen: {
             convention: 'cdecl',

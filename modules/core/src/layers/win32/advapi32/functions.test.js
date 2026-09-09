@@ -589,3 +589,42 @@ test('no size pointer at all is a refusal rather than a write to address zero', 
     const { fns } = setup();
     assert.equal(fns.GetUserNameA.handler([OUT_NAME, 0]), 0);
 });
+
+test('a SID is built in guest memory in the layout a program compares byte by byte', ()=>{
+    const memory = fakeMemory();
+    let next = 0x800;
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(),
+        allocate: bytes=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        setLastError: code=>errors.push(code),
+    });
+    // SECURITY_NT_AUTHORITY, and the two sub-authorities of the Administrators group.
+    memory.bytes.set([0, 0, 0, 0, 0, 5], 0x100);
+
+    assert.equal(fns.AllocateAndInitializeSid.handler(
+        [0x100, 2, 32, 544, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 1);
+    const sid = memory.dword(OUT_HANDLE);
+    assert.deepEqual([...memory.bytes.slice(sid, sid + 16)],
+        [1, 2, 0, 0, 0, 0, 0, 5, 32, 0, 0, 0, 0x20, 0x02, 0, 0]);
+    assert.equal(fns.FreeSid.handler(), 0, 'NULL is success');
+    assert.equal(fns.FreeSid.argBytes, 4, 'it still pops the SID it was given');
+
+    assert.equal(fns.AllocateAndInitializeSid.handler(
+        [0x100, 9, 0, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0, 'nine sub-authorities do not fit');
+    assert.deepEqual(errors, [1337], 'ERROR_INVALID_SID');
+});
+
+test('a build with nowhere to put a SID says it ran out of memory rather than faulting', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.AllocateAndInitializeSid.handler(
+        [0x100, 1, 18, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0);
+});

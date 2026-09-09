@@ -228,3 +228,25 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.TerminateProcess.argBytes, 8);
     assert.equal(fns.GetExitCodeProcess.argBytes, 8);
 });
+
+test('the processor features answered are the ones a 32-bit x86 with SSE2 has', ()=>{
+    // A runtime picks its memcpy and floating-point paths from these; a yes for
+    // an instruction the emulated processor lacks is a fault much later.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.IsProcessorFeaturePresent.handler([1]), 0, 'floating point is not emulated');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([2]), 1, 'cmpxchg8b');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([6]), 1, 'SSE');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([10]), 1, 'SSE2');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([12]), 0, 'no execute-disable');
+    assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
+});
+
+test('an activation context lookup finds nothing, as in a process without a manifest', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.FindActCtxSectionStringW.handler(), 0);
+    assert.deepEqual(host.errors, [14007], 'ERROR_SXS_KEY_NOT_FOUND');
+});

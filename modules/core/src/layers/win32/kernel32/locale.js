@@ -602,6 +602,15 @@ export function createLocaleFunctions(host){
         GetSystemDefaultLangID: { argBytes: 0, handler: ()=>LANGID_EN_US },
 
         /**
+         * LANGID GetSystemDefaultUILanguage(VOID)
+         *
+         * The language the system's own resources are in, which here is the
+         * only one there is: a program that picks its strings by this must
+         * land on the same table it picks its formats by.
+         */
+        GetSystemDefaultUILanguage: { argBytes: 0, handler: ()=>LANGID_EN_US },
+
+        /**
          * BOOL IsValidCodePage(UINT CodePage)
          *
          * Only the pages this build can actually convert. Claiming one it cannot

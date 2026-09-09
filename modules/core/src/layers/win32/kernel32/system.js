@@ -66,6 +66,26 @@ const MAX_STRING = 4096;
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** No activation context has this section: what a process without a manifest is told. */
+const ERROR_SXS_KEY_NOT_FOUND = 14007;
+
+/**
+ * IsProcessorFeaturePresent's answers, for the processor this is: a 32-bit x86
+ * with the SSE2 set and no execute-disable. A feature not listed is one the
+ * program must not use, so the default answer is no.
+ */
+const PROCESSOR_FEATURES = new Map([
+    [0, false],  // PF_FLOATING_POINT_PRECISION_ERRATA
+    [1, false],  // PF_FLOATING_POINT_EMULATED
+    [2, true],   // PF_COMPARE_EXCHANGE_DOUBLE
+    [3, true],   // PF_MMX_INSTRUCTIONS_AVAILABLE
+    [6, true],   // PF_XMMI_INSTRUCTIONS_AVAILABLE
+    [8, true],   // PF_RDTSC_INSTRUCTION_AVAILABLE
+    [10, true],  // PF_XMMI64_INSTRUCTIONS_AVAILABLE
+    [12, false], // PF_NX_ENABLED
+    [13, false], // PF_SSE3_INSTRUCTIONS_AVAILABLE
+    [14, false], // PF_COMPARE_EXCHANGE128
+]);
 
 /**
  * What FormatMessage says about a code, for the codes this build produces.
@@ -267,6 +287,36 @@ export function createSystemFunctions(host){
         BigInt(Math.trunc(host.systemTimeMs())) * 10_000n + FILETIME_AT_UNIX_EPOCH);
 
     return {
+        /**
+         * BOOL IsProcessorFeaturePresent(DWORD ProcessorFeature)
+         *
+         * A runtime picks its memcpy and its floating-point paths from these,
+         * so a yes for an instruction the emulated processor lacks is a fault
+         * later at an address that means nothing.
+         */
+        IsProcessorFeaturePresent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([feature])=>PROCESSOR_FEATURES.get(feature >>> 0) === true ? 1 : 0,
+        },
+
+        /**
+         * BOOL FindActCtxSectionStringW(DWORD dwFlags, const GUID *lpExtensionGuid,
+         *                               ULONG ulSectionId, LPCWSTR lpStringToFind,
+         *                               PACTCTX_SECTION_KEYED_DATA ReturnedData)
+         *
+         * There is no activation context, so nothing is ever found. That is
+         * the answer a process without a manifest gets, and the one a runtime
+         * takes as its cue to load the plain DLL instead of a side-by-side one.
+         */
+        FindActCtxSectionStringW: {
+            argBytes: 20,
+            handler: ()=>{
+                host.setLastError(ERROR_SXS_KEY_NOT_FOUND);
+                return 0;
+            },
+        },
+
         /** VOID GetSystemInfo(LPSYSTEM_INFO lpSystemInfo) */
         GetSystemInfo: {
             argBytes: 4,

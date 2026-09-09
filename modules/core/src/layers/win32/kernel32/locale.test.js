@@ -255,3 +255,10 @@ test('LCMapStringW maps the wide form in place of the narrow one', ()=>{
     fns.LCMapStringW.handler([0, LCMAP_LOWERCASE, 0x100, 3, 0x200, 3]);
     assert.equal(host.readWide(0x200, 3), 'abc');
 });
+
+test('the UI language is the language everything else here is in', ()=>{
+    const fns = createLocaleFunctions(fakeHost());
+    assert.equal(fns.GetSystemDefaultUILanguage.handler(),
+        fns.GetSystemDefaultLangID.handler());
+    assert.equal(fns.GetSystemDefaultUILanguage.argBytes, 0);
+});

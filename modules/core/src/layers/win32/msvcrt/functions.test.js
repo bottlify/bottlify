@@ -390,3 +390,15 @@ test('qsort of nothing asks nothing', async()=>{
     assert.equal(await fns.qsort.handler([0x100, 0, 4, 0x9000]), 0);
     assert.equal(await fns.qsort.handler([0x100, 1, 4, 0x9000]), 0);
 });
+
+test('_set_error_mode hands back what was put in, and refuses a mode it has not got', ()=>{
+    const { fns } = setup();
+    const REPORT = 3;
+
+    assert.equal(fns._set_error_mode.handler([REPORT]), 0, 'the default is _OUT_TO_DEFAULT');
+    assert.equal(fns._set_error_mode.handler([2]), 0, 'setting answers the previous mode');
+    assert.equal(fns._set_error_mode.handler([REPORT]), 2);
+    assert.equal(fns._set_error_mode.handler([1]), 2);
+    assert.equal(fns._set_error_mode.handler([7]) | 0, -1, 'an unknown mode is refused');
+    assert.equal(fns._set_error_mode.handler([REPORT]), 1, 'and changed nothing');
+});

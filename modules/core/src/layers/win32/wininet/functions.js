@@ -32,6 +32,84 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 
+/** InternetCanonicalizeUrl's flags, the ones that change the answer. */
+const ICU_NO_ENCODE = 0x20000000;
+const ICU_DECODE = 0x10000000;
+const ICU_NO_META = 0x08000000;
+const ICU_ENCODE_SPACES_ONLY = 0x04000000;
+const ICU_BROWSER_MODE = 0x02000000;
+const ICU_ENCODE_PERCENT = 0x00001000;
+
+/**
+ * Canonicalises a URL the way WinINet does for the cases a program relies on:
+ * "." and ".." collapsed out of the path, unsafe characters percent-encoded,
+ * and, when asked, existing escapes decoded first.
+ *
+ * The characters encoded are the ones WinINet treats as unsafe in a URL --
+ * controls, space, DEL, anything past ASCII, and the delimiters that are not
+ * URL syntax. Reserved characters stay, because encoding "?" or "/" would
+ * change what the URL names.
+ *
+ * @param {string} url @param {number} flags
+ * @returns {string}
+ */
+export function canonicalizeUrl(url, flags){
+    let text = url;
+    if ((flags & ICU_DECODE) !== 0)
+    {
+        text = text.replace(/%([0-9a-fA-F]{2})/g,
+            (_, hex)=>String.fromCharCode(parseInt(hex, 16)));
+    }
+    if ((flags & ICU_NO_META) === 0)
+    {
+        // Only the path: a query or fragment is the program's to keep as is,
+        // and a host name has no segments to collapse.
+        const scheme = text.match(/^[A-Za-z][A-Za-z0-9+.-]*:\/\/[^/?#]*/);
+        const start = scheme ? scheme[0].length : 0;
+        const stop = text.slice(start).search(/[?#]/);
+        const pathEnd = stop === -1 ? text.length : start + stop;
+        const path = text.slice(start, pathEnd);
+        if (path.startsWith('/'))
+        {
+            /** @type {string[]} */
+            const kept = [];
+            for (const segment of path.slice(1).split('/'))
+            {
+                if (segment === '.')
+                {
+                    continue;
+                }
+                if (segment === '..')
+                {
+                    kept.pop();
+                    continue;
+                }
+                kept.push(segment);
+            }
+            text = text.slice(0, start) + '/' + kept.join('/') + text.slice(pathEnd);
+        }
+    }
+    if ((flags & ICU_NO_ENCODE) === 0)
+    {
+        const spacesOnly = (flags & ICU_ENCODE_SPACES_ONLY) !== 0;
+        const percent = (flags & ICU_ENCODE_PERCENT) !== 0;
+        let encoded = '';
+        for (const character of text)
+        {
+            const code = character.charCodeAt(0);
+            const unsafe = spacesOnly
+                ? code === 0x20
+                : code <= 0x20 || code >= 0x7f || '"<>\\^`{|}'.includes(character)
+                    || (percent && character === '%');
+            encoded += unsafe && code <= 0xff
+                ? `%${code.toString(16).toUpperCase().padStart(2, '0')}`
+                : character;
+        }
+        text = encoded;
+    }
+    return text;
+}
+
 const ERROR_INTERNET_INVALID_URL = 12005;
 const ERROR_INTERNET_UNRECOGNIZED_SCHEME = 12006;
 const ERROR_INTERNET_INCORRECT_HANDLE_TYPE = 12018;
@@ -112,6 +190,9 @@ const FALSE = 0;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} setLastError
+ * @property {((api: string, detail: string) => void) | undefined} [divergence]
+ *           Told, once per kind, when a call is answered differently from
+ *           the real library.
  * @property {((request: { method: string, url: string,
  *                         headers: Record<string, string>,
  *                         body: Uint8Array | null }) => Promise<HttpResponse>) | null}
@@ -189,6 +270,9 @@ export function createWininetFunctions(host){
         }
         return !kind || found.kind === kind ? found : null;
     };
+
+    /** Said once: a program canonicalises many URLs and one line is the whole finding. */
+    let browserModeReported = false;
 
     /** @param {number} code @returns {number} FALSE, so a handler can return it directly */
     const fail = code=>{
@@ -788,6 +872,43 @@ export function createWininetFunctions(host){
                 const previous = target.state.callback ?? 0;
                 target.state.callback = callback >>> 0;
                 return previous;
+            },
+        },
+
+        /**
+         * BOOL InternetCanonicalizeUrlA(LPCSTR lpszUrl, LPSTR lpszBuffer,
+         *                               LPDWORD lpdwBufferLength, DWORD dwFlags)
+         *
+         * The length is characters without the terminator on success and the
+         * size the caller must allocate on failure -- the same two-call shape
+         * as the rest of the library.
+         */
+        InternetCanonicalizeUrlA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([url, buffer, length, flags])=>{
+                if (url === 0 || length === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((flags & ICU_BROWSER_MODE) !== 0 && !browserModeReported)
+                {
+                    // Browser mode leaves everything after the first "?" or
+                    // "#" untouched; this canonicalises the whole string.
+                    browserModeReported = true;
+                    host.divergence?.('WinINet',
+                        'InternetCanonicalizeUrl: ICU_BROWSER_MODE is not honoured');
+                }
+                const canonical = canonicalizeUrl(readText(url), flags >>> 0);
+                const needed = canonical.length + 1;
+                if (buffer === 0 || readDword(length) < needed)
+                {
+                    writeDword(length, needed);
+                    return fail(ERROR_INSUFFICIENT_BUFFER);
+                }
+                writeText(buffer, canonical);
+                writeDword(length, canonical.length);
+                return TRUE;
             },
         },
 

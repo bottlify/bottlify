@@ -742,6 +742,7 @@ export const win32Module = {
             'WININET.dll': createWininetFunctions({
                 readMemory, writeMemory, readCString, setLastError: setError,
                 request: config?.http ?? null,
+                divergence: config?.divergence,
             }),
 
             'USER32.dll': createWindowFunctions({
@@ -791,6 +792,10 @@ export const win32Module = {
                 writeMemory,
                 readCString,
                 hive,
+                setLastError: setError,
+                // A SID has to live where a program can compare it byte by byte.
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
             }),
 
             'GDI32.dll': gdi.table,

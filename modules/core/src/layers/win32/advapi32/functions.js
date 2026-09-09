@@ -30,6 +30,11 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_MORE_DATA = 234;
 const ERROR_NO_MORE_ITEMS = 259;
+const ERROR_NOT_ENOUGH_MEMORY = 8;
+const ERROR_INVALID_SID = 1337;
+
+/** The count is a byte and the format allows eight. */
+const MAX_SUB_AUTHORITIES = 8;
 
 /** What RegCreateKeyEx reports through lpdwDisposition. */
 const REG_CREATED_NEW_KEY = 1;
@@ -62,6 +67,11 @@ const USER_NAME = 'User';
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {ReturnType<typeof import('./registry.js').createHive>} hive
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory for the objects this library hands out by pointer -- a
+ *           SID. Without it those calls fail as an out-of-memory would, which
+ *           is a result a program is written to handle.
+ * @property {(code: number) => void} [setLastError]
  */
 
 /** @param {number[]} numbers */
@@ -413,6 +423,57 @@ export function createRegistryFunctions(host){
                 return 1;
             },
         },
+
+        /**
+         * BOOL AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY pIdentifierAuthority,
+         *                               BYTE nSubAuthorityCount, DWORD dwSubAuthority0..7,
+         *                               PSID *pSid)
+         *
+         * A real SID in guest memory -- revision, count, the six-byte authority
+         * and the sub-authorities -- because a program that builds one goes on
+         * to compare it byte for byte with one it read from a token or an ACL.
+         */
+        AllocateAndInitializeSid: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([authority, count, ...rest])=>{
+                const out = rest[MAX_SUB_AUTHORITIES];
+                const wanted = count & 0xff;
+                if (wanted > MAX_SUB_AUTHORITIES)
+                {
+                    host.setLastError?.(ERROR_INVALID_SID);
+                    return 0;
+                }
+                if (!host.allocate)
+                {
+                    host.setLastError?.(ERROR_NOT_ENOUGH_MEMORY);
+                    return 0;
+                }
+                const size = 8 + 4 * wanted;
+                const sid = host.allocate(size);
+                const bytes = new Uint8Array(size);
+                bytes[0] = 1;
+                bytes[1] = wanted;
+                bytes.set(host.readMemory(authority >>> 0, 6), 2);
+                for (let at = 0; at < wanted; at++)
+                {
+                    const value = rest[at] >>> 0;
+                    bytes.set([value & 0xff, value >>> 8 & 0xff,
+                        value >>> 16 & 0xff, value >>> 24 & 0xff], 8 + at * 4);
+                }
+                host.writeMemory(sid, bytes);
+                writeDword(out >>> 0, sid);
+                return 1;
+            },
+        },
+
+        /**
+         * PVOID FreeSid(PSID pSid)
+         *
+         * Answers NULL, which is success -- the documented shape. The memory
+         * itself stays with the process, as every small allocation here does.
+         */
+        FreeSid: { argBytes: 4, handler: ()=>0 },
 
         /** LONG RegCloseKey(HKEY) */
         RegCloseKey: {
