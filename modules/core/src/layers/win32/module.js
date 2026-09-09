@@ -885,12 +885,12 @@ export const win32Module = {
              * reach.
              *
              * @param {number} nowMs
-             * @param {number | null} [soundMs]
-             *        How much of the running film's sound has been played, for
-             *        the graph to pace the picture against. Only whoever is
-             *        playing it knows.
+             * @param {number | null} [soundOwedMs]
+             *        Milliseconds of the running film's sound handed over and
+             *        not played yet, which is what holds the picture back to
+             *        it. Only whoever plays it knows.
              */
-            videoTick: (nowMs, soundMs)=>quartz.tick(nowMs, soundMs ?? null),
+            videoTick: (nowMs, soundOwedMs)=>quartz.tick(nowMs, soundOwedMs ?? null),
 
             /** The registry, whose contents outlive the process (§9). */
             registry: ()=>hive,

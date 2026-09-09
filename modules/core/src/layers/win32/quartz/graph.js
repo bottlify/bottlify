@@ -100,6 +100,27 @@ const MAX_PATH = 260;
 const FRAMES_PER_TICK = 4;
 const STEPS_PER_TICK = 16;
 
+/**
+ * How far the picture may be decoded past the sound that has been heard.
+ *
+ * A frame is shown the moment it is decoded, so this is also how far the
+ * picture leads the sound. It is a lead rather than nothing because the sound
+ * decoded with those frames is what keeps a device fed through a turn that took
+ * a while, and a device left with nothing is heard at once where a frame a
+ * fifth of a second early is not.
+ */
+const SOUND_LEAD_MS = 200;
+
+/**
+ * How long the sound may fail to move before the film stops following it.
+ *
+ * Nothing may be draining what the mixer writes -- a build with no device, a
+ * context a browser has suspended -- and a film that follows a sound which has
+ * stopped is a still picture. Once nothing has been heard for this long the
+ * picture goes back to the host clock alone, and says so.
+ */
+const SOUND_STALL_MS = 500;
+
 /** A REFERENCE_TIME is a hundred nanoseconds. */
 const TICKS_PER_SECOND = 10_000_000;
 
@@ -128,7 +149,9 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  *           The current frame as BGRA. A view into the decoder's own memory,
  *           valid until the next call into it.
  * @property {(() => Int16Array | null) | undefined} [readAudio]
- *           What `decode` stopped early for, when this build decodes sound.
+ *           Whatever PCM the decoder is holding, and null when it holds none.
+ *           `decode` stops early to have this taken, and it is also read on its
+ *           own to take what the decoder has not stopped for yet.
  * @property {() => void} close
  */
 
@@ -158,7 +181,20 @@ const AUDIO_PROPERTIES = ['Volume', 'Balance'];
  * @property {Record<string, number>} audio
  * @property {{ width: number, height: number }} video
  * @property {VideoClip | null} clip   What RenderFile opened, when it opened one.
+ * @property {number} film             Which clip this is, so that whoever plays
+ *                                     the sound can tell one from the next.
  * @property {number} shown            Frames decoded and handed over so far.
+ * @property {number} soundMs
+ *           Milliseconds of this film's own sound handed over so far, which is
+ *           where the sound has reached in the film -- as against where it has
+ *           reached in the room, which is this less what is still owed.
+ * @property {number} heardMs
+ *           The furthest the sound has been heard, in milliseconds of the film.
+ *           Monotonic: a position that went backwards would take the picture
+ *           back with it.
+ * @property {number | null} soundMovedAt
+ *           Host milliseconds the sound was last seen making progress. Null
+ *           while nothing is reporting it at all.
  * @property {number | null} startedAt
  *           Host milliseconds the present run began, moved forward by whatever
  *           a pause or a decode that could not keep up cost. Null until the
@@ -219,7 +255,11 @@ function newGraphState(){
         audio: Object.fromEntries(AUDIO_PROPERTIES.map(name=>[name, 0])),
         video: { width: DEFAULT_VIDEO_WIDTH, height: DEFAULT_VIDEO_HEIGHT },
         clip: null,
+        film: 0,
         shown: 0,
+        soundMs: 0,
+        heardMs: 0,
+        soundMovedAt: null,
         startedAt: null,
         finished: false,
     };
@@ -437,12 +477,23 @@ export function createQuartz(host){
         return result;
     };
 
+    /**
+     * Which film any of these graphs is on. Handed out rather than counted per
+     * graph, so that whoever plays the sound of one can tell it apart from the
+     * next without knowing which graph it came from.
+     */
+    let films = 0;
+
     /** @param {FilterGraphState} graph @param {number} path */
     const render = (graph, path)=>{
         graph.clip?.close();
         graph.loaded = true;
         graph.clip = null;
+        graph.film = ++films;
         graph.shown = 0;
+        graph.soundMs = 0;
+        graph.heardMs = 0;
+        graph.soundMovedAt = null;
         graph.startedAt = null;
         graph.finished = false;
 
@@ -493,19 +544,36 @@ export function createQuartz(host){
     };
 
     /**
-     * Advances every running clip to where the clock says it should be.
+     * Advances every running clip as far as the clock says, and as far as its
+     * own sound has been heard.
      *
      * Driven from outside because a filter graph has no thread here and win32
      * may not reach the layer that would show a frame. What comes back is the
      * newest frame decoded this tick -- a view into the decoder's memory, good
      * until the next call into it -- and whatever sound came with it.
      *
-     * @param {number} nowMs  The host clock, which is what a film plays against.
+     * A film has one timeline and used to be advanced along it by two clocks:
+     * the picture was decoded at the rate the host counted seconds, the sound
+     * played at the rate a device consumed it, and whatever the difference was
+     * accumulated for as long as the film ran. The host clock still moves the
+     * film -- it is the one thing that cannot stop -- but the picture waits
+     * whenever the sound it has already produced has not been heard yet, which
+     * is what keeps the two together. Waiting rather than following outright:
+     * a sound clock that stops because a device starved would otherwise stop
+     * the film with it, and the film would play in slow motion.
+     *
+     * @param {number} nowMs  The host clock, which the film advances against.
+     * @param {number | null} [soundOwedMs]
+     *        Milliseconds of the running film's own sound handed over and not
+     *        played yet. Null where nothing can say -- no mixer, nothing
+     *        draining it, a film that has produced no sound yet -- and then
+     *        nothing holds the picture back and the graph says so.
      * @returns {{ hwnd: number, width: number, height: number,
      *             bgra: Uint8Array | null, audio: Int16Array[],
-     *             sampleRate: number, channels: number } | null}
+     *             sampleRate: number, channels: number,
+     *             positionMs: number, film: number } | null}
      */
-    const tick = nowMs=>{
+    const tick = (nowMs, soundOwedMs = null)=>{
         /** @type {ReturnType<typeof tick>} */
         let shown = null;
         for (const graph of [...playing])
@@ -520,7 +588,49 @@ export function createQuartz(host){
             {
                 graph.startedAt = nowMs;
             }
-            const want = Math.floor((nowMs - graph.startedAt) * clip.fps / 1000);
+            // Where the sound has reached in the room: everything handed over,
+            // less what is still waiting to be played.
+            if (soundOwedMs === null)
+            {
+                // Nothing is reporting the sound, so nothing about it has stood
+                // still: the wait is armed again from whenever a first report
+                // arrives. What has been handed over is emphatically not
+                // credited as heard here -- that would place the picture
+                // against sound nobody has played.
+                graph.soundMovedAt = nowMs;
+            }
+            else
+            {
+                const heard = Math.max(0, graph.soundMs - soundOwedMs);
+                if (graph.soundMovedAt === null || heard > graph.heardMs)
+                {
+                    graph.heardMs = heard;
+                    graph.soundMovedAt = nowMs;
+                }
+            }
+            // A sound that has not moved for this long is one nothing is
+            // playing -- a device that stopped, or one that cannot keep up
+            // while the machine decodes. The film must not wait on either: it
+            // goes back to the host clock, because a film at half speed is a
+            // worse fault than one whose sound is late.
+            const moving = soundOwedMs !== null
+                && nowMs - graph.soundMovedAt < SOUND_STALL_MS;
+            if (!moving && clip.hasAudio)
+            {
+                host.divergence?.('DirectShow',
+                    soundOwedMs === null
+                        ? 'a film is running on the host clock alone because nothing is'
+                            + ' reporting its sound: the picture may drift against it'
+                        : 'a film is running on the host clock alone because its sound has'
+                            + ' stopped moving: the picture may drift against it');
+            }
+            // The whole of the synchronisation: the picture is decoded to just
+            // ahead of the sound a person is actually hearing -- far enough
+            // ahead to keep a device fed through a turn that took a while, and
+            // no further. The host clock is only the fallback.
+            const want = moving
+                ? Math.floor((graph.heardMs + SOUND_LEAD_MS) * clip.fps / 1000)
+                : Math.floor((nowMs - graph.startedAt) * clip.fps / 1000);
             /** @type {Int16Array[]} */
             const audio = [];
             /** @type {Uint8Array | null} */
@@ -549,10 +659,26 @@ export function createQuartz(host){
                 complete(graph);
                 break;
             }
+            // Whatever sound the decoder is still holding goes now, rather than
+            // waiting for a tick that wants another frame: it belongs with
+            // pictures already shown, and every tick it waits inside is a tick
+            // it is heard late by.
+            const residue = clip.readAudio?.();
+            if (residue)
+            {
+                audio.push(residue);
+            }
+            for (const block of audio)
+            {
+                graph.soundMs += block.length / clip.channels * 1000 / clip.sampleRate;
+            }
             // Whatever the budget could not reach is time the film does not get
             // to have: the clock is moved up to what was actually shown, so a
-            // stall slows playback rather than throwing frames away.
-            if (graph.shown < want)
+            // stall slows playback rather than throwing frames away. A wait on
+            // the sound is credited the same way -- time the clock kept while
+            // the film was held would be spent on frames the moment it resumed,
+            // and the wait would have bought nothing.
+            if (moving || graph.shown < want)
             {
                 graph.startedAt = nowMs - (graph.shown * 1000 / clip.fps);
             }
@@ -564,6 +690,13 @@ export function createQuartz(host){
                     height: clip.height,
                     bgra: frame,
                     audio,
+                    // Where this frame sits in the film, so that whoever plays
+                    // the sound can say how far apart the two have got.
+                    positionMs: graph.shown * 1000 / clip.fps,
+                    // Which film it belongs to: the sound of the last one is
+                    // not played over this one, and the clock the picture
+                    // follows starts again at zero.
+                    film: graph.film,
                     // The film's own rate, which is its own and not the
                     // device's: whoever plays it has to open a track for it
                     // rather than assume the mixer's.
@@ -1026,7 +1159,8 @@ export function createQuartz(host){
  *
  * @param {import('../ole32/objects.js').ComRegistry} registry
  * @param {QuartzHost} host
- * @returns {{ tick: (nowMs: number) => ReturnType<ReturnType<typeof createQuartz>['tick']> }}
+ * @returns {{ tick: (nowMs: number, soundOwedMs?: number | null) =>
+ *             ReturnType<ReturnType<typeof createQuartz>['tick']> }}
  */
 export function registerQuartzClasses(registry, host){
     const quartz = createQuartz(host);

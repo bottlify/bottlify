@@ -81,7 +81,7 @@ import { createBlockCache, resolveBlockStore }
  *     The emulator's compiler budgets, by config index. For measurement.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
- * @property {(eip: number) => void} [sample]
+ * @property {(eip: number, instructions: number) => void} [sample]
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
@@ -1307,6 +1307,12 @@ async function buildApp(options){
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of.
             allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
+            // And back again when the last reference to a resource goes. The
+            // arena is the same one the program's own allocator draws from, and
+            // GlobalMemoryStatus reports what is left of it -- so a texture
+            // whose pixels are never given back does not only cost address
+            // space, it tells the program it is running out of memory.
+            free: (/** @type {number} */ address)=>win32.heap().free(address),
             // Where "this call succeeded and did not do all of what it
             // promises" goes. Every drawing API has states it accepts and does
             // not honour yet, and a state accepted in silence is the defect
@@ -1314,6 +1320,9 @@ async function buildApp(options){
             divergence: reportDivergence,
         },
         win32: {
+            // What the program is told its display is, handed to the libraries
+            // that answer for one as well as to the layer that draws on it.
+            screen: options.screen,
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build
@@ -2246,6 +2255,15 @@ async function buildApp(options){
     const sound = core.api('audio')?.output?.() ?? null;
 
     /**
+     * Whether anything is reading the other end of the ring.
+     *
+     * A track's play position is what the device consumed, so with nothing
+     * consuming there is no position to report -- and a film paced by one that
+     * never moves would be a still picture.
+     */
+    const soundIsHeard = core.api('audio')?.available?.() === true;
+
+    /**
      * Where a film's frames go, and its sound.
      *
      * The graph decodes and hands a frame back; showing one is this layer's
@@ -2258,9 +2276,32 @@ async function buildApp(options){
      */
     let filmSurface = null;
 
-    /** The track a film's sound goes to, opened at the film's own rate. */
-    /** @type {{ track: any, sampleRate: number, channels: number } | null} */
+    /**
+     * The track a film's sound goes to, opened at the film's own rate, with
+     * everything ever written to it -- which, less what has been played, is how
+     * much sound the picture is ahead of.
+     */
+    /** @type {{ track: any, sampleRate: number, channels: number,
+     *           written: number } | null} */
     let filmTrack = null;
+
+    /** Which film that track is playing, so that the next one gets a fresh one. */
+    let filmPlaying = 0;
+
+    /**
+     * Milliseconds of the running film's sound handed over and not played yet.
+     *
+     * The graph holds the picture back while more is owed than a film may lead
+     * its sound by, which is what keeps the two together. Null wherever nobody
+     * can say: no mixer, nothing draining it, or a film that has yet to hand
+     * over a first block of sound -- and then nothing holds the picture back.
+     *
+     * @returns {number | null}
+     */
+    const filmSoundOwedMs = ()=>(sound && filmTrack && soundIsHeard
+        ? Math.max(0, filmTrack.written - filmTrack.track.played())
+            * 1000 / sound.sampleRate
+        : null);
 
     /**
      * Why a decoded frame did not reach the screen.
@@ -2269,10 +2310,17 @@ async function buildApp(options){
      * is four different faults wearing the same face, and a report that only
      * says nothing arrived cannot tell them apart.
      */
-    const film = { ticks: 0, frames: 0, silent: 0, noScreen: 0, noRoom: 0, shown: 0 };
+    const film = {
+        ticks: 0, frames: 0, silent: 0, noScreen: 0, noRoom: 0, shown: 0,
+        // How far the picture is ahead of the sound, in milliseconds of the
+        // film's own timeline. A film has one timeline and two ways to advance
+        // along it, and nothing else in a report says whether they agree.
+        driftMs: 0, worstDriftMs: 0, soundMs: 0, queuedMs: 0,
+    };
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
-     *            audio: Int16Array[], sampleRate: number, channels: number } | null} shown */
+     *            audio: Int16Array[], sampleRate: number, channels: number,
+     *            positionMs: number, film: number } | null} shown */
     /** @param {any} shown  What a filter graph handed back for this tick. */
     const showVideoFrame = shown=>{
         if (!shown)
@@ -2280,6 +2328,15 @@ async function buildApp(options){
             return;
         }
         film.ticks++;
+        if (shown.film !== filmPlaying)
+        {
+            // A new film gets a track of its own: what the last one left queued
+            // is not played over it, and the position its picture follows
+            // starts again at zero rather than at the end of the one before.
+            filmPlaying = shown.film;
+            filmTrack?.track.close();
+            filmTrack = null;
+        }
         if (shown.audio.length > 0 && sound)
         {
             // A film carries its own rate and its own channel count, and they
@@ -2296,13 +2353,21 @@ async function buildApp(options){
                     }),
                     sampleRate: shown.sampleRate,
                     channels: shown.channels,
+                    written: 0,
                 };
             }
             for (const block of shown.audio)
             {
-                filmTrack.track.write(new Uint8Array(
+                filmTrack.written += filmTrack.track.write(new Uint8Array(
                     block.buffer, block.byteOffset, block.byteLength));
             }
+        }
+        if (filmTrack && sound)
+        {
+            film.soundMs = Math.round(filmTrack.track.played() * 1000 / sound.sampleRate);
+            film.queuedMs = Math.round(filmSoundOwedMs() ?? 0);
+            film.driftMs = Math.round(shown.positionMs) - film.soundMs;
+            film.worstDriftMs = Math.max(film.worstDriftMs, film.driftMs);
         }
         if (!shown.bgra)
         {
@@ -2519,7 +2584,7 @@ async function buildApp(options){
                     // graph a file and then sits in its message loop until it is
                     // told the film ended.
                     journal.begin('videoTick', journal.PhaseKind.HOST);
-                    showVideoFrame(win32.videoTick?.(clockSource()));
+                    showVideoFrame(win32.videoTick?.(clockSource(), filmSoundOwedMs()));
                     journal.end('videoTick');
 
                     // And a turn is also when anything waiting for something to
@@ -2679,7 +2744,13 @@ async function buildApp(options){
                         // only thing that says which code that was.
                         if (options.sample && step.ran)
                         {
-                            options.sample(cpu.eip());
+                            // With what the turn actually retired. A sample per
+                            // turn weights every thread the same, and a parked
+                            // one retires two instructions and a busy one a
+                            // hundred thousand -- so an unweighted profile
+                            // reads as though the machine spends its life in
+                            // the park loop.
+                            options.sample(cpu.eip(), step.instructions ?? 1);
                         }
                     }
                     catch (e){

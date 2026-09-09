@@ -246,7 +246,7 @@ function describe(before, after, windowMs){
             say(`  the picture is ${held.driftMs ?? 0}ms ahead of the sound`
                 + ` (worst ${held.worstDriftMs ?? 0}ms)`
                 + `, ${held.soundMs ?? 0}ms of it played`
-                + `, ${held.queuedMs ?? 0}ms waiting to be mixed`);
+                + `, ${held.queuedMs ?? 0}ms of it waiting to be played`);
         }
         say('');
     }

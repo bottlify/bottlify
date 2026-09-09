@@ -392,6 +392,43 @@ function show(image){
 }
 
 /**
+ * Reads the other end of the sound ring, at the rate a device would.
+ *
+ * A real page hands the ring to an audio worklet, which needs shared memory and
+ * therefore a cross-origin-isolated page; this one is not, so the samples are
+ * read here and dropped. What matters for a measurement is that they are read
+ * on the clock: a play cursor is what the device consumed, so with nothing
+ * consuming, every number about sound in a report is zero and a film that paces
+ * itself by its own sound has no clock at all.
+ *
+ * @param {any} app
+ */
+function drainSound(app){
+    const ring = app.audio.ring();
+    const { sampleRate, channels } = app.audio.format();
+    const block = new Float32Array(ring.capacity * channels);
+    let readAt = performance.now();
+    setInterval(()=>{
+        // By elapsed time rather than a fixed count per turn: this page's main
+        // thread is inside the emulator most of the time, so the reads are late
+        // and bursty, and only the clock keeps the total honest.
+        const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
+        const frames = Math.min(ring.capacity, owed);
+        if (frames <= 0)
+        {
+            return;
+        }
+        // The clock moves on by what was really taken, not by what was asked
+        // for. A device reading on its own thread never misses its turn; this
+        // one is on the thread the emulator is holding, and a read that gave up
+        // whatever it was late for would model a device running slow -- which
+        // is indistinguishable, in a report, from an engine that cannot feed
+        // one.
+        readAt += ring.read(block.subarray(0, frames * channels)) * 1000 / sampleRate;
+    }, 20);
+}
+
+/**
  * Everything the engine will say about itself while it runs, kept bounded.
  *
  * @param {any} app
@@ -633,7 +670,12 @@ async function run(request){
             prefetch: false,
         },
         storage: null,
+        // This page has a device, in the only sense the engine cares about:
+        // something reads the other end of the ring at the rate a device would.
+        audio: { drained: true },
     });
+
+    drainSound(app);
 
     listen(app, collected);
 

@@ -28,24 +28,34 @@ const EC_ERRORABORT = 3;
 /** Somewhere to point an out-parameter at. */
 const OUT = 0x1000;
 
+/** What the double's sound is recorded at. */
+const CLIP_RATE = 44100;
+const CLIP_CHANNELS = 2;
+
 /**
- * A clip that hands out `frameCount` frames and then ends, with a block of
- * sound before the first one -- which is the order a decoder that stops early
- * to drain its audio produces.
+ * A clip that hands out `frameCount` frames and then ends, each with the sound
+ * that belongs to it handed over just before -- which is the order a decoder
+ * that stops early to drain its audio produces, and makes one frame and one
+ * frame's worth of sound the same length of film.
  *
  * @param {{ frameCount?: number, fps?: number, width?: number, height?: number }} [shape]
  */
 function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
     let given = 0;
-    let sound = 1;
+    let owedSound = true;
+    // Whether there is PCM to hand over, as a real decoder tracks: reading when
+    // it is holding nothing answers with nothing rather than with a block.
+    let pending = false;
+    const samples = Math.round(CLIP_RATE / fps) * CLIP_CHANNELS;
     return {
         width, height, fps, frameCount, hasVideo: true, hasAudio: true,
-        sampleRate: 44100, channels: 2,
+        sampleRate: CLIP_RATE, channels: CLIP_CHANNELS,
         closed: false,
         decode(){
-            if (sound > 0)
+            if (owedSound)
             {
-                sound--;
+                owedSound = false;
+                pending = true;
                 return 'audio';
             }
             if (given >= frameCount)
@@ -53,14 +63,28 @@ function fakeClip({ frameCount = 3, fps = 10, width = 800, height = 368 } = {}){
                 return 'end';
             }
             given++;
+            owedSound = true;
             return 'frame';
         },
         frame: ()=>Uint8Array.of(given, 0, 0, 0xff),
-        readAudio: ()=>Int16Array.of(0x1234, -0x1234),
+        readAudio(){
+            if (!pending)
+            {
+                return null;
+            }
+            pending = false;
+            return new Int16Array(samples);
+        },
         close(){
             this.closed = true;
         },
     };
+}
+
+/** Milliseconds of film the sound in these blocks is. @param {Int16Array[]} blocks */
+function soundMs(blocks){
+    return blocks.reduce(
+        (total, block)=>total + block.length / CLIP_CHANNELS * 1000 / CLIP_RATE, 0);
 }
 
 /** @param {{ clip?: ReturnType<typeof fakeClip> | null }} [options] */
@@ -488,11 +512,176 @@ test('Run with a clip plays it instead of completing at once', ()=>{
     assert.equal(shown.hwnd, 0x40b4, 'addressed to the window the program owns it with');
     assert.deepEqual([shown.width, shown.height], [800, 368]);
     assert.ok(shown.bgra, 'and carries the picture');
-    assert.deepEqual(shown.audio.map(block=>[...block]), [[0x1234, -0x1234]],
-        'with whatever sound came with it');
+    assert.equal(Math.round(soundMs(shown.audio)), 100,
+        'with the sound that belongs to it: one frame of film, one frame of sound');
 
     assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
     assert.equal(host.f64(OUT), 0.1, 'the position is what has been shown');
+});
+
+test('the picture is shown where the sound has got to, not where the clock has', ()=>{
+    // The defect this pins: the picture was decoded against the host clock and
+    // the sound played at whatever rate a device drained it, so the two ran on
+    // separate clocks and the gap between them grew for as long as the film did
+    // -- a second and more of it, measured on a real run.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    /** @returns {number} the film's own position, in milliseconds */
+    const position = ()=>{
+        assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+        return Math.round(host.f64(OUT) * 1000);
+    };
+
+    // A device playing at the rate a device plays at, and never faster than the
+    // film hands it something -- which is what makes this a loop rather than
+    // two numbers that happen to agree.
+    let handed = 0;
+    let played = 0;
+    for (let at = 0; at <= 5000; at += 50)
+    {
+        played = Math.min(handed, at);
+        const shown = tick(at, handed - played);
+        handed += soundMs(shown?.audio ?? []);
+    }
+    const drift = position() - played;
+    assert.ok(drift >= 0 && drift <= 250,
+        `the picture stood ${drift}ms ahead of the sound a person heard`);
+});
+
+test('a film with no sound to follow runs on the host clock, and says so', ()=>{
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    // Nothing reports the sound: no mixer, or nothing draining it.
+    for (let at = 0; at <= 1000; at += 100)
+    {
+        tick(at);
+    }
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+    assert.equal(host.f64(OUT), 1, 'a second of host clock is a second of film');
+    assert.ok(host.reported.some(line=>line.includes('host clock alone')),
+        'and the run is told the picture may drift against the sound');
+});
+
+test('a sound nobody is playing stops holding the film back', ()=>{
+    // A device that goes away -- a suspended context, a build with nothing
+    // draining the ring -- must not leave the picture frozen for ever waiting
+    // for a sound that will never be heard.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    /** @returns {number} the film's own position, in milliseconds */
+    const position = ()=>{
+        assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+        return Math.round(host.f64(OUT) * 1000);
+    };
+
+    // Everything handed over is owed: nothing is ever played.
+    let handed = 0;
+    for (let at = 0; at <= 400; at += 100)
+    {
+        const shown = tick(at, handed);
+        handed += soundMs(shown?.audio ?? []);
+    }
+    assert.equal(position(), 200, 'held at the lead while the sound might still start');
+
+    for (let at = 500; at <= 3000; at += 100)
+    {
+        const shown = tick(at, handed);
+        handed += soundMs(shown?.audio ?? []);
+    }
+    assert.ok(position() > 200, 'and moving again once nothing is plainly playing it');
+    assert.ok(host.reported.some(line=>line.includes('host clock alone')),
+        'and the run is told the two may have come apart');
+});
+
+test('sound handed over while nobody reports it does not count as heard', ()=>{
+    // The picture is placed against the sound a person has heard. A tick that
+    // reports nothing says nothing about what was heard, and taking it for
+    // "all of it" would send the picture off to wherever the decoder had got
+    // to -- which is the very gap this pacing exists to close.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    /** @returns {number} the film's own position, in milliseconds */
+    const position = ()=>{
+        assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+        return Math.round(host.f64(OUT) * 1000);
+    };
+
+    // A second of film with nothing able to report the sound, so it runs on the
+    // host clock and hands a second of sound over.
+    let handed = 0;
+    for (let at = 0; at <= 1000; at += 100)
+    {
+        const shown = tick(at);
+        handed += soundMs(shown?.audio ?? []);
+    }
+    assert.ok(handed > 500, 'a second of film handed over its second of sound');
+
+    // Now a device appears with all of it still to play. None of it has been
+    // heard, so the picture stays where it is rather than running on.
+    const before = position();
+    for (let at = 1100; at <= 1400; at += 100)
+    {
+        tick(at, handed);
+    }
+    assert.equal(position(), before, 'the picture waited for sound nobody had heard yet');
+});
+
+test('a sound that stays late keeps the film running, late but moving', ()=>{
+    // Between a device that has stopped and one that is keeping up there is one
+    // that plays steadily and stays behind. The film follows it rather than
+    // stopping to wait, because a picture that stops is the worse fault.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+
+    // A device that is always a second behind whatever it has been handed.
+    let handed = 0;
+    for (let at = 0; at <= 4000; at += 50)
+    {
+        const shown = tick(at, Math.min(handed, 1000));
+        handed += soundMs(shown?.audio ?? []);
+    }
+    assert.equal(call(object, IID_IMEDIA_POSITION, 'get_CurrentPosition', [OUT]), S_OK);
+    assert.ok(host.f64(OUT) > 1, `the film kept going and stood at ${host.f64(OUT)}s`);
+});
+
+test('a second film starts its own sound rather than the last one\'s', ()=>{
+    // Whoever plays the sound has to know a new film began: a track carried
+    // over would report the last film's position, which is a clock hours ahead
+    // of a picture that has just started.
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH,
+        { clip: fakeClip({ frameCount: 1000, fps: 10 }) });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(0);
+    const first = tick(100);
+    assert.ok(first, 'the first film hands something over');
+
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(200);
+    const second = tick(300);
+    assert.ok(second);
+    assert.notEqual(second.film, first.film, 'and is not taken for the one before it');
 });
 
 test('EC_COMPLETE arrives when the clip ends, exactly once', ()=>{
