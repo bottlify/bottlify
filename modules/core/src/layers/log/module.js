@@ -175,6 +175,9 @@ export const logModule = {
                 frames: profile.frames,
                 averageFrameMs: profile.averageFrameMs,
                 unbalancedPhases: profile.unbalanced,
+                // Which ones, for the first few: a count says the accounting is
+                // wrong somewhere, a name says where.
+                imbalances: profile.imbalances,
                 topPhases: profile.phases.slice(0, TOP_PHASES).map((/** @type {any} */ row)=>
                     `${row.name} ${row.kind} x${row.count} self=${row.selfMs.toFixed(3)}`
                     + ` worst=${row.worstMs.toFixed(3)}`),

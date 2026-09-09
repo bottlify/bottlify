@@ -79,6 +79,28 @@ test('an unbalanced phase is counted, never thrown and never charged elsewhere',
     const snapshot = profiler.snapshot();
     assert.equal(snapshot.unbalanced, 3, 'a wrong name, an extra end, an extra endFrame');
     assert.equal(snapshot.openPhases, 0);
+    // A count says the accounting is wrong; only a name says where.
+    assert.deepEqual(snapshot.imbalances, [
+        'end(inner) while outer open at depth 1',
+        'end() at depth 0',
+        'endFrame() with no frame open',
+    ]);
+});
+
+test('imbalances are named for the first few and only counted after that', ()=>{
+    const { profiler, at } = harness();
+
+    for (let turn = 0; turn < 20; turn++)
+    {
+        at(turn).end('turn');
+    }
+
+    const snapshot = profiler.snapshot();
+    assert.equal(snapshot.unbalanced, 20);
+    assert.equal(snapshot.imbalances.length, 8, 'a loop that misbehaves every turn stays bounded');
+    assert.equal(snapshot.imbalances[0], 'end(turn) at depth 0');
+    assert.deepEqual(profiler.snapshot().imbalances, snapshot.imbalances,
+        'a snapshot hands out a copy, not the ring itself');
 });
 
 test('a phase outside a frame is still measured, and charged to no frame', ()=>{

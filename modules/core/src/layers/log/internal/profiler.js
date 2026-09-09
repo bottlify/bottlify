@@ -59,6 +59,9 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * @property {number} worstMs    The worst single occurrence, measured whole.
  */
 
+/** How many imbalances are described by name; the rest are only counted. */
+const IMBALANCES_KEPT = 8;
+
 /** @returns {FrameRecord} */
 const blankFrame = ()=>({
     index: 0,
@@ -92,6 +95,24 @@ export function createProfiler(options){
     let open = null;
     let frameIndex = 0;
     let unbalanced = 0;
+    /**
+     * What each imbalance was, for the first few. A count alone says the
+     * accounting is wrong somewhere; the name says where to look. Capped so a
+     * loop that ends the wrong phase every turn cannot grow this without
+     * bound, and empty in a healthy run, which is the only allocation-free
+     * path that matters.
+     *
+     * @type {string[]}
+     */
+    const imbalances = [];
+    /** @param {string} what */
+    const noteImbalance = what=>{
+        unbalanced++;
+        if (imbalances.length < IMBALANCES_KEPT)
+        {
+            imbalances.push(what);
+        }
+    };
 
     /**
      * @param {number} [count]
@@ -148,14 +169,14 @@ export function createProfiler(options){
         end(name){
             if (depth === 0)
             {
-                unbalanced++;
+                noteImbalance(`end(${name ?? ''}) at depth 0`);
                 return 0;
             }
             depth--;
             const entry = stack[depth];
             if (name !== undefined && name !== entry.name)
             {
-                unbalanced++;
+                noteImbalance(`end(${name}) while ${entry.name} open at depth ${depth + 1}`);
             }
             const elapsed = now() - entry.startedAt;
             const self = elapsed - entry.children;
@@ -202,7 +223,7 @@ export function createProfiler(options){
         endFrame(){
             if (!open)
             {
-                unbalanced++;
+                noteImbalance('endFrame() with no frame open');
                 return null;
             }
             const slot = open;
@@ -233,6 +254,7 @@ export function createProfiler(options){
             return {
                 frames: frameIndex,
                 unbalanced,
+                imbalances: imbalances.slice(),
                 openPhases: depth,
                 // Over the whole ring rather than the last frame: the threshold
                 // is about sustained cost, and one frame is noise.
