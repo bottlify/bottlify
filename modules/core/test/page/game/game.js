@@ -530,6 +530,9 @@ async function run(request){
             media: layers.media ?? null,
             film: layers.app?.film ?? null,
             instructions: layers.cpu?.instructions ?? 0,
+            // Zero here means every guest instruction is interpreted.
+            jitCache: layers.cpu?.jitCache ?? 0,
+            jit: layers.cpu?.jit ?? null,
             presents: presents,
             graphics: layers.graphics?.seam?.device
                 ? {

@@ -163,6 +163,23 @@ export function createRegionMap(){
                     `Region "${region.name}" (${region.access}) does not permit ${mode}`
                     + ` at 0x${address.toString(16)}`);
             }
+            return region;
+        },
+
+        /**
+         * Whether anything at this address could ever be executed.
+         *
+         * Asked by whoever writes on the host's behalf: a write into memory the
+         * guest can execute may be changing code the emulator has compiled, and
+         * has to say so. A write anywhere else cannot be, and paying the
+         * emulator's invalidation for it is pure loss.
+         *
+         * @param {number} address
+         * @returns {boolean} true when nothing is known, which is the safe answer.
+         */
+        executable(address){
+            const region = this.find(address);
+            return region ? PERMITS[region.access].execute : true;
         },
 
         /** @returns {Region[]} every region, lowest address first. */

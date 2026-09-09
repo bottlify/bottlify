@@ -17,6 +17,9 @@
 
 /**
  * @typedef {Object} RawMemory
+ * @property {(address: number, bytes: Uint8Array) => void} [writeData]
+ *     Writes bytes the guest cannot execute, without telling the emulator's
+ *     compiler anything. Absent in a build whose memory is a plain buffer.
  * @property {(address: number, length: number) => Uint8Array} readPhysical
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  */
@@ -65,8 +68,19 @@ export function createAccessors({ raw, regions }){
      */
     const write = (address, bytes)=>{
         regions.assert(address, bytes.length, 'write');
+        // Only a write the guest could execute has anything to tell the
+        // emulator's compiler. Everything else -- a structure field, an
+        // out-parameter, a surface -- goes straight into memory.
+        if (raw.writeData && !regions.executable(address))
+        {
+            raw.writeData(address, bytes);
+            return;
+        }
         raw.writePhysical(address, bytes);
     };
+
+    /** Scratch for the integer writers, so a dword does not cost an allocation. */
+    const scratch = new Uint8Array(8);
 
     /**
      * @param {number} address
@@ -89,12 +103,11 @@ export function createAccessors({ raw, regions }){
      * @param {number} length
      */
     const writeInteger = (address, value, length)=>{
-        const bytes = new Uint8Array(length);
         for (let i = 0; i < length; i++)
         {
-            bytes[i] = (value >>> (i * 8)) & 0xff;
+            scratch[i] = (value >>> (i * 8)) & 0xff;
         }
-        write(address, bytes);
+        write(address, scratch.subarray(0, length));
     };
 
     return {

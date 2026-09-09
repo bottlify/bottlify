@@ -373,6 +373,16 @@ export const cpuModule = {
                 instructions: host ? host.instructionCount() : 0,
                 protectedMode: host ? host.inProtectedMode() : false,
                 traps: thunks ? thunks.size : 0,
+                // Whether the emulator is compiling guest code at all.
+                //
+                // Every test this project has passes on a dead compiler: they
+                // assert what the guest computed, and an interpreter computes
+                // the same answers several times slower. So the one thing that
+                // separates a machine running at its speed from one running at
+                // a seventh of it is invisible to all of them, and this is the
+                // number that says which we are looking at.
+                jitCache: host ? host.jitCacheSize() : 0,
+                jit: host ? host.jitState() : null,
             },
         };
     },

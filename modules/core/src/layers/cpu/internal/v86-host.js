@@ -76,6 +76,38 @@ export async function createV86Host(config){
     await new Promise(resolve=>emulator.add_listener('emulator-ready', resolve));
 
     const cpu = emulator.v86.cpu;
+    // How many compiled modules the emulator actually published, and the first
+    // reason one was refused. `codegen_finalize` instantiates asynchronously and
+    // its promise has no rejection handler, so a compiler that cannot publish
+    // fails silently and every guest instruction is interpreted for the rest of
+    // the run -- which is correct, several times slower, and invisible.
+    let finalisedModules = 0;
+    // How many compiled modules the emulator threw away, and how much guest
+    // memory we wrote from the host. Every host write goes through v86's
+    // write_blob, which dirties the JIT cache for every page it touches -- so a
+    // layer that writes a megabyte a frame is asking the compiler to discard
+    // whatever it had for those pages, over and over.
+    let clearedFunctions = 0;
+    let hostWrites = 0;
+    let hostWrittenBytes = 0;
+    /** @type {unknown} */
+    let finaliseFailure = null;
+    const clearOne = cpu.jit_clear_func.bind(cpu);
+    /** @type {any} */ (cpu).jit_clear_func = (/** @type {number} */ index)=>{
+        clearedFunctions++;
+        return clearOne(index);
+    };
+    const finalise = cpu.codegen_finalize.bind(cpu);
+    /** @type {any} */ (cpu).codegen_finalize = (/** @type {any[]} */ ...args)=>{
+        try
+        {
+            finalise(...args);
+            finalisedModules++;
+        }
+        catch (e){
+            finaliseFailure ??= /** @type {Error} */ (e).message ?? String(e);
+        }
+    };
 
     // The mode switch happens here, not on the first `run()`.
     //
@@ -143,7 +175,34 @@ export async function createV86Host(config){
         readPhysical: (address, length)=>emulator.read_memory(address, length),
 
         /** @param {number} address @param {Uint8Array} bytes */
-        writePhysical: (address, bytes)=>emulator.write_memory(bytes, address),
+        writePhysical: (address, bytes)=>{
+            hostWrites++;
+            hostWrittenBytes += bytes.length;
+            return emulator.write_memory(bytes, address);
+        },
+
+        /**
+         * Writes bytes the guest can never execute.
+         *
+         * The ordinary path is `write_memory`, which for every call -- a single
+         * dword included -- crosses into the emulator three times: twice to ask
+         * whether the address is a device mapping, once to discard whatever it
+         * had compiled for the pages written. That is the right price for
+         * loading an image and the wrong one for an HLE writing a structure
+         * field, which is nearly every write there is: measured at 688,082 of
+         * them in one run of a title's menu.
+         *
+         * This writes straight into the machine's memory instead. The caller is
+         * the one that knows the target cannot be executed, and it is the
+         * caller that has to be right about it.
+         *
+         * @param {number} address @param {Uint8Array} bytes
+         */
+        writeData: (address, bytes)=>{
+            hostWrites++;
+            hostWrittenBytes += bytes.length;
+            cpu.mem8.set(bytes, address);
+        },
 
         /** @param {string} name @returns {number} */
         readReg32(name){
@@ -210,6 +269,49 @@ export async function createV86Host(config){
 
         /** @returns {number} instructions retired since boot (exact; Phase 2 quantum builds on this) */
         instructionCount: ()=>emulator.get_instruction_counter() >>> 0,
+
+        /**
+         * How many compiled entry points the emulator is holding.
+         *
+         * Zero means every guest instruction is being interpreted, which is
+         * correct and several times slower -- and indistinguishable from a
+         * healthy machine in every test we have, because a test asserts what
+         * the guest computed and an interpreter computes the same answers.
+         */
+        jitCacheSize: ()=>{
+            try
+            {
+                return cpu.wm.exports.jit_get_cache_size() >>> 0;
+            }
+            catch (e){
+                void e;
+                return -1;
+            }
+        },
+
+        /** What the emulator's compiler was configured with, and how it is doing. */
+        jitState: ()=>{
+            try
+            {
+                const exports = cpu.wm.exports;
+                return {
+                    disabled: exports.get_jit_config(0),
+                    maxPages: exports.get_jit_config(1),
+                    loopSafety: exports.get_jit_config(2),
+                    cache: exports.jit_get_cache_size() >>> 0,
+                    tableFree: exports.jit_get_wasm_table_index_free_list_count() >>> 0,
+                    finalised: finalisedModules,
+                    discarded: clearedFunctions,
+                    hostWrites,
+                    hostWrittenBytes,
+                    refused: String(finaliseFailure ?? ''),
+                };
+            }
+            catch (e){
+                void e;
+                return -1;
+            }
+        },
 
         romBase: ROM_BASE,
 
