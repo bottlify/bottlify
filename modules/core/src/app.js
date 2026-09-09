@@ -1229,7 +1229,22 @@ async function buildApp(options){
             // nowhere, which is what a build with no bridge should do.
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
                 core.api('bridge').publishInterface(object, iid),
-            device: options.device ?? null,
+            // The device, with the frame boundary marked around what it
+            // presents. The profiler has always been able to account per frame
+            // and nothing ever told it where a frame ends, so every report said
+            // it had seen none -- and "where did the frame go" could not be
+            // asked at all, only "where did the run go".
+            device: options.device
+                ? {
+                    ...options.device,
+                    /** @param {any} frame */
+                    presentTo: frame=>{
+                        journal.endFrame();
+                        options.device.presentTo?.(frame);
+                        journal.beginFrame();
+                    },
+                }
+                : null,
             screen: options.screen,
             // Where a locked surface or vertex buffer's bytes live. A lock
             // hands the program an address it writes through and the unlock
@@ -2740,6 +2755,18 @@ async function buildApp(options){
              */
             areas: ()=>['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
                 .map(area=>`call.${area}`),
+
+            /**
+             * Where a frame's time went: every phase by self time, the slowest
+             * frames, and the share of each that was ours rather than the
+             * guest's.
+             *
+             * @param {number} [worst] How many of the slowest frames to name.
+             */
+            profile: worst=>core.api('log').profile(worst),
+
+            /** @param {number} [count] The most recent frames, one row each. */
+            frames: count=>core.api('log').frames(count),
         },
 
         /** @param {(handle: number, text: string) => void} sink */

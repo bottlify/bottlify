@@ -23,6 +23,7 @@
     "check:boundaries": "npm run check:boundaries -w @bottlify/core",
     "cdp:probe": "node tools/cdp_test/cli.mjs probe",
     "cdp:game": "node tools/cdp_test/game.mjs",
+    "cdp:frames": "node tools/cdp_test/frames.mjs",
     "ui": "node ui/server.mjs"
   },
   "devDependencies": {

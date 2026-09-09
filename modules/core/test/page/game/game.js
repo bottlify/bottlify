@@ -132,6 +132,17 @@ const namespace = { errors: [] };
  */
 namespace.drainLog = (from, count)=>callLog.slice(from, from + count).join(NEWLINE);
 namespace.logLines = ()=>callLog.length;
+
+/**
+ * Where a frame's time goes, asked while the run is still going.
+ *
+ * A report at the end of a run answers what a whole run cost; this answers what
+ * one frame costs, which is the question a frame rate is. Filled in by `start`
+ * once the engine exists.
+ *
+ * @type {(() => string) | null}
+ */
+namespace.frameReport = null;
 /** @type {any} */ (window).__bottlify__ = namespace;
 
 window.addEventListener('error', event=>{
@@ -471,6 +482,44 @@ async function run(request){
     /** @type {any} */
     const collected = { failures: [], missing: [], output: [], events: [] };
 
+    /** @type {any} */
+    let running = null;
+    namespace.frameReport = ()=>{
+        if (!running)
+        {
+            return JSON.stringify({ ready: false });
+        }
+        const seen = running.log.profile(8);
+        const layers = Object.fromEntries(running.diagnostics()
+            .map((/** @type {any} */ layer)=>[layer.name, layer.metrics ?? {}]));
+        return JSON.stringify({
+            ready: true,
+            frames: seen.frames,
+            averageFrameMs: seen.averageFrameMs,
+            hostShare: seen.hostShare,
+            // Every phase that took part in a frame, by the time that was its
+            // own rather than its children's.
+            phases: seen.phases.slice(0, 24).map((/** @type {any} */ row)=>({
+                name: row.name, kind: row.kind, count: row.count,
+                selfMs: row.selfMs, worstMs: row.worstMs,
+            })),
+            worstFrames: seen.worstFrames.map((/** @type {any} */ frame)=>({
+                index: frame.index, ms: frame.ms, byKind: frame.byKind,
+            })),
+            recentFrames: seen.recentFrames.map((/** @type {any} */ frame)=>({
+                ms: frame.ms, byKind: frame.byKind,
+            })),
+            instructions: layers.cpu?.instructions ?? 0,
+            presents: presents,
+            graphics: layers.graphics?.seam?.device
+                ? {
+                    frames: layers.graphics.seam.device.frames,
+                    draws: layers.graphics.seam.device.draws,
+                }
+                : null,
+        });
+    };
+
     const app = await createApp({
         executable: fromBase64(request.exe),
         v86: {
@@ -545,6 +594,10 @@ async function run(request){
     const loaded = app.diagnostics()
         .find((/** @type {any} */ layer)=>layer.name === 'loader');
     result.unresolved = loaded?.metrics?.unresolved ?? app.image?.unresolved ?? [];
+
+    // Published before the run, not after: the whole point of the frame report
+    // is to be asked while the frames are still happening.
+    running = app;
 
     const started = performance.now();
     try
