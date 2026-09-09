@@ -125,7 +125,8 @@ function setup(names){
     const written = new Map();
     /** @type {number[]} */
     const errors = [];
-    const fns = createThreadingFunctions({
+    /** @type {import('./threading.js').ThreadingHost} */
+    const host = {
         kernel,
         readMemory: ()=>new Uint8Array(0),
         currentThread: ()=>current,
@@ -145,8 +146,9 @@ function setup(names){
         },
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
-    });
-    return { kernel, fns, parked, current, written, errors };
+    };
+    const fns = createThreadingFunctions(host);
+    return { kernel, fns, host, parked, current, written, errors };
 }
 
 test('CreateThread makes a thread and does not switch to it', ()=>{
@@ -159,6 +161,24 @@ test('CreateThread makes a thread and does not switch to it', ()=>{
     assert.equal(kernel.state.created[0].parameter, 0xdead);
     assert.ok(handle > 0, 'the guest gets a handle back');
     assert.deepEqual(parked, [], 'the creating thread keeps running');
+});
+
+test('CreateThread gives the new thread its own environment block', ()=>{
+    // FS points at it: a thread without one reads its id, its stack bounds
+    // and its thread-local slots from linear address zero and up.
+    const { kernel, fns, host } = setup();
+    /** @type {any[]} */
+    const given = [];
+    host.threadBlock = (/** @type {any} */ thread)=>{
+        given.push(thread);
+        thread.tebAddress = 0x7ffd0000;
+    };
+
+    fns.CreateThread.handler([0, 0x10000, 0x401000, 0, 0, 0]);
+
+    assert.equal(given.length, 1, 'asked once, for the thread just made');
+    assert.equal(given[0], kernel.state.created[0]);
+    assert.equal(kernel.state.created[0].tebAddress, 0x7ffd0000);
 });
 
 test('CreateThread fills in the thread id when asked, and not when not', ()=>{

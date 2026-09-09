@@ -1146,6 +1146,16 @@ async function buildApp(options){
     // is built before that and is handed the lookup rather than the answer.
     /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number } | null} */
     let blocks = null;
+    /**
+     * Where a thread's environment block comes from, once the process has
+     * one to hand out. Every thread needs its own: FS points at it, and a
+     * thread without one reads its id, its stack bounds and its thread-local
+     * slots from linear address zero and up.
+     *
+     * @type {{ createThreadBlock: (thread: { id: number, stackBase: number,
+     *          stackLimit: number }) => { teb: number, tls: number } } | null}
+     */
+    let threadBlocks = null;
 
     /** Range requests outstanding: what a parked guest thread is really on. */
     let fetching = 0;
@@ -1603,6 +1613,16 @@ async function buildApp(options){
                     trace: formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
                 });
             },
+            /** @param {any} thread */
+            threadBlock: thread=>{
+                const block = threadBlocks?.createThreadBlock({
+                    id: thread.id, stackBase: thread.stackTop, stackLimit: thread.stackLimit,
+                });
+                if (block)
+                {
+                    thread.tebAddress = block.teb;
+                }
+            },
             idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
             /** @param {any[]} needed */
             /** @param {any[]} needed */
@@ -1806,7 +1826,15 @@ async function buildApp(options){
         const exports = Object.entries(table).map(([exported, fn])=>({
             name: exported,
             ordinal: declared.get(exported),
-            target: bridge.register(`${name}!${exported}`, fn),
+            // An export is a trap into the host, or guest code that decides
+            // for itself when to trap: the builder hands such an entry the
+            // means to register the traps it falls back to.
+            target: fn.guest
+                ? fn.guest({
+                    /** @param {string} label @param {any} trap */
+                    register: (label, trap)=>bridge.register(label, trap),
+                })
+                : bridge.register(`${name}!${exported}`, fn),
         }));
 
         const base = MODULE_BASE + index * MODULE_STRIDE;
@@ -2362,6 +2390,7 @@ async function buildApp(options){
         currentDirectory: 'C:\\',
         standardHandles: { input: 0, output: 0, error: 0 },
     });
+    threadBlocks = process;
 
     // The program's first thread. Everything after this runs under the
     // scheduler, including the main thread -- there is no privileged path.

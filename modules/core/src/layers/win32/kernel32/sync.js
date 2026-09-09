@@ -4,6 +4,16 @@
  * See LICENSE for details
  */
 
+import { enterCode, leaveCode, tryEnterCode } from './critical.js';
+
+/**
+ * What the export binding hands an entry that is guest code rather than a
+ * trap: the means to register the traps it falls back to.
+ *
+ * @typedef {Object} GuestBuilder
+ * @property {(name: string, fn: { argBytes: number, handler: Function }) => number} register
+ */
+
 /**
  * The synchronisation a C runtime's startup reaches for before it reaches for
  * anything else: critical sections, the interlocked arithmetic that reference
@@ -34,8 +44,6 @@
  * is looking at something Windows also produces.
  */
 const CS_LOCK_COUNT = 0x04;
-const CS_RECURSION_COUNT = 0x08;
-const CS_OWNING_THREAD = 0x0c;
 const CS_SPIN_COUNT = 0x14;
 const CS_SIZE = 0x18;
 
@@ -67,6 +75,11 @@ const MAXIMUM_WAIT_OBJECTS = 64;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park        Stops a thread; returns the parked token.
+ * @property {ReturnType<typeof import('./critical.js').createCriticalSections>} critical
+ *           The queues behind contended sections, and the counters the fast
+ *           paths keep.
+ * @property {(bytes: number) => number} allocate
+ *           Guest memory the processor executes, for the fast paths.
  * @property {(milliseconds: number) => void} [advanceClock]
  *   Credits the guest clock for time a wait was supposed to spend. See the
  *   timeout note on WaitForMultipleObjects.
@@ -83,16 +96,6 @@ const MAXIMUM_WAIT_OBJECTS = 64;
 export function createSyncFunctions(host){
     const { kernel } = host;
 
-    /**
-     * The kernel object behind a section, keyed by where the guest put it.
-     *
-     * Only the waiting is here. Everything a guest can observe is in its own
-     * structure; this holds what a structure cannot -- a queue of threads.
-     *
-     * @type {Map<number, any>}
-     */
-    const sections = new Map();
-
     /** @param {number} address */
     const readI32 = address=>new DataView(
         host.readMemory(address, 4).buffer).getInt32(0, true);
@@ -105,46 +108,46 @@ export function createSyncFunctions(host){
     };
 
     /**
-     * The section at this address, made if it is not there yet.
+     * The fast paths, placed once and shared by every export that uses them.
      *
-     * Windows faults on a section nobody initialised; making one instead turns
-     * that into a section that simply works. The trade is deliberate: the fault
-     * would arrive here as a host exception with none of the guest's context,
-     * which tells whoever is reading the failure less than nothing.
+     * Entering, leaving and trying a section are guest code: the structure the
+     * program passes is the lock, and only a contended entry or a release that
+     * owes a wake reaches the host, through the two traps registered here.
      *
-     * @param {number} address
+     * @type {{ enter: number, leave: number, tryEnter: number } | null}
      */
-    const sectionAt = address=>{
-        let mutex = sections.get(address);
-        if (!mutex)
+    let fastPaths = null;
+    /** @param {GuestBuilder} builder */
+    const placed = builder=>{
+        if (fastPaths)
         {
-            mutex = kernel.createMutex({ name: `criticalsection@${address.toString(16)}` });
-            sections.set(address, mutex);
+            return fastPaths;
         }
-        return mutex;
-    };
-
-    /**
-     * Writes what a section's structure says about itself, from what the kernel
-     * says about the mutex behind it.
-     *
-     * LockCount is Windows' own encoding: minus one while nobody holds it, and
-     * otherwise one less than the number of threads that want it -- zero for an
-     * owner alone, one for an owner with somebody queued behind. Writing zero
-     * whatever the queue held was enough while every acquisition crossed into
-     * the host, because the host could see the queue for itself. It stops being
-     * enough the moment a release is allowed to happen in the guest: a release
-     * that cannot tell whether anyone is waiting either wakes nobody, and the
-     * queue stalls, or crosses every time, and there was no point.
-     *
-     * @param {number} address @param {any} mutex
-     */
-    const publish = (address, mutex)=>{
-        const owner = mutex.owner;
-        const queued = mutex.waiters ? mutex.waiters.length : 0;
-        writeI32(address + CS_LOCK_COUNT, owner ? queued : CS_UNLOCKED);
-        writeI32(address + CS_RECURSION_COUNT, owner ? mutex.recursion : 0);
-        writeI32(address + CS_OWNING_THREAD, owner ? owner.id : 0);
+        const waitTrap = builder.register('<cs-wait>', {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>host.critical.wait(pointer >>> 0),
+        });
+        const wakeTrap = builder.register('<cs-wake>', {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([pointer])=>host.critical.wake(pointer >>> 0),
+        });
+        const counters = host.critical.counters();
+        /** @param {(at: number) => Uint8Array} code */
+        const place = code=>{
+            // Sized by a throwaway rendering: the bytes depend on where they
+            // land only through relative jumps, never in length.
+            const at = host.allocate(code(0).length);
+            host.writeMemory(at, code(at));
+            return at;
+        };
+        fastPaths = {
+            enter: place(at=>enterCode(at, waitTrap, counters)),
+            leave: place(at=>leaveCode(at, wakeTrap, counters)),
+            tryEnter: place(()=>tryEnterCode()),
+        };
+        return fastPaths;
     };
 
     /**
@@ -197,8 +200,7 @@ export function createSyncFunctions(host){
 
     /** @param {number} address @param {number} spinCount */
     const initialise = (address, spinCount)=>{
-        sections.set(address,
-            kernel.createMutex({ name: `criticalsection@${address.toString(16)}` }));
+        host.critical.forget(address);
         // Written whole rather than field by field: the guest allocated this and
         // its contents are whatever was there before.
         host.writeMemory(address, new Uint8Array(CS_SIZE));
@@ -234,21 +236,15 @@ export function createSyncFunctions(host){
             },
         },
 
-        /** BOOL TryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        /**
+         * BOOL TryEnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
+         *
+         * Guest code, never a trap: a try that would wait answers FALSE.
+         */
         TryEnterCriticalSection: {
             argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const address = pointer >>> 0;
-                const mutex = sectionAt(address);
-                if (!ready(mutex, host.currentThread()))
-                {
-                    return 0;
-                }
-                kernel.wait(mutex, host.currentThread());
-                publish(address, mutex);
-                return 1;
-            },
+            /** @param {GuestBuilder} builder */
+            guest: builder=>placed(builder).tryEnter,
         },
 
         /** VOID DeleteCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
@@ -257,53 +253,35 @@ export function createSyncFunctions(host){
             /** @param {number[]} args */
             handler: ([pointer])=>{
                 const address = pointer >>> 0;
-                sections.delete(address);
+                host.critical.forget(address);
                 host.writeMemory(address, new Uint8Array(CS_SIZE));
                 return 0;
             },
         },
 
-        /** VOID EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        /**
+         * VOID EnterCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
+         *
+         * Guest code: the increment that takes the lock and the recursion are
+         * the program's own instructions, and only a section somebody else
+         * holds brings the thread here to be queued.
+         */
         EnterCriticalSection: {
             argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const address = pointer >>> 0;
-                const mutex = sectionAt(address);
-                const taken = kernel.wait(mutex, host.currentThread());
-                if (taken === null)
-                {
-                    // Blocked. The owner and the recursion still describe the
-                    // thread that holds it, and the one that leaves will write
-                    // them for us -- but the count of who wants it has just
-                    // changed, and this is the only moment anything knows.
-                    writeI32(address + CS_LOCK_COUNT,
-                        mutex.waiters ? mutex.waiters.length : 0);
-                    return host.park();
-                }
-                publish(address, mutex);
-                return 0;
-            },
+            /** @param {GuestBuilder} builder */
+            guest: builder=>placed(builder).enter,
         },
 
-        /** VOID LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection) */
+        /**
+         * VOID LeaveCriticalSection(LPCRITICAL_SECTION lpCriticalSection)
+         *
+         * Guest code too; a release that finds the count saying somebody
+         * waited traps to hand the section over.
+         */
         LeaveCriticalSection: {
             argBytes: 4,
-            /** @param {number[]} args */
-            handler: ([pointer])=>{
-                const address = pointer >>> 0;
-                const mutex = sections.get(address);
-                if (!mutex)
-                {
-                    return 0;
-                }
-                kernel.releaseMutex(mutex, host.currentThread());
-                // After the release the mutex names its next owner, if the
-                // kernel woke one. That thread's call has already returned, so
-                // this is the only moment the structure can be made true for it.
-                publish(address, mutex);
-                return 0;
-            },
+            /** @param {GuestBuilder} builder */
+            guest: builder=>placed(builder).leave,
         },
 
         /** LONG InterlockedIncrement(LONG volatile *lpAddend) */

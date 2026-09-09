@@ -13,6 +13,7 @@ import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
 import { createSyncFunctions } from './kernel32/sync.js';
+import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
@@ -333,6 +334,22 @@ export const win32Module = {
             }),
         });
 
+        // The host's half of a critical section: the queue behind a contended
+        // one and the hand-off that wakes it. The rest is guest code.
+        const critical = createCriticalSections({
+            readMemory,
+            writeMemory,
+            currentThread: ()=>kernel.currentThread(),
+            /** @param {any} thread @param {string} reason */
+            block: (thread, reason)=>kernel.block(thread, reason),
+            /** @param {any} thread @param {number} [result] */
+            wake: (thread, result)=>kernel.wake(thread, result),
+            /** @param {any} thread */
+            park: thread=>bridge.park(thread),
+            /** @param {number} bytes */
+            allocate: bytes=>heap.allocate(bytes),
+        });
+
         // The thread a wave device's WOM_DONE callbacks run on. Made on first
         // use: a build whose program never asks for the callback form pays for
         // no thread, no stub and no code.
@@ -342,7 +359,11 @@ export const win32Module = {
             writeMemory,
             register: (name, fn)=>bridge.register(name, fn),
             /** @param {{ entry: number, name: string }} options */
-            createThread: options=>kernel.createThread(options),
+            createThread: options=>{
+                const thread = kernel.createThread(options);
+                config?.threadBlock?.(thread);
+                return thread;
+            },
             currentThread: ()=>kernel.currentThread(),
             /** @param {any} thread @param {string} reason */
             block: (thread, reason)=>kernel.block(thread, reason),
@@ -445,6 +466,9 @@ export const win32Module = {
                     // first time a thread is made, because registering it costs
                     // a stub and a build that never makes a thread needs none.
                     threadReturn: ()=>threadReturnAddress(),
+                    // Every thread gets a block of its own, made by whoever
+                    // owns the process's, which win32 is only handed.
+                    threadBlock: config?.threadBlock,
                     /** @param {number} handle */
                     handleType: handle=>kernel.handles.typeOf(handle),
                 }),
@@ -491,6 +515,9 @@ export const win32Module = {
                     writeMemory,
                     currentThread: ()=>kernel.currentThread(),
                     park: (/** @type {any} */ thread)=>bridge.park(thread),
+                    critical,
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
                     advanceClock: (/** @type {number} */ ms)=>kernel.clock.advance(ms),
                 }),
                 ...createLocaleFunctions({
@@ -969,6 +996,11 @@ export const win32Module = {
             waveDevices: ()=>winmm.diagnostics(),
             /** The thread those devices call back on: whether it exists, and what it is doing. */
             waveThread: ()=>waveNotices.diagnostics(),
+            /**
+             * How many sections were entered and left without crossing into
+             * the host, and how many crossings the contended ones cost.
+             */
+            criticalSections: ()=>critical.diagnostics(),
 
             /**
              * What the program's message loop is pumping, and what it is
@@ -1019,6 +1051,7 @@ export const win32Module = {
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 waveDevices: current ? current.waveDevices() : [],
                 waveThread: current ? current.waveThread() : null,
+                criticalSections: current ? current.criticalSections() : null,
                 messages: current ? current.messages() : {},
                 // What is left of the one arena everything the guest is handed
                 // comes out of. A program sizes its own caches from this, so a

@@ -49,6 +49,11 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
  * @property {() => number} [threadReturn]
+ * @property {(thread: any) => void} [threadBlock]
+ *           Gives a thread just made its own environment block -- the thing FS
+ *           points at, with its id, its stack bounds and its thread-local
+ *           slots. Without one a thread reads all of those at linear address
+ *           zero and up, which is nobody's.
  *           Where a start routine returns to. A thread that returns has ended,
  *           and if nothing notices it stays runnable for ever, is picked every
  *           turn, retires nothing, and keeps whatever it was holding.
@@ -191,6 +196,7 @@ export function createThreadingFunctions(host){
                     // it returns to.
                     returnTo: host.threadReturn?.(),
                 });
+                host.threadBlock?.(thread);
                 if (threadIdOut !== 0)
                 {
                     kernel.writeThreadId(threadIdOut, thread.id);

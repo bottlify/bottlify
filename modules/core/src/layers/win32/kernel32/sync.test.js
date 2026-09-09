@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createSyncFunctions } from './sync.js';
+import { createCriticalSections, enterCode, leaveCode, tryEnterCode } from './critical.js';
 
 const CS_LOCK_COUNT = 0x04;
 const CS_RECURSION_COUNT = 0x08;
@@ -175,6 +176,7 @@ function fakeKernel(){
 
 function fakeHost(){
     const bytes = new Uint8Array(0x1000);
+    let free = 0x800;
     const kernel = fakeKernel();
     /** @type {{ first: any, second: any }} */
     const threads = { first: { id: 0x100 }, second: { id: 0x104 } };
@@ -199,6 +201,14 @@ function fakeHost(){
         park: ()=>PARKED,
         /** @param {number} milliseconds */
         advanceClock: milliseconds=>kernel.state.advanced.push(milliseconds),
+        /** Guest memory for code and counters, from the top of this little machine. */
+        allocate: (/** @type {number} */ size)=>{
+            const at = free;
+            free += size;
+            return at;
+        },
+        /** @type {any} */
+        critical: null,
         /** @param {number} address */
         readI32: address=>new DataView(bytes.buffer).getInt32(address, true),
         /** @param {number} handle @param {string} type @param {any} object */
@@ -207,7 +217,35 @@ function fakeHost(){
             return object;
         },
     };
+    host.critical = createCriticalSections({
+        readMemory: host.readMemory,
+        writeMemory: (address, data)=>host.writeMemory(address, data),
+        currentThread: ()=>current,
+        /** @param {any} thread @param {string} reason */
+        block: (thread, reason)=>kernel.state.blocked.push({ thread, reason }),
+        /** @param {any} thread */
+        wake: thread=>{
+            kernel.state.woken.push(thread);
+            return true;
+        },
+        park: ()=>PARKED,
+        allocate: host.allocate,
+    });
     return host;
+}
+
+/** What the export binding hands a guest-code entry: traps it can fall back to. */
+function fakeBuilder(){
+    /** @type {{ label: string, trap: any }[]} */
+    const registered = [];
+    return {
+        registered,
+        /** @param {string} label @param {any} trap */
+        register: (label, trap)=>{
+            registered.push({ label, trap });
+            return 0x105000 + registered.length * 0x10;
+        },
+    };
 }
 
 test('a critical section is initialised in the guest structure, not beside it', ()=>{
@@ -225,64 +263,74 @@ test('a critical section is initialised in the guest structure, not beside it', 
     assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
 });
 
-test('entering a section writes the owner and the count a runtime reads back', ()=>{
+test('entering, leaving and trying a section are guest code, placed once', ()=>{
+    // The structure the program passes is the lock, and every export that
+    // touches it points at a few instructions rather than at a trap. What the
+    // host places is the code, the two traps it falls back to, and nothing
+    // else; asking twice places nothing more.
     const host = fakeHost();
     const fns = createSyncFunctions(host);
+    const builder = fakeBuilder();
+
+    const enter = fns.EnterCriticalSection.guest(builder);
+    const leave = fns.LeaveCriticalSection.guest(builder);
+    const attempt = fns.TryEnterCriticalSection.guest(builder);
+
+    assert.deepEqual(builder.registered.map(one=>one.label), ['<cs-wait>', '<cs-wake>']);
+    assert.ok(enter !== leave && leave !== attempt && enter !== attempt, 'three places');
+    const counters = host.critical.counters();
+    assert.deepEqual([...host.bytes.slice(enter, enter + enterCode(enter, 0, 0).length)],
+        [...enterCode(enter, 0x105010, counters)], 'the entry falls back to the wait trap');
+    assert.deepEqual([...host.bytes.slice(leave, leave + leaveCode(leave, 0, 0).length)],
+        [...leaveCode(leave, 0x105020, counters)], 'the release falls back to the wake trap');
+    assert.deepEqual([...host.bytes.slice(attempt, attempt + tryEnterCode().length)],
+        [...tryEnterCode()]);
+
+    assert.equal(fns.EnterCriticalSection.guest(builder), enter, 'the same place again');
+    assert.equal(builder.registered.length, 2, 'and no more traps');
+    assert.equal('handler' in fns.EnterCriticalSection, false, 'nothing to trap into');
+});
+
+test('the traps behind the fast paths queue a loser and hand the section to it', ()=>{
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const builder = fakeBuilder();
+    fns.EnterCriticalSection.guest(builder);
+    const [wait, wake] = builder.registered.map(one=>one.trap);
     const section = 0x200;
 
-    fns.InitializeCriticalSection.handler([section]);
-    fns.EnterCriticalSection.handler([section]);
+    // The first thread holds it; the second lost the increment and traps.
+    host.run(host.threads.second);
+    assert.equal(wait.handler([section]), PARKED);
+    assert.equal(host.kernel.state.blocked.length, 1);
+    assert.equal(host.kernel.state.blocked[0].thread, host.threads.second);
 
-    assert.equal(host.readI32(section + CS_LOCK_COUNT), 0, 'held');
+    // The owner's release found the count saying somebody waited.
+    host.run(host.threads.first);
+    assert.equal(wake.handler([section]), 0);
+    assert.deepEqual(host.kernel.state.woken, [host.threads.second]);
+    assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.second.id,
+        'the structure names the new owner before it runs');
     assert.equal(host.readI32(section + CS_RECURSION_COUNT), 1);
-    assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.first.id);
 });
 
-test('a section is recursive, and only the matching leave releases it', ()=>{
+test('initialising or deleting a section forgets whoever was queued on it', ()=>{
     const host = fakeHost();
     const fns = createSyncFunctions(host);
-    const section = 0x200;
-
-    fns.InitializeCriticalSection.handler([section]);
-    fns.EnterCriticalSection.handler([section]);
-    fns.EnterCriticalSection.handler([section]);
-    assert.equal(host.readI32(section + CS_RECURSION_COUNT), 2);
-
-    fns.LeaveCriticalSection.handler([section]);
-    assert.equal(host.readI32(section + CS_RECURSION_COUNT), 1,
-        'one leave of two does not release it');
-    assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.first.id);
-
-    fns.LeaveCriticalSection.handler([section]);
-    assert.equal(host.readI32(section + CS_LOCK_COUNT), CS_UNLOCKED, 'and the second does');
-    assert.equal(host.readI32(section + CS_OWNING_THREAD), 0);
-});
-
-test('a thread that cannot take a section is parked, and told when it wins', ()=>{
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    const section = 0x200;
-
-    fns.InitializeCriticalSection.handler([section]);
-    fns.EnterCriticalSection.handler([section]);
+    const builder = fakeBuilder();
+    fns.EnterCriticalSection.guest(builder);
+    const [wait] = builder.registered.map(one=>one.trap);
 
     host.run(host.threads.second);
-    assert.equal(fns.EnterCriticalSection.handler([section]), PARKED);
-    assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.first.id,
-        'the structure still describes the thread that holds it');
-    // Windows' own encoding: one less than the number of threads that want it,
-    // so an owner alone reads zero and an owner with somebody queued reads one.
-    // A release that happens without crossing into the host has no other way to
-    // learn that it owes somebody a wake.
-    assert.equal(host.readI32(section + CS_LOCK_COUNT), 1,
-        'and says that a second thread is waiting behind it');
+    wait.handler([0x200]);
+    assert.equal(host.critical.diagnostics().queued, 1);
+    fns.DeleteCriticalSection.handler([0x200]);
+    assert.equal(host.critical.diagnostics().queued, 0);
 
-    // The leaving thread writes the structure for whoever the kernel handed it
-    // to: the winner's own call has already returned and cannot do it.
-    host.run(host.threads.first);
-    fns.LeaveCriticalSection.handler([section]);
-    assert.equal(host.readI32(section + CS_OWNING_THREAD), host.threads.second.id);
-    assert.equal(host.readI32(section + CS_RECURSION_COUNT), 1);
+    wait.handler([0x300]);
+    fns.InitializeCriticalSection.handler([0x300]);
+    assert.equal(host.critical.diagnostics().queued, 0);
+    assert.equal(host.readI32(0x300 + CS_LOCK_COUNT), CS_UNLOCKED);
 });
 
 test('a spin count is recorded where a guest looks for it', ()=>{
@@ -292,19 +340,6 @@ test('a spin count is recorded where a guest looks for it', ()=>{
     assert.equal(fns.InitializeCriticalSectionAndSpinCount.handler([0x200, 4000]), 1);
     assert.equal(host.readI32(0x200 + CS_SPIN_COUNT), 4000);
     assert.equal(host.readI32(0x200 + CS_LOCK_COUNT), CS_UNLOCKED);
-});
-
-test('trying a held section fails without blocking', ()=>{
-    const host = fakeHost();
-    const fns = createSyncFunctions(host);
-    const section = 0x200;
-
-    fns.InitializeCriticalSection.handler([section]);
-    assert.equal(fns.TryEnterCriticalSection.handler([section]), 1, 'free: taken');
-
-    host.run(host.threads.second);
-    assert.equal(fns.TryEnterCriticalSection.handler([section]), 0, 'held: refused');
-    assert.equal(host.kernel.state.blocked.length, 0, 'and nothing was queued');
 });
 
 test('increment and decrement answer with the value after, exchange with the value before', ()=>{
