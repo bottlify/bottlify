@@ -1412,8 +1412,12 @@ test('a back buffer is lockable exactly when the program asked for one', ()=>{
         'no flag, no lock, which is the real rule');
     refused.release();
 
+    /** @type {string[]} */
+    const reported = [];
     const asked = createDevice({
         parameters: { flags: D3DPRESENTFLAG.LOCKABLE_BACKBUFFER },
+        caps: { divergence: (/** @type {string} */ api, /** @type {string} */ detail)=>
+            reported.push(`${api}: ${detail}`) },
     });
     /** @type {{ surface?: any }} */
     const held = {};
@@ -1422,6 +1426,12 @@ test('a back buffer is lockable exactly when the program asked for one', ()=>{
     const locked = {};
     assert.equal(held.surface.LockRect(locked, null, 0), D3D_OK);
     assert.ok(locked.pBits > 0, 'and it hands out somewhere to read');
+    // Succeeding is right and is not the whole truth: what is drawn lives on
+    // the GPU and is never copied into those bytes. Accepting a call and not
+    // honouring it is the defect class that shows as a picture rather than an
+    // error, so it says so.
+    assert.ok(reported.some(line=>/never copied into/.test(line)),
+        'and says that what it hands out is not the rendered picture');
     assert.equal(held.surface.UnlockRect(), D3D_OK);
     asked.release();
 });

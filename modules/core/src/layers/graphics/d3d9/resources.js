@@ -134,6 +134,11 @@ export function createReferenceCount(options = {}){
  * @property {boolean} [lockable]     Only a render target is asked this at creation.
  * @property {boolean} [forgivesDoubleUnlock]
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
+ * @property {((api: string, detail: string) => void) | null} [divergence]
+ *           Where "this call succeeded and did not do all of what it promises"
+ *           goes. A render target lives on the GPU and its bytes are not read
+ *           back into the guest's copy, so a lock of one hands out somewhere to
+ *           read that holds something other than what was drawn.
  */
 
 /**
@@ -189,6 +194,19 @@ export function createSurface(options){
             if (locked || !lockable)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            // What is drawn lives on the GPU, and nothing copies it back into
+            // the guest's own bytes. The lock is right to succeed -- refusing
+            // it sends a program that asked for a lockable surface down a path
+            // it was not written for -- but what it hands out is not the
+            // picture, and reading a surface back is the only way to know what
+            // is in it.
+            if (options.type === SURFACE_TYPE.RENDER_TARGET
+                || options.type === SURFACE_TYPE.DEPTH_STENCIL)
+            {
+                options.divergence?.('Direct3D',
+                    `a lock of a ${options.type} surface is accepted and hands out guest`
+                    + ' memory that the rendered pixels are never copied into');
             }
             locked = true;
             out.Pitch = pitch;

@@ -617,6 +617,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 // at, so every such read was refused.
                 lockable: ((presentParameters.flags ?? 0)
                     & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
+                divergence: services.divergence ?? null,
                 base: allocate(0x100000),
                 count: implicitCount(),
             }));
