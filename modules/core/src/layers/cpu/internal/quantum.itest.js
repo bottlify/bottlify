@@ -24,9 +24,6 @@ const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 /** The JIT compiles a page at a time, so a slice rounds up to a page boundary. */
 const PAGE = 4096;
 
-/** The loop-safety check inside a compiled block still counts to this constant. */
-const IN_BLOCK_CEILING = 100_003;
-
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
     value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
@@ -82,24 +79,33 @@ test('a slice is bounded by retired instructions, to a page', async()=>{
     host.stop();
 });
 
-test('a hot loop inside one block still overruns, and by how much', async()=>{
-    // `dec eax; jmp back` — the whole loop fits in a single compiled block, so
-    // the check between blocks never gets a turn.
+test('a hot loop inside one block is bounded by the slice, compiled or not', async()=>{
+    // `dec eax; jmp back` -- the whole loop fits in a single block, so the check
+    // between blocks never gets a turn: the bound has to be honoured inside the
+    // loop itself, by the interpreter while the page is cold and by the
+    // generated code's own loop check once it is compiled.
     const host = await runningGuest(new Uint8Array([0x48, 0xeb, 0xfd]), 0x8000);
     const cpu = host.cpu();
 
-    const delivered = cpu.run_slice(1000);
+    for (const requested of [1000, 5000, 100000])
+    {
+        const delivered = cpu.run_slice(requested);
+        assert.ok(delivered >= requested,
+            `asked ${requested}, got ${delivered}: a slice must make progress`);
+        // One iteration of the loop is the most either path may run past the
+        // bound before it looks again.
+        assert.ok(delivered <= requested + 2,
+            `asked ${requested}, got ${delivered}: a hot loop must stop at the bound`);
+    }
 
-    // This asserts today's limitation on purpose. The in-block check is compiled
-    // against a constant, so no runtime bound can tighten it; making a small
-    // quantum real means emitting a load from a global in generated code. When
-    // that lands, this expectation should fall, and this test is what will
-    // notice.
-    assert.ok(delivered > 10_000,
-        `expected the known overrun, got ${delivered} — if this now honours the `
-        + 'request, the in-block check was fixed and this test should be tightened');
-    assert.ok(delivered <= IN_BLOCK_CEILING + PAGE,
-        `overrun ${delivered} exceeds even the in-block ceiling`);
+    // Enough turns for the page to be compiled, then the same question.
+    for (let i = 0; i < 10; i++)
+    {
+        cpu.run_slice(100000);
+    }
+    const delivered = cpu.run_slice(1000);
+    assert.ok(delivered >= 1000 && delivered <= 1002,
+        `asked 1000 of a hot page, got ${delivered}`);
 
     host.stop();
 });
