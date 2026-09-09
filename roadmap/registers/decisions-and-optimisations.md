@@ -413,3 +413,33 @@ the bottleneck. Worth a second pass when something is.
 Recorded here because it decides which of the above is worth doing first: the cost that matters most
 in this engine is how long a guest thread is held, not how much total work gets done. An
 optimisation that improves throughput while lengthening a single hold is a regression.
+
+### B7. The emulator does not honour the slice it is given
+
+Measured, not suspected. `run_slice` bounds a slice by retired instructions, and the check sits
+between blocks — but the just-in-time compiler emits its own loop-safety check against
+`LOOP_COUNTER`, a compile-time constant of 100 003, in two places in `jit.rs`. A generated block
+containing an internal loop therefore runs up to that many instructions before it returns, whatever
+the caller asked for.
+
+The numbers, from one title at its menu:
+
+| quantum asked for | worst slice |
+|---|---|
+| 100 000 instructions | 59.9 ms |
+| 2 000 instructions | 21.9 ms |
+
+A fiftieth of the quantum bought a third of the overrun, which is what a constant bound looks like
+from outside. Twenty milliseconds is the whole cost: the sound ring is fed once a turn, so a slice
+that long is that long with nothing reaching the ring, and it is heard as a stutter. Frame pacing
+takes it the same way.
+
+The fix is named in our own fork commit and is a single idea: emit a load from a global where the
+constant is emitted now, and have `run_slice` write the caller's bound into it. There is a free slot
+in the global map, and the compiler already loads globals in generated code
+(`builder.load_fixed_i32(global_pointers::…)`), so nothing new has to be invented — the care goes
+into initialising it, because a zero there would end every block immediately.
+
+Blocked on nothing but a toolchain: v86 builds in Docker, and this machine has neither Docker nor
+`cargo` nor `clang`, so the change cannot be built or verified here. It is not worth writing into the
+fork unbuilt.
