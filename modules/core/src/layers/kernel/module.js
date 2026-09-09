@@ -63,8 +63,11 @@ export const kernelModule = {
             // The guest's clock, which is what a timed wait is timed against
             // and what the scheduler moves when every thread is waiting on one.
             now: ()=>clock.virtualTime(),
-            /** @param {number} ms */
-            advance: ms=>clock.advance(ms),
+            // Moved *to* the deadline rather than *by* an interval, because
+            // the clock is the one that knows the host's, and a wait nobody has
+            // to sit through must never carry the guest past real time.
+            /** @param {number} deadline */
+            skipTo: deadline=>clock.skipTo(deadline),
             // Below a page the emulator cannot honour a smaller quantum anyway,
             // so asking for one would only be a lie in the configuration.
             quantum: config?.quantum ?? 100_000,
@@ -196,6 +199,15 @@ export const kernelModule = {
 
             /** The scheduler's own view, for a caller driving the machine. */
             diagnosticsSnapshot: ()=>scheduler.diagnostics(),
+
+            /**
+             * The soonest guest time a blocked thread is waiting for, or null.
+             *
+             * Whoever drives the machine needs it to tell two states apart that
+             * look identical from outside: nothing can run because nothing ever
+             * will, and nothing can run until a moment that is coming.
+             */
+            nextDeadline: ()=>scheduler.nextDeadline(),
 
             /** @param {any} thread @param {number} exitCode */
             exitThread(thread, exitCode){

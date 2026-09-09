@@ -2475,6 +2475,29 @@ async function buildApp(options){
                             handOver(replacing);
                             return 0;
                         }
+                        // Nothing ready is not the same as nothing to wait
+                        // for. A thread parked on a host call that has not
+                        // answered is deliberately not a candidate -- that is
+                        // what lets the scheduler move the clock -- so a turn
+                        // where only such threads exist means the machine is
+                        // waiting on us, and the wait above is where that is
+                        // paid for.
+                        if (bridge.suspended() > 0 || fetching > 0 || idlers.length > 0)
+                        {
+                            continue;
+                        }
+                        // Or every thread is in a timed wait and the clock has
+                        // caught up with the host's, so the only thing left to
+                        // do is let real time reach the deadline. That is a
+                        // machine waiting, not a machine stuck, and the two look
+                        // identical from here without asking.
+                        if (kernel.nextDeadline() !== null)
+                        {
+                            journal.begin('idle-deadline', journal.PhaseKind.HOST);
+                            await breathe();
+                            journal.end('idle-deadline');
+                            continue;
+                        }
                         // Either everything finished without the program exiting,
                         // or every thread is waiting on something no one will
                         // signal -- and the diagnostics name what.

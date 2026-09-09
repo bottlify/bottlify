@@ -32,11 +32,13 @@ export const ThreadState = {
  * @param {any} options.switcher   The single switch primitive.
  * @param {number} [options.quantum]  Retired instructions per turn.
  * @param {() => number} [options.now]  The guest's clock, for timed waits.
- * @param {(ms: number) => void} [options.advance]
- *        Moves the guest's clock forward when every thread is waiting on one.
+ * @param {(deadline: number) => number} [options.skipTo]
+ *        Moves the guest's clock to a deadline when every thread is waiting on
+ *        one, and answers how far it actually moved -- which is nothing once the
+ *        clock has caught up with the host's.
  */
 export function createScheduler(options){
-    const { cpu, switcher, quantum = 100_000, now = ()=>0, advance = ()=>{} } = options;
+    const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
     /** @type {any[]} */
     const threads = [];
     /** @type {any} */
@@ -47,7 +49,14 @@ export function createScheduler(options){
     /** @type {((thread: any) => void)[]} */
     const onExpiry = [];
 
-    const ready = ()=>threads.filter(thread=>thread.state === ThreadState.READY);
+    // A thread parked on a host call that has not answered is not a candidate.
+    // It is stopped on `hlt` with nothing of its own to run, and counting it as
+    // ready is what kept `soonest()` below out of reach: with one such thread
+    // the scheduler always had someone to give a turn to, so it never moved the
+    // clock to the next deadline and every timed wait in the guest expired in
+    // host time instead of guest time.
+    const ready = ()=>threads.filter(thread=>
+        thread.state === ThreadState.READY && !thread.awaitingHost);
 
     /** The soonest deadline any blocked thread is waiting on, or null. */
     const soonest = ()=>threads.reduce((best, thread)=>(
@@ -112,6 +121,11 @@ export function createScheduler(options){
                 exitCode: null,
                 /** What it is waiting for, when blocked; for diagnostics. */
                 waitingOn: null,
+                /**
+                 * Set while a host call this thread made has not answered. Such
+                 * a thread is ready in every other sense and has nothing to run.
+                 */
+                awaitingHost: false,
                 // A thread is a waitable object in its own right: a program
                 // joins one by waiting on its handle, and it becomes signalled
                 // when it ends and stays that way. Carried here rather than in
@@ -155,7 +169,14 @@ export function createScheduler(options){
                 {
                     return { ran: null, instructions: 0, switched: false };
                 }
-                advance(Math.max(0, deadline - now()));
+                // Nothing to gain from sitting through a wait in real time --
+                // and nothing to be had by moving past real time either, which
+                // is why the clock, not this, decides how far it goes. When it
+                // answers zero the machine really does have to wait.
+                if (skipTo(deadline) === 0)
+                {
+                    return { ran: null, instructions: 0, switched: false };
+                }
                 expire();
                 candidates = ready();
                 if (candidates.length === 0)

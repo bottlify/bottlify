@@ -129,3 +129,32 @@ test('the quantum bounds a turn', ()=>{
 
     assert.equal(sched.runOnce().instructions, 5000, 'the slice is capped by the quantum');
 });
+
+test('a thread parked on a host call is not a candidate for a turn', ()=>{
+    // It is stopped on `hlt` with nothing of its own to run. Counted as ready it
+    // gave the scheduler someone to hand a turn to for ever, so the branch below
+    // -- the one that moves the clock to the next deadline -- was unreachable,
+    // and every timed wait in the guest expired in host time instead.
+    const cpu = fakeCpu();
+    let clock = 0;
+    const sched = createScheduler({
+        cpu,
+        switcher: createSwitcher({ cpu }),
+        now: ()=>clock,
+        /** @param {number} deadline */
+        skipTo: deadline=>{
+            const jump = Math.max(0, deadline - clock);
+            clock = deadline;
+            return jump;
+        },
+    });
+
+    const waiter = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'waiter' });
+    const parked = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'parked' });
+    sched.block(waiter, 'a timed wait', { deadline: 50 });
+    parked.awaitingHost = true;
+
+    const turn = sched.runOnce();
+    assert.equal(turn.ran?.name, 'waiter', 'the clock moved and the waiter woke');
+    assert.equal(clock, 50, 'to exactly the deadline it was waiting for');
+});

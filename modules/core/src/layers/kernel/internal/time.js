@@ -36,6 +36,8 @@ export function createClock({
     let creditedMs = 0;
     let capped = 0;
     let ignored = 0;
+    let skippedMs = 0;
+    let overtaken = 0;
     /** @type {number | null} */
     let suspendedAt = null;
 
@@ -60,6 +62,35 @@ export function createClock({
          */
         advance(elapsedMs){
             virtualMs += elapsedMs;
+        },
+
+        /**
+         * Moves the clock to a deadline the machine is only waiting for.
+         *
+         * Every thread is in a timed wait and nothing else can run, so the wait
+         * is the only thing that can change the machine's mind and there is
+         * nothing to gain by sitting through it in real time.
+         *
+         * Never past the host's clock, though, and that bound is the whole
+         * point: a machine with nothing to do may catch up with real time and
+         * must not overtake it. Overtaking is what makes a program's own clock
+         * run fast -- animations play at several times their speed, and it asks
+         * a real sound device for far more audio than it can drain.
+         *
+         * @param {number} targetMs  Guest time the machine is waiting for.
+         * @returns {number} how far the clock actually moved
+         */
+        skipTo(targetMs){
+            const limit = Math.min(targetMs, now() - startedAt);
+            const jump = Math.max(0, limit - virtualMs);
+            if (jump === 0)
+            {
+                overtaken++;
+                return 0;
+            }
+            virtualMs += jump;
+            skippedMs += jump;
+            return jump;
         },
 
         /** Our code is about to run; the guest is not executing from here. */
@@ -110,6 +141,11 @@ export function createClock({
                 // guest can be told about, and the two clocks are drifting apart.
                 capped,
                 ignored,
+                // Guest time handed over for a wait nobody had to sit through,
+                // and the times that was refused because the clock had already
+                // caught up with the host's.
+                skippedMs: Math.round(skippedMs),
+                overtaken,
             };
         },
     };

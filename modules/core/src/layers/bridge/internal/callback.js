@@ -102,6 +102,18 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          */
         suspended(thread, call){
             pending++;
+            // A thread whose host call has not answered has nothing to run: it
+            // is parked on `hlt` and retires the park loop and nothing else.
+            // Left counted as runnable, it keeps the scheduler from ever
+            // reaching the branch that moves the guest's clock to the next
+            // deadline -- so a fifteen-millisecond wait inside the guest is
+            // crossed in steps of however long the host loop takes to come
+            // round, which measured at a fifth to a third of a whole run.
+            //
+            // Unless it is running a callback. Then the very same suspension is
+            // what sends it into guest code, and it is the most runnable thread
+            // there is.
+            thread.awaitingHost = callbackFrames(thread).length === 0;
             // Stamped so a report can say how long it has been waiting. A call
             // that suspends and never answers stops the whole machine -- every
             // thread of it -- and from outside that is indistinguishable from a
@@ -179,6 +191,8 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             frames.push({ frameBase, settle });
 
             kernel.scheduleResume(thread, { eip: entry, esp: frameBase });
+            // Off to run guest code, whatever it was doing before.
+            thread.awaitingHost = false;
             return answer;
         },
 
@@ -194,6 +208,9 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             {
                 return false;
             }
+            // Back inside whatever host call was waiting for it, which has not
+            // answered yet: nothing for this thread to run until it does.
+            thread.awaitingHost = hostCalls(thread).length > 0;
             frame.settle(cpu.readReg32('ecx') | 0);
             return true;
         },
@@ -212,6 +229,7 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
                 throw new Error('bridge: a host call finished that was never suspended');
             }
             pending--;
+            thread.awaitingHost = false;
             kernel.scheduleResume(thread, {
                 eip: call.hostReturn,
                 esp: call.restingStack,

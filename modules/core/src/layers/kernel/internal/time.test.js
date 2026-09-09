@@ -87,3 +87,23 @@ test('diagnostics show the two clocks side by side', ()=>{
     assert.equal(diag.capped, 1,
         'capping often means the host stalls longer than the guest can be told');
 });
+
+test('a wait nobody has to sit through is skipped, but never past real time', ()=>{
+    // The machine may catch up with the host's clock and must not overtake it.
+    // Overtaking makes the program's own clock run fast: animations play at
+    // several times their speed, and it asks a real sound device for far more
+    // audio than the device can drain.
+    let host = 1000;
+    const clock = createClock({ now: ()=>host });
+
+    host += 40;
+    assert.equal(clock.skipTo(25), 25, 'a deadline the host has already passed');
+    assert.equal(clock.virtualTime(), 25);
+
+    assert.equal(clock.skipTo(500), 15, 'and only as far as the host has got');
+    assert.equal(clock.virtualTime(), 40);
+
+    assert.equal(clock.skipTo(500), 0, 'with nothing left, the machine has to wait');
+    assert.equal(clock.diagnostics().overtaken, 1, 'and says it refused');
+    assert.equal(clock.diagnostics().skippedMs, 40);
+});
