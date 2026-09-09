@@ -45,6 +45,10 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [stackSize]
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {() => boolean} [pageHidden]
+ *     Whether nobody is looking at this run. A hidden page's timers are clamped
+ *     by the browser, which stops the machine rather than slowing it, so the
+ *     loop waits differently when this is true. Defaults to asking the document.
  * @property {number} [record]
  *     How many events at the bridge to keep, so a run that went wrong can be
  *     saved and replayed in a test. Zero, the default, records nothing.
@@ -362,6 +366,39 @@ export function createMacrotask(){
                 }
             },
         });
+}
+
+/**
+ * Whether the page this is running in is out of sight.
+ *
+ * @returns {boolean} false wherever there is no page to ask.
+ */
+export function pageIsHidden(){
+    return typeof document !== 'undefined' && Boolean(document.hidden);
+}
+
+/**
+ * How the run loop waits when every guest thread is waiting on a deadline.
+ *
+ * A real timer, ordinarily: the machine has nothing to run, and spinning the
+ * event loop to discover that again immediately is heat rather than progress.
+ *
+ * Except when nobody is looking. A browser clamps a hidden page's timers to
+ * about a second, which does not slow the machine down politely -- it stops it.
+ * Measured switching tabs during a cinematic: the loop fell from roughly two
+ * hundred and fifty turns a second to one, the film from twenty-four frames a
+ * second to four, and what came back when the tab did was a program that had
+ * lived through one second of every five. A program running in the background
+ * is still running, so the wait becomes a macrotask, which nothing clamps.
+ *
+ * @param {Object} how
+ * @param {() => boolean} how.hidden
+ * @param {() => Promise<void>} how.macrotask
+ * @param {() => Promise<void>} how.timer
+ * @returns {Promise<void>}
+ */
+export function timedWait({ hidden, macrotask, timer }){
+    return hidden() ? macrotask() : timer();
 }
 
 /**
@@ -2551,7 +2588,13 @@ async function buildApp(options){
                         // take four seconds -- measured at two and a half times
                         // the wall clock of looking again and finding work.
                         const timer = wait.timer
-                            ? new Promise(resolve=>setTimeout(resolve, 0))
+                            ? timedWait({
+                                hidden: options.pageHidden ?? pageIsHidden,
+                                macrotask: breathe,
+                                timer: ()=>new Promise(resolve=>{
+                                    setTimeout(resolve, 0);
+                                }),
+                            })
                             : breathe();
                         await (fetched && wait.timer
                             ? Promise.race([fetched, timer])

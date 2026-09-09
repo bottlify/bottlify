@@ -169,6 +169,55 @@ try
         video: options.video,
     })})`);
 
+    /**
+     * The one line that says whether the run is still doing anything: how much
+     * of the film has been decoded, how much of it reached the screen, and how
+     * many guest instructions have been retired. Printed after every step, so a
+     * step that stops the machine is visible as the step where these stop
+     * moving rather than as a conclusion at the end.
+     */
+    const pulse = async()=>{
+        const text = await evaluate(
+            'window.__bottlify__.frameReport ? window.__bottlify__.frameReport() : null');
+        if (!text)
+        {
+            return null;
+        }
+        const seen = JSON.parse(text);
+        if (!seen.ready)
+        {
+            return null;
+        }
+        return {
+            instructions: seen.instructions ?? 0,
+            frames: seen.frames ?? 0,
+            decoded: seen.media?.frames ?? 0,
+            shown: seen.film?.shown ?? 0,
+            ticks: seen.film?.ticks ?? 0,
+            presents: seen.presenter?.presents ?? 0,
+        };
+    };
+
+    /** @type {any} */
+    let before = null;
+    /** @param {string} what */
+    const say = async what=>{
+        const now = await pulse();
+        if (!now)
+        {
+            console.log(`  ${what.padEnd(22)} (nothing running yet)`);
+            return;
+        }
+        /** @param {string} key */
+        const grew = key=>{
+            const was = before?.[key] ?? 0;
+            return `${key} ${now[key]} (+${now[key] - was})`;
+        };
+        console.log(`  ${what.padEnd(22)} ${grew('instructions')}  ${grew('decoded')}`
+            + `  ${grew('shown')}  ${grew('presents')}`);
+        before = now;
+    };
+
     /** Whatever the engine has already said went wrong, or null. */
     const failureNow = async()=>{
         const text = await evaluate(
@@ -252,10 +301,15 @@ try
         const attached = await cdp.send('Target.attachToTarget',
             { targetId: other.targetId, flatten: true });
         await cdp.send('Page.bringToFront', {}, attached.sessionId);
-        const faulted = await watch(ms);
+        // Halfway through, while the page is still in the background: whether
+        // anything is moving *now* is the question, and asking afterwards
+        // cannot tell a machine that kept going from one that caught up.
+        const faulted = await watch(Math.floor(ms / 2));
+        await say('while hidden');
+        const alsoFaulted = faulted || await watch(Math.ceil(ms / 2));
         await cdp.send('Page.bringToFront', {}, sessionId);
         await cdp.send('Target.closeTarget', { targetId: other.targetId });
-        return faulted;
+        return alsoFaulted;
     };
 
     /** @param {any} step */
@@ -305,6 +359,7 @@ try
     for (const step of scenario.steps)
     {
         reproduced = await perform(step);
+        await say(step.note ?? Object.keys(step)[0]);
         if (reproduced)
         {
             break;

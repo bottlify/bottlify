@@ -12,7 +12,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, placePatches, resolveLibraryPath,
+    createMacrotask, groupBlocks, idleWait, inParallel, pageIsHidden, placePatches,
+    resolveLibraryPath, timedWait,
     retryingFetch,
 } from './app.js';
 import { createEvents } from './events.js';
@@ -357,4 +358,35 @@ test('the wait is named for what is being waited on', ()=>{
         'a range request outranks the message queue: it is the one with a cost');
     assert.equal(waitOn({ suspended: 1, spun: 64 }).phase, 'idle-host-wait',
         'and the name says which of the two waits it took');
+});
+
+test('a run that nobody is looking at does not wait on a clamped timer', async()=>{
+    // A browser clamps a hidden page's timers to about a second, which does not
+    // slow a machine down politely -- it stops it. Measured switching tabs
+    // during a cinematic: the loop fell from about two hundred and fifty turns
+    // a second to one, and the film from twenty-four frames a second to four.
+    // So while nothing is on screen the loop yields through a macrotask, which
+    // nothing clamps, and goes back to a real timer the moment anyone looks.
+    /** @type {string[]} */
+    const took = [];
+    const how = {
+        macrotask: async()=>{
+            took.push('macrotask');
+        },
+        timer: async()=>{
+            took.push('timer');
+        },
+    };
+
+    await timedWait({ hidden: ()=>false, ...how });
+    await timedWait({ hidden: ()=>true, ...how });
+    await timedWait({ hidden: ()=>false, ...how });
+
+    assert.deepEqual(took, ['timer', 'macrotask', 'timer']);
+});
+
+test('a run outside a page is never treated as hidden', ()=>{
+    // There is no document in a worker or in Node, and answering "hidden" there
+    // would put every run that is not in a tab on the spinning path.
+    assert.equal(pageIsHidden(), false);
 });
