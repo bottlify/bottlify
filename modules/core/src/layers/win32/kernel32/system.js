@@ -67,7 +67,6 @@ const MAX_STRING = 4096;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 /** No activation context has this section: what a process without a manifest is told. */
-const ERROR_SXS_KEY_NOT_FOUND = 14007;
 
 /**
  * IsProcessorFeaturePresent's answers, for the processor this is: a 32-bit x86
@@ -298,23 +297,6 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([feature])=>PROCESSOR_FEATURES.get(feature >>> 0) === true ? 1 : 0,
-        },
-
-        /**
-         * BOOL FindActCtxSectionStringW(DWORD dwFlags, const GUID *lpExtensionGuid,
-         *                               ULONG ulSectionId, LPCWSTR lpStringToFind,
-         *                               PACTCTX_SECTION_KEYED_DATA ReturnedData)
-         *
-         * There is no activation context, so nothing is ever found. That is
-         * the answer a process without a manifest gets, and the one a runtime
-         * takes as its cue to load the plain DLL instead of a side-by-side one.
-         */
-        FindActCtxSectionStringW: {
-            argBytes: 20,
-            handler: ()=>{
-                host.setLastError(ERROR_SXS_KEY_NOT_FOUND);
-                return 0;
-            },
         },
 
         /** VOID GetSystemInfo(LPSYSTEM_INFO lpSystemInfo) */

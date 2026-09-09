@@ -243,10 +243,3 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
     assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
 });
 
-test('an activation context lookup finds nothing, as in a process without a manifest', ()=>{
-    const host = fakeHost();
-    const fns = createSystemFunctions(host);
-
-    assert.equal(fns.FindActCtxSectionStringW.handler(), 0);
-    assert.deepEqual(host.errors, [14007], 'ERROR_SXS_KEY_NOT_FOUND');
-});
