@@ -98,14 +98,15 @@ test('a build with no win32 still takes input, it just has nowhere to post it', 
 
 test('diagnostics report both halves of the layer', async()=>{
     const { api } = await open();
-    api.send({ kind: 'focus', gained: true });
     api.send({ kind: 'key', code: 'Space', down: true });
 
     const metrics = /** @type {any} */ (inputModule.diagnostics().metrics);
     assert.deepEqual(metrics.libraries, ['DINPUT.dll', 'DINPUT8.dll']);
     assert.deepEqual(metrics.devices, [], 'nothing has asked for a device yet');
     assert.deepEqual(metrics.keysDown, ['Space']);
-    assert.equal(metrics.posted, 4, 'three activation messages and the key');
+    // Focus posts nothing, and nothing here wired input to a window, so the
+    // key is the only message there is.
+    assert.equal(metrics.posted, 1, 'the key, and nothing about the page');
 
     await inputModule.dispose();
     assert.equal(inputModule.diagnostics().status, 'created');

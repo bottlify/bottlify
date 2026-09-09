@@ -339,11 +339,13 @@ test('buffered DirectInput sees the same events, in order', ()=>{
         [[DIMOUSE_OFS.X, 3, 7], [DIMOUSE_OFS.BUTTON0, KEY_DOWN, 7]]);
 });
 
-test('gaining focus activates the window before anything else arrives', ()=>{
+test('gaining focus tells the program nothing at all', ()=>{
+    // It used to send the activation trio. Focus is the page's business: it
+    // decides whether this element receives keystrokes, and a program has no
+    // reason to hear about it. Activation is sent once by `arm`, below.
     const h = harness();
     h.send({ kind: 'focus', gained: true });
-    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]),
-        [[WM.ACTIVATEAPP, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
+    assert.deepEqual(h.drain(), []);
 });
 
 test('losing focus releases every held key and button, and says nothing else', ()=>{
@@ -389,21 +391,22 @@ test('a released key is not released twice when focus goes away', ()=>{
     assert.deepEqual(h.drain(), []);
 });
 
-test('the program is told it is active once, and never told it is not', ()=>{
+test('the program is told it is active once, when input is wired to a window', ()=>{
     // There is one window in this machine and it is the active one. The
     // activation a program waits for before it will do anything is owed to it,
-    // so it is sent -- and then never taken back, however often a page loses
-    // and regains its focus afterwards.
+    // so it is sent once -- when input is wired to a window, not when a page
+    // gains focus, which would be the browser deciding it. And it
+    // is never taken back, however often the page loses its focus afterwards.
     const h = harness();
-    h.send({ kind: 'focus', gained: true });
-    assert.deepEqual(h.drain().map(m=>m.message),
-        [WM.ACTIVATEAPP, WM.ACTIVATE, WM.SETFOCUS]);
+    h.router.arm();
+    h.router.arm();
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]),
+        [[WM.ACTIVATEAPP, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
 
     h.send({ kind: 'focus', gained: false });
     h.send({ kind: 'focus', gained: true });
     h.send({ kind: 'focus', gained: false });
-    h.send({ kind: 'focus', gained: true });
-    assert.deepEqual(h.drain(), []);
+    assert.deepEqual(h.drain(), [], 'and the page losing focus says nothing');
 });
 
 test('the cursor question is asked when the answer could have changed, not per move', ()=>{

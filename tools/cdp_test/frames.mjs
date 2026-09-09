@@ -54,6 +54,16 @@ function parse(argv){
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
+        // The emulator's compiler budgets, as "index=value,index=value".
+        jit: (()=>{
+            const at = argv.indexOf('--jit');
+            if (at === -1)
+            {
+                return null;
+            }
+            return Object.fromEntries(argv[at + 1].split(',')
+                .map(pair=>pair.split('=').map(Number)));
+        })(),
     };
 }
 
@@ -91,6 +101,19 @@ function describe(before, after, windowMs){
     say(`  ${(instructions / seconds / 1e6).toFixed(1)}M guest instructions per second`);
     say(`  ${after.jitCache ?? 0} compiled entry points`
         + `${(after.jitCache ?? 0) === 0 ? '  <- nothing compiled; this is the interpreter' : ''}`);
+    if (after.jit && after.jit.compiledSteps >= 0)
+    {
+        const was = before.jit ?? {};
+        /** @param {string} key */
+        const grew = key=>Math.max(0, (after.jit[key] ?? 0) - (was[key] ?? 0));
+        const compiled = grew('compiledSteps');
+        const interpreted = grew('interpretedSteps');
+        const total = Math.max(1, compiled + interpreted);
+        say(`  ${(compiled / total * 100).toFixed(1)}% of instructions ran compiled`
+            + `, ${(interpreted / total * 100).toFixed(1)}% interpreted`);
+        say(`  ${(grew('f80Conversions') / seconds / 1e6).toFixed(2)}M 80-bit float`
+            + ` conversions per second`);
+    }
     if (after.jit)
     {
         say(`  the compiler: ${JSON.stringify(after.jit)}`);
@@ -277,6 +300,7 @@ try
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,
+        jit: options.jit || undefined,
     })}); null`);
 
     /** Waits until the page has a report and answers with it. */

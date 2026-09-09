@@ -571,6 +571,7 @@ async function run(request){
         // something inside its own code makes no host call to record, and the
         // instruction pointer is then the only account of what it was doing --
         // which is exactly the situation once a game reaches its own main loop.
+        jit: request.jit || undefined,
         quantum: request.quantum || undefined,
         sample: request.quantum
             ? (/** @type {number} */ eip)=>{

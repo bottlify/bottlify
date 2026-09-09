@@ -360,8 +360,10 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
      * something happened to a web page. In this machine there is one window and
      * it is the active one, always.
      *
-     * So the program is told it is active once, when input is first armed, and
-     * is never told otherwise. What still happens on the way out is the release
+     * The program is told it is active once, by `arm` below, when input is
+     * wired to a window -- not by a focus event, which would be the page
+     * deciding when a program becomes active. What still happens here on the
+     * way out is the release
      * of everything held: a key whose release is never delivered stays down for
      * the rest of the session, the player walks into a wall for ever, and no
      * later event can undo it because as far as the program is concerned
@@ -374,13 +376,6 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
         if (event.gained)
         {
             cursorDirty = true;
-            if (!activated)
-            {
-                activated = true;
-                emit(WM.ACTIVATEAPP, 1, 0);
-                emit(WM.ACTIVATE, WA_ACTIVE, 0);
-                emit(WM.SETFOCUS, 0, 0);
-            }
             return true;
         }
 
@@ -403,6 +398,27 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
          *
          * @param {HostInputEvent} event
          */
+        /**
+         * The one activation this machine ever sends.
+         *
+         * Called when input is wired to a window, which is a fact about this
+         * machine rather than a browser event: there is one window here and it
+         * is the active one. A program that waits to be told so before it will
+         * do anything is owed this once -- and it is never taken back, whatever
+         * the page's focus does afterwards.
+         */
+        arm(){
+            if (activated)
+            {
+                return;
+            }
+            activated = true;
+            emit(WM.ACTIVATEAPP, 1, 0);
+            emit(WM.ACTIVATE, WA_ACTIVE, 0);
+            emit(WM.SETFOCUS, 0, 0);
+        },
+
+        /** @param {HostInputEvent} event */
         send(event){
             switch (event.kind){
                 case 'key':

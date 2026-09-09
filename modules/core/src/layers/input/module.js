@@ -127,6 +127,9 @@ export const inputModule = {
              */
             attach(canvas, options){
                 attached?.detach();
+                // Wiring input to a window is when the program becomes the
+                // active one, and it stays active for the rest of the run.
+                router.arm();
                 attached = createDomInput({
                     canvas,
                     /** @param {import('./router.js').HostInputEvent} event */

@@ -74,6 +74,12 @@ export const cpuModule = {
             // for -- which is unbounded in principle and in the low thousands
             // in practice.
             thunkCapacity: config?.thunkCapacity ?? 16384 * 16,
+            // The emulator's compiler budgets, by index, for a caller that
+            // wants to A/B them: 1 is how many pages one compiled module may
+            // span, 3 how many extra basic blocks discovery may follow. The
+            // defaults are small, and a program that leaves generated code
+            // every few dozen instructions pays the dispatch walk each time.
+            jit: config?.jit,
         };
 
         /** @type {(id: number) => void} */

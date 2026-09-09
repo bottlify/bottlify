@@ -27,6 +27,9 @@ import { buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE } from './boot-rom.js
  * @property {number} trapPort      I/O port used as the guest → host call channel.
  * @property {number} entryVector   Linear address of the dword holding the guest entry point.
  * @property {number} initialStack  Initial guest ESP.
+ * @property {Record<string, number>} [jit]
+ *     The emulator's own compiler budgets, by config index, applied before
+ *     anything runs. For measurement rather than for production.
  */
 
 /** Register names in v86's reg32 view, in index order. */
@@ -92,6 +95,20 @@ export async function createV86Host(config){
     let hostWrittenBytes = 0;
     /** @type {unknown} */
     let finaliseFailure = null;
+    // How much guest code one compiled module may span, and how far discovery
+    // may follow branches into it. The defaults are three pages and a handful
+    // of extra blocks, which for a program of this size means the guest leaves
+    // generated code every few dozen instructions and pays the dispatch walk
+    // again. Raising them is a configuration, not a patch.
+    if (config?.jit)
+    {
+        for (const [index, value] of Object.entries(config.jit))
+        {
+            cpu.wm.exports.set_jit_config(Number(index), Number(value));
+        }
+        cpu.wm.exports.jit_clear_cache_js();
+    }
+
     const clearOne = cpu.jit_clear_func.bind(cpu);
     /** @type {any} */ (cpu).jit_clear_func = (/** @type {number} */ index)=>{
         clearedFunctions++;
@@ -294,12 +311,24 @@ export async function createV86Host(config){
             try
             {
                 const exports = cpu.wm.exports;
+                /** @param {number} index */
+                const read = index=>(exports.bottlify_stat
+                    ? Math.round(exports.bottlify_stat(index))
+                    : -1);
                 return {
                     disabled: exports.get_jit_config(0),
                     maxPages: exports.get_jit_config(1),
                     loopSafety: exports.get_jit_config(2),
                     cache: exports.jit_get_cache_size() >>> 0,
                     tableFree: exports.jit_get_wasm_table_index_free_list_count() >>> 0,
+                    // Where the guest's instructions actually run, and how
+                    // much of its arithmetic goes through the 80-bit software
+                    // float. Absent in an emulator build without them.
+                    compiledSteps: read(0),
+                    interpretedSteps: read(1),
+                    entries: read(2),
+                    interpretedDispatches: read(3),
+                    f80Conversions: read(4),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,
                     hostWrites,

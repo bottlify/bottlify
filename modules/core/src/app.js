@@ -77,6 +77,8 @@ import { createBlockCache, resolveBlockStore }
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
  *           write it somewhere.
+ * @property {Record<string, number>} [jit]
+ *     The emulator's compiler budgets, by config index. For measurement.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {(eip: number) => void} [sample]
@@ -1195,6 +1197,7 @@ async function buildApp(options){
             // points to say anything; raising it costs nothing but resolution.
             quantum: options.quantum,
         },
+        cpu: { jit: options.jit },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced
