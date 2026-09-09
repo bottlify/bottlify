@@ -74,6 +74,18 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     let retrieved = 0;
 
     /**
+     * What a program actually pumps, by message.
+     *
+     * A count of messages says how busy a loop is; which messages says what it
+     * is doing, and those are different questions. A loop that spends a third
+     * of every frame waiting is waiting for one particular thing, and without
+     * this the only way to find out is to read the guest's own code.
+     *
+     * @type {Map<number, number>}
+     */
+    const pumped = new Map();
+
+    /**
      * Characters the host composed, waiting for the TranslateMessage that turns
      * one into a WM_CHAR.
      *
@@ -333,6 +345,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 {
                     pending.splice(index, 1);
                     retrieved++;
+                    pumped.set(entry.message, (pumped.get(entry.message) ?? 0) + 1);
                 }
                 return entry;
             }
@@ -341,6 +354,10 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             const due = takeTimer(filter);
             if (due)
             {
+                if (filter.remove)
+                {
+                    pumped.set(WM_TIMER, (pumped.get(WM_TIMER) ?? 0) + 1);
+                }
                 return due;
             }
             if (quitCode === null)
@@ -395,6 +412,25 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             posted,
             retrieved,
             quitPending: quitCode !== null,
+            // The dozen a program pumps most, by message, newest count first.
+            // Written as hexadecimal because that is how every reference lists
+            // a WM_.
+            byMessage: Object.fromEntries([...pumped]
+                .sort((one, two)=>two[1] - one[1])
+                .slice(0, 12)
+                .map(([message, count])=>[`0x${message.toString(16)}`, count])),
+            timerDue: (()=>{
+                let soonest = null;
+                for (const timer of timers.values())
+                {
+                    if (soonest === null || timer.due < soonest)
+                    {
+                        soonest = timer.due;
+                    }
+                }
+                return soonest;
+            })(),
+            timers: timers.size,
         }),
     };
 }

@@ -130,6 +130,18 @@ function describe(before, after, windowMs){
     }
     say('');
 
+    const messages = after.messages ?? null;
+    if (messages)
+    {
+        const pumped = Object.entries(messages.byMessage ?? {})
+            .map(([id, count])=>`${id} x${count}`).join('  ');
+        say(`what the loop pumps: ${pumped || 'nothing'}`);
+        say(`  ${messages.timers} timer(s) armed`
+            + `${messages.timerDue === null ? '' : `, next due at ${messages.timerDue}ms`}`
+            + `, ${messages.depth} waiting now`);
+        say('');
+    }
+
     say('the slowest frames, and what they were made of:');
     for (const frame of after.worstFrames.slice(0, 5))
     {

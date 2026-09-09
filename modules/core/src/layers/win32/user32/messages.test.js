@@ -309,3 +309,35 @@ test('the queue says when its next timer comes due', ()=>{
     queue.killTimer(0x40, 1);
     assert.equal(queue.nextTimerDue(), null);
 });
+
+test('the queue says what a program pumps, not only how much', ()=>{
+    // A count says how busy a loop is; which messages says what it is doing,
+    // and a loop that spends a third of every frame waiting is waiting for one
+    // particular thing. Without this the only way to find out is to read the
+    // guest's own code.
+    const { clock, queue } = timed();
+    queue.post({ hwnd: 4, message: WM_USER, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 4, message: WM_USER, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 4, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
+    queue.setTimer(4, 1, 10, 0);
+
+    queue.peek(ALL);
+    queue.peek(ALL);
+    queue.peek(ALL);
+    clock.at = 100;
+    queue.peek(ALL);
+
+    const seen = queue.diagnostics();
+    assert.equal(seen.byMessage[`0x${WM_USER.toString(16)}`], 2);
+    assert.equal(seen.byMessage[`0x${WM_KEYDOWN.toString(16)}`], 1);
+    assert.equal(seen.byMessage['0x113'], 1, 'a timer counts as the message it becomes');
+    assert.equal(seen.timers, 1);
+    assert.equal(seen.timerDue, 110, 'and when the next one is owed');
+});
+
+test('a peek that leaves the message alone does not count it as pumped', ()=>{
+    const { queue } = timed();
+    queue.post({ hwnd: 4, message: WM_USER, wParam: 0, lParam: 0 });
+    queue.peek({ hwnd: null, first: 0, last: 0, remove: false });
+    assert.deepEqual(queue.diagnostics().byMessage, {});
+});

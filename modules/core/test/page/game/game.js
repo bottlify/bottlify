@@ -509,6 +509,7 @@ async function run(request){
             recentFrames: seen.recentFrames.map((/** @type {any} */ frame)=>({
                 ms: frame.ms, byKind: frame.byKind,
             })),
+            messages: layers.win32?.messages ?? null,
             instructions: layers.cpu?.instructions ?? 0,
             presents: presents,
             graphics: layers.graphics?.seam?.device

@@ -908,6 +908,15 @@ export const win32Module = {
             waveDevices: ()=>winmm.diagnostics(),
 
             /**
+             * What the program's message loop is pumping, and what it is
+             * waiting for.
+             *
+             * A loop that spends a third of every frame waiting is waiting for
+             * one particular thing, and a count of messages does not say which.
+             */
+            messages: ()=>queue.diagnostics(),
+
+            /**
              * Which messages a window procedure is still inside.
              *
              * The same difference again, for the message loop: a procedure that
@@ -946,6 +955,7 @@ export const win32Module = {
                     .reduce((total, table)=>total + Object.keys(table).length, 0),
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 waveDevices: current ? current.waveDevices() : [],
+                messages: current ? current.messages() : {},
                 windowProcedures: current ? current.windowProcedures() : [],
                 exitCode: current ? current.exitCode() : null,
             },
