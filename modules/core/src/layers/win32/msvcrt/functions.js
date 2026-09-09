@@ -53,7 +53,8 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
- * @property {(entry: number, args: number[]) => Promise<number>} callGuest
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
+ * @property {() => any} [currentThread]
  *            Runs a guest routine and resolves with what it returned.
  * @property {(bytes: number) => number} [allocate]  The process heap. Without
  *            it every allocating function answers null, which is a failure a
@@ -423,13 +424,19 @@ export function createMsvcrtFunctions(host){
             handler: async([base, num, width, comparator])=>{
                 const count = num >>> 0;
                 const size = width >>> 0;
+                // Whose call this is, read before the first await. Every one of
+                // these calls the guest back more than once, and only the first
+                // is made while this handler still holds the processor: the
+                // loop turns between them and hands the machine to somebody
+                // else, whose stack the rest would otherwise be built on.
+                const asked = host.currentThread?.();
                 for (let index = 1; index < count; index++)
                 {
                     for (let at = index; at > 0; at--)
                     {
                         const left = base + (at - 1) * size;
                         const right = base + at * size;
-                        if (await host.callGuest(comparator, [left, right]) <= 0)
+                        if (await host.callGuest(comparator, [left, right], asked) <= 0)
                         {
                             break;
                         }
@@ -523,13 +530,19 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: async([key, base, num, width, ordering])=>{
                 const size = width >>> 0;
+                // Whose call this is, read before the first await. Every one of
+                // these calls the guest back more than once, and only the first
+                // is made while this handler still holds the processor: the
+                // loop turns between them and hands the machine to somebody
+                // else, whose stack the rest would otherwise be built on.
+                const asked = host.currentThread?.();
                 let low = 0;
                 let high = (num >>> 0) - 1;
                 while (low <= high)
                 {
                     const middle = (low + high) >> 1;
                     const element = base + middle * size;
-                    const order = await host.callGuest(ordering, [key, element]);
+                    const order = await host.callGuest(ordering, [key, element], asked);
                     if (order === 0)
                     {
                         return element;
@@ -586,6 +599,7 @@ export function createMsvcrtFunctions(host){
                 allocate: host.allocate,
                 commandLine: host.commandLine,
                 callGuest: host.callGuest,
+                currentThread: host.currentThread,
                 exitProcess: host.exitProcess,
             })
             : {}),

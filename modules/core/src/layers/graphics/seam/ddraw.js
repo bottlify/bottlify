@@ -195,7 +195,9 @@ export function versionOf(id){
  * @param {() => any} deps.screen The display this build is configured for.
  * @param {SurfaceDcServices} [deps.gdi]
  * @param {(surface: PresentedSurface) => void} [deps.present]
- * @param {(call: { entry: number, args: number[] }) => Promise<number>} [deps.callGuest]
+ * @param {(call: { entry: number, args: number[], thread?: any })
+ *          => Promise<number>} [deps.callGuest]
+ * @param {() => any} [deps.currentThread]
  *        The bridge's way into guest code, for the enumerations.
  * @param {{ allocate: (bytes: number) => number }} [deps.scratch]
  *        Guest memory for the descriptor a callback is shown. One block is
@@ -206,7 +208,8 @@ export function versionOf(id){
  *        reached by QueryInterface from it, not made by an entry point.
  */
 export function createDirectDrawSeam(
-    { publisher, memory, screen, gdi, present, callGuest, scratch, extraInterfaces = [] },
+    { publisher, memory, screen, gdi, present, callGuest, currentThread, scratch,
+        extraInterfaces = [] },
 )
 {
     const fields = createFields(memory);
@@ -877,13 +880,18 @@ export function createDirectDrawSeam(
      */
     async function enumerateSurfaces(list, generation, callback, context){
         const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+        // Whose call this is, before the loop awaits anything: only the first
+        // callback of an enumeration runs on the thread standing here.
+        const asked = currentThread?.();
         for (const surface of list)
         {
             surface.addRef();
             const pointer = publisher.publish(surface, surfaceInterfaces, generation.id);
             const desc = descriptorScratch();
             writeSurfaceDesc(memory, desc, generation.layout, descriptorOf(surface));
-            const answer = await call({ entry: callback, args: [pointer, desc, context] });
+            const answer = await call({
+                entry: callback, args: [pointer, desc, context], thread: asked,
+            });
             if ((answer >>> 0) === DDENUMRET_CANCEL)
             {
                 break;
@@ -1008,6 +1016,9 @@ export function createDirectDrawSeam(
                 return DD_OK;
             }
             const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+            // Whose call this is, before the loop awaits anything: only the
+            // first callback of an enumeration runs on the thread standing here.
+            const asked = currentThread?.();
             const display = screen();
             const sizes = MODES.some(([width, height])=>
                 width === display.width && height === display.height)
@@ -1035,7 +1046,7 @@ export function createDirectDrawSeam(
                             pixelFormat,
                         });
                         const answer = await call({ entry: callback >>> 0,
-                            args: [desc, context >>> 0] });
+                            args: [desc, context >>> 0], thread: asked });
                         if ((answer >>> 0) === DDENUMRET_CANCEL)
                         {
                             return DD_OK;

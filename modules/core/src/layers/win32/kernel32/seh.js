@@ -143,7 +143,9 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           the head of the chain.
  * @property {() => Record<string, number>} registers
  * @property {(values: Record<string, number>) => void} setRegisters
- * @property {(options: { entry: number, args: number[] }) => Promise<number>} callGuest
+ * @property {(options: { entry: number, args: number[], thread?: any })
+ *              => Promise<number>} callGuest
+ * @property {() => any} [currentThread]
  * @property {(text: string) => void} [trace]
  */
 
@@ -293,6 +295,10 @@ export function createSeh(host){
         });
         writeContext(at.context, registers);
 
+        // Whose fault this is, read before the walk. Each handler is guest
+        // code and the loop turns between them, so from the second one onwards
+        // the thread on the processor is somebody else's.
+        const asked = host.currentThread?.();
         const { frames, damaged } = chain();
         host.trace?.(`exception ${hex(what.code)} at ${hex(what.address)}, `
             + `${frames.length} frame(s)${damaged ? ', chain damaged' : ''}`);
@@ -308,6 +314,7 @@ export function createSeh(host){
             const answer = await host.callGuest({
                 entry: handler,
                 args: [at.record, frame, at.context, 0],
+                thread: asked,
             }) >>> 0;
 
             if (answer === Disposition.CONTINUE_EXECUTION)
@@ -348,6 +355,9 @@ export function createSeh(host){
             address,
         });
 
+        // As above: the unwind runs a handler per frame, and only the first
+        // of them runs on the thread that is standing here now.
+        const asked = host.currentThread?.();
         let reached = false;
         for (const { frame, handler } of frames)
         {
@@ -362,6 +372,7 @@ export function createSeh(host){
                 await host.callGuest({
                     entry: handler,
                     args: [at.record, frame, at.context, 0],
+                    thread: asked,
                 });
             }
         }

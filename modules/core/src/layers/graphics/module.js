@@ -292,6 +292,7 @@ export const graphicsModule = {
             // of the call.
             /** @param {any} call */
             callGuest: call=>bridge.callGuest(call),
+            currentThread: ()=>bridge.callerThread(),
             scratch: {
                 /** @param {number} bytes */
                 allocate: bytes=>win32.heap().allocate(bytes),

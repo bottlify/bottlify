@@ -114,7 +114,8 @@ export function splitCommandLine(line){
  *           What the process was started with, exactly as GetCommandLineA
  *           reports it -- the two must agree, because a program is free to read
  *           either and compare.
- * @property {(entry: number, args: number[]) => Promise<number>} callGuest
+ * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
+ * @property {() => any} [currentThread]
  * @property {(code: number) => any} exitProcess
  *           Ends the process. Returns whatever the caller must return to stop
  *           the calling thread, since `exit` does not come back.
@@ -285,8 +286,13 @@ export function createStartupFunctions(host){
                         entries.push(entry);
                     }
                 }
+                // Whose call this is, read before the walk starts. Only the
+                // first initialiser runs while this handler holds the
+                // processor; the loop turns between them, and the rest would
+                // otherwise be built on whichever thread ran next.
+                const asked = host.currentThread?.();
                 return entries.reduce(
-                    (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [])),
+                    (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
                     Promise.resolve(0)).then(()=>0);
             },
         },
@@ -318,9 +324,10 @@ export function createStartupFunctions(host){
                         entries.push(entry);
                     }
                 }
+                const asked = host.currentThread?.();
                 return entries.reduce(
                     (waiting, entry)=>waiting.then(
-                        code=>(code !== 0 ? code : host.callGuest(entry, []))),
+                        code=>(code !== 0 ? code : host.callGuest(entry, [], asked))),
                     /** @type {Promise<number>} */ (Promise.resolve(0)));
             },
         },

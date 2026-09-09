@@ -81,14 +81,18 @@ export function guidBytes(guid){
  *           The backend and its company, for a device that draws. A function
  *           is called when the first D3D7 object is made, so that a build
  *           that never reaches Direct3D never builds a GPU.
- * @property {(call: { entry: number, args: number[] }) => Promise<number>} [callGuest]
+ * @property {(call: { entry: number, args: number[], thread?: any })
+ *              => Promise<number>} [callGuest]
+ * @property {() => any} [currentThread]
  * @property {{ allocate: (bytes: number) => number }} [scratch]
  */
 
 /**
  * @param {Direct3D7Deps} deps
  */
-export function createDirect3D7Seam({ publisher, memory, render, callGuest, scratch }){
+export function createDirect3D7Seam(
+    { publisher, memory, render, callGuest, currentThread, scratch })
+{
     const fields = createFields(memory);
 
     /** One D3D7 object per DirectDraw object, made when first asked for. */
@@ -369,13 +373,17 @@ export function createDirect3D7Seam({ publisher, memory, render, callGuest, scra
                 return D3D_OK;
             }
             const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+            // Whose call this is, before the loop awaits anything: only the
+            // first callback of an enumeration runs on the thread standing here.
+            const asked = currentThread?.();
             return (async()=>{
                 for (const depth of TEXTURE_DEPTHS)
                 {
                     const format = /** @type {any} */ (pixelFormatForDepth(depth));
                     const at = scratchBlock();
                     writePixelFormat(memory, at, format);
-                    const answer = await call({ entry: callback >>> 0, args: [at, context >>> 0] });
+                    const answer = await call({ entry: callback >>> 0,
+                        args: [at, context >>> 0], thread: asked });
                     if ((answer >>> 0) === DDENUMRET_CANCEL)
                     {
                         break;
@@ -757,6 +765,9 @@ export function createDirect3D7Seam({ publisher, memory, render, callGuest, scra
                 return D3D_OK;
             }
             const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+            // Whose call this is, before the loop awaits anything: only the
+            // first callback of an enumeration runs on the thread standing here.
+            const asked = currentThread?.();
             const d3d = d3dFor(root);
             return (async()=>{
                 for (const device of d3d.enumDevices())
@@ -768,7 +779,7 @@ export function createDirect3D7Seam({ publisher, memory, render, callGuest, scra
                     writeString(description, device.text);
                     writeString(name, device.name);
                     const answer = await call({ entry: callback >>> 0,
-                        args: [description, name, at, context >>> 0] });
+                        args: [description, name, at, context >>> 0], thread: asked });
                     if ((answer >>> 0) === DDENUMRET_CANCEL)
                     {
                         break;
@@ -836,12 +847,16 @@ export function createDirect3D7Seam({ publisher, memory, render, callGuest, scra
                 return D3D_OK;
             }
             const call = /** @type {NonNullable<typeof callGuest>} */ (callGuest);
+            // Whose call this is, before the loop awaits anything: only the
+            // first callback of an enumeration runs on the thread standing here.
+            const asked = currentThread?.();
             return (async()=>{
                 for (const depth of [16, 32])
                 {
                     const at = scratchBlock();
                     writePixelFormat(memory, at, depthFormatForDepth(depth));
-                    const answer = await call({ entry: callback >>> 0, args: [at, context >>> 0] });
+                    const answer = await call({ entry: callback >>> 0,
+                        args: [at, context >>> 0], thread: asked });
                     if ((answer >>> 0) === DDENUMRET_CANCEL)
                     {
                         break;

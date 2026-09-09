@@ -386,6 +386,7 @@ export const win32Module = {
             setRegisters,
             /** @param {any} call */
             callGuest: call=>bridge.callGuest(call),
+            currentThread: ()=>kernel.currentThread(),
             /** @param {string} text */
             trace: text=>trace(text),
         });
@@ -627,6 +628,7 @@ export const win32Module = {
                     setRegisters,
                     /** @param {any} call */
                     callGuest: call=>bridge.callGuest(call),
+                    currentThread: ()=>kernel.currentThread(),
                     unwind: seh.unwind,
                 }).table,
                 ...createMsvcrtFunctions({
@@ -634,7 +636,11 @@ export const win32Module = {
                     writeMemory,
                     readCString,
                     write: (handle, text)=>sink(handle, text),
-                    callGuest: (entry, args)=>bridge.callGuest({ entry, args }),
+                    /**
+                      * @param {number} entry @param {number[]} args @param {any} [thread]
+                      */
+                    callGuest: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    currentThread: ()=>kernel.currentThread(),
                     // One allocator behind malloc and HeapAlloc alike: a C++
                     // program frees with `delete` what a library function
                     // allocated with `malloc`, and Windows lets it.

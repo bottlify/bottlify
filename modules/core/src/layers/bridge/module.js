@@ -287,6 +287,16 @@ export const bridgeModule = {
             suspended: ()=>callbacks.pendingCalls(),
 
             /**
+             * Whose call is being handled right now.
+             *
+             * Read at the top of a handler that is going to await and then call
+             * guest code: after the await the thread on the processor is
+             * somebody else, and this is the only moment the answer is still
+             * there to take.
+             */
+            callerThread: ()=>parking.current()?.thread ?? kernel.currentThread(),
+
+            /**
              * An error thrown by a suspended handler, which nothing above was
              * waiting on. Null unless one happened.
              */

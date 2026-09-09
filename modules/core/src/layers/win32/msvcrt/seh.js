@@ -59,7 +59,9 @@ export const NO_TRY_LEVEL = 0xffffffff;
  * @property {(address: number) => boolean} isMapped
  * @property {() => Record<string, number>} registers
  * @property {(values: Record<string, number>) => void} setRegisters
- * @property {(options: { entry: number, args: number[] }) => Promise<number>} callGuest
+ * @property {(options: { entry: number, args: number[], thread?: any })
+ *              => Promise<number>} callGuest
+ * @property {() => any} [currentThread]
  * @property {(targetFrame: number, address: number) => Promise<any>} unwind
  */
 
@@ -105,6 +107,11 @@ export function createCrtSeh(host){
      * @returns {Promise<number>}
      */
     const exceptHandler3 = async([record, frame])=>{
+        // Whose exception this is, read before anything is awaited. A __finally
+        // block and a filter are both guest code, the walk runs several of
+        // them, and the loop turns in between -- so after the first one the
+        // thread on the processor is no longer the one that faulted.
+        const asked = host.currentThread?.();
         const flags = readU32((record >>> 0) + 4);
         const table = readU32((frame >>> 0) + SCOPE_FRAME.TABLE);
         let level = readU32((frame >>> 0) + SCOPE_FRAME.TRY_LEVEL);
@@ -126,7 +133,7 @@ export function createCrtSeh(host){
                 // block simply runs as the frame goes away.
                 if (scope.filter === 0 && host.isMapped(scope.target))
                 {
-                    await host.callGuest({ entry: scope.target, args: [] });
+                    await host.callGuest({ entry: scope.target, args: [], thread: asked });
                 }
                 level = scope.enclosing;
             }
@@ -138,7 +145,8 @@ export function createCrtSeh(host){
             const scope = entryAt(table, level);
             if (scope.filter !== 0 && host.isMapped(scope.filter))
             {
-                const answer = await host.callGuest({ entry: scope.filter, args: [] }) | 0;
+                const answer = await host.callGuest(
+                    { entry: scope.filter, args: [], thread: asked }) | 0;
                 if (answer === EXCEPTION_EXECUTE_HANDLER)
                 {
                     // The frames between the fault and this one go away before
