@@ -10,6 +10,7 @@ import {
     D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
+import { createReferenceCount, createTexture } from './resources.js';
 
 const SIZE = 128;
 const BYTES_PER_PIXEL = 4;
@@ -280,4 +281,48 @@ test('a lock keeps the flags it was given, so a backend can honour them', ()=>{
 
     out.surface.release();
     assertFullyReleased(device);
+});
+
+test('a texture gives its storage back when the last reference goes', ()=>{
+    // The arena a texture's pixels come out of is the one the program's own
+    // allocator draws from, and GlobalMemoryStatus reports what is left of it.
+    // Holding the pixels of a texture nobody references does not merely leak
+    // address space -- it tells the program it is running out of memory, and a
+    // program told that evicts its own assets and loads them again. Measured on
+    // a real title's steady menu: a fifth of every guest instruction retired
+    // was re-reading and re-decoding textures it already had.
+    /** @type {number[]} */
+    const freed = [];
+    let next = 0x1000;
+    const texture = createTexture({
+        width: 8, height: 8, levels: 2, format: D3DFMT.A8R8G8B8,
+        pool: D3DPOOL.MANAGED, usage: 0,
+        count: createReferenceCount(),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const at = next;
+            next += bytes;
+            return at;
+        },
+        /** @param {number} address */
+        free: address=>freed.push(address),
+    });
+
+    /** @type {{ surface?: any }} */
+    const level0 = {};
+    /** @type {{ surface?: any }} */
+    const level1 = {};
+    texture.GetSurfaceLevel(0, level0);
+    texture.GetSurfaceLevel(1, level1);
+    const taken = [level0.surface.base, level1.surface.base];
+    assert.equal(freed.length, 0, 'nothing is given back while it is referenced');
+
+    // A level handed out takes a reference of its own; the storage goes back
+    // when the last of them does.
+    while (texture.refCount > 0)
+    {
+        texture.release();
+    }
+    assert.deepEqual(freed.sort(), taken.sort(),
+        'every level a program ever locked is handed back, not only the first');
 });

@@ -119,6 +119,13 @@ export function createMessageQueue({ now = ()=>0 } = {}){
      *
      * @param {MessageFilter} filter
      */
+    /** How well a timer's ticks are delivered against what it asked for. */
+    let timerTicks = 0;
+    let timerLateTicks = 0;
+    let timerLateMs = 0;
+    let worstTimerLateMs = 0;
+
+    /** @param {MessageFilter} filter */
     const takeTimer = filter=>{
         const at = now();
         for (const timer of timers.values())
@@ -147,6 +154,18 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             // handler that runs long does not make the timer drift later and
             // later. Skipped forward when it has fallen a whole period behind,
             // because catching up on missed ticks is a backlog nobody wants.
+            // How late this tick was handed over. A program that paces itself
+            // by a timer runs at the rate the timer is actually delivered at,
+            // not the rate it asked for, and lateness here is a frame rate lost
+            // somewhere nobody would think to look.
+            const late = at - timer.due;
+            if (late > 0)
+            {
+                timerLateMs += late;
+                timerLateTicks++;
+                worstTimerLateMs = Math.max(worstTimerLateMs, late);
+            }
+            timerTicks++;
             timer.due = Math.max(at, timer.due) + timer.elapse;
             return message;
         }
@@ -431,6 +450,17 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 return soonest;
             })(),
             timers: timers.size,
+            // What each armed timer actually asked for, and when it is next
+            // due. A machine that spends two fifths of every frame waiting for
+            // a timer is waiting for one of these, and until now a report could
+            // not say which or how often it wanted to fire.
+            timerIntervals: [...timers.values()].map(timer=>timer.elapse),
+            timerTicks,
+            timerLateTicks,
+            averageTimerLateMs: timerLateTicks === 0
+                ? 0
+                : Math.round(timerLateMs / timerLateTicks),
+            worstTimerLateMs: Math.round(worstTimerLateMs),
         }),
     };
 }

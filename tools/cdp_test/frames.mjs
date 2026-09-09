@@ -193,8 +193,17 @@ function describe(before, after, windowMs){
             .map(([id, count])=>`${id} x${count}`).join('  ');
         say(`what the loop pumps: ${pumped || 'nothing'}`);
         say(`  ${messages.timers} timer(s) armed`
+            + `${(messages.timerIntervals ?? []).length > 0
+                ? ` every ${messages.timerIntervals.join(', ')}ms` : ''}`
             + `${messages.timerDue === null ? '' : `, next due at ${messages.timerDue}ms`}`
             + `, ${messages.depth} waiting now`);
+        if ((messages.timerTicks ?? 0) > 0)
+        {
+            say(`  ${messages.timerTicks} tick(s) delivered`
+                + `, ${messages.timerLateTicks} late`
+                + ` by ${messages.averageTimerLateMs}ms on average`
+                + `, worst ${messages.worstTimerLateMs}ms`);
+        }
         say('');
     }
 
@@ -234,6 +243,10 @@ function describe(before, after, windowMs){
                 + `, no picture ${held.silent}`
                 + `, nowhere to show it ${held.noScreen}`
                 + `, no room for it ${held.noRoom}`);
+            say(`  the picture is ${held.driftMs ?? 0}ms ahead of the sound`
+                + ` (worst ${held.worstDriftMs ?? 0}ms)`
+                + `, ${held.soundMs ?? 0}ms of it played`
+                + `, ${held.queuedMs ?? 0}ms waiting to be mixed`);
         }
         say('');
     }

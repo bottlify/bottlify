@@ -180,6 +180,11 @@ function isTransformType(type){
  *     it writes through and the unlock reads those bytes back, so it has to be
  *     memory the guest can reach. Absent, addresses are invented -- which works
  *     exactly until something reads one.
+ * @property {(address: number)=>void} [free]
+ *     Gives that memory back when the last reference to a resource goes.
+ *     Absent, storage is held for the life of the process -- which the program
+ *     reads back as memory disappearing, and answers by evicting its own
+ *     assets and loading them again.
  * @property {boolean} [dumpDraws]
  *     Ask the renderer for a per-draw account of the last frame. Off by
  *     default: it costs a transform of every vertex of every draw.
@@ -271,15 +276,15 @@ function reportPresentParameters(parameters){
  */
 export function createDirect3D8(options = {}){
     const {
-        backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
-        divergence, skipTexture, ...caps
+        backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
+        dumpDraws, maxDraws, divergence, skipTexture, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
-        backend, readMemory, createSampler, allocate: guestMemory, dumpDraws, maxDraws,
-        divergence, skipTexture,
+        backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
+        dumpDraws, maxDraws, divergence, skipTexture,
     };
     if (backend && !readMemory)
     {
@@ -439,6 +444,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      * resources and starts filling them.
      */
     let nextAddress = 0x40000000;
+    /** Addresses this layer invented rather than took from the guest's heap. */
+    const fabricated = new Set();
     const softwareVertexProcessing =
         (behaviourFlags & D3DCREATE.SOFTWARE_VERTEXPROCESSING) !== 0;
 
@@ -535,9 +542,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      */
     const allocate = bytes=>{
         // Real guest memory when the assembling caller supplied a way to get
-        // some. Not freed on release yet: a resource's storage outlives it
-        // here, which costs address space and is the next thing to fix if a
-        // program is seen to churn through surfaces.
+        // some, and given back when the last reference goes -- see `free`.
         if (services.allocate)
         {
             const address = services.allocate(Math.max(bytes, 1));
@@ -550,7 +555,30 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         // Aligned generously: a lock's reported pitch is the row stride, and
         // nothing here should ever depend on two surfaces being adjacent.
         nextAddress += Math.max(bytes, 1) + 0x1000;
+        fabricated.add(address);
         return address;
+    };
+
+    /**
+     * Gives a resource's storage back.
+     *
+     * The arena a texture's pixels come out of is the one the program's own
+     * allocator draws from, and the program sizes its asset cache from what
+     * that arena reports free -- so storage held for a resource nobody
+     * references does not merely cost address space, it tells the program to
+     * evict what it has and load it again.
+     *
+     * An address this layer invented for itself was never the allocator's to
+     * begin with; handing it back would free somebody else's block.
+     *
+     * @param {number} address
+     */
+    const free = address=>{
+        if (address === 0 || fabricated.has(address))
+        {
+            return;
+        }
+        services.free?.(address);
     };
 
     /**
@@ -1947,6 +1975,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage,
                 count: explicitCount(pool),
                 allocate,
+                free,
             });
             if (renderer)
             {
@@ -1979,6 +2008,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage,
                 count: explicitCount(pool),
                 allocate,
+                free,
                 cube: true,
             });
             return D3D_OK;

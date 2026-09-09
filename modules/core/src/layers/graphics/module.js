@@ -103,6 +103,12 @@ export const graphicsModule = {
                 // memory the guest can write through, because the unlock reads
                 // back exactly what it wrote.
                 allocate: config?.allocate,
+                // And the way to give it back. A texture's pixels come out of
+                // the one arena the guest allocates from, and a program sizes
+                // its own asset cache from what that arena reports free -- so
+                // holding the pixels of a texture nobody references tells the
+                // program to stop keeping things.
+                free: config?.free,
                 // Rides on the device handle because that object reaches this
                 // layer exactly as the assembling caller wrote it, and a
                 // per-draw account of a frame is a thing only that caller can
@@ -125,6 +131,7 @@ export const graphicsModule = {
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
                 allocate: config?.allocate,
+                free: config?.free,
             }),
             // OpenGL draws on the processor and asks for no device at all, so
             // it is the one API here that a headless build can run to a

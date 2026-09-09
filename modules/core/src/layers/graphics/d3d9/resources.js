@@ -38,6 +38,7 @@ import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 /**
  * @typedef {Object} ReferenceCount
  * @property {number} value
+ * @property {boolean} destroyed
  * @property {() => number} addRef
  * @property {() => number} release
  */
@@ -54,6 +55,12 @@ export function createReferenceCount(options = {}){
     return {
         get value(){
             return count;
+        },
+        // Whether the last reference has gone for good. An implicit resource
+        // never reaches this: the device owns it and hands out the same pointer
+        // for as long as it lives, so its storage must not be reclaimed.
+        get destroyed(){
+            return destroyed;
         },
         addRef(){
             if (destroyed)
@@ -253,6 +260,9 @@ export function levelExtent(size, level){
  * @property {number} usage
  * @property {ReferenceCount} count
  * @property {(bytes: number) => number} allocate
+ * @property {(address: number) => void} [free]
+ *     Gives a level's storage back when the last reference goes. Absent in a
+ *     build whose storage is a fabricated address rather than guest memory.
  * @property {boolean} [cube]
  */
 
@@ -313,7 +323,29 @@ export function createTexture(options){
             return options.count.value;
         },
         addRef: ()=>options.count.addRef(),
-        release: ()=>options.count.release(),
+
+        /**
+         * Gives the storage back when the last reference goes.
+         *
+         * A texture's pixels come out of the one arena everything the guest is
+         * handed comes out of, and a program sizes its own asset cache from
+         * what that arena reports free. Keeping the pixels of a texture nobody
+         * holds does not merely leak address space -- it tells the program it
+         * is running out of memory, and a program told that evicts what it has
+         * and loads it again, for ever.
+         */
+        release(){
+            const left = options.count.release();
+            if (options.count.destroyed)
+            {
+                for (const surface of surfaces.values())
+                {
+                    options.free?.(surface.base);
+                }
+                surfaces.clear();
+            }
+            return left;
+        },
 
         /**
          * @param {number} level

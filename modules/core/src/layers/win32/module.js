@@ -284,6 +284,10 @@ export const win32Module = {
             block: address=>allocator.block(address),
             /** @param {number} address @param {number} bytes */
             resize: (address, bytes)=>allocator.resize(address, bytes),
+            // What is left of it. A program sizes its own caches from this
+            // through GlobalMemoryStatus, so anything that takes from the arena
+            // and does not give back changes how the program behaves.
+            diagnostics: ()=>allocator.diagnostics(),
         };
         bridge.useHeap(heap);
 
@@ -301,6 +305,11 @@ export const win32Module = {
                 close: handle=>kernel.handles.close(handle),
             },
             surfaces: heap,
+            // The display every device metric is derived from. It is the same
+            // screen the drawing layer is configured with: a program that asks
+            // GDI how big the desktop is and then creates a device that size
+            // must not be told two different things.
+            screen: config?.screen,
             // Where pixels go, and which pixel formats exist. The graphics
             // layer is above this one and cannot be imported from here, so the
             // assembling caller hands it down -- and reads it lazily, because
@@ -717,6 +726,11 @@ export const win32Module = {
                 readCString,
                 handles,
                 queue,
+                // What GetSystemMetrics and EnumDisplaySettings answer with.
+                // The same screen GDI and the drawing layer are given: a
+                // program picks its mode from this and would otherwise be
+                // offered one the device it then creates does not have.
+                screen: config?.screen,
                 dispatching,
                 dispatch: (wndProc, message)=>bridge.callGuest({
                     entry: wndProc,
@@ -871,8 +885,12 @@ export const win32Module = {
              * reach.
              *
              * @param {number} nowMs
+             * @param {number | null} [soundMs]
+             *        How much of the running film's sound has been played, for
+             *        the graph to pace the picture against. Only whoever is
+             *        playing it knows.
              */
-            videoTick: nowMs=>quartz.tick(nowMs),
+            videoTick: (nowMs, soundMs)=>quartz.tick(nowMs, soundMs ?? null),
 
             /** The registry, whose contents outlive the process (§9). */
             registry: ()=>hive,
@@ -970,6 +988,11 @@ export const win32Module = {
                 ioCompletionWaits: current ? current.ioCompletionWaits() : [],
                 waveDevices: current ? current.waveDevices() : [],
                 messages: current ? current.messages() : {},
+                // What is left of the one arena everything the guest is handed
+                // comes out of. A program sizes its own caches from this, so a
+                // layer that takes from it and never gives back does not merely
+                // leak -- it tells the program to stop keeping things.
+                heap: current ? current.heap().diagnostics() : null,
                 windowProcedures: current ? current.windowProcedures() : [],
                 exitCode: current ? current.exitCode() : null,
             },

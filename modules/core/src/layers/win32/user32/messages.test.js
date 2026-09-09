@@ -341,3 +341,29 @@ test('a peek that leaves the message alone does not count it as pumped', ()=>{
     queue.peek({ hwnd: null, first: 0, last: 0, remove: false });
     assert.deepEqual(queue.diagnostics().byMessage, {});
 });
+
+test('a timer says how late its ticks were delivered', ()=>{
+    // A program that paces itself by a timer runs at the rate the timer is
+    // actually delivered at, not the rate it asked for. Measured on a real
+    // title, two fifths of every frame went into waiting for one of these, and
+    // nothing in any report could say whether the wait was the program's own
+    // choice or our lateness.
+    let clock = 0;
+    const queue = createMessageQueue({ now: ()=>clock });
+    queue.setTimer(0x40, 7, 16, 0);
+
+    clock = 16;
+    assert.equal(queue.peek(ALL)?.message, WM_TIMER, 'on time');
+    let report = queue.diagnostics();
+    assert.equal(report.timerTicks, 1);
+    assert.equal(report.timerLateTicks, 0, 'a tick taken the moment it came due is not late');
+
+    // Nobody looked until well past the next tick.
+    clock = 52;
+    assert.equal(queue.peek(ALL)?.message, WM_TIMER);
+    report = queue.diagnostics();
+    assert.equal(report.timerTicks, 2);
+    assert.equal(report.timerLateTicks, 1);
+    assert.equal(report.worstTimerLateMs, 20, 'due at 32, taken at 52');
+    assert.deepEqual(report.timerIntervals, [16], 'and what it asked for is reported too');
+});
