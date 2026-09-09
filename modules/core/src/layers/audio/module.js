@@ -60,6 +60,14 @@ export const audioModule = {
         // Whether the other end of the ring is being read. Told from outside,
         // because only the assembling caller knows whether it opened a device.
         const drained = config?.drained ?? false;
+        // The whole path a sound takes, counted at each stage. Without these a
+        // silent run and a working one produce the same report, and the first
+        // question -- did anything come out of a buffer at all -- has no answer.
+        let fills = 0;
+        let refusedFills = 0;
+        let fedBytes = 0;
+        let fedRanges = 0;
+        let openTracks = 0;
 
         let nextAddress = 0x50000000;
         const allocate = config?.allocate ?? ((/** @type {number} */ bytes)=>{
@@ -121,6 +129,7 @@ export const audioModule = {
          * program wrote into long ago, at the rate the cursor moves.
          */
         const feedBuffers = ()=>{
+            fills++;
             // Nothing is reading the other end, so everything read out here
             // would be mixed and thrown away. The cursors still advance -- that
             // is DirectSound's own business and the program watches them -- but
@@ -128,6 +137,7 @@ export const audioModule = {
             // every mix of every turn.
             if (!drained)
             {
+                refusedFills++;
                 return;
             }
             for (const buffer of dsound.buffers())
@@ -155,6 +165,7 @@ export const audioModule = {
                         bitsPerSample: buffer.format.bitsPerSample,
                     });
                     tracks.set(buffer, track);
+                    openTracks++;
                 }
                 // Too far ahead to be worth playing: the cursor is driven by the
                 // guest's clock and the ring drains at the pace of a real
@@ -174,6 +185,8 @@ export const audioModule = {
                 track.gain = buffer.gain;
                 for (const range of ranges)
                 {
+                    fedBytes += range.bytes;
+                    fedRanges++;
                     track.write(memory.readBytes(buffer.address + range.from, range.bytes));
                 }
             }
@@ -196,6 +209,23 @@ export const audioModule = {
              * the thread's last error.
              */
             output: ()=>mixer,
+
+            /**
+             * What came out of the program's own sound buffers.
+             *
+             * `sink` is the one that decides everything else: with nothing
+             * draining the other end this layer reads no samples at all, on
+             * purpose, and every other number here is legitimately zero. A run
+             * with no sound and no sink is not a defect in the sound path.
+             */
+            feeding: ()=>({
+                sink: drained,
+                fills,
+                refusedFills,
+                fedRanges,
+                fedBytes,
+                tracksOpen: openTracks,
+            }),
 
             /**
              * Mixes ahead into the ring. Called once a scheduler turn by
@@ -231,6 +261,7 @@ export const audioModule = {
                 ...(current ? current.dsound().diagnostics() : {}),
                 ...(current ? current.output().diagnostics() : {}),
                 behindTurns: current ? current.behind() : 0,
+                ...(current ? current.feeding() : {}),
             },
         };
     },

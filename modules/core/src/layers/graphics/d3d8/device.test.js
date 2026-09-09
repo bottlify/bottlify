@@ -1435,3 +1435,22 @@ test('a back buffer is lockable exactly when the program asked for one', ()=>{
     assert.equal(held.surface.UnlockRect(), D3D_OK);
     asked.release();
 });
+
+test('the device reports memory it will not take back', ()=>{
+    // A program sizes its texture cache from this and evicts to stay under it.
+    // Nothing here evicts anything -- a texture's copy on the GPU lives as long
+    // as the texture does -- so an answer small enough to make a program work
+    // around it is describing a device other than this one. Sixty-four
+    // megabytes did exactly that: measured on a real title's menu, a tenth of
+    // every instruction the guest retired was inside its JPEG decoder,
+    // re-decoding textures it had already loaded, and the picture flickered as
+    // they came and went.
+    const device = createDevice();
+    const reported = device.GetAvailableTextureMem();
+
+    assert.ok(reported >= 256 * 1024 * 1024,
+        `${reported} is not enough room for a program of this era to stop evicting`);
+    assert.ok(reported < 0x7fffffff,
+        'and it stays positive in a caller that treats a DWORD as signed');
+    assertFullyReleased(device);
+});

@@ -77,7 +77,7 @@ import { blt, bltFast } from '../ddraw/blit.js';
 const IID_IDirect3D7 = '{F5049E77-4861-11D2-A407-00A0C90629A8}';
 
 /** What the caps report as video memory: a round number nothing here measures. */
-const VIDEO_MEMORY = 64 << 20;
+const VIDEO_MEMORY = 256 << 20;
 
 /** What an enumeration callback answers to go on, and to stop. */
 const DDENUMRET_CANCEL = 0;

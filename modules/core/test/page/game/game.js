@@ -41,7 +41,16 @@ const LIMITS = {
     log: 400000,
 };
 
-/** Every instruction pointer the sampler saw, in order. @type {number[]} */
+/**
+ * Where the guest was, and how much it retired while it was there.
+ *
+ * Weighted, because a sample per scheduler turn counts a parked thread that
+ * retired two instructions the same as a working one that retired a hundred
+ * thousand -- and an unweighted profile of this machine therefore reads as
+ * though it spends a seventh of its life in the park loop.
+ *
+ * @type {{ eip: number, retired: number }[]}
+ */
 const samples = [];
 
 /** Written out rather than escaped, so no tooling can mangle it. */
@@ -106,16 +115,24 @@ function profile(layout){
     const histogram = (mask, keep)=>{
         /** @type {Map<string, number>} */
         const counts = new Map();
-        for (const eip of samples)
+        let total = 0;
+        for (const { eip, retired } of samples)
         {
             const key = where(eip, mask);
-            counts.set(key, (counts.get(key) ?? 0) + 1);
+            counts.set(key, (counts.get(key) ?? 0) + retired);
+            total += retired;
         }
         return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, keep)
-            .map(([at, count])=>({ at, count, share: count / samples.length }));
+            .map(([at, count])=>({ at, count, share: count / Math.max(1, total) }));
     };
 
-    return { samples: samples.length, pages: histogram(~0xfff, 16), exact: histogram(~0, 16) };
+    const retired = samples.reduce((total, one)=>total + one.retired, 0);
+    return {
+        samples: samples.length,
+        retired,
+        pages: histogram(~0xfff, 16),
+        exact: histogram(~0, 16),
+    };
 }
 
 /** @type {any} */
@@ -514,6 +531,10 @@ async function run(request){
                 ms: frame.ms, byKind: frame.byKind,
             })),
             messages: layers.win32?.messages ?? null,
+            // Where the guest itself is spending its turns. The only account
+            // there is of a program's own code, which makes no host call to
+            // record what it decided.
+            profile: profile(layers.memory?.layout ?? []),
             // Whether the emulator honoured the slice it was given. A quantum
             // that is not kept is time one thread holds the machine while a
             // frame waits, and it is invisible in every other number here.
@@ -528,6 +549,9 @@ async function run(request){
             // two and nothing else.
             presenter: layers.graphics?.presenter ?? null,
             media: layers.media ?? null,
+            // The whole path a sound takes, stage by stage. A silent run and a
+            // working one used to produce the same report.
+            audio: layers.audio ?? null,
             film: layers.app?.film ?? null,
             instructions: layers.cpu?.instructions ?? 0,
             // Zero here means every guest instruction is interpreted.
@@ -573,11 +597,11 @@ async function run(request){
         // which is exactly the situation once a game reaches its own main loop.
         jit: request.jit || undefined,
         quantum: request.quantum || undefined,
-        sample: request.quantum
-            ? (/** @type {number} */ eip)=>{
+        sample: request.profile || request.quantum
+            ? (/** @type {number} */ eip, /** @type {number} */ retired)=>{
                 if (samples.length < LIMITS.samples)
                 {
-                    samples.push(eip);
+                    samples.push({ eip, retired });
                 }
             }
             : undefined,

@@ -51,6 +51,8 @@ function parse(argv){
         settle: number('--settle', 20),
         // A cinematic is minutes long and is not the steady state either.
         video: argv.includes('--video'),
+        // Sample where the guest's instruction pointer is, once a turn.
+        profile: argv.includes('--profile'),
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
@@ -173,6 +175,17 @@ function describe(before, after, windowMs){
         say('');
     }
 
+    if (after.profile)
+    {
+        say(`where the guest itself was, by instructions retired`
+            + ` (${after.profile.samples} samples):`);
+        for (const row of after.profile.pages.slice(0, 12))
+        {
+            say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${row.at}`);
+        }
+        say('');
+    }
+
     const messages = after.messages ?? null;
     if (messages)
     {
@@ -196,6 +209,19 @@ function describe(before, after, windowMs){
         }
         say('');
     }
+    const heard = after.audio ?? null;
+    if (heard)
+    {
+        say(`the sound: ${heard.sink ? 'something is draining it' : 'NOTHING is draining it'}`
+            + `, ${heard.buffers ?? 0} buffer(s), ${heard.playing ?? 0} playing`
+            + `, ${heard.tracksOpen ?? 0} track(s) open`);
+        say(`  ${heard.fedRanges ?? 0} spans read out of them`
+            + `, ${((heard.fedBytes ?? 0) / 1024).toFixed(0)} KiB`
+            + `, ${heard.behindTurns ?? 0} dropped for being late`);
+        say(`  the ring: ${heard.produced ?? 0} produced, ${heard.consumed ?? 0} consumed`);
+        say('');
+    }
+
     if (after.media && after.media.configured)
     {
         say(`the film: ${after.media.opened ?? 0} opened`
@@ -301,6 +327,7 @@ try
         video: options.video,
         quantum: options.quantum || undefined,
         jit: options.jit || undefined,
+        profile: options.profile || undefined,
     })}); null`);
 
     /** Waits until the page has a report and answers with it. */

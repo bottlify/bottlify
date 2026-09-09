@@ -108,11 +108,19 @@ function defaultMaterial(){
 /**
  * What the device reports as texture memory.
  *
- * A round number nothing here measures, and the same one DirectDraw reports as
- * video memory: there is no accounting of what the backend's device holds, and
- * a program asking this is sizing a cache rather than allocating anything.
+ * A program asking this is sizing a cache rather than allocating anything, and
+ * what it does with a small answer is evict and reload -- so the number has to
+ * describe what this device actually does with a texture, which is hold it.
+ * Nothing here is ever discarded to make room: a texture's storage is the
+ * guest's own memory, and the copy on the GPU lives as long as the texture
+ * does. An answer that implies otherwise makes a program work to avoid a
+ * pressure that does not exist.
+ *
+ * Two hundred and fifty-six megabytes: comfortably above what a program of this
+ * era will try to keep resident, and far enough below a signed 32-bit boundary
+ * that arithmetic on it cannot go negative in a caller that treats it as one.
  */
-const AVAILABLE_TEXTURE_MEMORY = 64 << 20;
+const AVAILABLE_TEXTURE_MEMORY = 256 << 20;
 
 /** The render states a state block leaves alone, by their own declaration. */
 const NOT_CAPTURED_BY_STATE_BLOCK = new Set(DEFAULT_RENDER_STATES
