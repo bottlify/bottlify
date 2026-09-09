@@ -101,6 +101,15 @@ export function createVtables({ memory, register, heap }){
         // The vtable and the one word pointing at it, allocated together: they
         // have the same lifetime and nothing else may sit between them.
         const block = heap.allocate(WORD + slots.length * WORD);
+        if (block === 0)
+        {
+            // Nothing left in the arena. Carrying on writes the table over
+            // guest address zero, remembers the zero so every later publish of
+            // this interface answers it without trying again, and hands the
+            // program a null pointer with a success code -- three lies from one
+            // unchecked allocation. Refusing is the answer a caller can act on.
+            return 0;
+        }
         const vtable = block + WORD;
         memory.writeU32(block, vtable);
         slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
@@ -186,6 +195,13 @@ export function createVtables({ memory, register, heap }){
         }
 
         const pointer = publish(object, wanted, record.methods);
+        if (pointer === 0)
+        {
+            // There is nowhere to put the interface, so there is no interface.
+            // Writing the zero and answering S_OK is how a program comes to
+            // call a method through a pointer it was told was good.
+            return 0x8007000e; // E_OUTOFMEMORY
+        }
         // The reference belongs to the interface the caller asked for, not to
         // the one it asked through.
         object.addRef(wanted);
