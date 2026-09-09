@@ -60,7 +60,7 @@ function fakeDevice(){
 
 function machine(){
     const memory = new Uint8Array(0x10000);
-    let free = 0x1000;
+    let free = 0x1008;
     const device = fakeDevice();
     /** @type {string[]} */
     const divergences = [];
@@ -134,6 +134,8 @@ test('the block is made on first use and mirrors what the device holds', ()=>{
 
     assert.notEqual(at, 0);
     assert.equal(m.shadow.address(), at, 'once');
+    assert.equal(at & 0xfff, 0, 'on a page boundary, whatever the heap handed out');
+    assert.ok(at + 0x1000 <= 0x1008 + 0x2000, 'the whole page is inside what was taken');
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 8 * 4), 3, 'state 8 as the device holds it');
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 7 * 4), 1);
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 9 * 4), 0, 'a state the device has not got');

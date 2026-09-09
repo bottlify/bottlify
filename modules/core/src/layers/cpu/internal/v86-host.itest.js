@@ -113,6 +113,20 @@ test('boots without a BIOS and reaches guest code in protected mode', async()=>{
         `only the ROM stub ran first (${host.instructionCount()} instructions)`);
 });
 
+test('the instruction count carries on past the emulator\'s own word', async()=>{
+    const host = await boot();
+    // The emulator's word is about to wrap: a count read from it alone would
+    // fall back to almost nothing, and a run's instructions per second with it.
+    host.cpu().instruction_counter[0] = 0xffffff00;
+    const before = host.instructionCount();
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().run_slice(1000);
+    const after = host.instructionCount();
+    assert.ok(after > before, `the count went on (${before} then ${after})`);
+    assert.ok(after - before < 0x1000, 'by what ran, not by the wrapped word');
+    host.stop();
+});
+
 test('the guest stack is the one the ROM set up', async()=>{
     const host = await boot();
 

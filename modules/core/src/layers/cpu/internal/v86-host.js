@@ -95,6 +95,12 @@ export async function createV86Host(config){
     let hostWrittenBytes = 0;
     /** @type {unknown} */
     let finaliseFailure = null;
+    // The emulator counts instructions in a thirty-two-bit word, which a run
+    // wraps in about a minute. The count kept here is the sum of what each
+    // read found new, exact as long as reads come less than 2^32 instructions
+    // apart -- which the slice runner sees to, reading after every slice.
+    let counted = 0;
+    let lastWord = 0;
     // How much guest code one compiled module may span, and how far discovery
     // may follow branches into it. The defaults are three pages and a handful
     // of extra blocks, which for a program of this size means the guest leaves
@@ -285,7 +291,12 @@ export async function createV86Host(config){
         inProtectedMode: ()=>(cpu.cr[0] & 1) === 1,
 
         /** @returns {number} instructions retired since boot (exact; Phase 2 quantum builds on this) */
-        instructionCount: ()=>emulator.get_instruction_counter() >>> 0,
+        instructionCount: ()=>{
+            const word = emulator.get_instruction_counter() >>> 0;
+            counted += (word - lastWord) >>> 0;
+            lastWord = word;
+            return counted;
+        },
 
         /**
          * How many compiled entry points the emulator is holding, when it will

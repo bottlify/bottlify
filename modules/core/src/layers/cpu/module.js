@@ -277,7 +277,10 @@ export const cpuModule = {
              */
             runSlice(maxInstructions){
                 running = true;
-                return started().cpu().run_slice(maxInstructions) >>> 0;
+                const instructions = started().cpu().run_slice(maxInstructions) >>> 0;
+                // Folds the emulator's word into the count before it can wrap.
+                started().instructionCount();
+                return instructions;
             },
 
             /** @returns {any} the running thread's full CPU state */

@@ -38,6 +38,15 @@
  */
 
 /** Byte offsets within the block. */
+/**
+ * The block takes a page of its own. The routines that write it are guest
+ * code the emulator compiles, and a write into a page that holds compiled
+ * code makes the emulator discard everything compiled for that page -- so a
+ * block laid right after the routines, out of the same heap, would have every
+ * SetRenderState throw the routines away and run them interpreted after.
+ */
+const PAGE = 4096;
+
 export const SHADOW = {
     /** Bit 0 set by the host: take the slow path. */
     FLAGS: 0,
@@ -338,10 +347,13 @@ export function createShadow(deps){
         address(){
             if (address === 0)
             {
-                address = deps.allocate(SHADOW.SIZE);
-                deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
-                if (address !== 0)
+                // Two pages, so that a whole page is the block's whichever
+                // boundary the allocation straddles.
+                const span = deps.allocate(2 * PAGE);
+                if (span !== 0)
                 {
+                    address = (span + PAGE - 1) & ~(PAGE - 1);
+                    deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
                     mirror();
                 }
             }
