@@ -41,7 +41,6 @@ export const WM = Object.freeze({
 });
 
 /** WM_ACTIVATE's low word. */
-const WA_INACTIVE = 0;
 const WA_ACTIVE = 1;
 
 /** The hit-test code WM_SETCURSOR reports for the client area. */
@@ -156,6 +155,11 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
      * which is where a program that sets its own cursor sets it.
      */
     let cursorDirty = true;
+    /**
+     * Whether the program has been told it is the active application. Once, and
+     * never taken back: see `focus` below.
+     */
+    let activated = false;
     let posted = 0;
     let dropped = 0;
 
@@ -342,22 +346,44 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
         return true;
     };
 
-    /** @param {HostInputEvent} event */
+    /**
+     * The page's focus, which is a page concern and almost never the program's.
+     *
+     * What focus legitimately decides is whether this element receives
+     * keystrokes at all. It is not the program's window activation, and the two
+     * are not even related: a person clicking a button beside the canvas takes
+     * the focus away without anything happening to the program, and a browser
+     * takes it away again for reasons of its own. Handing that through as
+     * WM_ACTIVATEAPP and WM_KILLFOCUS gives a program a state change it has no
+     * reason to see, and a program that reacts to going into the background --
+     * by pausing itself, or by abandoning a cinematic -- then does so because
+     * something happened to a web page. In this machine there is one window and
+     * it is the active one, always.
+     *
+     * So the program is told it is active once, when input is first armed, and
+     * is never told otherwise. What still happens on the way out is the release
+     * of everything held: a key whose release is never delivered stays down for
+     * the rest of the session, the player walks into a wall for ever, and no
+     * later event can undo it because as far as the program is concerned
+     * nothing has happened. That is not browser state reaching the program --
+     * it is the keyboard and the mouse, finished properly.
+     *
+     * @param {HostInputEvent} event
+     */
     const focus = event=>{
         if (event.gained)
         {
             cursorDirty = true;
-            emit(WM.ACTIVATEAPP, 1, 0);
-            emit(WM.ACTIVATE, WA_ACTIVE, 0);
-            emit(WM.SETFOCUS, 0, 0);
+            if (!activated)
+            {
+                activated = true;
+                emit(WM.ACTIVATEAPP, 1, 0);
+                emit(WM.ACTIVATE, WA_ACTIVE, 0);
+                emit(WM.SETFOCUS, 0, 0);
+            }
             return true;
         }
 
-        // Everything held goes up first, and it goes up while the program still
-        // believes it is active. A key whose release is never delivered is held
-        // down for the rest of the session: the player walks into a wall for
-        // ever, and no later event can undo it because as far as the program is
-        // concerned nothing has happened.
         for (const code of [...held.keys()])
         {
             key({ kind: 'key', code, down: false });
@@ -366,9 +392,6 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
         {
             button({ kind: 'pointerButton', button: name, down: false });
         }
-        emit(WM.KILLFOCUS, 0, 0);
-        emit(WM.ACTIVATE, WA_INACTIVE, 0);
-        emit(WM.ACTIVATEAPP, 0, 0);
         return true;
     };
 

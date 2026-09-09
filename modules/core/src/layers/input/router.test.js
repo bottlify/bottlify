@@ -346,7 +346,16 @@ test('gaining focus activates the window before anything else arrives', ()=>{
         [[WM.ACTIVATEAPP, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
 });
 
-test('losing focus releases every held key and button before it deactivates', ()=>{
+test('losing focus releases every held key and button, and says nothing else', ()=>{
+    // This test used to expect WM_KILLFOCUS, WM_ACTIVATE and WM_ACTIVATEAPP
+    // after the releases, and that expectation was the bug written down. The
+    // page's focus is a page concern -- it decides whether this element gets
+    // keystrokes -- and it is not the program's window activation: somebody
+    // clicking a button beside the canvas takes it away without anything having
+    // happened to the program. A program told it went to the background acts on
+    // it, by pausing itself or abandoning a cinematic, and it would be acting on
+    // something that happened to a web page. A virtual machine does not tell the
+    // programs inside it to stand down because its own window was minimised.
     const h = harness();
     h.send({ kind: 'focus', gained: true });
     h.send({ kind: 'key', code: 'KeyW', down: true });
@@ -360,9 +369,6 @@ test('losing focus releases every held key and button before it deactivates', ()
         [WM.KEYUP, 0x57],
         [WM.KEYUP, VK_SHIFT],
         [WM_LBUTTONUP, 0],
-        [WM.KILLFOCUS, 0],
-        [WM.ACTIVATE, 0],
-        [WM.ACTIVATEAPP, 0],
     ]);
 
     // And the other reading agrees: a program polling DirectInput must not
@@ -380,8 +386,24 @@ test('a released key is not released twice when focus goes away', ()=>{
     h.drain();
 
     h.send({ kind: 'focus', gained: false });
+    assert.deepEqual(h.drain(), []);
+});
+
+test('the program is told it is active once, and never told it is not', ()=>{
+    // There is one window in this machine and it is the active one. The
+    // activation a program waits for before it will do anything is owed to it,
+    // so it is sent -- and then never taken back, however often a page loses
+    // and regains its focus afterwards.
+    const h = harness();
+    h.send({ kind: 'focus', gained: true });
     assert.deepEqual(h.drain().map(m=>m.message),
-        [WM.KILLFOCUS, WM.ACTIVATE, WM.ACTIVATEAPP]);
+        [WM.ACTIVATEAPP, WM.ACTIVATE, WM.SETFOCUS]);
+
+    h.send({ kind: 'focus', gained: false });
+    h.send({ kind: 'focus', gained: true });
+    h.send({ kind: 'focus', gained: false });
+    h.send({ kind: 'focus', gained: true });
+    assert.deepEqual(h.drain(), []);
 });
 
 test('the cursor question is asked when the answer could have changed, not per move', ()=>{
