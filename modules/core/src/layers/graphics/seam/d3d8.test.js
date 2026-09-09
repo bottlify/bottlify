@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
-import { SHADOW } from './shadow.js';
+import { BUFFER, SHADOW } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
@@ -148,6 +148,17 @@ function machine(){
             assert.ok(entry, `slot ${index} has an implementation`);
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
+        /**
+         * The host's path of a method whose slot holds guest code: the trap
+         * the guest routine falls back to, found by its name.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        trap(pointer, name, args = []){
+            const entry = [...registered.values()].find(one=>one.name.endsWith(`::${name}`));
+            assert.ok(entry, `${name} has a trap`);
+            return entry.fn.handler([pointer, ...args]) >>> 0;
+        },
 
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
@@ -240,6 +251,8 @@ function seamed({ shadow = false } = {}){
         /** @param {number} texture @param {string} name @param {number[]} args */
         texture: (texture, name, args = [])=>
             box.call(texture, slot(IDIRECT3DTEXTURE8_SLOTS, name), args),
+        /** @param {number} buffer @param {string} name @param {number[]} args */
+        buffer: (buffer, name, args = [])=>box.trap(buffer, name, args),
         /** @param {number} pointer */
         release: pointer=>box.call(pointer, 2, []),
         /** @param {number} pointer */
@@ -1055,5 +1068,43 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.device(device, 'GetRenderState', [cull, out]), D3D_OK);
     assert.equal(h.box.memory.readU32(out), 1, 'the host answers from the block');
     assert.equal(h.libraries.shadow().renderStateCalls, 1);
+    assert.deepEqual(h.divergences, []);
+
+    // A buffer's block names the device's, and a binding the guest wrote
+    // reads back as the buffer the pointer names.
+    const created = 0xe100;
+    assert.equal(h.device(device, 'CreateVertexBuffer', [256, 0, 0, D3DPOOL.MANAGED, created]),
+        D3D_OK);
+    const vb = h.box.memory.readU32(created);
+    const vblock = h.box.memory.readU32(vb + 4);
+    assert.notEqual(vblock, 0, 'the buffer has a block');
+    assert.equal(h.box.memory.readU32(vblock + BUFFER.DEVICE), block);
+    assert.equal(h.box.memory.readU32(vblock + BUFFER.LENGTH), 256);
+    h.box.memory.writeU32(block + SHADOW.STREAMS, vb);
+    h.box.memory.writeU32(block + SHADOW.STREAMS + 4, 24);
+    h.box.memory.writeU32(block + SHADOW.BINDING_CALLS, 1);
+    const stride = 0xe200;
+    assert.equal(h.device(device, 'GetStreamSource', [0, out, stride]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), vb, 'bound to the buffer the guest named');
+    assert.equal(h.box.memory.readU32(stride), 24);
+    h.release(h.box.memory.readU32(out));
+
+    // A lock taken in the guest is a lock the host's path refuses; once the
+    // guest lets go, the host's path locks, and the block says so.
+    h.box.memory.writeU32(vblock + BUFFER.LOCKED, 1);
+    h.box.memory.writeU32(vblock + BUFFER.FROM, 0);
+    h.box.memory.writeU32(vblock + BUFFER.TO, 64);
+    h.box.memory.writeU32(block + SHADOW.LOCK_CALLS, 1);
+    const bits = 0xe300;
+    assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3DERR_INVALIDCALL);
+    h.box.memory.writeU32(vblock + BUFFER.LOCKED, 0);
+    h.box.memory.writeU32(block + SHADOW.RING, vblock);
+    h.box.memory.writeU32(block + SHADOW.RING_HEAD, 1);
+    h.box.memory.writeU32(block + SHADOW.UNLOCK_CALLS, 1);
+    assert.equal(h.buffer(vb, 'Lock', [0, 0, bits, 0]), D3D_OK);
+    assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 1, 'the guest routine sees it');
+    assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
+    assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 0);
+    assert.equal(h.libraries.shadow().buffers, 1);
     assert.deepEqual(h.divergences, []);
 });

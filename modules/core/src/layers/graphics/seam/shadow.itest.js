@@ -8,29 +8,43 @@
  * The state setters that run in the guest, run by the real processor.
  *
  * The unit test pins the bytes and the layout; this is the check that the
- * bytes are x86 that writes the block the way the host reads it, and that the
- * cases the routines do not take -- a state past the block, the host's flag --
- * really do leave for the trap.
+ * bytes are x86 that writes the blocks the way the host reads them, pops
+ * exactly its arguments, and leaves for the trap in every case it does not
+ * take -- a state past the block, the host's flag, a lock already held, a
+ * range past the buffer, a full ring.
  */
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../cpu/internal/v86-host.js';
-import { FLAG_SLOW_PATH, SHADOW, setRenderStateCode, setTransformCode } from './shadow.js';
+import {
+    BUFFER, FLAG_SLOW_PATH, SHADOW, lockCode, setIndicesCode, setRenderStateCode,
+    setStreamSourceCode, setTransformCode, setVertexShaderCode, unlockCode,
+} from './shadow.js';
 
 const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
 const PROGRAM = 0x8000;
-const SET_RENDER_STATE = 0x8100;
-const SET_TRANSFORM = 0x8200;
+/** Past the program, which is a few hundred bytes of pushes and calls. */
+const ROUTINES = {
+    renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
+    stream: 0x8a00, indices: 0x8a80, shader: 0x8b00,
+};
 /** Where the routines jump when they leave the case to the host: a halt here. */
-const TRAP = 0x8400;
+const TRAP = 0x8b80;
 const OBJECT = 0x9000;
+/** A buffer object, whose block names its bytes and the device's block. */
+const VBUF = 0x9400;
 /** An object whose state word is zero: one published before it had a block. */
 const BARE = 0x9800;
 const BLOCK = 0xa000;
 const MATRIX = 0xb000;
+const VBLOCK = 0xb400;
+const VBASE = 0xc000;
+const VLENGTH = 0x100;
+const OUT = 0xb800;
+const STACK = 0x300000;
 
 /** @param {number} value @returns {number[]} */
 const u32 = value=>[
@@ -38,38 +52,65 @@ const u32 = value=>[
 ];
 
 /**
- * `push args... ; push this ; call target ; hlt`, stdcall order.
+ * One step of the program: `push args... ; push this ; call target ; hlt`,
+ * stdcall order.
  *
- * @param {number} at @param {number} target @param {number[]} args
- * @param {number} [object]
+ * @param {number} target @param {number} object @param {number[]} args
  */
-const call = (at, target, args, object = OBJECT)=>{
+const step = (target, object, args)=>({ target, object, args });
+
+/** The program, as the steps a test runs one by one from a fresh stack. */
+const STEPS = [
+    step(ROUTINES.renderState, OBJECT, [8, 7]),          // 0: state 8 = 7
+    step(ROUTINES.transform, OBJECT, [256, MATRIX]),     // 1: WORLD = the matrix
+    step(ROUTINES.renderState, OBJECT, [300, 1]),        // 2: past the block: the trap
+    step(ROUTINES.renderState, OBJECT, [8, 9]),          // 3: with the flag up: the trap
+    step(ROUTINES.renderState, BARE, [8, 9]),            // 4: no block: the trap
+    step(ROUTINES.lock, VBUF, [16, 32, OUT, 0x2000]),    // 5: a lock, DISCARD
+    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 6: locked already: the trap
+    step(ROUTINES.unlock, VBUF, []),                     // 7: onto the ring
+    step(ROUTINES.unlock, VBUF, []),                     // 8: not locked: the trap
+    step(ROUTINES.lock, VBUF, [0xf0, 0x20, OUT, 0]),     // 9: past the end: the trap
+    step(ROUTINES.lock, VBUF, [0, 0, OUT, 0]),           // 10: the whole buffer, widening
+    step(ROUTINES.stream, OBJECT, [2, 0x1234, 20]),      // 11: stream 2
+    step(ROUTINES.stream, OBJECT, [2, 0, 99]),           // 12: unbound, stride kept
+    step(ROUTINES.stream, OBJECT, [16, 1, 1]),           // 13: no such stream: the trap
+    step(ROUTINES.indices, OBJECT, [0x5678, 3]),         // 14
+    step(ROUTINES.shader, OBJECT, [0x102]),              // 15: a vertex format
+    step(ROUTINES.shader, OBJECT, [0x3]),                // 16: a shader handle: the trap
+    step(ROUTINES.unlock, VBUF, []),                     // 17: with the ring full: the trap
+];
+
+/** @param {typeof STEPS[number]} entry @param {number} at */
+const bytesOf = (entry, at)=>{
     /** @type {number[]} */
     const code = [];
-    for (const value of [...args].reverse())
+    for (const value of [...entry.args].reverse())
     {
         code.push(0x68, ...u32(value));
     }
-    code.push(0x68, ...u32(object));
+    code.push(0x68, ...u32(entry.object));
     const from = at + code.length;
-    code.push(0xe8, ...u32((target - (from + 5)) | 0));
+    code.push(0xe8, ...u32((entry.target - (from + 5)) | 0));
     code.push(0xf4);
     return code;
 };
 
+/** The program's bytes and where each step starts; a halt first, for the boot to stop on. */
 function program(){
     /** @type {number[]} */
-    const code = [];
-    const at = ()=>PROGRAM + code.length;
-    code.push(...call(at(), SET_RENDER_STATE, [8, 7]));        // state 8 = 7
-    code.push(...call(at(), SET_TRANSFORM, [256, MATRIX]));    // WORLD = the matrix
-    code.push(...call(at(), SET_RENDER_STATE, [300, 1]));      // past the block: the trap
-    code.push(...call(at(), SET_RENDER_STATE, [8, 9]));        // with the flag up: the trap
-    code.push(...call(at(), SET_RENDER_STATE, [8, 9], BARE)); // no block: the trap
-    return new Uint8Array(code);
+    const code = [0xf4];
+    /** @type {number[]} */
+    const starts = [];
+    for (const entry of STEPS)
+    {
+        starts.push(PROGRAM + code.length);
+        code.push(...bytesOf(entry, PROGRAM + code.length));
+    }
+    return { bytes: new Uint8Array(code), starts, end: PROGRAM + code.length };
 }
 
-test('the guest setters write the block and leave what they cannot take to the trap', async()=>{
+test('the guest routines write the blocks and leave what they cannot take to the trap', async()=>{
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const host = await createV86Host({
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
@@ -77,19 +118,30 @@ test('the guest setters write the block and leave what they cannot take to the t
         memorySize: 64 * 1024 * 1024,
         trapPort: 0xb077,
         entryVector: 0x7000,
-        initialStack: 0x300000,
+        initialStack: STACK,
     });
 
-    host.writePhysical(SET_RENDER_STATE, setRenderStateCode(SET_RENDER_STATE, TRAP));
-    host.writePhysical(SET_TRANSFORM, setTransformCode(SET_TRANSFORM, TRAP));
+    host.writePhysical(ROUTINES.renderState, setRenderStateCode(ROUTINES.renderState, TRAP));
+    host.writePhysical(ROUTINES.transform, setTransformCode(ROUTINES.transform, TRAP));
+    host.writePhysical(ROUTINES.lock, lockCode(ROUTINES.lock, TRAP));
+    host.writePhysical(ROUTINES.unlock, unlockCode(ROUTINES.unlock, TRAP));
+    host.writePhysical(ROUTINES.stream, setStreamSourceCode(ROUTINES.stream, TRAP));
+    host.writePhysical(ROUTINES.indices, setIndicesCode(ROUTINES.indices, TRAP));
+    host.writePhysical(ROUTINES.shader, setVertexShaderCode(ROUTINES.shader, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
-    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    host.writePhysical(VBUF + 4, new Uint8Array(u32(VBLOCK)));
     host.writePhysical(BARE, new Uint8Array(8));
+    host.writePhysical(BLOCK, new Uint8Array(SHADOW.SIZE));
+    host.writePhysical(VBLOCK, new Uint8Array([
+        ...u32(0), ...u32(VBASE), ...u32(VLENGTH), ...u32(0),
+        ...u32(0), ...u32(0), ...u32(0), ...u32(BLOCK),
+    ]));
     const matrix = new Float32Array(16).map((unused, i)=>i * 1.5);
     host.writePhysical(MATRIX, new Uint8Array(matrix.buffer));
 
-    host.writePhysical(PROGRAM, program());
+    const { bytes: image, starts, end } = program();
+    host.writePhysical(PROGRAM, image);
     host.writePhysical(0x7000, new Uint8Array(u32(PROGRAM)));
     host.cpu().main_loop();
 
@@ -98,53 +150,106 @@ test('the guest setters write the block and leave what they cannot take to the t
         const bytes = host.readPhysical(at, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
+    /** @param {number} at @param {number} value */
+    const write = (at, value)=>host.writePhysical(at, new Uint8Array(u32(value)));
     const eip = ()=>host.cpu().instruction_pointer[0] >>> 0;
-    const run = ()=>{
+    /**
+     * Runs one step from a fresh stack, and says whether it answered to the
+     * program or left for the trap. An answer must also have left the stack
+     * where it was: a routine that pops too few leaves the caller to return
+     * into an argument, a long way from here.
+     *
+     * @param {number} index
+     */
+    const run = index=>{
+        host.cpu().instruction_pointer[0] = starts[index];
+        host.cpu().reg32[4] = STACK;
         host.cpu().in_hlt[0] = 0;
-        return host.cpu().run_slice(1000);
+        host.cpu().run_slice(1000);
+        if (eip() === TRAP + 1)
+        {
+            return 'trap';
+        }
+        const after = index + 1 < starts.length ? starts[index + 1] : end;
+        assert.equal(eip(), after, `step ${index} halted after its call`);
+        assert.equal(host.cpu().reg32[0] >>> 0, 0, `step ${index} answered D3D_OK`);
+        assert.equal(host.cpu().reg32[4] >>> 0, STACK, `step ${index} left the stack as it was`);
+        return 'ok';
     };
 
-    // Phase 1 ran in the boot's own pass: state 8 is 7, counted once, D3D_OK.
+    assert.equal(run(0), 'ok');
     assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 8 * 4), 7);
     assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1);
-    assert.equal(host.cpu().reg32[0] >>> 0, 0, 'EAX is D3D_OK');
-    assert.ok(eip() > PROGRAM && eip() < TRAP, 'answered to the program, not the trap');
-    // The one thing a halt after the call cannot show by itself: the routine
-    // popped exactly its arguments. A routine that pops too few leaves the
-    // caller to return into a matrix element, a long way from here.
-    assert.equal(host.cpu().reg32[4] >>> 0, 0x300000, 'the stack is where it was');
 
-    run();
+    assert.equal(run(1), 'ok');
     const slot = BLOCK + SHADOW.TRANSFORMS + 24 * 64;
     const written = new Float32Array(host.readPhysical(slot, 64).slice().buffer);
     assert.deepEqual([...written], [...matrix], 'WORLD copied into its slot');
     assert.equal(read(BLOCK + SHADOW.TRANSFORM_CALLS), 1);
     assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'the other counter untouched');
-    assert.equal(host.cpu().reg32[4] >>> 0, 0x300000, 'three arguments popped, not two');
 
-    run();
-    assert.equal(eip(), TRAP + 1, 'a state past the block went to the trap');
-    assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'and was not counted');
+    assert.equal(run(2), 'trap', 'a state past the block');
+    assert.equal(read(BLOCK + SHADOW.RENDER_STATE_CALLS), 1, 'and not counted');
 
-    host.writePhysical(BLOCK + SHADOW.FLAGS, new Uint8Array(u32(FLAG_SLOW_PATH)));
-    // The trap's halt ended the phase inside the trap; the next phase starts
-    // where the program left off, which is the trap's own halt again unless
-    // the program is resumed past it. Point the processor at the next call.
-    const one = call(0, SET_RENDER_STATE, [8, 9]).length;
-    /** @param {number} fromEnd */
-    const resume = fromEnd=>{
-        host.cpu().instruction_pointer[0] = PROGRAM + program().length - fromEnd * one;
-        host.cpu().reg32[4] = 0x300000; // ESP: a fresh stack, the trap's frame abandoned
-        run();
-    };
-    resume(2);
-    assert.equal(eip(), TRAP + 1, 'with the flag up, a valid state went to the trap too');
+    write(BLOCK + SHADOW.FLAGS, FLAG_SLOW_PATH);
+    assert.equal(run(3), 'trap', 'with the flag up, a valid state too');
     assert.equal(read(BLOCK + SHADOW.RENDER_STATES + 8 * 4), 7, 'and the block was not written');
+    write(BLOCK + SHADOW.FLAGS, 0);
 
-    host.writePhysical(BLOCK + SHADOW.FLAGS, new Uint8Array(4));
-    resume(1);
-    assert.equal(eip(), TRAP + 1, 'an object without a block went to the trap');
+    assert.equal(run(4), 'trap', 'an object without a block');
     assert.equal(read(SHADOW.RENDER_STATES + 8 * 4), 0, 'and nothing was written at address zero');
+
+    assert.equal(run(5), 'ok');
+    assert.equal(read(OUT), VBASE + 16, 'the address handed back is inside the buffer');
+    assert.equal(read(VBLOCK + BUFFER.LOCKED), 1);
+    assert.equal(read(VBLOCK + BUFFER.FROM), 16);
+    assert.equal(read(VBLOCK + BUFFER.TO), 48);
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000);
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 1);
+
+    assert.equal(run(6), 'trap', 'a second lock is the host\'s to refuse');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 1);
+
+    assert.equal(run(7), 'ok');
+    assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
+    assert.equal(read(BLOCK + SHADOW.RING_HEAD), 1);
+    assert.equal(read(BLOCK + SHADOW.RING), VBLOCK, 'the buffer\'s block is on the ring');
+    assert.equal(read(BLOCK + SHADOW.UNLOCK_CALLS), 1);
+
+    assert.equal(run(8), 'trap', 'an unlock with no lock held');
+
+    assert.equal(run(9), 'trap', 'a range past the end of the buffer');
+    assert.equal(read(VBLOCK + BUFFER.LOCKED), 0);
+
+    assert.equal(run(10), 'ok');
+    assert.equal(read(OUT), VBASE);
+    assert.equal(read(VBLOCK + BUFFER.FROM), 0, 'the range widened to take the new lock');
+    assert.equal(read(VBLOCK + BUFFER.TO), VLENGTH);
+    assert.equal(read(VBLOCK + BUFFER.LOCK_FLAGS), 0x2000, 'and kept the earlier flags');
+    assert.equal(read(BLOCK + SHADOW.LOCK_CALLS), 2);
+
+    assert.equal(run(11), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0x1234);
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20);
+    assert.equal(run(12), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8), 0);
+    assert.equal(read(BLOCK + SHADOW.STREAMS + 2 * 8 + 4), 20, 'unbinding keeps the stride');
+    assert.equal(run(13), 'trap', 'a stream the block has no slot for');
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 2);
+
+    assert.equal(run(14), 'ok');
+    assert.equal(read(BLOCK + SHADOW.INDICES), 0x5678);
+    assert.equal(read(BLOCK + SHADOW.BASE_VERTEX), 3);
+
+    assert.equal(run(15), 'ok');
+    assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
+    assert.equal(read(BLOCK + SHADOW.BINDING_CALLS), 4);
+    assert.equal(run(16), 'trap', 'a shader handle is the host\'s to check');
+    assert.equal(read(BLOCK + SHADOW.VERTEX_SHADER), 0x102);
+
+    write(BLOCK + SHADOW.RING_HEAD, SHADOW.RING_CAPACITY);
+    assert.equal(run(17), 'trap', 'with the ring full, an unlock is the host\'s');
+    assert.equal(read(VBLOCK + BUFFER.LOCKED), 1, 'and the lock is still held');
 
     host.stop();
 });

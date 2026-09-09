@@ -39,11 +39,14 @@ import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
     IID_IDirect3DIndexBuffer8 } from './iids.js';
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
-import { D3DDEVTYPE, D3DFMT_INDEX } from '../d3d8/constants.js';
+import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE } from '../d3d8/constants.js';
 import { D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { vertexCountOf } from '../d3d8/render.js';
-import { createShadow, setRenderStateCode, setTransformCode } from './shadow.js';
+import {
+    createShadow, lockCode, setIndicesCode, setRenderStateCode, setStreamSourceCode,
+    setTransformCode, setVertexShaderCode, unlockCode,
+} from './shadow.js';
 
 /**
  * The capability bits reported by GetDeviceCaps.
@@ -176,6 +179,13 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
      * @type {WeakMap<any, ReturnType<typeof createShadow>>}
      */
     const shadows = new WeakMap();
+    /**
+     * The shadow of the device each buffer belongs to, for the host's own
+     * lock and unlock to settle the guest's first.
+     *
+     * @type {WeakMap<object, ReturnType<typeof createShadow>>}
+     */
+    const bufferShadows = new WeakMap();
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
     /** @param {(at: number) => Uint8Array} code */
@@ -339,28 +349,73 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
      * one out-parameter and nothing else: the program writes there itself, and
      * the unlock is what tells this engine to look.
      */
+    //
+    // Both usually run in the guest; the host's path is the one the guest
+    // routine leaves for it -- a lock already held, a full ring -- and it
+    // settles what the guest did to the buffer first, then tells the block
+    // what it did, so the two paths see one lock.
     const bufferMethods = {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [offset, size, out, flags])=>{
+            const shadow = bufferShadows.get(buffer);
+            shadow?.settleBuffer(buffer);
             /** @type {{ pBits?: number }} */
             const locked = {};
             const hr = buffer.Lock(offset >>> 0, size >>> 0, locked, flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
+            if (hr === D3D_OK)
             {
-                fields.writeU32(out >>> 0, locked.pBits ?? 0);
+                shadow?.noteLocked(buffer, true);
+                if ((out >>> 0) !== 0)
+                {
+                    fields.writeU32(out >>> 0, locked.pBits ?? 0);
+                }
             }
             return hr;
         },
         /** @param {any} buffer */
-        Unlock: (/** @type {any} */ buffer)=>buffer.Unlock(),
+        Unlock: (/** @type {any} */ buffer)=>{
+            const shadow = bufferShadows.get(buffer);
+            shadow?.settleBuffer(buffer);
+            const hr = buffer.Unlock();
+            if (hr === D3D_OK)
+            {
+                shadow?.noteLocked(buffer, false);
+            }
+            return hr;
+        },
     };
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const bufferGuests = allocate
+        ? {
+            Lock: ({ trap })=>placeCode(at=>lockCode(at, trap)),
+            Unlock: ({ trap })=>placeCode(at=>unlockCode(at, trap)),
+        }
+        : {};
 
     const vertexBufferInterfaces = [
-        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods),
+        describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods,
+            bufferGuests),
     ];
     const indexBufferInterfaces = [
-        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods),
+        describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods,
+            bufferGuests),
     ];
+
+    /**
+     * A buffer the device just made gets its block before it is handed out,
+     * for the same reason the device does: the block's address is written
+     * when the interface is published.
+     *
+     * @param {any} device @param {any} buffer
+     */
+    const attach = (device, buffer)=>{
+        const shadow = shadowOf(device);
+        if (shadow)
+        {
+            bufferShadows.set(buffer, shadow);
+            buffer.guestState = ()=>shadow.attachBuffer(buffer);
+        }
+    };
 
     /** @param {number} pointer @returns {any} */
     const readRect = pointer=>((pointer >>> 0) === 0
@@ -643,6 +698,7 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
                 length >>> 0, usage >>> 0, fvf >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer && (out >>> 0) !== 0)
             {
+                attach(device, held.buffer);
                 return handBack(held.buffer, vertexBufferInterfaces,
                     IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
@@ -657,6 +713,7 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
                 length >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer && (out >>> 0) !== 0)
             {
+                attach(device, held.buffer);
                 return handBack(held.buffer, indexBufferInterfaces,
                     IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
@@ -1361,6 +1418,9 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
         ? {
             SetRenderState: ({ trap })=>placeCode(at=>setRenderStateCode(at, trap)),
             SetTransform: ({ trap })=>placeCode(at=>setTransformCode(at, trap)),
+            SetStreamSource: ({ trap })=>placeCode(at=>setStreamSourceCode(at, trap)),
+            SetIndices: ({ trap })=>placeCode(at=>setIndicesCode(at, trap)),
+            SetVertexShader: ({ trap })=>placeCode(at=>setVertexShaderCode(at, trap)),
         }
         : {};
     const deviceInterfaces = [
@@ -1608,6 +1668,15 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
                     readMemory: memory.readMemory,
                     writeMemory: memory.writeMemory,
                     device: held.device,
+                    objectAt: publisher.objectAt,
+                    // A buffer is published as the interface its kind has;
+                    // publishing is memoised, so this is the pointer the
+                    // program already holds.
+                    pointerOf: buffer=>(buffer.type === D3DRTYPE.INDEXBUFFER
+                        ? publisher.publish(buffer, indexBufferInterfaces,
+                            IID_IDirect3DIndexBuffer8)
+                        : publisher.publish(buffer, vertexBufferInterfaces,
+                            IID_IDirect3DVertexBuffer8)),
                     divergence,
                 });
                 shadows.set(held.device, shadow);

@@ -372,6 +372,40 @@ halving a texture until it fits halved it for ever, which is 97 per cent of a
 measured profile sitting on one instruction. A partial table is not a partial
 implementation; it is a wrong one.
 
+### A28. A device's state lives in guest memory, and the host trusts none of it
+
+The calls a program makes most between draws -- `SetRenderState`, `SetTransform`,
+`SetStreamSource`, `SetIndices`, `SetVertexShader`, and a buffer's `Lock` and `Unlock` -- are guest
+code that writes a block of guest memory the device owns, and the host never sees the call.
+**Status: decided, measured on one title's menu.** The rules, which are the whole design:
+
+- The block is one-way. The guest writes it; the host writes it only to mirror its own state into it
+  -- when the block is made, after a state block is applied, after a reset -- so that "unchanged in
+  the block" means "unchanged on the device".
+- The block is untrusted. On entry to any method of the device the host compares the whole of it
+  against its own copy and puts every difference through the real setter, which is where validation
+  and invalidation live. Nothing the host derives from state -- a pipeline, a shader, a binding -- is
+  keyed on the block; nothing depends on a flag the guest set. A `Get*` therefore answers what the
+  guest wrote, because the sync ran on the way in.
+- What the fast path cannot do stays with the host, by falling to the method's own trap: a state
+  past the block, a shader handle (the host knows whether it is live), a lock already held, a lock
+  for reading, a full ring, and -- by a flag the host raises -- everything while a state block
+  records, because the block must then capture what was set rather than what changed.
+- A value the device would have refused is refused at the next entry rather than at the call: the
+  program was told success, and the difference is reported as a divergence, once.
+- The block counts what it absorbed, in words the guest routines increment, so that the saving is a
+  number in the diagnostics and not a belief; and an entry reads those words first, and reads no
+  further when none has moved.
+- The block takes a page of its own. A write into a page that holds compiled guest code makes the
+  emulator throw that code away, and a block laid out of the heap right after the routines that
+  write it had every call discarding the routines.
+
+A buffer's storage was guest memory already, so its lock is an address handed back and a range
+remembered, its unlock is the buffer's block appended to a ring in the device's, and the host
+replays lock and unlock against the real buffer when it next looks -- before any draw, because a
+draw is a crossing. A lock the guest holds across a crossing is mirrored as one the host holds, so a
+second lock through either path is refused as the real interface refuses it.
+
 
 ## B. Where we could go faster
 
@@ -440,6 +474,7 @@ in the global map, and the compiler already loads globals in generated code
 (`builder.load_fixed_i32(global_pointers::…)`), so nothing new has to be invented — the care goes
 into initialising it, because a zero there would end every block immediately.
 
-Blocked on nothing but a toolchain: v86 builds in Docker, and this machine has neither Docker nor
-`cargo` nor `clang`, so the change cannot be built or verified here. It is not worth writing into the
-fork unbuilt.
+**Done, in the fork.** The constant is a global the slice runner writes, and the interpreter's own
+iteration limit honours the same bound. What remains is not this: with the bound in place a slice
+still runs to some five million instructions now and then, at a film and at a load, and the shape of
+guest code that does it has not been found -- every loop tried in a probe stops where it is told.
