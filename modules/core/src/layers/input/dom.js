@@ -11,12 +11,16 @@
  * else. Not `window`, not `document` -- the canvas. That is the whole design,
  * and it decides three things at once:
  *
- * - **Focus is what arms the machine.** A keyboard event goes to the focused
- *   element, so listeners on the canvas fire only while the canvas has focus.
- *   A page carrying one of these behaves like an ordinary page until the person
- *   deliberately clicks into the game, and goes back to being one the moment
- *   they click out. Nothing had to be written to make that true; it is what
- *   attaching to the element instead of the document means.
+ * - **Focus decides where a keystroke goes, and only that.** A keyboard event
+ *   reaches the focused element, so listeners on the canvas fire only while the
+ *   canvas has focus, and a page carrying one of these behaves like an ordinary
+ *   page until the person clicks into the game. Nothing had to be written to
+ *   make that true; it is what attaching to the element instead of the document
+ *   means. The pointer is a different matter: a move over this canvas is a move
+ *   over this canvas, and it is reported whether or not the element holds
+ *   focus. Making the mouse depend on focus lets a click on a panel beside the
+ *   viewport freeze the cursor inside the program, which is the page telling
+ *   the guest about itself.
  * - **Focus has to be visible, so it is made visible.** The canvas is given a
  *   tab stop if it has none and an outline while it holds focus. A machine that
  *   silently swallows every keystroke and one that silently ignores them look
@@ -139,13 +143,52 @@ export function createDomInput({ canvas, send, pointerLock = false }){
      * Read on every move rather than remembered, because a canvas is routinely
      * displayed at a size that is not its resolution and that size changes
      * whenever a panel opens or the window is dragged.
+     *
+     * What the rectangle is not is the picture: `getBoundingClientRect` answers
+     * with the border box, and a canvas is a replaced element whose image fills
+     * the content box. A border of a single pixel therefore moves the origin
+     * and stretches the ratio, and a page is entitled to put one there -- so
+     * the insets are taken out rather than assumed away. They are re-read only
+     * when the drawn size changes, because reading a computed style is a style
+     * recalculation and a pointer moves a hundred times a second.
      */
+    let boxWidth = -1;
+    let boxHeight = -1;
+    let inset = { left: 0, top: 0, x: 0, y: 0 };
+
+    const insetsOf = ()=>{
+        const style = globalThis.getComputedStyle?.(canvas);
+        if (!style)
+        {
+            return { left: 0, top: 0, x: 0, y: 0 };
+        }
+        /** @param {string} value */
+        const px = value=>parseFloat(value) || 0;
+        const left = px(style.borderLeftWidth) + px(style.paddingLeft);
+        const top = px(style.borderTopWidth) + px(style.paddingTop);
+        return {
+            left,
+            top,
+            x: left + px(style.borderRightWidth) + px(style.paddingRight),
+            y: top + px(style.borderBottomWidth) + px(style.paddingBottom),
+        };
+    };
+
     const projection = ()=>{
         const rect = canvas.getBoundingClientRect();
+        if (rect.width !== boxWidth || rect.height !== boxHeight)
+        {
+            boxWidth = rect.width;
+            boxHeight = rect.height;
+            inset = insetsOf();
+        }
+        const width = rect.width - inset.x;
+        const height = rect.height - inset.y;
         return {
-            rect,
-            x: rect.width > 0 ? canvas.width / rect.width : 1,
-            y: rect.height > 0 ? canvas.height / rect.height : 1,
+            left: rect.left + inset.left,
+            top: rect.top + inset.top,
+            x: width > 0 ? canvas.width / width : 1,
+            y: height > 0 ? canvas.height / height : 1,
         };
     };
 
@@ -200,19 +243,18 @@ export function createDomInput({ canvas, send, pointerLock = false }){
 
     /** @param {PointerEvent} e */
     const onPointerMove = e=>{
-        // A pointer event reaches an element whether or not it has focus, which
-        // the keyboard's does not. Without this the guest would be tracking a
-        // cursor across a page whose author is typing somewhere else entirely.
-        if (!focused)
-        {
-            return;
-        }
+        // Deliberately not gated on focus. Focus decides where a keystroke goes
+        // and nothing else: a pointer that moved over this canvas moved over
+        // this canvas whether or not somebody clicked a panel beside it a
+        // moment ago, and a program whose cursor stops dead until the viewport
+        // is clicked again is being told about the page rather than the mouse.
+        //
         // Read rather than listened for: knowing whether the pointer is locked
         // is a property of the document, but subscribing to it would put a
         // listener outside the canvas, which is the one thing this file does
         // not do.
         const locked = typeof document !== 'undefined' && document.pointerLockElement === canvas;
-        const { rect, x: scaleX, y: scaleY } = projection();
+        const { left, top, x: scaleX, y: scaleY } = projection();
         const dx = (e.movementX ?? 0) * scaleX + restX;
         const dy = (e.movementY ?? 0) * scaleY + restY;
         const wholeX = Math.trunc(dx);
@@ -225,8 +267,8 @@ export function createDomInput({ canvas, send, pointerLock = false }){
             // A locked pointer has no position: the client coordinates stop
             // moving, so reporting them would pin the cursor wherever the lock
             // began. The router advances its own from the deltas instead.
-            x: locked ? undefined : Math.round((e.clientX - rect.left) * scaleX),
-            y: locked ? undefined : Math.round((e.clientY - rect.top) * scaleY),
+            x: locked ? undefined : Math.round((e.clientX - left) * scaleX),
+            y: locked ? undefined : Math.round((e.clientY - top) * scaleY),
             dx: wholeX,
             dy: wholeY,
         });

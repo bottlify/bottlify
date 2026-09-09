@@ -219,12 +219,67 @@ test('the pointer is only locked when the caller asked for that', ()=>{
     assert.equal(locking.canvas.locks, 1, 'and only from inside the gesture');
 });
 
-test('nothing is captured from a canvas nobody is playing', ()=>{
+test('the page keeps its scroll over a canvas nobody is playing', ()=>{
     const h = harness();
     const scroll = h.canvas.fire('wheel', { deltaY: 400, deltaMode: 0 });
-    h.canvas.fire('pointermove', { clientX: 10, clientY: 10, movementX: 4, movementY: 4 });
     assert.equal(scroll.prevented, false, 'the page scrolls as it would anywhere else');
     assert.deepEqual(h.drain(), []);
+});
+
+test('the mouse keeps moving when the focus went to a panel beside the game', ()=>{
+    // Clicking a settings panel is a page event and the program has no business
+    // hearing about it. A cursor that stops until the viewport is clicked again
+    // is the page telling the guest about itself.
+    const h = harness({ canvas: {
+        width: 640, height: 480, rect: { left: 0, top: 0, width: 640, height: 480 },
+    } });
+    h.canvas.fire('focus', {});
+    h.drain();
+    h.canvas.fire('blur', {});
+    h.drain();
+
+    h.canvas.fire('pointermove', { clientX: 320, clientY: 240, movementX: 4, movementY: 2 });
+    assert.deepEqual(h.drain(),
+        [{ kind: 'pointerMove', x: 320, y: 240, dx: 4, dy: 2 }]);
+});
+
+test('a border and padding are page furniture, not part of the picture', ()=>{
+    // getBoundingClientRect answers with the border box; a canvas draws into its
+    // content box. Left in, a single-pixel border moves the origin and stretches
+    // the ratio -- which is a cursor that drifts further off the further it goes.
+    const style = {
+        borderLeftWidth: '1px', borderRightWidth: '1px',
+        borderTopWidth: '1px', borderBottomWidth: '1px',
+        paddingLeft: '4px', paddingRight: '4px',
+        paddingTop: '2px', paddingBottom: '2px',
+    };
+    const before = globalThis.getComputedStyle;
+    globalThis.getComputedStyle = /** @type {any} */ (()=>style);
+    try
+    {
+        // 800x600 of picture inside a box 10 wider and 6 taller than it.
+        const h = harness({ canvas: {
+            width: 800, height: 600,
+            rect: { left: 100, top: 50, width: 810, height: 606 },
+        } });
+        h.canvas.fire('focus', {});
+        h.drain();
+
+        // The content box starts 5 right and 3 down of the border box's corner.
+        h.canvas.fire('pointermove', { clientX: 105, clientY: 53 });
+        const [origin] = h.drain();
+        assert.deepEqual([origin.x, origin.y], [0, 0],
+            'the picture starts inside the furniture, not at the border box');
+
+        h.canvas.fire('pointermove', { clientX: 905, clientY: 653 });
+        const [corner] = h.drain();
+        assert.deepEqual([corner.x, corner.y], [800, 600],
+            'and its far corner is 800 of picture later, not 810 of box');
+    }
+    finally
+    {
+        globalThis.getComputedStyle = before;
+    }
 });
 
 test('a trackpad\'s many small deltas are one wheel notch', ()=>{
