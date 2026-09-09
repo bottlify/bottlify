@@ -310,6 +310,20 @@ function describe(result, context, calls){
             {
                 say(`    skipped: ${skipped}`);
             }
+            const cascade = device.cascade;
+            if (cascade && (cascade.noTexture > 0 || cascade.noCoordSet > 0))
+            {
+                // A draw whose stage cascade stopped early is a draw that ran
+                // untextured and said nothing. It is the shape of "a texture
+                // disappeared", so a run names it rather than leaving it to a
+                // screenshot.
+                say(`    cascade cut: no-texture=${cascade.noTexture}`
+                    + ` no-coord-set=${cascade.noCoordSet}`);
+                for (const line of cascade.truncations)
+                {
+                    say(`      ${line}`);
+                }
+            }
             const lighting = device.lighting;
             if (lighting)
             {

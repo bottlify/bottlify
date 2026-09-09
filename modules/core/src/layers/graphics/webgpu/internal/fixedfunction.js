@@ -76,6 +76,12 @@ export const D3DTA = Object.freeze({
     ALPHAREPLICATE: 0x20,
 });
 
+/**
+ * The coordinate set D3DTSS_TEXCOORDINDEX names. The bits above it are the
+ * D3DTSS_TCI_ generation modes, which this engine does not compute.
+ */
+export const COORD_SET_MASK = 0xffff;
+
 /** D3DFOG. */
 export const D3DFOG = Object.freeze({ NONE: 0, EXP: 1, EXP2: 2, LINEAR: 3 });
 
@@ -185,16 +191,47 @@ const SPOT_FUNCTION = `fn spotFactor(light: Light, toLight: vec3f) -> f32 {
 `;
 
 /**
+ * Which of an operation's two argument slots it reads.
+ *
+ * Stage state persists across draws, so a slot the operation does not read
+ * holds whatever an unrelated draw left in it, and the API is explicit that
+ * such a slot must not matter. Anything driven by the arguments -- which
+ * textures a stage needs, above all -- has to ask the operation first.
+ *
+ * @param {number} op  D3DTOP
+ * @param {number} arg1 @param {number} arg2
+ * @returns {number[]} the argument values the operation actually reads
+ */
+export function argumentsRead(op, arg1, arg2){
+    if (op === D3DTOP.DISABLE)
+    {
+        return [];
+    }
+    if (op === D3DTOP.SELECTARG1)
+    {
+        return [arg1];
+    }
+    if (op === D3DTOP.SELECTARG2)
+    {
+        return [arg2];
+    }
+    return [arg1, arg2];
+}
+
+/**
  * The WGSL expression for one stage argument.
  *
- * @param {number} arg @param {number} stageIndex @returns {string}
+ * @param {number} arg
+ * @param {number} stageIndex
+ * @param {number} coordSet  which coordinate set this stage samples with
+ * @returns {string}
  */
-function argument(arg, stageIndex){
+function argument(arg, stageIndex, coordSet){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
         [D3DTA.TEXTURE]: `textureSample(texture${stageIndex}, sampler${stageIndex}, `
-            + `input.texCoord${stageIndex})`,
+            + `input.texCoord${coordSet})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: 'input.specular',
     }[arg & D3DTA.SELECTMASK];
@@ -212,19 +249,30 @@ function argument(arg, stageIndex){
 }
 
 /**
- * The WGSL expression combining two arguments under one operation.
+ * The WGSL expression combining a stage's arguments under one operation.
  *
- * @param {number} op @param {string} a @param {string} b @returns {string | null}
+ * The slots the operation does not read are never turned into an expression at
+ * all: a stale value there is allowed to be anything, including a source this
+ * engine cannot spell, and building it would fail a draw over an argument
+ * nothing consumes.
+ *
+ * @param {number} op
+ * @param {number} stageIndex
+ * @param {number} coordSet
+ * @param {number} arg1 @param {number} arg2
+ * @returns {string | null}
  */
-function combine(op, a, b){
+function combine(op, stageIndex, coordSet, arg1, arg2){
+    const read = argumentsRead(op, arg1, arg2);
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordSet) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordSet) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
             return null;
         case D3DTOP.SELECTARG1:
-            return a;
         case D3DTOP.SELECTARG2:
-            return b;
+            return a;
         case D3DTOP.MODULATE:
             return `${a} * ${b}`;
         case D3DTOP.MODULATE2X:
@@ -491,14 +539,19 @@ export function generateFixedFunction(state, layout){
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
-            const color = combine(stage.colorOp,
-                argument(stage.colorArg1, index), argument(stage.colorArg2, index));
+            // The set the program bound, not the stage's own number: two stages
+            // sharing one set is the ordinary way a detail or lightmap pass is
+            // written, and reading set N for stage N samples a varying the
+            // vertex never carried.
+            const coordSet = stage.texCoordIndex & COORD_SET_MASK;
+            const color = combine(
+                stage.colorOp, index, coordSet, stage.colorArg1, stage.colorArg2);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
-            const alpha = combine(stage.alphaOp,
-                argument(stage.alphaArg1, index), argument(stage.alphaArg2, index));
+            const alpha = combine(
+                stage.alphaOp, index, coordSet, stage.alphaArg1, stage.alphaArg2);
             return `    current = vec4f((${color}).rgb, `
                 + `${alpha === null ? '(current).a' : `(${alpha}).a`});`;
         })].join('\n');

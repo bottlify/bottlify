@@ -208,6 +208,43 @@ test('5. the stage cascade modulates, and a second stage sees the first', ()=>{
     assert.deepEqual([result.r, result.g, result.b], [64, 64, 64]);
 });
 
+test('5a. a select reads only its own slot, whichever slot that is', ()=>{
+    // Stage state persists across draws, so the slot an operation does not read
+    // holds whatever an earlier one left there -- including a source this
+    // engine cannot resolve. Reading it at all is what made a select behave
+    // like the draw before it.
+    const stage = (/** @type {object} */ over)=>({
+        colorOp: D3DTOP.SELECTARG1,
+        colorArg1: D3DTA.TFACTOR,
+        colorArg2: D3DTA.SELECTMASK,
+        alphaOp: D3DTOP.SELECTARG1,
+        alphaArg1: D3DTA.TFACTOR,
+        alphaArg2: D3DTA.SELECTMASK,
+        texCoordIndex: 0,
+        ...over,
+    });
+    const sources = {
+        diffuse: solid(1, 2, 3),
+        specular: solid(0, 0, 0, 0),
+        texture: solid(4, 5, 6),
+        textureFactor: solid(7, 8, 9, 10),
+    };
+
+    const first = runStages([stage({})], sources);
+    assert.deepEqual([first.r, first.g, first.b, first.a], [7, 8, 9, 10]);
+
+    const second = runStages([stage({
+        colorOp: D3DTOP.SELECTARG2,
+        colorArg1: D3DTA.SELECTMASK,
+        colorArg2: D3DTA.TEXTURE,
+        alphaOp: D3DTOP.SELECTARG2,
+        alphaArg1: D3DTA.SELECTMASK,
+        alphaArg2: D3DTA.TEXTURE,
+    })], sources);
+    assert.deepEqual([second.r, second.g, second.b, second.a], [4, 5, 6, 255],
+        'argument two, and the unreadable slot one never resolved');
+});
+
 test('5b. an argument modifier replicates alpha and inverts, in that order', ()=>{
     // The two modifiers compose, and the order is the API's: replicate, then
     // invert. Reversed, the inversion happens on the colour and is then thrown

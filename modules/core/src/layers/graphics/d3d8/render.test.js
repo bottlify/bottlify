@@ -793,6 +793,105 @@ test('recorded: the cascade ends at a stage that samples a texture nobody bound'
     assert.equal(h.samplers.length, 0, 'no sampler was needed');
 });
 
+test('recorded: a stale texture argument the operation never reads keeps the cascade',
+    async()=>{
+        // Stage state persists across draws, so an unread slot holds whatever
+        // an earlier draw left in it. Counting it as a demand for a texture cut
+        // the cascade at a stage that never wanted one, and the draw lost its
+        // texturing while the rest of the picture stayed right.
+        /** @type {string[]} */
+        const said = [];
+        const h = harness({
+            width: 640, height: 480, dumpDraws: true,
+            divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+        });
+        const { device } = h;
+        device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1);
+        device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.DIFFUSE);
+        device.SetTextureStageState(0, D3DTSS.COLORARG2, D3DTA.TEXTURE);
+        device.SetTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG1);
+        device.SetTextureStageState(0, D3DTSS.ALPHAARG1, D3DTA.DIFFUSE);
+        device.SetTextureStageState(0, D3DTSS.ALPHAARG2, D3DTA.TEXTURE);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(
+            D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const diagnostics = device.diagnostics();
+        assert.deepEqual(diagnostics.cascade,
+            { noTexture: 0, noCoordSet: 0, truncations: [] });
+        assert.deepEqual(said, []);
+        assert.ok(diagnostics.lastDump[0].includes(
+            ` [${D3DTOP.SELECTARG1}(${D3DTA.DIFFUSE},${D3DTA.TEXTURE})`),
+        'the stage ran, with the stale argument still in the slot nothing reads');
+        assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
+    });
+
+test('recorded: a cascade the program really did cut short is counted and reported', async()=>{
+    // The other half of the rule: an operation that does read the texture with
+    // none bound still ends the cascade, and nothing else in a frame says the
+    // draw lost a layer.
+    /** @type {string[]} */
+    const said = [];
+    const h = harness({
+        width: 640, height: 480, dumpDraws: true,
+        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+    });
+    const { device } = h;
+    selectTexture(device);
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(
+        D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const diagnostics = device.diagnostics();
+    assert.equal(diagnostics.cascade.noTexture, 1);
+    assert.equal(diagnostics.cascade.truncations.length, 1);
+    assert.match(diagnostics.cascade.truncations[0], /^stage 0 texture: /);
+    assert.equal(said.length, 1);
+    assert.match(said[0], /cut short and the draw ran untextured/);
+    assert.match(diagnostics.lastDump[0], / cut=0\/texture\//);
+});
+
+test('recorded: a second stage reusing coordinate set zero is not cut for its own number',
+    async()=>{
+        // One set in the vertex and two stages naming it is how a detail pass
+        // is written. Comparing the stage's own number against the sets the
+        // vertex carries lost every stage past the first.
+        const h = harness({ width: 640, height: 480, dumpDraws: true });
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([1, 2, 3, 4]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        assert.equal(device.SetTexture(1, texture), D3D_OK);
+        selectTexture(device);
+        device.SetTextureStageState(1, D3DTSS.COLOROP, D3DTOP.MODULATE);
+        device.SetTextureStageState(1, D3DTSS.COLORARG1, D3DTA.TEXTURE);
+        device.SetTextureStageState(1, D3DTSS.COLORARG2, D3DTA.CURRENT);
+        device.SetTextureStageState(1, D3DTSS.ALPHAOP, D3DTOP.SELECTARG1);
+        device.SetTextureStageState(1, D3DTSS.ALPHAARG1, D3DTA.CURRENT);
+        device.SetTextureStageState(1, D3DTSS.TEXCOORDINDEX, 0);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const diagnostics = device.diagnostics();
+        assert.equal(diagnostics.cascade.noCoordSet, 0);
+        assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
+        const code = gpu.of('createShaderModule')[0].descriptor.code;
+        assert.match(code, /textureSample\(texture1, sampler1, input\.texCoord0\)/,
+            'stage one samples the set it named, not the set of its own number');
+    });
+
 test('recorded: a sampler follows the stage filter and address states', async()=>{
     const h = harness();
     const { device } = h;

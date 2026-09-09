@@ -37,8 +37,8 @@
 
 import {
     D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT, D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS,
-    COLORWRITEENABLE_ALPHA, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS, D3DZB, D3D_OK,
-    FORMAT_INFO, dwordToFloat,
+    COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS, D3DTSS,
+    D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat,
 } from './constants.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
@@ -88,6 +88,9 @@ const TTFF_COUNT2 = 2;
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
 const TEXTURE_DUMP_LIMIT = 24;
+
+/** Distinct cascade truncations a run keeps, so a report names them without a flood. */
+const TRUNCATION_SAMPLES = 8;
 
 /** Stages a device has. Every one past the cascade's end is ignored, not an error. */
 export const STAGE_COUNT = 8;
@@ -748,19 +751,34 @@ export function uniformsOf(model, lighting){
 }
 
 /**
+ * Why a cascade stopped before the program's stages ran out.
+ *
+ * @typedef {Object} CascadeTruncation
+ * @property {number} stage  the stage that ended it
+ * @property {'texture' | 'coordSet'} reason
+ * @property {string} detail  the stage's state, for a report to name
+ */
+
+/**
  * The stage cascade a draw runs, and which texture each stage samples.
  *
  * The cascade ends at the first stage whose colour operation is off. It also
- * ends at a stage that names the texture argument with nothing bound there, or
- * with no coordinate set for it in the vertex: the generated shader would
+ * ends at a stage that reads the texture argument with nothing bound there, or
+ * with no such coordinate set in the vertex: the generated shader would
  * otherwise sample a binding that does not exist, and a program that binds one
  * texture and leaves stage zero at its default expects that texture drawn, not
  * a refusal.
  *
+ * Only the arguments the two operations actually read count. Stage state
+ * persists across draws, so an unread slot holds whatever an earlier draw put
+ * there; treating a stale D3DTA_TEXTURE in one as a demand for a texture ends
+ * the cascade at a stage that never wanted one, and the draw loses its
+ * texturing with the rest of the picture intact.
+ *
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/vertexformat.js').VertexLayout} layout
  * @returns {{ stages: import('../webgpu/internal/pipeline.js').StageKey[],
- *             textures: (any | null)[] }}
+ *             textures: (any | null)[], truncated: CascadeTruncation | null }}
  */
 export function stageCascade(model, layout){
     /** @type {import('../webgpu/internal/pipeline.js').StageKey[]} */
@@ -776,30 +794,40 @@ export function stageCascade(model, layout){
         {
             break;
         }
-        const alphaOp = get(D3DTSS.ALPHAOP);
-        const selectors = [get(D3DTSS.COLORARG1), get(D3DTSS.COLORARG2)];
-        if (alphaOp !== D3DTOP.DISABLE)
-        {
-            selectors.push(get(D3DTSS.ALPHAARG1), get(D3DTSS.ALPHAARG2));
-        }
-        const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
-        const texture = model.textures.get(stage) ?? null;
-        if (samples && (!texture || stage >= layout.texCoordSets))
-        {
-            break;
-        }
-        stages.push({
+        const key = {
             colorOp,
             colorArg1: get(D3DTSS.COLORARG1),
             colorArg2: get(D3DTSS.COLORARG2),
-            alphaOp,
+            alphaOp: get(D3DTSS.ALPHAOP),
             alphaArg1: get(D3DTSS.ALPHAARG1),
             alphaArg2: get(D3DTSS.ALPHAARG2),
             texCoordIndex: get(D3DTSS.TEXCOORDINDEX),
-        });
+        };
+        const selectors = [
+            ...argumentsRead(key.colorOp, key.colorArg1, key.colorArg2),
+            ...argumentsRead(key.alphaOp, key.alphaArg1, key.alphaArg2),
+        ];
+        const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
+        const texture = model.textures.get(stage) ?? null;
+        const coordSet = key.texCoordIndex & COORD_SET_MASK;
+        if (samples && (!texture || coordSet >= layout.texCoordSets))
+        {
+            return {
+                stages,
+                textures,
+                truncated: {
+                    stage,
+                    reason: texture ? 'coordSet' : 'texture',
+                    detail: `${key.colorOp}(${key.colorArg1},${key.colorArg2})`
+                        + `/${key.alphaOp}(${key.alphaArg1},${key.alphaArg2})`
+                        + ` tci=${key.texCoordIndex} sets=${layout.texCoordSets}`,
+                },
+            };
+        }
+        stages.push(key);
         textures.push(samples ? texture : null);
     }
-    return { stages, textures };
+    return { stages, textures, truncated: null };
 }
 
 /**
@@ -1030,6 +1058,22 @@ export function createRenderer(options){
             indexFormat: 0,
             stencilRect: 0,
             texture: 0,
+        },
+        /**
+         * Draws that ran fewer stages than the program had set up.
+         *
+         * A cascade cut short draws untextured geometry and reports success,
+         * which reads as a texture that vanished while everything around it
+         * stayed right. Nothing else in a frame distinguishes that from a draw
+         * the program meant to be flat, so it is counted rather than inferred.
+         */
+        cascade: {
+            /** Ended at a stage that reads TEXTURE with nothing bound there. */
+            noTexture: 0,
+            /** Ended at a stage whose coordinate set the vertex does not carry. */
+            noCoordSet: 0,
+            /** @type {string[]} The distinct stage states that ended one. */
+            truncations: [],
         },
         /** @type {string[]} */
         failures: [],
@@ -1346,6 +1390,13 @@ export function createRenderer(options){
             + `:${prepared.stageBindings[at]?.placeholder
                 ? 'placeholder'
                 : describeTexture(prepared.textures[at])}`).join(' ');
+        // A draw that lost its texturing is a draw whose cascade ended before
+        // the program's stages did, and the state of the stage that ended it is
+        // the only thing that says why.
+        const cut = prepared.truncated
+            ? ` cut=${prepared.truncated.stage}/${prepared.truncated.reason}`
+                + `/${prepared.truncated.detail.replace(/ /g, ',')}`
+            : '';
         dump.push(`#${dump.length} ${where}`
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
@@ -1371,7 +1422,7 @@ export function createRenderer(options){
             + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
             + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
             + `@${round(model.viewport.rect.minDepth)}..${round(model.viewport.rect.maxDepth)}`
-            + ` [${cascade}]${corners}`);
+            + ` [${cascade}]${cut}${corners}`);
     };
 
     /**
@@ -1523,6 +1574,58 @@ export function createRenderer(options){
         dumpDraw(model, prepared,
             wanted > 0 ? readMemory(stream.buffer.base + skipped, wanted) : new Uint8Array(0),
             stream.stride, order);
+    };
+
+    /**
+     * Counts and reports a cascade that stopped short of the program's stages.
+     *
+     * The draw still happens -- refusing it would change what the program does
+     * -- so nothing else says the picture lost a texture layer. The counter
+     * carries the distinct stage states so that a run names which ones, and the
+     * divergence says it once.
+     *
+     * @param {{ truncated: CascadeTruncation | null }} cascade
+     */
+    const reportCascade = cascade=>{
+        const truncated = cascade.truncated;
+        if (!truncated)
+        {
+            return;
+        }
+        counters.cascade[truncated.reason === 'texture' ? 'noTexture' : 'noCoordSet']++;
+        const line = `stage ${truncated.stage} ${truncated.reason}: ${truncated.detail}`;
+        if (!counters.cascade.truncations.includes(line)
+            && counters.cascade.truncations.length < TRUNCATION_SAMPLES)
+        {
+            counters.cascade.truncations.push(line);
+        }
+        if (divergence)
+        {
+            divergence('Direct3D 8',
+                'a texture stage cascade was cut short and the draw ran untextured'
+                + ` from that stage on: ${line}`);
+        }
+    };
+
+    /**
+     * Says once that a stage asked for coordinates this engine does not
+     * generate. The set it names is used regardless, which is the coordinates
+     * the vertex carried rather than the ones the program asked to be computed.
+     *
+     * @param {import('../webgpu/internal/pipeline.js').StageKey[]} stages
+     */
+    const reportCoordGeneration = stages=>{
+        if (!divergence)
+        {
+            return;
+        }
+        if (stages.some(stage=>(stage.texCoordIndex & ~COORD_SET_MASK) !== 0))
+        {
+            divergence('Direct3D 8',
+                'texture coordinate generation is accepted and not applied'
+                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_*): the set named in the low'
+                + ' bits is sampled as the vertex carries it');
+        }
     };
 
     /**
@@ -1866,6 +1969,7 @@ export function createRenderer(options){
             return null;
         }
         const cascade = stageCascade(model, layout);
+        reportCascade(cascade);
         if (skipTexture !== null && cascade.textures.some(
             texture=>texture && textures.get(texture)?.id === skipTexture))
         {
@@ -1886,6 +1990,7 @@ export function createRenderer(options){
         });
         const lighting = lightingOf(model, layout);
         reportTextureTransform(model, cascade.stages.length);
+        reportCoordGeneration(cascade.stages);
         countLighting(model, layout, lighting);
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
@@ -1899,7 +2004,7 @@ export function createRenderer(options){
         // neither can be recovered from the recorded command.
         return {
             state, uniforms: uniformsOf(model, lighting), stageBindings,
-            layout, textures: cascade.textures,
+            layout, textures: cascade.textures, truncated: cascade.truncated,
         };
     };
 
@@ -2358,6 +2463,10 @@ export function createRenderer(options){
                 draws: counters.draws,
                 clears: counters.clears,
                 skipped: { ...counters.skipped },
+                cascade: {
+                    ...counters.cascade,
+                    truncations: [...counters.cascade.truncations],
+                },
                 failures: [...counters.failures],
                 lighting: {
                     ...counters.lighting,

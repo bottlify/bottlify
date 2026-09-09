@@ -141,6 +141,60 @@ test('each stage emits its own sample and reads the one before it', ()=>{
     assert.equal((code.match(/current = vec4f/g) || []).length, 2, 'one assignment per stage');
 });
 
+test('an argument slot the operation does not read is never built', ()=>{
+    // Stage state persists across draws, so the unread slot holds whatever an
+    // earlier operation put there. Building it anyway sampled a texture the
+    // stage does not use and failed the draw outright on a source this engine
+    // cannot spell.
+    const stage = (/** @type {object} */ over)=>({
+        colorOp: D3DTOP.SELECTARG1,
+        colorArg1: D3DTA.DIFFUSE,
+        colorArg2: D3DTA.SELECTMASK,
+        alphaOp: D3DTOP.SELECTARG1,
+        alphaArg1: D3DTA.DIFFUSE,
+        alphaArg2: D3DTA.TEXTURE,
+        texCoordIndex: 0,
+        ...over,
+    });
+    const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
+
+    const code = generate(baseState({ fvf, stages: [stage({})] })).code;
+    assert.doesNotMatch(code, /textureSample/,
+        'neither operation reads its second slot, so nothing samples');
+
+    const selected = generate(baseState({
+        fvf,
+        stages: [stage({
+            colorOp: D3DTOP.SELECTARG2,
+            colorArg1: D3DTA.SELECTMASK,
+            colorArg2: D3DTA.TFACTOR,
+            alphaOp: D3DTOP.SELECTARG2,
+            alphaArg1: D3DTA.SELECTMASK,
+            alphaArg2: D3DTA.DIFFUSE,
+        })],
+    })).code;
+    assert.match(selected, /current = vec4f\(\(uniforms\.textureFactor\)\.rgb/,
+        'argument two is what a select-two selects');
+});
+
+test('a stage samples the coordinate set it names, not its own number', ()=>{
+    // A second stage reusing set zero is how a detail or lightmap pass is
+    // written, and there is one set in the vertex for both. Reading set N for
+    // stage N samples a varying the vertex never carried.
+    const textured = {
+        colorOp: D3DTOP.MODULATE, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+        alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+        texCoordIndex: 0,
+    };
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
+        stages: [textured, textured],
+    })).code;
+
+    assert.match(code, /textureSample\(texture1, sampler1, input\.texCoord0\)/);
+    assert.doesNotMatch(code, /texCoord1/, 'the vertex carries one set and only one is read');
+});
+
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{
     const state = baseState({
         fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),

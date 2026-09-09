@@ -260,4 +260,4 @@ export const D3DTADDRESS = Object.freeze({
 });
 
 /** The stage cascade's operations and argument selectors, shared with the shader generator. */
-export { D3DTA, D3DTOP } from '../webgpu/internal/fixedfunction.js';
+export { COORD_SET_MASK, D3DTA, D3DTOP, argumentsRead } from '../webgpu/internal/fixedfunction.js';

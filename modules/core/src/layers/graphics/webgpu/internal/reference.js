@@ -33,7 +33,7 @@
  * thing.
  */
 
-import { D3DLIGHT, D3DTA, D3DTOP } from './fixedfunction.js';
+import { D3DLIGHT, D3DTA, D3DTOP, argumentsRead } from './fixedfunction.js';
 
 /** Bytes per pixel, everywhere in this engine. */
 const BPP = 4;
@@ -174,6 +174,10 @@ const clamp8 = value=>(value < 0 ? 0 : value > 255 ? 255 : value | 0);
 /**
  * One channel under one operation, in 0..255.
  *
+ * `a` and `b` are the operation's own arguments in the order it reads them, not
+ * the two slots: an operation that reads one slot reads it as `a` whichever
+ * slot it was, so that the other is never resolved at all.
+ *
  * @param {number} op @param {number} a @param {number} b @param {number} current
  * @returns {number}
  */
@@ -183,9 +187,8 @@ function applyOp(op, a, b, current){
         case D3DTOP.DISABLE:
             return current;
         case D3DTOP.SELECTARG1:
-            return a;
         case D3DTOP.SELECTARG2:
-            return b;
+            return a;
         case D3DTOP.MODULATE:
             return clamp8((a * b + 127) / 255);
         case D3DTOP.MODULATE2X:
@@ -219,10 +222,15 @@ export function runStages(stages, sources){
     for (const stage of stages)
     {
         const context = { ...sources, current };
-        const a1 = argumentValue(stage.colorArg1, context);
-        const a2 = argumentValue(stage.colorArg2, context);
-        const b1 = argumentValue(stage.alphaArg1, context);
-        const b2 = argumentValue(stage.alphaArg2, context);
+        // Only the slots the operation reads are resolved: an unread one is
+        // allowed to hold a stale value this engine cannot spell, and the
+        // shader never builds it either.
+        const resolve = (/** @type {number[]} */ read)=>
+            [0, 1].map(at=>at < read.length
+                ? argumentValue(read[at], context)
+                : { r: 0, g: 0, b: 0, a: 0 });
+        const [a1, a2] = resolve(argumentsRead(stage.colorOp, stage.colorArg1, stage.colorArg2));
+        const [b1, b2] = resolve(argumentsRead(stage.alphaOp, stage.alphaArg1, stage.alphaArg2));
         current = {
             r: applyOp(stage.colorOp, a1.r, a2.r, current.r),
             g: applyOp(stage.colorOp, a1.g, a2.g, current.g),
