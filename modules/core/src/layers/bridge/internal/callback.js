@@ -40,6 +40,19 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     let calls = 0;
     let deepest = 0;
     let pending = 0;
+    /**
+     * The last few routines the guest was sent to, and who sent it.
+     *
+     * A fault inside guest code says where the processor stopped and nothing
+     * about how it got there. When the guest was started by us -- a window
+     * procedure, a callback, an initialiser -- the entry we chose and the host
+     * call that chose it are the first two facts a reader needs, and neither
+     * exists anywhere else once the frame has unwound.
+     *
+     * @type {{ entry: number, by: string, thread: string }[]}
+     */
+    const started = [];
+    const STARTED_RING = 8;
 
     /** @param {any} thread */
     const callbackFrames = thread=>(thread.callbackFrames ??= []);
@@ -132,6 +145,13 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
         waiting: thread=>thread ? hostCalls(thread).map(call=>call.name) : [],
 
         /**
+         * Where the guest was last sent, newest last, and by which host call.
+         *
+         * @returns {{ entry: number, by: string, thread: string }[]}
+         */
+        recentlyStarted: ()=>started.slice(),
+
+        /**
          * Starts a call into guest code and returns its result.
          *
          * @param {Object} call
@@ -139,9 +159,10 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * @param {number} call.entry            Guest address of the routine.
          * @param {number[]} [call.args]
          * @param {number} [call.stackAtRest]    Where the stack is, when nothing else knows.
+         * @param {string} [call.by]             Which host call is starting it.
          * @returns {Promise<number>}
          */
-        call({ thread, entry, args = [], stackAtRest }){
+        call({ thread, entry, args = [], stackAtRest, by = 'somewhere' }){
             if (!thread)
             {
                 throw new Error('bridge: a guest callback needs a thread to run on');
@@ -149,6 +170,15 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             if (sentinelId === null)
             {
                 throw new Error('bridge: the callback sentinel was never reserved');
+            }
+            // A routine at address zero is not a routine. Sending the guest
+            // there produces a fault at 0x00000000 that reads exactly like the
+            // program's own null call, when in fact we chose the address -- and
+            // which of our calls chose it is gone by the time anyone reads the
+            // report. So it is refused here, named.
+            if ((entry >>> 0) === 0)
+            {
+                throw new Error(`bridge: ${by} asked to run guest code at address zero`);
             }
 
             // The call in flight decides where the frame goes, and the callback
@@ -199,6 +229,11 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             const frames = callbackFrames(thread);
             calls++;
             deepest = Math.max(deepest, frames.length + 1);
+            started.push({ entry: entry >>> 0, by, thread: thread.name });
+            if (started.length > STARTED_RING)
+            {
+                started.shift();
+            }
 
             /** @type {(value: number) => void} */
             let settle = ()=>{};

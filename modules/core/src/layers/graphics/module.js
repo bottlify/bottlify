@@ -189,6 +189,13 @@ export const graphicsModule = {
             present: surface=>presenter?.present(surface),
 
             /**
+             * The display the program asked for. Anything drawn outside the
+             * drawing libraries -- a film, an overlay -- has to fit into this
+             * rather than resize it.
+             */
+            screen: ()=>services.screen,
+
+            /**
              * Makes one of the APIs a program may have been written against.
              * Named rather than exported directly, so that adding one does not
              * change this module's shape.

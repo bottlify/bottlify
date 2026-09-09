@@ -4,6 +4,7 @@
  * See LICENSE for details
  */
 
+import { fitFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
@@ -2209,7 +2210,7 @@ async function buildApp(options){
      * surface the guest owns, which is also what a real video renderer writes
      * into -- the window's own bits.
      *
-     * @type {{ address: number, bytes: number } | null}
+     * @type {{ address: number, bytes: number, pixels: Uint8Array } | null}
      */
     let filmSurface = null;
 
@@ -2228,6 +2229,7 @@ async function buildApp(options){
 
     /** @param {{ hwnd: number, width: number, height: number, bgra: Uint8Array | null,
      *            audio: Int16Array[], sampleRate: number, channels: number } | null} shown */
+    /** @param {any} shown  What a filter graph handed back for this tick. */
     const showVideoFrame = shown=>{
         if (!shown)
         {
@@ -2270,7 +2272,17 @@ async function buildApp(options){
             film.noScreen++;
             return;
         }
-        const needed = shown.width * shown.height * 4;
+        // On the screen the program asked for, never on one the size of the
+        // film. A cinematic is authored at its own dimensions and they are
+        // rarely the display's -- letting them through resizes the surface
+        // everything else is drawn on, and a display does not change shape
+        // because a film started. So the frame is fitted into the screen and
+        // centred, with the margins left black, which is what a video renderer
+        // does with a destination rectangle it does not fill.
+        const shape = screen.screen();
+        const width = shape.width;
+        const height = shape.height;
+        const needed = width * height * 4;
         if (!filmSurface || filmSurface.bytes < needed)
         {
             const address = win32.heap().allocate(needed);
@@ -2279,15 +2291,17 @@ async function buildApp(options){
                 film.noRoom++;
                 return;
             }
-            filmSurface = { address, bytes: needed };
+            filmSurface = { address, bytes: needed, pixels: new Uint8Array(needed) };
         }
         film.shown++;
-        memory.writeBytes(filmSurface.address, shown.bgra.subarray(0, needed));
+        const surface = filmSurface;
+        fitFrame(shown, surface.pixels, width, height);
+        memory.writeBytes(surface.address, surface.pixels);
         screen.present({
-            buffer: filmSurface.address,
-            width: shown.width,
-            height: shown.height,
-            pitch: shown.width * 4,
+            buffer: surface.address,
+            width,
+            height,
+            pitch: width * 4,
             bitCount: 32,
             palette: null,
         });

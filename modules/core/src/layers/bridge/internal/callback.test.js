@@ -146,3 +146,34 @@ test('a callback runs on the thread whose call it answers, not whoever is curren
     assert.deepEqual(resumed.map(([name])=>name), ['main'],
         'the frame was built for the thread that asked, whoever is running now');
 });
+
+test('being sent to address zero is refused, and says which call sent it', ()=>{
+    // A fault at 0x00000000 reads as the program calling a null pointer, and
+    // when the address was ours that reading sends a reader off to disassemble
+    // the program. The one fact that separates the two -- which host call chose
+    // the entry -- exists only here, and only until the frame unwinds.
+    const worker = thread('main');
+    const { made, resumed } = callbacks([worker]);
+    made.reserve();
+
+    assert.throws(
+        ()=>made.call({
+            thread: worker, entry: 0, args: [1], stackAtRest: 0x2ff000,
+            by: 'USER32.dll!DispatchMessageA',
+        }),
+        /USER32.dll!DispatchMessageA asked to run guest code at address zero/);
+    assert.deepEqual(resumed, [], 'and the thread was not sent anywhere');
+});
+
+test('what the guest was last sent to run is kept for a failure report', ()=>{
+    const worker = thread('main');
+    const { made } = callbacks([worker]);
+    made.reserve();
+    made.call({
+        thread: worker, entry: 0x401000, args: [], stackAtRest: 0x2ff000,
+        by: 'USER32.dll!DispatchMessageA',
+    });
+
+    assert.deepEqual(made.recentlyStarted(),
+        [{ entry: 0x401000, by: 'USER32.dll!DispatchMessageA', thread: 'main' }]);
+});

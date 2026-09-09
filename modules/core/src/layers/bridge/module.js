@@ -238,6 +238,9 @@ export const bridgeModule = {
                     thread: runOn,
                     entry,
                     args,
+                    // Which host call is sending the guest off, so a fault in
+                    // what it runs has an author.
+                    by: parking.chain().at(-1) ?? 'somewhere',
                     // Only a call still holding the processor describes this
                     // thread's stack; otherwise the thread's own suspended call
                     // is the record of where it came to rest.
@@ -295,6 +298,9 @@ export const bridgeModule = {
              * there to take.
              */
             callerThread: ()=>parking.current()?.thread ?? kernel.currentThread(),
+
+            /** Where the guest was last sent by us, newest last. */
+            recentlyStarted: ()=>callbacks.recentlyStarted(),
 
             /**
              * An error thrown by a suspended handler, which nothing above was

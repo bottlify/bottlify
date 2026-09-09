@@ -281,6 +281,7 @@ export function captureTrace(sources){
         // guest made, the rest are what it led to.
         trace.hostCalls = bridge.chain();
         trace.recentCalls = bridge.recent();
+        trace.startedGuest = bridge.recentlyStarted?.() ?? [];
     }
     catch (e){
         void e;
@@ -374,6 +375,18 @@ export function formatTrace(trace){
     if (trace.recentCalls?.length > 0)
     {
         lines.push(`last calls: ${trace.recentCalls.join(', ')}`);
+    }
+    // Where we sent the guest, as against where it went itself. A fault inside
+    // a window procedure or a callback belongs to the entry named here, and
+    // without this the report cannot tell the two apart at all.
+    if (trace.startedGuest?.length > 0)
+    {
+        lines.push('we started guest code at:');
+        for (const entry of trace.startedGuest.slice().reverse())
+        {
+            lines.push(`  0x${entry.entry.toString(16).padStart(8, '0')}`
+                + ` on ${entry.thread}, by ${entry.by}`);
+        }
     }
     // Every blocked thread and what it is waiting on. This was captured all
     // along and never rendered, which made the report of a stalled machine the
