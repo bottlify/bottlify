@@ -61,6 +61,9 @@ export function createVtables({ memory, register, heap }){
     const published = new WeakMap();
     let interfaces = 0;
     let methods = 0;
+    let refused = 0;
+    /** @type {string | null} */
+    let refusedBecause = null;
 
     /**
      * @param {any} object     The object model's record; opaque here.
@@ -81,21 +84,37 @@ export function createVtables({ memory, register, heap }){
             return already;
         }
 
-        const slots = table.map((method, index)=>register(
-            `${interfaceId}::${method.name}`,
-            {
-                convention: Convention.STDCALL,
-                argBytes: method.argBytes,
-                /** @param {number[]} args */
-                handler: args=>{
-                    // The first argument is the interface pointer the guest
-                    // called through, not the object. What it identifies is
-                    // settled here so no implementation has to know how an
-                    // interface is laid out.
-                    const [, ...rest] = args;
-                    return dispatch(object, interfaceId, index, method, rest);
-                },
-            }));
+        /** @type {number[]} */
+        let slots;
+        try
+        {
+            slots = table.map((method, index)=>register(
+                `${interfaceId}::${method.name}`,
+                {
+                    convention: Convention.STDCALL,
+                    argBytes: method.argBytes,
+                    /** @param {number[]} args */
+                    handler: args=>{
+                        // The first argument is the interface pointer the guest
+                        // called through, not the object. What it identifies is
+                        // settled here so no implementation has to know how an
+                        // interface is laid out.
+                        const [, ...rest] = args;
+                        return dispatch(object, interfaceId, index, method, rest);
+                    },
+                }));
+        }
+        catch (e){
+            // A method needs a stub the guest can call, and the table stubs
+            // come out of is finite. There is nowhere else to put one, so this
+            // is the heap case again: no interface, and a refusal the caller
+            // reports. Raising instead would end the process at a call the
+            // program is entitled to see fail. Counted rather than swallowed --
+            // a build that starts refusing interfaces has to say so somewhere.
+            refused++;
+            refusedBecause = e instanceof Error ? e.message : String(e);
+            return 0;
+        }
         methods += slots.length;
 
         // The vtable and the one word pointing at it, allocated together: they
@@ -240,6 +259,11 @@ export function createVtables({ memory, register, heap }){
             return record ? publish(object, interfaceId, record.methods) : 0;
         },
 
-        diagnostics: ()=>({ comInterfaces: interfaces, comMethods: methods }),
+        diagnostics: ()=>({
+            comInterfaces: interfaces,
+            comMethods: methods,
+            comInterfacesRefused: refused,
+            comRefusedBecause: refusedBecause,
+        }),
     };
 }

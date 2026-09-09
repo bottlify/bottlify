@@ -137,7 +137,13 @@ export const cpuModule = {
                 }
                 lastFault = null;
                 host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
-                thunks = createThunkTable({ base: settings.thunkBase, port: settings.trapPort });
+                thunks = createThunkTable({
+                    base: settings.thunkBase,
+                    port: settings.trapPort,
+                    // The same span the region is registered with, so the table
+                    // refuses a slot rather than laying one outside it.
+                    capacity: settings.thunkCapacity,
+                });
                 host.onTrap((/** @type {number} */ id)=>{
                     // A processor exception arrives as a trap like any other,
                     // from a stub the ROM put behind its vector. Answered here

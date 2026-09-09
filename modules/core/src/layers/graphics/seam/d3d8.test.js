@@ -45,6 +45,8 @@ const D3D_OK = 0;
 const D3DERR_INVALIDCALL = 0x8876086c;
 const D3DERR_NOTAVAILABLE = 0x8876086a;
 const E_NOTIMPL = 0x80004001;
+const E_OUTOFMEMORY = 0x8007000e;
+const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c;
 const S_FALSE = 1;
 
 const SCREEN = { width: 800, height: 600, bitsPerPixel: 32 };
@@ -105,6 +107,7 @@ function machine(){
     /** @type {Map<number, any>} */
     const registered = new Map();
     let nextTrap = 1;
+    let arenaEmpty = false;
     const vtables = createVtables({
         memory,
         /** @param {string} name @param {any} fn */
@@ -116,6 +119,10 @@ function machine(){
         heap: {
             /** @param {number} size */
             allocate: size=>{
+                if (arenaEmpty)
+                {
+                    return 0;
+                }
                 const at = next;
                 next += size + 16 & ~15;
                 return at;
@@ -125,6 +132,10 @@ function machine(){
 
     return {
         memory,
+        /** Leaves nowhere to lay another vtable, the way a long run ends up. */
+        exhaustArena(){
+            arenaEmpty = true;
+        },
         services: { readMemory: readBytes, writeMemory: writeBytes },
         /** @param {any} object @param {string} id */
         publishInterface: (object, id)=>vtables.publish(object, id),
@@ -262,8 +273,12 @@ test('the interrogation a program does before it draws is answered from facts', 
     assert.equal(h.device(device, 'GetDisplayMode', [mode]), D3D_OK);
     assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.Width), SCREEN.width);
 
-    assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0, 'the device let go of everything it held');
+    assert.equal(h.release(device), 0, 'the device let go of everything it held');
+    // And its pointer stops resolving. This used to assert the count through
+    // the pointer, which only worked because every object ever published was
+    // held for the life of the process -- the leak, not the contract. The
+    // release above is what says the count reached zero.
+    assert.equal(h.object(device), null);
     h.release(root);
     assert.equal(h.roots[0].refCount, 0);
 });
@@ -628,8 +643,7 @@ test('the surfaces a device already has are one object, however they are reached
     assert.equal(h.release(surface), 0);
     assert.equal(h.release(stencil), 0);
     assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0,
-        'and the device is back to nothing once its own surfaces are let go');
+    assert.equal(h.object(device), null);
     h.release(root);
 });
 
@@ -672,7 +686,7 @@ test('a render target and a depth stencil are made, bound and let go', ()=>{
     assert.equal(h.release(target), 0);
     assert.equal(h.release(depth), 0);
     assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0);
+    assert.equal(h.object(device), null);
     h.release(root);
 });
 
@@ -730,7 +744,7 @@ test('a copy between surfaces moves the bytes the device named', ()=>{
     assert.equal(h.release(source), 0);
     assert.equal(h.release(destination), 0);
     assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0);
+    assert.equal(h.object(device), null);
     h.release(root);
 });
 
@@ -792,7 +806,7 @@ test('UpdateTexture carries a system-memory texture into the one that draws', ()
     assert.equal(h.release(source), 0);
     assert.equal(h.release(destination), 0);
     assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0);
+    assert.equal(h.object(device), null);
     h.release(root);
 });
 
@@ -839,7 +853,7 @@ test('a stream and an index binding read back as the buffers they were given', (
     assert.equal(h.release(vertices), 0);
     assert.equal(h.release(indices), 0);
     assert.equal(h.release(device), 0);
-    assert.equal(h.object(device).refCount, 0);
+    assert.equal(h.object(device), null);
     h.release(root);
 });
 
@@ -973,4 +987,32 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
 
     assert.equal(h.release(device), 0);
     h.release(root);
+});
+
+test('a create with nowhere to put the interface fails instead of answering success', ()=>{
+    // Publishing an interface takes guest memory for the vtable and a stub per
+    // method, and both run out. What the publisher answers then is a null
+    // pointer -- and a null pointer written next to D3D_OK is a texture the
+    // program goes on to call through, at address zero.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    h.box.exhaustArena();
+
+    const out = 0xe000;
+    h.box.memory.writeU32(out, 0xdeadbeef);
+    assert.equal(
+        h.device(device, 'CreateTexture', [4, 4, 1, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]),
+        D3DERR_OUTOFVIDEOMEMORY,
+        'a texture that could not be handed back is a failed create');
+    assert.equal(h.box.memory.readU32(out), 0, 'and the caller sees no pointer either');
+
+    assert.equal(h.device(device, 'CreateImageSurface', [4, 4, D3DFMT.A8R8G8B8, out]),
+        E_OUTOFMEMORY);
+    assert.equal(h.device(device, 'CreateVertexBuffer', [64, 0, 0, D3DPOOL.MANAGED, out]),
+        D3DERR_OUTOFVIDEOMEMORY);
+    assert.equal(h.device(device, 'CreateIndexBuffer',
+        [64, 0, 101, D3DPOOL.MANAGED, out]), D3DERR_OUTOFVIDEOMEMORY, 'D3DFMT_INDEX16');
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, out]), E_OUTOFMEMORY);
+    assert.equal(h.box.memory.readU32(out), 0);
 });

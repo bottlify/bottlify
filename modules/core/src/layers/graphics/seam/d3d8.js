@@ -141,6 +141,15 @@ const D3DERR_INVALIDCALL = 0x8876086c | 0;
 /** What a device answers for something it could do on other hardware and cannot here. */
 const D3DERR_NOTAVAILABLE = 0x8876086a | 0;
 
+/**
+ * The two failures a create documents when it cannot allocate. Which one a
+ * method answers is the method's own contract: a resource that would live in
+ * video memory says so, and everything else reports the plain out-of-memory
+ * that COM defines.
+ */
+const D3DERR_OUTOFVIDEOMEMORY = 0x8876017c | 0;
+const E_OUTOFMEMORY = 0x8007000e | 0;
+
 /** Succeeded, and answered nothing -- which is what GetInfo does outside a debug runtime. */
 const S_FALSE = 1;
 
@@ -160,15 +169,24 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
      * this both publishes and adds the reference: a program that receives an
      * interface owns a reference to it, and releases one when it is done.
      *
+     * Publishing can fail -- there is a finite amount of guest memory to lay a
+     * vtable in and a finite number of stubs to fill it with -- and a failure
+     * here is the whole call's failure. The pointer written is the zero the
+     * publisher answered, and the result is the one the method documents:
+     * telling a program D3D_OK next to a null interface is how it comes to call
+     * through that pointer.
+     *
      * @param {any} object
      * @param {import('./com.js').InterfaceDescriptor[]} interfaces
      * @param {string} id
      * @param {number} out  Where to write the pointer.
+     * @param {number} [failure]  What this method answers when it cannot allocate.
+     * @returns {number} D3D_OK, or `failure`.
      */
-    const handBack = (object, interfaces, id, out)=>{
+    const handBack = (object, interfaces, id, out, failure = E_OUTOFMEMORY)=>{
         const pointer = publisher.publish(object, interfaces, id);
         fields.writeU32(out, pointer);
-        return pointer;
+        return pointer === 0 ? failure : D3D_OK;
     };
 
     /**
@@ -232,7 +250,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             const hr = texture.GetSurfaceLevel(level >>> 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0);
             }
             return hr;
         },
@@ -565,7 +584,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
             {
-                handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8, out >>> 0);
+                return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
             return hr;
         },
@@ -577,7 +597,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             const hr = device.CreateImageSurface(width >>> 0, height >>> 0, format >>> 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0);
             }
             return hr;
         },
@@ -590,8 +611,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 length >>> 0, usage >>> 0, fvf >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer && (out >>> 0) !== 0)
             {
-                handBack(held.buffer, vertexBufferInterfaces,
-                    IID_IDirect3DVertexBuffer8, out >>> 0);
+                return handBack(held.buffer, vertexBufferInterfaces,
+                    IID_IDirect3DVertexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
             return hr;
         },
@@ -604,8 +625,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 length >>> 0, usage >>> 0, format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.buffer && (out >>> 0) !== 0)
             {
-                handBack(held.buffer, indexBufferInterfaces,
-                    IID_IDirect3DIndexBuffer8, out >>> 0);
+                return handBack(held.buffer, indexBufferInterfaces,
+                    IID_IDirect3DIndexBuffer8, out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
             return hr;
         },
@@ -617,7 +638,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             const hr = device.GetBackBuffer(index >>> 0, type >>> 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0);
             }
             return hr;
         },
@@ -705,7 +727,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             const hr = device.GetRenderTarget(held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0);
             }
             return hr;
         },
@@ -715,15 +738,17 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = device.GetDepthStencilSurface(held);
+            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            {
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0);
+            }
             if ((out >>> 0) !== 0)
             {
-                // Written whatever the result: this call clears the caller's
-                // pointer when it finds nothing, and a program tests the
-                // pointer rather than the HRESULT.
-                fields.writeU32(out >>> 0, hr === D3D_OK && held.surface
-                    ? handBack(held.surface, surfaceInterfaces,
-                        IID_IDirect3DSurface8, out >>> 0)
-                    : 0);
+                // Cleared when there is nothing to hand back: this call is how
+                // a program asks whether the device has a depth buffer, and it
+                // tests the pointer rather than the HRESULT.
+                fields.writeU32(out >>> 0, 0);
             }
             return hr;
         },
@@ -873,7 +898,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 width >>> 0, height >>> 0, format >>> 0, lockable !== 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
             return hr;
         },
@@ -886,7 +912,8 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 width >>> 0, height >>> 0, format >>> 0, held);
             if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
             {
-                handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8, out >>> 0);
+                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                    out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
             return hr;
         },
@@ -1505,14 +1532,19 @@ export function createDirect3D8Seam({ publisher, memory, screen }){
                 fields.writeU32(out >>> 0, 0);
                 return hr;
             }
-            // Held so the layer's diagnostics can reach the renderer's
-            // counters. The most recent one only: a program makes one device
-            // and remakes it on a reset, and keeping every one it ever had
-            // would hold a released device's resources alive to say nothing
-            // new about them.
-            lastDevice = held.device;
-            handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8, out >>> 0);
-            return D3D_OK;
+            const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice8,
+                out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
+            if (result === D3D_OK)
+            {
+                // Held so the layer's diagnostics can reach the renderer's
+                // counters. The most recent one only: a program makes one
+                // device and remakes it on a reset, and keeping every one it
+                // ever had would hold a released device's resources alive to
+                // say nothing new about them. A device the program was never
+                // given is not one of them.
+                lastDevice = held.device;
+            }
+            return result;
         },
     };
 

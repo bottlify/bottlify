@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStub, createThunkTable, STUB_SIZE } from './thunks.js';
+import { buildStub, createThunkTable, DEFAULT_THUNK_CAPACITY, STUB_SIZE } from './thunks.js';
 
 const PORT = 0xb077;
 
@@ -48,4 +48,39 @@ test('a forwarding stub keeps its target once the table is written', ()=>{
         'the slot in the table and the slot written later must be the same bytes');
     assert.equal(image[plain.id * STUB_SIZE + 10], 0xc2, 'an ordinary stub still returns');
     assert.deepEqual([...image.subarray(0, 3)], [0xf4, 0xeb, 0xfd], 'slot 0 is the park loop');
+});
+
+test('a full table refuses a slot rather than laying one outside its region', ()=>{
+    // Four slots, one of which is the park loop. What follows the region in the
+    // running machine is the guest's initial stack, so the slot after the last
+    // one is not a slot at all -- it is executable bytes written over the
+    // stack, and nothing downstream can tell that from a stub.
+    const base = 0x100000;
+    const capacity = 4 * STUB_SIZE;
+    const table = createThunkTable({ base, port: PORT, capacity });
+
+    const taken = [
+        table.register('KERNEL32.dll!Sleep', 4),
+        table.register('USER32.dll!PeekMessageA', 20),
+        table.register('IDirect3DTexture8::LockRect', 16),
+    ];
+    assert.equal(taken.at(-1)?.address, base + capacity - STUB_SIZE, 'the last slot fits');
+
+    assert.throws(
+        ()=>table.register('IDirect3DTexture8::UnlockRect', 8),
+        /full at 4 slots.*IDirect3DTexture8::UnlockRect/s,
+        'the refusal names the capacity and what was being registered');
+
+    assert.equal(table.count, 4, 'a refused registration takes nothing');
+    assert.equal(table.image().length, capacity, 'and the image still fits the region');
+});
+
+test('the table defaults to the capacity the module reserves for it', ()=>{
+    const table = createThunkTable({ base: 0x100000, port: PORT });
+    assert.equal(DEFAULT_THUNK_CAPACITY % STUB_SIZE, 0);
+    for (let taken = table.count; taken < DEFAULT_THUNK_CAPACITY / STUB_SIZE; taken++)
+    {
+        table.register(`slot-${taken}`, 0);
+    }
+    assert.throws(()=>table.register('one too many', 0), /stub table is full/);
 });

@@ -40,13 +40,21 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
 /**
  * @param {any} api        The drawing API's own object.
  * @param {InterfaceDescriptor[]} interfaces
+ * @param {(adapter: any) => void} onGone  Called when the last reference goes.
  * @returns {any} something the bridge's publisher will accept
  */
-function adapt(api, interfaces){
+function adapt(api, interfaces, onGone){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
     const adapter = {
         api,
+        /**
+         * Every pointer this object has been published as, so the map back can
+         * be given up all at once when the object dies.
+         *
+         * @type {Set<number>}
+         */
+        pointers: new Set(),
         /** @param {string} id */
         interfaceFor(id){
             // IUnknown is every object's, and answers with one record whichever
@@ -79,8 +87,35 @@ function adapt(api, interfaces){
         // whose generations count separately needs to know which one.
         /** @param {string} [id] */
         addRef: id=>api.addRef?.(id) ?? 1,
-        /** @param {string} [id] */
-        release: id=>api.release?.(id) ?? 0,
+
+        /**
+         * The object's own release, and the one moment this file learns that an
+         * object is over.
+         *
+         * An API that does not count references at all is left alone: nothing
+         * it answers means "gone", and reading its zero that way would forget a
+         * live object on its first Release.
+         *
+         * A count of zero is not the whole test either. DirectDraw counts per
+         * interface generation, so one generation reaching zero says nothing
+         * about the object -- three others may still be held, and the program
+         * still holds their pointers. Those objects report `destroyed`, and
+         * that is what decides it for them.
+         *
+         * @param {string} [id]
+         */
+        release(id){
+            if (typeof api.release !== 'function')
+            {
+                return 0;
+            }
+            const left = api.release(id);
+            if (left === 0 && api.destroyed !== false)
+            {
+                onGone(adapter);
+            }
+            return left;
+        },
     };
     return adapter;
 }
@@ -107,10 +142,19 @@ export function createPublisher({ publishInterface }){
         let adapter = adapters.get(api);
         if (!adapter)
         {
-            adapter = adapt(api, interfaces);
+            adapter = adapt(api, interfaces, forget);
             adapters.set(api, adapter);
         }
         return adapter;
+    };
+
+    /** @param {any} adapter */
+    const forget = adapter=>{
+        for (const pointer of adapter.pointers)
+        {
+            byPointer.delete(pointer);
+        }
+        adapter.pointers.clear();
     };
 
     /**
@@ -119,16 +163,21 @@ export function createPublisher({ publishInterface }){
      *
      * A program passes interfaces around -- SetTexture, SetStreamSource,
      * SetRenderTarget all take one -- and what arrives is the pointer we
-     * published, which nothing else can turn back into an object. Kept as a
-     * plain map rather than a weak one because a published pointer stays valid
-     * as long as guest memory does, and forgetting it would mean handing the
-     * guest an address that no longer resolves.
+     * published, which nothing else can turn back into an object.
+     *
+     * The entry lives exactly as long as the object does. A strong map that
+     * only ever grew would hold every object a program ever made for the life
+     * of the process -- its guest vtable, its stubs and its storage with it --
+     * and would keep a texture alive behind the weak table the renderer uses to
+     * account for them, which is the same as having no accounting. Dropping the
+     * entry when the last reference goes is safe because the vtable publisher
+     * memoises by object: anything published again comes back as the same
+     * pointer and is recorded here again.
      *
      * @type {Map<number, any>}
      */
     const byPointer = new Map();
 
-    let published = 0;
     return {
         /**
          * @param {any} api
@@ -137,11 +186,12 @@ export function createPublisher({ publishInterface }){
          * @returns {number}
          */
         publish(api, interfaces, id){
-            const pointer = publishInterface(adapterFor(api, interfaces), id);
+            const adapter = adapterFor(api, interfaces);
+            const pointer = publishInterface(adapter, id);
             if (pointer !== 0)
             {
                 byPointer.set(pointer >>> 0, api);
-                published++;
+                adapter.pointers.add(pointer >>> 0);
             }
             return pointer;
         },
@@ -149,7 +199,10 @@ export function createPublisher({ publishInterface }){
         /**
          * The object an interface pointer names, or null. A null pointer is a
          * legitimate argument -- unbinding a texture is SetTexture with one --
-         * so it answers null rather than refusing.
+         * so it answers null rather than refusing. So is a pointer whose object
+         * has been released: a program that goes on using one is doing what it
+         * would be doing on Windows, and answering null makes that a call that
+         * fails rather than one that faults.
          *
          * @param {number} pointer
          */
@@ -160,6 +213,11 @@ export function createPublisher({ publishInterface }){
         /** @param {any} api */
         adapterFor: api=>adapters.get(api) ?? null,
 
-        count: ()=>published,
+        /**
+         * Interface pointers a program can still call through. It falls as
+         * objects are released, and a build where it only ever rises is one
+         * where nothing is being given back.
+         */
+        count: ()=>byPointer.size,
     };
 }

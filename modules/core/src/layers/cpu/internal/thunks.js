@@ -21,6 +21,14 @@
 export const STUB_SIZE = 16;
 
 /**
+ * Room for the table when nobody says otherwise. The module configures this
+ * from the same number it reserves the guest region with; a table that believed
+ * in more slots than the region holds would write stubs into whatever follows
+ * it, which is the initial stack.
+ */
+export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
+
+/**
  * Emits one stub.
  *
  * EAX and EDX are clobbered on purpose: on stdcall and cdecl both are
@@ -79,8 +87,10 @@ export function buildStub(
  * @param {Object} options
  * @param {number} options.base  Guest address of the first stub.
  * @param {number} options.port
+ * @param {number} [options.capacity]  Bytes reserved for the table in the guest.
  */
-export function createThunkTable({ base, port }){
+export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY }){
+    const slots = Math.floor(capacity / STUB_SIZE);
     /**
      * @type {{
      *   id: number, name: string, popBytes: number,
@@ -113,9 +123,24 @@ export function createThunkTable({ base, port }){
          * @param {boolean} [options.preserveResult]
          * @param {number} [options.forwardTo]
          * @returns {{ id: number, address: number }}
+         * @throws when the table is full: the slot after the last one is not in
+         *         the region reserved for the table, and what follows it is the
+         *         guest's initial stack. Handing back that address writes
+         *         executable bytes over the stack and the machine corrupts
+         *         itself with nothing to say why -- so this refuses instead.
+         *         Every caller but one binds the address it gets into guest
+         *         code and has nothing to check; the one that can act on a
+         *         failure, the COM vtable publisher, catches this and answers
+         *         the guest with an out-of-memory result.
          */
         register(name, popBytes, { preserveResult = false, forwardTo = 0 } = {}){
             const id = entries.length;
+            if (id >= slots)
+            {
+                throw new Error(`cpu: the stub table is full at ${slots} slots`
+                    + ` (${capacity} bytes from ${base.toString(16)}); no room to register`
+                    + ` ${name}`);
+            }
             const address = base + id * STUB_SIZE;
             entries.push({ id, name, popBytes, address, preserveResult, forwardTo });
             return { id, address };
