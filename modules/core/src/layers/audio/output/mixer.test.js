@@ -230,3 +230,40 @@ test('a stopped device starts counting from nothing again', ()=>{
     assert.equal(track.playedBytes(), 0,
         'what a stopped device played is not owed to the next one');
 });
+
+test('a one-frame probe at a resampled rate comes back to the program', ()=>{
+    // How a sound library brings a device up: open it, hand it a single frame,
+    // and wait for that frame before writing anything else. A frame is one
+    // sample per channel, and at a rate the resampler has to convert it emits
+    // no output at all -- there is no next input frame to interpolate towards,
+    // so it is carried into the seam instead. Crediting the ledger with what
+    // came out rather than with what went in left the probe uncredited, the
+    // library waiting on it for ever, and the game silent behind that wait.
+    const mixer = createMixer();
+    const track = mixer.open({ sampleRate: 44100, channels: 2, bitsPerSample: 16 });
+
+    const probe = pcm16([1000, -1000]);
+    assert.equal(track.write(probe), 0, 'the assumption under this test');
+    mixer.pump();
+
+    assert.equal(track.playedBytes(), probe.length,
+        'a frame the resampler absorbed is a frame the program is finished with');
+});
+
+test('a frame held back for the seam is heard in the buffer after it', ()=>{
+    // The frame the probe above was credited for is not thrown away: it lives
+    // in the resampler's seam and is the first thing the next buffer emits.
+    // Retiring a buffer early would be worth nothing if it cost the sound.
+    const mixer = createMixer();
+    const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
+
+    // Loud on its own, against a silent buffer after it: if the carried frame
+    // were dropped the stream would open at silence instead.
+    track.write(pcm16([32767, 32767]));
+    track.write(pcm16([0, 0, 0, 0]));
+    mixer.pump();
+
+    const heard = drain(mixer, 2);
+    assert.ok(heard[0] > 0.9,
+        `the carried frame opens the next buffer, heard ${heard[0]}`);
+});

@@ -24,9 +24,20 @@
  * -- the classic ambiguity -- and cost a slot to avoid.
  */
 
-/** Where the two indices live in the shared control block. */
+/** Where the indices live in the shared control block. */
 const WRITTEN = 0;
 const READ = 1;
+// The reader runs on a thread nothing here can ask a question of, so the one
+// event that is heard as a click -- a block that found the ring empty -- is
+// counted into the same block the samples travel in. Counted rather than
+// signalled: a message per starved block would itself overrun the callback.
+const STARVED_BLOCKS = 2;
+const STARVED_FRAMES = 3;
+// How often the device asked at all. Without it a slow drain cannot be told
+// apart from a short one: the same missing frames follow either from the
+// reader being called rarely or from it taking little each time.
+const BLOCKS = 4;
+const CONTROL_SLOTS = 5;
 
 /**
  * A ring of interleaved float32 frames.
@@ -50,7 +61,7 @@ export function createRing({ channels, capacityFrames, memory }){
         // Shared when the environment allows it, ordinary memory when it does
         // not. A build without cross-origin isolation still has to make sound;
         // what it loses is the second thread, not the audio.
-        control: allocate(8),
+        control: allocate(CONTROL_SLOTS * 4),
         samples: allocate(capacity * channels * 4),
     };
     const control = new Int32Array(shared.control);
@@ -77,6 +88,20 @@ export function createRing({ channels, capacityFrames, memory }){
         /** Frames the reader has taken since the ring was made. */
         consumed(){
             return Atomics.load(control, READ);
+        },
+
+        /**
+         * What the reader found missing: blocks that came up short and the
+         * frames of silence they had to emit instead. This is the artifact
+         * itself rather than a proxy for it -- every one of these frames is a
+         * hole in the sound somebody heard.
+         */
+        starved(){
+            return {
+                blocks: Atomics.load(control, STARVED_BLOCKS),
+                frames: Atomics.load(control, STARVED_FRAMES),
+                asked: Atomics.load(control, BLOCKS),
+            };
         },
 
         /**

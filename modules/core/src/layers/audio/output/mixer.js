@@ -61,6 +61,17 @@ export function createMixer(
     const tracks = new Set();
     /** How many output frames have been handed to the ring. */
     let produced = 0;
+    /**
+     * Frames a track was mixed short by while another track was carrying the
+     * block. A block is as long as the longest track has to give, so a track
+     * with nothing ready has silence written into its own stream for the rest
+     * of it -- a hole that arrives at the ear as a break in that one sound,
+     * with the ring never running dry and nothing else showing it happened.
+     */
+    let shortfall = 0;
+    /** Pumps that found nothing to write while at least one track was open. */
+    let idlePumps = 0;
+    let pumps = 0;
 
     return {
         sampleRate,
@@ -172,6 +183,18 @@ export function createMixer(
                     if (frames.length > 0)
                     {
                         track.queue.push(frames);
+                    }
+                    // Credited for what it gave up, not for what came out of
+                    // it. A buffer shorter than the resampler needs to reach
+                    // its next output frame yields nothing now and is carried
+                    // into the seam instead, so its samples are absorbed and
+                    // it is finished with -- while a ledger that only counted
+                    // emitted frames left it uncredited for ever. A program
+                    // that probes a device with one frame and waits for it
+                    // back then waits for ever, and every sound it would have
+                    // made afterwards is never made.
+                    if (pcm.length > 0)
+                    {
                         track.ledger.push({
                             frames: frames.length / OUTPUT_CHANNELS,
                             bytes: pcm.length,
@@ -252,6 +275,7 @@ export function createMixer(
          */
         pump(frames = ring.room()){
             fill?.();
+            pumps++;
             const room = Math.min(frames, ring.room());
             if (room <= 0 || tracks.size === 0)
             {
@@ -267,6 +291,7 @@ export function createMixer(
             }
             if (wanted === 0)
             {
+                idlePumps++;
                 return 0;
             }
 
@@ -277,7 +302,7 @@ export function createMixer(
                 {
                     continue;
                 }
-                mixInto(block, track, wanted);
+                shortfall += wanted - mixInto(block, track, wanted);
             }
             const written = ring.write(block);
             produced += written;
@@ -291,6 +316,12 @@ export function createMixer(
             ringFilled: ring.filled(),
             produced,
             consumed: ring.consumed(),
+            deviceBlocks: ring.starved().asked,
+            starvedBlocks: ring.starved().blocks,
+            starvedFrames: ring.starved().frames,
+            shortfall,
+            idlePumps,
+            pumps,
         }),
     };
 }
@@ -303,6 +334,7 @@ export function createMixer(
  * would be the same thing written more slowly.
  *
  * @param {Float32Array} block @param {any} track @param {number} frames
+ * @returns {number} frames this track actually had
  */
 function mixInto(block, track, frames){
     let at = 0;
@@ -326,6 +358,7 @@ function mixInto(block, track, frames){
         }
     }
     track.mixed += at;
+    return at;
 }
 
 /**

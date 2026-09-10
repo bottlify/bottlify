@@ -23,9 +23,12 @@
  * and the constants below are the whole of what has to stay in step.
  */
 
-/** Where the two indices live in the shared control block; see ring.js. */
+/** Where the indices live in the shared control block; see ring.js. */
 const WRITTEN = 0;
 const READ = 1;
+const STARVED_BLOCKS = 2;
+const STARVED_FRAMES = 3;
+const BLOCKS = 4;
 
 class BottlifyOutput extends AudioWorkletProcessor {
     /** @param {any} options */
@@ -37,7 +40,7 @@ class BottlifyOutput extends AudioWorkletProcessor {
         this.channels = channels;
         this.capacity = this.samples.length / channels;
         this.mask = this.capacity - 1;
-        /** Blocks that found the ring empty. Reported, never acted on here. */
+        /** Blocks that found the ring empty. Counted, never acted on here. */
         this.starved = 0;
         this.running = true;
         this.port.onmessage = (/** @type {any} */ event)=>{
@@ -60,6 +63,7 @@ class BottlifyOutput extends AudioWorkletProcessor {
             return this.running;
         }
         const wanted = output[0].length;
+        Atomics.add(this.control, BLOCKS, 1);
         const read = Atomics.load(this.control, READ);
         const have = Math.min(wanted, Atomics.load(this.control, WRITTEN) - read);
 
@@ -85,6 +89,11 @@ class BottlifyOutput extends AudioWorkletProcessor {
         if (have < wanted)
         {
             this.starved++;
+            // Published into the control block, because the engine cannot ask
+            // this thread anything and a hole in the sound that nobody can
+            // count is a defect that can only be argued about.
+            Atomics.add(this.control, STARVED_BLOCKS, 1);
+            Atomics.add(this.control, STARVED_FRAMES, wanted - have);
         }
         return this.running;
     }
