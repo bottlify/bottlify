@@ -95,9 +95,35 @@ test('a slower source is resampled to the output rate', ()=>{
     const mixer = createMixer();
     const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
 
-    // Half the rate, so twice as many output frames come out of it.
+    // Half the rate, so about twice as many output frames come out. A single
+    // buffer holds its last fractional frame back to join the next one, so a
+    // four-frame buffer yields six now rather than the naive eight.
     track.write(pcm16([1000, 1000, 2000, 2000, 3000, 3000, 4000, 4000]));
-    assert.equal(mixer.pump(), 8);
+    assert.equal(mixer.pump(), 6);
+});
+
+test('a stream resampled across two buffers has no discontinuity at the seam', ()=>{
+    const mixer = createMixer();
+    const track = mixer.open({ sampleRate: 24000, channels: 2, bitsPerSample: 16 });
+
+    // One continuous ramp of step 1000, delivered as two buffers. At double the
+    // rate the output is the same ramp at step 500, and the seam between the
+    // buffers must carry that step -- a resampler that restarted each buffer
+    // would put a flat or a jump there, which is the click this fixes.
+    track.write(pcm16([1000, 1000, 2000, 2000, 3000, 3000, 4000, 4000]));
+    track.write(pcm16([5000, 5000, 6000, 6000, 7000, 7000, 8000, 8000]));
+    const frames = mixer.pump();
+    const out = drain(mixer, frames);
+
+    const scale = 32768;
+    // Left channel only; both channels carry the same ramp here.
+    const left = out.filter((_, index)=>index % 2 === 0).map(value=>Math.round(value * scale));
+    for (let index = 1; index < left.length; index++)
+    {
+        assert.equal(left[index] - left[index - 1], 500,
+            `step ${index} is ${left[index] - left[index - 1]}, not 500 -- a seam discontinuity`);
+    }
+    assert.equal(left[0], 1000, 'the ramp starts where the stream did');
 });
 
 test('the play position is what the device took, not what was written', ()=>{

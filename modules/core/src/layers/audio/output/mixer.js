@@ -133,6 +133,16 @@ export function createMixer(
                 gain: 1,
                 paused: false,
 
+                /**
+                 * The resampler's seam between the buffers streamed into this
+                 * track, so the pieces of one continuous signal join without a
+                 * discontinuity where they meet. One per track, because two
+                 * tracks are two independent streams.
+                 *
+                 * @type {ResampleState}
+                 */
+                resample: { pos: 0, tail: null },
+
                 /** The rate `played()` counts in. */
                 rate: sampleRate,
 
@@ -158,7 +168,7 @@ export function createMixer(
                  * @returns {number} output frames this became
                  */
                 write(pcm){
-                    const frames = convert(pcm, format, sampleRate);
+                    const frames = convert(pcm, format, sampleRate, track.resample);
                     if (frames.length > 0)
                     {
                         track.queue.push(frames);
@@ -319,16 +329,40 @@ function mixInto(block, track, frames){
 }
 
 /**
- * One buffer of guest PCM as interleaved stereo float at the output's rate.
+ * The state a track's resampler carries between the buffers a program streams.
+ *
+ * A stream is one continuous signal delivered in pieces, and the pieces do not
+ * fall on output-sample boundaries: the read position lands part way between
+ * two input frames at the end of one buffer and must resume there in the next,
+ * reading across the seam. Restarting the read at zero for every buffer instead
+ * -- which is what a stateless resample does -- both drops the fractional frame
+ * at each seam and interpolates the first output of a buffer from that buffer's
+ * own start rather than from where the last one left off. For a program that
+ * streams thousands of small buffers a second that is a discontinuity per
+ * buffer, heard as a continuous buzz over the sound rather than as one click.
+ *
+ * @typedef {Object} ResampleState
+ * @property {number} pos    The next read position, in input frames, measured
+ *                           from the start of the buffer being written now.
+ *                           Negative reaches back into `tail`. Zero to begin.
+ * @property {Float32Array | null} tail  The last input frame of the previous
+ *                           buffer, per channel, so the seam interpolates.
+ */
+
+/**
+ * One buffer of a stream's PCM as interleaved stereo float at the output's
+ * rate, resampled continuously with the piece before it.
  *
  * Resampling is linear. It is not the last word on quality and is not meant to
  * be: what it has to be is cheap and free of discontinuities at a block
- * boundary, because a click is audible where a slightly soft high end is not.
+ * boundary, because a click is audible where a slightly soft high end is not --
+ * and free of them across a boundary too, which is what `state` carries.
  *
  * @param {Uint8Array} pcm @param {PcmFormat} format @param {number} rate
+ * @param {ResampleState} state  Read and advanced; the seam lives here.
  * @returns {Float32Array}
  */
-function convert(pcm, format, rate){
+function convert(pcm, format, rate, state){
     const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
     const stride = bytesPerSample * format.channels;
     const inputFrames = Math.floor(pcm.length / stride);
@@ -338,13 +372,22 @@ function convert(pcm, format, rate){
     }
 
     const ratio = rate / format.sampleRate;
-    const outputFrames = Math.max(1, Math.floor(inputFrames * ratio));
-    const out = new Float32Array(outputFrames * OUTPUT_CHANNELS);
     const view = new DataView(pcm.buffer, pcm.byteOffset, pcm.byteLength);
 
-    /** @param {number} frame @param {number} channel */
+    /**
+     * A channel of an input frame. Frame -1 is the previous buffer's last
+     * frame, carried in `tail`; a first-ever buffer has none, so -1 reads the
+     * buffer's own first frame, which is a flat start and not a click.
+     *
+     * @param {number} frame @param {number} channel
+     * @returns {number}
+     */
     const sample = (frame, channel)=>{
-        const at = frame * stride + channel * bytesPerSample;
+        if (frame < 0)
+        {
+            return state.tail ? state.tail[channel] : sample(0, channel);
+        }
+        const at = Math.min(frame, inputFrames - 1) * stride + channel * bytesPerSample;
         // Eight-bit wave audio is unsigned with silence at 128; sixteen-bit is
         // signed with silence at zero. Reading either as the other is not a
         // subtle difference -- it is a loud constant offset.
@@ -353,20 +396,62 @@ function convert(pcm, format, rate){
             : view.getInt16(at, true) / 32768;
     };
 
-    for (let frame = 0; frame < outputFrames; frame++)
+    // At the output's own rate there is nothing to resample: one input frame is
+    // one output frame, consecutive buffers already concatenate exactly, and so
+    // there is no seam to carry. A mono source is still spread across both
+    // channels. Kept a separate path because the resampler below holds a
+    // fractional frame back for the next buffer, which is right for a stream at
+    // another rate and wrong for an exact copy -- it would delay every sample
+    // by one and leave a program's one-buffer probe a frame short for ever.
+    if (rate === format.sampleRate)
     {
-        const source = frame / ratio;
-        const left = Math.min(inputFrames - 1, Math.floor(source));
-        const right = Math.min(inputFrames - 1, left + 1);
-        const blend = source - left;
+        const out = new Float32Array(inputFrames * OUTPUT_CHANNELS);
+        for (let frame = 0; frame < inputFrames; frame++)
+        {
+            for (let channel = 0; channel < OUTPUT_CHANNELS; channel++)
+            {
+                out[frame * OUTPUT_CHANNELS + channel] =
+                    sample(frame, Math.min(channel, format.channels - 1));
+            }
+        }
+        return out;
+    }
+
+    // Emit while the right interpolation neighbour is still inside this buffer;
+    // the last fractional step is carried in `pos`, to resume across the seam.
+    let pos = state.pos;
+    const step = 1 / ratio;
+    // A generous upper bound on the output frames, so the loop always ends on
+    // the read position and never on the buffer running out under a rounding
+    // error, which would drop a frame at the seam -- the very thing this fixes.
+    const capacity = Math.max(0, Math.ceil((inputFrames - 1 - pos) / step)) + 2;
+    const out = new Float32Array(capacity * OUTPUT_CHANNELS);
+    let frame = 0;
+    while (pos < inputFrames - 1 && frame < capacity)
+    {
+        const left = Math.floor(pos);
+        const blend = pos - left;
         for (let channel = 0; channel < OUTPUT_CHANNELS; channel++)
         {
             // A mono source is heard from both sides rather than from one.
             const which = Math.min(channel, format.channels - 1);
-            const value = sample(left, which) * (1 - blend)
-                + sample(right, which) * blend;
-            out[frame * OUTPUT_CHANNELS + channel] = value;
+            out[frame * OUTPUT_CHANNELS + channel] = sample(left, which) * (1 - blend)
+                + sample(left + 1, which) * blend;
         }
+        pos += step;
+        frame++;
     }
-    return out;
+
+    // Carry the seam into the next buffer, whose frame 0 is this buffer's frame
+    // count: the read position and the last frame both shift back by that many.
+    state.pos = pos - inputFrames;
+    if (!state.tail || state.tail.length !== OUTPUT_CHANNELS)
+    {
+        state.tail = new Float32Array(OUTPUT_CHANNELS);
+    }
+    for (let channel = 0; channel < OUTPUT_CHANNELS; channel++)
+    {
+        state.tail[channel] = sample(inputFrames - 1, Math.min(channel, format.channels - 1));
+    }
+    return out.subarray(0, frame * OUTPUT_CHANNELS);
 }
