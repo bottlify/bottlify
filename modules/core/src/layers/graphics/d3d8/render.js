@@ -117,10 +117,10 @@ export const IDENTITY = Object.freeze([
  *
  * @param {ArrayLike<number>} a
  * @param {ArrayLike<number>} b
+ * @param {Float32Array} [out]  Where the product goes; fresh when not given.
  * @returns {Float32Array}
  */
-export function multiplyMatrices(a, b){
-    const out = new Float32Array(16);
+export function multiplyMatrices(a, b, out = new Float32Array(16)){
     for (let row = 0; row < 4; row++)
     {
         for (let column = 0; column < 4; column++)
@@ -514,9 +514,6 @@ export const UNIFORM_FLOATS = UNIFORM_AT.lights;
 /** Floats one light occupies: the seven vec4f rows of the shader's `Light`. */
 export const LIGHT_FLOATS = 28;
 
-/** @param {{ r: number, g: number, b: number, a: number }} colour */
-const rgba = colour=>[colour.r, colour.g, colour.b, colour.a];
-
 /** @type {Material} the material a block carries when nothing lights it */
 const NO_MATERIAL = Object.freeze({
     Diffuse: { r: 0, g: 0, b: 0, a: 0 },
@@ -539,17 +536,46 @@ const NO_MATERIAL = Object.freeze({
  * @param {Light} light
  */
 export function packLight(block, at, light){
-    block.set(rgba(light.Diffuse), at);
-    block.set(rgba(light.Specular), at + 4);
-    block.set(rgba(light.Ambient), at + 8);
-    block.set([light.Position.x, light.Position.y, light.Position.z, light.Range], at + 12);
+    putColour(block, at, light.Diffuse);
+    putColour(block, at + 4, light.Specular);
+    putColour(block, at + 8, light.Ambient);
+    put4(block, at + 12, light.Position.x, light.Position.y, light.Position.z, light.Range);
     const { x, y, z } = light.Direction;
     const length = Math.sqrt(x * x + y * y + z * z);
-    block.set(length > 0 ? [x / length, y / length, z / length, 0] : [0, 0, 0, 0], at + 16);
-    block.set(
-        [light.Attenuation0, light.Attenuation1, light.Attenuation2, 0], at + 20);
-    block.set(
-        [Math.cos(light.Theta / 2), Math.cos(light.Phi / 2), light.Falloff, 0], at + 24);
+    if (length > 0)
+    {
+        put4(block, at + 16, x / length, y / length, z / length, 0);
+    }
+    else
+    {
+        put4(block, at + 16, 0, 0, 0, 0);
+    }
+    put4(block, at + 20, light.Attenuation0, light.Attenuation1, light.Attenuation2, 0);
+    put4(block, at + 24, Math.cos(light.Theta / 2), Math.cos(light.Phi / 2), light.Falloff, 0);
+}
+
+/**
+ * Four floats into a block, without an array to carry them: a draw packs
+ * dozens, and a frame has hundreds of draws.
+ *
+ * @param {Float32Array} block @param {number} at
+ * @param {number} a @param {number} b @param {number} c @param {number} d
+ */
+function put4(block, at, a, b, c, d){
+    block[at] = a;
+    block[at + 1] = b;
+    block[at + 2] = c;
+    block[at + 3] = d;
+}
+
+/** @param {Float32Array} block @param {number} at @param {ColourValue} colour */
+function putColour(block, at, colour){
+    put4(block, at, colour.r, colour.g, colour.b, colour.a);
+}
+
+/** A D3DCOLOR into a block, as four floats. @param {Float32Array} block @param {number} at @param {number} dword */
+function putDword(block, at, dword){
+    putColour(block, at, colorToFloats(dword));
 }
 
 /**
@@ -569,34 +595,74 @@ export function packLight(block, at, light){
 
 /**
  * @param {UniformValues} values
+ * @param {(floats: number) => Float32Array} [take]
+ *     Where the block's floats come from; a fresh array when not given.
  * @returns {Float32Array}
  */
-export function uniformBlock(values){
+export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const at = UNIFORM_AT;
     const lights = values.lights ?? [];
-    const block = new Float32Array(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
+    const block = take(UNIFORM_FLOATS + lights.length * LIGHT_FLOATS);
     block.set(values.worldViewProjection, at.worldViewProjection);
     block.set(values.world ?? IDENTITY, at.world);
     block.set(values.viewport.offset, at.viewportOffset);
     block.set(values.viewport.scale, at.viewportScale);
-    block.set(rgba(colorToFloats(values.textureFactor)), at.textureFactor);
-    block.set(rgba(colorToFloats(values.fogColor)), at.fogColor);
+    putDword(block, at.textureFactor, values.textureFactor);
+    putDword(block, at.fogColor, values.fogColor);
     // Start, end and density, which is everything the three fog curves need;
     // which curve is in force shaped the shader and is not carried here.
-    block.set([...values.fogFactors ?? [0, 1, 1], 0], at.fogFactors);
+    const fog = values.fogFactors ?? [0, 1, 1];
+    put4(block, at.fogFactors, fog[0], fog[1], fog[2], 0);
     const material = values.material ?? NO_MATERIAL;
-    block.set(rgba(material.Diffuse), at.materialDiffuse);
-    block.set(rgba(material.Ambient), at.materialAmbient);
-    block.set(rgba(material.Specular), at.materialSpecular);
-    block.set(rgba(material.Emissive), at.materialEmissive);
-    block.set(rgba(colorToFloats(values.ambient ?? 0)), at.ambient);
+    putColour(block, at.materialDiffuse, material.Diffuse);
+    putColour(block, at.materialAmbient, material.Ambient);
+    putColour(block, at.materialSpecular, material.Specular);
+    putColour(block, at.materialEmissive, material.Emissive);
+    putDword(block, at.ambient, values.ambient ?? 0);
     // The specular power rides in the eye row: it is one float, and a row of
     // its own would cost sixteen bytes to carry four.
-    block.set([...(values.eye ?? [0, 0, 0]), material.Power], at.eye);
+    const eye = values.eye ?? [0, 0, 0];
+    put4(block, at.eye, eye[0], eye[1], eye[2], material.Power);
     block[at.alphaRef] = values.alphaRef / 255;
-    lights.forEach((light, index)=>
-        packLight(block, at.lights + index * LIGHT_FLOATS, light));
+    for (let index = 0; index < lights.length; index++)
+    {
+        packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
+    }
     return block;
+}
+
+/**
+ * Where a frame's uniform blocks are laid: one array the frame's draws take
+ * their blocks out of in turn, kept from frame to frame. A block is read at
+ * replay, after the frame is recorded, so the arena is the recording's until
+ * then and goes back to the pool after.
+ *
+ * @param {number} [floats]
+ */
+export function createUniformArena(floats = 1 << 16){
+    let storage = new Float32Array(floats);
+    let used = 0;
+    return {
+        reset(){
+            used = 0;
+        },
+        /** @param {number} count @returns {Float32Array} */
+        take(count){
+            // The arena outgrown: the draws recorded so far keep their views
+            // of the old array, which the old array keeps alive for them.
+            if (used + count > storage.length)
+            {
+                storage = new Float32Array(Math.max(storage.length * 2, used + count));
+                used = 0;
+            }
+            const block = storage.subarray(used, used + count);
+            block.fill(0);
+            // Blocks are bound at a 256-byte alignment on the GPU side; kept
+            // here at a 4-float one, which every field of a block already has.
+            used += Math.ceil(count / 4) * 4;
+            return block;
+        },
+    };
 }
 
 /**
@@ -653,6 +719,7 @@ export function eyePosition(view){
  * @property {any} depthStencil
  * @property {Map<number, Float32Array>} transforms
  * @property {Map<number, { light: Light, enabled: boolean }>} lights
+ * @property {number} [lightsVersion]   Raised whenever `lights` changes.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number }} stageProcessing
@@ -676,11 +743,29 @@ const transformOf = (model, type)=>model.transforms.get(type) ?? IDENTITY;
  * @returns {Light[]}
  */
 export function enabledLights(model){
-    return [...model.lights.entries()]
+    const kept = enabledLightsKept.get(model);
+    if (kept && kept.version === model.lightsVersion && model.lightsVersion !== undefined)
+    {
+        return kept.lights;
+    }
+    const lights = [...model.lights.entries()]
         .filter(([, record])=>record.enabled)
         .sort(([left], [right])=>left - right)
         .map(([, record])=>record.light);
+    if (model.lightsVersion !== undefined)
+    {
+        enabledLightsKept.set(model, { version: model.lightsVersion, lights });
+    }
+    return lights;
 }
+
+/**
+ * The enabled lights of each model as last listed, with the version they
+ * were listed at: a draw asks three times, and a frame has hundreds.
+ *
+ * @type {WeakMap<object, { version: number, lights: Light[] }>}
+ */
+const enabledLightsKept = new WeakMap();
 
 /**
  * What the vertex stage lights this draw with, or null when it lights nothing.
@@ -717,15 +802,17 @@ export function lightingOf(model, layout){
 /**
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [lighting]
+ * @param {(floats: number) => Float32Array} [take]  Where the block's floats come from.
  * @returns {Float32Array} the block an ordinary draw carries
  */
-export function uniformsOf(model, lighting){
+export function uniformsOf(model, lighting, take){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
     return uniformBlock({
         worldViewProjection: multiplyMatrices(
-            multiplyMatrices(world, view), transformOf(model, D3DTS.PROJECTION)),
+            multiplyMatrices(world, view, WORLD_VIEW), transformOf(model, D3DTS.PROJECTION),
+            WORLD_VIEW_PROJECTION),
         world,
         viewport: model.viewport,
         textureFactor: rs('TEXTUREFACTOR'),
@@ -747,8 +834,12 @@ export function uniformsOf(model, lighting){
         // said, so a block that carried lights it does not know about would be
         // read past its own end.
         lights: lighting ? enabledLights(model) : [],
-    });
+    }, take);
 }
+
+/** Scratch for the two products every draw forms; copied into the block at once. */
+const WORLD_VIEW = new Float32Array(16);
+const WORLD_VIEW_PROJECTION = new Float32Array(16);
 
 /**
  * Why a cascade stopped before the program's stages ran out.
@@ -1207,13 +1298,20 @@ export function createRenderer(options){
             + ` [0]=${texels[2]},${texels[1]},${texels[0]},${texels[3]}}`;
     };
 
-    /** @param {Set<string>} into @param {string} text */
+    /** @param {Set<string>} into @param {() => string} text  Built only when there is room. */
     const sample = (into, text)=>{
         if (into.size < SAMPLE_LIMIT)
         {
-            into.add(text);
+            into.add(text());
         }
     };
+    /**
+     * How many fogged draws have been examined for the samples below. A set
+     * whose values never vary never fills, and examining every draw for it
+     * would build a matrix and three strings per draw for the whole run.
+     */
+    let fogExamined = 0;
+    const FOG_EXAMINED_LIMIT = 256;
 
     /**
      * @param {RenderModel} model
@@ -1230,6 +1328,12 @@ export function createRenderer(options){
         {
             tally.fog.modes.add(fogMode);
             tally.fog[layout.preTransformed ? 'preTransformed' : 'transformed']++;
+        }
+        // The samples below are text, built per draw, and a frame has hundreds
+        // of draws: they are built for the first few hundred fogged draws only.
+        if (fogMode !== 0 && fogExamined < FOG_EXAMINED_LIMIT)
+        {
+            fogExamined++;
             // The numbers, because a fog whose range is the default 0..1 while
             // the world is thousands of units across fogs everything equally
             // and completely -- which is a wall of fog colour, not fog.
@@ -1248,7 +1352,7 @@ export function createRenderer(options){
             const amount = end > start
                 ? Math.max(0, Math.min(1, (end - depth) / (end - start)))
                 : 1;
-            sample(tally.fog.depths, `depth=${round(depth)} amount=${round(amount)}`);
+            sample(tally.fog.depths, ()=>`depth=${round(depth)} amount=${round(amount)}`);
             // A draw whose model origin sits on the camera is a screen-space
             // quad written as ordinary geometry rather than as XYZRHW. It is
             // rectangular by construction, so when one of these is wrong it is
@@ -1258,7 +1362,7 @@ export function createRenderer(options){
             {
                 const stage = model.stageStates(0);
                 const get = (/** @type {number} */ state)=>stage?.get(state) ?? 0;
-                sample(tally.fog.screenSpace,
+                sample(tally.fog.screenSpace, ()=>
                     `blend=${(model.renderStates.get(D3DRS.ALPHABLENDENABLE) ?? 0) !== 0}`
                     + `/${model.renderStates.get(D3DRS.SRCBLEND) ?? 0}`
                     + `,${model.renderStates.get(D3DRS.DESTBLEND) ?? 0}`
@@ -1279,7 +1383,7 @@ export function createRenderer(options){
                     + ` diffuseSource=${model.renderStates.get(D3DRS.DIFFUSEMATERIALSOURCE) ?? 0}`
                     + ` colorVertex=${(model.renderStates.get(D3DRS.COLORVERTEX) ?? 0) !== 0}`);
             }
-            sample(tally.fog.settings,
+            sample(tally.fog.settings, ()=>
                 `colour=${((model.renderStates.get(D3DRS.FOGCOLOR) ?? 0) >>> 0)
                     .toString(16).padStart(8, '0')}`
                 + ` start=${round(dwordToFloat(model.renderStates.get(D3DRS.FOGSTART) ?? 0))}`
@@ -1310,11 +1414,14 @@ export function createRenderer(options){
         {
             tally.types.add(type);
         }
-        tally.ambients.add(
-            ((model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0).toString(16).padStart(8, '0'));
+        if (tally.ambients.size < SAMPLE_LIMIT)
+        {
+            tally.ambients.add(
+                ((model.renderStates.get(D3DRS.AMBIENT) ?? 0) >>> 0).toString(16).padStart(8, '0'));
+        }
         for (const light of enabledLights(model))
         {
-            sample(tally.lightValues, `type=${light.Type} range=${round(light.Range)}`
+            sample(tally.lightValues, ()=>`type=${light.Type} range=${round(light.Range)}`
                 + ` atten=${round(light.Attenuation0)}/${round(light.Attenuation1)}`
                 + `/${round(light.Attenuation2)}`
                 + ` at=${round(light.Position.x)},${round(light.Position.y)}`
@@ -1329,10 +1436,11 @@ export function createRenderer(options){
         // translations is what tells that apart from a light that is simply
         // dim, and nothing else in a frame does.
         const world = transformOf(model, D3DTS.WORLD);
-        sample(tally.worlds, `origin=${round(world[12])},${round(world[13])},${round(world[14])}`
+        sample(tally.worlds, ()=>`origin=${round(world[12])},${round(world[13])}`
+            + `,${round(world[14])}`
             + ` scale=${round(Math.hypot(world[0], world[1], world[2]))}`);
         const material = model.material;
-        sample(tally.materials, `diffuse=${colourText(material?.Diffuse)}`
+        sample(tally.materials, ()=>`diffuse=${colourText(material?.Diffuse)}`
             + ` ambient=${colourText(material?.Ambient)}`
             + ` emissive=${colourText(material?.Emissive)}`);
     };
@@ -1862,10 +1970,14 @@ export function createRenderer(options){
 
     // --- recording ---
 
+    /** Arenas of frames already replayed, for the next recording to take. @type {any[]} */
+    const arenas = [];
     const ensureFrame = ()=>{
         if (!recording)
         {
-            recording = { commands: [], pipelines: [], pass: null, viewport: null };
+            const arena = arenas.pop() ?? createUniformArena();
+            arena.reset();
+            recording = { commands: [], pipelines: [], pass: null, viewport: null, arena };
         }
         return recording;
     };
@@ -2003,7 +2115,7 @@ export function createRenderer(options){
         // rather than worked out again there: both are already in hand and
         // neither can be recovered from the recorded command.
         return {
-            state, uniforms: uniformsOf(model, lighting), stageBindings,
+            state, uniforms: uniformsOf(model, lighting, ensureFrame().arena.take), stageBindings,
             layout, textures: cascade.textures, truncated: cascade.truncated,
         };
     };
@@ -2507,6 +2619,10 @@ export function createRenderer(options){
         }
         finally
         {
+            if (recorded.arena)
+            {
+                arenas.push(recorded.arena);
+            }
             // Ended whatever happened. One object owns the command encoder and
             // one call releases it, so a throw anywhere above -- a command
             // whose buffer never reached the GPU, a depth attachment for a

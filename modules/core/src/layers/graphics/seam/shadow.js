@@ -612,6 +612,8 @@ export function setVertexShaderCode(at, trap){
  * @typedef {Object} ShadowDeps
  * @property {(bytes: number) => number} allocate     Guest memory.
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ *     May answer with the guest's own bytes rather than a copy; nothing here
+ *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {ShadowDevice} device
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
@@ -657,11 +659,18 @@ export function createShadow(deps){
     const dwordBytes = value=>new Uint8Array(dword(value));
     /** @param {number[]} values */
     const dwordsBytes = values=>new Uint8Array(values.flatMap(dword));
+    /**
+     * Guest bytes as words, in place when they are aligned for it and copied
+     * when they are not: the block is read on every device call.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const wordsOf = bytes=>((bytes.byteOffset & 3) === 0
+        ? new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >>> 2)
+        : new Uint32Array(
+            bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
     /** @param {number} at @param {number} words */
-    const readWords = (at, words)=>{
-        const bytes = deps.readMemory(at, words * 4);
-        return new Uint32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + words * 4));
-    };
+    const readWords = (at, words)=>wordsOf(deps.readMemory(at, words * 4));
     /** @param {number} bytes @returns {number} a page-aligned span, or 0 */
     const allocatePage = bytes=>{
         // Two pages, so that a whole page is ours whichever boundary the
@@ -871,10 +880,7 @@ export function createShadow(deps){
                 }
             }
 
-            const matrices = deps.readMemory(address + SHADOW.TRANSFORMS,
-                SHADOW.TRANSFORM_SLOTS * 64);
-            const words = new Uint32Array(matrices.buffer.slice(
-                matrices.byteOffset, matrices.byteOffset + matrices.byteLength));
+            const words = readWords(address + SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16);
             for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
             {
                 let same = true;
@@ -891,7 +897,7 @@ export function createShadow(deps){
                     continue;
                 }
                 seenTransforms.set(words.subarray(slot * 16, slot * 16 + 16), slot * 16);
-                const matrix = new Float32Array(words.buffer, slot * 64, 16);
+                const matrix = new Float32Array(words.buffer, words.byteOffset + slot * 64, 16);
                 if (device.SetTransform(transformType(slot), matrix) !== 0)
                 {
                     refused++;

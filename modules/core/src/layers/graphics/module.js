@@ -73,6 +73,17 @@ export const graphicsModule = {
         const services = {
             /** @param {number} address @param {number} length */
             readMemory: (address, length)=>memory.readBytes(address, length),
+            /**
+             * The bytes themselves rather than a copy, valid until the guest
+             * runs again: for a path that reads a block on every call.
+             *
+             * @param {number} address @param {number} length
+             */
+            windowMemory: (address, length)=>(memory.window
+                ? memory.window(address, length)
+                : memory.readBytes(address, length)),
+            /** A dword, read in place. @param {number} address */
+            readU32: address=>memory.readU32(address),
             /** @param {number} address @param {Uint8Array} bytes */
             writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
             /** How many bytes a surface of this size needs. */

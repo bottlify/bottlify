@@ -423,8 +423,14 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
         : fields.readStruct(pointer >>> 0, { left: 0, top: 4, right: 8, bottom: 12 }));
 
     /** @param {number} pointer @param {number} count @returns {Float32Array} */
-    const readFloats = (pointer, count)=>new Float32Array(
-        memory.readMemory(pointer >>> 0, count * 4).slice().buffer);
+    const readFloats = (pointer, count)=>{
+        // One copy, out of the window where there is one: the floats are the
+        // caller's to keep, so a copy there must be, but not two.
+        const read = memory.windowMemory ?? memory.readMemory;
+        const floats = new Float32Array(count);
+        new Uint8Array(floats.buffer).set(read(pointer >>> 0, count * 4));
+        return floats;
+    };
 
     /**
      * Bytes a drawing call reads straight out of the program's own arrays.
@@ -1665,7 +1671,9 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
                 // zero, out of the host's sight.
                 const shadow = createShadow({
                     allocate,
-                    readMemory: memory.readMemory,
+                    // The block is read on every device call and compared
+                    // in place, so the window, where there is one.
+                    readMemory: memory.windowMemory ?? memory.readMemory,
                     writeMemory: memory.writeMemory,
                     device: held.device,
                     objectAt: publisher.objectAt,

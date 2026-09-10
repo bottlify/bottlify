@@ -21,6 +21,9 @@
  *     Writes bytes the guest cannot execute, without telling the emulator's
  *     compiler anything. Absent in a build whose memory is a plain buffer.
  * @property {(address: number, length: number) => Uint8Array} readPhysical
+ * @property {(address: number) => number} [readU32]
+ *     A dword read in place, with nothing allocated. Absent in a build whose
+ *     memory has no such path.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  */
 
@@ -88,6 +91,13 @@ export function createAccessors({ raw, regions }){
      * @returns {number}
      */
     const readInteger = (address, length)=>{
+        if (length === 4 && raw.readU32)
+        {
+            // The one read every host call makes several of -- an argument, a
+            // pointer, a field -- and the one that must not cost a copy.
+            regions.assert(address, 4, 'read');
+            return raw.readU32(address);
+        }
         const bytes = read(address, length);
         let value = 0;
         for (let i = length - 1; i >= 0; i--)
@@ -113,6 +123,18 @@ export function createAccessors({ raw, regions }){
     return {
         readBytes: read,
         writeBytes: write,
+
+        /**
+         * The window the copy above refuses: the emulator's own bytes, valid
+         * only until control returns to the guest. For a path that reads a
+         * block every call and has measured what the copy costs.
+         *
+         * @param {number} address @param {number} length
+         */
+        window(address, length){
+            regions.assert(address, length, 'read');
+            return raw.readPhysical(address, length);
+        },
 
         /** @param {number} address */
         readU8: address=>readInteger(address, 1),

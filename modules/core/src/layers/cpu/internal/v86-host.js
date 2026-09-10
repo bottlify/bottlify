@@ -79,6 +79,45 @@ export async function createV86Host(config){
     await new Promise(resolve=>emulator.add_listener('emulator-ready', resolve));
 
     const cpu = emulator.v86.cpu;
+
+    // The emulator hands out its registers and its memory as proxies that
+    // make a fresh typed array on every property access -- measured at half
+    // a gigabyte of views a minute on a title's menu, every one of them
+    // garbage the runtime then collects. The views are taken once here, from
+    // the proxies' own offsets, and taken again only if the emulator ever
+    // replaces its memory.
+    /**
+     * @type {{ buffer: ArrayBuffer | null, ram: Uint8Array, ramOffset: number,
+     *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
+     *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
+     *     counter: Uint32Array }}
+     */
+    const views = {
+        buffer: null, ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
+        reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
+        flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
+        counter: new Uint32Array(0),
+    };
+    const v = ()=>{
+        const buffer = cpu.wasm_memory.buffer;
+        if (views.buffer !== buffer)
+        {
+            /** @param {any} proxied @param {any} Type */
+            const take = (proxied, Type)=>new Type(buffer, proxied.byteOffset, proxied.length);
+            views.buffer = buffer;
+            views.ram = take(cpu.mem8, Uint8Array);
+            views.ramOffset = views.ram.byteOffset;
+            views.data = new DataView(buffer);
+            views.reg32 = take(cpu.reg32, Int32Array);
+            views.eip = take(cpu.instruction_pointer, Int32Array);
+            views.flags = take(cpu.flags, Int32Array);
+            views.flagsChanged = take(cpu.flags_changed, Int32Array);
+            views.cr = take(cpu.cr, Int32Array);
+            views.inHlt = take(cpu.in_hlt, Uint8Array);
+            views.counter = take(cpu.instruction_counter, Uint32Array);
+        }
+        return views;
+    };
     // How many compiled modules the emulator actually published, and the first
     // reason one was refused. `codegen_finalize` instantiates asynchronously and
     // its promise has no rejection handler, so a compiler that cannot publish
@@ -151,19 +190,19 @@ export async function createV86Host(config){
         config.entryVector);
     for (let slice = 0; slice < BRING_UP_SLICES; slice++)
     {
-        if ((cpu.instruction_pointer[0] >>> 0) === BRING_UP_PARK)
+        if ((v().eip[0] >>> 0) === BRING_UP_PARK)
         {
             break;
         }
         cpu.run_slice(1);
     }
-    if ((cpu.cr[0] & 1) !== 1 || (cpu.instruction_pointer[0] >>> 0) !== BRING_UP_PARK)
+    if ((v().cr[0] & 1) !== 1 || (v().eip[0] >>> 0) !== BRING_UP_PARK)
     {
         throw new Error('cpu: the boot ROM did not reach protected mode'
-            + ` (eip 0x${(cpu.instruction_pointer[0] >>> 0).toString(16)},`
-            + ` cr0 0x${(cpu.cr[0] >>> 0).toString(16)})`);
+            + ` (eip 0x${(v().eip[0] >>> 0).toString(16)},`
+            + ` cr0 0x${(v().cr[0] >>> 0).toString(16)})`);
     }
-    cpu.instruction_pointer[0] = GUEST_JUMP;
+    v().eip[0] = GUEST_JUMP;
 
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
@@ -194,8 +233,17 @@ export async function createV86Host(config){
             trapHandler = handler;
         },
 
-        /** @param {number} address @param {number} length @returns {Uint8Array} */
-        readPhysical: (address, length)=>emulator.read_memory(address, length),
+        /**
+         * A window on the machine's memory, not a copy: it is the memory,
+         * and it moves when the guest runs. A caller that keeps it keeps a
+         * value that changes under it.
+         *
+         * @param {number} address @param {number} length @returns {Uint8Array}
+         */
+        readPhysical: (address, length)=>v().ram.subarray(address, address + length),
+
+        /** A dword, read without a view or a copy being made. @param {number} address */
+        readU32: address=>v().data.getUint32(v().ramOffset + address, true),
 
         /** @param {number} address @param {Uint8Array} bytes */
         writePhysical: (address, bytes)=>{
@@ -224,7 +272,7 @@ export async function createV86Host(config){
         writeData: (address, bytes)=>{
             hostWrites++;
             hostWrittenBytes += bytes.length;
-            cpu.mem8.set(bytes, address);
+            v().ram.set(bytes, address);
         },
 
         /** @param {string} name @returns {number} */
@@ -234,7 +282,7 @@ export async function createV86Host(config){
             // exception is described to the code that will handle it.
             if (name === 'eip')
             {
-                return cpu.instruction_pointer[0] >>> 0;
+                return v().eip[0] >>> 0;
             }
             if (name === 'eflags')
             {
@@ -249,23 +297,23 @@ export async function createV86Host(config){
             {
                 throw new Error(`Unknown register "${name}"`);
             }
-            return cpu.reg32[index] >>> 0;
+            return v().reg32[index] >>> 0;
         },
 
         /** @param {string} name @param {number} value */
         writeReg32(name, value){
             if (name === 'eip')
             {
-                cpu.instruction_pointer[0] = value | 0;
+                v().eip[0] = value | 0;
                 return;
             }
             if (name === 'eflags')
             {
-                cpu.flags[0] = value | 0;
+                v().flags[0] = value | 0;
                 // The word is now literal, so the lazy arithmetic flags must
                 // stop claiming to know better -- left set, they recompute over
                 // whatever was just written the next time anything reads them.
-                cpu.flags_changed[0] = 0;
+                v().flagsChanged[0] = 0;
                 return;
             }
             const index = REGISTERS.indexOf(name);
@@ -273,7 +321,7 @@ export async function createV86Host(config){
             {
                 throw new Error(`Unknown register "${name}"`);
             }
-            cpu.reg32[index] = value | 0;
+            v().reg32[index] = value | 0;
         },
 
         /**
@@ -285,10 +333,10 @@ export async function createV86Host(config){
         cpu: ()=>cpu,
 
         /** @returns {number} guest EIP */
-        eip: ()=>cpu.instruction_pointer[0] >>> 0,
+        eip: ()=>v().eip[0] >>> 0,
 
         /** @returns {boolean} whether the guest is in protected mode */
-        inProtectedMode: ()=>(cpu.cr[0] & 1) === 1,
+        inProtectedMode: ()=>(v().cr[0] & 1) === 1,
 
         /** @returns {number} instructions retired since boot (exact; Phase 2 quantum builds on this) */
         instructionCount: ()=>{

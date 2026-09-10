@@ -59,6 +59,7 @@ export const memoryModule = {
 
             readBytes: accessors.readBytes,
             writeBytes: accessors.writeBytes,
+            window: accessors.window,
             readU8: accessors.readU8,
             readU16: accessors.readU16,
             readU32: accessors.readU32,

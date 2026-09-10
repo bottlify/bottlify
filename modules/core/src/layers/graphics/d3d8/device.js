@@ -454,6 +454,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     /** @type {Map<number, { light: Light, enabled: boolean }>} */
     let lights = new Map();
+    // Raised whenever the lights change, so a reader that keeps a sorted list
+    // of the enabled ones knows when it is stale, without building it per draw.
+    let lightsVersion = 0;
 
     /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
     let stageStates = new Map();
@@ -1025,6 +1028,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         get lights(){
             return lights;
         },
+        get lightsVersion(){
+            return lightsVersion;
+        },
         get material(){
             return material;
         },
@@ -1282,6 +1288,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             transforms = new Map();
             material = defaultMaterial();
             lights = new Map();
+            lightsVersion++;
             clipPlanes = new Map();
             clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
             buildImplicitResources();
@@ -1592,6 +1599,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         SetLight(index, light){
             const existing = lights.get(index);
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
+            lightsVersion++;
             return D3D_OK;
         },
 
@@ -1623,6 +1631,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const record = lights.get(index) ?? { light: defaultLight(), enabled: false };
             record.enabled = enable === true;
             lights.set(index, record);
+            lightsVersion++;
             return D3D_OK;
         },
 

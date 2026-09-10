@@ -206,6 +206,10 @@ export const cpuModule = {
             readPhysical: (address, length)=>started().readPhysical(address, length),
             /** @param {number} address @param {Uint8Array} bytes */
             writePhysical: (address, bytes)=>started().writePhysical(address, bytes),
+            /** @param {number} address */
+            readU32: address=>started().readU32(address),
+            /** @param {number} address @param {Uint8Array} bytes */
+            writeData: (address, bytes)=>started().writeData(address, bytes),
             /** @param {string} name */
             readReg32: name=>started().readReg32(name),
             /** @param {string} name @param {number} value */

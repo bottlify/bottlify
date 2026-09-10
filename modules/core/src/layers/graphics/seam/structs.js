@@ -366,6 +366,12 @@ export const DDCAPS_SIZES = Object.freeze([0x13c, 0x16c, 0x17c]);
 export function createFields(memory){
     /** @param {number} address */
     const readU32 = address=>{
+        // The memory layer reads a dword in place where it can; every field a
+        // call reads went through a four-byte copy otherwise.
+        if (typeof memory.readU32 === 'function')
+        {
+            return memory.readU32(address >>> 0) >>> 0;
+        }
         const bytes = memory.readMemory(address >>> 0, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
     };
