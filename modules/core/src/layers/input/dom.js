@@ -303,6 +303,39 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         });
     };
 
+    /**
+     * Where a press or a release happened, when that is not where the pointer
+     * was last seen.
+     *
+     * A press carries its own position on Windows and a program hit-tests its
+     * controls against it, but here the position only ever travelled with a
+     * move -- so a press arriving without one was delivered wherever the
+     * pointer had been before. A mouse always moves first; a touch, a pen and a
+     * synthesised click do not.
+     *
+     * Only when it differs, and never while the pointer is locked: a press at
+     * the position already reported is not news, and a locked pointer has no
+     * absolute position to report at all.
+     *
+     * @param {PointerEvent} e
+     */
+    const moveToEventPosition = e=>{
+        if (typeof document !== 'undefined' && document.pointerLockElement === canvas)
+        {
+            return;
+        }
+        const { left, top, x: scaleX, y: scaleY } = projection();
+        const atX = (e.clientX - left) * scaleX;
+        const atY = (e.clientY - top) * scaleY;
+        if (!Number.isFinite(atX) || !Number.isFinite(atY)
+            || (lastX !== null && Math.round(atX) === Math.round(lastX)
+                && lastY !== null && Math.round(atY) === Math.round(lastY)))
+        {
+            return;
+        }
+        onPointerMove(e);
+    };
+
     /** @param {PointerEvent} e */
     const onPointerDown = e=>{
         e.preventDefault();
@@ -317,18 +350,14 @@ export function createDomInput({ canvas, send, pointerLock = false }){
             // Already captured, or the pointer is locked. Neither is a failure:
             // both mean the moves are coming here anyway.
         }
+        // Before the lock, not after: once the pointer is locked there is no
+        // absolute position to report, and reporting one from inside the lock
+        // would throw away the position this press actually happened at.
+        moveToEventPosition(e);
         if (pointerLock)
         {
             lockPointer();
         }
-        // Where the press happened travels with it. A press carries its own
-        // position on Windows, and a program hit-tests a button against that
-        // position -- but here the position only ever moved with a move, so a
-        // press that arrives without one is delivered wherever the pointer was
-        // before. A mouse always moves first; a touch, a pen and a synthesised
-        // click do not, and their press landed on whatever was last under the
-        // cursor.
-        onPointerMove(e);
         send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: true });
     };
 
@@ -341,7 +370,7 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         catch {
             // Nothing was captured. The button still has to be released.
         }
-        onPointerMove(e);
+        moveToEventPosition(e);
         send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: false });
     };
 
