@@ -47,6 +47,13 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * @property {number} ms                        Wall time of the whole frame.
  * @property {Record<string, number>} byKind    Self time per PhaseKind.
  * @property {number} hostShare                 `byKind.host / ms`, the watched metric.
+ * @property {{ name: string, ms: number }} longest
+ *     The single longest phase that ended inside the frame, whole: the one
+ *     thing a freeze is made of, when it is made of one thing.
+ * @property {{ ms: number, instructions: number }} longestGuest
+ *     The longest guest slice in the frame, and how much it retired.
+ * @property {number} waits      Turns the machine spent waiting for a fetch.
+ * @property {number} compiles   Modules the emulator compiled during the frame.
  */
 
 /**
@@ -69,6 +76,21 @@ const blankFrame = ()=>({
     ms: 0,
     byKind: { host: 0, guest: 0, gpu: 0, present: 0 },
     hostShare: 0,
+    longest: { name: '', ms: 0 },
+    longestGuest: { ms: 0, instructions: 0 },
+    waits: 0,
+    compiles: 0,
+});
+
+/** A turn the machine spent waiting for something to arrive from outside. */
+const isWait = (/** @type {string} */ name)=>name.startsWith('idle-') && name.endsWith('-wait');
+
+/** @param {FrameRecord} frame */
+const copyFrame = frame=>({
+    ...frame,
+    byKind: { ...frame.byKind },
+    longest: { ...frame.longest },
+    longestGuest: { ...frame.longestGuest },
 });
 
 /**
@@ -127,7 +149,7 @@ export function createProfiler(options){
             // would read as a suspiciously fast one.
             if (frame !== open)
             {
-                out.push({ ...frame, byKind: { ...frame.byKind } });
+                out.push(copyFrame(frame));
             }
         });
         return out;
@@ -164,9 +186,10 @@ export function createProfiler(options){
          * already misbehaving has destroyed the evidence.
          *
          * @param {string} [name]
+         * @param {{ instructions?: number }} [detail]  What a guest slice retired.
          * @returns {number} the phase's total duration
          */
-        end(name){
+        end(name, detail){
             if (depth === 0)
             {
                 noteImbalance(`end(${name ?? ''}) at depth 0`);
@@ -202,8 +225,35 @@ export function createProfiler(options){
             if (open)
             {
                 open.byKind[entry.kind] += self;
+                if (elapsed > open.longest.ms)
+                {
+                    open.longest.name = entry.name;
+                    open.longest.ms = elapsed;
+                }
+                if (entry.kind === PhaseKind.GUEST && elapsed > open.longestGuest.ms)
+                {
+                    open.longestGuest.ms = elapsed;
+                    open.longestGuest.instructions = detail?.instructions ?? 0;
+                }
+                if (isWait(entry.name))
+                {
+                    open.waits++;
+                }
             }
             return elapsed;
+        },
+
+        /**
+         * Something the frame paid for that is not a phase of its own: a
+         * module the emulator compiled inside a guest slice.
+         *
+         * @param {number} [count]
+         */
+        compiled(count = 1){
+            if (open)
+            {
+                open.compiles += count;
+            }
         },
 
         beginFrame(){
@@ -216,6 +266,12 @@ export function createProfiler(options){
             {
                 slot.byKind[kind] = 0;
             }
+            slot.longest.name = '';
+            slot.longest.ms = 0;
+            slot.longestGuest.ms = 0;
+            slot.longestGuest.instructions = 0;
+            slot.waits = 0;
+            slot.compiles = 0;
             open = slot;
         },
 
@@ -230,7 +286,7 @@ export function createProfiler(options){
             open = null;
             slot.ms = now() - slot.startedAt;
             slot.hostShare = slot.ms > 0 ? slot.byKind.host / slot.ms : 0;
-            return { ...slot, byKind: { ...slot.byKind } };
+            return copyFrame(slot);
         },
 
         frames,

@@ -328,7 +328,7 @@ function describe(before, after, windowMs){
     }
 
     say('the slowest frames, and what they were made of:');
-    for (const frame of after.worstFrames.slice(0, 5))
+    for (const frame of after.worstFrames.slice(0, 8))
     {
         const parts = Object.entries(frame.byKind)
             .filter(([, value])=>Number(value) > 0)
@@ -336,6 +336,14 @@ function describe(before, after, windowMs){
             .join(', ');
         say(`  frame ${String(frame.index).padStart(6)}  ${asMs(frame.ms).padStart(9)}`
             + `   ${parts}`);
+        // What the frame's time was made of: one long thing, or many.
+        if (frame.longest)
+        {
+            const slice = frame.longestGuest ?? { ms: 0, instructions: 0 };
+            say(`          longest ${frame.longest.name} ${asMs(frame.longest.ms)}`
+                + `; longest slice ${asMs(slice.ms)} for ${slice.instructions} instructions`
+                + `; ${frame.waits ?? 0} fetch wait(s), ${frame.compiles ?? 0} compile(s)`);
+        }
     }
     return `${lines.join('\n')}\n`;
 }

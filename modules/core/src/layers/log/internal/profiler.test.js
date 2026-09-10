@@ -152,3 +152,37 @@ test('the watched share is taken over the history, and the worst frames are name
     assert.deepEqual(snapshot.worstFrames.map((/** @type {any} */ f)=>f.hostShare),
         [40 / 90, 1 / 50], 'the frame that stalled is named, not averaged away');
 });
+
+test('a frame says what its worst moment was made of', ()=>{
+    const { at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(5).end('guest', { instructions: 1000 });
+    at(5).begin('idle-fetch-wait', PhaseKind.HOST);
+    at(45).end('idle-fetch-wait');
+    at(45).begin('guest', PhaseKind.GUEST);
+    at(45).compiled(2);
+    at(75).end('guest', { instructions: 5000000 });
+    at(75).begin('draw', PhaseKind.HOST);
+    at(85).end('draw');
+    const frame = at(85).endFrame();
+
+    assert.deepEqual(frame.longest, { name: 'idle-fetch-wait', ms: 40 },
+        'the one thing the frame waited longest for');
+    assert.deepEqual(frame.longestGuest, { ms: 30, instructions: 5000000 },
+        'the longest slice, with what it retired');
+    assert.equal(frame.waits, 1);
+    assert.equal(frame.compiles, 2);
+
+    // The next frame starts clean, and a copy handed out does not change
+    // when the slot is reused.
+    at(85).beginFrame();
+    at(85).begin('guest', PhaseKind.GUEST);
+    at(86).end('guest', { instructions: 10 });
+    const next = at(86).endFrame();
+    assert.deepEqual(next.longest, { name: 'guest', ms: 1 });
+    assert.equal(next.waits, 0);
+    assert.equal(next.compiles, 0);
+    assert.equal(frame.longest.ms, 40);
+});

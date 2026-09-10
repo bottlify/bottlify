@@ -145,8 +145,13 @@ export const logModule = {
 
             /** @param {string} name @param {string} [kind] */
             begin: (name, kind)=>profiler.begin(name, kind),
-            /** @param {string} [name] @returns {number} the phase's duration */
-            end: name=>profiler.end(name),
+            /**
+             * @param {string} [name] @param {{ instructions?: number }} [detail]
+             * @returns {number} the phase's duration
+             */
+            end: (name, detail)=>profiler.end(name, detail),
+            /** @param {number} [count] */
+            compiled: count=>profiler.compiled(count),
             beginFrame: ()=>profiler.beginFrame(),
             endFrame: ()=>profiler.endFrame(),
             /** @param {number} [count] */

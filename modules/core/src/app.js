@@ -2892,7 +2892,11 @@ async function buildApp(options){
                         // time is the guest actually executing -- which is the
                         // number every question about speed starts from.
                         journal.begin('guest', journal.PhaseKind.GUEST);
+                        const compiledBefore = cpu.compiledModules();
                         step = kernel.runOnce();
+                        // Compiling happens inside the slice, on the way to a
+                        // hot page, and is the guest's time only by position.
+                        journal.compiled(cpu.compiledModules() - compiledBefore);
                         // Where the guest stood when its slice ran out. Sampled
                         // here because this is the only boundary the host owns: a
                         // program that decides something inside its own code makes
@@ -2916,7 +2920,7 @@ async function buildApp(options){
                         journal.end('guest');
                         throw fail('guest', e);
                     }
-                    journal.end('guest');
+                    journal.end('guest', { instructions: step.instructions ?? 0 });
 
                     spun = step.instructions === 0 ? spun + 1 : 0;
 

@@ -375,6 +375,9 @@ export async function createV86Host(config){
             },
         },
 
+        /** How many modules the compiler has published so far. */
+        compiledModules: ()=>finalisedModules,
+
         /** What the emulator's compiler was configured with, and how it is doing. */
         jitState: ()=>{
             try

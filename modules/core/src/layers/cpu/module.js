@@ -364,6 +364,7 @@ export const cpuModule = {
                 started().decompressZstd(packed, expectedLength),
 
             instructionCount: ()=>started().instructionCount(),
+            compiledModules: ()=>started().compiledModules(),
             /**
              * The emulator's account of where the guest ran, by address and
              * weighted by instructions. Kept only between start and stop, and
