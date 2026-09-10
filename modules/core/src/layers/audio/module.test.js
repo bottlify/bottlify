@@ -118,6 +118,12 @@ async function playing({ silent = false, drained = true } = {}){
         signal: handle=>signalled.push(handle),
     }, {
         requireApi: (/** @type {string} */ name)=>{
+            if (name === 'bridge')
+            {
+                // The route into guest code. Nothing here calls one, but the
+                // module asks for it the way the registry always binds it.
+                return { callGuest: async()=>0 };
+            }
             assert.equal(name, 'memory');
             return f.memory;
         },

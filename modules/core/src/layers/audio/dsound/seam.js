@@ -333,6 +333,11 @@ export function createPublisher({ publishInterface }){
  * @param {() => number} deps.now   The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(event: number) => void} [deps.signal]  Signals an event a notification names.
+ * @param {(entry: number, args: number[]) => Promise<number>} [deps.callGuest]
+ *        Runs a guest routine and answers with what it returned. A sound
+ *        library of this era hands the system a callback and expects it run
+ *        before the call returns, so a table without this route cannot answer
+ *        those calls truthfully.
  */
 export function createDirectSound({ memory, allocate, now, publishInterface, signal }){
     const publisher = createPublisher({ publishInterface });
@@ -360,6 +365,24 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
     /** @type {any[]} */
     const buffers = [];
+    // TEMP diag: how often a program drove each buffer method, to see whether
+    // the effect the menu plays is ever played at all versus lost on the way
+    // to the mixer. Keyed by method name.
+    /** @type {Record<string, number>} */
+    const calls = {};
+    // TEMP diag: the last buffer calls in order, with the detail that says why
+    // an effect starts and dies -- Play's loop flag, what GetCurrentPosition
+    // handed back, where Stop left the cursor.
+    /** @type {string[]} */
+    const events = [];
+    /** @param {string} line */
+    const record = line=>{
+        events.push(line);
+        if (events.length > 48)
+        {
+            events.shift();
+        }
+    };
     /**
      * The last level a program asked for. DSSCL_NORMAL is 1, and the levels
      * above it are what Windows requires before the primary format may be set.
@@ -449,10 +472,12 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
     const bufferMethods = {
         /** HRESULT GetCurrentPosition(LPDWORD play, LPDWORD write) */
         GetCurrentPosition(buffer, [play, write]){
+            calls.GetCurrentPosition = (calls.GetCurrentPosition || 0) + 1;
             deliver(buffer);
             const { play: at, write: ahead } = buffer.cursors();
             writeU32(play, at);
             writeU32(write, ahead);
+            record(`b${buffers.indexOf(buffer)} GetPos p=${at} w=${ahead} st=${buffer.status()}`);
             return DS_OK;
         },
 
@@ -469,20 +494,25 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         /** HRESULT Play(DWORD reserved, DWORD priority, DWORD flags) */
         Play(buffer, [, , flags]){
+            calls.Play = (calls.Play || 0) + 1;
+            record(`b${buffers.indexOf(buffer)} Play loop=${(flags >>> 0) & 1} n=${buffer.bytes}`);
             buffer.play(flags >>> 0);
             return DS_OK;
         },
 
         /** HRESULT Stop(void) */
         Stop(buffer){
+            calls.Stop = (calls.Stop || 0) + 1;
             deliver(buffer);
             buffer.stop();
+            record(`b${buffers.indexOf(buffer)} Stop cursor=${buffer.cursors().play}`);
             return DS_OK;
         },
 
         /** HRESULT SetCurrentPosition(DWORD position) */
         SetCurrentPosition(buffer, [position]){
             buffer.setCurrentPosition(position);
+            record(`b${buffers.indexOf(buffer)} SetPos ${position >>> 0}`);
             return DS_OK;
         },
 
@@ -491,6 +521,8 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
          *              LPVOID* p2, LPDWORD n2, DWORD flags)
          */
         Lock(buffer, [offset, bytes, p1, n1, p2, n2, flags]){
+            calls.Lock = (calls.Lock || 0) + 1;
+            record(`b${buffers.indexOf(buffer)} Lock off=${offset >>> 0} bytes=${bytes >>> 0}`);
             if ((p1 >>> 0) === 0 || (n1 >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;
@@ -509,6 +541,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         /** HRESULT Unlock(LPVOID p1, DWORD n1, LPVOID p2, DWORD n2) */
         Unlock(buffer){
+            record(`b${buffers.indexOf(buffer)} Unlock`);
             return buffer.unlock() ? DS_OK : DSERR_INVALIDCALL;
         },
 
@@ -838,6 +871,8 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         diagnostics: ()=>({
             buffers: buffers.length,
+            calls,
+            events: [...events],
             cooperativeLevel,
             playing: buffers.filter(buffer=>(buffer.status() & 1) !== 0).length,
             published: publisher.count(),

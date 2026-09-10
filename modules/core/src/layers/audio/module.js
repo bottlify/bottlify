@@ -56,6 +56,13 @@ export const audioModule = {
      */
     async create(config, host){
         const memory = host.requireApi('memory');
+        // The route into guest code. A sound library of this era hands the
+        // system a callback and expects it run before the call returns -- an
+        // enumeration that never calls back is read as "there is no device
+        // here" -- so a table that cannot call the guest cannot answer those
+        // calls truthfully. Optional, because a caller assembling this module
+        // for a test has no bridge and no guest to call.
+        const bridge = host.requireApi('bridge');
 
         // Whether the other end of the ring is being read. Told from outside,
         // because only the assembling caller knows whether it opened a device.
@@ -98,6 +105,17 @@ export const audioModule = {
             now: config?.now ?? (()=>Date.now()),
             publishInterface: config?.publishInterface ?? (()=>0),
             signal: config?.signal,
+            /**
+             * Runs a guest routine and answers with what it returned. The
+             * bridge parks the caller while it does, which is what makes a
+             * callback delivered from inside a host call legal here.
+             *
+             * @param {number} entry @param {number[]} args
+             * @returns {Promise<number>}
+             */
+            callGuest: config?.callGuest
+                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args)=>
+                    bridge.callGuest({ entry, args })),
         });
 
         /**
@@ -285,6 +303,14 @@ export const audioModule = {
                 ...(current ? current.output().diagnostics() : {}),
                 behindTurns: current ? current.behind() : 0,
                 ...(current ? current.feeding() : {}),
+                // TEMP diag: per-buffer state, to see why sounds do not feed.
+                bufferDetail: current ? current.dsound().buffers()
+                    .filter((/** @type {any} */ b)=>!b.primary)
+                    .map((/** @type {any} */ b)=>{
+                        const c = b.cursors();
+                        return `st=${b.status()} play=${c.play} write=${c.write}`
+                            + ` bytes=${b.bytes} freq=${b.frequency}`;
+                    }) : [],
             },
         };
     },
