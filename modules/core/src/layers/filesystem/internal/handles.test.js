@@ -222,13 +222,30 @@ test('a closed handle is not a handle', ()=>{
     const { tree, files } = mounted();
     const handle = openFile(files, tree, ['Game', 'Data.BIN']);
 
-    assert.deepEqual(files.diagnostics(), { open: 1, opened: 1, closed: 0 });
+    assert.equal(files.diagnostics().open, 1);
+    assert.equal(files.diagnostics().opened, 1);
     files.close(handle);
-    assert.deepEqual(files.diagnostics(), { open: 0, opened: 1, closed: 1 });
+    assert.equal(files.diagnostics().open, 0);
+    assert.equal(files.diagnostics().closed, 1);
 
     assert.throws(()=>files.read(handle, 1), { code: 'INVALID_HANDLE' });
     assert.throws(()=>files.close(handle), { code: 'INVALID_HANDLE' });
     // And what it was holding no longer blocks anyone.
     assert.ok(openFile(files, tree, ['Game', 'Data.BIN'],
         { share: { read: false, write: false } }));
+});
+
+test('the report says which files a run read, and how much of each', ()=>{
+    const { tree, files } = mounted();
+    const handle = openFile(files, tree, ['Game', 'Data.BIN']);
+    files.read(handle, 3);
+    files.read(handle, 2);
+    files.close(handle);
+    // Opened twice so that a repeated open is visible as one entry, not two.
+    files.close(openFile(files, tree, ['Game', 'Data.BIN']));
+
+    const byPath = files.diagnostics().byPath;
+    const entry = Object.entries(byPath).find(([path])=>path.endsWith('Data.BIN'));
+    assert.ok(entry, 'the file that was read is named in the report');
+    assert.equal(entry[1], '2 opens, 5 bytes');
 });

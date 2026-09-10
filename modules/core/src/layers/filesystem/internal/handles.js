@@ -73,6 +73,29 @@ export function createFileTable({ limit = 4096 } = {}){
     let nextId = 1;
     let opened = 0;
     let closed = 0;
+    // What was opened and how much was read of it, by path. A bring-up
+    // question that keeps coming back is whether a program ever went looking
+    // for a piece of its own data -- a sound it should be playing, a map it
+    // should be loading -- and the handle counts cannot answer it: they say
+    // seventeen files were opened and nothing about which.
+    /** @type {Map<string, { opens: number, read: number }>} */
+    const paths = new Map();
+    /** @param {string} path @returns {{ opens: number, read: number }} */
+    const track = path=>{
+        const known = paths.get(path);
+        if (known)
+        {
+            return known;
+        }
+        // Bounded, because a program that walks a tree would otherwise grow
+        // this without end. The cap is high enough that a normal run is whole.
+        const fresh = { opens: 0, read: 0 };
+        if (paths.size < 4096)
+        {
+            paths.set(path, fresh);
+        }
+        return fresh;
+    };
 
     /**
      * Win32 refuses a second open whose access is not permitted by what the
@@ -175,6 +198,7 @@ export function createFileTable({ limit = 4096 } = {}){
             };
             open.add(handle);
             opened++;
+            track(entry.path).opens++;
             return handle;
         },
 
@@ -204,6 +228,7 @@ export function createFileTable({ limit = 4096 } = {}){
                 ? handle.tree.read(handle.components, handle.position, available)
                 : new Uint8Array(0);
             handle.position += data.length;
+            track(handle.path).read += data.length;
             return data;
         },
 
@@ -291,7 +316,17 @@ export function createFileTable({ limit = 4096 } = {}){
         },
 
         diagnostics(){
-            return { open: open.size, opened, closed };
+            return {
+                open: open.size,
+                opened,
+                closed,
+                // Ordered by what was read rather than by name: the answer this
+                // is here for is which files a run actually spent its reads on.
+                byPath: Object.fromEntries([...paths]
+                    .sort((left, right)=>right[1].read - left[1].read)
+                    .slice(0, 40)
+                    .map(([path, counts])=>[path, `${counts.opens} opens, ${counts.read} bytes`])),
+            };
         },
     };
 }
