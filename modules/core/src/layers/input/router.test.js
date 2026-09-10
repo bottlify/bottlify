@@ -266,6 +266,46 @@ test('the cursor stays inside the client area when one is known', ()=>{
     assert.deepEqual(h.router.cursor(), { x: 639, y: 0 });
 });
 
+test('a declared cursor space scales motion, so a viewport sweep spans the space', ()=>{
+    const h = harness({ bounds: ()=>({ width: 1024, height: 768 }) });
+    // A menu built for 640x480, shown in a 1024x768 backbuffer, clips the
+    // cursor to 640x480 and moves it by DirectInput counts it expects to span
+    // exactly that.
+    h.router.clip({ left: 0, top: 0, right: 640, bottom: 480 });
+
+    // A relative sweep across the whole viewport reaches DirectInput as motion
+    // spanning the declared space -- not the viewport, which would overshoot
+    // the program's own clamp and drift the cursor short of the bottom-right.
+    h.send({ kind: 'pointerMove', dx: 1024, dy: 768 });
+    const swept = h.mouse.mouseState();
+    assert.equal(swept.x, 640, 'a full-width sweep spans the declared width, not the viewport');
+    assert.equal(swept.y, 480, 'and a full-height sweep the declared height');
+
+    // An absolute position lands in the declared space too, so the reading a
+    // program takes from a message agrees with the one it accumulates.
+    h.send({ kind: 'pointerMove', x: 1023, y: 767 });
+    assert.deepEqual(h.router.cursor(), { x: 639, y: 479 },
+        'the far corner of the viewport is the far corner of the declared space');
+});
+
+test('with no declared cursor space, motion maps straight into the viewport, unchanged', ()=>{
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    h.send({ kind: 'pointerMove', x: 320, y: 240 });
+    assert.deepEqual(h.router.cursor(), { x: 320, y: 240 });
+    h.mouse.mouseState();
+    h.send({ kind: 'pointerMove', dx: 10, dy: -5 });
+    assert.equal(h.mouse.mouseState().x, 10, 'the DirectInput delta is raw motion at scale one');
+    assert.deepEqual(h.router.cursor(), { x: 330, y: 235 });
+});
+
+test('clearing the declared space returns motion to the viewport', ()=>{
+    const h = harness({ bounds: ()=>({ width: 1024, height: 768 }) });
+    h.router.clip({ left: 0, top: 0, right: 640, bottom: 480 });
+    h.router.clip(null);
+    h.send({ kind: 'pointerMove', x: 800, y: 600 });
+    assert.deepEqual(h.router.cursor(), { x: 800, y: 600 }, 'unclipped, the viewport is the space');
+});
+
 test('a button posts its own message pair and reaches the DirectInput mouse', ()=>{
     const h = harness();
     h.send({ kind: 'pointerMove', x: 8, y: 9 });

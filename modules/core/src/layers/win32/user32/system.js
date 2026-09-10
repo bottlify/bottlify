@@ -1003,10 +1003,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ()=>1,
         },
 
-        /** BOOL ClipCursor(const RECT *lpRect) */
+        /**
+         * BOOL ClipCursor(const RECT *lpRect)
+         *
+         * A program confines the cursor to a rectangle, and for a game that
+         * rectangle is the coordinate space it reckons the cursor in -- a menu
+         * built for a smaller logical screen than the backbuffer clips to that
+         * screen. The input layer is told, so it can scale pointer motion into
+         * that space; a null rect releases the cursor to the whole viewport.
+         */
         ClipCursor: {
             argBytes: 4,
-            handler: ()=>1,
+            /** @param {number[]} args */
+            handler: ([rect])=>{
+                host.clipCursor?.((rect >>> 0) === 0 ? null : readRect(host, rect >>> 0));
+                return 1;
+            },
         },
 
         /**

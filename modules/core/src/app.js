@@ -1566,6 +1566,11 @@ async function buildApp(options){
                 },
             },
             cursor: ()=>core.api('input')?.cursor?.() ?? { x: 0, y: 0 },
+            // The cursor space a program declares with ClipCursor: the input
+            // layer scales pointer motion into it, so a menu built for a smaller
+            // logical screen than the backbuffer tracks the pointer exactly.
+            /** @param {{ left: number, top: number, right: number, bottom: number } | null} rect */
+            clipCursor: rect=>core.api('input')?.clip?.(rect),
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
             // The same reporter the graphics layer gets: a Win32 function that

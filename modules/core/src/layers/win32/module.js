@@ -800,6 +800,10 @@ export const win32Module = {
                 // it answered before, which is that nothing is pressed.
                 cursor: config?.cursor,
                 keyState: config?.keyState,
+                // The cursor space a program declares with ClipCursor, handed
+                // down the same way and for the same reason: the input layer
+                // that scales pointer motion into it sits above this one.
+                clipCursor: config?.clipCursor,
                 // A program's own explanation of why it is stopping, handed up
                 // whole rather than as a line of log, so whoever is embedding
                 // this engine can show it the way a person would have seen it.

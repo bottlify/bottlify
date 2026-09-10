@@ -157,6 +157,15 @@ export const inputModule = {
                 attached?.poll();
             },
 
+            /**
+             * The cursor's coordinate space, as the program declared it with
+             * ClipCursor. Passed straight to the router, which scales pointer
+             * motion into it.
+             *
+             * @param {{ left: number, top: number, right: number, bottom: number } | null} rect
+             */
+            clip: rect=>router.clip(rect),
+
             /** @param {number} vk */
             keyState: vk=>router.keyState(vk),
             cursor: ()=>router.cursor(),

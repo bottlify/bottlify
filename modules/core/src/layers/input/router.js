@@ -140,6 +140,25 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
     /** @type {Set<string>} */
     const pressed = new Set();
     const cursor = { x: 0, y: 0 };
+    /**
+     * The space the program reckons the cursor in, when it has declared one
+     * with ClipCursor, or null. A menu built for 640x480 shown in a larger
+     * backbuffer confines the cursor to 640x480 and moves it by DirectInput
+     * counts it expects to span exactly that: so a pointer's travel across the
+     * real viewport is scaled into this space, and the same sweep covers the
+     * same fraction of each. Undeclared, the viewport itself is that space and
+     * the scale is one -- which is the 640x480-into-640x480 case, unchanged.
+     * @type {{ left: number, top: number, right: number, bottom: number } | null}
+     */
+    let clipRect = null;
+    // The fraction of a scaled motion not yet delivered as a whole count, so a
+    // slow drag through a shrinking scale is not rounded away to nothing.
+    let residualX = 0;
+    let residualY = 0;
+    // The last absolute pointer position in real-viewport pixels, to derive a
+    // relative motion from when the host gives a position but no delta.
+    let rawX = 0;
+    let rawY = 0;
     /** @type {number[]} */
     const padAxes = [];
     /** @type {number[]} */
@@ -281,29 +300,79 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
     /** @param {number} value @param {number} limit */
     const confine = (value, limit)=>Math.max(0, Math.min(limit - 1, value));
 
+    /** @param {number} value @param {number} low @param {number} high */
+    const confineRange = (value, low, high)=>Math.max(low, Math.min(high - 1, value));
+
     /** @param {HostInputEvent} event */
     const move = event=>{
         const box = confinedTo?.() ?? null;
-        // Relative motion is what DirectInput reports and absolute is what a
-        // message carries, and a host knows one, the other, or both: a locked
-        // pointer has no position, a touch has no delta. Whichever is missing
-        // is derived from the one that is not.
-        const dx = event.dx ?? (event.x === undefined ? 0 : (event.x | 0) - cursor.x);
-        const dy = event.dy ?? (event.y === undefined ? 0 : (event.y | 0) - cursor.y);
-        const x = event.x === undefined ? cursor.x + dx : event.x | 0;
-        const y = event.y === undefined ? cursor.y + dy : event.y | 0;
-        const moved = x !== cursor.x || y !== cursor.y;
-        cursor.x = box ? confine(x, box.width) : x;
-        cursor.y = box ? confine(y, box.height) : y;
+        const clip = clipRect;
+        // How a pointer's travel across the real viewport (the canvas) maps onto
+        // the space the program reckons the cursor in (what it declared with
+        // ClipCursor). Declared smaller than the viewport, the same sweep must
+        // cover the same fraction of each; undeclared, the two spaces are one.
+        const scaleX = clip && box && box.width > 0
+            ? (clip.right - clip.left) / box.width : 1;
+        const scaleY = clip && box && box.height > 0
+            ? (clip.bottom - clip.top) / box.height : 1;
 
-        if (moved)
+        // Relative motion in real-viewport pixels is what DirectInput reports
+        // and absolute is what a message carries, and a host knows one, the
+        // other, or both: a locked pointer has no position, a touch has no
+        // delta. Whichever is missing is derived from the one that is not.
+        const rawDx = event.dx ?? (event.x === undefined ? 0 : (event.x | 0) - rawX);
+        const rawDy = event.dy ?? (event.y === undefined ? 0 : (event.y | 0) - rawY);
+        if (event.x !== undefined)
+        {
+            rawX = event.x | 0;
+        }
+        if (event.y !== undefined)
+        {
+            rawY = event.y | 0;
+        }
+
+        // That motion in the declared space, its fraction carried so a slow
+        // drag is not rounded away. This is what DirectInput reports and what
+        // the program's own cursor accumulates and clamps -- as on hardware,
+        // the device reports the scaled motion whether or not it is clipped.
+        residualX += rawDx * scaleX;
+        residualY += rawDy * scaleY;
+        const stepX = Math.trunc(residualX);
+        const stepY = Math.trunc(residualY);
+        residualX -= stepX;
+        residualY -= stepY;
+
+        // Where that leaves the cursor in the declared space: from an absolute
+        // position when the host gives one, else advanced by the scaled step.
+        const px = cursor.x;
+        const py = cursor.y;
+        let nx = event.x === undefined
+            ? cursor.x + stepX
+            : (clip ? clip.left : 0) + Math.round((event.x | 0) * scaleX);
+        let ny = event.y === undefined
+            ? cursor.y + stepY
+            : (clip ? clip.top : 0) + Math.round((event.y | 0) * scaleY);
+        if (clip)
+        {
+            nx = confineRange(nx, clip.left, clip.right);
+            ny = confineRange(ny, clip.top, clip.bottom);
+        }
+        else if (box)
+        {
+            nx = confine(nx, box.width);
+            ny = confine(ny, box.height);
+        }
+        cursor.x = nx;
+        cursor.y = ny;
+
+        if (cursor.x !== px || cursor.y !== py)
         {
             announceCursor(WM.MOUSEMOVE);
             emit(WM.MOUSEMOVE, mask(), point());
         }
-        if (dx !== 0 || dy !== 0)
+        if (stepX !== 0 || stepY !== 0)
         {
-            device({ kind: 'mouseMove', x: dx, y: dy });
+            device({ kind: 'mouseMove', x: stepX, y: stepY });
         }
         return true;
     };
@@ -421,6 +490,26 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
          */
         confineTo(viewport){
             confinedTo = viewport ?? bounds;
+        },
+
+        /**
+         * The coordinate space the program declared for the cursor, via
+         * ClipCursor. A degenerate or null rect clears it, and motion maps
+         * straight into the viewport again.
+         *
+         * @param {{ left: number, top: number, right: number, bottom: number } | null} rect
+         */
+        clip(rect){
+            clipRect = rect && rect.right - rect.left > 0 && rect.bottom - rect.top > 0
+                ? {
+                    left: rect.left | 0,
+                    top: rect.top | 0,
+                    right: rect.right | 0,
+                    bottom: rect.bottom | 0,
+                }
+                : null;
+            residualX = 0;
+            residualY = 0;
         },
 
         arm(){

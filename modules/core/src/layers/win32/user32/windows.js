@@ -234,6 +234,12 @@ function characterFor(key){
  *           Whether a virtual key is down, as GetAsyncKeyState reports it:
  *           the high bit set while it is held. Absent means nothing is
  *           pressed, which is the one safe wrong answer.
+ * @property {(rect: { left: number, top: number, right: number,
+ *           bottom: number } | null) => void} [clipCursor]
+ *           The cursor space a program declares with ClipCursor, forwarded to
+ *           the input layer so it can scale pointer motion into it. Null
+ *           releases the cursor to the whole viewport. Absent in a build with
+ *           no input, and then the declaration is simply not acted on.
  * @property {(notice: { text: string, caption: string, type: number }) => void} [messageBox]
  *           A message box the program put up, handed up whole. It is a program
  *           explaining in its own words why it is about to stop, which is the
