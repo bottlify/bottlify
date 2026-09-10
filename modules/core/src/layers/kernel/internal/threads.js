@@ -413,6 +413,16 @@ export function createScheduler(options){
                     .join(' '),
                 threads: threads.length,
                 byState,
+                // Which thread the machine actually spent itself on. A run that
+                // is too slow at something -- feeding a sound device, drawing --
+                // is either a machine running everything slowly or one thread
+                // starved by another, and the totals cannot tell those apart.
+                // Instructions retired, because that is what a quantum is
+                // measured in here and so it is the only currency the scheduler
+                // and the thread agree on.
+                byThread: threads
+                    .map(thread=>`${thread.name} ${thread.instructions} ${thread.state}`)
+                    .join(' | '),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
                 // time is the shape of a deadlock, so name what each is waiting on.

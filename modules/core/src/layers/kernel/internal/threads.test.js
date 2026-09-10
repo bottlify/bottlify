@@ -195,3 +195,20 @@ test('a slice the emulator ran past is counted, not assumed away', ()=>{
     assert.equal(report.worstSliceFrom, 0x4242, 'and where it began');
     assert.equal(report.worstSliceOn, 'main', 'on which thread');
 });
+
+test('the report says which thread the machine was spent on', ()=>{
+    const cpu = { ...fakeCpu(), runSlice: ()=>100 };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'worker' });
+
+    // Round robin, so three turns give the first thread two of them. Totals
+    // alone would say the machine ran 300 instructions and nothing about who.
+    sched.runOnce();
+    sched.runOnce();
+    sched.runOnce();
+
+    const byThread = sched.diagnostics().byThread;
+    assert.match(byThread, /main 200/, 'the thread that ran twice is credited twice');
+    assert.match(byThread, /worker 100/, 'and the one that ran once, once');
+});
