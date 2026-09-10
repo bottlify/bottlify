@@ -212,3 +212,18 @@ test('the report says which thread the machine was spent on', ()=>{
     assert.match(byThread, /main 200/, 'the thread that ran twice is credited twice');
     assert.match(byThread, /worker 100/, 'and the one that ran once, once');
 });
+
+test('the report says where the guest ran, by page and weighted by the slice', ()=>{
+    let at = 0x00401000;
+    const cpu = { ...fakeCpu(), eip: ()=>at, runSlice: ()=>100 };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+
+    sched.runOnce();
+    sched.runOnce();
+    // A different 64 KiB page, so the two are counted apart rather than summed.
+    at = 0x00810000;
+    sched.runOnce();
+
+    assert.deepEqual(sched.pages(), { '0x400000': 200, '0x810000': 100 });
+});

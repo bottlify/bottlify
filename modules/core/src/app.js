@@ -3335,6 +3335,27 @@ async function buildApp(options){
                         ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
                     },
                     film: { ...film },
+                    // Which of the program's own code the machine is spent on.
+                    // The scheduler counts it by address because only here are
+                    // the images known by name, and a page number answers
+                    // nothing on its own. Heaviest first, and cut short: the
+                    // tail is every page the guest ever touched once.
+                    guestByModule: (()=>{
+                        const mapped = memory.list();
+                        /** @type {Record<string, number>} */
+                        const byModule = {};
+                        for (const [page, instructions] of Object.entries(kernel.pages())
+                            .sort((left, right)=>right[1] - left[1])
+                            .slice(0, 64))
+                        {
+                            const address = Number(page);
+                            const region = mapped.find((/** @type {any} */ each)=>
+                                address >= each.base && address < each.base + each.size);
+                            const name = region ? region.name : 'unmapped';
+                            byModule[name] = (byModule[name] ?? 0) + instructions;
+                        }
+                        return byModule;
+                    })(),
                     unimplementedCalls: Object.fromEntries(missingCalls),
                 },
             },

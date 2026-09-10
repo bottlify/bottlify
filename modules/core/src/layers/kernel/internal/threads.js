@@ -26,6 +26,9 @@ export const ThreadState = {
     TERMINATED: 'terminated',
 };
 
+/** How finely the guest's whereabouts are recorded: one entry per 64 KiB. */
+const PAGE = 0x10000;
+
 /**
  * @param {Object} options
  * @param {any} options.cpu        The cpu layer's API.
@@ -57,6 +60,34 @@ export function createScheduler(options){
     let current = null;
     let nextId = 1;
     let turns = 0;
+    /**
+     * Where the machine went, by 64 KiB page of guest code.
+     *
+     * A sampling profile taken at slice boundaries: the address is the one the
+     * slice started at and the weight is everything it retired, so a slice that
+     * ran through several pages is credited entirely to the first. Across
+     * thousands of slices that averages out to where the guest actually is, and
+     * it is the only account of that available -- the emulator's own profiler
+     * is compiled out of the build we vendor. Coarse deliberately: a page is
+     * enough to name the module, and per-address would cost a map entry for
+     * every basic block the guest ever entered.
+     *
+     * @type {Map<number, number>}
+     */
+    const pages = new Map();
+    /** @param {number} address @param {number} instructions */
+    const creditPage = (address, instructions)=>{
+        const page = Math.floor((address >>> 0) / PAGE);
+        const known = pages.get(page);
+        if (known !== undefined)
+        {
+            pages.set(page, known + instructions);
+        }
+        else if (pages.size < 4096)
+        {
+            pages.set(page, instructions);
+        }
+    };
     let expiries = 0;
     /**
      * Threads whose stack pointer has been seen outside the stack they were
@@ -287,6 +318,7 @@ export function createScheduler(options){
             const from = cpu.eip?.() ?? 0;
             const instructions = cpu.runSlice(quantum);
             next.instructions += instructions;
+            creditPage(from, instructions);
             turns++;
             // Whether the slice we asked for is the slice we got.
             //
@@ -380,6 +412,23 @@ export function createScheduler(options){
                 limit: thread.stackLimit ?? null,
                 top: thread.stackTop ?? null,
             };
+        },
+
+        /**
+         * Where the guest ran, by 64 KiB page, weighted by the instructions
+         * that slice retired. Addresses rather than names: what a page belongs
+         * to is known where the images are mapped, not here.
+         *
+         * @returns {Record<string, number>} page base in hex, to instructions
+         */
+        pages(){
+            /** @type {Record<string, number>} */
+            const report = {};
+            for (const [page, instructions] of pages)
+            {
+                report[`0x${(page * PAGE).toString(16)}`] = instructions;
+            }
+            return report;
         },
 
         diagnostics(){

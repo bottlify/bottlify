@@ -219,6 +219,11 @@ export const kernelModule = {
 
             /** The scheduler's own view, for a caller driving the machine. */
             diagnosticsSnapshot: ()=>scheduler.diagnostics(),
+            /**
+             * Where the guest ran, by page of guest code, weighted by retired
+             * instructions. Addresses, because naming them needs the image map.
+             */
+            pages: ()=>scheduler.pages(),
 
             /**
              * The soonest guest time a blocked thread is waiting for, or null.
