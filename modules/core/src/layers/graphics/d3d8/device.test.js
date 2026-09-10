@@ -1487,3 +1487,29 @@ test('setting a matrix that is already set does nothing, and is counted', ()=>{
 
     assertFullyReleased(device);
 });
+
+test('the cursor is kept as the program set it, and refused when it could not be one', ()=>{
+    const device = createDevice();
+    /** @type {{ surface?: any }} */
+    const made = {};
+    device.CreateImageSurface(32, 32, D3DFMT.A8R8G8B8, made);
+    /** @type {{ surface?: any }} */
+    const wrong = {};
+    device.CreateImageSurface(32, 32, D3DFMT.X8R8G8B8, wrong);
+
+    assert.equal(device.SetCursorProperties(0, 0, null), D3DERR_INVALIDCALL);
+    assert.equal(device.SetCursorProperties(0, 0, wrong.surface), D3DERR_INVALIDCALL,
+        'a cursor is A8R8G8B8 and nothing else');
+    assert.equal(device.SetCursorProperties(32, 0, made.surface), D3DERR_INVALIDCALL,
+        'the hot spot is inside the bitmap');
+    assert.equal(device.SetCursorProperties(3, 5, made.surface), D3D_OK);
+    assert.deepEqual(device.GetCursor().hotSpot, { x: 3, y: 5 });
+    assert.equal(device.GetCursor().surface, made.surface);
+
+    assert.equal(device.ShowCursor(true), false, 'hidden until shown');
+    assert.equal(device.ShowCursor(false), true, 'and the previous state comes back');
+    assert.equal(device.GetCursor().shown, false);
+    made.surface.release();
+    wrong.surface.release();
+    assertFullyReleased(device);
+});

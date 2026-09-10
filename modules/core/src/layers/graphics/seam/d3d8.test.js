@@ -179,6 +179,8 @@ function seamed({ shadow = false } = {}){
     /** @type {string[]} */
     const divergences = [];
     /** @type {any[]} */
+    const cursors = [];
+    /** @type {any[]} */
     const roots = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const libraries = createGraphicsLibraries({
@@ -202,6 +204,7 @@ function seamed({ shadow = false } = {}){
         allocate: shadow ? box.allocate : undefined,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        cursor: (/** @type {any} */ notice)=>cursors.push(notice),
     });
     const fields = createFields(box.services);
 
@@ -212,6 +215,7 @@ function seamed({ shadow = false } = {}){
         roots,
         libraries,
         divergences,
+        cursors,
         /** The IDirect3D8 a program gets from the entry point. */
         create(){
             const pointer = libraries.libraries['D3D8.dll'].Direct3DCreate8.handler([32]);
@@ -1107,4 +1111,35 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 0);
     assert.equal(h.libraries.shadow().buffers, 1);
     assert.deepEqual(h.divergences, []);
+});
+
+test('the cursor a program sets reaches whoever shows the frame, bitmap and hot spot', ()=>{
+    const h = seamed();
+    const device = h.createDevice(h.create());
+    const out = 0xe400;
+    assert.equal(h.device(device, 'CreateImageSurface', [2, 2, D3DFMT.A8R8G8B8, out]), D3D_OK);
+    const surface = h.box.memory.readU32(out);
+    // Four texels, written the way a program writes them: through a lock.
+    const locked = 0xe500;
+    assert.equal(h.surface(surface, 'LockRect', [locked, 0, 0]), D3D_OK);
+    const bits = h.box.memory.readU32(locked + 4);
+    h.box.services.writeMemory(bits, new Uint8Array([
+        1, 2, 3, 255, 4, 5, 6, 255, 7, 8, 9, 0, 10, 11, 12, 128,
+    ]));
+    assert.equal(h.surface(surface, 'UnlockRect', []), D3D_OK);
+
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.cursors.length, 1);
+    assert.deepEqual(h.cursors[0].hotSpot, { x: 1, y: 0 });
+    assert.equal(h.cursors[0].width, 2);
+    assert.equal(h.cursors[0].shown, false);
+    assert.deepEqual([...h.cursors[0].bgra.slice(0, 8)], [1, 2, 3, 255, 4, 5, 6, 255],
+        'the texels as the surface holds them');
+
+    assert.equal(h.device(device, 'ShowCursor', [1]), 0, 'it was hidden before');
+    assert.equal(h.cursors[1].shown, true);
+    assert.equal(h.device(device, 'ShowCursor', [0]), 1);
+    assert.equal(h.device(device, 'SetCursorProperties', [5, 5, surface]), D3DERR_INVALIDCALL,
+        'a hot spot outside the bitmap is refused, and nobody is told');
+    assert.equal(h.cursors.length, 3);
 });

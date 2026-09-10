@@ -42,7 +42,7 @@ import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE } from '../d3d8/constants.js';
 import { D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
-import { vertexCountOf } from '../d3d8/render.js';
+import { expandTexels, vertexCountOf } from '../d3d8/render.js';
 import {
     createShadow, lockCode, setIndicesCode, setRenderStateCode, setStreamSourceCode,
     setTransformCode, setVertexShaderCode, unlockCode,
@@ -158,8 +158,22 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 const S_FALSE = 1;
 
 /**
+ * The program's cursor, as the device was given it.
+ *
+ * @typedef {Object} CursorNotice
+ * @property {number} width
+ * @property {number} height
+ * @property {{ x: number, y: number }} hotSpot
+ * @property {Uint8Array} bgra   Four bytes a texel, blue first, as the surface holds them.
+ * @property {boolean} shown
+ */
+
+/**
  * @param {Object} deps
  * @param {any} deps.publisher   From createPublisher.
+ * @param {(cursor: CursorNotice) => void} [deps.cursor]
+ *     Where the program's cursor goes: nothing composites a bitmap over the
+ *     presented frame, so whoever shows the frame is told and shows it.
  * @param {any} deps.memory      readMemory/writeMemory.
  * @param {() => any} deps.screen  The display this build is configured for.
  * @param {(bytes: number) => number} [deps.allocate]
@@ -168,7 +182,7 @@ const S_FALSE = 1;
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  */
-export function createDirect3D8Seam({ publisher, memory, screen, allocate, divergence }){
+export function createDirect3D8Seam({ publisher, memory, screen, allocate, divergence, cursor }){
     const fields = createFields(memory);
 
     /**
@@ -955,17 +969,39 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
             return 0;
         },
 
-        // Nothing composites a bitmap over the presented frame, so a cursor set
-        // here would never appear. Refusing is the only answer that says so: a
-        // program told its cursor was accepted has no reason to draw one
-        // itself, and a program told otherwise usually does.
-        SetCursorProperties: ()=>D3DERR_INVALIDCALL,
+        // Nothing composites a bitmap over the presented frame; the cursor is
+        // handed to whoever shows the frame, who shows it the way its own
+        // screen can. Without such a taker the call is refused, which is the
+        // one answer that says so: a program told its cursor was accepted
+        // has no reason to draw one itself, and a program told otherwise
+        // usually does.
+        /** @param {any} device @param {number[]} args */
+        SetCursorProperties: (device, [x, y, surface])=>{
+            if (!cursor)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            const hr = device.SetCursorProperties(x >>> 0, y >>> 0, publisher.objectAt(surface));
+            if (hr === D3D_OK)
+            {
+                tellCursor(device);
+            }
+            return hr;
+        },
 
-        // Declared void, and there is no cursor to move.
+        // Declared void. The position is the host's own pointer, and a cursor
+        // the program moves itself is moved by the program's own drawing.
         SetCursorPosition: ()=>0,
 
-        // The previous visibility, which is always false because none is shown.
-        ShowCursor: ()=>0,
+        /** @param {any} device @param {number[]} args */
+        ShowCursor: (device, [show])=>{
+            const was = device.ShowCursor((show >>> 0) !== 0);
+            if (cursor)
+            {
+                tellCursor(device);
+            }
+            return was ? 1 : 0;
+        },
 
         // One swap chain exists and it is the device's own. There is no second
         // one to publish -- not even an interface for it -- and NOTAVAILABLE is
@@ -1704,6 +1740,31 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
             }
             return result;
         },
+    };
+
+    /**
+     * What the device holds as its cursor, as the taker wants it: the bitmap
+     * read out of the surface's own bytes, in the order they lie.
+     *
+     * @param {any} device
+     */
+    const tellCursor = device=>{
+        const held = device.GetCursor();
+        if (!cursor || !held.surface)
+        {
+            return;
+        }
+        /** @type {{ desc?: any }} */
+        const out = {};
+        held.surface.GetDesc(out);
+        const { Width: width, Height: height, Format: format } = out.desc;
+        const bytes = memory.readMemory(held.surface.base, width * height * 4);
+        cursor({
+            width, height,
+            hotSpot: { ...held.hotSpot },
+            bgra: expandTexels(format, bytes, width * height),
+            shown: held.shown,
+        });
     };
 
     const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods)];

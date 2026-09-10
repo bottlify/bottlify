@@ -499,6 +499,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
 
     /** @type {GammaRamp} */
     let gammaRamp = identityGammaRamp();
+    /**
+     * The cursor the program asked the device to draw over its frames: the
+     * surface it gave and where the hot spot is in it, and whether it is to
+     * be shown. Nothing here draws it; whoever shows the presented frame
+     * is told and shows it the way its own screen can.
+     *
+     * @type {{ hotSpot: { x: number, y: number }, surface: any, shown: boolean }}
+     */
+    let cursor = { hotSpot: { x: 0, y: 0 }, surface: null, shown: false };
 
     /** @type {Map<number, StateBlock>} */
     const stateBlocks = new Map();
@@ -1169,6 +1178,46 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 green: Uint16Array.from(ramp.green),
                 blue: Uint16Array.from(ramp.blue),
             };
+        },
+
+        /**
+         * The bitmap has to be A8R8G8B8 and the hot spot inside it, as the
+         * interface demands of a program; the surface is kept rather than
+         * copied, because the program keeps it too.
+         *
+         * @param {number} x @param {number} y @param {any} surface
+         */
+        SetCursorProperties(x, y, surface){
+            if (!surface)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ desc?: any }} */
+            const out = {};
+            surface.GetDesc(out);
+            const desc = out.desc;
+            if (!desc || desc.Format !== D3DFMT.A8R8G8B8
+                || x < 0 || y < 0 || x >= desc.Width || y >= desc.Height)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            cursor = { hotSpot: { x, y }, surface, shown: cursor.shown };
+            return D3D_OK;
+        },
+
+        /**
+         * @param {boolean} show
+         * @returns {boolean} whether it was shown before
+         */
+        ShowCursor(show){
+            const was = cursor.shown;
+            cursor.shown = show;
+            return was;
+        },
+
+        /** The cursor as set: for whoever shows it. */
+        GetCursor(){
+            return cursor;
         },
 
         /** @param {{ ramp?: GammaRamp }} out */

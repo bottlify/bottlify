@@ -1480,6 +1480,11 @@ async function buildApp(options){
             // not honour yet, and a state accepted in silence is the defect
             // class that produces a picture rather than an error.
             divergence: reportDivergence,
+            // The cursor a program asks its device to draw. Nothing here
+            // composites one over the frame; the host is told, with the
+            // bitmap and the hot spot, and shows it the way its screen can.
+            /** @param {any} cursor */
+            cursor: cursor=>events.emit('cursor', cursor),
         },
         win32: {
             // What the program is told its display is, handed to the libraries
@@ -2604,12 +2609,15 @@ async function buildApp(options){
     /**
      * How often the run loop leaves the microtask queue entirely.
      *
-     * A whole turn is a hundred thousand guest instructions by default, so this
-     * is a handful of milliseconds of guest time -- short enough that a person
-     * clicking a button is answered at once, long enough that the loop is not
-     * paying for a trip round the event loop on every turn.
+     * Every turn. A presented frame reaches the screen only when the browser
+     * finds the thread free at the moment it composes, and it looks between
+     * tasks: with a yield every sixteen turns, measured on the launcher, nine
+     * frames a second reached the screen of the forty the engine presented.
+     * A trip round the task queue costs microseconds, a turn is a hundred
+     * thousand guest instructions, and the guest never waits on anything --
+     * no timer, no animation frame -- so a covered tab slows nothing.
      */
-    const TURNS_PER_YIELD = 16;
+    const TURNS_PER_YIELD = 1;
 
     const breathe = createMacrotask();
 

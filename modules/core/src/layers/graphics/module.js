@@ -276,6 +276,8 @@ export const graphicsModule = {
             // would have accepted.
             allocate: config?.allocate,
             divergence: config?.divergence,
+            // Where a program's cursor goes, when the host shows one.
+            cursor: config?.cursor,
             // Absent in a build with no bridge behind it -- a test, an
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.
