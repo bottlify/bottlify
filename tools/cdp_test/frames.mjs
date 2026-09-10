@@ -57,6 +57,11 @@ function parse(argv){
         // itself, so the attribution is by the code that ran and not by
         // where the turn happened to stop.
         exact: argv.includes('--exact'),
+        // Sample what the engine allocates during the window, by the
+        // function that allocated it. A heap that grows ten megabytes a
+        // frame is collected as often, and a collection slows everything on
+        // the thread at once, which no phase of ours can see.
+        allocations: argv.includes('--allocations'),
         // Guest instructions per scheduler turn. Worth varying: it is the one
         // number that decides how long a thread may hold the machine.
         quantum: number('--quantum', 0),
@@ -88,6 +93,43 @@ function quantile(values, share){
     }
     const sorted = [...values].sort((one, two)=>one - two);
     return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * share))];
+}
+
+/**
+ * Folds a sampling heap profile into the functions that allocated most, by
+ * self size, with the caller that reached each so a helper is not blamed for
+ * what every caller asked of it.
+ *
+ * @param {any} profile  HeapProfiler's SamplingHeapProfile.
+ */
+function summariseAllocations(profile){
+    /** @type {Map<string, number>} */
+    const bySite = new Map();
+    let total = 0;
+    /** @param {any} node @param {string} parent */
+    const walk = (node, parent)=>{
+        const frame = node.callFrame ?? {};
+        const file = String(frame.url ?? '').split('/').pop() || '<native>';
+        const line = (frame.lineNumber ?? -1) + 1;
+        const here = `${frame.functionName || '<anonymous>'} ${file}:${line}`;
+        const size = Number(node.selfSize ?? 0);
+        if (size > 0)
+        {
+            const key = `${here}  <- ${parent}`;
+            bySite.set(key, (bySite.get(key) ?? 0) + size);
+            total += size;
+        }
+        for (const child of node.children ?? [])
+        {
+            walk(child, here);
+        }
+    };
+    walk(profile.head, '(root)');
+    return {
+        total,
+        sites: [...bySite].sort((left, right)=>right[1] - left[1]).slice(0, 24)
+            .map(([site, bytes])=>({ site, bytes, share: bytes / Math.max(1, total) })),
+    };
 }
 
 /**
@@ -213,6 +255,18 @@ function describe(before, after, windowMs){
         for (const row of exact.hot.slice(0, 12))
         {
             say(`  ${row.at}: ${row.bytes}`);
+        }
+        say('');
+    }
+
+    if (after.allocations)
+    {
+        const { total, sites } = after.allocations;
+        say(`what the engine allocated in the window, sampled`
+            + ` (${(total / 1024 / 1024).toFixed(1)} MiB, ${(total / 1024 / 1024 / seconds).toFixed(1)} MiB/s):`);
+        for (const row of sites)
+        {
+            say(`  ${(row.share * 100).toFixed(1).padStart(5)}%  ${(row.bytes / 1024 / 1024).toFixed(1).padStart(7)} MiB  ${row.site}`);
         }
         say('');
     }
@@ -477,11 +531,29 @@ try
         // The account is kept from boot; the window wants only itself.
         await evaluate('window.__bottlify__.exactRestart && window.__bottlify__.exactRestart()');
     }
+    if (options.allocations)
+    {
+        // The engine runs on the page's own thread in this harness, so the
+        // page's session is where its allocations are.
+        await cdp.send('HeapProfiler.enable', {}, sessionId);
+        await cdp.send('HeapProfiler.startSampling', {
+            samplingInterval: 32768,
+            // Garbage is what a collection is paid for; the default counts
+            // only what survived one.
+            includeObjectsCollectedByMajorGC: true,
+            includeObjectsCollectedByMinorGC: true,
+        }, sessionId);
+    }
     const before = await read();
     const startedAt = Date.now();
     console.log(`watching for ${options.seconds}s`);
     await sleep(options.seconds * 1000);
     const after = await read();
+    if (options.allocations)
+    {
+        const { profile } = await cdp.send('HeapProfiler.stopSampling', {}, sessionId);
+        after.allocations = summariseAllocations(profile);
+    }
 
     console.log('');
     console.log(describe(before, after, Date.now() - startedAt));
