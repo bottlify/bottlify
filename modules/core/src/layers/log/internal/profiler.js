@@ -54,6 +54,9 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  *     The longest guest slice in the frame, and how much it retired.
  * @property {number} waits      Turns the machine spent waiting for a fetch.
  * @property {number} compiles   Modules the emulator compiled during the frame.
+ * @property {Record<string, number>} notes
+ *     Whatever else the frame's owner counted into it -- instructions
+ *     retired, instructions interpreted -- summed by name.
  */
 
 /**
@@ -80,6 +83,7 @@ const blankFrame = ()=>({
     longestGuest: { ms: 0, instructions: 0 },
     waits: 0,
     compiles: 0,
+    notes: {},
 });
 
 /** A turn the machine spent waiting for something to arrive from outside. */
@@ -91,6 +95,7 @@ const copyFrame = frame=>({
     byKind: { ...frame.byKind },
     longest: { ...frame.longest },
     longestGuest: { ...frame.longestGuest },
+    notes: { ...frame.notes },
 });
 
 /**
@@ -256,6 +261,18 @@ export function createProfiler(options){
             }
         },
 
+        /**
+         * A number the frame's owner counts into it, summed by name.
+         *
+         * @param {string} name @param {number} amount
+         */
+        note(name, amount){
+            if (open)
+            {
+                open.notes[name] = (open.notes[name] ?? 0) + amount;
+            }
+        },
+
         beginFrame(){
             const slot = history.next();
             slot.index = frameIndex++;
@@ -272,6 +289,7 @@ export function createProfiler(options){
             slot.longestGuest.instructions = 0;
             slot.waits = 0;
             slot.compiles = 0;
+            slot.notes = {};
             open = slot;
         },
 

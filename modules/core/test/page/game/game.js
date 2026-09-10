@@ -618,7 +618,7 @@ async function run(request){
             worstFrames: seen.worstFrames.map((/** @type {any} */ frame)=>({
                 index: frame.index, ms: frame.ms, byKind: frame.byKind,
                 longest: frame.longest, longestGuest: frame.longestGuest,
-                waits: frame.waits, compiles: frame.compiles,
+                waits: frame.waits, compiles: frame.compiles, notes: frame.notes,
             })),
             recentFrames: seen.recentFrames.map((/** @type {any} */ frame)=>({
                 ms: frame.ms, byKind: frame.byKind,

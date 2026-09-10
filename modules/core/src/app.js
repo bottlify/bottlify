@@ -1141,6 +1141,16 @@ async function buildApp(options){
     let foreground = 0;
     /** Whether a frame is open in the journal: the first present opens one, the rest close and reopen. */
     let framed = false;
+    // Where the counters stood when the frame being measured began.
+    let retiredAtFrameStart = 0;
+    let interpretedAtFrameStart = 0;
+    let writtenAtFrameStart = 0;
+    let heapAtFrameStart = 0;
+    /** The JS heap, where the runtime will say; a frame's growth is what the host allocated. */
+    const heapUsed = ()=>{
+        const performance = /** @type {any} */ (globalThis.performance);
+        return performance?.memory?.usedJSHeapSize ?? 0;
+    };
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
@@ -1429,10 +1439,25 @@ async function buildApp(options){
                         // engine reported on every run.
                         if (framed)
                         {
+                            // What the frame retired, and how much of it the
+                            // interpreter ran: a frame of ordinary slices that
+                            // all ran slowly is a compiler that had thrown its
+                            // code away, and nothing else in the frame says so.
+                            journal.note('instructions',
+                                cpu.instructionCount() - retiredAtFrameStart);
+                            journal.note('interpreted',
+                                cpu.interpretedSteps() - interpretedAtFrameStart);
+                            journal.note('hostWrittenBytes',
+                                cpu.hostWrittenBytes() - writtenAtFrameStart);
+                            journal.note('heapDelta', heapUsed() - heapAtFrameStart);
                             journal.endFrame();
                         }
                         options.device.presentTo?.(frame);
                         journal.beginFrame();
+                        retiredAtFrameStart = cpu.instructionCount();
+                        interpretedAtFrameStart = cpu.interpretedSteps();
+                        writtenAtFrameStart = cpu.hostWrittenBytes();
+                        heapAtFrameStart = heapUsed();
                         framed = true;
                     },
                 }

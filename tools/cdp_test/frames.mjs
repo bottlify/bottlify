@@ -340,9 +340,18 @@ function describe(before, after, windowMs){
         if (frame.longest)
         {
             const slice = frame.longestGuest ?? { ms: 0, instructions: 0 };
+            const notes = frame.notes ?? {};
+            const retired = notes.instructions ?? 0;
+            const guestMs = Number(frame.byKind.guest ?? 0);
             say(`          longest ${frame.longest.name} ${asMs(frame.longest.ms)}`
                 + `; longest slice ${asMs(slice.ms)} for ${slice.instructions} instructions`
                 + `; ${frame.waits ?? 0} fetch wait(s), ${frame.compiles ?? 0} compile(s)`);
+            say(`          ${retired} instructions`
+                + ` (${notes.interpreted ?? 0} interpreted)`
+                + `${guestMs > 0 ? `, ${(retired / guestMs / 1000).toFixed(1)}M/s in the guest` : ''}`
+                + `; host wrote ${((notes.hostWrittenBytes ?? 0) / 1024).toFixed(0)} KiB`
+                + ' into the guest'
+                + `; JS heap ${((notes.heapDelta ?? 0) / 1024 / 1024).toFixed(1)} MiB`);
         }
     }
     return `${lines.join('\n')}\n`;

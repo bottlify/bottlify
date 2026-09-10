@@ -365,6 +365,8 @@ export const cpuModule = {
 
             instructionCount: ()=>started().instructionCount(),
             compiledModules: ()=>started().compiledModules(),
+            interpretedSteps: ()=>started().interpretedSteps(),
+            hostWrittenBytes: ()=>started().hostWrittenBytes(),
             /**
              * The emulator's account of where the guest ran, by address and
              * weighted by instructions. Kept only between start and stop, and

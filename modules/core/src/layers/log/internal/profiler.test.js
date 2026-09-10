@@ -186,3 +186,16 @@ test('a frame says what its worst moment was made of', ()=>{
     assert.equal(next.compiles, 0);
     assert.equal(frame.longest.ms, 40);
 });
+
+test('a frame keeps what its owner counted into it, by name', ()=>{
+    const { at } = harness();
+    at(0).beginFrame();
+    at(0).note('instructions', 100);
+    at(1).note('instructions', 50);
+    at(1).note('interpreted', 7);
+    const frame = at(2).endFrame();
+    assert.deepEqual(frame.notes, { instructions: 150, interpreted: 7 });
+    at(2).beginFrame();
+    assert.deepEqual(at(3).endFrame().notes, {}, 'the next frame starts with none');
+    assert.equal(frame.notes.instructions, 150, 'and the copy handed out keeps its own');
+});

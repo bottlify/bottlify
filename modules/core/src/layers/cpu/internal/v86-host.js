@@ -378,6 +378,14 @@ export async function createV86Host(config){
         /** How many modules the compiler has published so far. */
         compiledModules: ()=>finalisedModules,
 
+        /** Bytes the host has written into guest memory so far. */
+        hostWrittenBytes: ()=>hostWrittenBytes,
+
+        /** Instructions the interpreter has run so far, in a build that counts. */
+        interpretedSteps: ()=>(cpu.wm.exports.bottlify_stat
+            ? Math.round(cpu.wm.exports.bottlify_stat(1))
+            : 0),
+
         /** What the emulator's compiler was configured with, and how it is doing. */
         jitState: ()=>{
             try

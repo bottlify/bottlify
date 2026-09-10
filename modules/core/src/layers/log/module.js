@@ -152,6 +152,8 @@ export const logModule = {
             end: (name, detail)=>profiler.end(name, detail),
             /** @param {number} [count] */
             compiled: count=>profiler.compiled(count),
+            /** @param {string} name @param {number} amount */
+            note: (name, amount)=>profiler.note(name, amount),
             beginFrame: ()=>profiler.beginFrame(),
             endFrame: ()=>profiler.endFrame(),
             /** @param {number} [count] */
