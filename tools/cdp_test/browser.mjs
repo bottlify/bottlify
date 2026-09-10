@@ -79,13 +79,14 @@ export function launch({ browser = findBrowser() } = {}){
  *
  * @param {Object} [options]
  * @param {string} [options.browser]
+ * @param {boolean} [options.headed]  A window a person can watch, for a run they asked to see.
  * @returns {Promise<BrowserHandle>}
  */
-export function launchWithGpu({ browser = findBrowser() } = {}){
+export function launchWithGpu({ browser = findBrowser(), headed = false } = {}){
     return start(browser, [
         '--enable-unsafe-webgpu',
         '--enable-unsafe-swiftshader',
-    ]);
+    ], headed);
 }
 
 /**
@@ -93,14 +94,23 @@ export function launchWithGpu({ browser = findBrowser() } = {}){
  *
  * @param {string} browser
  * @param {string[]} flags   What this scenario needs on top of the common set.
+ * @param {boolean} [headed]
  * @returns {Promise<BrowserHandle>}
  */
-function start(browser, flags){
+function start(browser, flags, headed = false){
     const profileRoot = mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'));
     const proc = spawn(
         browser,
         [
-            '--headless=new',
+            ...(headed ? [] : ['--headless=new']),
+            // A fresh profile every launch, so without these a visible window
+            // opens on the first-run questions -- a search engine to pick, an
+            // account to sign into -- over the page a person came to watch.
+            '--no-first-run',
+            '--no-default-browser-check',
+            '--disable-search-engine-choice-screen',
+            '--disable-sync',
+            '--disable-features=SigninPromo,SignInProfileCreation,PrivacySandboxSettings4',
             '--no-sandbox',
             '--no-proxy-server',
             '--proxy-bypass-list=*',
