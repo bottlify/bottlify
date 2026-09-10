@@ -421,6 +421,11 @@ export const cpuModule = {
                 // as a dead compiler on a healthy machine. Counted where the
                 // instructions are actually retired instead.
                 jit: host ? host.jitState() : null,
+                // Where the guest is right now. A thread that spins in guest
+                // code makes no host call, so nothing else in this report can
+                // say what it is doing; sampled repeatedly from outside, this
+                // one number names the loop.
+                eip: host ? host.eip() : 0,
             },
         };
     },

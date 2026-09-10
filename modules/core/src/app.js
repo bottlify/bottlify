@@ -2069,6 +2069,13 @@ async function buildApp(options){
      * @type {Map<string, number>}
      */
     const missingImports = new Map();
+    // How often a program actually called an import nothing claims. Binding one
+    // is routine and mostly harmless -- a program imports far more than it
+    // calls -- so the list of unresolved names says little on its own. Being
+    // called is the event that matters, and without this counter it leaves no
+    // trace anywhere a run can be read.
+    /** @type {Map<string, number>} */
+    const missingCalls = new Map();
 
     /**
      * How many argument bytes a stub for an unknown name must pop.
@@ -2103,6 +2110,7 @@ async function buildApp(options){
         const address = bridge.register(label, {
             argBytes: cleanupFor(name),
             handler: ()=>{
+                missingCalls.set(label, (missingCalls.get(label) ?? 0) + 1);
                 events.emit('unimplemented', { import: label });
                 // Zero, and back to the caller. It is the only value that reads
                 // as failure under every convention at once -- a null pointer,
@@ -3327,6 +3335,7 @@ async function buildApp(options){
                         ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
                     },
                     film: { ...film },
+                    unimplementedCalls: Object.fromEntries(missingCalls),
                 },
             },
         ],
