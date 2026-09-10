@@ -303,7 +303,10 @@ export const audioModule = {
                 ...(current ? current.output().diagnostics() : {}),
                 behindTurns: current ? current.behind() : 0,
                 ...(current ? current.feeding() : {}),
-                // TEMP diag: per-buffer state, to see why sounds do not feed.
+                // Every sound buffer's own state. A count of buffers says a
+                // program made some; this says whether any of them is playing,
+                // where its cursor stands and how much of it was ever filled --
+                // which is what separates a silent buffer from a busy one.
                 bufferDetail: current ? current.dsound().buffers()
                     .filter((/** @type {any} */ b)=>!b.primary)
                     .map((/** @type {any} */ b)=>{

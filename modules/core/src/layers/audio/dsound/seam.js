@@ -365,14 +365,15 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
     /** @type {any[]} */
     const buffers = [];
-    // TEMP diag: how often a program drove each buffer method, to see whether
-    // the effect the menu plays is ever played at all versus lost on the way
-    // to the mixer. Keyed by method name.
+    // How often a program drove each buffer method. A sound that is never heard
+    // and a sound that is played and dropped on the way to the mixer look the
+    // same from outside, and this is the first thing that tells them apart.
     /** @type {Record<string, number>} */
     const calls = {};
-    // TEMP diag: the last buffer calls in order, with the detail that says why
-    // an effect starts and dies -- Play's loop flag, what GetCurrentPosition
-    // handed back, where Stop left the cursor.
+    // The last calls in order, with the detail that says why a sound starts and
+    // dies: Play's loop flag, what GetCurrentPosition handed back, where Stop
+    // left the cursor. Totals cannot show a sequence, and the sequence is what
+    // a program's own sound engine decided.
     /** @type {string[]} */
     const events = [];
     /** @param {string} line */
