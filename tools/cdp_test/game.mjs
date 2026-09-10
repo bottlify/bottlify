@@ -324,6 +324,36 @@ function describe(result, context, calls){
                     say(`      ${line}`);
                 }
             }
+            // Frame by frame, the frames that were not like the others: a
+            // picture wrong for one frame in fifty is invisible in a total.
+            /** @type {any[]} */
+            const recent = device.recentFrames ?? [];
+            if (recent.length > 0)
+            {
+                /** @param {(frame: any) => number} of */
+                const usual = of=>{
+                    /** @type {Map<number, number>} */
+                    const seen = new Map();
+                    for (const frame of recent)
+                    {
+                        seen.set(of(frame), (seen.get(of(frame)) ?? 0) + 1);
+                    }
+                    return [...seen].sort((left, right)=>right[1] - left[1])[0][0];
+                };
+                const usualTextures = usual(frame=>frame.textures);
+                const usualDraws = usual(frame=>frame.draws);
+                const odd = recent.filter(frame=>frame.placeholder > 0 || frame.truncated > 0
+                    || frame.textures !== usualTextures
+                    || Math.abs(frame.draws - usualDraws) > usualDraws / 5);
+                say(`    recent frames: ${recent.length}, usually ${usualDraws} draws with`
+                    + ` ${usualTextures} textures; ${odd.length} not like that`);
+                for (const frame of odd.slice(0, 16))
+                {
+                    say(`      frame ${frame.index}: ${frame.draws} draws,`
+                        + ` ${frame.textures} textures, ${frame.placeholder} placeholder,`
+                        + ` ${frame.truncated} cut, ${frame.uploads} uploaded`);
+                }
+            }
             const lighting = device.lighting;
             if (lighting)
             {

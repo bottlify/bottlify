@@ -2695,15 +2695,20 @@ async function buildApp(options){
          *
          * @param {Object} [runOptions]
          * @param {number} [runOptions.maxTurns]
+         *     Turns in which the guest ran something. A turn that ran nothing
+         *     is the machine waiting -- on a fetch, on a timer -- and waiting
+         *     is not the work this bounds: with a yield every turn, a wait of
+         *     a few seconds is tens of thousands of such turns.
          * @returns {Promise<number>} the guest's exit code
          */
         async run({ maxTurns = 200000 } = {}){
+            let worked = 0;
             // How many turns in a row have retired nothing. This is what tells
             // a machine waiting on its own next instruction from one waiting on
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
-            for (let turn = 0; turn < maxTurns; turn++)
+            for (let turn = 0; worked < maxTurns; turn++)
             {
                 if (paused)
                 {
@@ -2973,6 +2978,10 @@ async function buildApp(options){
                     // where no time passes is a broken one.
                     clock.advance(Math.max(0, clockSource() - startedAt));
 
+                    if (step.ran)
+                    {
+                        worked++;
+                    }
                     if (!step.ran)
                     {
                         // Nobody is ready. When a child is waiting to be started

@@ -1701,6 +1701,7 @@ export function createRenderer(options){
             return;
         }
         counters.cascade[truncated.reason === 'texture' ? 'noTexture' : 'noCoordSet']++;
+        frameStats.truncated++;
         const line = `stage ${truncated.stage} ${truncated.reason}: ${truncated.detail}`;
         if (!counters.cascade.truncations.includes(line)
             && counters.cascade.truncations.length < TRUNCATION_SAMPLES)
@@ -1938,6 +1939,7 @@ export function createRenderer(options){
         }
         if (record.dirty)
         {
+            frameStats.uploads++;
             const count = record.width * record.height;
             const bytes = readMemory(record.base, count * FORMAT_INFO[record.format].bytesPerPixel);
             const texels = expandTexels(record.format, bytes, count);
@@ -1972,6 +1974,21 @@ export function createRenderer(options){
 
     /** Arenas of frames already replayed, for the next recording to take. @type {any[]} */
     const arenas = [];
+    /**
+     * What one frame drew, as it is being recorded: closed out at present.
+     *
+     * @returns {{ draws: number, placeholder: number, truncated: number,
+     *     uploads: number, textures: Set<any> }}
+     */
+    const blankFrameStats = ()=>({
+        draws: 0, placeholder: 0, truncated: 0, uploads: 0, textures: new Set(),
+    });
+    let frameStats = blankFrameStats();
+    /** @type {{ index: number, draws: number, placeholder: number, truncated: number,
+     *     uploads: number, textures: number }[]} */
+    const frameHistory = [];
+    const FRAME_HISTORY = 240;
+
     const ensureFrame = ()=>{
         if (!recording)
         {
@@ -2037,7 +2054,7 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {import('../webgpu/internal/pipeline.js').PipelineState} state
      * @param {Float32Array} uniforms
-     * @param {{ view: any, sampler: any }[]} stageBindings
+     * @param {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
      * @param {any} geometry
      */
     const record = (model, state, uniforms, stageBindings, geometry)=>{
@@ -2046,6 +2063,18 @@ export function createRenderer(options){
             return;
         }
         kept++;
+        frameStats.draws++;
+        for (const binding of stageBindings)
+        {
+            if (binding.placeholder)
+            {
+                frameStats.placeholder++;
+            }
+            else
+            {
+                frameStats.textures.add(binding.view);
+            }
+        }
         const frame = ensureViewport(model);
         const pipeline = frame.pipelines.length;
         frame.pipelines.push(backend.pipelineFor(state));
@@ -2561,6 +2590,19 @@ export function createRenderer(options){
             dump = [];
             kept = 0;
             const surface = surfaceFor(model.backBuffer);
+            frameHistory.push({
+                index: counters.frames,
+                draws: frameStats.draws,
+                placeholder: frameStats.placeholder,
+                truncated: frameStats.truncated,
+                uploads: frameStats.uploads,
+                textures: frameStats.textures.size,
+            });
+            if (frameHistory.length > FRAME_HISTORY)
+            {
+                frameHistory.shift();
+            }
+            frameStats = blankFrameStats();
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
             return chain;
@@ -2596,6 +2638,11 @@ export function createRenderer(options){
                     },
                 },
                 recording: recording ? recording.commands.length : 0,
+                // Frame by frame, so a picture that is wrong for one frame in
+                // fifty can be found: a draw that sampled the placeholder, a
+                // cascade cut short, a texture uploaded, how many textures
+                // the frame drew with.
+                recentFrames: frameHistory.slice(),
                 // What the last frame was made of, for a test that wants to
                 // evaluate the same draws on the processor.
                 lastFrame,
