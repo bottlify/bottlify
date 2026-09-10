@@ -267,3 +267,20 @@ test('a frame held back for the seam is heard in the buffer after it', ()=>{
     assert.ok(heard[0] > 0.9,
         `the carried frame opens the next buffer, heard ${heard[0]}`);
 });
+
+test('silence written for an idle track is counted against that track', ()=>{
+    // A block is as long as the longest track has to give, so every other track
+    // has silence written into its own stream for the rest of it. Whether that
+    // matters depends entirely on which track it fell on -- a stream somebody
+    // is listening to, or one that had stopped -- and a single total cannot
+    // tell those apart. It is attributed here so a measurement can.
+    const mixer = createMixer();
+    const playing = mixer.open(DIRECT);
+    const idle = mixer.open(DIRECT);
+
+    playing.write(pcm16([1000, -1000, 2000, -2000, 3000, -3000]));
+    mixer.pump();
+
+    assert.equal(playing.short, 0, 'the track carrying the block is never short');
+    assert.equal(idle.short, 3, 'the idle track was short the whole block');
+});

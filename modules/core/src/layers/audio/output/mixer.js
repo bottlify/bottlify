@@ -139,6 +139,14 @@ export function createMixer(
                 retiredBytes: 0,
                 /** Output frames this track has contributed to the ring. */
                 mixed: 0,
+                /**
+                 * Frames written as silence into this track s own stream while
+                 * another track was carrying a longer block. A total across
+                 * tracks cannot say whether that silence fell on the stream
+                 * somebody is listening to or on one that had simply stopped,
+                 * and those are opposite findings.
+                 */
+                short: 0,
                 /** Of those, the ones the device has already played. */
                 heard: 0,
                 gain: 1,
@@ -302,7 +310,9 @@ export function createMixer(
                 {
                     continue;
                 }
-                shortfall += wanted - mixInto(block, track, wanted);
+                const had = mixInto(block, track, wanted);
+                shortfall += wanted - had;
+                track.short += wanted - had;
             }
             const written = ring.write(block);
             produced += written;
@@ -320,6 +330,7 @@ export function createMixer(
             starvedBlocks: ring.starved().blocks,
             starvedFrames: ring.starved().frames,
             shortfall,
+            perTrack: [...tracks].map(t=>`short=${t.short} mixed=${t.mixed}`),
             idlePumps,
             pumps,
         }),
