@@ -181,8 +181,14 @@ const S_FALSE = 1;
  *        host; without it every setter stays a trap.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
+ * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
+ * @param {(width: number, height: number) => void} [deps.resolution]
+ *        Told the resolution a device is created at, to report as the screen.
  */
-export function createDirect3D8Seam({ publisher, memory, screen, allocate, divergence, cursor }){
+export function createDirect3D8Seam(
+    { publisher, memory, screen, allocate, divergence, cursor, resolution },
+)
+{
     const fields = createFields(memory);
 
     /**
@@ -1690,6 +1696,11 @@ export function createDirect3D8Seam({ publisher, memory, screen, allocate, diver
                 hFocusWindow: focus >>> 0,
             });
             writePresentParameters(parameters >>> 0, wanted);
+            if (hr === D3D_OK && held.device)
+            {
+                // The window is now this resolution; the reported screen is too.
+                resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0);
+            }
             if (hr !== D3D_OK || !held.device)
             {
                 // Cleared, because a caller checks the pointer it passed as

@@ -180,6 +180,8 @@ function seamed({ shadow = false } = {}){
     const divergences = [];
     /** @type {any[]} */
     const cursors = [];
+    /** @type {[number, number][]} */
+    const resolutions = [];
     /** @type {any[]} */
     const roots = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
@@ -205,6 +207,7 @@ function seamed({ shadow = false } = {}){
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         cursor: (/** @type {any} */ notice)=>cursors.push(notice),
+        resolution: (/** @type {number} */ w, /** @type {number} */ h)=>resolutions.push([w, h]),
     });
     const fields = createFields(box.services);
 
@@ -216,6 +219,7 @@ function seamed({ shadow = false } = {}){
         libraries,
         divergences,
         cursors,
+        resolutions,
         /** The IDirect3D8 a program gets from the entry point. */
         create(){
             const pointer = libraries.libraries['D3D8.dll'].Direct3DCreate8.handler([32]);
@@ -1142,4 +1146,13 @@ test('the cursor a program sets reaches whoever shows the frame, bitmap and hot 
     assert.equal(h.device(device, 'SetCursorProperties', [5, 5, surface]), D3DERR_INVALIDCALL,
         'a hot spot outside the bitmap is refused, and nobody is told');
     assert.equal(h.cursors.length, 3);
+});
+
+test('creating a device reports its resolution as the screen the program now has', ()=>{
+    const h = seamed();
+    const device = h.createDevice(h.create());
+    assert.notEqual(device, 0);
+    // createDevice builds present parameters at 64x64 (see the fixture).
+    assert.deepEqual(h.resolutions.at(-1), [64, 64],
+        'the back buffer size a device was created at is reported');
 });

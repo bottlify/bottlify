@@ -278,6 +278,9 @@ export const graphicsModule = {
             divergence: config?.divergence,
             // Where a program's cursor goes, when the host shows one.
             cursor: config?.cursor,
+            // Told the resolution a device is created at, so the reported
+            // screen becomes that resolution.
+            resolution: config?.resolution,
             // Absent in a build with no bridge behind it -- a test, an
             // inspection -- which then gets tables that refuse rather than
             // tables that publish into nowhere.

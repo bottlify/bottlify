@@ -1196,8 +1196,14 @@ async function buildApp(options){
     /** @type {(() => void)[]} */
     let idlers = [];
 
-    /** What the program is told its display is, where it was told anything. */
-    const display = options.screen ?? null;
+    /**
+     * What the program is told its display is. Mutable: a program that creates
+     * its Direct3D device at a resolution other than the one the launch named
+     * is telling the engine its screen is that resolution, one window full of
+     * it. The reported metrics follow, so a cursor the game normalises by the
+     * screen and draws in its own back buffer stays under the pointer.
+     */
+    const display = { ...(options.screen ?? { width: 640, height: 480, bitsPerPixel: 32 }) };
 
     /**
      * Divergences already reported, so each is said once.
@@ -1462,7 +1468,16 @@ async function buildApp(options){
                     },
                 }
                 : null,
-            screen: options.screen,
+            screen: display,
+            // A program that creates its device at a resolution names its screen:
+            // one window is that resolution. The reported metrics follow it.
+            resolution: (/** @type {number} */ width, /** @type {number} */ height)=>{
+                if (width > 0 && height > 0)
+                {
+                    display.width = width;
+                    display.height = height;
+                }
+            },
             // Where a locked surface or vertex buffer's bytes live. A lock
             // hands the program an address it writes through and the unlock
             // reads those bytes back, so it has to be memory the guest can
@@ -1489,7 +1504,7 @@ async function buildApp(options){
         win32: {
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
-            screen: options.screen,
+            screen: display,
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build

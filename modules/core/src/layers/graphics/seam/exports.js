@@ -66,6 +66,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Guest memory for the state a program sets without crossing into the host.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
+ * @param {(width: number, height: number) => void} [deps.resolution]
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
@@ -78,12 +79,14 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
         currentThread,
-        scratch, render, allocate, divergence, cursor },
+        scratch, render, allocate, divergence, cursor, resolution },
 )
 {
     const publisher = shared ?? createPublisher({ publishInterface });
     const fields = createFields(memory);
-    const d3d8 = createDirect3D8Seam({ publisher, memory, screen, allocate, divergence, cursor });
+    const d3d8 = createDirect3D8Seam({
+        publisher, memory, screen, allocate, divergence, cursor, resolution,
+    });
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
     });
