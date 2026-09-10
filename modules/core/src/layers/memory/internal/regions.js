@@ -63,6 +63,9 @@ const PERMITS = {
 export function createRegionMap(){
     /** @type {Region[]} */
     const regions = [];
+    /** The region the last lookup found; regions are only ever added, so it stays valid. */
+    /** @type {Region | undefined} */
+    let last;
 
     /**
      * @param {number} base
@@ -130,8 +133,23 @@ export function createRegionMap(){
          * @returns {Region | undefined}
          */
         find(address){
-            return regions.find(
-                region=>address >= region.base && address < region.base + region.size);
+            // Asked on every read and write the host makes, thousands a
+            // frame, nearly all of them in the region the last one hit: that
+            // region is tried first, and the walk below makes no closure.
+            if (last && address >= last.base && address < last.base + last.size)
+            {
+                return last;
+            }
+            for (let index = 0; index < regions.length; index++)
+            {
+                const region = regions[index];
+                if (address >= region.base && address < region.base + region.size)
+                {
+                    last = region;
+                    return region;
+                }
+            }
+            return undefined;
         },
 
         /**
