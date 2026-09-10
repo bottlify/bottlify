@@ -191,10 +191,39 @@ test('motion too small to count is kept rather than dropped', ()=>{
     } });
     h.canvas.fire('focus', {});
     h.drain();
-    h.canvas.fire('pointermove', { clientX: 0, clientY: 0, movementX: 1, movementY: 0 });
+    h.canvas.fire('pointermove', { clientX: 0, clientY: 0, movementX: 0, movementY: 0 });
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 1, clientY: 0, movementX: 1, movementY: 0 });
     assert.equal(h.drain()[0].dx, 0, 'half a game pixel is not a pixel yet');
-    h.canvas.fire('pointermove', { clientX: 0, clientY: 0, movementX: 1, movementY: 0 });
+    h.canvas.fire('pointermove', { clientX: 2, clientY: 0, movementX: 1, movementY: 0 });
     assert.equal(h.drain()[0].dx, 1, 'and the other half arrives');
+});
+
+test('motion is the difference between two positions, not the browser\'s own number', ()=>{
+    // A browser reports the position in CSS pixels and the movement in the
+    // screen's own, so on a display at anything but 100% the two disagree by
+    // the device pixel ratio. A program that draws its cursor by adding up
+    // deltas -- which is what DirectInput hands it -- then drifts further from
+    // the pointer the further it travels, while every absolute position it
+    // could have asked for stays exactly right. Here the browser overstates
+    // movement by half again, as a display at 150% does.
+    const h = harness({ canvas: {
+        width: 800, height: 600, rect: { left: 0, top: 0, width: 800, height: 600 },
+    } });
+    h.canvas.fire('focus', {});
+    h.drain();
+    h.canvas.fire('pointermove', { clientX: 0, clientY: 0, movementX: 0, movementY: 0 });
+    h.drain();
+
+    let travelled = 0;
+    for (let step = 1; step <= 8; step++)
+    {
+        h.canvas.fire('pointermove',
+            { clientX: step * 50, clientY: step * 30, movementX: 75, movementY: 45 });
+        travelled += h.drain()[0].dx;
+    }
+    assert.equal(travelled, 400,
+        'eight steps of fifty pixels are four hundred pixels, whatever the browser calls them');
 });
 
 test('a button takes focus, captures the pointer and is named', ()=>{

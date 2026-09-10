@@ -113,11 +113,16 @@ export function createDomInput({ canvas, send, pointerLock = false }){
     const listeners = [];
     let focused = false;
     let lastEscape = -RELEASE_WINDOW_MS;
-    // What a rounded delta has left over. Dropping it would mean a canvas shown
-    // larger than its backing store loses slow mouse movement entirely, since
-    // every delta would round to zero.
     let restX = 0;
     let restY = 0;
+    // Where the pointer was, in the picture's own pixels, so that motion can be
+    // the difference between two positions instead of a number in units of its
+    // own. Null until there is a previous position, and again whenever the
+    // pointer is locked and has none.
+    /** @type {number | null} */
+    let lastX = null;
+    /** @type {number | null} */
+    let lastY = null;
     let restNotches = 0;
     /** @type {number[]} */
     const padAxes = [];
@@ -255,8 +260,32 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         // not do.
         const locked = typeof document !== 'undefined' && document.pointerLockElement === canvas;
         const { left, top, x: scaleX, y: scaleY } = projection();
-        const dx = (e.movementX ?? 0) * scaleX + restX;
-        const dy = (e.movementY ?? 0) * scaleY + restY;
+        const atX = (e.clientX - left) * scaleX;
+        const atY = (e.clientY - top) * scaleY;
+
+        // Relative motion is taken from the positions rather than from
+        // `movementX`, which is not measured in the same units: a browser
+        // reports the position in CSS pixels and the movement in the screen's
+        // own, so on a display running at anything but 100% they differ by the
+        // device pixel ratio. A program that draws its own cursor by adding up
+        // deltas -- which is what DirectInput gives it -- then drifts further
+        // from the pointer the further it is moved, while every absolute
+        // position stays exactly right. Subtracting two positions cannot
+        // disagree with those positions about what a pixel is.
+        //
+        // A locked pointer has no position to subtract, so it is the one case
+        // left with `movementX`. It is also the one case where a program
+        // expects to scale the numbers itself.
+        const dx = (locked || lastX === null ? (e.movementX ?? 0) * scaleX : atX - lastX)
+            + restX;
+        const dy = (locked || lastY === null ? (e.movementY ?? 0) * scaleY : atY - lastY)
+            + restY;
+        lastX = locked ? null : atX;
+        lastY = locked ? null : atY;
+
+        // What a rounded delta leaves over is carried rather than dropped: a
+        // canvas shown larger than its backing store would otherwise lose slow
+        // movement entirely, every delta rounding to zero.
         const wholeX = Math.trunc(dx);
         const wholeY = Math.trunc(dy);
         restX = dx - wholeX;
@@ -264,11 +293,11 @@ export function createDomInput({ canvas, send, pointerLock = false }){
 
         send({
             kind: 'pointerMove',
-            // A locked pointer has no position: the client coordinates stop
-            // moving, so reporting them would pin the cursor wherever the lock
-            // began. The router advances its own from the deltas instead.
-            x: locked ? undefined : Math.round((e.clientX - left) * scaleX),
-            y: locked ? undefined : Math.round((e.clientY - top) * scaleY),
+            // A locked pointer's client coordinates stop moving, so reporting
+            // them would pin the cursor wherever the lock began. The router
+            // advances its own from the deltas instead.
+            x: locked ? undefined : Math.round(atX),
+            y: locked ? undefined : Math.round(atY),
             dx: wholeX,
             dy: wholeY,
         });
