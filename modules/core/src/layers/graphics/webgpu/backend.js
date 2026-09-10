@@ -345,6 +345,18 @@ export function createBackend(options){
         createSurface,
 
         /**
+         * A frame has been recorded and queued for replay. Renames after
+         * this retire backings that belong to it, so every dynamic buffer
+         * counts the present.
+         */
+        markPresent(){
+            for (const buffer of dynamicBuffers)
+            {
+                buffer.markPresent();
+            }
+        },
+
+        /**
          * @param {any} descriptor
          * @returns {any}
          */

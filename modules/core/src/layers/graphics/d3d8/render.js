@@ -2586,6 +2586,9 @@ export function createRenderer(options){
         present(model){
             const recorded = ensureFrame();
             recording = null;
+            // Before the replay chain, so a rename in the next frame's
+            // recording retires this frame's backings against this present.
+            backend.markPresent();
             lastDump = dump;
             dump = [];
             kept = 0;

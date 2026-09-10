@@ -179,3 +179,33 @@ test('the upload cost is reported per buffer, not just in total', ()=>{
 
     assert.deepEqual(uploads, [['indices', 24]], 'aligned outward from 17..37 to 16..40');
 });
+
+test('a backing is not reused until the frame that read it has been submitted', ()=>{
+    const { gpu, dynamic } = buffer(4096);
+    const first = dynamic.gpu;
+
+    // Frame one is recorded and presented; its draws read `first`.
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    const second = dynamic.gpu;
+    dynamic.markPresent();
+
+    // Frame two is recorded before either has been submitted -- the guest runs
+    // ahead of the replay chain. Its rename retires `second`, which frame two's
+    // own draws read.
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    dynamic.markPresent();
+    assert.equal(gpu.count('createBuffer'), 3, 'three backings, none reused yet');
+
+    // Frame one submits. Only `first` is free; `second` is still read by frame
+    // two, which has not been drawn.
+    dynamic.endFrame();
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    assert.equal(dynamic.gpu, first, 'the first frame\'s backing came back');
+    assert.notEqual(dynamic.gpu, second, 'the second frame\'s is still in flight');
+    assert.equal(gpu.count('createBuffer'), 3, 'and no fourth had to be made');
+
+    // Frame two submits. Now `second` is free.
+    dynamic.endFrame();
+    fill(dynamic, 0, 16, LockFlags.DISCARD);
+    assert.equal(dynamic.gpu, second, 'released once its frame was submitted');
+});

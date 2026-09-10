@@ -73,8 +73,18 @@ export function createDynamicBuffer(options){
 
     /** @type {any[]} */
     const available = [];
-    /** @type {any[]} */
-    const retiredThisFrame = [];
+    // A backing retired by a rename is still read by the draws recorded before
+    // it, which submit when their frame does. So it is tagged with the number
+    // of frames presented before it was retired, and returns to the pool only
+    // once that many frames have been submitted -- not at the next submit,
+    // which with several frames in flight is one belonging to a later frame
+    // that has not been drawn yet. Reusing it then is what made a textured
+    // model flicker: the draw that still pointed at it read the next frame's
+    // vertices instead.
+    /** @type {{ gpu: any, at: number }[]} */
+    const retired = [];
+    let presents = 0;
+    let submits = 0;
     let generation = 0;
     let renames = 0;
     let dirtyStart = -1;
@@ -114,7 +124,7 @@ export function createDynamicBuffer(options){
         // Whatever is still dirty belongs to the generation being retired: draws
         // already recorded read that buffer object, not the new one.
         flush();
-        retiredThisFrame.push(gpu);
+        retired.push({ gpu, at: presents });
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
         if (discard)
@@ -184,10 +194,24 @@ export function createDynamicBuffer(options){
          * Buffers retired during a frame may still be read by draws recorded in
          * it, so they only become reusable once that frame has been submitted.
          */
+        /**
+         * A frame was recorded and handed to the chain. What renames retire
+         * from here on belongs to it, not to the frames already in flight.
+         */
+        markPresent(){
+            presents++;
+        },
+
+        /** A frame was submitted; the backings its draws read are free now. */
         endFrame(){
-            while (retiredThisFrame.length > 0)
+            submits++;
+            for (let index = retired.length - 1; index >= 0; index--)
             {
-                available.push(retiredThisFrame.shift());
+                if (retired[index].at < submits)
+                {
+                    available.push(retired[index].gpu);
+                    retired.splice(index, 1);
+                }
             }
         },
 
@@ -196,7 +220,7 @@ export function createDynamicBuffer(options){
                 label,
                 size: options.size,
                 renames,
-                pooled: available.length + retiredThisFrame.length,
+                pooled: available.length + retired.length,
                 dirty: dirtyStart < 0 ? 0 : dirtyEnd - dirtyStart,
             };
         },
