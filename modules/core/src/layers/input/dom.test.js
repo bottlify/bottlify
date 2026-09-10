@@ -235,7 +235,23 @@ test('a button takes focus, captures the pointer and is named', ()=>{
     assert.equal(h.drain().at(-1).button, 'right');
 
     h.canvas.fire('pointerup', { button: 2, pointerId: 7 });
-    assert.deepEqual(h.drain(), [{ kind: 'pointerButton', button: 'right', down: false }]);
+    assert.deepEqual(h.drain().at(-1), { kind: 'pointerButton', button: 'right', down: false });
+});
+
+test('a press says where it happened, even with no move before it', ()=>{
+    const h = harness();
+    h.canvas.fire('pointerdown', { button: 0, pointerId: 1, clientX: 200, clientY: 150 });
+
+    // A mouse always moves before it is pressed, so this only shows up for a
+    // touch, a pen or a synthesised click -- where the program would otherwise
+    // hit-test the press against wherever the pointer was left last.
+    const sent = h.drain();
+    const moved = sent.find(event=>event.kind === 'pointerMove');
+    assert.ok(moved, 'the press carries the position with it');
+    assert.equal(moved.x, 200);
+    assert.equal(moved.y, 150);
+    assert.deepEqual(sent.at(-1), { kind: 'pointerButton', button: 'left', down: true },
+        'and the button still arrives after it, never before');
 });
 
 test('the pointer is only locked when the caller asked for that', ()=>{

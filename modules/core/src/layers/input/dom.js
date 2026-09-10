@@ -321,6 +321,14 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         {
             lockPointer();
         }
+        // Where the press happened travels with it. A press carries its own
+        // position on Windows, and a program hit-tests a button against that
+        // position -- but here the position only ever moved with a move, so a
+        // press that arrives without one is delivered wherever the pointer was
+        // before. A mouse always moves first; a touch, a pen and a synthesised
+        // click do not, and their press landed on whatever was last under the
+        // cursor.
+        onPointerMove(e);
         send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: true });
     };
 
@@ -333,6 +341,7 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         catch {
             // Nothing was captured. The button still has to be released.
         }
+        onPointerMove(e);
         send({ kind: 'pointerButton', button: BUTTON_NAMES[e.button] ?? '', down: false });
     };
 
