@@ -125,6 +125,12 @@ export function createSoundBuffer(
     let lastNotified = 0;
     /** Where it stood the last time the bytes it passed were read out for mixing. */
     let fedByte = 0;
+    // A non-looping buffer that reached its end since the last drain. Its play
+    // cursor reads zero again, so the wrapped span drainPlayed forms collapses
+    // to nothing for a sound short enough to finish between two fills of the
+    // ring -- which every menu click is. The flag makes the last drain hand
+    // over the rest of the buffer linearly instead.
+    let reachedEnd = false;
     /** @type {{ offset: number, first: number, second: number } | null} */
     let lock = null;
 
@@ -151,6 +157,7 @@ export function createSoundBuffer(
             playing = false;
             anchorByte = 0;
             anchorMs = now();
+            reachedEnd = true;
         }
     };
 
@@ -252,6 +259,7 @@ export function createSoundBuffer(
 
         /** @param {number} position */
         setCurrentPosition(position){
+            reachedEnd = false;
             anchorByte = alignDown((position >>> 0) % bytes);
             anchorMs = now();
             lastNotified = anchorByte;
@@ -353,6 +361,16 @@ export function createSoundBuffer(
          */
         drainPlayed(){
             const play = playCursor();
+            if (reachedEnd)
+            {
+                // Everything from the last look to the end, once. The buffer
+                // plays start to end and is not circular in doing it, so this
+                // is a single contiguous range and never wraps.
+                reachedEnd = false;
+                const from = fedByte % bytes;
+                fedByte = 0;
+                return from < bytes ? [{ from, bytes: bytes - from }] : [];
+            }
             // Forward around the circle: a cursor that reads as behind the last
             // one has wrapped, and the span is the rest of the buffer plus what
             // it has covered since.

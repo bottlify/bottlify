@@ -320,3 +320,18 @@ test('volume is decibels, and a gain is what a mixer can use', ()=>{
     sound.setVolume(DSBVOLUME_MIN);
     assert.equal(sound.gain, 0, 'and the floor is silence, not almost silence');
 });
+
+test('a one-shot that finishes before it is ever drained still hands over its sound', ()=>{
+    // A menu click is short enough to play out between two fills of the ring.
+    // Draining sees the cursor back at zero, and the whole sound must not be
+    // dropped as no progress.
+    const { sound, time } = buffer();
+    sound.play(0);
+    time.advance(1500);
+    assert.equal(sound.status() & DSBSTATUS_PLAYING, 0, 'it finished');
+    const ranges = sound.drainPlayed();
+    assert.equal(ranges.length, 1);
+    assert.equal(ranges[0].from, 0, 'from the beginning');
+    assert.equal(ranges[0].bytes, SECOND, 'the whole buffer, once');
+    assert.deepEqual(sound.drainPlayed(), [], 'and not a second time');
+});

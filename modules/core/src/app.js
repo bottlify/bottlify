@@ -2760,20 +2760,22 @@ async function buildApp(options){
                     // while the guest is working perfectly. Every few turns is
                     // enough to keep the outside responsive and rare enough that
                     // the cost of going round the event loop does not show.
+                    // Sound is written ahead before the turn yields to the
+                    // browser, not after: the device reads on a thread of its
+                    // own, and a yield is where the browser may take the thread
+                    // to compose a frame or collect its garbage. Topping the
+                    // ring up first is what keeps it from draining empty in that
+                    // gap -- heard as a click in otherwise steady sound.
+                    journal.begin('pump', journal.PhaseKind.HOST);
+                    sound?.pump();
+                    journal.end('pump');
+
                     if (turn % TURNS_PER_YIELD === 0)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
                         await breathe();
                         journal.end('yield');
                     }
-
-                    // Sound is written ahead here rather than on demand: the
-                    // device reads on a thread of its own and must never find the
-                    // ring empty because the emulator was inside a long
-                    // instruction.
-                    journal.begin('pump', journal.PhaseKind.HOST);
-                    sound?.pump();
-                    journal.end('pump');
 
                     // And devices that keep a cursor are moved on, whether or not
                     // the guest asked anything. A program is entitled to hand a
