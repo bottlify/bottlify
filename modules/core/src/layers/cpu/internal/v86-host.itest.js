@@ -245,3 +245,52 @@ test('eip and eflags are readable by name, as a CONTEXT record needs', async()=>
     host.writeReg32('eflags', 0x2);
     assert.equal(host.readReg32('eflags'), 0x2, 'ZF is gone because we said so');
 });
+
+test('a loop with two entries is held to the slice like any other', async()=>{
+    // Two blocks that jump back to each other, so the loop has two heads: the
+    // compiler dispatches such a loop by index and once emitted no bound check
+    // on its way round, so a slice of a thousand ran the whole loop. A game
+    // spinning on a flag in a loop of this shape held the machine for as long
+    // as the spin lasted, with no frame and no sound in between.
+    const host = await boot();
+    const N = 100000;
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0x31, 0xc9,                 //     xor ecx, ecx
+        0x31, 0xd2,                 //     xor edx, edx
+        0xeb, 0x01,                 //     jmp B
+        0x41,                       // A:  inc ecx
+        0x42,                       // B:  inc edx
+        0xf7, 0xc2, ...u32(1),      //     test edx, 1
+        0x75, 0xf6,                 //     jnz A
+        0x81, 0xf9, ...u32(N),      //     cmp ecx, N
+        0x75, 0xef,                 //     jne B
+        0xf4,                       //     hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+
+    const SLICE = 1000;
+    let worst = 0;
+    let slices = 0;
+    while (!host.cpu().in_hlt[0] && slices < 20000)
+    {
+        const retired = host.cpu().run_slice(SLICE) >>> 0;
+        worst = Math.max(worst, retired);
+        slices++;
+        if (slices % 20 === 0)
+        {
+            // The compiler finishes a module off the thread; give it the chance.
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], `the loop ran to its end (${slices} slices)`);
+    const state = host.jitState();
+    if (state !== -1 && state.compiledSteps >= 0)
+    {
+        assert.ok(state.compiledSteps > 0, 'the loop was compiled, not only interpreted');
+    }
+    // What is left to overrun by is one basic block.
+    assert.ok(worst <= SLICE + 16, `the worst slice retired ${worst} of ${SLICE} asked`);
+    host.stop();
+});
