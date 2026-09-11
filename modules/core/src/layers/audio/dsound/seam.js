@@ -339,7 +339,7 @@ export function createPublisher({ publishInterface }){
  *        before the call returns, so a table without this route cannot answer
  *        those calls truthfully.
  */
-export function createDirectSound({ memory, allocate, now, publishInterface, signal }){
+export function createDirectSound({ memory, allocate, now, publishInterface, signal, callGuest }){
     const publisher = createPublisher({ publishInterface });
 
     /** @param {number} address */
@@ -829,9 +829,90 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
         return DS_OK;
     };
 
+    /**
+     * Puts a string where guest code can read it, in the width the caller of
+     * the A or W entry point expects, and answers with its address.
+     *
+     * @param {string} text @param {boolean} wide
+     * @returns {number}
+     */
+    const stringForGuest = (text, wide)=>{
+        const units = wide ? 2 : 1;
+        const bytes = new Uint8Array((text.length + 1) * units);
+        for (let index = 0; index < text.length; index++)
+        {
+            const code = text.charCodeAt(index);
+            bytes[index * units] = code & 0xff;
+            if (wide)
+            {
+                bytes[index * units + 1] = code >>> 8 & 0xff;
+            }
+        }
+        const address = allocate(bytes.length);
+        memory.writeMemory(address, bytes);
+        return address;
+    };
+
+    /** How many times a program has asked what sound devices there are. */
+    let enumerations = 0;
+
+    /**
+     * Describes the devices to a program's own callback, as Windows does.
+     *
+     * The primary driver comes first and always, with a null GUID -- that entry
+     * is what a program takes as "this machine can play sound", and a machine
+     * with hardware then describes each device after it. One device follows
+     * here because that is what this engine has: a single output that whoever
+     * assembles it opened.
+     *
+     * The callback is guest code, so answering means running the guest from
+     * inside a host call; the bridge parks the caller while that happens, and
+     * this returns a promise it hands back rather than a value.
+     *
+     * @param {number} callback @param {number} context @param {boolean} wide
+     */
+    const enumerate = (callback, context, wide)=>{
+        if ((callback >>> 0) === 0)
+        {
+            return DSERR_INVALIDPARAM;
+        }
+        enumerations++;
+        if (!callGuest)
+        {
+            // No route to guest code -- a test harness, or an engine assembled
+            // without a bridge. Saying so is better than reporting no devices,
+            // which a program reads as a machine that cannot play sound.
+            return DS_OK;
+        }
+        const primary = stringForGuest('Primary Sound Driver', wide);
+        const blank = stringForGuest('', wide);
+        const device = stringForGuest('Bottlify Audio', wide);
+        // A GUID is sixteen bytes and a program keeps it to open that device by
+        // name later; every guid opens the same output here, so its contents
+        // only have to be stable and not null.
+        const guid = allocate(16);
+        memory.writeMemory(guid, new Uint8Array([
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ]));
+        return (async()=>{
+            // TRUE asks for the next one, and a program that has seen enough
+            // says FALSE -- so a caller that stops early is obeyed rather than
+            // handed a list it did not want.
+            const more = await callGuest(callback >>> 0, [0, primary, blank, context >>> 0]);
+            if ((more | 0) !== 0)
+            {
+                await callGuest(callback >>> 0, [guid, device, blank, context >>> 0]);
+            }
+            return DS_OK;
+        })();
+    };
+
     return {
         root,
         publisher,
+        /** How many times a program asked what sound devices there are. */
+        enumerations: ()=>enumerations,
         /** For tests and for whoever wants to look at a buffer without a guest. */
         buffers: ()=>buffers,
 
@@ -855,13 +936,23 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
                 /**
                  * HRESULT DirectSoundEnumerateA(LPDSENUMCALLBACKA, LPVOID)
                  *
-                 * Succeeds having enumerated nothing: the callback is guest
-                 * code and calling it needs a route this table does not have.
-                 * A program that finds no devices falls back to the default,
-                 * which is what DirectSoundCreate gives it.
+                 * Windows always describes the primary driver first, with a
+                 * null GUID, before any device of its own -- so a program that
+                 * counts the callbacks and gets none concludes the machine has
+                 * no sound hardware at all. Succeeding while calling back never
+                 * is therefore not a harmless simplification: it is an answer,
+                 * and the answer is "there is nothing here".
                  */
-                DirectSoundEnumerateA: { argBytes: 8, handler: ()=>DS_OK },
-                DirectSoundEnumerateW: { argBytes: 8, handler: ()=>DS_OK },
+                DirectSoundEnumerateA: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([callback, context])=>enumerate(callback, context, false),
+                },
+                DirectSoundEnumerateW: {
+                    argBytes: 8,
+                    /** @param {number[]} args */
+                    handler: ([callback, context])=>enumerate(callback, context, true),
+                },
                 /** HRESULT DirectSoundCaptureCreate(...) — there is no capture device. */
                 DirectSoundCaptureCreate: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
                 DirectSoundCaptureCreate8: { argBytes: 12, handler: ()=>DSERR_UNSUPPORTED },
@@ -875,6 +966,10 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             calls,
             events: [...events],
             cooperativeLevel,
+            // Asking what devices there are and being told none is how a
+            // program concludes the machine cannot play sound, so how often it
+            // asked is worth seeing beside what it did next.
+            enumerations,
             playing: buffers.filter(buffer=>(buffer.status() & 1) !== 0).length,
             published: publisher.count(),
         }),

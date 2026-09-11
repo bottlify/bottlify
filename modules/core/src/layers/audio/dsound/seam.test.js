@@ -793,3 +793,83 @@ test('a secondary buffer refuses to have its format set', ()=>{
     const buffer = createBuffer(f);
     assert.equal(f.bridge.call(buffer, 'SetFormat', [0x2000]), 0x88780032 | 0);
 });
+
+/**
+ * A fixture with a route into guest code, recording every call made through it
+ * and answering with whatever the test says the program's callback returned.
+ *
+ * @param {number[]} answers  One per expected callback, in order.
+ */
+function withGuest(answers){
+    const memory = guestMemory();
+    const bridge = fakeBridge();
+    let nextAddress = 0x50000;
+    /** @type {{ entry: number, args: number[] }[]} */
+    const calls = [];
+    const dsound = createDirectSound({
+        memory,
+        allocate: (/** @type {number} */ bytes)=>{
+            const address = nextAddress;
+            nextAddress += (bytes + 0xfff) & ~0xfff;
+            return address;
+        },
+        now: ()=>0,
+        publishInterface: (object, id)=>bridge.publishInterface(object, id),
+        callGuest: async(entry, args)=>{
+            calls.push({ entry, args });
+            return answers[calls.length - 1] ?? 1;
+        },
+    });
+    return { memory, dsound, calls };
+}
+
+/** @param {any} memory @param {number} address */
+function textAt(memory, address){
+    let out = '';
+    for (let at = address; memory.bytes[at] !== 0; at++)
+    {
+        out += String.fromCharCode(memory.bytes[at]);
+    }
+    return out;
+}
+
+test('enumerating devices describes the primary driver first, with no guid', async()=>{
+    const f = withGuest([1, 1]);
+    const result = await f.dsound.libraries['DSOUND.dll']
+        .DirectSoundEnumerateA.handler([0x9000, 0xabcd]);
+
+    assert.equal(result, DS_OK);
+    assert.equal(f.calls.length, 2, 'the primary driver, then the device itself');
+    const [primary, device] = f.calls;
+    assert.equal(primary.entry, 0x9000, 'the callback the program handed over is what runs');
+    assert.equal(primary.args[0], 0, 'the primary driver has no guid, which is how it is known');
+    assert.equal(textAt(f.memory, primary.args[1]), 'Primary Sound Driver');
+    assert.equal(primary.args[3], 0xabcd, 'and the context it was given comes back to it');
+    assert.notEqual(device.args[0], 0, 'a device of its own carries a guid');
+});
+
+test('a program that has seen enough is not handed the rest', async()=>{
+    const f = withGuest([0]);
+    const result = await f.dsound.libraries['DSOUND.dll']
+        .DirectSoundEnumerateA.handler([0x9000, 0]);
+
+    assert.equal(result, DS_OK);
+    assert.equal(f.calls.length, 1, 'FALSE from the callback ends the enumeration');
+});
+
+test('enumerating with no callback is refused rather than ignored', ()=>{
+    const f = withGuest([]);
+    assert.equal(f.dsound.libraries['DSOUND.dll'].DirectSoundEnumerateA.handler([0, 0]),
+        DSERR_INVALIDPARAM);
+    assert.equal(f.calls.length, 0);
+});
+
+test('the wide spelling writes the names a wide caller reads', async()=>{
+    const f = withGuest([0]);
+    await f.dsound.libraries['DSOUND.dll'].DirectSoundEnumerateW.handler([0x9000, 0]);
+
+    const at = f.calls[0].args[1];
+    assert.equal(f.memory.bytes[at], 'P'.charCodeAt(0));
+    assert.equal(f.memory.bytes[at + 1], 0, 'two bytes a character, so a wide read finds it');
+    assert.equal(f.memory.bytes[at + 2], 'r'.charCodeAt(0));
+});
