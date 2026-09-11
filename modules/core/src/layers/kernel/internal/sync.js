@@ -306,6 +306,30 @@ export function createSyncObjects({ scheduler }){
         },
 
         /**
+         * Asks whether an object is available now, taking it if it is, and
+         * never queues the thread.
+         *
+         * Not a wait with a zero deadline. That queued the thread and answered
+         * at once, and the entry outlived the question: the thread went on to
+         * wait on something else, the polled object was signalled to nobody in
+         * particular, and the stale entry handed it the thread -- woken with an
+         * answer that named the wrong object, which a program reads as its
+         * shutdown signal.
+         *
+         * @param {any} object
+         * @param {any} thread
+         * @returns {number | null} the wait result, or null if it is not ready
+         */
+        poll(object, thread){
+            if (object.kind === SyncKind.MUTEX && object.owner === thread)
+            {
+                object.recursion++;
+                return WaitResult.OBJECT_0;
+            }
+            return isSignalled(object) ? acquire(object, thread) : null;
+        },
+
+        /**
          * Waits for all of several objects.
          *
          * Nothing is taken until everything is available. Acquiring what is ready

@@ -237,13 +237,13 @@ export function createThreadingFunctions(host){
                 }
 
                 // Zero is a poll, not a wait: it asks whether the object is
-                // available now and never blocks. Blocking on it would stop a
-                // program that was only checking.
+                // available now and never blocks or queues. A wait with a zero
+                // deadline answered at once too, but left the thread queued on
+                // the object, and a later signal woke it out of whatever it
+                // was waiting on by then with an answer naming the wrong thing.
                 if (wait === 0)
                 {
-                    const answer = kernel.wait(target, thread,
-                        { deadline: 0, result: WAIT_TIMEOUT });
-                    return answer === null ? WAIT_TIMEOUT : answer;
+                    return kernel.poll(target, thread) ?? WAIT_TIMEOUT;
                 }
                 return settle(kernel.wait(target, thread, wait === INFINITE
                     ? undefined

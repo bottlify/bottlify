@@ -25,6 +25,7 @@ function fakeKernel(){
     const state = {
         created: /** @type {any[]} */ ([]),
         waits: /** @type {any[]} */ ([]),
+        polls: /** @type {any[]} */ ([]),
         released: /** @type {any[]} */ ([]),
         exited: /** @type {any[]} */ ([]),
         blocked: /** @type {any[]} */ ([]),
@@ -54,6 +55,11 @@ function fakeKernel(){
         /** @param {any} object @param {any} thread @param {any} [timed] */
         wait(object, thread, timed){
             state.waits.push({ object, thread, timed });
+            return state.waitBlocks ? null : 0;
+        },
+        /** @param {any} object @param {any} thread */
+        poll(object, thread){
+            state.polls.push({ object, thread });
             return state.waitBlocks ? null : 0;
         },
         clock: { virtualTime: ()=>state.now },
@@ -261,8 +267,12 @@ test('a timed wait carries a deadline, and a zero one is a poll', ()=>{
         'the deadline is guest time, not a duration: the scheduler compares, it does not count');
 
     // Zero asks whether the object is available now. A program checking must
-    // not be stopped by the question, so an unavailable object answers at once.
+    // not be stopped by the question, so an unavailable object answers at once
+    // -- and is not queued on it either, which a zero-deadline wait would do.
+    const waits = state.waits.length;
     assert.equal(fns.WaitForSingleObject.handler([handle, 0]), 0x102);
+    assert.equal(state.waits.length, waits, 'a poll is not a wait');
+    assert.equal(state.polls.length, 1);
 
     // INFINITE carries no deadline at all rather than one far away, so nothing
     // downstream has to know how far away is far enough.

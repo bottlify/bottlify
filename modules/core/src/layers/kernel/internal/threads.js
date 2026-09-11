@@ -39,9 +39,20 @@ const PAGE = 0x10000;
  *        Moves the guest's clock to a deadline when every thread is waiting on
  *        one, and answers how far it actually moved -- which is nothing once the
  *        clock has caught up with the host's.
+ * @param {(thread: any, reason: string | null, value: number) => void} [options.onResume]
+ *        Told what a parked thread is resumed with, and from which wait.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    /**
+     * Told what a parked thread is about to be resumed with: which wait it
+     * was in and the value the call answers. The only record of that answer
+     * -- the call was logged as parked when it began, and the value is put
+     * straight into a register when the thread comes back.
+     *
+     * @type {((thread: any, reason: string | null, value: number) => void) | null}
+     */
+    const onResume = options.onResume ?? null;
     /** Turns where the emulator ran past the slice it was given, and the worst. */
     let overruns = 0;
     let worstSlice = 0;
@@ -293,6 +304,7 @@ export function createScheduler(options){
                     esp: next.resumeStack ?? null,
                     returnValue: next.waitResult ?? 0,
                 };
+                onResume?.(next, next.lastWaitingOn ?? null, resume.returnValue >>> 0);
                 next.parkedReturn = null;
                 next.resumeStack = null;
                 next.waitResult = null;
@@ -362,6 +374,9 @@ export function createScheduler(options){
         block(thread, reason, timed){
             thread.state = ThreadState.BLOCKED;
             thread.waitingOn = reason ?? null;
+            // Kept past the wake, so the resume can still say what was waited
+            // for: the wake clears the live reason.
+            thread.lastWaitingOn = reason ?? null;
             thread.deadline = timed?.deadline ?? null;
             thread.timeoutResult = timed?.result ?? 0;
         },

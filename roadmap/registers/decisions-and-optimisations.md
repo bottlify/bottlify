@@ -628,3 +628,23 @@ cost of hearing the lead once more.
 After both, forty seconds at the same menu: no starved block once the music had started (the
 count stayed at what the start-up had cost), and the ring held 50-100 ms throughout. Whether
 that is the whole of what was heard is for a listener to say; what was measured is gone.
+
+## A poll never queues the thread
+
+A zero-timeout wait was answered by queuing the thread on the object with a deadline of now
+and reporting the timeout at once. The answer was right and the queue entry outlived it: the
+thread went on to wait on something else, and when the polled object was later signalled the
+stale entry handed it to the thread, which woke out of its real wait with an answer naming the
+wrong object. Measured on the title: its sound loader thread polled a read-completion event on
+every pass of its loop and then waited on its own pair of events, quit first; the completion
+came, the thread was woken with index 0, read that as its quit signal and exited, and every
+sound effect after that was requested and never loaded. **The decision: a poll is its own
+primitive** -- it takes what is ready and never queues -- rather than a wait with no time in
+it. After the change the middleware receives and starts every click sample (measured through
+the import watch); what it sounds like is for a listener to say.
+
+The instrument that found it is generic and stays: the kernel journals what a parked thread
+is resumed with and from which wait (`kernel` category), because a call logged as parked has
+no other record of its answer, and a watch stub now saves every register before it traps, so
+a watch in front of a fastcall or thiscall routine no longer hands it the trap port as an
+argument -- which had produced a wholly wrong account of why the sound tables were missing.

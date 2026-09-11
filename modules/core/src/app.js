@@ -53,13 +53,14 @@ import { createBlockCache, resolveBlockStore }
  *     How many events at the bridge to keep, so a run that went wrong can be
  *     saved and replayed in a test. Zero, the default, records nothing.
  * @property {(dll: string, name: string | null, ordinal: number | null)
- *     => ({ args: number, strings?: number[] } | null)} [watchImport]
+ *     => ({ args: number, strings?: (number | string)[] } | null)} [watchImport]
  *     Asked about every import as it is bound. Answering with an argument count
  *     puts a watch in front of that function, so a call from one guest module
  *     into another shows up in the trace like a call into ours. This is the only
  *     way to see them, and a game's own libraries are where its decisions live.
- *     `strings` names the arguments (by position) that point at C strings, and
- *     the watch reports those with the answer: a pointer into the stack says
+ *     `strings` names the arguments that point at C strings -- a stack slot by
+ *     position, or `'ecx'` / `'edx'` for one passed in a register -- and the
+ *     watch reports those with the answer: a pointer into the stack says
  *     nothing once the call is over, and the name a program asked for is
  *     usually the whole point.
  * @property {number} [maxFps]
@@ -2108,7 +2109,7 @@ async function buildApp(options){
      * A watch stub in front of `target`, one per label.
      *
      * @param {string} label @param {number} argBytes @param {number} target
-     * @param {number[]} [strings]  Which arguments to report as C strings.
+     * @param {(number | string)[]} [strings]  Which arguments to report as C strings.
      * @returns {number} the stub's address, to be called in place of the target
      */
     const installWatch = (label, argBytes, target, strings = [])=>{
@@ -2124,13 +2125,19 @@ async function buildApp(options){
             // its own result in EAX; nothing here answers it. What this does
             // instead is arrange to be told what that answer was, by sending
             // the function home through a stub of ours.
-            /** @param {number[]} _args @param {{ callerStack: number }} frame */
+            /** @param {number[]} _args @param {{ callerStack: number, freeStack: number }} frame */
             handler: (_args, frame)=>{
                 const esp = frame.callerStack >>> 0;
                 // Read now, while the arguments are still there: a name built
                 // on the caller's stack is gone by the time the answer comes.
-                const named = strings.map(index=>{
-                    const pointer = memory.readU32(esp + 4 + index * 4) >>> 0;
+                const named = strings.map(where=>{
+                    // ECX is untouched by the stub; EDX was spent on the trap
+                    // and sits in the block the stub saved, third from the top.
+                    const pointer = where === 'ecx'
+                        ? cpu.readReg32('ecx') >>> 0
+                        : where === 'edx'
+                            ? memory.readU32((frame.freeStack >>> 0) + 20) >>> 0
+                            : memory.readU32(esp + 4 + Number(where) * 4) >>> 0;
                     try
                     {
                         return memory.readCString(pointer, 260);
@@ -3489,9 +3496,10 @@ async function buildApp(options){
              * under observation, never for one that is meant to be faithful.
              *
              * @param {number} address
-             * @param {{ label: string, argBytes: number, lengths: number[] }} how
+             * @param {{ label: string, argBytes: number, lengths: number[],
+             *     strings?: (number | string)[] }} how
              */
-            hook: (address, { label, argBytes, lengths })=>{
+            hook: (address, { label, argBytes, lengths, strings = [] })=>{
                 const displaced = lengths.reduce((sum, n)=>sum + n, 0);
                 const at = address >>> 0;
                 const region = memory.find(at);
@@ -3509,7 +3517,7 @@ async function buildApp(options){
                 memory.writeBytes(trampoline, moved);
                 memory.writeBytes(trampoline + displaced,
                     jumpBytes(trampoline + displaced, at + displaced));
-                const stub = installWatch(label, argBytes, trampoline);
+                const stub = installWatch(label, argBytes, trampoline, strings);
                 const patch = new Uint8Array(displaced).fill(0x90);
                 patch.set(jumpBytes(at, stub));
                 // Opened for the write and put back exactly as it was: an image

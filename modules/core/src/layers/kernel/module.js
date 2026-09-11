@@ -45,6 +45,7 @@ export const kernelModule = {
     async create(config, host){
         const cpu = host.requireApi('cpu');
         const memory = host.requireApi('memory');
+        const log = host.requireApi('log');
 
         // Where new threads get their stacks. Each is registered in the address
         // space like anything else, so a stack that runs into its neighbour is
@@ -73,6 +74,12 @@ export const kernelModule = {
             // to sit through must never carry the guest past real time.
             /** @param {number} deadline */
             skipTo: deadline=>clock.skipTo(deadline),
+            // The answer a parked call woke with, which the trace has no other
+            // record of: a program that quits a loop on a wait's answer cannot
+            // be read back without it.
+            /** @param {any} thread @param {string | null} reason @param {number} value */
+            onResume: (thread, reason, value)=>log.debug('kernel',
+                '{0} resumed from {1} with {2:x}', thread.name, reason ?? 'a park', value),
             // Below a page the emulator cannot honour a smaller quantum anyway,
             // so asking for one would only be a lie in the configuration.
             quantum: config?.quantum ?? 100_000,
@@ -287,6 +294,8 @@ export const kernelModule = {
              * @param {{ deadline?: number, result?: number }} [timed]
              */
             wait: (object, thread, timed)=>sync.wait(object, thread, timed),
+            /** @param {any} object @param {any} thread */
+            poll: (object, thread)=>sync.poll(object, thread),
 
             /**
              * Blocks a thread for a span of guest time and nothing else.

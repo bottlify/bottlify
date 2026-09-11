@@ -88,6 +88,24 @@ test('a blocked thread does not get a turn until it is woken', ()=>{
     assert.equal(a.state, ThreadState.READY);
 });
 
+test('a resumed thread reports what it waited for and what it was answered', ()=>{
+    // The call was logged as parked when it began, and its answer goes
+    // straight into a register when the thread comes back; this is the one
+    // place both are known.
+    const cpu = { ...fakeCpu(), resumeContextAt: ()=>{} };
+    /** @type {any[]} */
+    const resumed = [];
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000,
+        onResume: (thread, reason, value)=>resumed.push([thread.name, reason, value]) });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.block(a, 'any of event "#403c", event "#4040"');
+    sched.wake(a);
+    a.parkedReturn = 0x401000;
+    a.waitResult = 1;
+    sched.runOnce();
+    assert.deepEqual(resumed, [['a', 'any of event "#403c", event "#4040"', 1]]);
+});
+
 test('waking a thread that is not blocked changes nothing', ()=>{
     const { sched } = scheduler();
     const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000 });

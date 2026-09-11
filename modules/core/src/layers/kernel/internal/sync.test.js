@@ -177,6 +177,36 @@ test('waiting for all takes nothing until everything is ready', ()=>{
     assert.equal(sync.diagnostics()[0].state, 'signalled', 'first was left alone');
 });
 
+test('a poll takes what is ready and never leaves the thread queued', ()=>{
+    // A program's service thread checked a completion event with a zero
+    // timeout on every pass of its loop and then waited on its own pair of
+    // events. The check queued it on the completion event, so when that was
+    // signalled the stale entry woke the thread out of the pair with index 0
+    // -- its quit event -- and it exited, taking the program's sound with it.
+    const { scheduler, sync } = setup();
+    const done = sync.createEvent({ name: 'done', manualReset: true });
+    const quit = sync.createEvent({ name: 'quit' });
+    const work = sync.createEvent({ name: 'work' });
+    const a = thread('a');
+
+    assert.equal(sync.poll(done, a), null, 'not ready');
+    assert.deepEqual(done.waiters, [], 'and not queued for it');
+    assert.equal(sync.waitAny([quit, work], a), null);
+    sync.setEvent(done);
+    assert.deepEqual(scheduler.log, ['block a: any of event "quit", event "work"'],
+        'the signal woke nobody');
+    assert.equal(a.waitResult, null);
+
+    sync.setEvent(done);
+    assert.equal(sync.poll(done, thread('b')), WaitResult.OBJECT_0, 'ready: taken');
+    const held = sync.createMutex({ name: 'held' });
+    const b = thread('b');
+    assert.equal(sync.poll(held, b), WaitResult.OBJECT_0);
+    assert.equal(sync.poll(held, b), WaitResult.OBJECT_0, 'a mutex recurses for its owner');
+    assert.equal(held.recursion, 2);
+    assert.equal(sync.poll(held, thread('c')), null, 'and is not free for anyone else');
+});
+
 test('waiting for any reports which one came through', ()=>{
     const { sync } = setup();
     const quiet = sync.createEvent({ name: 'quiet' });
