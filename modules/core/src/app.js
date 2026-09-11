@@ -1920,25 +1920,13 @@ async function buildApp(options){
     // Seeded before the program's first instruction, and awaited: a save that
     // arrives after the program has looked for it is a save that was not there.
     const seeded = normaliseSession(await storage.load());
-    if (seeded.files.length > 0)
-    {
-        filesystem.apply(seeded.files);
-    }
-    // The registry too, and before the program's first instruction for the
-    // same reason: its settings and its name are here as often as in a file,
-    // and a program that finds the key empty writes its defaults over them.
+    // The registry first, and before the program's first instruction: its
+    // settings and its name are here as often as in a file, and a program
+    // that finds the key empty writes its defaults over them. The files wait
+    // for the volume they belong on, which the bundle mount below replaces.
     if (seeded.registry)
     {
         core.api('win32').registry().fromJSON(seeded.registry);
-    }
-
-    // And what the process this one replaces had written. A self-extracting
-    // installer unpacks its payload and then starts it; without this the
-    // payload goes with the machine that wrote it and the child is started
-    // against files that are no longer there.
-    if (options.seed && options.seed.length > 0)
-    {
-        filesystem.apply(options.seed);
     }
 
     // One way out. What the program writes is announced once the writes settle;
@@ -2011,6 +1999,24 @@ async function buildApp(options){
     // block is inside it: zstd is the only decompressor available here that
     // answers a guest's read without a promise.
     blocks = await mountBundle({ options, cpu, filesystem, events });
+
+    // The session's files go onto the volume once it is the one the program
+    // will run on: the mount above puts a fresh writable layer over the
+    // bundle, and files laid down before it went with the layer it replaced
+    // -- which is how a saved profile was written faithfully and never seen
+    // again.
+    if (seeded.files.length > 0)
+    {
+        filesystem.apply(seeded.files);
+    }
+    // And what the process this one replaces had written. A self-extracting
+    // installer unpacks its payload and then starts it; without this the
+    // payload goes with the machine that wrote it and the child is started
+    // against files that are no longer there.
+    if (options.seed && options.seed.length > 0)
+    {
+        filesystem.apply(options.seed);
+    }
 
     const { entryVector, initialStack, thunkBase } = cpu.layout;
 

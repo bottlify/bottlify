@@ -183,6 +183,35 @@ function fakeStore(){
     };
 }
 
+test('a session arriving from outside lands on the volume the bundle is mounted on', async()=>{
+    // The bundle mount puts a fresh writable layer over the bundle. A session
+    // laid down before it went with the layer that was replaced: a program's
+    // saved profile was written faithfully, kept faithfully, and never seen
+    // again on the next start.
+    const source = await bundleWith(PLANTED);
+    const [wasm, exe] = await Promise.all([
+        readFile(new URL('v86.wasm', PREBUILT)),
+        readFile(FIXTURE),
+    ]);
+    const kept = { path: 'C:\\Save\\profile.w3p', bytes: new Uint8Array([1, 2, 3]) };
+
+    const app = await createApp({
+        executable: new Uint8Array(exe),
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+        bundle: { fetch: source.fetch, prefix: '' },
+        storage: { load: async()=>({ files: [kept], registry: null }) },
+    });
+
+    const paths = app.session.export().map((/** @type {any} */ file)=>file.path);
+    assert.ok(paths.includes(kept.path), `the session's file is on the volume: ${paths}`);
+
+    await app.dispose();
+    await source.cleanup();
+});
+
 test('what the program never read is fetched anyway, in the gaps', async()=>{
     // The fixture reads save.dat and nothing else. Data\big.bin is 300 KiB of
     // incompressible filler it never opens, so if those blocks arrive, they

@@ -648,3 +648,30 @@ is resumed with and from which wait (`kernel` category), because a call logged a
 no other record of its answer, and a watch stub now saves every register before it traps, so
 a watch in front of a fastcall or thiscall routine no longer hands it the trap port as an
 argument -- which had produced a wholly wrong account of why the sound tables were missing.
+
+## A session is the files and the registry, kept on this machine, laid onto the mounted volume
+
+A program's settings and its name live in the registry as often as in a file, and the session
+carried only the files; the launcher, for its part, gave a bundle no storage at all. Measured on
+the title: its options and its profile name are registry values, its profile is a file under
+its own directory, and nothing of either survived a restart. **The decision: the hive announces
+its changes and travels inside the session** as one more packed entry under a name no path can
+have, and the launcher keeps a bundle's session in the origin's private file system, named by
+the bundle, with local storage as the fallback for a browser without one.
+
+The second half was an order of operations. The session's files were laid onto the volume
+before the bundle was mounted, and the mount puts a fresh writable layer over the bundle: the
+profile was saved faithfully, restored faithfully, and replaced by an empty layer before the
+program's first instruction -- and a program that found its profile file gone cleared the
+registry value that named it, so the registry half looked lost too. The files now go on after
+the mount, pinned by an integration test that mounts a bundle over a session.
+
+## The library carries its own emulator and ships built small
+
+A caller starting a bundle from code had to name the emulator's module and fetch its binary
+first. Both are the package's own and sit beside the built module, so `createApp` finds them
+there unless a part is named to override it; the build tells the module where through
+`import.meta.env`, and the source tree's prebuilt directory is the fallback of the same line.
+The package is built minified and without a source map -- the source is in the repository for
+whoever has it -- and the audio worklet ships as its own export, because an audio thread loads
+it by URL rather than importing it.
