@@ -41,9 +41,11 @@ const PAGE = 0x10000;
  *        clock has caught up with the host's.
  * @param {(thread: any, reason: string | null, value: number) => void} [options.onResume]
  *        Told what a parked thread is resumed with, and from which wait.
+ * @param {() => number} [options.wall]  The host's clock, for how long a slice held the machine.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    const wall = options.wall ?? (()=>performance.now());
     /**
      * Told what a parked thread is about to be resumed with: which wait it
      * was in and the value the call answers. The only record of that answer
@@ -65,6 +67,20 @@ export function createScheduler(options){
     let worstSliceFrom = 0;
     /** @type {string | null} */
     let worstSliceOn = null;
+    /**
+     * The slices that held the machine longest, by the host's clock. An
+     * instruction count says the emulator ran past its bound; a time says a
+     * frame and the sound ring waited, whether the count was over or not --
+     * a slice of a hundred thousand instructions that each take a microsecond
+     * is a freeze the count alone would never show. Kept few and sorted, so
+     * a report names the worst offenders with where they ran.
+     *
+     * @type {{ ms: number, instructions: number, from: number, at: number,
+     *     thread: string | null }[]}
+     */
+    const slowSlices = [];
+    const SLOW_SLICES_KEPT = 8;
+    const SLOW_SLICE_MS = 40;
     /** @type {any[]} */
     const threads = [];
     /** @type {any} */
@@ -328,8 +344,20 @@ export function createScheduler(options){
             // would report every faulting thread as having left its stack.
             watchStack(next);
             const from = cpu.eip?.() ?? 0;
+            const began = wall();
             const instructions = cpu.runSlice(quantum);
+            const held = wall() - began;
             next.instructions += instructions;
+            const slowest = slowSlices[slowSlices.length - 1];
+            const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
+            if (held >= SLOW_SLICE_MS && kept)
+            {
+                slowSlices.push({
+                    ms: held, instructions, from, at: cpu.eip?.() ?? 0, thread: next.name ?? null,
+                });
+                slowSlices.sort((a, b)=>b.ms - a.ms);
+                slowSlices.length = Math.min(slowSlices.length, SLOW_SLICES_KEPT);
+            }
             creditPage(from, instructions);
             turns++;
             // Whether the slice we asked for is the slice we got.
@@ -462,6 +490,9 @@ export function createScheduler(options){
                 worstSliceAt,
                 worstSliceFrom,
                 worstSliceOn,
+                worstSliceMs: slowSlices.length > 0 ? Math.round(slowSlices[0].ms) : 0,
+                slowSlices: slowSlices.map(s=>`${Math.round(s.ms)}ms ${s.instructions} ${
+                    s.thread ?? '?'} 0x${s.from.toString(16)}->0x${s.at.toString(16)}`).join('; '),
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
                 // Empty in a healthy run: a thread's stack pointer belongs

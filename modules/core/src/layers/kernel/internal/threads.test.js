@@ -214,6 +214,36 @@ test('a slice the emulator ran past is counted, not assumed away', ()=>{
     assert.equal(report.worstSliceOn, 'main', 'on which thread');
 });
 
+test('the slices that held the machine longest are named, with where they ran', ()=>{
+    // A slice within its instruction bound can still be a freeze: the count
+    // says nothing about how long each instruction took. The host's clock does.
+    let tick = 0;
+    let cost = 1;
+    let eip = 0x4000;
+    const cpu = { ...fakeCpu(), runSlice: ()=>{
+        tick += cost;
+        eip += 0x10;
+        return 500;
+    }, eip: ()=>eip };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        wall: ()=>tick });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    sched.runOnce();
+    assert.equal(sched.diagnostics().worstSliceMs, 0, 'a quick slice is not recorded');
+    assert.equal(sched.diagnostics().slowSlices, '');
+    cost = 120;
+    sched.runOnce();
+    cost = 300;
+    sched.runOnce();
+    cost = 1;
+    sched.runOnce();
+    const report = sched.diagnostics();
+    assert.equal(report.worstSliceMs, 300);
+    assert.equal(report.slowSlices, '300ms 500 main 0x4020->0x4030; 120ms 500 main 0x4010->0x4020',
+        'longest first, with the instructions, the thread and where it began and ended');
+    assert.equal(report.overruns, 0, 'none of them ran past its instruction bound');
+});
+
 test('the report says which thread the machine was spent on', ()=>{
     const cpu = { ...fakeCpu(), runSlice: ()=>100 };
     const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000 });
