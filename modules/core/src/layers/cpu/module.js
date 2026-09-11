@@ -7,6 +7,15 @@
 import { createV86Host } from './internal/v86-host.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
+
+/**
+ * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
+ * era that loads a level allocates several hundred megabytes and a machine
+ * with less turns that into an out-of-memory failure it reports as its own;
+ * a power of two, because the emulator requires it. Reserved rather than
+ * committed: the host pays only for what the guest touches.
+ */
+export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
 
@@ -60,7 +69,7 @@ export const cpuModule = {
             // its textures, models and sound into the heap and asks for
             // hundreds of megabytes of it. Must stay a power of two -- the
             // emulator requires it.
-            memorySize: config?.memorySize ?? 512 * 1024 * 1024,
+            memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
             trapPort: config?.trapPort ?? 0xb077,
             entryVector: config?.entryVector ?? 0x7000,
             initialStack: config?.initialStack ?? 0x300000,

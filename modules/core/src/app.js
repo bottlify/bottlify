@@ -9,6 +9,7 @@ import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
 import { inflateRaw, normaliseSession, resolveStorage } from './storage.js';
+import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
@@ -46,7 +47,9 @@ import { createBlockCache, resolveBlockStore }
  *           The decoder binary. Absent, the media layer comes up and reports
  *           that nothing can be played, which is what a build without it is.
  * @property {number} [stackSize]
+ * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
+ *           Defaults to everything above the libraries up to the end of RAM.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
  * @property {() => boolean} [pageHidden]
  *     Whether nobody is looking at this run. A hidden page's timers are clamped
@@ -573,6 +576,29 @@ export function jumpBytes(from, to){
     const rel = (to - (from + 5)) >>> 0;
     return Uint8Array.of(0xe9, rel & 0xff, (rel >>> 8) & 0xff, (rel >>> 16) & 0xff,
         (rel >>> 24) & 0xff);
+}
+
+/**
+ * How much of the guest's RAM the heap gets: what the caller asked for, or
+ * everything from the heap's base to the end of RAM. The heap is the last
+ * region, so the end of RAM is the only ceiling there is -- and a fixed size
+ * short of it was what a program loading a level ran into, reporting the
+ * machine's memory as exhausted while most of it sat unused above.
+ *
+ * @param {number} memorySize
+ * @param {number} [asked]
+ * @param {number} [base]
+ */
+export function heapSizeFor(memorySize, asked, base = 0x0c000000){
+    if (asked !== undefined)
+    {
+        return asked;
+    }
+    if (memorySize <= base)
+    {
+        throw new Error(`heap: ${memorySize} bytes of RAM is less than the heap's base`);
+    }
+    return memorySize - base;
 }
 
 /**
@@ -1264,7 +1290,8 @@ async function buildApp(options){
         Math.max(parsePe(options.executable).stackReserve, 0x10000),
         Math.floor(STACK_POOL_SIZE / 16));
     const HEAP_BASE = 0x0c000000;
-    const HEAP_SIZE = options.heapSize ?? 0x14000000;
+    const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
+    const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize);
 
     /**
      * The modules win32 implements, filled in below. win32 is built before they
@@ -1481,7 +1508,7 @@ async function buildApp(options){
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
         },
-        cpu: { jit: options.jit },
+        cpu: { jit: options.jit, memorySize },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced

@@ -16,7 +16,7 @@ import {
     withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -503,4 +503,13 @@ test('the emulator is found beside the module unless the caller names it', ()=>{
     const given = emulatorArtifacts({ wasmBytes: bytes }, here);
     assert.equal(given.wasmBytes, bytes);
     assert.equal(given.wasmUrl, null, 'bytes in hand are not fetched again');
+});
+
+test('the heap reaches the end of RAM unless a size was asked for', ()=>{
+    // A fixed heap short of the end of RAM was what a program loading a level
+    // ran into: it reported the machine's memory as exhausted while most of
+    // it sat unused above the heap.
+    assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x0c000000);
+    assert.equal(heapSizeFor(1024 * 1024 * 1024, 0x14000000), 0x14000000, 'an asked-for size wins');
+    assert.throws(()=>heapSizeFor(64 * 1024 * 1024), /less than the heap's base/);
 });
