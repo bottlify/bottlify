@@ -57,9 +57,9 @@ async function runOnce(incoming){
         },
         storage: {
             load: async()=>incoming,
-            /** @param {any[]} files @param {any[]} changes */
-            save: (files, changes)=>{
-                saved = files;
+            /** @param {{ files: any[] }} session @param {any[]} changes */
+            save: (session, changes)=>{
+                saved = session.files;
                 announced.push(...changes);
             },
         },
@@ -91,7 +91,7 @@ test('a program finds, on its second run, what it wrote on its first', async()=>
     // Everything between the runs is what a cloud would carry: out through the
     // interface an upload uses, back in through the one a restore uses.
     const travelled = await unpackSession(await packSession(first.session));
-    const second = await runOnce(travelled);
+    const second = await runOnce(travelled.files);
 
     assert.equal(second.exitCode, 0);
     assert.equal(second.printed, PAYLOAD,

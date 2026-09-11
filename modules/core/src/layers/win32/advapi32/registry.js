@@ -165,6 +165,31 @@ export function createHive(){
     /** @type {Map<number, RegistryKey>} */
     const roots = new Map();
 
+    /**
+     * Whoever keeps the hive between runs. Told once per burst of changes and
+     * on a microtask, so a program writing its settings one value at a time
+     * costs one save rather than one per value, and nothing is announced from
+     * inside the call that is still making the change.
+     *
+     * @type {(() => void)[]}
+     */
+    const listeners = [];
+    let announcing = false;
+    const changed = ()=>{
+        if (announcing || listeners.length === 0)
+        {
+            return;
+        }
+        announcing = true;
+        queueMicrotask(()=>{
+            announcing = false;
+            for (const listener of listeners)
+            {
+                listener();
+            }
+        });
+    };
+
     const reset = ()=>{
         roots.clear();
         for (const [id, name] of ROOT_NAMES)
@@ -250,6 +275,10 @@ export function createHive(){
                 }
                 node = next;
             }
+            if (created)
+            {
+                changed();
+            }
             return { key: node, created };
         },
 
@@ -277,6 +306,7 @@ export function createHive(){
                 return 'has-subkeys';
             }
             target.parent.keys.delete(fold(target.name));
+            changed();
             return 'deleted';
         },
 
@@ -314,12 +344,35 @@ export function createHive(){
         setValue(key, name, type, data){
             const value = { name, type: type >>> 0, data: terminate(type >>> 0, data) };
             key.values.set(fold(name), value);
+            changed();
             return value;
         },
 
         /** @param {RegistryKey} key @param {string} name @returns {boolean} */
         deleteValue(key, name){
-            return key.values.delete(fold(name));
+            const deleted = key.values.delete(fold(name));
+            if (deleted)
+            {
+                changed();
+            }
+            return deleted;
+        },
+
+        /**
+         * Asks to be told when the hive has changed. A restore is not a change.
+         *
+         * @param {() => void} listener
+         * @returns {() => void} forgets the listener
+         */
+        onChanged(listener){
+            listeners.push(listener);
+            return ()=>{
+                const at = listeners.indexOf(listener);
+                if (at >= 0)
+                {
+                    listeners.splice(at, 1);
+                }
+            };
         },
 
         /**

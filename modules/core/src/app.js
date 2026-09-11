@@ -8,7 +8,7 @@ import { fitFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
-import { inflateRaw, resolveStorage } from './storage.js';
+import { inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
@@ -106,7 +106,10 @@ import { createBlockCache, resolveBlockStore }
  *           What the program is told its display is.
  * @property {any} [storage]
  *           Where the session comes from and goes: a provider with `load` and
- *           `save`, a function that only loads, or the string `local`.
+ *           `save`, a function that only loads, or the string `local` or
+ *           `opfs`. A session is the files the program wrote and the registry
+ *           it wrote; `save` is handed both, and `load` may answer with both
+ *           or with a bare list of files.
  * @property {string} [id]           Names the session when storage does not.
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
@@ -1861,10 +1864,17 @@ async function buildApp(options){
 
     // Seeded before the program's first instruction, and awaited: a save that
     // arrives after the program has looked for it is a save that was not there.
-    const seeded = await storage.load();
-    if (seeded.length > 0)
+    const seeded = normaliseSession(await storage.load());
+    if (seeded.files.length > 0)
     {
-        filesystem.apply(seeded);
+        filesystem.apply(seeded.files);
+    }
+    // The registry too, and before the program's first instruction for the
+    // same reason: its settings and its name are here as often as in a file,
+    // and a program that finds the key empty writes its defaults over them.
+    if (seeded.registry)
+    {
+        core.api('win32').registry().fromJSON(seeded.registry);
     }
 
     // And what the process this one replaces had written. A self-extracting
@@ -1881,13 +1891,22 @@ async function buildApp(options){
     const persist = storage.save;
     if (persist)
     {
-        filesystem.onChanged((/** @type {any[]} */ changes)=>{
+        /** @param {any[]} changes */
+        const save = changes=>{
             events.emit('session', { changes });
-            Promise.resolve(persist(filesystem.export(), changes)).catch(
+            const session = {
+                files: filesystem.export(),
+                registry: core.api('win32').registry().toJSON(),
+            };
+            Promise.resolve(persist(session, changes)).catch(
                 (/** @type {Error} */ error)=>{
                     events.emit('error', { reason: 'session-save', error });
                 });
-        });
+        };
+        filesystem.onChanged(save);
+        // A registry write is a change to the session like a file write is,
+        // announced without a path: the whole hive travels with every save.
+        core.api('win32').registry().onChanged(()=>save([{ kind: 'registry' }]));
     }
 
     // Every event the engine reports also goes to the journal, so that one

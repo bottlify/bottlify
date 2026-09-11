@@ -27,6 +27,30 @@ const latin1 = text=>Uint8Array.from([...text].map(character=>character.charCode
 const machine = (hive, path)=>hive.create(
     /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), path).key;
 
+test('the hive announces a burst of changes once, and a restore not at all', async()=>{
+    // Whoever keeps the hive between runs is told when it is worth keeping
+    // again. A program writes its settings one value at a time; that is one
+    // save, not one per value, and putting a saved hive back is not a change.
+    const hive = createHive();
+    let announced = 0;
+    hive.onChanged(()=>announced++);
+    const user = /** @type {any} */ (hive.root(HKEY_CURRENT_USER));
+    const { key } = hive.create(user, 'Software\\Test');
+    hive.setValue(key, 'Name', REG_SZ, Uint8Array.of(65, 0));
+    hive.setValue(key, 'Width', REG_DWORD, Uint8Array.of(0, 4, 0, 0));
+    assert.equal(announced, 0, 'not from inside the call that makes the change');
+    await Promise.resolve();
+    assert.equal(announced, 1, 'one burst, one announcement');
+
+    hive.fromJSON(hive.toJSON());
+    await Promise.resolve();
+    assert.equal(announced, 1, 'a restore is not a change');
+
+    hive.deleteValue(key, 'Missing');
+    await Promise.resolve();
+    assert.equal(announced, 1, 'and neither is deleting what was not there');
+});
+
 test('the predefined roots exist and nothing else does', ()=>{
     const hive = createHive();
 
