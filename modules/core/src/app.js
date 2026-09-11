@@ -12,7 +12,7 @@ import { inflateRaw, resolveStorage } from './storage.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
-import { loadString } from './layers/loader/internal/resources.js';
+import { findResource, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
@@ -68,7 +68,7 @@ import { createBlockCache, resolveBlockStore }
  *     the journal is kept. Everything a program decides about a device it
  *     decides while starting up, so a category switched on once the engine
  *     exists is switched on too late to see any of it.
- * @property {{ drained?: boolean, sampleRate?: number }} [audio]
+ * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean }} [audio]
  *     Sound leaves through a ring in shared memory. `drained` says that
  *     something on the other side of it is really reading -- a WebAudio
  *     worklet, usually -- which is what decides whether a program's play cursor
@@ -502,6 +502,22 @@ export function idleWait({ fetching, idlers, suspended, spun }){
     const on = fetching > 0 ? 'fetch' : idlers > 0 ? 'message' : 'host';
     const timer = spun >= IDLE_SPINS_BEFORE_TIMER;
     return { phase: `idle-${on}${timer ? '-wait' : ''}`, timer };
+}
+
+/**
+ * The key a module is known by: its file name, without directory, case or
+ * the extension a program is free to leave off.
+ *
+ * A library is asked for by bare name in an import descriptor and by full
+ * path from a loader that found the file itself, and both must find the one
+ * module -- a second copy at a second address has globals its first copy's
+ * callers do not share.
+ *
+ * @param {string} name
+ */
+export function moduleKeyOf(name){
+    const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
+    return file.toLowerCase().replace(/\.dll$/, '');
 }
 
 /**
@@ -1130,10 +1146,7 @@ async function buildApp(options){
         {
             return mainModule;
         }
-        // A name may arrive with or without its extension, and case never
-        // matters: the same library is asked for both ways in one program.
-        const wanted = name.toLowerCase().replace(/\.dll$/, '');
-        return byName.get(wanted) ?? null;
+        return byName.get(moduleKeyOf(name)) ?? null;
     };
 
     // Where input goes when nobody says otherwise: the most recently created
@@ -1253,7 +1266,7 @@ async function buildApp(options){
     const CALL_AREAS = {
         'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
         'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
-        'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio',
+        'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio', 'Mp3dec.asi': 'audio',
         'quartz.dll': 'video', 'blizzard.ax': 'video',
         'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
         'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
@@ -1389,6 +1402,15 @@ async function buildApp(options){
             // opened a device, and it decides whether a program's play cursor
             // follows the sound or the clock.
             drained: options.audio?.drained ?? false,
+            // Whose call a sound provider is answering, read before it awaits
+            // anything: a callback into the guest after an await has to name
+            // the thread whose call it continues.
+            currentThread: ()=>core.api('kernel').currentThread(),
+            // An export's address, of a library the program ships or of one we
+            // synthesised. A provider announces itself through the library
+            // that loaded it, and hands that library its own entry points.
+            /** @param {string} dll @param {string} name */
+            resolveImport: (dll, name)=>resolveImport(dll, name, null),
             // Setting an event belongs to the kernel, which sits below this
             // layer and cannot be reached from it, so it is handed down the way
             // the wave notifier's is. A stale handle is the program's mistake
@@ -1404,6 +1426,10 @@ async function buildApp(options){
                 }
             },
             sampleRate: options.audio?.sampleRate,
+            // Whether the hosted MPEG provider is offered at all. Off, a
+            // program runs the decoder it ships, which is the comparison a
+            // measurement of the hosted one is made against.
+            mp3: options.audio?.mp3 ?? true,
         },
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
@@ -1642,6 +1668,21 @@ async function buildApp(options){
                         : byBase.get(instance >>> 0) ?? null;
                     return module?.file
                         ? loadString(module.file, module.image, id)
+                        : null;
+                },
+                /**
+                 * Whether a module carries a resource, and where: what a cursor
+                 * or icon loaded out of the program's own image is checked
+                 * against before a handle to it is handed out.
+                 *
+                 * @param {number} instance @param {number} type @param {number | string} name
+                 */
+                findResource: (instance, type, name)=>{
+                    const module = instance === 0
+                        ? mainModule
+                        : byBase.get(instance >>> 0) ?? null;
+                    return module?.file
+                        ? findResource(module.file, module.image, type, name)
                         : null;
                 },
             },
@@ -1888,7 +1929,12 @@ async function buildApp(options){
         }));
 
         const base = MODULE_BASE + index * MODULE_STRIDE;
-        const placed = loader.synthesise({ name, base, exports });
+        // A table with a DllMain is a module with an entry point, run when a
+        // program first loads it -- which is how a library the program did not
+        // import announces itself to the one that asked for it.
+        const placed = loader.synthesise({
+            name, base, exports, entryPoint: 'DllMain' in table ? 'DllMain' : undefined,
+        });
 
         // An export's address is its trampoline inside the module, and that is
         // what both the import table and GetProcAddress hand out -- so a program
@@ -1909,8 +1955,13 @@ async function buildApp(options){
             addressOf: exported=>addresses.get(exported) ?? null,
             /** @param {number} ordinal */
             addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+            entryPoint: placed.entryPoint,
+            // Not until a program asks for it: a synthesised module exists
+            // from the first instruction, but its entry point is a promise
+            // to whoever loads it, and runs on that caller's thread.
+            attached: false,
         };
-        byName.set(name.toLowerCase().replace(/\.dll$/, ''), record);
+        byName.set(moduleKeyOf(name), record);
         byBase.set(base, record);
     });
 
@@ -2166,7 +2217,20 @@ async function buildApp(options){
         const loaded = findModule(name);
         if (loaded)
         {
-            return loaded.base;
+            if (loaded.attached !== false || !loaded.entryPoint)
+            {
+                return loaded.base;
+            }
+            // Its first LoadLibrary: the entry point runs now, on the thread
+            // that asked, exactly as a library read off the volume gets its
+            // DllMain below. Marked first, so a load the entry point itself
+            // provokes does not run it twice.
+            loaded.attached = true;
+            return bridge.callGuest({
+                entry: loaded.entryPoint,
+                args: [loaded.base, DLL_PROCESS_ATTACH, 0],
+                thread: asked,
+            }).then(()=>loaded.base);
         }
         return (async()=>{
             const wanted = resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe');
@@ -2216,7 +2280,7 @@ async function buildApp(options){
             // Registered before its own imports are bound, so a library that
             // imports back into itself -- or into one still being loaded --
             // finds an address rather than nothing.
-            byName.set(key, held);
+            byName.set(moduleKeyOf(name), held);
             byBase.set(base, held);
             nextLibraryBase = base
                 + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;

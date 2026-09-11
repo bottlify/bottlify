@@ -172,12 +172,13 @@ export const loaderModule = {
              * @param {string} options.name    As an import descriptor names it.
              * @param {number} options.base
              * @param {{ name: string, target: number }[]} options.exports
-             * @returns {{ base: number, size: number,
+             * @param {string} [options.entryPoint]  The export that is its DllMain.
+             * @returns {{ base: number, size: number, entryPoint: number,
              *   addressOf: (name: string) => number | null,
              *   ordinalOf: (name: string) => number | null }}
              */
-            synthesise({ name, base, exports }){
-                const module = synthesiseModule({ name, base, exports });
+            synthesise({ name, base, exports, entryPoint }){
+                const module = synthesiseModule({ name, base, exports, entryPoint });
 
                 memory.register({
                     name,
@@ -191,11 +192,13 @@ export const loaderModule = {
                 memory.writeBytes(base, module.bytes);
                 memory.protect(name, memory.Access.READ_EXECUTE);
 
-                const record = { base, entryPoint: 0, unresolved: [], name };
+                const entryAddress = module.entryPointRva === 0 ? 0 : base + module.entryPointRva;
+                const record = { base, entryPoint: entryAddress, unresolved: [], name };
                 loaded.push(record);
                 return {
                     base,
                     size: module.size,
+                    entryPoint: entryAddress,
                     addressOf: module.addressOf,
                     ordinalOf: module.ordinalOf,
                 };

@@ -64,6 +64,7 @@ const encoder = new TextEncoder();
  * @property {Uint8Array} bytes            The whole image, ready to be written at `base`.
  * @property {number} size                 SizeOfImage; equals bytes.length.
  * @property {number} exportDirectoryRva
+ * @property {number} entryPointRva      Zero when the module has nothing to initialise.
  * @property {(name: string) => number | null} addressOf  Guest address of the trampoline.
  * @property {(name: string) => number | null} ordinalOf
  */
@@ -73,10 +74,20 @@ const encoder = new TextEncoder();
  * @param {string} options.name    Module name as it appears in an import descriptor.
  * @param {number} options.base    Guest address the image will be mapped at.
  * @param {SynthExport[]} options.exports
+ * @param {string} [options.entryPoint]
+ *   The export that is the module's DllMain. A library a program loads at
+ *   run time is initialised through its entry point, and a system module
+ *   that has to announce itself to another library on being loaded needs one.
  * @returns {SynthesisedModule}
  */
-export function synthesiseModule({ name, base, exports }){
+export function synthesiseModule({ name, base, exports, entryPoint }){
     requireAscii(name, 'module name');
+    const entryIndex = entryPoint === undefined ? -1
+        : exports.findIndex(entry=>entry.name === entryPoint);
+    if (entryPoint !== undefined && entryIndex < 0)
+    {
+        throw new Error(`entry point "${entryPoint}" is not among the exports`);
+    }
     const ordinals = assignOrdinals(exports);
     const ordinalBase = ordinals.length === 0 ? DEFAULT_ORDINAL_BASE : Math.min(...ordinals);
     const functionCount = ordinals.length === 0 ? 0 : Math.max(...ordinals) - ordinalBase + 1;
@@ -108,9 +119,10 @@ export function synthesiseModule({ name, base, exports }){
 
     const bytes = new Uint8Array(size);
     const view = new DataView(bytes.buffer);
+    const entryPointRva = entryIndex < 0 ? 0 : trampolinesRva + entryIndex * TRAMPOLINE_STRIDE;
 
     writeHeaders(bytes, view, {
-        base, size, sectionSize, exportDirectoryRva, exportDirectorySize,
+        base, size, sectionSize, exportDirectoryRva, exportDirectorySize, entryPointRva,
     });
 
     exports.forEach((entry, index)=>{
@@ -155,6 +167,7 @@ export function synthesiseModule({ name, base, exports }){
         bytes,
         size,
         exportDirectoryRva,
+        entryPointRva,
         addressOf: exported=>table.get(exported)?.address ?? null,
         ordinalOf: exported=>table.get(exported)?.ordinal ?? null,
     };
@@ -222,6 +235,7 @@ function assignOrdinals(exports){
  * @param {number} layout.sectionSize
  * @param {number} layout.exportDirectoryRva
  * @param {number} layout.exportDirectorySize
+ * @param {number} layout.entryPointRva
  */
 function writeHeaders(bytes, view, layout){
     const rawSize = align(layout.sectionSize, PAGE);
@@ -239,7 +253,7 @@ function writeHeaders(bytes, view, layout){
     const optional = coff + 20;
     view.setUint16(optional, PE32_MAGIC, true);
     view.setUint32(optional + 4, rawSize, true); // SizeOfCode
-    view.setUint32(optional + 16, 0, true); // no entry point: nothing to initialise
+    view.setUint32(optional + 16, layout.entryPointRva, true); // AddressOfEntryPoint
     view.setUint32(optional + 20, SECTION_RVA, true); // BaseOfCode
     view.setUint32(optional + 28, layout.base, true); // ImageBase
     view.setUint32(optional + 32, PAGE, true); // SectionAlignment

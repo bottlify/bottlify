@@ -16,6 +16,7 @@ import {
     withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
+    moduleKeyOf,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -420,4 +421,15 @@ test('a run outside a page is never treated as hidden', ()=>{
     // There is no document in a worker or in Node, and answering "hidden" there
     // would put every run that is not in a tab on the spinning path.
     assert.equal(pageIsHidden(), false);
+});
+
+test('a module is known by its file name, however it was asked for', ()=>{
+    // A loader that found the file itself asks with the full path; an import
+    // descriptor asks with the bare name; a program asks either way and may
+    // leave the extension off. All of them must find the one module.
+    assert.equal(moduleKeyOf('Storm.dll'), 'storm');
+    assert.equal(moduleKeyOf('C:\\App\\Storm.dll'), 'storm');
+    assert.equal(moduleKeyOf('C:/App/STORM'), 'storm');
+    assert.equal(moduleKeyOf('C:\\App\\redist\\miles\\Mp3dec.asi'), 'mp3dec.asi',
+        'an extension that is not .dll is part of the name');
 });

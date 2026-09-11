@@ -120,19 +120,18 @@ export function createModuleFunctions(host){
      * @returns {number | Promise<number>}
      */
     const load = name=>{
+        // Through the loader even for a module already here: only it knows
+        // whether this is the load that has to run the module's entry point.
         const known = host.find(name);
-        if (known)
-        {
-            return known.base;
-        }
-        const answer = host.load?.(name) ?? 0;
+        const answer = host.load ? host.load(name) : known?.base ?? 0;
         if (typeof answer === 'number')
         {
-            if (answer === 0)
+            const base = answer || known?.base || 0;
+            if (base === 0)
             {
                 host.setLastError(ERROR_MOD_NOT_FOUND);
             }
-            return answer;
+            return base;
         }
         return answer.then(base=>{
             if (base === 0)

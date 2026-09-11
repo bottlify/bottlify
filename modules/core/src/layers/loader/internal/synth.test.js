@@ -298,3 +298,24 @@ test('a library may pin some ordinals and leave the rest to us', ()=>{
     assert.equal(module.ordinalOf('Free'), 152,
         'and one we assign sits above everything claimed, so it cannot collide');
 });
+
+test('an export may be the entry point, and the header names it', ()=>{
+    // A library loaded at run time is initialised through its header's entry
+    // point, so a synthesised one that has to announce itself needs the field
+    // filled in -- and one that does not must keep it zero, or the loader
+    // would run a trampoline that was never meant to be called that way.
+    const exports = [{ name: 'DllMain', target: 0x1000 }, { name: 'Other', target: 0x2000 }];
+    const plain = synthesiseModule({ name: 'A.dll', base: BASE, exports });
+    assert.equal(plain.entryPointRva, 0);
+    assert.equal(parsePe(plain.bytes).entryPointRva, 0);
+
+    const withEntry = synthesiseModule({
+        name: 'A.dll', base: BASE, exports, entryPoint: 'DllMain',
+    });
+    assert.equal(BASE + withEntry.entryPointRva, withEntry.addressOf('DllMain'));
+    assert.equal(parsePe(withEntry.bytes).entryPointRva, withEntry.entryPointRva);
+    assert.throws(
+        ()=>synthesiseModule({ name: 'A.dll', base: BASE, exports, entryPoint: 'Nope' }),
+        /entry point "Nope"/,
+    );
+});
