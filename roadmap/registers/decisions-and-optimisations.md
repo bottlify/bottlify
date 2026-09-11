@@ -441,6 +441,15 @@ coarse lookup table indexed by the top bits of each channel makes it a constant-
 All three are known techniques for an emulator of this shape and none is taken up yet: nothing
 here is fast enough for the interpreter to be the bottleneck. Worth a second pass when something is.
 
+Measured since, on the title in a match: 99.7% of the guest's instructions run in generated
+code and the module table never overflows, so the compiler's cache is not the missing piece.
+What remains is the dispatch walk -- the guest leaves generated code about every 37
+instructions, 3.3 million re-entries a second -- which the module-size knobs (pages per module,
+extra basic blocks) address. Raised to 8 pages and 2,000 blocks, the run got worse, not better:
+the compiler's threads took a core and a half for the whole of a map load, the guest ran a
+quarter of the wall time, and the load had not finished after four minutes. The defaults stand;
+a smaller step is untried.
+
 ### B6. Guest thread latency, not throughput
 
 Recorded here because it decides which of the above is worth doing first: the cost that matters most
