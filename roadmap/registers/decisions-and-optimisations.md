@@ -438,9 +438,8 @@ coarse lookup table indexed by the top bits of each channel makes it a constant-
 
 ### B5. A just-in-time compiler, an ahead-of-time cache, and a differential oracle
 
-The predecessor tree carries a substantial body of work on all three. It was read only at the level
-of its commit messages and is deliberately not carried yet: nothing here is fast enough for it to be
-the bottleneck. Worth a second pass when something is.
+All three are known techniques for an emulator of this shape and none is taken up yet: nothing
+here is fast enough for the interpreter to be the bottleneck. Worth a second pass when something is.
 
 ### B6. Guest thread latency, not throughput
 
@@ -565,6 +564,34 @@ picture then depends on which sampler the device believes is bound. The cost is 
 per sample and three words in the block; what it does not cover is anisotropy and border colour,
 neither of which the target titles were seen to use.
 
-The predecessor tree renders the same title on this machine without the symptom; a comparison of
-how the two build a frame (submit shape, uniform rings, bind-group keys and binding order, buffer
-sizes on binding, upload counts) found no difference that changed the outcome when tried here.
+An engine that binds one sampler for every draw does not show the symptom on this machine; a
+comparison of how a frame is built (submit shape, uniform rings, bind-group keys and binding
+order, buffer sizes on binding, upload counts) found no other difference that changed the outcome
+when tried here.
+
+## The MPEG decoder a sound middleware loads is hosted, as the provider it expects
+
+A sound middleware of the late nineties decodes compressed music through a provider it loads
+itself: it scans a directory beside the program for `*.asi` files, loads each with LoadLibrary
+and expects the DllMain to register an "ASI codec" and an "ASI stream" interface through the
+middleware's own RIB entry points; it then calls the registered functions directly. Run as guest
+code, the decoder took a fifth of the machine's retired instructions on a title's main menu, and
+the music was supplied in bursts.
+
+**The decision: host the provider.** The audio layer offers a synthesised `Mp3dec.asi` whose
+DllMain registers the two tables with the same entry types, attribute tokens and data subtypes
+the redistributable decoder registers, and whose stream functions read compressed bytes through
+the middleware's fetch callback and decode on the host through WebCodecs. This is the middle of
+three options: stubbing the whole middleware replaces a library the program ships and runs
+correctly, and patching the emulator for one decoder's hot loop is a per-title fix by another
+name.
+
+Two things had to be learned from the running middleware rather than from documentation: the
+size it gives at open is its own read buffer (4096 bytes for a stream of megabytes), so the
+stream is read until a read answers nothing; and each read names its offset, which the callback
+takes either way. Two generic pieces of the process came with it: a synthesised module may have
+an entry point, run on the thread that first asks for the module by LoadLibrary, and a module is
+known by its file name however it was asked for. Measured on the title through the launcher: the
+provider registered, the music opened through it, samples came out at the stream's rate, and the
+shipped decoder no longer appears in the guest's instruction share.
+
