@@ -595,6 +595,40 @@ export function createBackend(options){
                     return currentPass;
                 },
 
+                /**
+                 * The target's pixels as they are at this point of the frame,
+                 * for a reader after `end`. The pass is closed for the copy;
+                 * the caller reopens one that loads what is there.
+                 *
+                 * @param {import('./contract.js').Surface} surface
+                 * @returns {() => Promise<{ width: number, height: number, data: Uint8Array }>}
+                 */
+                snapshot(surface){
+                    closeCurrentPass();
+                    const bytesPerRow = Math.ceil(surface.width * 4 / 256) * 256;
+                    const staging = device.createBuffer({
+                        label: 'snapshot',
+                        size: bytesPerRow * surface.height,
+                        usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST,
+                    });
+                    encoder.copyTextureToBuffer({ texture: surface.texture },
+                        { buffer: staging, bytesPerRow, rowsPerImage: surface.height },
+                        { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
+                    return async()=>{
+                        await staging.mapAsync(MapMode.READ);
+                        const mapped = new Uint8Array(staging.getMappedRange());
+                        const data = new Uint8Array(surface.width * surface.height * 4);
+                        for (let row = 0; row < surface.height; row++)
+                        {
+                            data.set(mapped.subarray(row * bytesPerRow,
+                                row * bytesPerRow + surface.width * 4), row * surface.width * 4);
+                        }
+                        staging.unmap();
+                        staging.destroy();
+                        return { width: surface.width, height: surface.height, data };
+                    };
+                },
+
                 /** @param {import('./contract.js').Surface} surface */
                 present(surface){
                     if (frame.ended)

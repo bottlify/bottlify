@@ -81,6 +81,11 @@ export function createFakeDevice(options = {}){
             calls.push({ op: 'copyBufferToBuffer', encoder, source, sourceOffset,
                 destination, destinationOffset, size });
         };
+        // This device keeps no texels, so a texture read back is zeros of the
+        // right size: enough for a caller to be exercised end to end.
+        encoder.copyTextureToBuffer = (/** @type {any} */ source, /** @type {any} */ destination,
+            /** @type {any} */ size)=>calls.push(
+            { op: 'copyTextureToBuffer', encoder, source, destination, size });
         encoder.finish = ()=>{
             const buffer = object('commandBuffer', { encoder, deferred });
             calls.push({ op: 'finish', encoder, buffer });

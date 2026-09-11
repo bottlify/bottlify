@@ -56,7 +56,8 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
- *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean,
+ *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean, mips?: boolean,
+ *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
  *           skipTexture?: string }} [options]
  */
@@ -85,7 +86,9 @@ function harness(options = {}){
         maxDraws: options.maxDraws,
         divergence: options.divergence,
         skipTexture: options.skipTexture,
+        probeTexture: options.probeTexture,
         fog: options.fog,
+        mips: options.mips,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1015,7 +1018,36 @@ test('recorded: a chain of levels goes up level by level, into a texture with th
         const pinned = h.samplers[h.samplers.length - 1].descriptor;
         assert.equal(pinned.mipmapFilter, 'nearest');
         assert.equal(pinned.lodMaxClamp, 0);
+
+        // The record says which levels the program wrote and what the smallest
+        // hold, because a far surface is sampled out of those and nothing else
+        // says what they are.
+        const record = device.diagnostics().textureRecords.find(
+            (/** @type {any} */ entry)=>entry.width === 4 && entry.levels === 3);
+        assert.deepEqual(record.written, [0, 1, 2]);
+        assert.deepEqual(Object.keys(record.tails), ['0', '1', '2'], 'a 4x4 top is small enough');
+        assert.deepEqual(record.tails[2].slice(0, 4), [30, 30, 30, 255]);
     });
+
+test('mips can be switched off for a run, and every sample comes from the top level', async()=>{
+    // Recorded commands. The knob exists so two runs differ by the mip chain
+    // and nothing else; it has to reach the sampler, or the runs are one.
+    const h = harness({ mips: false });
+    const { device } = h;
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture(4, 4, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out), D3D_OK);
+    assert.equal(device.SetTexture(0, out.texture), D3D_OK);
+    selectTexture(device);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.LINEAR), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const sampler = h.samplers[h.samplers.length - 1].descriptor;
+    assert.equal(sampler.lodMaxClamp, 0, 'the top level alone, whatever the program asked');
+});
 
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
     const h = harness();
@@ -1516,7 +1548,7 @@ test('a draw`s screen extent is the box its transformed vertices span', ()=>{
         stride: 12,
         indices: null,
     }), { x0: 0, y0: 0, x1: 480, y1: 720, behind: 0, before: 0, beyond: 0, depth: [0, 0],
-        eye: [1, 1] });
+        eye: [1, 1], nearest: [1, 1] });
 
     // The same bytes read as pre-transformed are target pixels already, which
     // is a different box entirely and is why the flag is carried.
@@ -1528,7 +1560,7 @@ test('a draw`s screen extent is the box its transformed vertices span', ()=>{
         stride: 12,
         indices: null,
     }), { x0: -1, y0: -2, x1: 1, y1: 1, behind: 0, before: 0, beyond: 0,
-        depth: [Infinity, -Infinity], eye: [Infinity, -Infinity] });
+        depth: [Infinity, -Infinity], eye: [Infinity, -Infinity], nearest: [] });
 });
 
 test('a vertex behind the eye is counted rather than divided by its own w', ()=>{
@@ -1558,7 +1590,7 @@ test('a vertex behind the eye is counted rather than divided by its own w', ()=>
         stride: 12,
         indices: null,
     }), { x0: 640, y0: 0, x1: 640, y1: 0, behind: 1, before: 0, beyond: 0, depth: [1, 1],
-        eye: [2, 2] });
+        eye: [2, 2], nearest: [-1, 2] });
 });
 
 test('a vertex past either depth plane is counted, because the far plane clips too', ()=>{
@@ -1580,7 +1612,7 @@ test('a vertex past either depth plane is counted, because the far plane clips t
         stride: 12,
         indices: null,
     }), { x0: 320, y0: 240, x1: 320, y1: 240, behind: 0, before: 1, beyond: 1,
-        depth: [-0.5, 1.25], eye: [1, 1] });
+        depth: [-0.5, 1.25], eye: [1, 1], nearest: [1, 1, 1] });
 });
 
 test('the frame dump says where each draw landed and is empty unless asked for', async()=>{
@@ -1628,7 +1660,7 @@ test('the frame dump says where each draw landed and is empty unless asked for',
     assert.match(dumped[0], / view=0,0\+640x480@0..1 /,
         'the rectangle the draw was clipped and mapped by, which a later draw inherits');
     assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
-    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 gpu=same ugpu=same$/,
+    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 pipe\d+ vb\d+@\d+ gpu=same ugpu=same$/,
         'the corners themselves, because the union of a draw`s quads is not one of them');
 });
 
@@ -1667,7 +1699,7 @@ test('the dump reads back what the GPU holds for a draw: vertices, block and ind
     const dumped = device.diagnostics().lastDump;
     assert.equal(dumped.length, 1);
     assert.match(dumped[0], / u=[0-9a-f]{8} /, 'the block the draw was shaded with, as one word');
-    assert.match(dumped[0], / gpu=same ugpu=same igpu=same$/,
+    assert.match(dumped[0], / pipe\d+ vb\d+@0 ib\d+@0 gpu=same ugpu=same igpu=same$/,
         'the vertices, the block and the indices the GPU holds are the ones described');
     assert.deepEqual(device.diagnostics().failures ?? [], [], 'the read-back is not an error');
     vertices.buffer.release();
@@ -1815,6 +1847,46 @@ test('every draw sampling one texture can be dropped, by the id the dump names i
     assert.equal(counted.skipped.texture, 1);
     assert.equal(counted.lastDump.length, 1, 'and the dump lists only the draw that survived');
     assert.match(counted.lastDump[0], /:t0:/);
+});
+
+test('a probed draw reports what the target held right after it, inside the frame', async()=>{
+    // Recorded commands. A finished frame shows what every draw left; what one
+    // draw painted is only knowable by copying the target out before the next
+    // one runs, and the copy has to close and reopen the pass without losing
+    // what was there or the viewport the rest of the frame runs under.
+    const h = harness({ dumpDraws: true, probeTexture: 't0', width: 640, height: 480 });
+    const { device, gpu } = h;
+    const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([0, 0, 255, 255]));
+    selectTexture(device);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    for (let at = 0; at < 2; at++)
+    {
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const dumped = device.diagnostics().lastDump;
+    assert.equal(dumped.length, 2);
+    for (const line of dumped)
+    {
+        assert.match(line, / after=(0\/0\/0,){6}0\/0\/0 distinct=1$/,
+            'this device keeps no texels, so the copy reads as zeros of the right shape');
+    }
+    assert.equal(gpu.count('copyTextureToBuffer'), 2, 'one copy per probed draw');
+    assert.equal(gpu.count('beginRenderPass'), 3, 'each copy reopens the pass');
+    const reopened = gpu.of('beginRenderPass').slice(1).map((/** @type {any} */ call)=>
+        call.descriptor.colorAttachments[0].loadOp);
+    assert.deepEqual(reopened, ['load', 'load'], 'and what was there is kept');
+    const passes = gpu.of('beginRenderPass').map((/** @type {any} */ call)=>call.pass);
+    for (const pass of passes.slice(1))
+    {
+        assert.ok(gpu.of('setViewport').some((/** @type {any} */ call)=>call.pass === pass),
+            'the viewport is set again after each reopening');
+    }
 });
 
 test('a target whose format has no alpha channel is never written with one', async()=>{

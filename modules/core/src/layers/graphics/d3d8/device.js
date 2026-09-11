@@ -197,9 +197,14 @@ function isTransformType(type){
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {string} [skipTexture]
  *     Drop every draw that samples the texture with this dump id.
+ * @property {string} [probeTexture]
+ *     Copy the target out after each dumped draw that samples this texture.
  * @property {boolean} [fog]
  *     Whether fog is applied at all. Off, every draw renders as if the
  *     program had never enabled it: a frame that clears up with it was fog.
+ * @property {boolean} [mips]
+ *     Whether textures are sampled below their top level. Off, every sample
+ *     comes from the top level, so a frame that changes with it was mips.
  */
 
 /**
@@ -294,14 +299,14 @@ function reportPresentParameters(parameters){
 export function createDirect3D8(options = {}){
     const {
         backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture, fog, ...caps
+        dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture, fog,
+        dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
     };
     if (backend && !readMemory)
     {
@@ -573,7 +578,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             maxDraws: services.maxDraws,
             divergence: services.divergence,
             skipTexture: services.skipTexture ?? null,
+            probeTexture: services.probeTexture ?? null,
             fog: services.fog,
+            mips: services.mips,
         })
         : null;
 

@@ -139,7 +139,9 @@ function parse(argv){
             : null,
         // Every draw rendered as if D3DRS_FOGENABLE were clear, so a run
         // differs from an ordinary one by fog and nothing else.
+        probeTexture: argv.includes('--probe') ? argv[argv.indexOf('--probe') + 1] : null,
         fog: !argv.includes('--no-fog'),
+        mips: !argv.includes('--no-mips'),
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the

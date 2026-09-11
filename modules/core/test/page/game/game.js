@@ -729,7 +729,9 @@ async function run(request){
             skipTexture: request.skipTexture ?? null,
             // Fog off is the other half of a pair of runs: a wash that goes
             // with it was fog, and one that stays was not.
+            probeTexture: request.probeTexture ?? null,
             fog: request.fog !== false,
+            mips: request.mips !== false,
             /** @param {any} frame */
             presentTo: frame=>{
                 presented = frame;

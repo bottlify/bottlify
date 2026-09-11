@@ -184,8 +184,12 @@ export function transformPosition(m, point){
  * distance a vertex is fogged by.
  *
  * @param {ScreenDraw} draw
+ * `nearest` lists the clip w of the vertices closest to the eye plane, behind
+ * or before it: a triangle with a vertex on that plane is interpolated through
+ * a division by nothing, and what it paints is decided by rounding.
+ *
  * @returns {{ points: number[][], behind: number, before: number, beyond: number,
- *            depth: [number, number], eye: [number, number] }}
+ *            depth: [number, number], eye: [number, number], nearest: number[] }}
  */
 export function screenPositions(draw){
     const { rect } = draw.viewport;
@@ -203,6 +207,8 @@ export function screenPositions(draw){
     const depth = [Infinity, -Infinity];
     /** @type {[number, number]} */
     const eye = [Infinity, -Infinity];
+    /** @type {number[]} */
+    const nearest = [];
     for (let index = 0; index < total; index++)
     {
         const at = (draw.indices ? draw.indices[index] : index) * draw.stride;
@@ -216,6 +222,7 @@ export function screenPositions(draw){
         {
             const clip = transformPosition(draw.worldViewProjection,
                 [x, y, view.getFloat32(at + 8, true)]);
+            nearest.push(clip[3]);
             if (!(clip[3] > 0))
             {
                 behind++;
@@ -242,7 +249,8 @@ export function screenPositions(draw){
         // because vertices behind the eye leave no gap in this list.
         points.push([x, y, at]);
     }
-    return { points, behind, before, beyond, depth, eye };
+    nearest.sort((left, right)=>Math.abs(left) - Math.abs(right));
+    return { points, behind, before, beyond, depth, eye, nearest: nearest.slice(0, 5) };
 }
 
 /**
@@ -251,10 +259,10 @@ export function screenPositions(draw){
  * @param {ScreenDraw} draw
  * @returns {{ x0: number, y0: number, x1: number, y1: number, behind: number,
  *            before: number, beyond: number, depth: [number, number],
- *            eye: [number, number] } | null}
+ *            eye: [number, number], nearest: number[] } | null}
  */
 export function screenExtent(draw){
-    const { points, behind, before, beyond, depth, eye } = screenPositions(draw);
+    const { points, behind, before, beyond, depth, eye, nearest } = screenPositions(draw);
     if (points.length === 0)
     {
         return null;
@@ -269,6 +277,7 @@ export function screenExtent(draw){
         beyond,
         depth,
         eye,
+        nearest,
     };
 }
 
@@ -1068,13 +1077,14 @@ const ADDRESS = Object.freeze({
 
 /**
  * @param {Map<number, number>} states  one stage's states
+ * @param {boolean} [mips]  False pins every sample to the top level.
  * @returns {{ magFilter: string, minFilter: string, mipmapFilter: string,
  *             addressModeU: string, addressModeV: string,
  *             lodMinClamp: number, lodMaxClamp: number }}
  */
-export function samplerDescriptorOf(states){
+export function samplerDescriptorOf(states, mips = true){
     const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
-    const mipFilter = get(D3DTSS.MIPFILTER);
+    const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
     return {
         magFilter: FILTER[get(D3DTSS.MAGFILTER)] ?? 'nearest',
         minFilter: FILTER[get(D3DTSS.MINFILTER)] ?? 'nearest',
@@ -1156,6 +1166,15 @@ const CLEAR_STRIDE = 20;
  *     shader it would run with D3DRS_FOGENABLE clear, which is how a picture
  *     washed towards the fog colour is told apart from one washed by something
  *     else -- two runs then differ by fog and nothing else.
+ * @property {boolean} [mips]
+ *     Whether a sample may come from a level below the top; on by default.
+ *     Off, every texture is sampled at its top level whatever the program
+ *     asked, so two runs differ by the mip chain and nothing else.
+ * @property {string | null} [probeTexture]
+ *     Copy the colour target out right after each dumped draw that samples the
+ *     texture with this dump id, inside the frame, and put a few of its pixels
+ *     on the draw's line. What a draw painted is otherwise only knowable from
+ *     the finished frame, where every later draw has had its say.
  * @property {string | null} [skipTexture]
  *     Drop every draw that samples the texture with this dump id. A draw's
  *     position in a frame moves between runs and its bound texture does not,
@@ -1173,8 +1192,12 @@ export function createRenderer(options){
     const dumpDraws = options.dumpDraws === true;
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
     const divergence = options.divergence ?? null;
-    const skipTexture = options.skipTexture ?? null;
+    // One id or several, comma-separated: a picture painted by a family of
+    // draws is only removed by removing the family.
+    const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
+    const probeTexture = options.probeTexture ?? null;
     const fogApplied = options.fog !== false;
+    const mipsApplied = options.mips !== false;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
     // A dumping run reads vertex buffers back off the GPU to compare them
     // with what the program wrote, which needs them made as copy sources.
@@ -1346,6 +1369,16 @@ export function createRenderer(options){
             hash = Math.imul(hash ^ bytes[at], 0x01000193);
         }
         return (hash >>> 0).toString(16).padStart(8, '0');
+    };
+
+    /** @param {Uint8Array} bytes */
+    const bytesToBase64 = bytes=>{
+        let text = '';
+        for (let at = 0; at < bytes.length; at += 4096)
+        {
+            text += String.fromCharCode(...bytes.subarray(at, at + 4096));
+        }
+        return btoa(text);
     };
 
     /**
@@ -1613,7 +1646,10 @@ export function createRenderer(options){
                 + (prepared.layout.preTransformed
                     ? ''
                     : ` depth=${box.depth[0].toFixed(6)}..${box.depth[1].toFixed(6)}`
-                        + ` eye=${round(box.eye[0])}..${round(box.eye[1])}`)
+                        + ` eye=${round(box.eye[0])}..${round(box.eye[1])}`
+                        + (box.behind > 0
+                            ? ` nearest=${box.nearest.map(w=>w.toPrecision(4)).join(',')}`
+                            : ''))
             : 'nowhere';
         // A draw of a handful of quads has its own corners, and the union of
         // them is not one of them: an artefact bounded by one quad of six is
@@ -1622,13 +1658,23 @@ export function createRenderer(options){
         const texCoord = prepared.layout.attributes.find(
             (/** @type {any} */ entry)=>entry.name === 'texCoord0');
         const view = new DataView(vertices.buffer, vertices.byteOffset, vertices.byteLength);
-        const corners = box && drawn <= 64
+        const corners = box && drawn <= 128
             ? ` at=${[...new Set(screenPositions(geometry).points.map(point=>
                 `${Math.round(point[0])},${Math.round(point[1])}`
                 + (texCoord
                     ? `@${round(view.getFloat32(point[2] + texCoord.offset, true))}`
                         + `,${round(view.getFloat32(point[2] + texCoord.offset + 4, true))}`
                     : '')))].join(' ')}`
+            : '';
+        // A draw with vertices behind the eye is clipped by the hardware, and
+        // what the clipper makes of its attributes cannot be read from any
+        // field above -- so such a draw carries its bytes and its transform,
+        // for a replay of the one draw on its own.
+        const geometry64 = box && box.behind > 0 && drawn <= 128
+            ? ` geo=v:${bytesToBase64(vertices)};i:${indices
+                ? bytesToBase64(new Uint8Array(Uint16Array.from(indices).buffer))
+                : '-'};m:${Array.from(prepared.uniforms.subarray(
+                UNIFORM_AT.worldViewProjection, UNIFORM_AT.worldViewProjection + 16)).join(',')}`
             : '';
         const cascade = state.stages.map((/** @type {any} */ stage, /** @type {number} */ at)=>
             `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -1644,7 +1690,7 @@ export function createRenderer(options){
             ? ` cut=${prepared.truncated.stage}/${prepared.truncated.reason}`
                 + `/${prepared.truncated.detail.replace(/ /g, ',')}`
             : '';
-        dump.push(`#${dump.length} ${where}`
+        dump.push(`#${dump.length} ${where}${geometry64}`
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
             + ` fog=${state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
@@ -1676,7 +1722,8 @@ export function createRenderer(options){
             + ` wvp=${[0, 5, 10, 12, 13, 14, 15]
                 .map(index=>round(prepared.uniforms[UNIFORM_AT.worldViewProjection + index]))
                 .join(',')}`
-            + ` sampler=${Object.values(samplerDescriptorOf(model.stageStates(0))).join(',')}`
+            + ` sampler=${Object.values(samplerDescriptorOf(model.stageStates(0), mipsApplied))
+                .join(',')}`
             + ` texXform=${textureTransformOf(model, 0)}`
             // The rectangle the draw was clipped and mapped by. A viewport
             // left set by one draw and inherited by the next puts a hard
@@ -1893,6 +1940,8 @@ export function createRenderer(options){
         }
         command.check = {
             dump: dump.length - 1,
+            probe: probeTexture !== null && prepared.textures.some(
+                (/** @type {any} */ texture)=>texture && textures.get(texture)?.id === probeTexture),
             vertices: command.vertices,
             bytes: vertices.slice(),
             // The block as recorded, because the arena it lives in is reused
@@ -1904,6 +1953,30 @@ export function createRenderer(options){
             texCoord: prepared.layout.attributes.find(
                 (/** @type {any} */ entry)=>entry.name === 'texCoord0')?.offset,
         };
+    };
+
+    /** Where a probe reads the target: a few points, and a grid for how varied it is. */
+    const PROBE_POINTS = [[0.5, 0.125], [0.625, 0.2], [0.3125, 0.3125], [0.78, 0.4], [0.5, 0.52],
+        [0.15, 0.625], [0.94, 0.17]];
+
+    /**
+     * @param {{ width: number, height: number, data: Uint8Array }} shot
+     */
+    const describeSnapshot = shot=>{
+        const at = (/** @type {number} */ x, /** @type {number} */ y)=>{
+            const index = (Math.min(shot.height - 1, Math.floor(y * shot.height)) * shot.width
+                + Math.min(shot.width - 1, Math.floor(x * shot.width))) * 4;
+            return `${shot.data[index + 2]}/${shot.data[index + 1]}/${shot.data[index]}`;
+        };
+        const seen = new Set();
+        for (let y = 0.05; y < 0.62; y += 0.04)
+        {
+            for (let x = 0.03; x < 0.97; x += 0.03)
+            {
+                seen.add(at(x, y));
+            }
+        }
+        return `after=${PROBE_POINTS.map(([x, y])=>at(x, y)).join(',')} distinct=${seen.size}`;
     };
 
     /**
@@ -2180,7 +2253,7 @@ export function createRenderer(options){
 
     /** @param {Map<number, number>} states */
     const samplerFor = states=>{
-        const descriptor = samplerDescriptorOf(states);
+        const descriptor = samplerDescriptorOf(states, mipsApplied);
         const key = Object.values(descriptor).join('|');
         const existing = samplers.get(key);
         if (existing)
@@ -2285,6 +2358,14 @@ export function createRenderer(options){
                     height,
                     data: texels,
                 });
+                // Which levels the program has written, and what its smallest
+                // ones hold: a surface sampled far away comes out of those,
+                // and a level the program never wrote is sampled all the same.
+                (record.written ??= new Set()).add(level);
+                if (width * height <= 16 && !isCompressed(record.format))
+                {
+                    (record.tails ??= {})[level] = [...texels];
+                }
                 if (level === 0 && dumpDraws && !isCompressed(record.format))
                 {
                     record.census = censusOf(texels);
@@ -2451,8 +2532,8 @@ export function createRenderer(options){
         }
         const cascade = stageCascade(model, layout);
         reportCascade(cascade);
-        if (skipTexture !== null && cascade.textures.some(
-            texture=>texture && textures.get(texture)?.id === skipTexture))
+        if (skipTextures.size > 0 && cascade.textures.some(
+            texture=>texture && skipTextures.has(textures.get(texture)?.id ?? '')))
         {
             skip('texture');
             return null;
@@ -3054,6 +3135,9 @@ export function createRenderer(options){
                     uploads: entry.uploads || 0,
                     dirty: !!entry.dirty,
                     resident: !!entry.gpu,
+                    levels: entry.levels,
+                    written: [...(entry.written ?? [])].sort((left, right)=>left - right),
+                    tails: entry.tails ?? {},
                 })),
                 textures: [...uploaded.values()],
             };
@@ -3131,11 +3215,13 @@ export function createRenderer(options){
             let next = 0;
             for (const check of checks)
             {
-                recorded.dump[check.dump] += ` ${describeCheck(check, held[next++])}`
+                recorded.dump[check.dump] += ` ${check.bound}`
+                    + ` ${describeCheck(check, held[next++])}`
                     + ` ${describeBytes('ugpu', check.uniforms, held[next++])}`
                     + (check.indices
                         ? ` ${describeBytes('igpu', check.indices.bytes, held[next++])}`
-                        : '');
+                        : '')
+                    + (check.snapshot ? ` ${describeSnapshot(await check.snapshot())}` : '');
             }
         }
     }
@@ -3147,10 +3233,17 @@ export function createRenderer(options){
     function replayInto(frame, pipelines, recorded, surface){
         /** @type {any} */
         let pass = null;
+        /** @type {any} */
+        let opened = null;
+        /** @type {any} */
+        let viewport = null;
+        /** @type {any} */
+        let scissor = null;
         for (const command of recorded.commands)
         {
             if (command.kind === 'pass')
             {
+                opened = command;
                 pass = frame.beginPass({
                     target: command.target,
                     clear: command.clearColor !== undefined,
@@ -3163,11 +3256,13 @@ export function createRenderer(options){
             }
             if (command.kind === 'viewport')
             {
+                viewport = command.rect;
                 pass.setViewport(command.rect);
                 continue;
             }
             if (command.kind === 'scissor')
             {
+                scissor = command.rect;
                 pass.setScissor(command.rect);
                 continue;
             }
@@ -3183,6 +3278,16 @@ export function createRenderer(options){
             if (command.check)
             {
                 command.check.block = block;
+                // The objects this draw actually binds, by identity: two draws
+                // recorded alike that bind different objects were served by a
+                // cache, and only the identities say which one lied.
+                command.check.bound = `pipe${resourceId(pipeline.gpu)}`
+                    + ` vb${resourceId(command.vertices.gpu)}@${command.vertices.offset}`
+                    + (command.indices
+                        ? ` ib${resourceId(command.indices.gpu)}@${command.indices.offset}`
+                        : '')
+                    + command.stageBindings.map((/** @type {any} */ stage)=>
+                        ` tv${resourceId(stage.view)}/sm${resourceId(stage.sampler)}`).join('');
             }
             const entries = [{ binding: 0, resource: block }];
             command.stageBindings.forEach((/** @type {any} */ stage, /** @type {number} */ index)=>{
@@ -3203,9 +3308,31 @@ export function createRenderer(options){
                 pass.draw(command.count, 1, command.first);
             }
             counters.draws++;
+            if (command.check?.probe && opened)
+            {
+                // The target as this draw left it. The copy closes the pass,
+                // so one that keeps what is there is opened for the rest.
+                command.check.snapshot = frame.snapshot(opened.target);
+                pass = frame.beginPass({
+                    target: opened.target,
+                    clear: false,
+                    depthStencilAttachment: opened.depth
+                        ? depthAttachment({ depth: opened.depth })
+                        : undefined,
+                });
+                if (viewport)
+                {
+                    pass.setViewport(viewport);
+                }
+                if (scissor)
+                {
+                    pass.setScissor(scissor);
+                }
+            }
         }
         frame.present(surface);
     }
+
 
     /** @param {any} command a pass command with a depth target */
     function depthAttachment(command){
