@@ -154,12 +154,22 @@ await build({
     // A Node fallback for compression that a browser never reaches: every
     // engine with WebGPU has CompressionStream, so the dynamic import stays
     // unresolved rather than dragging a polyfill into the bundle.
-    external: ['node:zlib'],
-    sourcemap: true,
+    external: ['node:zlib', 'node:fs/promises', 'node:url'],
+    // Shipped small and with its names mangled, and without a map that would
+    // hand the source back: the source is in the repository for whoever has
+    // it, and the package is the built thing.
+    minify: true,
+    sourcemap: false,
+    // The built module's own directory holds the emulator (see copyVendor),
+    // so the engine finds it without being told.
+    define: { 'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"' },
     outfile: join(DIST, 'core.js'),
     logLevel: 'info',
 });
 const vendored = await copyVendor();
+// The audio worklet runs on the browser's audio thread, loaded by URL rather
+// than imported, so it ships as a file of its own beside the module.
+await copyFile(join(SRC, 'layers', 'audio', 'output', 'worklet.js'), join(DIST, 'worklet.js'));
 // The licence and the notices live once, at the repository root; a published
 // package still has to carry its own, so they are copied rather than duplicated.
 for (const name of LEGAL)

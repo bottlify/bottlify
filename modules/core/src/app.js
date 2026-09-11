@@ -35,9 +35,12 @@ import { createBlockCache, resolveBlockStore }
 /**
  * @typedef {Object} AppOptions
  * @property {Uint8Array} executable      The program to run.
- * @property {Object} v86                 Emulator artifacts.
- * @property {string} v86.moduleUrl
- * @property {ArrayBuffer} v86.wasmBytes
+ * @property {Object} [v86]               Emulator artifacts, when the package's
+ *           own are not wanted: any of these overrides its counterpart, and
+ *           what is not named is taken from beside this module.
+ * @property {string} [v86.moduleUrl]     The emulator's module.
+ * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
+ * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -603,6 +606,58 @@ export function clockCredit(source, clock, cap){
         clock.advance(credit);
         return credit;
     };
+}
+
+/**
+ * Where the emulator's artifacts are, relative to this module.
+ *
+ * A built package carries them beside itself and the build says where; the
+ * source tree keeps them in its prebuilt directory. One expression rather
+ * than two entry points, so a caller that imports either gets an engine that
+ * boots without being told where its own emulator is.
+ */
+const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
+    ?? '../vendor/prebuilt/';
+
+/**
+ * The emulator to boot: what the caller named, and the package's own for the
+ * rest.
+ *
+ * @param {{ moduleUrl?: string, wasmUrl?: string, wasmBytes?: ArrayBuffer } | undefined} asked
+ * @param {string} [here]  The module the defaults are relative to.
+ * @returns {{ moduleUrl: string, wasmUrl: string | null, wasmBytes: ArrayBuffer | null }}
+ */
+export function emulatorArtifacts(asked, here = import.meta.url){
+    return {
+        moduleUrl: asked?.moduleUrl ?? new URL(`${VENDOR}libv86.mjs`, here).href,
+        wasmUrl: asked?.wasmBytes
+            ? null
+            : (asked?.wasmUrl ?? new URL(`${VENDOR}v86.wasm`, here).href),
+        wasmBytes: asked?.wasmBytes ?? null,
+    };
+}
+
+/**
+ * The bytes at a URL, wherever this runs: a browser fetches, and Node reads a
+ * file URL from disk because its fetch does not.
+ *
+ * @param {string} url
+ * @returns {Promise<ArrayBuffer>}
+ */
+export async function bytesAt(url){
+    if (url.startsWith('file:'))
+    {
+        const [{ readFile }, { fileURLToPath }] = await Promise.all([
+            import('node:fs/promises'), import('node:url')]);
+        const bytes = await readFile(fileURLToPath(url));
+        return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    }
+    const response = await fetch(url);
+    if (!response.ok)
+    {
+        throw new Error(`${url}: ${response.status} ${response.statusText}`);
+    }
+    return response.arrayBuffer();
 }
 
 /**
@@ -1946,7 +2001,11 @@ async function buildApp(options){
     const audio = core.api('audio');
     const input = core.api('input');
 
-    await cpu.boot(options.v86);
+    const emulator = emulatorArtifacts(options.v86);
+    await cpu.boot({
+        moduleUrl: emulator.moduleUrl,
+        wasmBytes: emulator.wasmBytes ?? await bytesAt(/** @type {string} */ (emulator.wasmUrl)),
+    });
 
     // Mounted after the emulator is up, because the decoder for a compressed
     // block is inside it: zstd is the only decompressor available here that

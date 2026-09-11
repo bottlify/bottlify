@@ -16,7 +16,7 @@ import {
     withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -483,4 +483,24 @@ test('the guest clock is credited with all the wall time between credits, capped
     wall += 2000;
     assert.equal(credit(Infinity), 2000, 'a wait that was asked for is credited in full');
     assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
+});
+
+test('the emulator is found beside the module unless the caller names it', ()=>{
+    // A caller starting a bundle from code should not have to know where the
+    // package keeps its emulator; naming a part overrides that part only.
+    const here = 'https://example.test/lib/dist/core.js';
+    const own = emulatorArtifacts(undefined, here);
+    assert.match(own.moduleUrl, /libv86\.mjs$/);
+    assert.match(String(own.wasmUrl), /v86\.wasm$/);
+    assert.equal(own.wasmBytes, null);
+    assert.equal(new URL(own.moduleUrl).origin, 'https://example.test', 'relative to the module');
+
+    const theirs = emulatorArtifacts({ moduleUrl: 'https://cdn.test/v86.mjs' }, here);
+    assert.equal(theirs.moduleUrl, 'https://cdn.test/v86.mjs');
+    assert.match(String(theirs.wasmUrl), /v86\.wasm$/, 'the rest is still the package\'s own');
+
+    const bytes = new ArrayBuffer(4);
+    const given = emulatorArtifacts({ wasmBytes: bytes }, here);
+    assert.equal(given.wasmBytes, bytes);
+    assert.equal(given.wasmUrl, null, 'bytes in hand are not fetched again');
 });

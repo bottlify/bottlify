@@ -48,7 +48,7 @@ function npm(cwd, args){
 const PROBE = `
 import { createApp } from '@bottlify/core';
 
-const subpaths = ['libv86.mjs', 'v86.wasm', 'video-decoder.wasm'];
+const subpaths = ['worklet.js', 'libv86.mjs', 'v86.wasm', 'video-decoder.wasm'];
 const artifacts = Object.fromEntries(
     subpaths.map(name=>[name, import.meta.resolve(\`@bottlify/core/\${name}\`)]));
 console.log(JSON.stringify({ createApp: typeof createApp, artifacts }));
@@ -83,13 +83,21 @@ test('the packed tarball installs and hands a consumer the emulator', async t=>{
         join(consumer, 'node_modules', '@bottlify', 'core', 'dist', 'vendor', 'manifest.json'),
         'utf8'));
 
+    const checksums = JSON.parse(await readFile(
+        join(consumer, 'node_modules', '@bottlify', 'core', 'dist', 'checksums.json'), 'utf8'));
     for (const [name, url] of Object.entries(result.artifacts))
     {
         const path = fileURLToPath(url);
         const { size } = await stat(path);
-        assert.ok(size >= MIN_BYTES, `${name}: ${size} bytes is not a real artifact`);
+        // The worklet is a page of code; the emulator's artifacts are not.
+        const floor = name === 'worklet.js' ? 1000 : MIN_BYTES;
+        assert.ok(size >= floor, `${name}: ${size} bytes is not a real artifact`);
         const hash = createHash('sha256').update(await readFile(path)).digest('hex');
-        assert.equal(`sha256:${hash}`, manifest.artifacts[`./${name}`],
-            `${name} did not survive packing intact`);
+        // The manifest is the emulator's account of itself; the worklet is ours
+        // and is checked by the build's own checksums.
+        const recorded = name === 'worklet.js'
+            ? checksums.files[`./${name}`]
+            : manifest.artifacts[`./${name}`];
+        assert.equal(`sha256:${hash}`, recorded, `${name} did not survive packing intact`);
     }
 });
