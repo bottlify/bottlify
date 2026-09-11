@@ -893,3 +893,15 @@ test('what a program asked the device for is kept whole: buffers and refused int
     assert.match(diagnostics.creations[0], /^CreateSoundBuffer flags=0x[0-9a-f]+ bytes=4096 fmt=/);
     assert.deepEqual(Object.values(diagnostics.refusedInterfaces), [1]);
 });
+
+test('two buffers share one method list, and a slot called through either acts on its own', ()=>{
+    // A method list per object was a table of stubs per object in the bridge,
+    // and the table those come out of is finite.
+    const f = createRoot();
+    const first = f.bridge.recordAt(createBuffer(f));
+    const second = f.bridge.recordAt(createBuffer(f));
+    assert.notEqual(first.object, second.object, 'two buffers');
+    assert.equal(first.methods, second.methods, 'one list for IDirectSoundBuffer');
+    assert.equal(first.object.interfaceFor(first.id).methods, first.methods,
+        'the same list every time');
+});

@@ -39,6 +39,43 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  */
 
 /**
+ * One method list per interface descriptor, shared by every object that
+ * exposes it, as a compiled program shares one vtable among all instances of
+ * a class. The publisher keys its table of stubs by the list's identity, so a
+ * list built afresh for each object was a table of stubs per object -- and
+ * the stubs come out of a table of sixteen thousand, which a program making a
+ * thousand textures had used up. Each method is reached through the adapter
+ * the call arrived on, which is what makes one list serve every object.
+ *
+ * @type {WeakMap<any, any[]>}
+ */
+const methodLists = new WeakMap();
+/** IUnknown alone, one list for everyone: it names no method of the object's own. */
+const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
+
+/** @param {any} descriptor */
+function methodsFor(descriptor){
+    let methods = methodLists.get(descriptor);
+    if (!methods)
+    {
+        methods = [
+            ...IUNKNOWN_METHODS,
+            ...descriptor.methods.map((/** @type {any} */ method)=>({
+                name: method.name,
+                argBytes: method.argBytes,
+                guest: method.guest,
+                invoke: method.invoke
+                    ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
+                        method.invoke(adapter.api, args) ?? 0
+                    : undefined,
+            })),
+        ];
+        methodLists.set(descriptor, methods);
+    }
+    return methods;
+}
+
+/**
  * @param {any} api        The drawing API's own object.
  * @param {InterfaceDescriptor[]} interfaces
  * @param {(adapter: any) => void} onGone  Called when the last reference goes.
@@ -64,28 +101,16 @@ function adapt(api, interfaces, onGone){
             // IUnknown is every object's, and answers with one record whichever
             // interface it was reached through -- which is what a program
             // comparing two pointers is testing.
-            const descriptor = id === IID_IUNKNOWN
-                ? { id, methods: [] }
-                : declared.get(id);
+            if (id === IID_IUNKNOWN)
+            {
+                return { id, methods: IUNKNOWN_ONLY };
+            }
+            const descriptor = declared.get(id);
             if (!descriptor)
             {
                 return null;
             }
-            return {
-                id,
-                methods: [
-                    ...IUNKNOWN_METHODS,
-                    ...descriptor.methods.map(method=>({
-                        name: method.name,
-                        argBytes: method.argBytes,
-                        guest: method.guest,
-                        invoke: method.invoke
-                            ? (/** @type {any} */ unused, /** @type {number[]} */ args)=>
-                                method.invoke?.(api, args) ?? 0
-                            : undefined,
-                    })),
-                ],
-            };
+            return { id, methods: methodsFor(descriptor) };
         },
 
         // Forwarded with the interface it was called through, because an API

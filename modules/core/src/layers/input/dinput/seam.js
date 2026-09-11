@@ -213,6 +213,43 @@ export const IDIRECTINPUTDEVICE8_SLOTS = /** @type {[string, number][]} */ ([
 ]);
 
 /**
+ * One method list per interface descriptor, shared by every object that
+ * exposes it, as a compiled program shares one vtable among all instances of
+ * a class. The publisher keys its table of stubs by the list's identity, so a
+ * list built afresh for each object was a table of stubs per object -- and
+ * the stubs come out of a table of sixteen thousand, which a program making a
+ * thousand textures had used up. Each method is reached through the adapter
+ * the call arrived on, which is what makes one list serve every object.
+ *
+ * @type {WeakMap<any, any[]>}
+ */
+const methodLists = new WeakMap();
+/** IUnknown alone, one list for everyone: it names no method of the object's own. */
+const IUNKNOWN_ONLY = Object.freeze([...IUNKNOWN_METHODS]);
+
+/** @param {any} descriptor */
+function methodsFor(descriptor){
+    let methods = methodLists.get(descriptor);
+    if (!methods)
+    {
+        methods = [
+            ...IUNKNOWN_METHODS,
+            ...descriptor.methods.map((/** @type {any} */ method)=>({
+                name: method.name,
+                argBytes: method.argBytes,
+                invoke: method.invoke
+                    ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
+                        method.invoke(adapter.api, args) ?? 0
+                    : undefined,
+            })),
+        ];
+        methodLists.set(descriptor, methods);
+    }
+    return methods;
+}
+
+
+/**
  * One adapter per object, so that one object is one identity.
  *
  * @param {Object} deps
@@ -234,27 +271,16 @@ export function createPublisher({ publishInterface }){
                 api,
                 /** @param {string} id */
                 interfaceFor(id){
-                    const descriptor = id === IID_IUNKNOWN
-                        ? { id, methods: [] }
-                        : declared.get(id);
+                    if (id === IID_IUNKNOWN)
+                    {
+                        return { id, methods: IUNKNOWN_ONLY };
+                    }
+                    const descriptor = declared.get(id);
                     if (!descriptor)
                     {
                         return null;
                     }
-                    return {
-                        id,
-                        methods: [
-                            ...IUNKNOWN_METHODS,
-                            ...descriptor.methods.map((/** @type {any} */ method)=>({
-                                name: method.name,
-                                argBytes: method.argBytes,
-                                invoke: method.invoke
-                                    ? (/** @type {any} */ unused, /** @type {number[]} */ args)=>
-                                        method.invoke(api, args)
-                                    : undefined,
-                            })),
-                        ],
-                    };
+                    return { id, methods: methodsFor(descriptor) };
                 },
                 addRef: ()=>api.addRef?.() ?? 1,
                 release: ()=>api.release?.() ?? 0,

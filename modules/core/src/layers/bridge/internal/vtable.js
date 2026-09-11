@@ -66,16 +66,108 @@ const WORD = 4;
  * @param {Object} deps
  * @param {any} deps.memory
  * @param {(name: string, fn: any) => number} deps.register  Bridge registration.
- * @param {{ allocate: (bytes: number) => number }} deps.heap
+ * @param {{ allocate: (bytes: number) => number, free?: (address: number) => void }} deps.heap
  */
 export function createVtables({ memory, register, heap }){
-    /** One entry per object; inside it, one address per interface. */
+    /** One entry per object; inside it, one interface pointer per interface. */
     const published = new WeakMap();
+    /**
+     * One table of stubs per interface description, shared by every object
+     * that exposes it -- as a compiled program shares one vtable among all
+     * instances of a class. A table per object was a stub per method per
+     * object, and the table stubs come out of holds sixteen thousand: a
+     * program that made a thousand textures had used them all, every later
+     * texture was refused as out of video memory, and the program made the
+     * same texture again on every frame until the machine was out of memory
+     * for real.
+     *
+     * Keyed by the method list's identity: two object models describing the
+     * same interface id with different lists get two tables.
+     *
+     * @type {WeakMap<InterfaceMethod[], number>}
+     */
+    const tables = new WeakMap();
+    /**
+     * Which object an interface pointer belongs to. A shared stub is called
+     * through many pointers, and the pointer is the first argument of every
+     * COM method, so this is where the call finds its object.
+     *
+     * @type {Map<number, { object: any, interfaceId: string }>}
+     */
+    const owners = new Map();
     let interfaces = 0;
     let methods = 0;
     let refused = 0;
     /** @type {string | null} */
     let refusedBecause = null;
+
+    /**
+     * The shared table for one interface description, built on first use.
+     *
+     * @param {string} interfaceId
+     * @param {InterfaceMethod[]} table
+     * @returns {number} the table's address, or 0 if it could not be built
+     */
+    function sharedTable(interfaceId, table){
+        const already = tables.get(table);
+        if (already !== undefined)
+        {
+            return already;
+        }
+        /** @type {number[]} */
+        let slots;
+        try
+        {
+            slots = table.map((method, index)=>{
+                const trap = register(`${interfaceId}::${method.name}`, {
+                    convention: Convention.STDCALL,
+                    argBytes: method.argBytes,
+                    /** @param {number[]} args */
+                    handler: args=>{
+                        // The first argument is the interface pointer the guest
+                        // called through, not the object. What it identifies is
+                        // settled here so no implementation has to know how an
+                        // interface is laid out.
+                        const [self, ...rest] = args;
+                        const owner = owners.get(self >>> 0);
+                        if (!owner)
+                        {
+                            // A pointer nobody published, or one whose object
+                            // was released: E_POINTER, rather than a call on
+                            // whatever the memory now holds.
+                            return 0x80004003;
+                        }
+                        return dispatch(owner.object, owner.interfaceId, index, method, rest);
+                    },
+                });
+                // A method that runs in the guest keeps its trap: that is
+                // what its code falls back to for the cases it does not take.
+                return method.guest ? method.guest({ trap, register }) : trap;
+            });
+        }
+        catch (e){
+            // A method needs a stub the guest can call, and the table stubs
+            // come out of is finite. There is nowhere else to put one, so this
+            // is the heap case again: no interface, and a refusal the caller
+            // reports. Raising instead would end the process at a call the
+            // program is entitled to see fail. Counted rather than swallowed --
+            // a build that starts refusing interfaces has to say so somewhere.
+            refused++;
+            refusedBecause = e instanceof Error ? e.message : String(e);
+            return 0;
+        }
+        const vtable = heap.allocate(slots.length * WORD);
+        if (vtable === 0)
+        {
+            refused++;
+            refusedBecause = 'no room in the arena for a table';
+            return 0;
+        }
+        slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
+        methods += slots.length;
+        tables.set(table, vtable);
+        return vtable;
+    }
 
     /**
      * @param {any} object     The object model's record; opaque here.
@@ -95,66 +187,58 @@ export function createVtables({ memory, register, heap }){
         {
             return already;
         }
-
-        /** @type {number[]} */
-        let slots;
-        try
+        const vtable = sharedTable(interfaceId, table);
+        if (vtable === 0)
         {
-            slots = table.map((method, index)=>{
-                const trap = register(`${interfaceId}::${method.name}`, {
-                    convention: Convention.STDCALL,
-                    argBytes: method.argBytes,
-                    /** @param {number[]} args */
-                    handler: args=>{
-                        // The first argument is the interface pointer the guest
-                        // called through, not the object. What it identifies is
-                        // settled here so no implementation has to know how an
-                        // interface is laid out.
-                        const [, ...rest] = args;
-                        return dispatch(object, interfaceId, index, method, rest);
-                    },
-                });
-                // A method that runs in the guest keeps its trap: that is
-                // what its code falls back to for the cases it does not take.
-                return method.guest ? method.guest({ trap, register }) : trap;
-            });
-        }
-        catch (e){
-            // A method needs a stub the guest can call, and the table stubs
-            // come out of is finite. There is nowhere else to put one, so this
-            // is the heap case again: no interface, and a refusal the caller
-            // reports. Raising instead would end the process at a call the
-            // program is entitled to see fail. Counted rather than swallowed --
-            // a build that starts refusing interfaces has to say so somewhere.
-            refused++;
-            refusedBecause = e instanceof Error ? e.message : String(e);
             return 0;
         }
-        methods += slots.length;
 
-        // The vtable, the word pointing at it and the object's state word,
+        // The word pointing at the table and the object's state word,
         // allocated together: they have the same lifetime and nothing else
         // may sit between them. The state word is where a method that runs
         // in the guest finds the memory it works on, one word past `this`;
         // a program sees only the vtable pointer and assumes nothing after it.
-        const block = heap.allocate(2 * WORD + slots.length * WORD);
+        const block = heap.allocate(2 * WORD);
         if (block === 0)
         {
-            // Nothing left in the arena. Carrying on writes the table over
+            // Nothing left in the arena. Carrying on writes the pointer over
             // guest address zero, remembers the zero so every later publish of
             // this interface answers it without trying again, and hands the
             // program a null pointer with a success code -- three lies from one
             // unchecked allocation. Refusing is the answer a caller can act on.
+            refused++;
+            refusedBecause = 'no room in the arena for an interface';
             return 0;
         }
-        const vtable = block + 2 * WORD;
         memory.writeU32(block, vtable);
         memory.writeU32(block + WORD, (object.guestState?.() ?? 0) >>> 0);
-        slots.forEach((address, index)=>memory.writeU32(vtable + index * WORD, address));
-
+        owners.set(block, { object, interfaceId });
         byInterface.set(interfaceId, block);
         interfaces++;
         return block;
+    }
+
+    /**
+     * Forgets an interface pointer whose object let go of its last reference:
+     * the pointer stops finding the object, and its two words go back. Kept
+     * per interface rather than per object, because an object model that
+     * counts references per interface generation can end one while another
+     * is still held.
+     *
+     * @param {any} object
+     * @param {string} interfaceId
+     */
+    function forget(object, interfaceId){
+        const byInterface = published.get(object);
+        const block = byInterface?.get(interfaceId);
+        if (block === undefined)
+        {
+            return;
+        }
+        byInterface.delete(interfaceId);
+        owners.delete(block);
+        heap.free?.(block);
+        interfaces--;
     }
 
     /**
@@ -180,8 +264,14 @@ export function createVtables({ memory, register, heap }){
             // counts per object ignores the argument and is unaffected.
             case 'addRef':
                 return object.addRef(interfaceId);
-            case 'release':
-                return object.release(interfaceId);
+            case 'release': {
+                const left = object.release(interfaceId);
+                if (left === 0)
+                {
+                    forget(object, interfaceId);
+                }
+                return left;
+            }
             default:
                 if (!method.invoke)
                 {

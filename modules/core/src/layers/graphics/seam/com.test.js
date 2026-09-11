@@ -151,3 +151,31 @@ test('a null pointer, and one that was never published, are answered rather than
     assert.equal(seam.objectAt(0), null, 'unbinding a texture is SetTexture with a null');
     assert.equal(seam.objectAt(0x4000), null);
 });
+
+test('objects of one interface share one method list, and a call reaches its own object', ()=>{
+    // The bridge keys its table of stubs by the method list's identity, so a
+    // list built afresh per object was a table of stubs per object -- out of
+    // sixteen thousand, which a program making a thousand textures used up.
+    const p = publisher();
+    /** @type {string[]} */
+    const seen = [];
+    const descriptor = { id: IID_ONE, methods: [
+        { name: 'Draw', argBytes: 8,
+            /** @param {any} api @param {number[]} args */
+            invoke: (api, args)=>{ seen.push(`${api.name}:${args[0]}`); return 0; } },
+    ] };
+    const a = { name: 'a', ...counted() };
+    const b = { name: 'b', ...counted() };
+    p.publish(a, [descriptor], IID_ONE);
+    p.publish(b, [descriptor], IID_ONE);
+    const listA = p.adapterFor(a).interfaceFor(IID_ONE).methods;
+    const listB = p.adapterFor(b).interfaceFor(IID_ONE).methods;
+    assert.equal(listA, listB, 'one list for the interface, not one per object');
+    assert.equal(p.adapterFor(a).interfaceFor(IID_ONE).methods, listA,
+        'and the same list every time');
+
+    const draw = listA[listA.length - 1];
+    draw.invoke?.(p.adapterFor(b), [7]);
+    draw.invoke?.(p.adapterFor(a), [9]);
+    assert.deepEqual(seen, ['b:7', 'a:9'], 'the adapter the call arrived on names the object');
+});

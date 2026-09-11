@@ -675,3 +675,23 @@ there unless a part is named to override it; the build tells the module where th
 The package is built minified and without a source map -- the source is in the repository for
 whoever has it -- and the audio worklet ships as its own export, because an audio thread loads
 it by URL rather than importing it.
+
+## One vtable per interface, as a compiled program has it
+
+Every published COM object got a table of stubs of its own -- a trap slot per method per
+object -- and the stubs come out of a table of sixteen thousand. Measured on the title in a
+match: 1,216 objects had taken 14,984 slots, every later publish was refused, the seam
+reported each refused texture as out of video memory, and the program did what a program does
+with a texture it cannot make: it made it again on the next frame, without a picture (white),
+until the guest heap was full and its file layer reported the machine out of memory. The same
+thing had shown in the menu as the same water texture created thirty times over.
+
+**The decision: a shared table per interface description**, keyed by the method list's
+identity, with the object found from the interface pointer the call arrived through -- which
+is the first argument of every COM method, and the whole reason the pointer exists. An object
+costs two words: the table pointer and its state word, given back when its last reference
+goes. The three publishers (drawing, sound, input) hand every object of an interface the same
+method list, and a method is reached through the adapter the call arrived on. Measured after:
+5,079 objects published on 210 stubs, 1,606 slots in use, no refusal, textures stable at
+about 1,600, heap steady at 168 MB, the match running with its terrain, units and panels
+drawn.

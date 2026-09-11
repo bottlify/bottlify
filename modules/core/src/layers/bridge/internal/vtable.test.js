@@ -149,11 +149,81 @@ test('a method that runs in the guest takes its slot, and keeps its trap to fall
 
     const pointer = table.publish(guestObject, IID);
 
-    assert.equal(memory.get(pointer), String(pointer + 8), 'the vtable follows the two words');
+    // The table is the interface's, shared, and the pointer's first word names it.
+    const vtable = Number(memory.get(pointer));
+    assert.notEqual(vtable, pointer + 8, 'the table is not part of the object');
     assert.equal(memory.get(pointer + 4), '39612', 'the state word, 0x9abc');
-    assert.equal(memory.get(pointer + 8 + 3 * 4), '28672', 'the slot holds the code, 0x7000');
+    assert.equal(memory.get(vtable + 3 * 4), '28672', 'the slot holds the code, 0x7000');
     assert.equal(given.trap, 0x1000 + 4 * 0x10, 'built with Draw\'s own trap to fall back to');
     assert.equal(registered.filter(name=>name.endsWith('::Draw')).length, 1, 'which is registered');
-    assert.equal(memory.get(pointer + 8 + 4 * 4), String(0x1000 + 5 * 0x10),
+    assert.equal(memory.get(vtable + 4 * 4), String(0x1000 + 5 * 0x10),
         'Present is a trap');
+});
+
+test('objects of one interface share its stubs, and a call still finds its own object', ()=>{
+    // A table of stubs per object was a stub per method per object, and the
+    // stub table holds sixteen thousand: a program that made a thousand
+    // textures had used them all, and every later one was refused.
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    /** @type {Map<number, string>} */
+    const memory = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            /** @param {number} address @param {number} value */
+            writeU32: (address, value)=>memory.set(address, String(value)),
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+    });
+    /** @type {string[]} */
+    const drawn = [];
+    const methods = [
+        ...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 8,
+            /** @param {any} self @param {number[]} args */
+            invoke: (self, args)=>{ drawn.push(`${self.name}:${args[0]}`); return 0; } },
+    ];
+    /** @param {string} name */
+    const make = name=>({
+        name,
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2,
+        release: ()=>0,
+    });
+    const a = make('a');
+    const b = make('b');
+    const pointerA = table.publish(a, IID);
+    const pointerB = table.publish(b, IID);
+    assert.notEqual(pointerA, pointerB, 'two objects, two identities');
+    assert.equal(handlers.size, 4, 'one set of stubs for the interface, not one per object');
+    assert.equal(table.diagnostics().comMethods, 4);
+    assert.equal(table.diagnostics().comInterfaces, 2);
+    assert.equal(memory.get(pointerA), memory.get(pointerB), 'both point at the shared table');
+
+    const draw = handlers.get(`${IID}::Draw`).handler;
+    draw([pointerB, 7]);
+    draw([pointerA, 9]);
+    assert.deepEqual(drawn, ['b:7', 'a:9']);
+    assert.equal(draw([0x9999, 1]) >>> 0, 0x80004003, 'a pointer nobody published is E_POINTER');
+
+    // The last release forgets the pointer: the same words can be another
+    // object's later without the stub finding the old one.
+    const release = handlers.get(`${IID}::Release`).handler;
+    assert.equal(release([pointerA]), 0);
+    assert.equal(draw([pointerA, 1]) >>> 0, 0x80004003);
+    assert.equal(table.diagnostics().comInterfaces, 1);
+    assert.notEqual(table.publish(a, IID), pointerA, 'published again, it is a new pointer');
 });
