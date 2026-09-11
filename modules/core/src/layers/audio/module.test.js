@@ -355,3 +355,28 @@ test('a program is woken even when nothing is listening to the sound', async()=>
 
     assert.deepEqual(f.signalled, [EVENT]);
 });
+
+test('the MPEG provider is a library beside DirectSound, with an entry point', async()=>{
+    // A sound library of this era loads the provider itself and expects its
+    // DllMain to register with it; a table without one would load and stay
+    // silent, which the program reads as "no decoder for this file".
+    const f = await playing();
+    const provider = f.api.libraries()['Mp3dec.asi'];
+    assert.ok(provider, 'listed with the rest');
+    assert.equal(provider?.DllMain.argBytes, 12);
+    assert.ok(provider?.ASI_stream_open && provider?.ASI_stream_process);
+    assert.deepEqual(audioModule.diagnostics().metrics?.mp3, {
+        registered: false, provider: 0, opens: 0, failedOpens: 0, open: 0, samplesOut: 0,
+        waits: 0, lastError: '', recent: [], streams: [],
+    });
+});
+
+test('the MPEG provider can be left out, for a run to compare against', async()=>{
+    const f = fixture();
+    const api = await audioModule.create({ ...f.config, mp3: false }, {
+        requireApi: (/** @type {string} */ name)=>
+            name === 'bridge' ? { callGuest: async()=>0 } : f.memory,
+        provide: ()=>{},
+    });
+    assert.deepEqual(Object.keys(api.libraries()), ['DSOUND.dll']);
+});

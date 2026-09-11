@@ -6,6 +6,8 @@
 
 import { createDirectSound } from './dsound/seam.js';
 import { createMixer } from './output/mixer.js';
+import { createMp3Provider } from './asi/provider.js';
+import { createWebCodecsDecoder } from './asi/mp3.js';
 
 /**
  * audio — the sound APIs a program was written against.
@@ -116,6 +118,27 @@ export const audioModule = {
             callGuest: config?.callGuest
                 ?? ((/** @type {number} */ entry, /** @type {number[]} */ args)=>
                     bridge.callGuest({ entry, args })),
+        });
+
+        // The MPEG decoder a sound library of this era loads beside a program
+        // as a provider of its own. Hosted, because decoding it in the guest
+        // costs a fifth of the machine; reached through the same library
+        // table as everything else, because to the program it is a file it
+        // ships that LoadLibrary found.
+        const mp3 = createMp3Provider({
+            /** @param {number} address @param {number} length */
+            readMemory: (address, length)=>memory.readBytes(address, length),
+            /** @param {number} address @param {Uint8Array} bytes */
+            writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
+            allocate,
+            callGuest: config?.callGuest
+                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
+                    /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
+            currentThread: config?.currentThread ?? (()=>undefined),
+            resolveImport: config?.resolveImport ?? (()=>null),
+            decoder: config?.decoder ?? createWebCodecsDecoder(),
+            /** @param {string} text */
+            warn: text=>config?.warn?.(text),
         });
 
         /**
@@ -238,7 +261,12 @@ export const audioModule = {
              * assembling caller merges these with win32's and hands the lot to
              * the loader; nothing here needs a special case.
              */
-            libraries: ()=>dsound.libraries,
+            libraries: ()=>(config?.mp3 === false
+                ? { ...dsound.libraries }
+                : { ...dsound.libraries, ...mp3.libraries }),
+
+            /** The MPEG provider, for whoever is measuring. */
+            mp3: ()=>mp3,
 
             /**
              * Where a sound API sends its samples.
@@ -300,6 +328,7 @@ export const audioModule = {
             metrics: {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dsound().diagnostics() : {}),
+                mp3: current ? current.mp3().diagnostics() : null,
                 ...(current ? current.output().diagnostics() : {}),
                 behindTurns: current ? current.behind() : 0,
                 ...(current ? current.feeding() : {}),

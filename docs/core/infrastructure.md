@@ -63,6 +63,8 @@ modules/core/src/layers/
 ├── audio/                  # ✦ sibling of win32
 │   ├── webaudio/            # SAB ring + AudioWorklet, our own backend
 │   ├── dsound/
+│   ├── asi/                 # the MPEG decoder a sound middleware loads as a
+│   │                        #   provider of its own, hosted; see §3
 │   ├── dshow/               # video playback
 │   ├── winmm/               # waveOut/waveIn/MCI-audio — the audio half of winmm.dll
 │   └── msacm/               # audio compression manager; some titles' own audio
