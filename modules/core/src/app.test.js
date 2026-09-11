@@ -16,7 +16,7 @@ import {
     withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
-    moduleKeyOf, relocatablePrefix, jumpBytes,
+    moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -460,4 +460,27 @@ test('a near jump is encoded relative to the instruction after it', ()=>{
     assert.deepEqual([...jumpBytes(0x1000, 0x2000)], [0xe9, 0xfb, 0x0f, 0, 0]);
     assert.deepEqual([...jumpBytes(0x2000, 0x1000)], [0xe9, 0xfb, 0xef, 0xff, 0xff],
         'backwards wraps');
+});
+
+test('the guest clock is credited with all the wall time between credits, capped', ()=>{
+    // Credited only for the slices the guest ran, the clock fell behind the
+    // wall by the loop's own share -- a tenth at a menu -- and a sound
+    // buffer's cursor, paced by that clock, fell behind the device by the same
+    // share, which the device filled with silence.
+    let wall = 1000;
+    /** @type {number[]} */
+    const advanced = [];
+    const credit = clockCredit(()=>wall, { advance: ms=>advanced.push(ms) }, 250);
+
+    wall += 3;
+    assert.equal(credit(), 3, 'a slice');
+    wall += 4;
+    assert.equal(credit(), 4, 'and the yield after it, not just the slice');
+    assert.equal(credit(), 0, 'nothing twice');
+
+    wall += 2000;
+    assert.equal(credit(), 250, 'a stall is capped');
+    wall += 2000;
+    assert.equal(credit(Infinity), 2000, 'a wait that was asked for is credited in full');
+    assert.deepEqual(advanced, [3, 4, 0, 250, 2000]);
 });

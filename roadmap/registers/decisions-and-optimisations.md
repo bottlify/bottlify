@@ -600,3 +600,31 @@ seconds at the main menu, hosted against shipped: starved frames at the device 0
 in 60 s of wall clock, engine frames 2007 against 1232, and the shipped decoder no longer appears
 in the guest's instruction share.
 
+
+## The guest's clock runs for the whole turn, and a sound buffer is read to its write cursor
+
+Measured on the title at its main menu through the launcher, with the mixer's own counters:
+the device found the ring empty in about 330 of every 1,880 blocks it asked for -- a tenth of
+the sound was silence, heard as a constant crackle -- while the ring never held more than a
+few hundred frames. Two causes, one on each side of the ring.
+
+The guest's clock was credited only for the slices the guest ran. Everything between two
+slices -- the yield to the browser, the mix, the cursors, the polls -- passed on the wall and
+not on the clock, so the clock ran slow by the loop's own share, a tenth at a menu. A
+DirectSound buffer's play cursor is paced by that clock and the device that plays it by the
+wall, so the cursor fell behind the device by the same tenth, and the device filled the
+difference with silence. **The decision: credit the clock with all the wall time between two
+credits**, capped at a quarter of a second so that a stall -- a fetch, a hidden tab, a
+debugger -- is not handed to the program as time it spent; a wait the program asked for is
+still credited in full. A real clock runs while the machine is in a syscall.
+
+A buffer was also read out only as far as its play cursor, so the ring held what the last turn
+produced and nothing more, and any turn longer than one device block was a click. **The read
+now runs to the write cursor**: the span between the two is what a real device has already
+fetched, and fetching it here is what the ring holds against a long turn. Stopping pulls the
+read point back to the cursor, so a resume reads from where the program sees playback, at the
+cost of hearing the lead once more.
+
+After both, forty seconds at the same menu: no starved block once the music had started (the
+count stayed at what the start-up had cost), and the ring held 50-100 ms throughout. Whether
+that is the whole of what was heard is for a listener to say; what was measured is gone.

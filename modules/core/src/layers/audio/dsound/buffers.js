@@ -123,7 +123,14 @@ export function createSoundBuffer(
     let notifications = [];
     /** Where the play cursor stood the last time notifications were tested. */
     let lastNotified = 0;
-    /** Where it stood the last time the bytes it passed were read out for mixing. */
+    /**
+     * How far the bytes have been read out for mixing: the write cursor, not
+     * the play cursor. The span between the two is what a real device has
+     * already fetched, and fetching it here is what keeps the ring ahead of
+     * the device by that much. Read only up to the play cursor, the ring holds
+     * what the last turn produced and no more, and every turn longer than one
+     * device block is heard as a click.
+     */
     let fedByte = 0;
     // A non-looping buffer that reached its end since the last drain. Its play
     // cursor reads zero again, so the wrapped span drainPlayed forms collapses
@@ -255,6 +262,11 @@ export function createSoundBuffer(
             anchorByte = playCursor();
             anchorMs = now();
             playing = false;
+            // What was read ahead of here is out of the program's hands and
+            // will still be heard; playing again reads it once more, so that
+            // the sound resumes from where the cursor says it is rather than
+            // from where the read had got to.
+            fedByte = anchorByte;
         },
 
         /** @param {number} position */
@@ -367,20 +379,36 @@ export function createSoundBuffer(
                 // plays start to end and is not circular in doing it, so this
                 // is a single contiguous range and never wraps.
                 reachedEnd = false;
-                const from = fedByte % bytes;
+                const from = fedByte;
                 fedByte = 0;
                 return from < bytes ? [{ from, bytes: bytes - from }] : [];
+            }
+            const ahead = playing ? span(WRITE_LEAD_MS) : 0;
+            if (!looping)
+            {
+                // Start to end and never round: the read runs up to the write
+                // cursor and stops at the end of the buffer, where the rest
+                // is handed over by the branch above once playback gets there.
+                const target = Math.min(play + ahead, bytes);
+                if (target <= fedByte)
+                {
+                    return [];
+                }
+                const from = fedByte;
+                fedByte = target;
+                return [{ from, bytes: target - from }];
             }
             // Forward around the circle: a cursor that reads as behind the last
             // one has wrapped, and the span is the rest of the buffer plus what
             // it has covered since.
-            const covered = (play - fedByte + bytes) % bytes;
+            const target = (play + ahead) % bytes;
+            const covered = (target - fedByte + bytes) % bytes;
             if (covered === 0)
             {
                 return [];
             }
             const from = fedByte;
-            fedByte = play;
+            fedByte = target;
             const first = Math.min(covered, bytes - from);
             return first === covered
                 ? [{ from, bytes: covered }]

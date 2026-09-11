@@ -263,10 +263,35 @@ test('the bytes playback passed are read out, which is what makes it audible', (
     const { sound, time } = buffer();
     sound.play(DSBPLAY_LOOPING);
 
-    assert.deepEqual(sound.drainPlayed(), [], 'nothing has been played yet');
+    // The read runs to the write cursor, not the play cursor: the span between
+    // them is what a real device has fetched already, and fetched here it is
+    // what the ring holds against a turn longer than one device block. Read
+    // only to the play cursor, every such turn was heard as a click.
+    const lead = sound.cursors().write;
+    assert.ok(lead > 0, 'the write cursor leads');
+    assert.deepEqual(sound.drainPlayed(), [{ from: 0, bytes: lead }], 'the lead, at once');
     time.advance(250);
-    assert.deepEqual(sound.drainPlayed(), [{ from: 0, bytes: aligned(SECOND / 4) }]);
+    assert.deepEqual(sound.drainPlayed(), [{ from: lead, bytes: aligned(SECOND / 4) }],
+        'then exactly what playback advanced by');
     assert.deepEqual(sound.drainPlayed(), [], 'and it is not handed over twice');
+    assert.equal(lead + aligned(SECOND / 4), sound.cursors().write, 'up to the write cursor');
+});
+
+test('stopping and playing again resumes the read from the cursor', ()=>{
+    // What was read ahead of the stop is already on its way to the device; a
+    // resume reads it again rather than leaving a hole the length of the lead
+    // between where the program sees the cursor and where the read had got.
+    const { sound, time } = buffer();
+    sound.play(DSBPLAY_LOOPING);
+    time.advance(250);
+    sound.drainPlayed();
+    sound.stop();
+    assert.deepEqual(sound.drainPlayed(), [], 'a stopped buffer reads nothing');
+
+    sound.play(DSBPLAY_LOOPING);
+    const [range] = sound.drainPlayed();
+    assert.equal(range.from, sound.cursors().play, 'from the cursor');
+    assert.equal(range.from + range.bytes, sound.cursors().write, 'to the lead');
 });
 
 test('a span that runs off the end comes back as the two ranges it is', ()=>{
@@ -291,11 +316,14 @@ test('a buffer that ran to its end hands over its tail, not nothing', ()=>{
     time.advance(400);
     sound.drainPlayed();
 
+    const read = sound.cursors().write;
+
     time.advance(1000);
     assert.equal(sound.status() & DSBSTATUS_PLAYING, 0, 'it finished');
     const [tail] = sound.drainPlayed();
-    assert.equal(tail.from, aligned(SECOND * 0.4));
+    assert.equal(tail.from, read, 'from where the read had got to');
     assert.equal(tail.from + tail.bytes, SECOND, 'the rest of the buffer');
+    assert.deepEqual(sound.drainPlayed(), [], 'and nothing more');
 });
 
 test('putting the cursor somewhere does not play everything in between', ()=>{
@@ -305,7 +333,9 @@ test('putting the cursor somewhere does not play everything in between', ()=>{
     sound.drainPlayed();
 
     sound.setCurrentPosition(aligned(SECOND * 0.75));
-    assert.deepEqual(sound.drainPlayed(), []);
+    const [range] = sound.drainPlayed();
+    assert.equal(range.from, aligned(SECOND * 0.75), 'only from the new position');
+    assert.equal(range.from + range.bytes, sound.cursors().write, 'and only the lead');
 });
 
 test('volume is decibels, and a gain is what a mixer can use', ()=>{

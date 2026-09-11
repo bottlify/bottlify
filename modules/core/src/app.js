@@ -569,6 +569,39 @@ export function jumpBytes(from, to){
 }
 
 /**
+ * Credits the guest's clock with the wall time that has passed, all of it.
+ *
+ * Between two slices of the guest the loop yields to the browser, mixes sound,
+ * moves cursors and polls its own state, and none of that used to move the
+ * guest's clock: it was credited only for the slices themselves. A program
+ * then saw its clock run slow by whatever share of the wall the loop took --
+ * a tenth at a menu -- and everything paced against a real device fell behind
+ * by that share: a sound buffer's cursor lagged the device that plays it, and
+ * the device filled the difference with silence, heard as a constant crackle.
+ * A real clock runs while the machine is in a syscall too.
+ *
+ * Capped, because a stall is not time the program spent: a fetch that took a
+ * second, a tab in the background, a debugger. Credited in full, a program
+ * would wake to find a second gone and run a second's worth of frames at once.
+ *
+ * @param {() => number} source   The wall clock, in milliseconds.
+ * @param {{ advance: (milliseconds: number) => void }} clock  The guest's.
+ * @param {number} cap            The most one credit may be.
+ * @returns {(limit?: number) => number} credits what passed since the last call
+ *     and says how much; a limit of its own for a wait that was asked for in full
+ */
+export function clockCredit(source, clock, cap){
+    let creditedTo = source();
+    return (limit = cap)=>{
+        const now = source();
+        const credit = Math.min(limit, Math.max(0, now - creditedTo));
+        creditedTo = now;
+        clock.advance(credit);
+        return credit;
+    };
+}
+
+/**
  * Where a LoadLibrary at run time actually looks.
  *
  * A name that already says where it is, is where it is. Windows searches for a
@@ -2771,6 +2804,13 @@ async function buildApp(options){
     /** The guest's own clock, and the host clock it is credited from. */
     const clock = core.api('kernel').clock;
     const clockSource = ()=>Date.now();
+    /**
+     * Longer than this between two credits is a stall, not the program's time.
+     * Generous next to a turn -- a slice is a few milliseconds and a yield less
+     * -- and short next to anything a person would notice as the page hanging.
+     */
+    const CLOCK_CREDIT_CAP_MS = 250;
+    const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
 
     /**
      * How often the run loop leaves the microtask queue entirely.
@@ -2891,6 +2931,12 @@ async function buildApp(options){
                 journal.begin('turn', journal.PhaseKind.HOST);
                 try
                 {
+                    // What passed since the last slice ended -- the yield, the
+                    // pump, the cursors, the polls -- is the program's time as
+                    // much as the slice was, and it is credited before the
+                    // sound is pumped so that a cursor read there is current.
+                    creditClock();
+
                     // One yield per turn, so a host function suspended on a
                     // guest callback can make progress between them. Without it
                     // the loop never returns to the event loop on its normal
@@ -2992,7 +3038,7 @@ async function buildApp(options){
                     if (wait)
                     {
                         journal.begin(wait.phase, journal.PhaseKind.HOST);
-                        const idledAt = clockSource();
+                        creditClock();
                         // A caller sitting on an empty message queue is waiting
                         // for two things: something posted from outside, which
                         // nobody can predict, and a timer of its own, whose due
@@ -3040,8 +3086,9 @@ async function buildApp(options){
                         // guest waits far longer than it asked for: a sleep, a
                         // timeout, a WM_TIMER, a wave cursor. The wait that would
                         // end the idling is itself the thing the idling stops
-                        // from expiring.
-                        clock.advance(Math.max(0, clockSource() - idledAt));
+                        // from expiring. In full: a wait this long was asked
+                        // for, and a cap here would make it end early.
+                        creditClock(Infinity);
                         journal.end(wait.phase);
                     }
 
@@ -3089,7 +3136,6 @@ async function buildApp(options){
                     }
 
                     let step;
-                    const startedAt = clockSource();
                     try
                     {
                         // The one measurement that separates emulation from our
@@ -3144,7 +3190,7 @@ async function buildApp(options){
                     // its own work took, and on a machine this slow that really is
                     // the wall time. A slow machine is a slow machine; a machine
                     // where no time passes is a broken one.
-                    clock.advance(Math.max(0, clockSource() - startedAt));
+                    creditClock();
 
                     if (step.ran)
                     {
