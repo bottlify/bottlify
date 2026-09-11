@@ -533,6 +533,38 @@ host, but in one loop over the ring rather than through the dispatcher. Expected
 percent of a frame in a match. Together with B8 and B9 this is the 25 percent of a battle frame that
 the draw path takes today brought to eight or ten, which is a fifth more frames.
 
+### B11. What the generated code pays per instruction, and where to stop paying
+
+The emulator retires about 184 million instructions a second on this machine, some fifteen to
+twenty times slower than the processor the program was written for. Measured shares in a match:
+generated code 48% of the page's time, the emulator's own runtime 11%, the x87 wrappers 8.5%.
+Every candidate below is generic -- none knows a program -- and each is a patch to our fork.
+
+- **Flat memory when paging is off.** Every load and store goes through the translation cache:
+  a lookup, three flag tests and an address rewrite, some ten operations around one. The guest
+  we build never turns paging on and its segments are flat, so a load could be a range check and
+  one wasm load, with the has-code bitmap consulted on writes alone. The broadest win there is,
+  because every instruction class touches memory.
+- **Chaining modules and predicting returns.** Generated code leaves its module every forty
+  instructions or so (three to four million exits a second) and comes back through the runtime:
+  a lookup, a table call, the registers spilled and reloaded. Two remedies from the literature:
+  an exit whose target is compiled jumps to that module directly, and a `ret` compares the popped
+  address with the site that called before it asks the runtime. The dispatch cost (some six to
+  eight percent) and much of the register traffic go with them.
+- **Flags that are never read are never computed.** Every arithmetic instruction stores its
+  operands and result for the lazy flags -- three stores -- and the flags are wanted by perhaps
+  one instruction in ten. A liveness pass over a block, and the lazy-flag state held in locals
+  rather than memory, drop most of that. Integer code, which is most code, gains.
+- **x87, MMX and SSE inline.** The arithmetic now takes the double shortcut, but each operation is
+  still a call with a ten-byte struct passed through memory and the stack pointer and empty bits
+  checked in Rust; MMX and SSE go through calls as well. Emitted inline -- the eight FPU registers
+  as doubles, MMX and SSE on wasm's own 64- and 128-bit lanes -- the 8.5% of wrappers goes, and
+  the vertex code every 3D title of the era runs gets the same.
+- **Measure the mix first.** The profiler build of the emulator counts retired instructions by
+  opcode and exits by cause. Built once by the fork's workflow as a second artifact, it says which
+  of the four above pays off first for a given title, and turns the rest of this list from an
+  argument into a measurement.
+
 ## A redistributable runtime is ours to reimplement, whoever ships the file
 
 The rule this project started with was "only Windows system libraries are reimplemented; anything
