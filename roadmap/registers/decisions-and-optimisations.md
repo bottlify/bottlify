@@ -594,7 +594,9 @@ it copy a negative count (hundreds of megabytes past the end of guest memory, se
 hanging); and after a seek the middleware serves again from the byte named, so what is already
 held is dropped on arrival rather than appended. Two generic pieces of the process came with it: a synthesised module may have
 an entry point, run on the thread that first asks for the module by LoadLibrary, and a module is
-known by its file name however it was asked for. Measured on the title through the launcher: the
-provider registered, the music opened through it, samples came out at the stream's rate, and the
-shipped decoder no longer appears in the guest's instruction share.
+known by its file name however it was asked for. Measured on the title through the launcher, sixty
+seconds at the main menu, hosted against shipped: starved frames at the device 0 against 9091
+(189 ms of invented silence, the holes heard as crackle), sound delivered 60.0 s against 59.8 s
+in 60 s of wall clock, engine frames 2007 against 1232, and the shipped decoder no longer appears
+in the guest's instruction share.
 
