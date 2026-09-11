@@ -27,9 +27,10 @@
  *   the whole buffer travels. Uploaded ranges round outward to the API's
  *   alignment and are sent from their own offset.
  * - **Bindings.** Bind-group layouts are explicit; a pipeline with an automatic
- *   layout is refused. The bind-group cache belongs to a pass and dies with it.
- *   Each uniform block gets its own buffer, and the cache is keyed on buffer
- *   identity.
+ *   layout is refused. Uniform blocks live in one ring buffer and are bound at
+ *   a dynamic offset, so a group names a texture, a sampler and the ring and
+ *   nothing that changes per draw; the bind-group cache is keyed on those
+ *   identities and lives as long as the backend.
  * - **Textures.** Block-compressed uploads go through a staging buffer with rows
  *   repacked to the copy alignment; a direct write is used only for uncompressed
  *   formats, and can be forced either way.

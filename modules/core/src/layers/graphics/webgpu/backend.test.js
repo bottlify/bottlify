@@ -116,7 +116,11 @@ test('the two halves of the viewport travel together', ()=>{
     assert.deepEqual(pass.viewport.scale, [2 / 64, -2 / 32]);
 });
 
-test('the binding cache does not survive a pass boundary', ()=>{
+test('the binding cache survives a pass boundary and a frame boundary', ()=>{
+    // A group names a layout, a view, a sampler and the uniform ring: nothing
+    // that changes per draw, so the one made in the first pass is the one
+    // bound in every pass after it. A group per draw per frame was a
+    // descriptor churn the device did not always keep up with.
     const { gpu, backend } = harness();
     const layout = backend.createBindGroupLayout({ entries: [] });
     const view = {};
@@ -129,12 +133,13 @@ test('the binding cache does not survive a pass boundary', ()=>{
     assert.equal(gpu.count('createBindGroup'), 1, 'reused inside the pass');
 
     frame.beginPass({ target: target(backend) }).setBindings(0, layout, entries());
-    assert.equal(gpu.count('createBindGroup'), 2,
-        'a group carried across a pass boundary silently stops drawing');
+    assert.equal(gpu.count('createBindGroup'), 1, 'and across a pass');
     frame.end();
+    backend.beginFrame().beginPass({ target: target(backend) }).setBindings(0, layout, entries());
+    assert.equal(gpu.count('createBindGroup'), 1, 'and across a frame');
 });
 
-test('two draws in one pass with different uniform blocks get different buffers', ()=>{
+test('two draws in one pass with different uniform blocks share a group at two offsets', ()=>{
     const { gpu, backend } = harness();
     const layout = backend.createBindGroupLayout({ entries: [] });
 
@@ -149,11 +154,13 @@ test('two draws in one pass with different uniform blocks get different buffers'
     pass.draw(3);
     frame.end();
 
-    assert.notEqual(first.buffer, second.buffer, 'or every draw in the pass shows the last write');
-    const groups = gpu.of('setBindGroup').map(call=>call.group);
-    assert.notEqual(groups[0], groups[1],
-        'and the cache keyed on buffer identity built two groups');
-    assert.equal(gpu.count('createBindGroup'), 2);
+    assert.equal(first.buffer, second.buffer, 'one ring');
+    assert.notEqual(first.dynamicOffset, second.dynamicOffset,
+        'or every draw in the pass shows the last write');
+    const bound = gpu.of('setBindGroup');
+    assert.equal(bound[0].group, bound[1].group, 'one group, bound twice');
+    assert.deepEqual(bound.map(call=>call.offsets), [[0], [256]], 'each at its own offset');
+    assert.equal(gpu.count('createBindGroup'), 1);
 });
 
 test('a pipeline with an automatic bind-group layout is refused', ()=>{
@@ -286,7 +293,10 @@ test('the snapshot is deep enough to find a regression that is not in the top ro
     assert.equal(snapshot.counters.draws, 2);
     assert.equal(snapshot.counters.bufferUploads, 4);
     assert.equal(snapshot.counters.bufferUploadBytes, 4 * 64);
-    assert.equal(snapshot.counters.bindGroupsCreated, 4);
+    assert.equal(snapshot.counters.bindGroupsCreated, 3,
+        'the uniform group once, and the vertex buffer once per generation');
+    assert.equal(snapshot.counters.bindGroupsReused, 1,
+        'the second frame bound the uniform group again');
     assert.deepEqual(snapshot.uploadsByLabel.vertices, { count: 2, bytes: 128 },
         'per-buffer rows, because the decisive row is rarely near the top');
     assert.deepEqual(snapshot.uploadsByLabel.indices, { count: 2, bytes: 128 });

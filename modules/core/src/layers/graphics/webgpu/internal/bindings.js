@@ -51,11 +51,29 @@ export function resourceId(resource){
 function resourceKey(resource){
     if (resource && typeof resource === 'object' && resource.buffer)
     {
+        // The dynamic offset is not part of the group: it is given at bind
+        // time, which is what lets one group serve every draw.
         const offset = resource.offset === undefined ? 0 : resource.offset;
         const size = resource.size === undefined ? 'all' : resource.size;
         return `b${resourceId(resource.buffer)}@${offset}+${size}`;
     }
     return `r${resourceId(resource)}`;
+}
+
+/**
+ * The dynamic offsets a group's buffer bindings are bound at, in binding
+ * order, or nothing when no binding carries one.
+ *
+ * @param {any[]} entries
+ * @returns {number[] | undefined}
+ */
+export function dynamicOffsetsOf(entries){
+    const offsets = entries
+        .filter(entry=>entry.resource && typeof entry.resource === 'object'
+            && entry.resource.buffer && entry.resource.dynamicOffset !== undefined)
+        .sort((left, right)=>left.binding - right.binding)
+        .map(entry=>entry.resource.dynamicOffset);
+    return offsets.length > 0 ? offsets : undefined;
 }
 
 /**
@@ -105,70 +123,74 @@ export function createBindingCache(options){
 export const UNIFORM_ALIGNMENT = 256;
 
 /**
- * Hands out one buffer per uniform block, recycled between frames.
+ * Hands out uniform blocks from one ring buffer, each at its own offset.
+ *
+ * A block is bound with a dynamic offset, so the bind group that names the
+ * ring names nothing that changes per draw: one group serves every draw that
+ * samples the same texture through the same sampler, frame after frame. The
+ * ring is written with the queue's own ordering, which lands every write after
+ * the submits before it, so a wrap overwrites only blocks whose frames have
+ * finished; a frame needing more than the ring holds gets a larger ring.
  *
  * @param {Object} options
  * @param {import('../contract.js').GpuDeviceLike} options.device
  * @param {import('../contract.js').GpuQueueLike} options.queue
- * @param {number} [options.blockSize]
+ * @param {number} [options.capacity]  Bytes in the ring.
  * @param {number} [options.usage]
  * @returns {any}
  */
 export function createUniformPool(options){
-    const blockSize = options.blockSize === undefined ? UNIFORM_ALIGNMENT : options.blockSize;
-    /** @type {any[]} */
-    const free = [];
-    /** @type {any[]} */
-    const inUse = [];
+    let capacity = options.capacity === undefined ? 1 << 22 : options.capacity;
+    let cursor = 0;
     let created = 0;
     let reused = 0;
+    /** @type {any} */
+    let ring = null;
+
+    const make = ()=>{
+        ring = options.device.createBuffer({
+            label: `uniforms#${created}`,
+            size: capacity,
+            usage: options.usage,
+        });
+        created++;
+        cursor = 0;
+    };
 
     return {
         /**
          * @param {ArrayBufferView} block
-         * @returns {{ buffer: any, offset: number, size: number }}
+         * @returns {{ buffer: any, offset: number, size: number, dynamicOffset: number }}
          */
         allocate(block){
-            const needed = Math.max(blockSize,
-                Math.ceil(block.byteLength / UNIFORM_ALIGNMENT) * UNIFORM_ALIGNMENT);
-            const index = free.findIndex(candidate=>candidate.size >= needed);
-            let buffer;
-            if (index < 0)
+            const needed = Math.ceil(block.byteLength / UNIFORM_ALIGNMENT) * UNIFORM_ALIGNMENT;
+            if (needed > capacity)
             {
-                buffer = {
-                    size: needed,
-                    gpu: options.device.createBuffer({
-                        label: `uniforms#${created}`,
-                        size: needed,
-                        usage: options.usage,
-                    }),
-                };
-                created++;
+                capacity = Math.max(capacity * 2, needed);
+                make();
             }
-            else
+            if (!ring)
             {
-                buffer = free.splice(index, 1)[0];
-                reused++;
+                make();
             }
-            inUse.push(buffer);
-            // `writeBuffer` counts its offset and size in elements of the view it
-            // is given, so blocks travel as bytes regardless of how they were built.
+            else if (cursor + needed > capacity)
+            {
+                cursor = 0;
+            }
+            const at = cursor;
+            cursor += needed;
+            reused++;
             const bytes = block instanceof Uint8Array
                 ? block
                 : new Uint8Array(block.buffer, block.byteOffset, block.byteLength);
-            options.queue.writeBuffer(buffer.gpu, 0, bytes, 0, bytes.byteLength);
-            return { buffer: buffer.gpu, offset: 0, size: block.byteLength };
+            options.queue.writeBuffer(ring, at, bytes, 0, bytes.byteLength);
+            // The binding covers one block at offset zero; the offset the draw
+            // actually reads from travels beside it, for setBindGroup.
+            return { buffer: ring, offset: 0, size: block.byteLength, dynamicOffset: at };
         },
 
-        /**
-         * Blocks are read by draws recorded in the frame that allocated them, so
-         * they only return to the pool once that frame has been submitted.
-         */
+        /** Nothing to return: the ring is reused by wrapping. */
         endFrame(){
-            while (inUse.length > 0)
-            {
-                free.push(inUse.pop());
-            }
         },
 
         stats(){

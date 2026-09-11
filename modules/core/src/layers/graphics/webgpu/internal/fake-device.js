@@ -46,8 +46,9 @@ export function createFakeDevice(options = {}){
         pass.setViewport = (/** @type {number[]} */ ...rect)=>record('setViewport', { rect });
         pass.setScissorRect = (/** @type {number[]} */ ...rect)=>record('setScissorRect', { rect });
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
-        pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ group)=>
-            record('setBindGroup', { index, group });
+        pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ group,
+            /** @type {number[] | undefined} */ offsets)=>
+            record('setBindGroup', { index, group, offsets });
         pass.setVertexBuffer = (/** @type {number} */ slot, /** @type {any} */ buffer,
             /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });
         pass.setIndexBuffer = (/** @type {any} */ buffer, /** @type {string} */ format,

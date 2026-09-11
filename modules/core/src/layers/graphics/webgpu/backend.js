@@ -5,7 +5,7 @@
  */
 
 import { LockFlags, createDynamicBuffer } from './internal/buffers.js';
-import { createBindingCache, createUniformPool } from './internal/bindings.js';
+import { createBindingCache, createUniformPool, dynamicOffsetsOf } from './internal/bindings.js';
 import { createProfiler } from './internal/profiler.js';
 import { createShaderCache } from './internal/shaders.js';
 import { createTextureUploader } from './internal/textures.js';
@@ -80,6 +80,11 @@ export function createBackend(options){
         // shaded with against the one recorded for it; the flag costs nothing.
         usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST | BufferUsage.COPY_SRC,
     });
+    // For the backend's life: a group names a layout, a texture view, a
+    // sampler and the uniform ring, none of which changes per draw, so the
+    // same group serves the same draw in every frame. A group per draw per
+    // frame was a descriptor churn the device did not always keep up with.
+    const cache = createBindingCache({ device });
 
     /**
      * A pipeline per distinct state, built once.
@@ -102,7 +107,9 @@ export function createBackend(options){
         }
         /** @type {any[]} */
         const entries = [
-            { binding: 0, visibility: 3, buffer: { type: 'uniform' } },
+            // The block is bound at a dynamic offset into the uniform ring,
+            // so the group that carries it never names a per-draw buffer.
+            { binding: 0, visibility: 3, buffer: { type: 'uniform', hasDynamicOffset: true } },
         ];
         for (let index = 0; index < stageCount; index++)
         {
@@ -274,9 +281,6 @@ export function createBackend(options){
             colorAttachments: [attachment],
             depthStencilAttachment: descriptor.depthStencilAttachment,
         });
-        // Fresh per pass, and unreachable afterwards: a group cached in one pass
-        // and rebound in the next silently stops drawing, with no error raised.
-        const cache = createBindingCache({ device });
         profiler.count('passes');
 
         /** @type {any} */
@@ -329,14 +333,22 @@ export function createBackend(options){
                 profiler.count(after.created > before.created
                     ? 'bindGroupsCreated'
                     : 'bindGroupsReused');
-                raw.setBindGroup(index, group);
+                const offsets = dynamicOffsetsOf(entries);
+                if (offsets)
+                {
+                    raw.setBindGroup(index, group, offsets);
+                }
+                else
+                {
+                    raw.setBindGroup(index, group);
+                }
                 return group;
             },
 
             /**
-             * A uniform block for one draw. Each call gets its own buffer: one
-             * buffer rewritten between draws shows every draw in the pass the
-             * last write, and the draws render, with the wrong values.
+             * A uniform block for one draw, at its own offset in the ring: one
+             * buffer rewritten between draws would show every draw in the pass
+             * the last write, and the draws would render, with the wrong values.
              *
              * @param {ArrayBufferView} block
              */
@@ -530,6 +542,19 @@ export function createBackend(options){
                     // it interrupted rather than corrupting the recording.
                     closeCurrentPass();
                     encoder.copyBufferToTexture(source, destination, size);
+                },
+
+                /**
+                 * One buffer range into another, outside any pass.
+                 *
+                 * @param {any} source @param {number} sourceOffset
+                 * @param {any} destination @param {number} destinationOffset
+                 * @param {number} size
+                 */
+                copyBuffer(source, sourceOffset, destination, destinationOffset, size){
+                    closeCurrentPass();
+                    encoder.copyBufferToBuffer(source, sourceOffset, destination,
+                        destinationOffset, size);
                 },
 
                 /**
