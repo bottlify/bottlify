@@ -794,6 +794,9 @@ export const win32Module = {
                 created: config?.created ?? (()=>{}),
                 /** @param {number} instance @param {number} id */
                 loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
+                /** @param {number} instance @param {number} type @param {number | string} name */
+                findResource: (instance, type, name)=>
+                    modules.findResource?.(instance, type, name) ?? null,
                 // Where the pointer is and what is held down. The input layer
                 // is above this one and cannot be imported from here, so both
                 // are handed down as thunks; a build without one answers what
@@ -804,6 +807,17 @@ export const win32Module = {
                 // down the same way and for the same reason: the input layer
                 // that scales pointer motion into it sits above this one.
                 clipCursor: config?.clipCursor,
+                // Where a window's device context comes from. GDI owns the
+                // contexts and lives in this same module, so user32's GetDC is
+                // GDI's under the window's name: a program that takes a DC on
+                // its window to ask the display about itself must get one, or
+                // it reads a null context's answers as facts about the screen.
+                dc: ()=>({
+                    /** @param {number} hwnd */
+                    get: hwnd=>gdi.table.GetDC.handler([hwnd]),
+                    /** @param {number} hwnd @param {number} hdc */
+                    release: (hwnd, hdc)=>gdi.table.ReleaseDC.handler([hwnd, hdc]),
+                }),
                 // A program's own explanation of why it is stopping, handed up
                 // whole rather than as a line of log, so whoever is embedding
                 // this engine can show it the way a person would have seen it.

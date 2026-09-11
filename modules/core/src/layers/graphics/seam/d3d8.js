@@ -57,6 +57,12 @@ import {
  * cannot, and every one of these is a claim a program acts on.
  */
 const D3DCAPS2_FULLSCREENGAMMA = 0x00020000;
+// A colour cursor at any resolution: the device keeps the bitmap a program
+// hands it and the host shows it over the frame. A device that claims neither
+// sends a program down its own drawing path for the cursor, which a program
+// tests far less than the one it takes on hardware.
+const D3DCURSORCAPS_COLOR = 0x00000001;
+const D3DCURSORCAPS_LOWRES = 0x00000002;
 const D3DCAPS2_CANRENDERWINDOWED = 0x00080000;
 
 const D3DPRESENT_INTERVAL_ONE = 0x00000001;
@@ -1633,6 +1639,7 @@ export function createDirect3D8Seam(
             // D3DCAPS_READ_SCANLINE is not claimed: there is no scanline.
             Caps2: D3DCAPS2_CANRENDERWINDOWED | D3DCAPS2_FULLSCREENGAMMA,
             PresentationIntervals: D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE,
+            CursorCaps: D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES,
             DevCaps: D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION
                 | D3DDEVCAPS_DRAWPRIMTLVERTEX | D3DDEVCAPS_DRAWPRIMITIVES2
                 | D3DDEVCAPS_DRAWPRIMITIVES2EX | D3DDEVCAPS_EXECUTESYSTEMMEMORY

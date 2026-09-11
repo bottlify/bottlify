@@ -19,6 +19,7 @@
  */
 
 import { formatToString } from '../msvcrt/format.js';
+import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import {
     DEVMODEA,
     DM_BITSPERPEL,
@@ -969,22 +970,33 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * HANDLE LoadImageA(HINSTANCE hInst, LPCSTR name, UINT type, int cx,
          *                  int cy, UINT fuLoad)
          *
-         * Not implemented, for the same reason: an image comes out of the
-         * resource directory. Null is what a program checks for.
+         * A cursor or an icon out of a module's resources, as LoadCursor and
+         * LoadIcon load them; a bitmap needs a decoder that is not here, and
+         * null is what a program checks for.
          */
         LoadImageA: {
             argBytes: 24,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([instance, name, type])=>{
+                const IMAGE_ICON = 1;
+                const IMAGE_CURSOR = 2;
+                switch (type >>> 0){
+                    case IMAGE_ICON:
+                        return loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name);
+                    case IMAGE_CURSOR:
+                        return loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name);
+                    default:
+                        return 0;
+                }
+            },
         },
 
         /** HCURSOR LoadCursorA(HINSTANCE hInstance, LPCSTR lpCursorName) */
         LoadCursorA: {
             argBytes: 8,
             /** @param {number[]} args */
-            // A standard cursor is named by a small integer rather than by a
-            // string, and those are the ones a program can expect to exist.
-            handler: ([instance, name])=>((instance >>> 0) === 0
-                && (name >>> 0) < 0x10000 ? name >>> 0 : 0),
+            handler: ([instance, name])=>
+                loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name),
         },
 
         /** HCURSOR SetCursor(HCURSOR hCursor) */
@@ -1142,7 +1154,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * is indistinguishable from a program with nothing to do.
          *
          * A timer with no window gets an id of our choosing, as Windows does;
-         * one with a window keeps the id it asked for.
+         * one with a window keeps the id it asked for. The answer is success,
+         * not the id: a window timer numbered zero is a legal timer, and a
+         * program that reads zero back as failure sets it again on every
+         * message and never gets past the window it was for.
          */
         SetTimer: {
             argBytes: 16,
@@ -1151,7 +1166,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const window = hwnd >>> 0;
                 const timerId = window === 0 ? nextTimerId++ : id >>> 0;
                 host.queue.setTimer(window, timerId, elapse >>> 0, proc >>> 0);
-                return timerId;
+                return timerId === 0 ? 1 : timerId;
             },
         },
 

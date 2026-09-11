@@ -221,6 +221,10 @@ function characterFor(key){
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's resources. Absent in a build with no
  *           loader behind it, which answers as a module with no string table.
+ * @property {(instance: number, type: number, name: number | string) => unknown} [findResource]
+ *           Whether a module carries a resource of that type and name: what
+ *           decides if a cursor or icon a program loads out of its own image
+ *           exists. Absent for the same reason, and then none does.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {(bytes: number) => number} [allocate]

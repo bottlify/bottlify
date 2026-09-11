@@ -142,8 +142,11 @@ function fakeContexts(){
  * @param {{ x: number, y: number }} [options.cursor] Where the host says the
  *        pointer is, for the queries a game polls instead of reading messages.
  * @param {(key: number) => number} [options.keyState]
+ * @param {(instance: number, type: number, name: number | string) => unknown}
+ *        [options.findResource]
+ *        Which resources the program's own image carries.
  */
-function setup({ cursor, keyState } = {}){
+function setup({ cursor, keyState, findResource } = {}){
     const memory = fakeMemory();
     const clock = { at: 0 };
     const queue = createMessageQueue({ now: ()=>clock.at });
@@ -166,6 +169,7 @@ function setup({ cursor, keyState } = {}){
         idle: ()=>new Promise(()=>{}),
         cursor: cursor && (()=>cursor),
         keyState,
+        findResource,
         /** @param {any} notice */
         messageBox: notice=>notices.push(notice),
         /** @param {string} text */
@@ -463,6 +467,48 @@ test('both ChangeDisplaySettings spellings pop the stack their signature declare
     assert.equal(fns.ChangeDisplaySettingsExA.argBytes, 20);
 });
 
+// --- cursors and icons out of the image ---
+
+test('a cursor or icon the image carries is loaded, one it does not is null', ()=>{
+    // A program registers its window class with the cursor and icon it was
+    // built with, by id or by name, and reads null as its own image being
+    // short of them. Only the resource directory can say whether they exist.
+    /** @type {[number, number, number | string][]} */
+    const asked = [];
+    const { fns, memory } = setup({
+        findResource: (instance, type, name)=>{
+            asked.push([instance, type, name]);
+            const carried = name === 101 || name === 'MAINCURSOR';
+            return instance === 0x400000 && carried ? { rva: 1 } : null;
+        },
+    });
+    const RT_GROUP_CURSOR = 12;
+    const RT_GROUP_ICON = 14;
+    const IMAGE_ICON = 1;
+    // Above 64 KiB, as a pointer must be: below it the argument is an id.
+    const NAME = 0x12000;
+    memory.writeMemory(NAME, new TextEncoder().encode('MAINCURSOR\0'));
+
+    const byId = fns.LoadCursorA.handler([0x400000, 101]);
+    const byName = fns.LoadCursorA.handler([0x400000, NAME]);
+    assert.notEqual(byId, 0);
+    assert.notEqual(byName, 0);
+    assert.notEqual(byName, byId, 'two loads are two handles');
+    assert.equal(fns.LoadCursorA.handler([0x400000, 102]), 0, 'a cursor the image lacks');
+    assert.notEqual(fns.LoadImageA.handler([0x400000, 101, IMAGE_ICON, 0, 0, 0]), 0);
+    assert.equal(fns.LoadImageA.handler([0x400000, 101, 0, 0, 0, 0]), 0,
+        'a bitmap needs a decoder');
+    assert.deepEqual(asked.slice(0, 3), [
+        [0x400000, RT_GROUP_CURSOR, 101], [0x400000, RT_GROUP_CURSOR, 'MAINCURSOR'],
+        [0x400000, RT_GROUP_CURSOR, 102],
+    ], 'looked up in the cursor directory, by the id or the name given');
+    assert.equal(asked[3][1], RT_GROUP_ICON);
+
+    const IDC_ARROW = 0x7f00;
+    assert.equal(fns.LoadCursorA.handler([0, IDC_ARROW]), IDC_ARROW,
+        'a standard cursor is its own handle and needs no image');
+});
+
 // --- timers ---
 
 test('SetTimer registers the timer and gives back the id the caller must kill', ()=>{
@@ -484,6 +530,21 @@ test('a timer with no window gets an id of our choosing', ()=>{
 
     assert.notEqual(first, 0, 'zero is the failure the caller checks for');
     assert.notEqual(second, first, 'two timers are two timers');
+});
+
+test('a window timer numbered zero is a success, not a failure', ()=>{
+    // A program sets timer 0 on its window and reads the answer as a BOOL. A
+    // title was measured re-arming it on every message, for ever, when zero
+    // came back; Windows answers a nonzero integer for any window timer.
+    const { fns, queue, clock } = setup();
+    const hwnd = 0x40b4;
+
+    assert.equal(fns.SetTimer.handler([hwnd, 0, 100, 0]), 1);
+    clock.at = 100;
+    const fired = queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+    assert.equal(fired?.message, WM_TIMER, 'and the timer is real');
+    assert.equal(fired?.wParam, 0, 'under the id the program asked for');
+    assert.equal(fns.KillTimer.handler([hwnd, 0]), 1);
 });
 
 test('SetTimer reaches the queue a message loop reads', ()=>{

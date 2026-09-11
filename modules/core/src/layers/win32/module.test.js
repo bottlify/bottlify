@@ -47,6 +47,11 @@ const SCREEN = { width: 1024, height: 768, bitsPerPixel: 16 };
  * @returns {import('../../system/contract.js').ScopedModuleHost}
  */
 function stubHost(){
+    // Handles that tell each other apart: a DC taken twice is two contexts, and
+    // a table that hands out zero for both cannot show that.
+    /** @type {Map<number, { type: string, object: any }>} */
+    const opened = new Map();
+    let nextHandle = 0x100;
     /** @type {Record<string, any>} */
     const apis = {
         memory: {
@@ -58,7 +63,18 @@ function stubHost(){
         },
         kernel: {
             handles: {
-                open: ()=>0, close: ()=>null, resolve: ()=>null, typeOf: ()=>null,
+                /** @param {string} type @param {any} object */
+                open: (type, object)=>{
+                    const handle = nextHandle++;
+                    opened.set(handle, { type, object });
+                    return handle;
+                },
+                /** @param {number} handle */
+                close: handle=>(opened.delete(handle) ? true : null),
+                /** @param {number} handle */
+                resolve: handle=>opened.get(handle)?.object ?? null,
+                /** @param {number} handle */
+                typeOf: handle=>opened.get(handle)?.type ?? null,
             },
             clock: { virtualTime: ()=>0 },
             currentThread: ()=>null,
@@ -98,6 +114,26 @@ test('a configured screen reaches the libraries that answer for one', async()=>{
     assert.equal(gdi32.GetDeviceCaps.handler([dc, HORZRES]), SCREEN.width);
     assert.equal(gdi32.GetDeviceCaps.handler([dc, VERTRES]), SCREEN.height);
     assert.equal(gdi32.GetDeviceCaps.handler([dc, BITSPIXEL]), SCREEN.bitsPerPixel);
+
+    await win32Module.dispose();
+});
+
+test('a DC taken through user32 is one GDI answers for', async()=>{
+    // A program asks the display about itself through its own window: GetDC
+    // on the window, GetDeviceCaps on what came back. Both libraries live in
+    // this module, so user32 hands out GDI's context under the window's name
+    // rather than a null one whose caps read as zero.
+    const api = await win32Module.create({ screen: SCREEN }, stubHost());
+    const user32 = api.libraries()['USER32.dll'];
+    const gdi32 = api.libraries()['GDI32.dll'];
+    const hwnd = 0x40b4;
+
+    const dc = user32.GetDC.handler([hwnd]);
+    assert.notEqual(dc, 0, 'a window has a device context');
+    assert.equal(gdi32.GetDeviceCaps.handler([dc, BITSPIXEL]), SCREEN.bitsPerPixel);
+    assert.equal(gdi32.GetDeviceCaps.handler([dc, HORZRES]), SCREEN.width);
+    assert.equal(user32.ReleaseDC.handler([hwnd, dc]), 1);
+    assert.equal(user32.ReleaseDC.handler([hwnd, dc]), 0, 'released once, gone');
 
     await win32Module.dispose();
 });

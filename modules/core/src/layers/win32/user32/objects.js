@@ -29,6 +29,49 @@
  *   to open it.
  */
 
+/** The resource directories a cursor and an icon are named in. */
+export const RT_GROUP_CURSOR = 12;
+export const RT_GROUP_ICON = 14;
+
+/** A resource name is an integer below this and a pointer to a string above. */
+const MAX_INTEGER_RESOURCE = 0x10000;
+const MAX_RESOURCE_NAME = 256;
+
+/**
+ * A cursor or icon as LoadCursor, LoadIcon and LoadImage hand one out.
+ *
+ * A standard one is named by a small integer on a null instance and exists
+ * everywhere, so its number is its handle. One out of a module's own image
+ * exists when the module carries the resource -- and then a program is owed a
+ * handle it can put in a window class or pass to SetCursor, whether or not
+ * anything here ever draws it. The bits are not decoded: no path consumes
+ * them, and a program that gets null back concludes its own image is short
+ * of a resource it was built with.
+ *
+ * @param {{ handles: { open: (type: string, object: any) => number },
+ *           readCString: (address: number, maxLength: number) => string,
+ *           findResource?: (instance: number, type: number,
+ *               name: number | string) => unknown }} host
+ * @param {string} kind    The handle type opened: 'cursor' or 'icon'.
+ * @param {number} type    RT_GROUP_CURSOR or RT_GROUP_ICON.
+ * @param {number} instance
+ * @param {number} name    An integer id or a pointer to a name.
+ */
+export function loadResourceObject(host, kind, type, instance, name){
+    const module = instance >>> 0;
+    const raw = name >>> 0;
+    if (module === 0)
+    {
+        return raw < MAX_INTEGER_RESOURCE ? raw : 0;
+    }
+    const key = raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_RESOURCE_NAME);
+    if (!host.findResource?.(module, type, key))
+    {
+        return 0;
+    }
+    return host.handles.open(kind, { instance: module, name: key });
+}
+
 /** How a menu item is addressed: by its command id, or by where it sits. */
 const MF_BYCOMMAND = 0x0000;
 const MF_BYPOSITION = 0x0400;
@@ -762,19 +805,12 @@ export function createObjectFunctions({ host, live }){
             handler: ([handle])=>(host.handles.close(handle >>> 0) ? 1 : 0),
         },
 
-        /**
-         * HICON LoadIconA(HINSTANCE hInstance, LPCSTR lpIconName)
-         *
-         * A standard icon is named by a small integer and exists everywhere; one
-         * out of a module's resources needs an icon decoder, which is not here.
-         * Answering null for the second is what a program checks, and it goes on
-         * without an icon rather than believing it has one.
-         */
+        /** HICON LoadIconA(HINSTANCE hInstance, LPCSTR lpIconName) */
         LoadIconA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([instance, name])=>((instance >>> 0) === 0
-                && (name >>> 0) < 0x10000 ? name >>> 0 : 0),
+            handler: ([instance, name])=>
+                loadResourceObject(host, 'icon', RT_GROUP_ICON, instance, name),
         },
 
         /** BOOL GetScrollInfo(HWND hwnd, int nBar, LPSCROLLINFO lpsi) */

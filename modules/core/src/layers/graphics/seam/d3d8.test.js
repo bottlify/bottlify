@@ -1058,8 +1058,11 @@ test('the capabilities a device reports are answers, not gaps', ()=>{
     assert.ok((caps.TextureCaps & 0x00004000) !== 0, 'D3DPTEXTURECAPS_MIPMAP');
     assert.ok((caps.TextureAddressCaps & 0x00000001) !== 0, 'D3DPTADDRESSCAPS_WRAP');
     assert.ok((caps.DevCaps & 0x00010000) !== 0, 'D3DDEVCAPS_HWTRANSFORMANDLIGHT');
-    assert.equal(caps.CursorCaps, 0, 'nothing was written into the field before DevCaps');
-    assert.equal(caps.Caps3, 0, 'nor into the one before the presentation intervals');
+    // A colour cursor is claimed, because the device keeps the bitmap it is
+    // handed and the host shows it. A title was measured drawing its own
+    // cursor, from the wrong cell of its sheet, when this field read zero.
+    assert.equal(caps.CursorCaps, 0x3, 'D3DCURSORCAPS_COLOR | D3DCURSORCAPS_LOWRES');
+    assert.equal(caps.Caps3, 0, 'nothing was written into the field before the intervals');
 
     assert.equal(h.release(device), 0);
     h.release(root);
