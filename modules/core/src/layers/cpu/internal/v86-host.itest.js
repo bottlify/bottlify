@@ -294,3 +294,68 @@ test('a loop with two entries is held to the slice like any other', async()=>{
     assert.ok(worst <= SLICE + 16, `the worst slice retired ${worst} of ${SLICE} asked`);
     host.stop();
 });
+
+test('x87 arithmetic, rounding to integers and the widths a program stores in', async()=>{
+    // What a program compiled for the x87 relies on, and what the emulator's
+    // double-precision shortcut must keep: exact results where the values are
+    // exact, the rounding mode the control word names when storing an
+    // integer, a double stored from a single, and a single that overflows
+    // going to infinity under round-to-nearest rather than to a wrong finite
+    // number (towards zero it would be the largest finite, which is why the
+    // control word is put back first).
+    const host = await boot();
+    const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
+    host.writePhysical(0x9000, new Uint8Array([
+        ...f32(1.5), ...f32(3.25), ...f32(0.75), ...f32(2.5),   // 0x9000..0x900c
+        0, 0, 0, 0,                                             // 0x9010: result
+        ...f32(2.75), 0, 0, 0, 0,                               // 0x9014, 0x9018: result
+        ...f32(-2.5), 0, 0, 0, 0,                               // 0x901c, 0x9020: result
+        0, 0, 0, 0,                                             // 0x9024: result
+        ...f32(3e38), 0, 0, 0, 0,                               // 0x9028, 0x902c: result
+    ]));
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xd9, 0x05, ...u32(0x9000),         // fld dword [1.5]
+        0xd8, 0x0d, ...u32(0x9004),         // fmul dword [3.25]
+        0xd8, 0x05, ...u32(0x9008),         // fadd dword [0.75]
+        0xd8, 0x35, ...u32(0x900c),         // fdiv dword [2.5]
+        0xd9, 0x1d, ...u32(0x9010),         // fstp dword -> 2.25
+        0xd9, 0x05, ...u32(0x9014),         // fld dword [2.75]
+        0xdb, 0x1d, ...u32(0x9018),         // fistp dword -> 3 (nearest)
+        0xd9, 0x05, ...u32(0x901c),         // fld dword [-2.5]
+        0xdb, 0x1d, ...u32(0x9020),         // fistp dword -> -2 (nearest, ties to even)
+        0xd9, 0x3d, ...u32(0x9030),         // fnstcw [0x9030]
+        0x66, 0x81, 0x0d, ...u32(0x9030), 0x00, 0x0c, // or word [0x9030], 0x0c00: towards zero
+        0xd9, 0x2d, ...u32(0x9030),         // fldcw [0x9030]
+        0xd9, 0x05, ...u32(0x9014),         // fld dword [2.75]
+        0xdb, 0x1d, ...u32(0x9024),         // fistp dword -> 2 (truncated)
+        0xd9, 0x05, ...u32(0x9000),         // fld dword [1.5]
+        0xdd, 0x1d, ...u32(0x9040),         // fstp qword -> 1.5 as a double
+        0x66, 0x81, 0x25, ...u32(0x9030), 0xff, 0xf3, // and word [0x9030], 0xf3ff: nearest
+        0xd9, 0x2d, ...u32(0x9030),         // fldcw [0x9030]
+        0xd9, 0x05, ...u32(0x9028),         // fld dword [3e38]
+        0xd8, 0xc8,                         // fmul st0, st0 -> 9e76
+        0xd9, 0x1d, ...u32(0x902c),         // fstp dword -> +infinity in a single
+        0xf4,                               // hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    for (let slice = 0; slice < 50 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(1000);
+    }
+    assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+    const word = (/** @type {number} */ at)=>{
+        const b = host.readPhysical(at, 4);
+        return (b[0] | b[1] << 8 | b[2] << 16 | b[3] << 24) >>> 0;
+    };
+    assert.equal(word(0x9010), new Uint32Array(Float32Array.of(2.25).buffer)[0],
+        '(1.5 * 3.25 + 0.75) / 2.5 stored as a single');
+    assert.equal(word(0x9018), 3, '2.75 to the nearest integer');
+    assert.equal(word(0x9020), 0xfffffffe, '-2.5 to the nearest even integer');
+    assert.equal(word(0x9024), 2, '2.75 truncated under the control word');
+    assert.equal(word(0x9040), 0, 'the double 1.5, low word');
+    assert.equal(word(0x9044), 0x3ff80000, 'the double 1.5, high word');
+    assert.equal(word(0x902c), 0x7f800000, 'a single that overflows is infinity');
+    host.stop();
+});

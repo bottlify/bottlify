@@ -220,6 +220,26 @@ export async function createV86Host(config){
         },
     );
 
+    /** The pages written most while holding code, as "page:count" pairs. */
+    const dirtyPages = ()=>{
+        const exports = cpu.wm.exports;
+        if (typeof exports.bottlify_dirty_page !== 'function')
+        {
+            return '';
+        }
+        const pairs = [];
+        for (let i = 0; i < 16; i++)
+        {
+            const count = exports.bottlify_dirty_count(i);
+            if (count > 0)
+            {
+                pairs.push([exports.bottlify_dirty_page(i) >>> 0, count]);
+            }
+        }
+        return pairs.sort((left, right)=>right[1] - left[1])
+            .map(([page, count])=>`0x${(page * 4096).toString(16)}:${count}`).join(' ');
+    };
+
     return {
         /**
          * Lets the machine run. The mode switch is already done, so this
@@ -457,6 +477,15 @@ export async function createV86Host(config){
                     entries: read(2),
                     interpretedDispatches: read(3),
                     f80Conversions: read(4),
+                    // Writes that reached a page holding code, and what they
+                    // cost: a module thrown away, or a page's hotness before
+                    // it compiled. The pages written most while holding code
+                    // are named, as "page:count" pairs, so a report can say
+                    // which page mixes its data with code.
+                    codePageWrites: read(5),
+                    modulesLostToWrites: read(6),
+                    hotnessLostToWrites: read(7),
+                    dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,
                     hostWrites,
