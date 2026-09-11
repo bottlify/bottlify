@@ -879,3 +879,17 @@ test('the wide spelling writes the names a wide caller reads', async()=>{
     assert.equal(f.memory.bytes[at + 1], 0, 'two bytes a character, so a wide read finds it');
     assert.equal(f.memory.bytes[at + 2], 'r'.charCodeAt(0));
 });
+
+test('what a program asked the device for is kept whole: buffers and refused interfaces', ()=>{
+    // The event ring is short and turns over in seconds of mixing; what a
+    // sound library asked for while starting up is the record that says why
+    // it chose the path it did, so it is kept apart and never dropped.
+    const f = createRoot();
+    const buffer = createBuffer(f, { bytes: 4096 });
+    assert.equal(f.bridge.recordAt(buffer).object.interfaceFor(IID_IDirectSound3DBuffer), null,
+        'a positional buffer is refused');
+    const diagnostics = f.dsound.diagnostics();
+    assert.equal(diagnostics.creations.length, 1);
+    assert.match(diagnostics.creations[0], /^CreateSoundBuffer flags=0x[0-9a-f]+ bytes=4096 fmt=/);
+    assert.deepEqual(Object.values(diagnostics.refusedInterfaces), [1]);
+});

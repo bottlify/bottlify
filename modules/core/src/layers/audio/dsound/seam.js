@@ -264,6 +264,14 @@ export function createPublisher({ publishInterface }){
     /** @type {Map<number, any>} */
     const byPointer = new Map();
     let published = 0;
+    /**
+     * Interfaces asked for and not answered, by id. A program that wanted
+     * one it did not get takes another path silently, and which one it wanted
+     * is the only trace of that decision.
+     *
+     * @type {Record<string, number>}
+     */
+    const refused = {};
 
     /** @param {any} api @param {any[]} interfaces */
     const adapterFor = (api, interfaces)=>{
@@ -280,6 +288,7 @@ export function createPublisher({ publishInterface }){
                         : declared.get(id);
                     if (!descriptor)
                     {
+                        refused[id] = (refused[id] ?? 0) + 1;
                         return null;
                     }
                     return {
@@ -321,6 +330,8 @@ export function createPublisher({ publishInterface }){
             ? null
             : byPointer.get(pointer >>> 0) ?? null),
         count: ()=>published,
+        /** Interface ids asked for and refused, with counts. */
+        refused: ()=>({ ...refused }),
     };
 }
 
@@ -376,6 +387,9 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
     // a program's own sound engine decided.
     /** @type {string[]} */
     const events = [];
+    /** Every buffer asked for, with its flags and the answer; kept whole. */
+    /** @type {string[]} */
+    const creations = [];
     /** @param {string} line */
     const record = line=>{
         events.push(line);
@@ -675,8 +689,10 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
             const format = readFormat(readU32(descriptor + DSBUFFERDESC.lpwfxFormat));
-            record(`CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
-                + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`);
+            const asked = `CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
+                + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`;
+            record(asked);
+            creations.push(asked);
 
             // A primary buffer names no size and no format: it is the mix
             // target, and a program creates one only to set the format the
@@ -974,6 +990,8 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             buffers: buffers.length,
             calls,
             events: [...events],
+            refusedInterfaces: publisher.refused(),
+            creations: [...creations],
             cooperativeLevel,
             // Asking what devices there are and being told none is how a
             // program concludes the machine cannot play sound, so how often it
