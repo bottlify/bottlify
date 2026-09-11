@@ -487,6 +487,52 @@ iteration limit honours the same bound. What remains is not this: with the bound
 still runs to some five million instructions now and then, at a film and at a load, and the shape of
 guest code that does it has not been found -- every loop tried in a probe stops where it is told.
 
+### B8. The per-call cost of a trap, paid fifteen hundred times a frame
+
+Measured with the browser's profiler on a real title in a match: a draw call costs 46 µs of host
+time (10 µs in a quiet scene), a texture bind 39 µs, and every trap pays 8-10 µs before its handler
+runs. Fifteen hundred host calls a frame, so the dispatch alone is a tenth of a 100 ms frame.
+Where it goes: the arguments and the caller's registers read out of guest memory; a record
+`{name, args, from, result, error}` allocated per call for the detail ring; `performance.now()`
+twice per call for the phase profiler; the last-error read; the interface pointer resolved to its
+object; and the seam's `sync`, which reads six words of shadow state back and compares them.
+
+The candidates: a detail ring of typed arrays (ids and arguments) rather than objects; a phase clock
+taken every Nth call or only around phases known to be expensive; `sync` gated by a version counter
+the shadow state bumps rather than a read on every call. Expected: four to six percent of a frame in
+a match, and the garbage collector's share (four percent) with it. The 39 µs of a texture bind is
+not explained by its handler, which does nothing; that path wants its own profile before anything
+is changed.
+
+### B9. The draw's preparation, recomputed for every draw
+
+`prepare()` works the whole draw out from scratch each time: the vertex format decoded, the cascade
+of texture stages, an array of stage bindings, the samplers, the lighting, the pipeline key, and the
+uniform block -- two 4x4 products and a copy of some two hundred floats -- with objects and arrays
+made along the way. Fifteen to twenty microseconds a draw. The program keeps a state cache of its
+own, so consecutive draws mostly share their state and differ in the world transform alone.
+
+The candidate: generation counters bumped by every state, texture, transform, material and light
+call, and the prepared cascade, bindings and pipeline key reused while none changed since the last
+draw; the uniform block rebuilt only when a transform, the material or the lights changed, and the
+view-by-projection product cached across the frame so a draw costs one multiply. Expected: five to
+seven percent of a frame in a match.
+
+### B10. A command ring in guest memory, drained once a frame
+
+The largest of the three. The state and draw calls -- texture, render state, stage state, material,
+transform, indexed draw -- need no answer from the host but `D3D_OK`, and are the bulk of the
+fifteen hundred traps a frame. As guest-side stubs that append a command to a ring in guest memory
+and answer at once, they stop being traps at all; the host drains the ring in one trap at `Present`
+or whenever a call arrives that does need an answer -- a lock, a creation, a getter. This is how a
+real driver works, and the seam's shadow state in guest memory is part of the way there.
+
+What it costs: a call that would have failed answers success and its failure is reported when the
+ring is drained, as a divergence rather than as a return code; every draw is still prepared on the
+host, but in one loop over the ring rather than through the dispatcher. Expected: ten to twelve
+percent of a frame in a match. Together with B8 and B9 this is the 25 percent of a battle frame that
+the draw path takes today brought to eight or ten, which is a fifth more frames.
+
 ## A redistributable runtime is ours to reimplement, whoever ships the file
 
 The rule this project started with was "only Windows system libraries are reimplemented; anything
