@@ -675,6 +675,8 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             const primary = (flags & DSBCAPS_PRIMARYBUFFER) !== 0;
             const wanted = readU32(descriptor + DSBUFFERDESC.dwBufferBytes);
             const format = readFormat(readU32(descriptor + DSBUFFERDESC.lpwfxFormat));
+            record(`CreateSoundBuffer flags=0x${(flags >>> 0).toString(16)} bytes=${wanted}`
+                + ` fmt=${format ? `${format.sampleRate}/${format.bitsPerSample}/${format.channels}` : '-'}`);
 
             // A primary buffer names no size and no format: it is the mix
             // target, and a program creates one only to set the format the
@@ -733,6 +735,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
          */
         SetCooperativeLevel(root, [, level]){
             cooperativeLevel = level >>> 0;
+            record(`SetCooperativeLevel ${cooperativeLevel}`);
             // Recorded and not enforced. Windows refuses SetFormat on the
             // primary buffer below DSSCL_PRIORITY and this does not: a program
             // that sets the mix format without asking for the right to gets it
@@ -745,6 +748,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         /** HRESULT GetCaps(LPDSCAPS) */
         GetCaps(root, [caps]){
+            record('GetCaps');
             if ((caps >>> 0) === 0 || readU32(caps + DSCAPS.dwSize) < DSCAPS.SIZE)
             {
                 return DSERR_INVALIDPARAM;
@@ -761,11 +765,15 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
                 | DSCAPS_FLAGS.SECONDARYMONO | DSCAPS_FLAGS.SECONDARYSTEREO
                 | DSCAPS_FLAGS.SECONDARY8BIT | DSCAPS_FLAGS.SECONDARY16BIT
                 // Any rate, because resampling is what the mixer does anyway.
-                | DSCAPS_FLAGS.CONTINUOUSRATE
-                // Mixed in software, and saying so is not a weakness: a program
-                // that knows it reaches for hardware voices differently, and one
-                // told it has hardware it has not is worse off.
-                | DSCAPS_FLAGS.EMULDRIVER);
+                //
+                // Not EMULDRIVER. That flag meant the wave-out emulation of a
+                // system with no DirectSound driver at all, and no working
+                // device of the last two decades reports it. A sound
+                // middleware reading it concludes DirectSound is not really
+                // there, mixes through wave-out instead, and refuses every
+                // positional provider that needs the DirectSound path -- which
+                // is the whole of a title's effects, silently.
+                | DSCAPS_FLAGS.CONTINUOUSRATE);
             writeU32(caps + DSCAPS.dwMinSecondarySampleRate, 100);
             writeU32(caps + DSCAPS.dwMaxSecondarySampleRate, 100000);
             writeU32(caps + DSCAPS.dwPrimaryBuffers, 1);
@@ -787,6 +795,7 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
 
         /** HRESULT GetSpeakerConfig(LPDWORD) */
         GetSpeakerConfig(root, [out]){
+            record('GetSpeakerConfig');
             if ((out >>> 0) === 0)
             {
                 return DSERR_INVALIDPARAM;

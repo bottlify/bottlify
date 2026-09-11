@@ -546,12 +546,18 @@ test('the device says what it can play, or a program has nothing to ask for', ()
     const flags = f.memory.u32(caps + DSCAPS.dwFlags);
     for (const [name, bit] of Object.entries(DSCAPS_FLAGS))
     {
-        if (name === 'CERTIFIED')
+        if (name === 'CERTIFIED' || name === 'EMULDRIVER')
         {
             continue;
         }
         assert.ok((flags & bit) !== 0, `the device claims ${name}`);
     }
+    // And not the emulation flag: a sound middleware reading it decides the
+    // DirectSound path is not really there, mixes through wave-out and refuses
+    // the positional providers that carry a title's effects.
+    assert.equal(flags & DSCAPS_FLAGS.EMULDRIVER, 0, 'a real device, not an emulated one');
+    assert.deepEqual(f.dsound.diagnostics().events.filter((/** @type {string} */ e)=>!e.startsWith('b')),
+        ['GetCaps'], 'the device-level call is in the sequence a diagnostic reads');
 });
 
 test('every field of DSCAPS is written, not only the ones anyone thought of', ()=>{

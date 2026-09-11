@@ -3438,6 +3438,8 @@ async function buildApp(options){
                         return byModule;
                     })(),
                     unimplementedCalls: Object.fromEntries(missingCalls),
+                    // The guest-to-guest calls a watch was put in front of, by label.
+                    watches: [...watches.keys()],
                 },
             },
         ],
