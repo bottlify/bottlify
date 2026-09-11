@@ -56,7 +56,7 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  * A device with a backend over the recording GPU, and guest memory it can read.
  *
  * @param {{ width?: number, height?: number, format?: number, depth?: boolean,
- *           dumpDraws?: boolean, maxDraws?: number,
+ *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean,
  *           divergence?: (api: string, detail: string)=>void,
  *           skipTexture?: string }} [options]
  */
@@ -85,6 +85,7 @@ function harness(options = {}){
         maxDraws: options.maxDraws,
         divergence: options.divergence,
         skipTexture: options.skipTexture,
+        fog: options.fog,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1514,7 +1515,8 @@ test('a draw`s screen extent is the box its transformed vertices span', ()=>{
         vertices: new Uint8Array(vertices.buffer),
         stride: 12,
         indices: null,
-    }), { x0: 0, y0: 0, x1: 480, y1: 720, behind: 0 });
+    }), { x0: 0, y0: 0, x1: 480, y1: 720, behind: 0, before: 0, beyond: 0, depth: [0, 0],
+        eye: [1, 1] });
 
     // The same bytes read as pre-transformed are target pixels already, which
     // is a different box entirely and is why the flag is carried.
@@ -1525,7 +1527,8 @@ test('a draw`s screen extent is the box its transformed vertices span', ()=>{
         vertices: new Uint8Array(vertices.buffer),
         stride: 12,
         indices: null,
-    }), { x0: -1, y0: -2, x1: 1, y1: 1, behind: 0 });
+    }), { x0: -1, y0: -2, x1: 1, y1: 1, behind: 0, before: 0, beyond: 0,
+        depth: [Infinity, -Infinity], eye: [Infinity, -Infinity] });
 });
 
 test('a vertex behind the eye is counted rather than divided by its own w', ()=>{
@@ -1554,7 +1557,30 @@ test('a vertex behind the eye is counted rather than divided by its own w', ()=>
         vertices: new Uint8Array(vertices.buffer),
         stride: 12,
         indices: null,
-    }), { x0: 640, y0: 0, x1: 640, y1: 0, behind: 1 });
+    }), { x0: 640, y0: 0, x1: 640, y1: 0, behind: 1, before: 0, beyond: 0, depth: [1, 1],
+        eye: [2, 2] });
+});
+
+test('a vertex past either depth plane is counted, because the far plane clips too', ()=>{
+    // Unit. A draw whose vertices straddle the far plane is one the rasteriser
+    // cuts triangles out of, and a surface placed on that plane on purpose is
+    // cut whole or not at all as the camera moves by less than a depth unit.
+    // The identity projection leaves z as the depth: one vertex before the
+    // near plane, one on it, one past the far plane.
+    const vertices = new DataView(new ArrayBuffer(36));
+    vertices.setFloat32(8, -0.5, true);
+    vertices.setFloat32(20, 0, true);
+    vertices.setFloat32(32, 1.25, true);
+
+    assert.deepEqual(screenExtent({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 640, height: 480 }),
+        preTransformed: false,
+        vertices: new Uint8Array(vertices.buffer),
+        stride: 12,
+        indices: null,
+    }), { x0: 320, y0: 240, x1: 320, y1: 240, behind: 0, before: 1, beyond: 1,
+        depth: [-0.5, 1.25], eye: [1, 1] });
 });
 
 test('the frame dump says where each draw landed and is empty unless asked for', async()=>{
@@ -1602,8 +1628,72 @@ test('the frame dump says where each draw landed and is empty unless asked for',
     assert.match(dumped[0], / view=0,0\+640x480@0..1 /,
         'the rectangle the draw was clipped and mapped by, which a later draw inherits');
     assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
-    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70$/,
+    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 gpu=same ugpu=same$/,
         'the corners themselves, because the union of a draw`s quads is not one of them');
+});
+
+test('the dump reads back what the GPU holds for a draw: vertices, block and indices', async()=>{
+    // Recorded commands, through a device whose buffers keep their bytes. A
+    // draw is described from guest memory and shaded from the GPU's copies of
+    // it, and the two are compared at replay: a draw whose picture no field of
+    // its line explains is one whose copies differ, and only the comparison
+    // can say which.
+    const h = harness({ width: 640, height: 480, dumpDraws: true });
+    const { device } = h;
+    /** @type {{ buffer?: any }} */
+    const vertices = {};
+    /** @type {{ buffer?: any }} */
+    const indices = {};
+    assert.equal(device.CreateVertexBuffer(20 * 4, 0, FVF_QUAD, D3DPOOL.DEFAULT, vertices), D3D_OK);
+    assert.equal(device.CreateIndexBuffer(6, 0, D3DFMT_INDEX.INDEX16, D3DPOOL.DEFAULT, indices),
+        D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(vertices.buffer.Lock(0, 0, locked, 0), D3D_OK);
+    h.write(/** @type {number} */ (locked.pBits), quad([10, 20, 110, 70], argb(255, 0, 0)));
+    assert.equal(vertices.buffer.Unlock(), D3D_OK);
+    assert.equal(indices.buffer.Lock(0, 0, locked, 0), D3D_OK);
+    h.write(/** @type {number} */ (locked.pBits), new Uint8Array(Uint16Array.from([0, 1, 2]).buffer));
+    assert.equal(indices.buffer.Unlock(), D3D_OK);
+
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, vertices.buffer, 20), D3D_OK);
+    assert.equal(device.SetIndices(indices.buffer, 0), D3D_OK);
+    assert.equal(device.DrawIndexedPrimitive(D3DPT.TRIANGLELIST, 0, 3, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const dumped = device.diagnostics().lastDump;
+    assert.equal(dumped.length, 1);
+    assert.match(dumped[0], / u=[0-9a-f]{8} /, 'the block the draw was shaded with, as one word');
+    assert.match(dumped[0], / gpu=same ugpu=same igpu=same$/,
+        'the vertices, the block and the indices the GPU holds are the ones described');
+    assert.deepEqual(device.diagnostics().failures ?? [], [], 'the read-back is not an error');
+    vertices.buffer.release();
+    indices.buffer.release();
+});
+
+test('fog can be switched off for a run, and the dump says a draw ran without it', async()=>{
+    // Recorded commands. The knob exists so two runs differ by fog and nothing
+    // else, which only holds if the device hands it on to the renderer -- a
+    // knob that stops at the device makes the two runs identical and the
+    // conclusion drawn from them false.
+    const fogged = async(/** @type {boolean | undefined} */ fog)=>{
+        const h = harness({ width: 640, height: 480, dumpDraws: true, fog });
+        const device = h.device;
+        assert.equal(device.SetRenderState(D3DRS.FOGENABLE, 1), D3D_OK);
+        assert.equal(device.SetRenderState(D3DRS.FOGVERTEXMODE, D3DFOG.LINEAR), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(
+            D3DPT.TRIANGLELIST, 2, quad([10, 20, 110, 70], argb(255, 0, 0)), 20), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+        return device.diagnostics().lastDump[0];
+    };
+    assert.match(await fogged(undefined), / fog=3\//, 'on by default, as the program asked');
+    assert.match(await fogged(false), / fog=- /, 'off, the draw ran as if never fogged');
 });
 
 test('a frame can be cut short after a given number of draws', async()=>{

@@ -66,8 +66,23 @@ export function createFakeDevice(options = {}){
         encoder.copyBufferToTexture = (/** @type {any} */ source, /** @type {any} */ destination,
             /** @type {any} */ size)=>calls.push(
             { op: 'copyBufferToTexture', encoder, source, destination, size });
+        // A copy lands when its command buffer is submitted, not when it is
+        // encoded: a write the queue takes between the two is seen by the copy,
+        // which is the ordering a read-back at the end of a frame relies on.
+        /** @type {(() => void)[]} */
+        const deferred = [];
+        /**
+         * @param {any} source @param {number} sourceOffset @param {any} destination
+         * @param {number} destinationOffset @param {number} size
+         */
+        encoder.copyBufferToBuffer = (source, sourceOffset, destination, destinationOffset, size)=>{
+            deferred.push(()=>destination.bytes.set(
+                source.bytes.subarray(sourceOffset, sourceOffset + size), destinationOffset));
+            calls.push({ op: 'copyBufferToBuffer', encoder, source, sourceOffset,
+                destination, destinationOffset, size });
+        };
         encoder.finish = ()=>{
-            const buffer = object('commandBuffer', { encoder });
+            const buffer = object('commandBuffer', { encoder, deferred });
             calls.push({ op: 'finish', encoder, buffer });
             return buffer;
         };
@@ -93,12 +108,31 @@ export function createFakeDevice(options = {}){
         return made;
     };
 
+    /**
+     * A buffer holds its bytes, so that what a queue wrote and an encoder
+     * copied can be mapped and read back the way a real one is.
+     *
+     * @param {any} descriptor
+     */
+    const createBuffer = descriptor=>{
+        const buffer = object('createBuffer',
+            { descriptor, bytes: new Uint8Array(descriptor.size) });
+        buffer.mapAsync = async()=>{
+            calls.push({ op: 'mapAsync', buffer });
+        };
+        buffer.getMappedRange = ()=>buffer.bytes.buffer;
+        buffer.unmap = ()=>{};
+        buffer.destroy = ()=>{};
+        calls.push({ op: 'createBuffer', createBuffer: buffer, descriptor });
+        return buffer;
+    };
+
     const device = {
         calls,
         createTexture,
         createCommandEncoder,
         createShaderModule,
-        createBuffer: recorder('createBuffer'),
+        createBuffer,
         createBindGroupLayout: recorder('createBindGroupLayout'),
         createPipelineLayout: recorder('createPipelineLayout'),
         createBindGroup: recorder('createBindGroup'),
@@ -115,6 +149,12 @@ export function createFakeDevice(options = {}){
          */
         writeBuffer(buffer, bufferOffset, data, dataOffset = 0, size = undefined){
             const length = size === undefined ? data.byteLength - dataOffset : size;
+            if (buffer.bytes)
+            {
+                buffer.bytes.set(
+                    Uint8Array.prototype.slice.call(data, dataOffset, dataOffset + length),
+                    bufferOffset);
+            }
             calls.push({
                 op: 'writeBuffer',
                 buffer,
@@ -138,6 +178,13 @@ export function createFakeDevice(options = {}){
         },
         /** @param {any[]} buffers */
         submit(buffers){
+            for (const buffer of buffers)
+            {
+                for (const copy of buffer.deferred ?? [])
+                {
+                    copy();
+                }
+            }
             calls.push({ op: 'submit', buffers });
         },
     };

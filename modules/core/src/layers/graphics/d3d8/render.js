@@ -175,8 +175,17 @@ export function transformPosition(m, point){
  */
 
 /**
+ * Depth is reported beside position, because the far plane is a clip too:
+ * a vertex whose clip z exceeds its w is cut away with every triangle it is
+ * in, and a surface built to sit exactly on the far plane -- a sky -- is the
+ * one this decides frame by frame. `before` counts vertices nearer than the
+ * near plane among those in front of the eye, `beyond` those past the far
+ * plane, `depth` spans their z/w and `eye` their clip w -- the eye-space
+ * distance a vertex is fogged by.
+ *
  * @param {ScreenDraw} draw
- * @returns {{ points: number[][], behind: number }}
+ * @returns {{ points: number[][], behind: number, before: number, beyond: number,
+ *            depth: [number, number], eye: [number, number] }}
  */
 export function screenPositions(draw){
     const { rect } = draw.viewport;
@@ -188,6 +197,12 @@ export function screenPositions(draw){
     /** @type {number[][]} */
     const points = [];
     let behind = 0;
+    let before = 0;
+    let beyond = 0;
+    /** @type {[number, number]} */
+    const depth = [Infinity, -Infinity];
+    /** @type {[number, number]} */
+    const eye = [Infinity, -Infinity];
     for (let index = 0; index < total; index++)
     {
         const at = (draw.indices ? draw.indices[index] : index) * draw.stride;
@@ -206,6 +221,19 @@ export function screenPositions(draw){
                 behind++;
                 continue;
             }
+            const z = clip[2] / clip[3];
+            if (z < 0)
+            {
+                before++;
+            }
+            else if (z > 1)
+            {
+                beyond++;
+            }
+            depth[0] = Math.min(depth[0], z);
+            depth[1] = Math.max(depth[1], z);
+            eye[0] = Math.min(eye[0], clip[3]);
+            eye[1] = Math.max(eye[1], clip[3]);
             x = rect.x + (clip[0] / clip[3] * 0.5 + 0.5) * rect.width;
             y = rect.y + (0.5 - clip[1] / clip[3] * 0.5) * rect.height;
         }
@@ -214,18 +242,19 @@ export function screenPositions(draw){
         // because vertices behind the eye leave no gap in this list.
         points.push([x, y, at]);
     }
-    return { points, behind };
+    return { points, behind, before, beyond, depth, eye };
 }
 
 /**
  * The box those positions span, in whole pixels.
  *
  * @param {ScreenDraw} draw
- * @returns {{ x0: number, y0: number, x1: number, y1: number, behind: number }
- *           | null}
+ * @returns {{ x0: number, y0: number, x1: number, y1: number, behind: number,
+ *            before: number, beyond: number, depth: [number, number],
+ *            eye: [number, number] } | null}
  */
 export function screenExtent(draw){
-    const { points, behind } = screenPositions(draw);
+    const { points, behind, before, beyond, depth, eye } = screenPositions(draw);
     if (points.length === 0)
     {
         return null;
@@ -236,6 +265,10 @@ export function screenExtent(draw){
         x1: Math.round(Math.max(...points.map(point=>point[0]))),
         y1: Math.round(Math.max(...points.map(point=>point[1]))),
         behind,
+        before,
+        beyond,
+        depth,
+        eye,
     };
 }
 
@@ -1301,6 +1334,21 @@ export function createRenderer(options){
         : '-';
 
     /**
+     * FNV-1a over a block's bytes, as eight hex digits.
+     *
+     * @param {Float32Array | Uint8Array} block
+     */
+    const hashOf = block=>{
+        const bytes = new Uint8Array(block.buffer, block.byteOffset, block.byteLength);
+        let hash = 0x811c9dc5;
+        for (let at = 0; at < bytes.length; at++)
+        {
+            hash = Math.imul(hash ^ bytes[at], 0x01000193);
+        }
+        return (hash >>> 0).toString(16).padStart(8, '0');
+    };
+
+    /**
      * What is bound to a stage, by format and size.
      *
      * The format is the half of a sprite that decides whether it has a shape
@@ -1317,7 +1365,8 @@ export function createRenderer(options){
         }
         const entry = textures.get(texture);
         return entry
-            ? `${entry.id}:${entry.format}@${entry.width}x${entry.height}${entry.census ?? ''}`
+            ? `${entry.id}:${entry.format}@${entry.width}x${entry.height}`
+                + `^${entry.uploads || 0}${entry.census ?? ''}`
             : 'untracked';
     };
 
@@ -1559,6 +1608,12 @@ export function createRenderer(options){
             ? `${box.x0},${box.y0}..${box.x1},${box.y1}`
                 + ` (${box.x1 - box.x0}x${box.y1 - box.y0})`
                 + (box.behind > 0 ? ` behind=${box.behind}` : '')
+                + (box.before > 0 ? ` before=${box.before}` : '')
+                + (box.beyond > 0 ? ` beyond=${box.beyond}` : '')
+                + (prepared.layout.preTransformed
+                    ? ''
+                    : ` depth=${box.depth[0].toFixed(6)}..${box.depth[1].toFixed(6)}`
+                        + ` eye=${round(box.eye[0])}..${round(box.eye[1])}`)
             : 'nowhere';
         // A draw of a handful of quads has its own corners, and the union of
         // them is not one of them: an artefact bounded by one quad of six is
@@ -1600,6 +1655,10 @@ export function createRenderer(options){
             // as the camera moves by less than a depth unit.
             + `/bias${model.renderStates.get(D3DRS.ZBIAS) ?? 0}`
             + `/${state.depthFormat ?? 'nodepth'}`
+            // Whether the program asked for its primitives to be clipped at
+            // all: with clipping off, a vertex past the far plane is a depth
+            // to clamp, not a triangle to drop.
+            + `/clip${model.renderStates.get(D3DRS.CLIPPING) ?? 1}`
             + ` cull=${state.cullMode}`
             + ` blend=${state.blend ? `${state.srcBlend},${state.destBlend}` : '-'}`
             + ` aTest=${state.alphaTest
@@ -1610,6 +1669,10 @@ export function createRenderer(options){
             // changes while every draw's geometry and texture stay the same
             // is one whose material or transform moved, and only these show it.
             + ` mat=${describeMaterial(model.material)}`
+            // The whole block the draw was shaded with, as one word: two draws
+            // that read the same in every field above and shade differently
+            // differ in a field this line does not print, and the word says so.
+            + ` u=${hashOf(prepared.uniforms)}`
             + ` wvp=${[0, 5, 10, 12, 13, 14, 15]
                 .map(index=>round(prepared.uniforms[UNIFORM_AT.worldViewProjection + index]))
                 .join(',')}`
@@ -1832,11 +1895,60 @@ export function createRenderer(options){
             dump: dump.length - 1,
             vertices: command.vertices,
             bytes: vertices.slice(),
+            // The block as recorded, because the arena it lives in is reused
+            // before the read-back lands.
+            uniforms: new Uint8Array(prepared.uniforms.buffer, prepared.uniforms.byteOffset,
+                prepared.uniforms.byteLength).slice(),
             offset,
             stride,
             texCoord: prepared.layout.attributes.find(
                 (/** @type {any} */ entry)=>entry.name === 'texCoord0')?.offset,
         };
+    };
+
+    /**
+     * The indices a dumped draw reads from the program's own buffer, kept
+     * beside its vertices for the same read-back.
+     *
+     * @param {Uint8Array} bytes  What the program wrote, from the draw's start.
+     */
+    const noteDumpIndices = bytes=>{
+        const commands = recording?.commands ?? [];
+        const command = commands[commands.length - 1];
+        if (command?.check && command.indices && !command.check.indices)
+        {
+            command.check.indices = { buffer: command.indices, bytes: bytes.slice() };
+        }
+    };
+
+    /**
+     * Bytes the GPU holds against bytes the program wrote, as one clause.
+     *
+     * @param {string} name
+     * @param {Uint8Array} guest
+     * @param {Uint8Array} gpu
+     */
+    const describeBytes = (name, guest, gpu)=>{
+        if (gpu.byteLength !== guest.byteLength)
+        {
+            return `${name}=short(${gpu.byteLength}/${guest.byteLength})`;
+        }
+        let differing = 0;
+        let first = -1;
+        for (let at = 0; at < guest.byteLength; at++)
+        {
+            if (gpu[at] !== guest[at])
+            {
+                differing++;
+                if (first < 0)
+                {
+                    first = at;
+                }
+            }
+        }
+        return differing === 0
+            ? `${name}=same`
+            : `${name}=differs(${differing}/${guest.byteLength} bytes, first at ${first})`;
     };
 
     /**
@@ -2739,9 +2851,9 @@ export function createRenderer(options){
                 });
                 if (dumpDraws)
                 {
-                    dumpIndexed(model, prepared, indicesFrom(
-                        readMemory(model.indices.base + byteOffset, count * format.bytes),
-                        format.bytes));
+                    const bytes = readMemory(model.indices.base + byteOffset, count * format.bytes);
+                    dumpIndexed(model, prepared, indicesFrom(bytes, format.bytes));
+                    noteDumpIndices(bytes);
                 }
                 return;
             }
@@ -2974,11 +3086,25 @@ export function createRenderer(options){
             }
             if (checks.length > 0)
             {
-                read = frame.copyOut(checks.map(check=>({
-                    buffer: check.vertices.gpu,
-                    offset: check.vertices.offset + check.offset,
-                    size: check.bytes.byteLength,
-                })));
+                read = frame.copyOut(checks.flatMap(check=>[
+                    {
+                        buffer: check.vertices.gpu,
+                        offset: check.vertices.offset + check.offset,
+                        size: check.bytes.byteLength,
+                    },
+                    {
+                        buffer: check.block.buffer,
+                        offset: check.block.offset,
+                        size: check.uniforms.byteLength,
+                    },
+                    ...(check.indices
+                        ? [{
+                            buffer: check.indices.buffer.gpu,
+                            offset: check.indices.buffer.offset,
+                            size: check.indices.bytes.byteLength,
+                        }]
+                        : []),
+                ]));
             }
         }
         finally
@@ -3002,9 +3128,15 @@ export function createRenderer(options){
         if (read)
         {
             const held = await read();
-            checks.forEach((check, index)=>{
-                recorded.dump[check.dump] += ` ${describeCheck(check, held[index])}`;
-            });
+            let next = 0;
+            for (const check of checks)
+            {
+                recorded.dump[check.dump] += ` ${describeCheck(check, held[next++])}`
+                    + ` ${describeBytes('ugpu', check.uniforms, held[next++])}`
+                    + (check.indices
+                        ? ` ${describeBytes('igpu', check.indices.bytes, held[next++])}`
+                        : '');
+            }
         }
     }
 
@@ -3047,7 +3179,12 @@ export function createRenderer(options){
             }
             const pipeline = outcome.value;
             pass.setPipeline(pipeline.gpu);
-            const entries = [{ binding: 0, resource: pass.uniforms(command.uniforms) }];
+            const block = pass.uniforms(command.uniforms);
+            if (command.check)
+            {
+                command.check.block = block;
+            }
+            const entries = [{ binding: 0, resource: block }];
             command.stageBindings.forEach((/** @type {any} */ stage, /** @type {number} */ index)=>{
                 entries.push(
                     { binding: 1 + index * 2, resource: stage.view },

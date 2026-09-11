@@ -197,6 +197,9 @@ function isTransformType(type){
  *     Where "this call succeeded and did not do all of what it promises" goes.
  * @property {string} [skipTexture]
  *     Drop every draw that samples the texture with this dump id.
+ * @property {boolean} [fog]
+ *     Whether fog is applied at all. Off, every draw renders as if the
+ *     program had never enabled it: a frame that clears up with it was fog.
  */
 
 /**
@@ -291,14 +294,14 @@ function reportPresentParameters(parameters){
 export function createDirect3D8(options = {}){
     const {
         backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture, ...caps
+        dumpDraws, maxDraws, divergence, skipTexture, fog, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
         backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture,
+        dumpDraws, maxDraws, divergence, skipTexture, fog,
     };
     if (backend && !readMemory)
     {
@@ -570,6 +573,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             maxDraws: services.maxDraws,
             divergence: services.divergence,
             skipTexture: services.skipTexture ?? null,
+            fog: services.fog,
         })
         : null;
 

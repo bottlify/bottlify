@@ -76,7 +76,9 @@ export function createBackend(options){
     const uniforms = createUniformPool({
         device,
         queue,
-        usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+        // Readable back, so a frame's dump can compare the block a draw was
+        // shaded with against the one recorded for it; the flag costs nothing.
+        usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST | BufferUsage.COPY_SRC,
     });
 
     /**
