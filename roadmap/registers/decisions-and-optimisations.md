@@ -695,3 +695,26 @@ method list, and a method is reached through the adapter the call arrived on. Me
 5,079 objects published on 210 stubs, 1,606 slots in use, no refusal, textures stable at
 about 1,600, heap steady at 168 MB, the match running with its terrain, units and panels
 drawn.
+
+## A picture codec a program ships is hosted, as the library it links
+
+The title decodes every JPEG-compressed texture through the Intel JPEG Library it ships,
+and that library's inner loops -- Huffman, inverse transform, colour planes -- are pure
+arithmetic that the emulated path runs at a small fraction of native speed. Measured in a
+match: 5.7% of the guest's time was in that library, on top of what the title's own code
+costs, and each texture arriving mid-fight was a decode on the frame's critical path.
+
+**The decision: host the library by its export contract**, the same rule as the MPEG
+provider before it. `ijl15.dll` is a redistributable, imported by ordinal, and its whole
+public surface is six functions over one structure; the media layer now publishes those
+functions and a baseline JPEG decoder of its own answers them, so any program shipping the
+library gets the host path without knowing it. Two things about that structure were learned
+from the program's own memory rather than from a header: the DIB pointer is its second word
+and the channel count precedes the colour space on both the DIB and the JPEG side; and the
+rows are delivered in the picture's order for a positive height -- a texture atlas delivered
+upside down hands the program the wrong cells, which showed as black tiles with the edge
+variations of their neighbours. The decoder is checked byte-for-byte against the shipped
+textures' own mips decoded by a second implementation (at most one level apart), and against
+its own encoder for the layouts a texture library uses. Measured after: the library gone from
+the guest's share, 1,877 decodes of a map load costing 1.9 s of host time in total, terrain
+and panels correct.

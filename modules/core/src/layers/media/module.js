@@ -5,6 +5,7 @@
  */
 
 import { createDecoder } from './internal/decoder.js';
+import { createIjlLibrary } from './internal/ijl.js';
 
 /**
  * media -- the video and audio inside a cinematic, decoded.
@@ -26,6 +27,8 @@ let binary = null;
 let loading = null;
 /** @type {string[]} */
 let issues = [];
+/** @type {ReturnType<typeof createIjlLibrary> | null} */
+let ijl = null;
 
 export const mediaModule = {
     name: 'media',
@@ -41,6 +44,15 @@ export const mediaModule = {
         loading = null;
         issues = [];
         binary = config?.wasmBytes ?? null;
+        // The JPEG library a program ships beside itself, hosted: it reaches
+        // guest memory through the thunks the assembling caller hands down,
+        // the same way the sound layer's hosted provider does.
+        ijl = config?.readMemory && config?.writeMemory && config?.allocate
+            ? createIjlLibrary({
+                readMemory: config.readMemory, writeMemory: config.writeMemory,
+                allocate: config.allocate, warn: config.warn,
+            })
+            : null;
         if (!binary)
         {
             issues.push('No decoder binary was configured: nothing can be played.');
@@ -81,6 +93,10 @@ export const mediaModule = {
             closeAll(){
                 decoder?.closeAll();
             },
+            /** The libraries this layer stands in for, keyed as an import names them. */
+            libraries: ()=>({ ...(ijl?.libraries ?? {}) }),
+            /** Their exports by ordinal, for a program that imports by number. */
+            ordinals: ()=>({ ...(ijl?.ordinals ?? {}) }),
         };
     },
 
@@ -96,6 +112,7 @@ export const mediaModule = {
                 // with no binary at all until this is read.
                 configured: binary !== null,
                 ...(decoder ? decoder.diagnostics() : {}),
+                jpeg: ijl ? ijl.diagnostics() : null,
             },
             issues: [...issues],
         };
@@ -107,5 +124,6 @@ export const mediaModule = {
         loading = null;
         binary = null;
         issues = [];
+        ijl = null;
     },
 };

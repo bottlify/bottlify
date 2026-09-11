@@ -17,6 +17,7 @@ export default [
             'tools/cdp_test/reports/**',
             '.ghidra/**',
             '.ghidra-home/**',
+            'dbg/**',
             '.certs/**',
             'roadmap/**',
             // The launcher is its own application, with its own package.json,

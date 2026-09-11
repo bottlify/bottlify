@@ -1434,7 +1434,7 @@ async function buildApp(options){
         'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
         'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
         'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio', 'Mp3dec.asi': 'audio',
-        'quartz.dll': 'video', 'blizzard.ax': 'video',
+        'quartz.dll': 'video', 'blizzard.ax': 'video', 'ijl15.dll': 'video',
         'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
         'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
         'WININET.dll': 'net',
@@ -1528,6 +1528,14 @@ async function buildApp(options){
             // the assembling caller's decision rather than something to fetch
             // from inside a worker. Absent, the layer comes up and says so.
             wasmBytes: options.media?.wasmBytes,
+            // The hosted JPEG library reads a program's buffers and writes its
+            // pictures; handed the same thunks the sound layer's provider gets.
+            readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+                core.api('memory').readBytes(address, length),
+            writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+                core.api('memory').writeBytes(address, bytes),
+            allocate: (/** @type {number} */ bytes)=>core.api('win32').heap().allocate(bytes),
+            warn: (/** @type {string} */ message)=>events.emit('divergence', { api: 'ijl15', detail: message }),
         },
         log: {
             // Every call area starts switched off. A short run makes tens of
@@ -2088,7 +2096,10 @@ async function buildApp(options){
     // instruction, not when something first asks for it. An address taken early
     // has to be the address that works later (§13.3), and a module conjured on
     // demand cannot promise that.
-    const ordinalsOf = win32.ordinals ? win32.ordinals() : {};
+    const ordinalsOf = {
+        ...(win32.ordinals ? win32.ordinals() : {}),
+        ...(core.api('media').ordinals?.() ?? {}),
+    };
     // The drawing APIs are libraries like any other as far as a program is
     // concerned: it imports Direct3DCreate8 exactly as it imports CreateFileA,
     // and nothing about how they are reached should differ.
@@ -2097,6 +2108,7 @@ async function buildApp(options){
         ...graphics.libraries?.() ?? {},
         ...audio.libraries?.() ?? {},
         ...input.libraries?.() ?? {},
+        ...core.api('media').libraries?.() ?? {},
     };
     Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
