@@ -586,10 +586,13 @@ three options: stubbing the whole middleware replaces a library the program ship
 correctly, and patching the emulator for one decoder's hot loop is a per-title fix by another
 name.
 
-Two things had to be learned from the running middleware rather than from documentation: the
+Three things had to be learned from the running middleware rather than from documentation: the
 size it gives at open is its own read buffer (4096 bytes for a stream of megabytes), so the
-stream is read until a read answers nothing; and each read names its offset, which the callback
-takes either way. Two generic pieces of the process came with it: a synthesised module may have
+stream is read until a read answers nothing; every read continues from where the last stopped,
+because a read that names an offset outside the window the middleware holds was measured making
+it copy a negative count (hundreds of megabytes past the end of guest memory, seen as the page
+hanging); and after a seek the middleware serves again from the byte named, so what is already
+held is dropped on arrival rather than appended. Two generic pieces of the process came with it: a synthesised module may have
 an entry point, run on the thread that first asks for the module by LoadLibrary, and a module is
 known by its file name however it was asked for. Measured on the title through the launcher: the
 provider registered, the music opened through it, samples came out at the stream's rate, and the

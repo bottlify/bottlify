@@ -3339,6 +3339,23 @@ async function buildApp(options){
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),
+            /**
+             * Which image an address belongs to, or null: a stack of return
+             * addresses is a list of numbers until each is given its module.
+             *
+             * @param {number} address
+             */
+            moduleAt: address=>{
+                const at = address >>> 0;
+                for (const module of byName.values())
+                {
+                    if (at >= module.base && at < module.base + (module.size ?? 0))
+                    {
+                        return { name: module.name, base: module.base, offset: at - module.base };
+                    }
+                }
+                return null;
+            },
         },
 
         /**

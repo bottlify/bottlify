@@ -165,6 +165,8 @@ const STREAM_TABLE = [
  * @property {number} inputAt        how many of them
  * @property {boolean} inputDone     the callback had nothing more
  * @property {number} scannedAt      where the frame scan resumes
+ * @property {number} discard        bytes of the next reads to drop: the library
+ *                                   re-serves them after a seek back into what is held
  * @property {import('./mp3.js').Frame[]} frames
  * @property {import('./mp3.js').FrameHeader} first
  * @property {import('./mp3.js').DecoderStream} decoder
@@ -317,9 +319,11 @@ export function createMp3Provider(host){
      * The size given at open is not a limit. The library was measured naming
      * its own read buffer there -- four kilobytes for a stream of megabytes --
      * and it answers each read with at most that much, so the stream is read
-     * until a read answers nothing. Every read names its offset, which a
-     * callback reading sequentially and one seeking to the offset both take
-     * the same way.
+     * until a read answers nothing. Every read continues from where the last
+     * one stopped (an offset of -1): the callback takes a named offset only
+     * inside the window it holds, and past that window it was measured
+     * copying a negative count -- hundreds of megabytes over the end of the
+     * guest's memory.
      *
      * @param {Stream} stream @param {any} thread
      */
@@ -329,22 +333,25 @@ export function createMp3Provider(host){
             scratch = allocate(FETCH_CHUNK);
         }
         const read = (await callGuest(stream.fetch,
-            [stream.user, scratch, FETCH_CHUNK, stream.inputAt], thread)) | 0;
+            [stream.user, scratch, FETCH_CHUNK, -1], thread)) | 0;
         if (read <= 0)
         {
             stream.inputDone = true;
         }
         else
         {
-            if (stream.inputAt + read > stream.input.length)
+            const skip = Math.min(stream.discard, read);
+            stream.discard -= skip;
+            const fresh = read - skip;
+            if (stream.inputAt + fresh > stream.input.length)
             {
                 const grown = new Uint8Array(
-                    Math.max(stream.input.length * 2, stream.inputAt + read));
+                    Math.max(stream.input.length * 2, stream.inputAt + fresh));
                 grown.set(stream.input.subarray(0, stream.inputAt));
                 stream.input = grown;
             }
-            stream.input.set(readMemory(scratch, read), stream.inputAt);
-            stream.inputAt += read;
+            stream.input.set(readMemory(scratch + skip, fresh), stream.inputAt);
+            stream.inputAt += fresh;
         }
         const from = stream.scannedAt === 0 ? id3Length(stream.input.subarray(0, stream.inputAt))
             : stream.scannedAt;
@@ -552,6 +559,7 @@ export function createMp3Provider(host){
                         inputAt: 0,
                         inputDone: false,
                         scannedAt: 0,
+                        discard: 0,
                         frames: [],
                         first: /** @type {any} */ (null),
                         decoder: /** @type {any} */ (null),
@@ -651,7 +659,6 @@ export function createMp3Provider(host){
                     {
                         return ASI_NOERR;
                     }
-                    const thread = currentThread();
                     const target = offset >>> 0;
                     const land = ()=>{
                         let index = stream.frames.findIndex(frame=>frame.offset >= target);
@@ -663,19 +670,27 @@ export function createMp3Provider(host){
                         note(`seek #${stream.handle} to=${target} frame=${index}`);
                         return ASI_NOERR;
                     };
-                    if (target < stream.scannedAt || stream.inputDone)
+                    // The library has moved its own stream to the byte named
+                    // and serves from there: what it re-serves of the bytes
+                    // already held is dropped on arrival, and a seek past
+                    // what is held leaves the bytes between unread -- the
+                    // next read starts at the byte named, and so does the
+                    // frame scan.
+                    if (target > stream.inputAt && !stream.inputDone)
                     {
+                        if (target > stream.input.length)
+                        {
+                            const grown = new Uint8Array(Math.max(stream.input.length * 2, target));
+                            grown.set(stream.input.subarray(0, stream.inputAt));
+                            stream.input = grown;
+                        }
+                        stream.inputAt = target;
+                        stream.scannedAt = target;
+                        stream.discard = 0;
                         return land();
                     }
-                    // Past what was read: read up to it, so the frame it names
-                    // is known before the position is chosen.
-                    return (async()=>{
-                        while (stream.scannedAt <= target && !stream.inputDone)
-                        {
-                            await readMore(stream, thread);
-                        }
-                        return land();
-                    })();
+                    stream.discard = Math.max(0, stream.inputAt - target);
+                    return land();
                 },
             },
 

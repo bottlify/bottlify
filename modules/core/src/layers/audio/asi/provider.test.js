@@ -51,6 +51,8 @@ function fixture(options = {}){
     const chunk = options.chunk ?? 4096;
     /** @type {{ entry: number, args: number[], thread: any }[]} */
     const calls = [];
+    /** Where the library's own stream stands. */
+    let fileAt = 0;
     /** @type {Map<string, number>} */
     const exports = new Map();
     let nextExport = EXPORTS_AT;
@@ -112,13 +114,15 @@ function fixture(options = {}){
             if (entry === FETCH)
             {
                 const [, dest, ask, offset] = args;
-                // "Continue from where you were" is not understood: nothing.
-                if (offset === -1)
+                // The library's own convention: -1 continues, and a named
+                // offset repositions its stream.
+                if (offset !== -1)
                 {
-                    return Promise.resolve(0);
+                    fileAt = offset;
                 }
-                const part = file.subarray(offset, offset + Math.min(ask, chunk));
+                const part = file.subarray(fileAt, fileAt + Math.min(ask, chunk));
                 bytes.set(part, dest);
+                fileAt += part.length;
                 return Promise.resolve(part.length);
             }
             return Promise.resolve(0);
@@ -148,6 +152,10 @@ function fixture(options = {}){
         bytes, view, calls, provider, table, exports, file,
         fetches: ()=>calls.filter(call=>call.entry === FETCH)
             .map(call=>[call.args[2], call.args[3]]),
+        /** Repositions the library's stream, as it does itself before a seek. */
+        reposition: (/** @type {number} */ at)=>{
+            fileAt = at;
+        },
         release,
         fed: ()=>fedCount,
         flushed: ()=>flushed,
@@ -248,8 +256,8 @@ test('opening a stream reads until its first frame and describes it', async()=>{
     // for a stream of megabytes, so it must not cap the reads.
     const handle = await f.call('ASI_stream_open', [0x55, FETCH, 4096]);
     assert.equal(handle, 1);
-    assert.deepEqual(f.fetches(), [[0x10000, 0]],
-        'one read, from offset zero; the library answered its own chunk');
+    assert.deepEqual(f.fetches(), [[0x10000, -1]],
+        'one read, continuing from wherever the library stands; it answered its own chunk');
     assert.equal(f.calls.find(call=>call.entry === FETCH)?.args[0], 0x55, 'the user word');
     assert.equal(f.fed(), 3, 'the last frame waits to be confirmed by what follows it');
 
@@ -268,7 +276,7 @@ test('opening a stream reads until its first frame and describes it', async()=>{
     assert.equal(attribute(ATTRIB.MINIMUM_INPUT_BLOCK_SIZE), 0x1000);
 });
 
-test('the rest of a stream is read as samples are asked for, a named offset each time', async()=>{
+test('the rest of a stream is read as samples are asked for, continuing each time', async()=>{
     const file = mp3Stream(40); // 16680 bytes: five chunks of 4096
     const f = fixture({ file, held: true });
     const handle = await f.call('ASI_stream_open', [1, FETCH, 4096]);
@@ -285,9 +293,8 @@ test('the rest of a stream is read as samples are asked for, a named offset each
     assert.equal(await pending, perFrame * 12);
     assert.equal(f.view.getInt16(buffer, true), 1);
     assert.equal(f.view.getInt16(buffer + perFrame * 11, true), 12);
-    const offsets = f.fetches().map(([, offset])=>offset);
-    assert.deepEqual(offsets.slice(0, 2), [0, 4096], 'each read names where it starts');
-    assert.ok(offsets.every(offset=>offset !== -1));
+    assert.ok(f.fetches().every(([, offset])=>offset === -1),
+        'no read names an offset: the library serves sequentially');
 
     // Everything else: the reads reach the end, the decoder is flushed, and the
     // stream ends with a zero.
@@ -300,7 +307,7 @@ test('the rest of a stream is read as samples are asked for, a named offset each
     assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame]), 0);
     assert.equal(f.call('ASI_stream_attribute', [handle, ATTRIB.PERCENT_DONE]), 97,
         'against what was read, since the size word was not the stream');
-    assert.deepEqual(f.fetches().at(-1), [0x10000, file.length], 'the read that answered nothing');
+    assert.deepEqual(f.fetches().at(-1), [0x10000, -1], 'the read that answered nothing');
     assert.equal(f.provider.diagnostics().samplesOut, 40 * 1152 * 2);
 });
 
@@ -336,17 +343,32 @@ test('seeking names a byte of the input, and lands on the frame that holds it', 
     assert.equal(f.provider.diagnostics().open, 0);
 });
 
-test('a seek past what was read reads up to it first', async()=>{
+test('a seek past what is held continues from the byte named; back to the start replays', async()=>{
     const file = mp3Stream(40);
     const f = fixture({ file });
     const handle = await f.call('ASI_stream_open', [1, FETCH, file.length]);
-    const seek = f.call('ASI_stream_seek', [handle, 417 * 30]);
-    assert.ok(seek instanceof Promise);
-    assert.equal(await seek, 0);
-    assert.ok(f.fetches().length >= 4, 'read on to the frame named');
+    // The library has moved its stream to the byte named before asking, and
+    // serves from there: the bytes between are never seen.
+    f.reposition(417 * 30);
+    assert.equal(f.call('ASI_stream_seek', [handle, 417 * 30]), 0);
     const buffer = 0x80000;
+    const pending = f.call('ASI_stream_process', [handle, buffer, 1152 * 4]);
+    assert.equal(await pending, 1152 * 4);
+    // The tenth frame fed, and it is the one at the byte named.
+    assert.equal(f.view.getInt16(buffer, true), 10);
+    assert.equal(f.provider.streams().get(1)?.frames[9]?.offset, 417 * 30);
+    assert.ok(f.fetches().every(([, offset])=>offset === -1), 'every read continued');
+    // To the end, then back to the start: what is held replays, and the bytes
+    // the library serves again are dropped rather than appended.
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, 1152 * 4 * 60]), 1152 * 4 * 9);
+    const held = f.provider.streams().get(1)?.frames.length;
+    f.reposition(0);
+    assert.equal(f.call('ASI_stream_seek', [handle, 0]), 0);
     assert.equal(f.call('ASI_stream_process', [handle, buffer, 1152 * 4]), 1152 * 4);
-    assert.equal(f.view.getInt16(buffer, true), 31);
+    assert.equal(f.view.getInt16(buffer, true), 1);
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, 1152 * 4 * 60]),
+        1152 * 4 * ((held ?? 0) - 1));
+    assert.equal(f.provider.streams().get(1)?.frames.length, held, 'no frame twice');
 });
 
 test('a preference is kept and its previous value returned', async()=>{
