@@ -34,7 +34,8 @@ import {
 import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
-    listIndices, multiplyMatrices, packLight, pipelineStateOf, screenExtent, transformPosition,
+    HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
+    screenExtent, transformPosition,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -44,6 +45,19 @@ import { viewportState } from '../webgpu/internal/viewport.js';
 import {
     clear as referenceClear, createReferenceSurface, fillRect, toBase64,
 } from '../webgpu/internal/reference.js';
+
+/**
+ * The sampler state of stage zero as the last uniform block on the queue carries it.
+ *
+ * @param {any} gpu the recording device
+ */
+function stageFlagsWritten(gpu){
+    const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+        call.buffer.descriptor.label.startsWith('uniforms'));
+    const last = writes[writes.length - 1].bytes;
+    return new DataView(last.buffer, last.byteOffset, last.byteLength)
+        .getUint32(UNIFORM_AT.stage0 * 4, true);
+}
 
 /** Where the device hands out storage from; the fixture backs it with real bytes. */
 const RAM_BASE = 0x40000000;
@@ -648,7 +662,7 @@ test('recorded: a draw binds its pipeline, its stream and a viewport inside its 
     out.buffer.release();
 });
 
-test('recorded: two draws with different transforms in one pass get their own uniforms', async()=>{
+test('recorded: two draws with different transforms in one pass get their own offsets', async()=>{
     const h = harness();
     const { device, gpu } = h;
     assert.equal(device.BeginScene(), D3D_OK);
@@ -663,12 +677,15 @@ test('recorded: two draws with different transforms in one pass get their own un
     const blocks = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
         call.buffer.descriptor.label.startsWith('uniforms'));
     assert.equal(blocks.length, 2);
-    assert.notEqual(blocks[0].buffer, blocks[1].buffer,
-        'one buffer rewritten twice would show both draws the second matrix');
+    assert.equal(blocks[0].buffer, blocks[1].buffer, 'one ring');
+    assert.notEqual(blocks[0].bufferOffset, blocks[1].bufferOffset,
+        'one block rewritten twice would show both draws the second matrix');
     assert.equal(new Float32Array(blocks[0].bytes.buffer, blocks[0].bytes.byteOffset, 16)[12], 0);
     assert.equal(new Float32Array(blocks[1].bytes.buffer, blocks[1].bytes.byteOffset, 16)[12], 5);
-    const groups = gpu.of('setBindGroup').map((/** @type {any} */ call)=>call.group);
-    assert.notEqual(groups[0], groups[1], 'and each draw bound its own group');
+    const bound = gpu.of('setBindGroup');
+    assert.equal(bound[0].group, bound[1].group, 'and both draws bound the one group');
+    assert.deepEqual(bound.map((/** @type {any} */ call)=>call.offsets),
+        [[blocks[0].bufferOffset], [blocks[1].bufferOffset]], 'each at its own offset');
     assert.equal(gpu.count('beginRenderPass'), 1, 'in one pass');
     assert.equal(gpu.count('createRenderPipeline'), 1,
         'with one pipeline: the state did not change');
@@ -892,13 +909,13 @@ test('recorded: a second stage reusing coordinate set zero is not cut for its ow
         assert.equal(diagnostics.cascade.noCoordSet, 0);
         assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
         const code = gpu.of('createShaderModule')[0].descriptor.code;
-        assert.match(code, /textureSample\(texture1, sampler1, input\.texCoord0\)/,
+        assert.match(code, /sampleStage1\(input\.texCoord0\)/,
             'stage one samples the set it named, not the set of its own number');
     });
 
 test('recorded: a sampler follows the stage filter and address states', async()=>{
     const h = harness();
-    const { device } = h;
+    const { device, gpu } = h;
     const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([1, 2, 3, 4]));
     assert.equal(device.SetTexture(0, texture), D3D_OK);
     device.SetTextureStageState(0, D3DTSS.MAGFILTER, D3DTEXF.LINEAR);
@@ -911,12 +928,32 @@ test('recorded: a sampler follows the stage filter and address states', async()=
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
 
+    // One hardware sampler for every draw, whatever the stage asked: the
+    // request travels in the block and the shader applies it. A device was
+    // measured keeping one sampler in force for every draw of a run no matter
+    // which group each draw bound, so nothing in the picture may depend on it.
     assert.equal(h.samplers.length, 1);
-    const descriptor = h.samplers[0].descriptor;
-    assert.equal(descriptor.magFilter, 'linear');
-    assert.equal(descriptor.minFilter, 'nearest', 'the default is point');
-    assert.equal(descriptor.addressModeU, 'clamp-to-edge');
-    assert.equal(descriptor.addressModeV, 'mirror-repeat');
+    assert.deepEqual(h.samplers[0].descriptor,
+        { label: h.samplers[0].descriptor.label, ...HARDWARE_SAMPLER });
+    const flags = stageFlagsWritten(gpu);
+    assert.equal(flags & 3, 2, 'u clamps');
+    assert.equal((flags >> 2) & 3, 1, 'v mirrors');
+    assert.equal((flags >> 4) & 1, 0, 'magnification is linear');
+    assert.equal((flags >> 5) & 1, 1, 'minification is point, the default');
+    assert.equal((flags >> 6) & 3, 0, 'no mip filter: the top level alone');
+});
+
+test('the sampler state packs as the shader unpacks it', ()=>{
+    // Unit. Each field lands in its own bits, and MIPFILTER off pins the top
+    // level whatever the mip filter says.
+    const states = new Map([
+        [D3DTSS.ADDRESSU, D3DTADDRESS.MIRROR], [D3DTSS.ADDRESSV, D3DTADDRESS.CLAMP],
+        [D3DTSS.MAGFILTER, D3DTEXF.POINT], [D3DTSS.MINFILTER, D3DTEXF.LINEAR],
+        [D3DTSS.MIPFILTER, D3DTEXF.LINEAR], [D3DTSS.MAXMIPLEVEL, 3],
+    ]);
+    assert.equal(samplerFlagsOf(states), 1 | (2 << 2) | (1 << 4) | (0 << 5) | (2 << 6) | (3 << 8));
+    assert.equal((samplerFlagsOf(states, false) >> 6) & 3, 0, 'mips off: no mip mode');
+    assert.equal(samplerFlagsOf(new Map()), 1 << 4 | 1 << 5, 'the defaults: wrap, point, no mips');
 });
 
 test('recorded: a texture is uploaded after it is unlocked, and only then', async()=>{
@@ -1003,7 +1040,8 @@ test('recorded: a chain of levels goes up level by level, into a texture with th
             .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
             .map(shape);
         assert.deepEqual(uploads(), [[0, 4, 4, 10], [1, 2, 2, 20], [2, 1, 1, 30]]);
-        assert.equal(h.samplers[h.samplers.length - 1].descriptor.mipmapFilter, 'linear');
+        assert.equal((stageFlagsWritten(gpu) >> 6) & 3, 2,
+            'a linear mip filter, applied in the shader');
 
         // One level written again is one level sent again.
         fill(1, 40);
@@ -1015,9 +1053,7 @@ test('recorded: a chain of levels goes up level by level, into a texture with th
         assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.NONE), D3D_OK);
         draw();
         await h.present();
-        const pinned = h.samplers[h.samplers.length - 1].descriptor;
-        assert.equal(pinned.mipmapFilter, 'nearest');
-        assert.equal(pinned.lodMaxClamp, 0);
+        assert.equal((stageFlagsWritten(gpu) >> 6) & 3, 0, 'no mip mode: the top level alone');
 
         // The record says which levels the program wrote and what the smallest
         // hold, because a far surface is sampled out of those and nothing else
@@ -1033,7 +1069,7 @@ test('mips can be switched off for a run, and every sample comes from the top le
     // Recorded commands. The knob exists so two runs differ by the mip chain
     // and nothing else; it has to reach the sampler, or the runs are one.
     const h = harness({ mips: false });
-    const { device } = h;
+    const { device, gpu } = h;
     /** @type {{ texture?: any }} */
     const out = {};
     assert.equal(device.CreateTexture(4, 4, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out), D3D_OK);
@@ -1045,8 +1081,8 @@ test('mips can be switched off for a run, and every sample comes from the top le
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28), D3D_OK);
     assert.equal(device.EndScene(), D3D_OK);
     await h.present();
-    const sampler = h.samplers[h.samplers.length - 1].descriptor;
-    assert.equal(sampler.lodMaxClamp, 0, 'the top level alone, whatever the program asked');
+    assert.equal((stageFlagsWritten(gpu) >> 6) & 3, 0,
+        'the top level alone, whatever the program asked');
 });
 
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
@@ -1660,7 +1696,7 @@ test('the frame dump says where each draw landed and is empty unless asked for',
     assert.match(dumped[0], / view=0,0\+640x480@0..1 /,
         'the rectangle the draw was clipped and mapped by, which a later draw inherits');
     assert.match(dumped[0], / \[\] /, 'no stage is on, so the cascade is empty');
-    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 pipe\d+ vb\d+@\d+ gpu=same ugpu=same$/,
+    assert.match(dumped[0], / at=10,20 110,20 10,70 110,70 pipe\d+ vb\d+@\d+\([^)]*\) gpu=same ugpu=same$/,
         'the corners themselves, because the union of a draw`s quads is not one of them');
 });
 
@@ -1699,7 +1735,7 @@ test('the dump reads back what the GPU holds for a draw: vertices, block and ind
     const dumped = device.diagnostics().lastDump;
     assert.equal(dumped.length, 1);
     assert.match(dumped[0], / u=[0-9a-f]{8} /, 'the block the draw was shaded with, as one word');
-    assert.match(dumped[0], / pipe\d+ vb\d+@0 ib\d+@0 gpu=same ugpu=same igpu=same$/,
+    assert.match(dumped[0], / pipe\d+ vb\d+@0\([^)]*\) ib\d+@0\([^)]*\) gpu=same ugpu=same igpu=same$/,
         'the vertices, the block and the indices the GPU holds are the ones described');
     assert.deepEqual(device.diagnostics().failures ?? [], [], 'the read-back is not an error');
     vertices.buffer.release();
@@ -1873,14 +1909,25 @@ test('a probed draw reports what the target held right after it, inside the fram
     assert.equal(dumped.length, 2);
     for (const line of dumped)
     {
-        assert.match(line, / after=(0\/0\/0,){6}0\/0\/0 distinct=1$/,
-            'this device keeps no texels, so the copy reads as zeros of the right shape');
+        assert.match(line, / after=(0\/0\/0,){6}0\/0\/0 distinct=1 tex=(0\/0\/0,){6}0\/0\/0 distinct=1/);
+        for (const name of ['before', 'again', 'copy', 'host', 'hostuni', 'newpipe', 'newview',
+            'newsampler',
+            'newshader', 'quad', 'mirrorsampler', 'clampsampler'])
+        {
+            assert.match(line, new RegExp(` ${name}=(0\\/0\\/0,){6}0\\/0\\/0 distinct=1`),
+                `this device keeps no texels, so the ${name} copy reads as zeros`);
+        }
     }
-    assert.equal(gpu.count('copyTextureToBuffer'), 2, 'one copy per probed draw');
-    assert.equal(gpu.count('beginRenderPass'), 3, 'each copy reopens the pass');
+    assert.equal(gpu.count('copyTextureToBuffer'), 28,
+        'nine copies per probed draw: the target after it, the texture it sampled,'
+        + ' and the target after each of the seven redraws');
+    assert.equal(gpu.count('beginRenderPass'), 27, 'each copy reopens the pass');
     const reopened = gpu.of('beginRenderPass').slice(1).map((/** @type {any} */ call)=>
         call.descriptor.colorAttachments[0].loadOp);
-    assert.deepEqual(reopened, ['load', 'load'], 'and what was there is kept');
+    assert.equal(reopened.filter(op=>op === 'load').length, 4,
+        'the frame is reopened keeping what was there, before and after the redraws');
+    assert.equal(reopened.filter(op=>op === 'clear').length, 22,
+        'each redraw paints into a scratch target cleared first');
     const passes = gpu.of('beginRenderPass').map((/** @type {any} */ call)=>call.pass);
     for (const pass of passes.slice(1))
     {

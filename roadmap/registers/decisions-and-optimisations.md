@@ -517,3 +517,54 @@ in its own contract, including the case of "a library a program linked against d
 
 The obligation that comes with it: a substituted runtime reports its divergence the way every other
 one does, and it is chosen for what the target titles actually need rather than built speculatively.
+
+## Uniform blocks live in one ring and a bind group names nothing per draw
+
+Measured on a title's main menu through the launcher, before the change: about 140 bind groups
+created per frame and none reused over a run of 100,000 draws, because each draw's uniform block
+had a buffer of its own and a bind group is keyed on the buffers it names. Every group also costs
+the device a descriptor allocation, which is the kind of churn a driver can fall behind on.
+
+**The decision: uniform blocks go into one ring buffer and are bound at a dynamic offset.** A bind
+group then names a layout, a texture view, a sampler and the ring -- nothing that changes per
+draw -- so the cache of groups lives for the backend's life instead of one pass. Measured after the
+change on the same menu: 71 groups created in total against 890,000 reuses. The ring wraps rather
+than growing; a write into it is ordered by the queue after every submit before it, so a wrap can
+only overwrite blocks whose frames have finished. A block larger than the ring gets a larger ring.
+
+What this did not change: a sky that alternates between its texture and its corner texel on the
+machine this was measured on. That one was traced elsewhere (below), and the ring stays for what it
+is -- a removal of per-draw descriptor churn.
+
+## Sampler state is applied in the shader; every draw samples through one hardware sampler
+
+Traced on the machine this project develops on -- a virtual machine whose adapter is "Parallels
+Display Adapter (WDDM)", reached through Dawn's D3D12 backend, with Chrome's other adapters not
+available -- with a title's main-menu sky that alternated between its cloud texture and a flat
+wash of its corner texel for seconds at a time.
+
+What was established, each step on the real title and then on a page of a few hundred lines
+against the engine's own backend:
+
+- The flat state is, to the unit at seven probe points, the dome sampled with a clamp-to-edge
+  point sampler; the good state is its own repeat sampler.
+- Every input the draw has was read back or replaced: vertices, indices, the uniform block, the
+  pipeline, the shader module, the texture view, the sampler. A view of the texture's smallest
+  level took effect; no sampler ever did.
+- Eight draws of the dome in one pass, samplers alternating, all came out with one sampler; a
+  pass per draw changed nothing; samplers in a bind group of their own changed only which sampler
+  it was. Which one is in force switches every fifty-one frames whatever the frame rate.
+
+So on this device the sampler a draw binds is not the sampler it samples with, and no arrangement
+of bind groups makes it so. **The decision: one hardware sampler for all draws -- linear, repeating,
+whole chain -- and the Direct3D sampler state carried in the uniform block and applied by the
+shader.** Address modes fold or hold the coordinate and keep it inside the outermost texel centres
+so the repeating sampler cannot blend across an edge; point filtering snaps to texel centres; the
+mip mode chooses the level explicitly from derivatives taken before any of that. Nothing in the
+picture then depends on which sampler the device believes is bound. The cost is a few operations
+per sample and three words in the block; what it does not cover is anisotropy and border colour,
+neither of which the target titles were seen to use.
+
+The predecessor tree renders the same title on this machine without the symptom; a comparison of
+how the two build a frame (submit shape, uniform rings, bind-group keys and binding order, buffer
+sizes on binding, upload counts) found no difference that changed the outcome when tried here.

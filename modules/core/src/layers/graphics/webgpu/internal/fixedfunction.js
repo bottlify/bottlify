@@ -230,8 +230,7 @@ function argument(arg, stageIndex, coordSet){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
-        [D3DTA.TEXTURE]: `textureSample(texture${stageIndex}, sampler${stageIndex}, `
-            + `input.texCoord${coordSet})`,
+        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(input.texCoord${coordSet})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: 'input.specular',
     }[arg & D3DTA.SELECTMASK];
@@ -592,11 +591,15 @@ export function generateFixedFunction(state, layout){
     materialEmissive: vec4f,
     ambient: vec4f,
     eye: vec4f,
-    alphaRef: f32,${lightCount === 0 ? '' : `
+    alphaRef: f32,
+    stage0: u32,
+    stage1: u32,
+    stage2: u32,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length)}
+${sampleFunctions(state.stages.length)}
 struct VertexIn {
 ${inputs}
 };
@@ -652,6 +655,77 @@ function functionDeclarations(lighting, fogMode){
     return fog
         + (attenuates ? ATTENUATION_FUNCTION : '')
         + (lighting.lights.includes(D3DLIGHT.SPOT) ? SPOT_FUNCTION : '');
+}
+
+/**
+ * One coordinate under a Direct3D address mode, for the repeating sampler.
+ *
+ * Wrap is the sampler's own; mirror folds the coordinate; clamp holds it. A
+ * folded or held coordinate is then kept inside the outermost texel centres,
+ * because the sampler underneath repeats and would otherwise blend the edge
+ * with the far side of the texture.
+ */
+const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -> f32 {
+    if (mode == 0u) {
+        return t;
+    }
+    var folded = t;
+    if (mode == 1u) {
+        folded = 1.0 - abs(fract(t * 0.5) * 2.0 - 1.0);
+    }
+    let inset = 0.5 / max(texels, 1.0);
+    return clamp(folded, inset, 1.0 - inset);
+}
+`;
+
+/**
+ * The sampling of one stage, with the stage's sampler state read from the
+ * block: address modes, point filtering by snapping to texel centres, and the
+ * mip mode as an explicit level. The derivatives are taken from the raw
+ * coordinate first, in uniform control flow, whatever the mode then does.
+ *
+ * @param {number} count @returns {string}
+ */
+function sampleFunctions(count){
+    if (count === 0)
+    {
+        return '';
+    }
+    /** @type {string[]} */
+    const lines = [ADDRESS_FUNCTION];
+    for (let index = 0; index < count; index++)
+    {
+        const flags = index < 3 ? `uniforms.stage${index}` : '0u';
+        lines.push(`fn sampleStage${index}(raw: vec2f) -> vec4f {
+    let flags = ${flags};
+    let size = vec2f(textureDimensions(texture${index}, 0));
+    let dx = dpdx(raw * size);
+    let dy = dpdy(raw * size);
+    let levels = f32(textureNumLevels(texture${index}));
+    let lod = clamp(0.5 * log2(max(max(dot(dx, dx), dot(dy, dy)), 1.0e-12)),
+        f32((flags >> 8u) & 0xffu), max(levels - 1.0, 0.0));
+    let mipMode = (flags >> 6u) & 3u;
+    var level = 0.0;
+    if (mipMode == 1u) {
+        level = round(lod);
+    } else if (mipMode == 2u) {
+        level = lod;
+    }
+    let levelSize = max(floor(size / exp2(floor(level))), vec2f(1.0));
+    var uv = vec2f(addressCoordinate(raw.x, flags & 3u, levelSize.x),
+        addressCoordinate(raw.y, (flags >> 2u) & 3u, levelSize.y));
+    var point = (flags >> 4u) & 1u;
+    if (lod > 0.0) {
+        point = (flags >> 5u) & 1u;
+    }
+    if (point == 1u) {
+        uv = (floor(uv * levelSize) + 0.5) / levelSize;
+    }
+    return textureSampleLevel(texture${index}, sampler${index}, uv, level);
+}
+`);
+    }
+    return lines.join('\n');
 }
 
 /**

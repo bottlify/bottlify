@@ -70,7 +70,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '5e003f3ab4867f4d');
+    assert.equal(digest(first), '279f8a01f046905b');
 });
 
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{
@@ -112,7 +112,7 @@ test('no stages leaves the diffuse colour alone', ()=>{
     // for some operations, and emitting one for a subtract darkens the scene.
     const code = generate(baseState()).code;
     assert.match(code, /var current = input\.diffuse;/);
-    assert.doesNotMatch(code, /textureSample/);
+    assert.doesNotMatch(code, /sampleStage/);
 });
 
 test('each stage emits its own sample and reads the one before it', ()=>{
@@ -159,7 +159,7 @@ test('an argument slot the operation does not read is never built', ()=>{
     const fvf = FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
 
     const code = generate(baseState({ fvf, stages: [stage({})] })).code;
-    assert.doesNotMatch(code, /textureSample/,
+    assert.doesNotMatch(code, /sampleStage\d\(input/,
         'neither operation reads its second slot, so nothing samples');
 
     const selected = generate(baseState({
@@ -191,8 +191,14 @@ test('a stage samples the coordinate set it names, not its own number', ()=>{
         stages: [textured, textured],
     })).code;
 
-    assert.match(code, /textureSample\(texture1, sampler1, input\.texCoord0\)/);
+    assert.match(code, /sampleStage1\(input\.texCoord0\)/);
     assert.doesNotMatch(code, /texCoord1/, 'the vertex carries one set and only one is read');
+    // The stage samples through the one hardware sampler with its own state
+    // from the block: the address mode, the filters and the mip mode are
+    // applied in the shader, and the level is chosen there.
+    assert.match(code, /fn sampleStage1\(raw: vec2f\) -> vec4f \{\n {4}let flags = uniforms\.stage1;/);
+    assert.match(code, /textureSampleLevel\(texture1, sampler1, uv, level\)/);
+    assert.match(code, /fn addressCoordinate\(t: f32, mode: u32, texels: f32\) -> f32/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{

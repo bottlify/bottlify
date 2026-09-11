@@ -571,8 +571,16 @@ export const UNIFORM_AT = Object.freeze({
     ambient: 64,
     eye: 68,
     alphaRef: 72,
+    // Three scalars in the padding after alphaRef: the sampler state of the
+    // first three stages, packed as the shader unpacks it.
+    stage0: 73,
+    stage1: 74,
+    stage2: 75,
     lights: 76,
 });
+
+/** How many stages the block carries sampler state for. */
+export const SAMPLED_STAGES = 3;
 
 /** The block's own length, before any light is appended. */
 export const UNIFORM_FLOATS = UNIFORM_AT.lights;
@@ -654,6 +662,7 @@ function putDword(block, at, dword){
  * @property {ArrayLike<number>} [world]   Identity unless the draw is lit.
  * @property {Material} [material]
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
+ * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -690,6 +699,13 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const eye = values.eye ?? [0, 0, 0];
     put4(block, at.eye, eye[0], eye[1], eye[2], material.Power);
     block[at.alphaRef] = values.alphaRef / 255;
+    // Raw bit patterns, not colours: the shader reads these fields as u32.
+    const stages = values.stages ?? [];
+    const words = new Uint32Array(block.buffer, block.byteOffset, block.length);
+    for (let index = 0; index < SAMPLED_STAGES; index++)
+    {
+        words[at.stage0 + index] = (stages[index] ?? 0) >>> 0;
+    }
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -869,9 +885,10 @@ export function lightingOf(model, layout){
  * @param {RenderModel} model
  * @param {import('../webgpu/internal/pipeline.js').LightingState | null} [lighting]
  * @param {(floats: number) => Float32Array} [take]  Where the block's floats come from.
+ * @param {boolean} [mips]  False pins every sample to the top level.
  * @returns {Float32Array} the block an ordinary draw carries
  */
-export function uniformsOf(model, lighting, take){
+export function uniformsOf(model, lighting, take, mips = true){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
@@ -893,6 +910,7 @@ export function uniformsOf(model, lighting, take){
             dwordToFloat(rs('FOGDENSITY')),
         ],
         alphaRef: rs('ALPHAREF'),
+        stages: stageFlags(model, mips),
         material: model.material,
         ambient: rs('AMBIENT'),
         eye: eyePosition(view),
@@ -902,6 +920,16 @@ export function uniformsOf(model, lighting, take){
         lights: lighting ? enabledLights(model) : [],
     }, take);
 }
+
+/** @param {RenderModel} model @param {boolean} mips */
+const stageFlags = (model, mips)=>{
+    const flags = [];
+    for (let index = 0; index < SAMPLED_STAGES; index++)
+    {
+        flags.push(samplerFlagsOf(model.stageStates(index), mips));
+    }
+    return flags;
+};
 
 /** Scratch for the two products every draw forms; copied into the block at once. */
 const WORLD_VIEW = new Float32Array(16);
@@ -1101,6 +1129,58 @@ export function samplerDescriptorOf(states, mips = true){
 
 /** WebGPU's own default for the far end of the level range. */
 const LOD_MAX = 32;
+
+/** D3DTADDRESS, as the shader's two-bit address mode. */
+/** @type {Readonly<Record<number, number>>} */
+const ADDRESS_BITS = Object.freeze({
+    [D3DTADDRESS.WRAP]: 0,
+    [D3DTADDRESS.MIRROR]: 1,
+    [D3DTADDRESS.CLAMP]: 2,
+    [D3DTADDRESS.BORDER]: 2,
+    [D3DTADDRESS.MIRRORONCE]: 1,
+});
+
+/**
+ * A stage's sampler state packed for the shader, which applies it itself.
+ *
+ * Every draw samples through one hardware sampler -- linear, repeating,
+ * whole mip chain -- and the state a program set per stage is carried in the
+ * uniform block instead: address mode per axis (bits 0-3), point filtering
+ * for magnification and minification (bits 4-5), the mip mode (bits 6-7:
+ * none, point, linear) and the most detailed level allowed (bits 8-15).
+ * Measured reason: a device was seen to keep one sampler in force for every
+ * draw of a run regardless of the group each draw bound, for stretches of
+ * frames at a time, so a picture whose sampling depends on which sampler is
+ * bound is not a picture the device can be trusted with.
+ *
+ * @param {Map<number, number>} states  one stage's states
+ * @param {boolean} [mips]  False pins every sample to the top level.
+ * @returns {number}
+ */
+export function samplerFlagsOf(states, mips = true){
+    const get = (/** @type {number} */ state)=>states.get(state) ?? 0;
+    const mipFilter = mips ? get(D3DTSS.MIPFILTER) : D3DTEXF.NONE;
+    const mipMode = mipFilter === D3DTEXF.LINEAR ? 2 : mipFilter === D3DTEXF.NONE ? 0 : 1;
+    const point = (/** @type {number} */ filter)=>
+        filter === D3DTEXF.LINEAR || filter === D3DTEXF.ANISOTROPIC ? 0 : 1;
+    return (ADDRESS_BITS[get(D3DTSS.ADDRESSU)] ?? 0)
+        | ((ADDRESS_BITS[get(D3DTSS.ADDRESSV)] ?? 0) << 2)
+        | (point(get(D3DTSS.MAGFILTER)) << 4)
+        | (point(get(D3DTSS.MINFILTER)) << 5)
+        | (mipMode << 6)
+        | ((Math.min(255, Math.max(0, get(D3DTSS.MAXMIPLEVEL))) & 0xff) << 8);
+}
+
+/** The one sampler every draw samples through; the state is in the shader. */
+export const HARDWARE_SAMPLER = Object.freeze({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    mipmapFilter: 'linear',
+    addressModeU: 'repeat',
+    addressModeV: 'repeat',
+    lodMinClamp: 0,
+    lodMaxClamp: LOD_MAX,
+});
 
 /**
  * @param {number} flags D3DLOCK
@@ -1675,6 +1755,9 @@ export function createRenderer(options){
                 ? bytesToBase64(new Uint8Array(Uint16Array.from(indices).buffer))
                 : '-'};m:${Array.from(prepared.uniforms.subarray(
                 UNIFORM_AT.worldViewProjection, UNIFORM_AT.worldViewProjection + 16)).join(',')}`
+                + `;u:${bytesToBase64(new Uint8Array(prepared.uniforms.buffer,
+                    prepared.uniforms.byteOffset, prepared.uniforms.byteLength))}`
+                + `;s:${bytesToBase64(new TextEncoder().encode(JSON.stringify(state)))}`
             : '';
         const cascade = state.stages.map((/** @type {any} */ stage, /** @type {number} */ at)=>
             `${stage.colorOp}(${stage.colorArg1},${stage.colorArg2})`
@@ -1692,6 +1775,7 @@ export function createRenderer(options){
             : '';
         dump.push(`#${dump.length} ${where}${geometry64}`
             + ` fvf=0x${state.fvf.toString(16)} n=${drawn}`
+            + (indices ? ` base=${model.baseVertexIndex}` : '')
             + ` lit=${state.lighting ? state.lighting.lights.length : '-'}`
             + ` fog=${state.fogMode === D3DFOG.NONE ? '-' : fogSettingOf(model)}`
             + ` spec=${state.specularEnable ? 1 : 0}`
@@ -1942,7 +2026,56 @@ export function createRenderer(options){
             dump: dump.length - 1,
             probe: probeTexture !== null && prepared.textures.some(
                 (/** @type {any} */ texture)=>texture && textures.get(texture)?.id === probeTexture),
+            // The texture as it is on the device when this draw samples it:
+            // nothing else says what the sampler actually read.
+            sampled: probeTexture !== null
+                ? textures.get(prepared.textures.find((/** @type {any} */ texture)=>
+                    texture && textures.get(texture)?.id === probeTexture))?.gpu ?? null
+                : null,
             vertices: command.vertices,
+            // A pipeline of the same shader under another key, to draw with a
+            // pipeline object other than the cached one.
+            alternate: probeTexture !== null && recording
+                ? recording.pipelines.push(backend.pipelineFor(
+                    { ...prepared.state, colorWrite: prepared.state.colorWrite ^ 8 })) - 1
+                : -1,
+            // The same draw through a fragment shader whose source differs, so
+            // the module is compiled afresh; the alpha test it adds passes.
+            alternateShader: probeTexture !== null && recording
+                ? recording.pipelines.push(backend.pipelineFor(
+                    { ...prepared.state, alphaTest: true, alphaFunc: D3DCMP.GREATEREQUAL })) - 1
+                : -1,
+            // A pre-transformed quad that samples the same texture over the
+            // top of the target with plain coordinates: what the texture looks
+            // like to a draw with no transform at all.
+            quad: probeTexture !== null && recording
+                ? recording.pipelines.push(backend.pipelineFor({
+                    fvf: FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
+                    vertexShader: 0,
+                    pixelShader: 0,
+                    targetFormat: prepared.state.targetFormat,
+                    depthFormat: prepared.state.depthFormat,
+                    topology: 'triangle-list',
+                    depthTest: false,
+                    depthWrite: false,
+                    depthFunc: D3DCMP.ALWAYS,
+                    cullMode: D3DCULL.NONE,
+                    blend: false,
+                    srcBlend: D3DBLEND.ONE,
+                    destBlend: D3DBLEND.ZERO,
+                    blendOp: 1,
+                    colorWrite: 0xf,
+                    alphaTest: false,
+                    alphaFunc: D3DCMP.ALWAYS,
+                    fogMode: D3DFOG.NONE,
+                    stages: [{
+                        colorOp: 2, colorArg1: 2, colorArg2: 1,
+                        alphaOp: 2, alphaArg1: 2, alphaArg2: 1, texCoordIndex: 0,
+                    }],
+                    specularEnable: false,
+                    lighting: null,
+                })) - 1
+                : -1,
             bytes: vertices.slice(),
             // The block as recorded, because the arena it lives in is reused
             // before the read-back lands.
@@ -1954,6 +2087,54 @@ export function createRenderer(options){
                 (/** @type {any} */ entry)=>entry.name === 'texCoord0')?.offset,
         };
     };
+
+    /** @type {{ target: any, depth: any, width: number, height: number } | null} */
+    let probeScratch = null;
+    /**
+     * A target of the frame's size that the probe's redraws paint into, so a
+     * redraw that paints nothing is seen as the clear and not as the frame.
+     *
+     * @param {any} like  the frame's target
+     * @param {any} depth the frame's depth surface, or null
+     */
+    const probeScratchFor = (like, depth)=>{
+        if (!probeScratch || probeScratch.width !== like.width
+            || probeScratch.height !== like.height)
+        {
+            probeScratch = {
+                width: like.width,
+                height: like.height,
+                target: backend.createSurface({
+                    width: like.width,
+                    height: like.height,
+                    format: like.format,
+                    label: 'probe-target',
+                }),
+                depth: depth
+                    ? backend.createSurface({
+                        width: like.width, height: like.height, format: depth.format,
+                        label: 'probe-depth', usage: TextureUsage.RENDER_ATTACHMENT,
+                    })
+                    : null,
+            };
+        }
+        return probeScratch;
+    };
+
+    /** The pass a probe's redraw runs in: the scratch target, cleared, depth cleared. */
+    const probePass = (/** @type {any} */ frame, /** @type {any} */ scratch)=>frame.beginPass({
+        target: scratch.target,
+        clear: true,
+        clearValue: { r: 1, g: 0, b: 1, a: 1 },
+        depthStencilAttachment: scratch.depth
+            ? {
+                view: scratch.depth.view,
+                depthLoadOp: 'clear',
+                depthStoreOp: 'store',
+                depthClearValue: 1,
+            }
+            : undefined,
+    });
 
     /** Where a probe reads the target: a few points, and a grid for how varied it is. */
     const PROBE_POINTS = [[0.5, 0.125], [0.625, 0.2], [0.3125, 0.3125], [0.78, 0.4], [0.5, 0.52],
@@ -2251,13 +2432,19 @@ export function createRenderer(options){
     const scratchIndices = ring('scratch-indices',
         BufferUsage.INDEX | BufferUsage.COPY_DST, 1 << 18);
 
-    /** @param {Map<number, number>} states */
+    /**
+     * The one hardware sampler. What the stage asked for is in the block; the
+     * descriptor of the request is kept on the sampler for a probe.
+     *
+     * @param {Map<number, number>} states
+     */
     const samplerFor = states=>{
-        const descriptor = samplerDescriptorOf(states, mipsApplied);
+        const descriptor = { ...HARDWARE_SAMPLER };
         const key = Object.values(descriptor).join('|');
         const existing = samplers.get(key);
         if (existing)
         {
+            existing.probeDescriptor = samplerDescriptorOf(states, mipsApplied);
             return existing;
         }
         if (!createSampler)
@@ -2266,6 +2453,8 @@ export function createRenderer(options){
                 'graphics/d3d8: a textured draw needs a sampler factory and none was supplied');
         }
         const made = createSampler({ label: `sampler:${key}`, ...descriptor });
+        // Kept on the object for a probe that wants one just like it.
+        made.probeDescriptor = samplerDescriptorOf(states, mipsApplied);
         samplers.set(key, made);
         return made;
     };
@@ -2566,7 +2755,8 @@ export function createRenderer(options){
         // rather than worked out again there: both are already in hand and
         // neither can be recovered from the recorded command.
         return {
-            state, uniforms: uniformsOf(model, lighting, ensureFrame().arena.take), stageBindings,
+            state, uniforms: uniformsOf(model, lighting, ensureFrame().arena.take, mipsApplied),
+            stageBindings,
             layout, textures: cascade.textures, truncated: cascade.truncated,
         };
     };
@@ -3178,7 +3368,7 @@ export function createRenderer(options){
                     },
                     {
                         buffer: check.block.buffer,
-                        offset: check.block.offset,
+                        offset: check.block.offset + (check.block.dynamicOffset ?? 0),
                         size: check.uniforms.byteLength,
                     },
                     ...(check.indices
@@ -3221,7 +3411,33 @@ export function createRenderer(options){
                     + (check.indices
                         ? ` ${describeBytes('igpu', check.indices.bytes, held[next++])}`
                         : '')
-                    + (check.snapshot ? ` ${describeSnapshot(await check.snapshot())}` : '');
+                    + (check.before
+                        ? ` ${describeSnapshot(await check.before()).replace('after=', 'before=')}`
+                        : '')
+                    + (check.snapshot ? ` ${describeSnapshot(await check.snapshot())}` : '')
+                    + (check.sampledShot
+                        ? ` tex${describeSnapshot(await check.sampledShot())
+                            .replace('after=', '=')}`
+                        : '')
+                    + (check.again
+                        ? ` again${describeSnapshot(await check.again()).replace('after=', '=')}`
+                        : '')
+                    + (check.copy
+                        ? ` copy${describeSnapshot(await check.copy()).replace('after=', '=')}`
+                        : '')
+                    + (check.host
+                        ? ` host${describeSnapshot(await check.host()).replace('after=', '=')}`
+                        : '')
+                    + (check.quadShot
+                        ? ` quad${describeSnapshot(await check.quadShot()).replace('after=', '=')}`
+                        : '')
+                    + (await Promise.all(
+                        ['hostidx', 'hostuni', 'newpipe', 'newview', 'newsampler', 'newshader',
+                            'mirrorsampler', 'clampsampler', 'smallview']
+                            .map(async name=>check[name]
+                                ? ` ${name}${describeSnapshot(await check[name]())
+                                    .replace('after=', '=')}`
+                                : ''))).join('');
             }
         }
     }
@@ -3273,6 +3489,27 @@ export function createRenderer(options){
                 continue;
             }
             const pipeline = outcome.value;
+            if (command.check?.probe && opened)
+            {
+                // What the target held before this draw: a draw that seems to
+                // paint what was already there painted nothing.
+                command.check.before = frame.snapshot(opened.target);
+                pass = frame.beginPass({
+                    target: opened.target,
+                    clear: false,
+                    depthStencilAttachment: opened.depth
+                        ? depthAttachment({ depth: opened.depth })
+                        : undefined,
+                });
+                if (viewport)
+                {
+                    pass.setViewport(viewport);
+                }
+                if (scissor)
+                {
+                    pass.setScissor(scissor);
+                }
+            }
             pass.setPipeline(pipeline.gpu);
             const block = pass.uniforms(command.uniforms);
             if (command.check)
@@ -3283,8 +3520,11 @@ export function createRenderer(options){
                 // cache, and only the identities say which one lied.
                 command.check.bound = `pipe${resourceId(pipeline.gpu)}`
                     + ` vb${resourceId(command.vertices.gpu)}@${command.vertices.offset}`
+                    + `(${command.vertices.gpu.label ?? '?'},${command.vertices.gpu.size ?? '?'})`
                     + (command.indices
                         ? ` ib${resourceId(command.indices.gpu)}@${command.indices.offset}`
+                            + `(${command.indices.gpu.label ?? '?'},`
+                            + `${command.indices.gpu.size ?? '?'})`
                         : '')
                     + command.stageBindings.map((/** @type {any} */ stage)=>
                         ` tv${resourceId(stage.view)}/sm${resourceId(stage.sampler)}`).join('');
@@ -3313,6 +3553,249 @@ export function createRenderer(options){
                 // The target as this draw left it. The copy closes the pass,
                 // so one that keeps what is there is opened for the rest.
                 command.check.snapshot = frame.snapshot(opened.target);
+                if (command.check.sampled && !String(command.check.sampled.format).startsWith('bc'))
+                {
+                    command.check.sampledShot = frame.snapshot(command.check.sampled);
+                }
+                const scratch = probeScratchFor(opened.target, opened.depth);
+                pass = probePass(frame, scratch);
+                if (viewport)
+                {
+                    pass.setViewport(viewport);
+                }
+                if (scissor)
+                {
+                    pass.setScissor(scissor);
+                }
+                pass.setPipeline(pipeline.gpu);
+                pass.setBindings(0, pipeline.bindGroupLayout, entries);
+                pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+                if (command.indices)
+                {
+                    pass.setIndexBuffer(command.indices.gpu, command.indices.format,
+                        command.indices.offset);
+                    pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+                }
+                else
+                {
+                    pass.draw(command.count, 1, command.first);
+                }
+                command.check.again = frame.snapshot(scratch.target);
+                // The same vertices, twice more: from a fresh buffer the region
+                // was copied into on the device, and from one the program's own
+                // bytes were written into.
+                const check = command.check;
+                const length = check.bytes.byteLength;
+                const copied = backend.createDynamicBuffer({
+                    size: length,
+                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+                    label: 'probe-copy',
+                });
+                const written = backend.createDynamicBuffer({
+                    size: length,
+                    usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+                    label: 'probe-host',
+                });
+                const lock = written.lock(0, length, LockFlags.NOOVERWRITE);
+                lock.data.set(check.bytes);
+                written.unlock(lock);
+                frame.copyBuffer(command.vertices.gpu, command.vertices.offset + check.offset,
+                    copied.gpu, 0, length);
+                const hostIndices = check.indices
+                    ? backend.createDynamicBuffer({
+                        size: check.indices.bytes.byteLength,
+                        usage: BufferUsage.INDEX | BufferUsage.COPY_DST,
+                        label: 'probe-indices',
+                    })
+                    : null;
+                if (hostIndices)
+                {
+                    const held = hostIndices.lock(0, check.indices.bytes.byteLength,
+                        LockFlags.NOOVERWRITE);
+                    held.data.set(check.indices.bytes);
+                    hostIndices.unlock(held);
+                }
+                const hostBlock = backend.createDynamicBuffer({
+                    size: Math.ceil(check.uniforms.byteLength / 256) * 256,
+                    usage: BufferUsage.UNIFORM | BufferUsage.COPY_DST,
+                    label: 'probe-block',
+                });
+                {
+                    const held = hostBlock.lock(0, check.uniforms.byteLength,
+                        LockFlags.NOOVERWRITE);
+                    held.data.set(check.uniforms);
+                    hostBlock.unlock(held);
+                }
+                const alternate = check.alternate >= 0
+                    && pipelines[check.alternate]?.status === 'fulfilled'
+                    ? pipelines[check.alternate].value
+                    : null;
+                const stage0 = command.stageBindings[0];
+                const freshView = check.sampled
+                    ? check.sampled.texture.createView({ label: 'probe-view' })
+                    : null;
+                const freshSampler = createSampler && stage0?.sampler?.probeDescriptor
+                    ? createSampler({ ...stage0.sampler.probeDescriptor, label: 'probe-sampler' })
+                    : null;
+                /** @type {[string, Record<string, any>][]} */
+                const variants = [
+                    ['copy', { vertices: copied.gpu }],
+                    ['host', { vertices: written.gpu }],
+                    ['hostidx', { indices: hostIndices }],
+                    ['hostuni', { block:
+                        {
+                            buffer: hostBlock.gpu,
+                            offset: 0,
+                            size: check.uniforms.byteLength,
+                            dynamicOffset: 0,
+                        } }],
+                    ['newpipe', { pipeline: alternate }],
+                    ['newview', { view: freshView }],
+                    ['newsampler', { sampler: freshSampler }],
+                    // A control: the same texture through a view of its smallest
+                    // level. A draw that still shows the top level is not drawing
+                    // with these entries at all.
+                    ['smallview', {
+                        view: check.sampled && (check.sampled.mipLevelCount ?? 1) > 1
+                            ? check.sampled.texture.createView({
+                                label: 'probe-small',
+                                baseMipLevel: check.sampled.mipLevelCount - 1,
+                                mipLevelCount: 1,
+                            })
+                            : null,
+                    }],
+                    // Two samplers that must change the picture if the binding
+                    // is honoured at all: one mirrors, one clamps and points.
+                    ['mirrorsampler', {
+                        sampler: createSampler && stage0?.sampler?.probeDescriptor
+                            ? createSampler({
+                                ...stage0.sampler.probeDescriptor,
+                                addressModeU: 'mirror-repeat',
+                                addressModeV: 'mirror-repeat',
+                                label: 'probe-mirror',
+                            })
+                            : null,
+                    }],
+                    ['clampsampler', {
+                        sampler: createSampler && stage0?.sampler?.probeDescriptor
+                            ? createSampler({
+                                ...stage0.sampler.probeDescriptor,
+                                magFilter: 'nearest',
+                                minFilter: 'nearest',
+                                addressModeU: 'clamp-to-edge',
+                                addressModeV: 'clamp-to-edge',
+                                lodMaxClamp: 0,
+                                label: 'probe-clamp',
+                            })
+                            : null,
+                    }],
+                    ['newshader', {
+                        pipeline: check.alternateShader >= 0
+                            && pipelines[check.alternateShader]?.status === 'fulfilled'
+                            ? pipelines[check.alternateShader].value
+                            : null,
+                    }],
+                ];
+                for (const [name, variant] of variants)
+                {
+                    if (Object.values(variant).some(value=>!value))
+                    {
+                        continue;
+                    }
+                    const drawPipeline = variant.pipeline ?? pipeline;
+                    const drawEntries = entries.map((/** @type {any} */ entry)=>{
+                        if (entry.binding === 0 && variant.block)
+                        {
+                            return { binding: 0, resource: variant.block };
+                        }
+                        if (entry.binding === 1 && variant.view)
+                        {
+                            return { binding: 1, resource: variant.view };
+                        }
+                        if (entry.binding === 2 && variant.sampler)
+                        {
+                            return { binding: 2, resource: variant.sampler };
+                        }
+                        return entry;
+                    });
+                    pass = probePass(frame, scratch);
+                    if (viewport)
+                    {
+                        pass.setViewport(viewport);
+                    }
+                    pass.setPipeline(drawPipeline.gpu);
+                    pass.setBindings(0, drawPipeline.bindGroupLayout, drawEntries);
+                    pass.setVertexBuffer(0, variant.vertices ?? command.vertices.gpu,
+                        variant.vertices ? 0 : command.vertices.offset);
+                    if (command.indices)
+                    {
+                        if (variant.indices)
+                        {
+                            pass.setIndexBuffer(variant.indices.gpu, command.indices.format, 0);
+                        }
+                        else
+                        {
+                            pass.setIndexBuffer(command.indices.gpu, command.indices.format,
+                                command.indices.offset);
+                        }
+                        pass.drawIndexed(command.count, 1, command.first,
+                            variant.vertices ? 0 : command.baseVertex);
+                    }
+                    else
+                    {
+                        pass.draw(command.count, 1, command.first);
+                    }
+                    check[name] = frame.snapshot(scratch.target);
+                }
+                const quadPipeline = check.quad >= 0
+                    && pipelines[check.quad]?.status === 'fulfilled'
+                    ? pipelines[check.quad].value
+                    : null;
+                if (quadPipeline)
+                {
+                    const width = opened.target.width;
+                    const height = Math.round(opened.target.height * 0.625);
+                    const quad = new DataView(new ArrayBuffer(28 * 6));
+                    [[0, 0, 0, 0], [width, 0, 1, 0], [0, height, 0, 1],
+                        [0, height, 0, 1], [width, 0, 1, 0], [width, height, 1, 1]]
+                        .forEach(([x, y, u, v], index)=>{
+                            const at = index * 28;
+                            quad.setFloat32(at, x, true);
+                            quad.setFloat32(at + 4, y, true);
+                            quad.setFloat32(at + 8, 0.5, true);
+                            quad.setFloat32(at + 12, 1, true);
+                            quad.setUint32(at + 16, 0xffffffff, true);
+                            quad.setFloat32(at + 20, u, true);
+                            quad.setFloat32(at + 24, v, true);
+                        });
+                    const quadBuffer = backend.createDynamicBuffer({
+                        size: quad.byteLength,
+                        usage: BufferUsage.VERTEX | BufferUsage.COPY_DST,
+                        label: 'probe-quad',
+                    });
+                    const held = quadBuffer.lock(0, quad.byteLength, LockFlags.NOOVERWRITE);
+                    held.data.set(new Uint8Array(quad.buffer));
+                    quadBuffer.unlock(held);
+                    pass = probePass(frame, scratch);
+                    if (viewport)
+                    {
+                        pass.setViewport(viewport);
+                    }
+                    pass.setPipeline(quadPipeline.gpu);
+                    pass.setBindings(0, quadPipeline.bindGroupLayout, entries.map(
+                        (/** @type {any} */ entry)=>entry.binding === 0
+                            ? { binding: 0, resource:
+                                {
+                                    buffer: hostBlock.gpu,
+                                    offset: 0,
+                                    size: check.uniforms.byteLength,
+                                    dynamicOffset: 0,
+                                } }
+                            : entry));
+                    pass.setVertexBuffer(0, quadBuffer.gpu, 0);
+                    pass.draw(6, 1, 0);
+                    check.quadShot = frame.snapshot(scratch.target);
+                }
                 pass = frame.beginPass({
                     target: opened.target,
                     clear: false,
