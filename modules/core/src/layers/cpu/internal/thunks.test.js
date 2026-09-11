@@ -7,7 +7,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { buildStub, createThunkTable, DEFAULT_THUNK_CAPACITY, STUB_SIZE } from './thunks.js';
+import {
+    buildStub, createThunkTable, DEFAULT_THUNK_CAPACITY, FORWARD_SAVE, STUB_SIZE,
+} from './thunks.js';
 
 const PORT = 0xb077;
 
@@ -24,17 +26,35 @@ test('a stub raises its trap and returns the way its convention says', ()=>{
 
 test('a forwarding stub jumps into the real function instead of returning', ()=>{
     // The jump is relative to the byte after it, and the whole preamble is
-    // fifteen bytes: ten for the trap and five for the jump itself. Getting
-    // this wrong lands in the middle of an instruction, which is not a failure
-    // anybody can read afterwards -- so it is checked here rather than found
-    // in a guest.
+    // sixteen bytes: one to save the registers, ten for the trap and five for
+    // the jump itself. Getting this wrong lands in the middle of an
+    // instruction, which is not a failure anybody can read afterwards -- so it
+    // is checked here rather than found in a guest.
     const address = 0x100200;
     const target = 0x37c49a8;
     const stub = buildStub({ trapId: 7, port: PORT, popBytes: 0, forwardTo: target, address });
 
-    assert.equal(stub[10], 0xe9, 'jmp rel32 where the ret would have been');
-    const relative = new DataView(stub.buffer).getInt32(11, true);
-    assert.equal(address + 15 + relative, target);
+    assert.equal(stub[11], 0xe9, 'jmp rel32 where the ret would have been');
+    const relative = new DataView(stub.buffer).getInt32(12, true);
+    assert.equal(address + 16 + relative, target);
+});
+
+test('a forwarding stub saves every register before the trap spends two of them', ()=>{
+    // The function it forwards into may take its arguments in ECX and EDX, or
+    // in EAX under a compiler's private convention, and the trap sequence
+    // writes DX and EAX. Saved with one `pushad`, so the host can put them
+    // back; a stub that only preserved the stack would hand a fastcall
+    // routine the trap port as its second argument.
+    const stub = buildStub({
+        trapId: 7, port: PORT, popBytes: 0, forwardTo: 0x37c49a8, address: 0x100200,
+    });
+    assert.equal(stub[0], 0x60, 'pushad first');
+    assert.equal(FORWARD_SAVE, 32, 'eight registers of four bytes');
+    assert.deepEqual([...stub.subarray(1, 5)], [0x66, 0xba, PORT & 0xff, PORT >>> 8],
+        'then the trap');
+
+    const plain = buildStub({ trapId: 7, port: PORT, popBytes: 0 });
+    assert.notEqual(plain[0], 0x60, 'an ordinary stub answers in EAX and saves nothing');
 });
 
 test('a forwarding stub keeps its target once the table is written', ()=>{

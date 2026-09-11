@@ -16,7 +16,7 @@ import {
     withReadAhead,
     resolveLibraryPath, timedWait,
     retryingFetch,
-    moduleKeyOf,
+    moduleKeyOf, relocatablePrefix, jumpBytes,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -432,4 +432,32 @@ test('a module is known by its file name, however it was asked for', ()=>{
     assert.equal(moduleKeyOf('C:/App/STORM'), 'storm');
     assert.equal(moduleKeyOf('C:\\App\\redist\\miles\\Mp3dec.asi'), 'mp3dec.asi',
         'an extension that is not .dll is part of the name');
+});
+
+test("a routine's opening bytes move only when no relative branch is among them", ()=>{
+    // A hook copies them to a trampoline; a branch encoded relative to where
+    // it stood would then go somewhere else, silently.
+    assert.equal(relocatablePrefix(Uint8Array.of(0x81, 0xec, 0xd0, 0x01, 0x00, 0x00), [6]), true,
+        'sub esp, imm32');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x56, 0x57, 0x8b, 0xf9, 0x8b, 0xf2), [1, 1, 2, 2]),
+        true, 'push, push, mov, mov');
+    assert.equal(relocatablePrefix(Uint8Array.of(0xa1, 0x30, 0x50, 0x78, 0x04), [5]), true,
+        'an absolute address whose bytes look like a short jump is an operand, not an opcode');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x55, 0x8b, 0xec, 0xe8, 0, 0, 0, 0), [1, 2, 5]),
+        false, 'a call');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x85, 0xc0, 0x74, 0x05, 0x90), [2, 2, 1]), false,
+        'a short jump');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x85, 0xc0, 0x0f, 0x84, 0, 0, 0, 0), [2, 6]),
+        false, 'a near conditional jump');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x90, 0x90), [1, 1]), false,
+        'too few for the jump in');
+    assert.equal(relocatablePrefix(Uint8Array.of(0x90, 0x90, 0x90, 0x90, 0x90), [1, 1]), false,
+        'the lengths must account for every byte');
+});
+
+test('a near jump is encoded relative to the instruction after it', ()=>{
+    assert.deepEqual([...jumpBytes(0x1000, 0x1005)], [0xe9, 0, 0, 0, 0]);
+    assert.deepEqual([...jumpBytes(0x1000, 0x2000)], [0xe9, 0xfb, 0x0f, 0, 0]);
+    assert.deepEqual([...jumpBytes(0x2000, 0x1000)], [0xe9, 0xfb, 0xef, 0xff, 0xff],
+        'backwards wraps');
 });

@@ -99,6 +99,42 @@ test('a negative result reaches the guest as the guest reads it', ()=>{
     assert.equal(registers.eax, 0xffffffff);
 });
 
+test('a forwarding call reads the frame above the saved registers and restores them', ()=>{
+    // The stub in front of a watched function pushed all eight registers and
+    // then trapped, so ESP is 32 bytes below the caller's frame. The handler
+    // sees the real arguments, and afterwards EAX and EDX are what the caller
+    // set and the block is gone -- the function forwarded into is one that
+    // may take its arguments in exactly those registers.
+    const callerEsp = 0x3000;
+    const { dispatcher, registers, memory } = machine({ esp: callerEsp, args: [0x11, 0x22] });
+    registers.esp = callerEsp - 32;
+    memory.writeU32(callerEsp - 32 + 28, 0xaaaa); // EAX as pushed
+    memory.writeU32(callerEsp - 32 + 20, 0xdddd); // EDX as pushed
+    registers.eax = 7; // the trap id, as the stub left it
+    registers.edx = 0xb077; // the trap port, as the stub left it
+    /** @type {any[]} */
+    const seen = [];
+
+    dispatcher.register(1, {
+        name: 'Storm.dll!#279',
+        convention: Convention.STDCALL,
+        argBytes: 8,
+        forwards: true,
+        saved: 32,
+        /** @param {number[]} args @param {any} frame */
+        handler: (args, frame)=>{
+            seen.push(args, frame.callerStack, frame.hostReturn);
+            return 0;
+        },
+    });
+    dispatcher.dispatch(1);
+
+    assert.deepEqual(seen, [[0x11, 0x22], callerEsp, 0x401234]);
+    assert.equal(registers.esp, callerEsp, 'the saved block is dropped');
+    assert.equal(registers.eax, 0xaaaa);
+    assert.equal(registers.edx, 0xdddd);
+});
+
 test('a parked call leaves EAX alone', ()=>{
     const { dispatcher, parking, registers, parkedThreads, current } = machine();
     registers.eax = 0x1234;

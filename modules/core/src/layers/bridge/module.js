@@ -217,6 +217,7 @@ export const bridgeModule = {
                     // forwards into, long after the record is written, and a
                     // zero printed there reads as a failure that never happened.
                     forwards: true,
+                    saved: cpu.forwardSave,
                 });
                 dispatcher.placed(address, name);
                 return address;

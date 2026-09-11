@@ -21,6 +21,17 @@
 export const STUB_SIZE = 16;
 
 /**
+ * What a forwarding stub pushes before it traps: every general register, by
+ * `pushad`. The routine it stands in front of may take its arguments in any
+ * register -- ECX and EDX under fastcall and thiscall, EAX under a compiler's
+ * private convention -- and the trap sequence needs EAX and DX for itself. The
+ * host restores the two it spends and drops the block before the stub jumps
+ * on, so the caller's frame sits this many bytes above ESP while the trap is
+ * being handled.
+ */
+export const FORWARD_SAVE = 32;
+
+/**
  * Room for the table when nobody says otherwise. The module configures this
  * from the same number it reserves the guest region with; a table that believed
  * in more slots than the region holds would write stubs into whatever follows
@@ -32,7 +43,9 @@ export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
  * Emits one stub.
  *
  * EAX and EDX are clobbered on purpose: on stdcall and cdecl both are
- * caller-saved, and EAX is where the return value belongs anyway.
+ * caller-saved, and EAX is where the return value belongs anyway. A forwarding
+ * stub is the exception, because what it forwards into may need either: it
+ * saves everything first, and the host puts the two back (see `FORWARD_SAVE`).
  *
  * @param {Object} options
  * @param {number} options.trapId
@@ -58,8 +71,8 @@ export function buildStub(
     const jump = forwardTo === 0
         ? []
         // The trap is 10 bytes and the jump 5, so the target is relative to the
-        // byte after all fifteen.
-        : [0xe9, ...u32(forwardTo - (address + (preserveResult ? 2 : 0) + 15))];
+        // byte after all fifteen, plus whatever came before the trap.
+        : [0xe9, ...u32(forwardTo - (address + (preserveResult ? 2 : 0) + 1 + 15))];
 
     const bytes = [
         // A stub reached by a `ret` is being handed a return value, and EAX is
@@ -67,6 +80,7 @@ export function buildStub(
         // aside first costs two bytes; ECX is caller-saved under every
         // convention here, so nothing was counting on it either.
         ...preserveResult ? [0x89, 0xc1] : [], // mov ecx, eax
+        ...forwardTo !== 0 ? [0x60] : [], //   pushad: the host pops it again
         0x66, 0xba, ...u16(port), // mov dx, port
         0xb8, ...u32(trapId), //     mov eax, trapId
         0xef, //                     out dx, eax   -> host handles it, leaves the result in EAX

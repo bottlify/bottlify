@@ -6,7 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createFpu } from './internal/fpu.js';
-import { createThunkTable } from './internal/thunks.js';
+import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
 
@@ -384,6 +384,7 @@ export const cpuModule = {
             },
             inProtectedMode: ()=>started().inProtectedMode(),
             eip: ()=>started().eip(),
+            forwardSave: FORWARD_SAVE,
 
             /**
              * The floating-point stack, for whoever answers a call that returns

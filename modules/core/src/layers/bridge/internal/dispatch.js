@@ -25,6 +25,19 @@ import { isParkedCall } from './parking.js';
  * @property {Function} handler
  * @property {boolean} [forwards]  The call goes on into guest code afterwards,
  *     so the handler's answer is not the call's answer.
+ * @property {number} [saved]  Bytes of registers the stub pushed below the
+ *     caller's frame before trapping, to be restored and dropped afterwards:
+ *     a forwarding stub keeps the registers the real function will read.
+ */
+
+/**
+ * @typedef {Object} CallFrame
+ * @property {string} name
+ * @property {number} freeStack    What is safe to write below now.
+ * @property {number} callerStack  ESP as the caller left it: the return address
+ *     is here and the stack arguments above it.
+ * @property {number} restingStack Where the stack will be once the stub returns.
+ * @property {number} hostReturn
  */
 
 /**
@@ -271,7 +284,8 @@ export function createDispatcher(deps){
                 throw new Error(`bridge: trap ${id} has no implementation`);
             }
 
-            const esp = cpu.readReg32('esp');
+            const pushed = cpu.readReg32('esp');
+            const esp = pushed + (fn.saved ?? 0);
             const args = readArguments(fn.convention, fn.argBytes, {
                 esp,
                 ecx: cpu.readReg32('ecx'),
@@ -287,9 +301,11 @@ export function createDispatcher(deps){
             // read. `freeStack` is what is safe to write below *now*, while the
             // return address at ESP is still live; `restingStack` is where the
             // stack will be once the stub has returned.
+            /** @type {CallFrame} */
             const frame = {
                 name: fn.name,
-                freeStack: esp,
+                freeStack: pushed,
+                callerStack: esp,
                 restingStack: esp + 4 + calleeCleanup(fn.convention, fn.argBytes),
                 hostReturn: memory.readU32(esp),
             };
@@ -318,7 +334,7 @@ export function createDispatcher(deps){
             profiler?.begin(fn.name, 'host');
             try
             {
-                result = fn.handler(args);
+                result = fn.handler(args, frame);
                 // A promise is neither a value nor the parked token: it is a
                 // call that has not finished, and the thread is about to be
                 // parked on it. Rendering it as a number turns every such call
@@ -379,6 +395,17 @@ export function createDispatcher(deps){
                     }));
                 }
                 suspend(result, frame);
+                return;
+            }
+            if (fn.saved)
+            {
+                // The stub saved with `pushad`, EAX first and EDI last; the
+                // trap spent EAX and DX and nothing else. Put those two back
+                // and drop the block, so the function it forwards into sees
+                // the registers exactly as its caller set them.
+                cpu.writeReg32('eax', memory.readU32(pushed + 28));
+                cpu.writeReg32('edx', memory.readU32(pushed + 20));
+                cpu.writeReg32('esp', esp);
                 return;
             }
             cpu.writeReg32('eax', result >>> 0);

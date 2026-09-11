@@ -53,11 +53,15 @@ import { createBlockCache, resolveBlockStore }
  *     How many events at the bridge to keep, so a run that went wrong can be
  *     saved and replayed in a test. Zero, the default, records nothing.
  * @property {(dll: string, name: string | null, ordinal: number | null)
- *     => ({ args: number } | null)} [watchImport]
+ *     => ({ args: number, strings?: number[] } | null)} [watchImport]
  *     Asked about every import as it is bound. Answering with an argument count
  *     puts a watch in front of that function, so a call from one guest module
  *     into another shows up in the trace like a call into ours. This is the only
  *     way to see them, and a game's own libraries are where its decisions live.
+ *     `strings` names the arguments (by position) that point at C strings, and
+ *     the watch reports those with the answer: a pointer into the stack says
+ *     nothing once the call is over, and the name a program asked for is
+ *     usually the whole point.
  * @property {number} [maxFps]
  *     The most frames a second that may reach the screen. Sixty unless said
  *     otherwise; zero delivers at whatever rate the caller's scheduler offers.
@@ -518,6 +522,50 @@ export function idleWait({ fetching, idlers, suspended, spun }){
 export function moduleKeyOf(name){
     const file = name.slice(Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1);
     return file.toLowerCase().replace(/\.dll$/, '');
+}
+
+/**
+ * Whether the first `length` bytes of a routine can run from somewhere else.
+ *
+ * A watch on a routine nothing imports moves its opening bytes to a
+ * trampoline, which only works when they are whole instructions with no
+ * relative branch among them. The instruction boundaries come from the
+ * caller's disassembly; at each one this reads just enough of the encoding
+ * to refuse a branch (near calls and jumps, short jumps, and the two-byte
+ * conditional jumps). An operand byte is never mistaken for an opcode.
+ *
+ * @param {Uint8Array} bytes      Exactly the bytes to be moved.
+ * @param {number[]} lengths      The length of each instruction in them, in order.
+ */
+export function relocatablePrefix(bytes, lengths){
+    if (bytes.length < 5 || lengths.reduce((sum, n)=>sum + n, 0) !== bytes.length)
+    {
+        return false;
+    }
+    let at = 0;
+    for (const length of lengths)
+    {
+        const op = bytes[at];
+        if (op === 0xe8 || op === 0xe9 || op === 0xeb || (op >= 0x70 && op <= 0x7f)
+            || (op === 0x0f && bytes[at + 1] >= 0x80 && bytes[at + 1] <= 0x8f))
+        {
+            return false;
+        }
+        at += length;
+    }
+    return true;
+}
+
+/**
+ * A near jump from `from` to `to`, as the five bytes of it.
+ *
+ * @param {number} from  The address the jump instruction itself sits at.
+ * @param {number} to
+ */
+export function jumpBytes(from, to){
+    const rel = (to - (from + 5)) >>> 0;
+    return Uint8Array.of(0xe9, rel & 0xff, (rel >>> 8) & 0xff, (rel >>> 16) & 0xff,
+        (rel >>> 24) & 0xff);
 }
 
 /**
@@ -2019,22 +2067,46 @@ async function buildApp(options){
         {
             return address;
         }
-        const label = `${dll}!${name ?? `#${ordinal}`}`;
+        return installWatch(`${dll}!${name ?? `#${ordinal}`}`, asked.args * 4, address,
+            asked.strings ?? []);
+    };
+
+    /**
+     * A watch stub in front of `target`, one per label.
+     *
+     * @param {string} label @param {number} argBytes @param {number} target
+     * @param {number[]} [strings]  Which arguments to report as C strings.
+     * @returns {number} the stub's address, to be called in place of the target
+     */
+    const installWatch = (label, argBytes, target, strings = [])=>{
         const already = watches.get(label);
         if (already !== undefined)
         {
             return already;
         }
         const stub = bridge.watch(label, {
-            argBytes: asked.args * 4,
-            target: address,
+            argBytes,
+            target,
             // The call is about to reach the real function, which will leave
             // its own result in EAX; nothing here answers it. What this does
             // instead is arrange to be told what that answer was, by sending
             // the function home through a stub of ours.
-            handler: ()=>{
-                const esp = cpu.readReg32('esp') >>> 0;
-                pending.push({ label, esp, returnTo: memory.readU32(esp) });
+            /** @param {number[]} _args @param {{ callerStack: number }} frame */
+            handler: (_args, frame)=>{
+                const esp = frame.callerStack >>> 0;
+                // Read now, while the arguments are still there: a name built
+                // on the caller's stack is gone by the time the answer comes.
+                const named = strings.map(index=>{
+                    const pointer = memory.readU32(esp + 4 + index * 4) >>> 0;
+                    try
+                    {
+                        return memory.readCString(pointer, 260);
+                    }
+                    catch {
+                        return `0x${pointer.toString(16)}`;
+                    }
+                });
+                pending.push({ label, esp, returnTo: memory.readU32(esp), named });
                 memory.writeU32(esp, catcher());
                 return 0;
             },
@@ -2051,7 +2123,7 @@ async function buildApp(options){
      * and would confuse it; this is a diagnostic taken with a handful of
      * functions watched, where they do not.
      *
-     * @type {{ label: string, esp: number, returnTo: number }[]}
+     * @type {{ label: string, esp: number, returnTo: number, named: string[] }[]}
      */
     const pending = [];
 
@@ -2078,7 +2150,9 @@ async function buildApp(options){
                 {
                     return answer;
                 }
-                events.emit('guest-return', { name: frame.label, result: answer });
+                events.emit('guest-return', frame.named.length
+                    ? { name: frame.label, strings: frame.named, result: answer }
+                    : { name: frame.label, result: answer });
                 const esp = (cpu.readReg32('esp') >>> 0) - 4;
                 memory.writeU32(esp, frame.returnTo);
                 cpu.writeReg32('esp', esp);
@@ -3355,6 +3429,51 @@ async function buildApp(options){
                     }
                 }
                 return null;
+            },
+            /**
+             * A watch in front of a routine nothing imports, so a call the
+             * program makes into its own code appears in the trace with its
+             * arguments and its answer.
+             *
+             * The routine's opening instructions, whose lengths the caller
+             * read off a disassembly, move to a trampoline that ends in a
+             * jump back, and the entry becomes a jump into a watch stub whose
+             * target is the trampoline. They must hold no relative branch. A
+             * diagnostic, and a rewrite of the program's code: for a run
+             * under observation, never for one that is meant to be faithful.
+             *
+             * @param {number} address
+             * @param {{ label: string, argBytes: number, lengths: number[] }} how
+             */
+            hook: (address, { label, argBytes, lengths })=>{
+                const displaced = lengths.reduce((sum, n)=>sum + n, 0);
+                const at = address >>> 0;
+                const region = memory.find(at);
+                if (!region)
+                {
+                    throw new Error(`hook: nothing is mapped at 0x${at.toString(16)}`);
+                }
+                const moved = memory.readBytes(at, displaced).slice();
+                if (!relocatablePrefix(moved, lengths))
+                {
+                    throw new Error(`hook: the first ${displaced} bytes at 0x${at.toString(16)}`
+                        + ' cannot be moved (too few, or a relative branch among them)');
+                }
+                const trampoline = allocateFromHeap(displaced + 5);
+                memory.writeBytes(trampoline, moved);
+                memory.writeBytes(trampoline + displaced,
+                    jumpBytes(trampoline + displaced, at + displaced));
+                const stub = installWatch(label, argBytes, trampoline);
+                const patch = new Uint8Array(displaced).fill(0x90);
+                patch.set(jumpBytes(at, stub));
+                // Opened for the write and put back exactly as it was: an image
+                // whose data the program writes is mapped writable, and leaving
+                // it read-only would fault the program's next store.
+                const before = region.access;
+                memory.protect(region.name, memory.Access.READ_WRITE_EXECUTE);
+                memory.writeBytes(at, patch);
+                memory.protect(region.name, before);
+                return { stub, trampoline };
             },
         },
 
