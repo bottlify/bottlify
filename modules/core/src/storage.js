@@ -292,6 +292,80 @@ export function opfsSession(key, directory){
 }
 
 /**
+ * What a save is told changed: a file by its path, or the registry.
+ *
+ * @typedef {{ kind: string, path?: string }} SessionChange
+ */
+
+/**
+ * One save for a burst of changes.
+ *
+ * A program saving a game writes its file in hundreds of pieces, and a
+ * session saved on every piece packed the whole session -- every file and the
+ * registry, compressed -- hundreds of times over, on the thread the program
+ * runs on. Measured on a real title: the machine spent four fifths of its
+ * time packing and the save took minutes. Changes are noted and the save
+ * waits for them to settle; a change that arrives while a save is under way
+ * is saved once that one is done, never alongside it, so the store sees one
+ * session at a time and always the latest.
+ *
+ * @param {Object} options
+ * @param {() => Session} options.snapshot  The session as it is now; called once per save.
+ * @param {(session: Session, changes: SessionChange[]) => unknown} options.persist
+ * @param {number} [options.settleMs]  How long after the last change a save begins.
+ * @param {(fn: () => void, ms: number) => unknown} [options.schedule]
+ *        How to wait; the default is the host's timer.
+ */
+export function coalescedSaver({ snapshot, persist, settleMs = 250, schedule }){
+    const later = schedule ?? ((fn, ms)=>setTimeout(fn, ms));
+    /** @type {SessionChange[]} */
+    let pending = [];
+    /** @type {unknown} */
+    let timer = null;
+    /** @type {Promise<unknown> | null} */
+    let inFlight = null;
+
+    const flush = ()=>{
+        timer = null;
+        if (inFlight)
+        {
+            return inFlight;
+        }
+        if (pending.length === 0)
+        {
+            return Promise.resolve();
+        }
+        const changes = pending;
+        pending = [];
+        inFlight = Promise.resolve(persist(snapshot(), changes)).finally(()=>{
+            inFlight = null;
+            if (pending.length > 0 && timer === null)
+            {
+                timer = later(flush, settleMs);
+            }
+        });
+        return inFlight;
+    };
+
+    return {
+        /** @param {SessionChange[]} changes */
+        note(changes){
+            pending.push(...changes);
+            if (timer === null && !inFlight)
+            {
+                timer = later(flush, settleMs);
+            }
+        },
+        /** Saves what is pending now rather than after it settles. */
+        flush,
+        /** Changes noted and not yet handed to the store. */
+        get pending(){
+            return pending.length;
+        },
+    };
+}
+
+/**
  * Turns whatever a caller passed as `storage` into the one shape the engine
  * uses. A provider object, the string `local` or `opfs`, a function that loads and
  * nothing else, or nothing at all.

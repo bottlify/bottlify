@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+    coalescedSaver,
     normaliseSession, opfsSession, packSession, resolveStorage, unpackSession,
 } from './storage.js';
 
@@ -147,4 +148,57 @@ test('the local option says plainly where it does not work', async()=>{
     {
         await assert.rejects(()=>local.load(), /does not exist here/);
     }
+});
+
+test('a burst of changes is saved once, after it settles, and never two at a time', async()=>{
+    /** @type {(() => void)[]} */
+    const timers = [];
+    /** @type {{ resolve: (value?: unknown) => void }[]} */
+    const stores = [];
+    /** @type {{ files: number, changes: number }[]} */
+    const saved = [];
+    let version = 0;
+    const saver = coalescedSaver({
+        snapshot: ()=>({
+            files: Array.from({ length: ++version }, ()=>({ path: 'f', bytes: new Uint8Array(0) })),
+            registry: null,
+        }),
+        persist: (session, changes)=>new Promise(resolve=>{
+            saved.push({ files: session.files.length, changes: changes.length });
+            stores.push({ resolve });
+        }),
+        schedule: fn=>timers.push(fn),
+    });
+
+    saver.note([{ kind: 'written', path: 'f' }]);
+    saver.note([{ kind: 'written', path: 'f' }]);
+    saver.note([{ kind: 'registry' }]);
+    assert.equal(timers.length, 1, 'one wait for the burst to settle');
+    assert.equal(saved.length, 0, 'nothing saved before it does');
+
+    timers.shift()?.();
+    assert.deepEqual(saved, [{ files: 1, changes: 3 }], 'one save carrying every change');
+
+    // Changes that arrive while the store is busy wait for it, then go as one.
+    saver.note([{ kind: 'written', path: 'g' }]);
+    saver.note([{ kind: 'written', path: 'g' }]);
+    assert.equal(timers.length, 0, 'no wait is set while a save is under way');
+    stores.shift()?.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(timers.length, 1, 'the next save waits its turn once the first is done');
+    timers.shift()?.();
+    assert.deepEqual(saved.at(-1), { files: 2, changes: 2 }, 'the snapshot is taken at save time');
+    assert.equal(saver.pending, 0);
+
+    // A flush saves what is pending now, without the wait.
+    stores.shift()?.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    saver.note([{ kind: 'registry' }]);
+    const flushed = saver.flush();
+    assert.equal(saved.length, 3, 'saved at once, without the wait');
+    assert.equal(saved.at(-1)?.changes, 1);
+    stores.shift()?.resolve();
+    await flushed;
 });

@@ -8,7 +8,7 @@ import { fitFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
 import { captureTrace, formatTrace } from './trace.js';
-import { inflateRaw, normaliseSession, resolveStorage } from './storage.js';
+import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
@@ -1967,19 +1967,25 @@ async function buildApp(options){
     // One way out. What the program writes is announced once the writes settle;
     // nothing is ever pulled back in while it runs.
     const persist = storage.save;
+    /** @type {ReturnType<typeof coalescedSaver> | null} */
+    let saver = null;
     if (persist)
     {
+        saver = coalescedSaver({
+            snapshot: ()=>({
+                files: filesystem.export(),
+                registry: core.api('win32').registry().toJSON(),
+            }),
+            persist: (session, changes)=>Promise.resolve(persist(session, changes)).catch(
+                (/** @type {Error} */ error)=>{
+                    events.emit('error', { reason: 'session-save', error });
+                }),
+        });
+        const pending = saver;
         /** @param {any[]} changes */
         const save = changes=>{
             events.emit('session', { changes });
-            const session = {
-                files: filesystem.export(),
-                registry: core.api('win32').registry().toJSON(),
-            };
-            Promise.resolve(persist(session, changes)).catch(
-                (/** @type {Error} */ error)=>{
-                    events.emit('error', { reason: 'session-save', error });
-                });
+            pending.note(changes);
         };
         filesystem.onChanged(save);
         // A registry write is a change to the session like a file write is,
@@ -3754,6 +3760,9 @@ async function buildApp(options){
          */
         trace: ()=>formatTrace(captureTrace({ cpu, memory, kernel, bridge })),
         dispose(){
+            // What the program wrote last is saved now rather than after it
+            // settles: the machine it was written on is about to go.
+            saver?.flush();
             // Before the graph goes: the background filler would otherwise go
             // on asking for blocks nobody can put anywhere.
             blocks?.stop();
