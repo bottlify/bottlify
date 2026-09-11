@@ -86,6 +86,7 @@ export function createGraphicsLibraries(
     const fields = createFields(memory);
     const d3d8 = createDirect3D8Seam({
         publisher, memory, screen, allocate, divergence, cursor, resolution,
+        identity: ()=>graphics.adapter?.() ?? null,
     });
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,

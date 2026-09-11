@@ -216,39 +216,39 @@ try
             includeObjectsCollectedByMinorGC: true,
         }, sessionId);
     }
-    // What reaches the screen, counted by the browser's own compositor: the
-    // frame rate the person sees, whatever the engine presented.
-    let drawn = 0;
-    /** @type {(() => void) | null} */
-    let traced = null;
-    cdp.on('Tracing.dataCollected', (/** @type {any} */ params)=>{
-        for (const event of params.value ?? [])
-        {
-            if (event.name === 'DrawFrame')
-            {
-                drawn++;
-            }
-        }
-    });
-    cdp.on('Tracing.tracingComplete', ()=>traced?.());
-    await cdp.send('Tracing.start', {
-        traceConfig: { includedCategories: ['disabled-by-default-devtools.timeline.frame'] },
-        transferMode: 'ReportEvents',
-    }, sessionId);
+    // What reaches the screen: an animation frame callback runs once for
+    // every frame the browser composes while the page is visible, so counting
+    // them is counting the frames a person could have seen -- whatever the
+    // engine presented in between.
+    // And what the engine put there: the launcher takes the canvas's current
+    // texture once per frame it presents, so counting those is counting the
+    // frames the engine drew into the canvas.
+    await evaluate(`(()=>{
+        window.__bottlifyFrames = 0;
+        const count = ()=>{ window.__bottlifyFrames++; requestAnimationFrame(count); };
+        requestAnimationFrame(count);
+        window.__bottlifyPresents = 0;
+        const taken = GPUCanvasContext.prototype.getCurrentTexture;
+        GPUCanvasContext.prototype.getCurrentTexture = function(){
+            window.__bottlifyPresents++;
+            return taken.call(this);
+        };
+    })()`);
     await cdp.send('Profiler.start', {}, sessionId);
     console.log(`sampling the launcher's thread for ${options.seconds}s`);
     const startedAt = Date.now();
+    const drawnBefore = await evaluate('window.__bottlifyFrames');
+    const presentedBefore = await evaluate('window.__bottlifyPresents');
     await sleep(options.seconds * 1000);
     const { profile } = await cdp.send('Profiler.stop', {}, sessionId);
+    const drawn = (await evaluate('window.__bottlifyFrames')) - drawnBefore;
+    const presented = (await evaluate('window.__bottlifyPresents')) - presentedBefore;
     const windowMs = Date.now() - startedAt;
-    const finished = new Promise(resolve=>{
-        traced = resolve;
-    });
-    await cdp.send('Tracing.end', {}, sessionId);
-    await Promise.race([finished, sleep(10000)]);
     const summary = summarise(profile, windowMs);
 
-    console.log(`frames drawn on the screen: ${drawn} in ${windowMs} ms`
+    console.log(`frames the engine drew into the canvas: ${presented} in ${windowMs} ms`
+        + ` = ${(presented * 1000 / windowMs).toFixed(1)} per second`);
+    console.log(`frames the browser composed for the screen: ${drawn}`
         + ` = ${(drawn * 1000 / windowMs).toFixed(1)} per second`);
     console.log(`the thread was busy ${(summary.busyShare * 100).toFixed(0)}% of ${windowMs} ms`
         + ` (${summary.sampledMs.toFixed(0)} ms sampled)`);

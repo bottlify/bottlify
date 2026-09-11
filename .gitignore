@@ -27,3 +27,7 @@ ui/
 
 # Game installers downloaded for bring-up testing: gigabytes of someone else's data.
 .to_install/
+
+# Frames and textures dumped out of a running game to be looked at: someone
+# else's artwork, and megabytes of it.
+dbg/

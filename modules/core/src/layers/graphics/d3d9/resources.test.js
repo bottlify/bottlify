@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK,
+    D3DCUBEMAP_FACE, D3DERR_INVALIDCALL, D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK, offsetOfRect,
+    surfaceBytes, surfacePitch,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
 import { createReferenceCount, createTexture } from './resources.js';
@@ -325,4 +326,39 @@ test('a texture gives its storage back when the last reference goes', ()=>{
     }
     assert.deepEqual(freed.sort(), taken.sort(),
         'every level a program ever locked is handed back, not only the first');
+});
+
+// --- how a compressed level is measured ---
+
+test('a compressed level is counted in whole blocks, not in pixels', ()=>{
+    // DXT1 is eight bytes for each 4x4 block; DXT5 is sixteen.
+    assert.equal(surfacePitch(D3DFMT.DXT1, 256), 64 * 8);
+    assert.equal(surfaceBytes(D3DFMT.DXT1, 256, 256), 64 * 8 * 64);
+    assert.equal(surfaceBytes(D3DFMT.DXT5, 256, 256), 64 * 16 * 64);
+    // Four times less than the uncompressed surface the same art would need,
+    // which is the whole reason a program keeps it compressed.
+    assert.equal(surfaceBytes(D3DFMT.A8R8G8B8, 256, 256) / surfaceBytes(D3DFMT.DXT1, 256, 256), 8);
+});
+
+test('a level smaller than one block still costs a whole block', ()=>{
+    // The tail of a mip chain, where counting by pixels leaves a level short of
+    // its own last row and it samples as whatever lay after it.
+    assert.equal(surfaceBytes(D3DFMT.DXT1, 1, 1), 8);
+    assert.equal(surfaceBytes(D3DFMT.DXT1, 2, 2), 8);
+    assert.equal(surfaceBytes(D3DFMT.DXT1, 5, 5), 4 * 8);
+    assert.equal(surfaceBytes(D3DFMT.DXT5, 3, 9), 1 * 16 * 3);
+});
+
+test('an uncompressed format is measured exactly as it always was', ()=>{
+    assert.equal(surfacePitch(D3DFMT.A8R8G8B8, 10), 40);
+    assert.equal(surfaceBytes(D3DFMT.R5G6B5, 10, 4), 80);
+    assert.equal(surfaceBytes(D3DFMT.A8, 7, 3), 21);
+});
+
+test('a rectangle into a compressed surface is addressed by block', ()=>{
+    const pitch = surfacePitch(D3DFMT.DXT1, 256);
+    assert.equal(offsetOfRect(D3DFMT.DXT1, pitch, { top: 0, left: 0 }), 0);
+    // Row four of pixels is row one of blocks; column eight is block two.
+    assert.equal(offsetOfRect(D3DFMT.DXT1, pitch, { top: 4, left: 8 }), pitch + 16);
+    assert.equal(offsetOfRect(D3DFMT.A8R8G8B8, 1024, { top: 4, left: 8 }), 4096 + 32);
 });

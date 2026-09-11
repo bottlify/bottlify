@@ -137,6 +137,9 @@ function parse(argv){
         skipTexture: argv.includes('--skip-texture')
             ? argv[argv.indexOf('--skip-texture') + 1]
             : null,
+        // Every draw rendered as if D3DRS_FOGENABLE were clear, so a run
+        // differs from an ordinary one by fog and nothing else.
+        fog: !argv.includes('--no-fog'),
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -352,6 +355,21 @@ function describe(result, context, calls){
                     say(`      frame ${frame.index}: ${frame.draws} draws,`
                         + ` ${frame.textures} textures, ${frame.placeholder} placeholder,`
                         + ` ${frame.truncated} cut, ${frame.uploads} uploaded`);
+                }
+                // The fog each frame's draws ran under, as settings with a
+                // draw count each. A frame whose sky ran under its ground's
+                // fog is one where a count moved between settings, and that
+                // shows here and nowhere else.
+                /** @type {Map<string, number>} */
+                const fogs = new Map();
+                for (const frame of recent)
+                {
+                    const key = frame.fogs ?? '';
+                    fogs.set(key, (fogs.get(key) ?? 0) + 1);
+                }
+                for (const [key, count] of [...fogs].sort((left, right)=>right[1] - left[1]))
+                {
+                    say(`      fog on ${count} frames: ${key === '' ? 'none' : key}`);
                 }
             }
             const lighting = device.lighting;
@@ -588,32 +606,28 @@ export async function game(options){
             dumpDraws: options.dumpDraws,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
+            fog: options.fog,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
                 returnByValue: true },
             sessionId);
 
-        const result = await poll(cdp, sessionId,
-            'window.__bottlify__.result ? JSON.stringify(window.__bottlify__.result) : null',
-            options.waitMs);
-
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const shotPath = join(REPORTS_DIR, `game-${stamp}.png`);
-        const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
-        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
-        writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
-
-        // The whole call stream, when one was asked for, drained in pieces:
-        // a quarter of a million lines is more than one evaluation carries.
-        if (options.log)
-        {
+        // The whole call stream, drained in pieces: a quarter of a million
+        // lines is more than one evaluation carries. Factored out so a run that
+        // never readies a result -- a title that does not exit, slowed by its
+        // own freezing past any wait -- still leaves behind the stream up to the
+        // point it reached, which is the whole reason the log was asked for.
+        const drainLog = async()=>{
+            if (!options.log)
+            {
+                return;
+            }
             const lines = [];
             for (let at = 0; ; at += LOG_CHUNK)
             {
                 const piece = await cdp.send('Runtime.evaluate', {
-                    expression:
-                        `window.__bottlify__.drainLog(${at}, ${LOG_CHUNK})`,
+                    expression: `window.__bottlify__.drainLog(${at}, ${LOG_CHUNK})`,
                     returnByValue: true,
                 }, sessionId);
                 const text = piece.result?.value ?? '';
@@ -625,7 +639,36 @@ export async function game(options){
             }
             writeFileSync(options.log, lines.join(String.fromCharCode(10)));
             console.log(`call log: ${options.log}`);
+        };
+
+        let result;
+        try
+        {
+            result = await poll(cdp, sessionId,
+                'window.__bottlify__.result ? JSON.stringify(window.__bottlify__.result) : null',
+                options.waitMs);
         }
+        catch (e){
+            await drainLog();
+            const onTimeout = await cdp.send(
+                'Page.captureScreenshot', { format: 'png' }, sessionId);
+            const stampOut = new Date().toISOString().replace(/[:.]/g, '-');
+            writeFileSync(join(REPORTS_DIR, `game-${stampOut}.png`),
+                Buffer.from(onTimeout.data, 'base64'));
+            return {
+                ok: false, measured: false, pageUrl, events: thrown,
+                reason: `${e instanceof Error ? e.message : String(e)}`
+                    + `${options.log ? ` -- call log drained to ${options.log}` : ''}`,
+            };
+        }
+
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const shotPath = join(REPORTS_DIR, `game-${stamp}.png`);
+        const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
+        const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
+        writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
+
+        await drainLog();
 
         // Everything the program wrote, kept as files rather than as excerpts.
         // A game's own crash report is its account of what went wrong and beats

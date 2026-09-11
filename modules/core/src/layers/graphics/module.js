@@ -106,6 +106,13 @@ export const graphicsModule = {
             /** @returns {any} */
             d3d8: (/** @type {any} */ caps)=>createDirect3D8({
                 ...caps,
+                // What the adapter actually offers, rather than a default that
+                // says no on every machine. A device that can sample compressed
+                // blocks lets a program keep its art compressed: four to eight
+                // times less to upload, and it spares the program decompressing
+                // every texture in its own code.
+                compressedTextures: caps?.compressedTextures
+                    ?? device?.device?.features?.has('texture-compression-bc') === true,
                 backend: api.backend(),
                 readMemory: services.readMemory,
                 createSampler: (/** @type {any} */ descriptor)=>
@@ -128,6 +135,7 @@ export const graphicsModule = {
                 maxDraws: device?.maxDraws,
                 divergence: config?.divergence,
                 skipTexture: device?.skipTexture,
+                fog: device?.fog,
             }),
             // The same wiring, except that the backend is asked for only when
             // this build has a GPU: a Direct3D 9 object made in a headless
@@ -191,6 +199,16 @@ export const graphicsModule = {
 
             /** Whether this build can draw at all. */
             available: ()=>device !== null,
+
+            /**
+             * The hardware behind the device, as the assembling caller knows
+             * it: vendor, architecture and description as WebGPU reports them.
+             * A program asks who made its adapter before deciding how much to
+             * ask of it, and an answer it can act on has to come from here.
+             *
+             * @returns {{ vendor?: string, architecture?: string, description?: string } | null}
+             */
+            adapter: ()=>device?.adapter ?? null,
 
             /**
              * Shows a surface the guest owns.

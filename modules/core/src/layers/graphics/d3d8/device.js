@@ -44,6 +44,7 @@ import {
     D3DCLEAR, D3DCREATE, D3DDEVTYPE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET,
     D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DERR_NOTFOUND, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
     D3DPRESENTFLAG, D3DRTYPE, D3DSBT, D3DTS, D3DUSAGE, D3D_OK, FORMAT_INFO, isShaderHandle,
+    surfaceBytes, surfacePitch,
 } from './constants.js';
 import { GAMMA_RAMP_ENTRIES } from './structs.js';
 import { DEFAULT_RENDER_STATES, createDefaultRenderStates } from './renderstates.js';
@@ -62,6 +63,7 @@ export { DEVICE_STATE, LIGHT_ENABLED };
 /**
  * @typedef {Object} DeviceCaps
  * @property {number} maxPointSize     Decides the POINTSIZE_MAX default.
+ * @property {boolean} [compressedTextures]  Whether the backend samples DXT blocks.
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
@@ -71,6 +73,7 @@ export { DEVICE_STATE, LIGHT_ENABLED };
 export const DEFAULT_CAPS = Object.freeze({
     maxPointSize: 64.0,
     depthTexture2d: false,
+    compressedTextures: false,
     depthCube: false,
     depthPlain: false,
 });
@@ -214,6 +217,16 @@ function isTransformType(type){
  *
  * @returns {Light}
  */
+/**
+ * How many levels a texture has when a program asks for zero: every one down
+ * to a single texel, which is what zero means and what the program then locks.
+ *
+ * @param {number} width @param {number} height
+ */
+function fullChainOf(width, height){
+    return Math.floor(Math.log2(Math.max(width, height, 1))) + 1;
+}
+
 function defaultLight(){
     return {
         Type: D3DLIGHTTYPE.DIRECTIONAL,
@@ -237,6 +250,7 @@ function defaultLight(){
  * @returns {import('./validity.js').PresentParameters}
  */
 function normalisePresentParameters(parameters){
+
     return {
         swapEffect: parameters.swapEffect,
         backBufferCount: reportedBackBufferCount(parameters),
@@ -430,6 +444,30 @@ export function createDirect3D8(options = {}){
  * @param {DeviceIdentity} [identity]
  */
 function createDeviceObject(parameters, caps, behaviourFlags, services, identity){
+    /** Formats already reported, so a refusal in a loop says it once. */
+    const refusedFormats = new Set();
+
+    /**
+     * A refusal a program can act on, but only if it is told which format was
+     * refused. Saying nothing is how an unsupported format costs a run its art
+     * with no trace anywhere: the program takes a slower path of its own, and
+     * everything after that looks merely slow rather than wrong.
+     *
+     * @param {number} format D3DFMT
+     */
+    const reportRefusedFormat = format=>{
+        if (!services.divergence || refusedFormats.has(format))
+        {
+            return;
+        }
+        refusedFormats.add(format);
+        const name = Object.entries(D3DFMT).find(entry=>entry[1] === format);
+        services.divergence('Direct3D 8',
+            `a texture in format ${name ? name[0] : format} was refused: this device`
+            + ' does not offer it, and a program with no other copy of the art will'
+            + ' either convert it itself or go without');
+    };
+
     let presentParameters = parameters;
     /** @type {string} */
     let deviceState = DEVICE_STATE.OK;
@@ -879,7 +917,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
      *
      * @param {import('../d3d9/resources.js').SurfaceDesc} desc
      */
-    const pitchOf = desc=>desc.Width * FORMAT_INFO[desc.Format].bytesPerPixel;
+    const pitchOf = desc=>surfacePitch(desc.Format, desc.Width);
 
     /**
      * A whole surface, as one move.
@@ -2069,12 +2107,19 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const hr = createResult(SURFACE_TYPE.TEXTURE_2D, format, pool, usage, caps);
             if (hr !== D3D_OK)
             {
+                // A refusal a program can act on, but only if it is told which
+                // format was refused. Saying nothing is how an unsupported
+                // format costs a run its art with no trace anywhere: the
+                // program takes a slower path of its own and everything after
+                // looks merely slow rather than wrong.
+                reportRefusedFormat(format);
                 return hr;
             }
+            const chain = levels || fullChainOf(width, height);
             const texture = createTexture({
                 width,
                 height,
-                levels: levels || 1,
+                levels: chain,
                 format,
                 pool,
                 usage,
@@ -2084,7 +2129,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             });
             if (renderer)
             {
-                renderer.trackTexture(texture, { width, height, format });
+                renderer.trackTexture(texture, { width, height, format, levels: chain });
             }
             out.texture = texture;
             return D3D_OK;
@@ -2107,7 +2152,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             out.texture = createTexture({
                 width: edgeLength,
                 height: edgeLength,
-                levels: levels || 1,
+                levels: levels || fullChainOf(edgeLength, edgeLength),
                 format,
                 pool,
                 usage,
@@ -2133,7 +2178,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            const info = FORMAT_INFO[format];
             out.surface = createSurface({
                 type: SURFACE_TYPE.RENDER_TARGET,
                 width,
@@ -2142,7 +2186,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.RENDERTARGET,
                 lockable,
-                base: allocate(width * height * info.bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
             });
             return D3D_OK;
@@ -2161,7 +2205,6 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return hr;
             }
-            const info = FORMAT_INFO[format];
             out.surface = createSurface({
                 type: SURFACE_TYPE.DEPTH_STENCIL,
                 width,
@@ -2169,7 +2212,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL,
-                base: allocate(width * height * info.bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
             });
             return D3D_OK;
@@ -2198,7 +2241,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool: D3DPOOL.SYSTEMMEM,
                 usage: 0,
-                base: allocate(width * height * FORMAT_INFO[format].bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.SYSTEMMEM),
             });
             return D3D_OK;

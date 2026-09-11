@@ -34,8 +34,8 @@ import {
     D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
 } from './structs.js';
 import {
-    D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
-    GAMMA_RAMP_ENTRIES,
+    D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8, D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP,
+    D3DRASTER_STATUS, GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import {
@@ -198,6 +198,7 @@ function seamed({ shadow = false } = {}){
                 return root;
             },
             available: ()=>false,
+            adapter: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
         },
         memory: box.services,
         publishInterface: box.publishInterface,
@@ -315,6 +316,47 @@ test('the interrogation a program does before it draws is answered from facts', 
     assert.equal(h.object(device), null);
     h.release(root);
     assert.equal(h.roots[0].refCount, 0);
+});
+
+test('the adapter says who made it, in the shape a card database reads', ()=>{
+    // A program looks its adapter up before deciding how much to ask of it,
+    // and one refused the answer settles for the most cautious hardware it
+    // knows. So the answer exists, the strings are terminated, the vendor is
+    // the PCI id for the word WebGPU used, and the fields around them are
+    // laid where the header puts them.
+    const h = seamed();
+    const root = h.create();
+    /** @param {string} name @param {number[]} args */
+    const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
+    const out = 0x1400;
+    h.box.services.writeMemory(out, new Uint8Array(D3DADAPTER_IDENTIFIER8.SIZE + 4).fill(0xcd));
+
+    assert.equal(ask('GetAdapterIdentifier', [0, 0, out]), D3D_OK);
+    /** @param {number} at */
+    const text = at=>{
+        const bytes = h.box.services.readMemory(out + at, 512);
+        const end = bytes.indexOf(0);
+        return String.fromCharCode(...bytes.subarray(0, end < 0 ? 512 : end));
+    };
+    assert.equal(text(D3DADAPTER_IDENTIFIER8.Description), 'nvidia ampere');
+    assert.equal(text(D3DADAPTER_IDENTIFIER8.Driver), 'webgpu');
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.VendorId), 0x10de);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DeviceId), 0);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.WHQLLevel), 1);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.DriverVersion + 4), 0x00010000);
+    // The fields are written and the padding after them is not: a program
+    // built with the structure packed keeps its stack cookie there.
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.FIELDS), 0xcdcdcdcd);
+
+    // The flag that skips the certification lookup answers zero for it.
+    assert.equal(ask('GetAdapterIdentifier', [0, 2, out]), D3D_OK);
+    assert.equal(h.fields.readU32(out + D3DADAPTER_IDENTIFIER8.WHQLLevel), 0);
+
+    assert.equal(ask('GetAdapterIdentifier', [1, 0, out]), D3DERR_INVALIDCALL,
+        'there is one adapter');
+    assert.equal(ask('GetAdapterIdentifier', [0, 0, 0]), D3DERR_INVALIDCALL,
+        'and nowhere to write is refused, not written');
+    h.release(root);
 });
 
 test('the adapter answers what it can make, from the tables that make it', ()=>{

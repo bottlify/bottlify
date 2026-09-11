@@ -742,6 +742,29 @@ test('a texture and a surface level of it share one count', ()=>{
     assertFullyReleased(device);
 });
 
+test('a level count of zero is the whole chain, down to one texel', ()=>{
+    // Zero is how a program asks for every level; answered with one, it locks
+    // levels that do not exist and fills nothing past the top.
+    const device = createDevice();
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    /** @type {{ surface?: any }} */
+    const last = {};
+
+    assert.equal(device.CreateTexture(8, 4, 0, 0, D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, texture),
+        D3D_OK);
+    assert.equal(texture.texture.levels, 4, 'eight wide: 8, 4, 2, 1');
+    assert.equal(texture.texture.GetSurfaceLevel(3, last), D3D_OK);
+    /** @type {{ desc?: any }} */
+    const described = {};
+    assert.equal(last.surface.GetDesc(described), D3D_OK);
+    assert.equal(described.desc.Width, 1);
+    assert.equal(described.desc.Height, 1, 'the narrow side stops at one and stays there');
+    assert.equal(last.surface.release(), 1);
+    assert.equal(texture.texture.release(), 0);
+    assertFullyReleased(device);
+});
+
 test('binding a resource never changes its count', ()=>{
     const device = createDevice();
     /** @type {{ texture?: any }} */

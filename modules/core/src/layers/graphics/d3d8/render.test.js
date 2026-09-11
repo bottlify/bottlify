@@ -950,6 +950,72 @@ test('recorded: a texture is uploaded after it is unlocked, and only then', asyn
     assert.deepEqual([...gpu.of('writeTexture')[1].bytes], [1, 1, 1, 255]);
 });
 
+test('recorded: a chain of levels goes up level by level, into a texture with that many',
+    async()=>{
+        // A far surface sampled from its top level alone aliases, and the
+        // aliasing moves with every fraction of a texel the camera moves. So
+        // the chain a program fills is the chain the device holds, each level
+        // at its own size, and a level written again goes up again on its own.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 3, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED, out),
+            D3D_OK);
+        const texture = out.texture;
+        /** @param {number} level @param {number} value */
+        const fill = (level, value)=>{
+            /** @type {{ pBits?: number }} */
+            const locked = {};
+            assert.equal(texture.LockRect(level, locked, null, 0), D3D_OK);
+            const extent = Math.max(1, 4 >> level);
+            h.write(/** @type {number} */ (locked.pBits),
+                new Uint8Array(extent * extent * 4).fill(value));
+            assert.equal(texture.UnlockRect(level), D3D_OK);
+        };
+        fill(0, 10);
+        fill(1, 20);
+        fill(2, 30);
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.LINEAR), D3D_OK);
+        const draw = ()=>{
+            assert.equal(device.BeginScene(), D3D_OK);
+            assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+            assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(84), 28),
+                D3D_OK);
+            assert.equal(device.EndScene(), D3D_OK);
+        };
+        draw();
+        await h.present();
+
+        const made = gpu.of('createTexture').find(
+            (/** @type {any} */ call)=>call.descriptor.label === 'texture');
+        assert.equal(made.descriptor.mipLevelCount, 3);
+        /** @param {any} call */
+        const shape = call=>[call.destination.mipLevel, call.size.width, call.size.height,
+            call.bytes[0]];
+        const uploads = ()=>gpu.of('writeTexture')
+            .filter((/** @type {any} */ call)=>call.destination.texture === made.texture)
+            .map(shape);
+        assert.deepEqual(uploads(), [[0, 4, 4, 10], [1, 2, 2, 20], [2, 1, 1, 30]]);
+        assert.equal(h.samplers[h.samplers.length - 1].descriptor.mipmapFilter, 'linear');
+
+        // One level written again is one level sent again.
+        fill(1, 40);
+        draw();
+        await h.present();
+        assert.deepEqual(uploads().slice(3), [[1, 2, 2, 40]]);
+
+        // No mip filter means the top level alone, whatever the chain holds.
+        assert.equal(device.SetTextureStageState(0, D3DTSS.MIPFILTER, D3DTEXF.NONE), D3D_OK);
+        draw();
+        await h.present();
+        const pinned = h.samplers[h.samplers.length - 1].descriptor;
+        assert.equal(pinned.mipmapFilter, 'nearest');
+        assert.equal(pinned.lodMaxClamp, 0);
+    });
+
 test('recorded: a whole clear is a clearing pass, a partial clear a scissored quad', async()=>{
     const h = harness();
     const { device, gpu } = h;

@@ -42,7 +42,7 @@
 
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTFOUND, D3DFMT,
-    D3DLIGHTTYPE, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO,
+    D3DLIGHTTYPE, D3DPOOL, D3DRTYPE, D3DUSAGE, D3D_OK, FORMAT_INFO, isCompressed, surfaceBytes,
 } from './constants.js';
 import { D3DCLEAR } from '../d3d8/constants.js';
 import { IDENTITY, STAGE_COUNT, createRenderer, vertexCountOf } from '../d3d8/render.js';
@@ -71,12 +71,14 @@ export const LIGHT_ENABLED = 128;
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as offscreen plain surfaces.
+ * @property {boolean} [compressedTextures]  Whether the backend samples DXT blocks.
  */
 
 /** @type {DeviceCaps} */
 export const DEFAULT_CAPS = Object.freeze({
     maxPointSize: 64.0,
     depthTexture2d: false,
+    compressedTextures: false,
     depthCube: false,
     depthPlain: false,
 });
@@ -1333,7 +1335,7 @@ function createDeviceObject(parameters, caps, services = {}){
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.RENDERTARGET,
                 lockable,
-                base: allocate(width * height * info.bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(),
             });
             return D3D_OK;
@@ -1358,7 +1360,7 @@ function createDeviceObject(parameters, caps, services = {}){
                 format,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL,
-                base: allocate(width * height * info.bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(),
             });
             return D3D_OK;
@@ -1384,7 +1386,7 @@ function createDeviceObject(parameters, caps, services = {}){
                 format,
                 pool,
                 usage: 0,
-                base: allocate(width * height * info.bytesPerPixel),
+                base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(),
             });
             return D3D_OK;
@@ -1451,6 +1453,14 @@ function checkTextureArguments(usage, format, pool, caps, cube){
     }
     // A write-only texture is a contradiction the API rejects outright.
     if ((usage & D3DUSAGE.WRITEONLY) !== 0)
+    {
+        return D3DERR_INVALIDCALL;
+    }
+    // Offered only when the backend can sample blocks, and never as something
+    // the pipeline draws into: the blocks are not writable by it.
+    if (isCompressed(format)
+        && (!caps.compressedTextures
+            || (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0))
     {
         return D3DERR_INVALIDCALL;
     }

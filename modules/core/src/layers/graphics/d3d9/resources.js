@@ -32,7 +32,9 @@
  * name, because that is the name the caller compiled against.
  */
 
-import { D3DERR_INVALIDCALL, D3DRTYPE, FORMAT_INFO, D3D_OK } from './constants.js';
+import {
+    D3DERR_INVALIDCALL, D3DRTYPE, D3D_OK, offsetOfRect, surfaceBytes, surfacePitch,
+} from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 
 /**
@@ -153,8 +155,7 @@ export function createReferenceCount(options = {}){
  * @returns {Surface}
  */
 export function createSurface(options){
-    const info = FORMAT_INFO[options.format];
-    const pitch = options.width * info.bytesPerPixel;
+    const pitch = surfacePitch(options.format, options.width);
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
     let locked = false;
@@ -218,7 +219,7 @@ export function createSurface(options){
             locked = true;
             out.Pitch = pitch;
             out.pBits = options.base
-                + (rect ? (rect.top * pitch) + (rect.left * info.bytesPerPixel) : 0);
+                + (rect ? offsetOfRect(options.format, pitch, rect) : 0);
             // The flags decide whether the backend may rename the storage or
             // must write into it; whoever consumes this must see them.
             lockFlags = flags;
@@ -306,7 +307,7 @@ export function createTexture(options){
             format: options.format,
             pool: options.pool,
             usage: options.usage,
-            base: options.allocate(width * height * FORMAT_INFO[options.format].bytesPerPixel),
+            base: options.allocate(surfaceBytes(options.format, width, height)),
             count: options.count,
             // Only a surface reached through a 2D texture forgives an unlock it
             // does not owe; a cube face does not, and that difference is

@@ -42,6 +42,11 @@ const BufferUsage = {
     INDIRECT: 0x0100,
 };
 
+/** `GPUMapMode` bits, likewise. */
+const MapMode = {
+    READ: 0x0001,
+};
+
 /** `GPUTextureUsage` bits, likewise. */
 const TextureUsage = {
     COPY_SRC: 0x01,
@@ -161,6 +166,31 @@ export function createBackend(options){
     const dynamicBuffers = [];
     /** @type {any[]} */
     const pendingCopies = [];
+    /**
+     * When each surface was last written, and when each frame was presented.
+     *
+     * A presented surface is not copied by the page instantly, and the frame
+     * after it draws into the same texture -- with one back buffer, literally
+     * the same one. If a write to that surface is submitted before the page has
+     * copied it, what reaches the canvas is the next frame's cleared target
+     * rather than the frame that was presented, which is a dark frame with a
+     * perfectly correct draw record. Nothing else in this layer can see that,
+     * because everything else is right.
+     *
+     * @type {{ index: number, label: string, at: number }[]}
+     */
+    const surfaceWrites = [];
+    /** @type {{ index: number, label: string, at: number }[]} */
+    const presentLog = [];
+    const RING = 600;
+    /** @param {{ index: number, label: string, at: number }[]} ring @param {any} entry */
+    const remember = (ring, entry)=>{
+        ring.push(entry);
+        if (ring.length > RING)
+        {
+            ring.shift();
+        }
+    };
     /** @type {any} */
     let openFrame = null;
     /** @type {any} */
@@ -191,6 +221,7 @@ export function createBackend(options){
      */
     const createSurface = descriptor=>{
         const label = descriptor.label === undefined ? 'surface' : descriptor.label;
+        const mipLevelCount = descriptor.mipLevelCount === undefined ? 1 : descriptor.mipLevelCount;
         const texture = device.createTexture({
             label,
             size: {
@@ -198,6 +229,11 @@ export function createBackend(options){
                 height: descriptor.height,
                 depthOrArrayLayers: 1,
             },
+            // The whole chain a program supplies, so a sampler can filter
+            // between levels: a far surface sampled from its top level alone
+            // aliases, and aliasing moves with every fraction of a texel the
+            // camera moves.
+            mipLevelCount,
             format: descriptor.format,
             usage: descriptor.usage === undefined
                 ? TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
@@ -211,6 +247,7 @@ export function createBackend(options){
             width: descriptor.width,
             height: descriptor.height,
             format: descriptor.format,
+            mipLevelCount,
             label,
         };
     };
@@ -222,6 +259,8 @@ export function createBackend(options){
      */
     function beginPass(encoder, descriptor){
         const target = descriptor.target;
+        remember(surfaceWrites,
+            { index: frameIndex, label: target.label ?? 'surface', at: now() });
         const attachment = {
             view: target.view,
             loadOp: descriptor.clear ? 'clear' : 'load',
@@ -491,6 +530,56 @@ export function createBackend(options){
                     encoder.copyBufferToTexture(source, destination, size);
                 },
 
+                /**
+                 * Ranges of buffers, brought back to the processor once this
+                 * frame has been submitted.
+                 *
+                 * What a draw read is what the GPU holds, and that is not
+                 * necessarily what the program wrote: the bytes travel through
+                 * a shadow, a rename and a flush, and a gap in any of them is
+                 * invisible from the recorded command. This is the one way to
+                 * put the two side by side. Diagnostic only -- it closes the
+                 * pass in progress, and every range of a frame shares one
+                 * staging buffer and one map, because a map per range costs a
+                 * round trip each.
+                 *
+                 * @param {{ buffer: any, offset: number, size: number }[]} ranges
+                 * @returns {() => Promise<Uint8Array[]>} to call after `end`
+                 */
+                copyOut(ranges){
+                    closeCurrentPass();
+                    // Copies are in whole words at word offsets; each read takes
+                    // in the bytes around its range and hands back the range.
+                    let total = 0;
+                    const placed = ranges.map(range=>{
+                        const from = range.offset & ~3;
+                        const length = (range.offset + range.size - from + 3) & ~3;
+                        const at = total;
+                        total += length;
+                        return { ...range, from, length, at };
+                    });
+                    const staging = device.createBuffer({
+                        label: 'copy-out',
+                        size: Math.max(total, 4),
+                        usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST,
+                    });
+                    for (const range of placed)
+                    {
+                        encoder.copyBufferToBuffer(
+                            range.buffer, range.from, staging, range.at, range.length);
+                    }
+                    return async()=>{
+                        await staging.mapAsync(MapMode.READ);
+                        const mapped = new Uint8Array(staging.getMappedRange());
+                        const results = placed.map(range=>mapped.slice(
+                            range.at + range.offset - range.from,
+                            range.at + range.offset - range.from + range.size));
+                        staging.unmap();
+                        staging.destroy();
+                        return results;
+                    };
+                },
+
                 /** @param {any} descriptor @returns {any} */
                 beginPass(descriptor){
                     if (frame.ended)
@@ -547,6 +636,8 @@ export function createBackend(options){
                     {
                         const endPresent = profiler.phase('present');
                         lastPresented = { surface: presenting, frameIndex: index };
+                        remember(presentLog, { index,
+                            label: presenting.label ?? 'surface', at: now() });
                         profiler.count('presents');
                         presentTo(lastPresented);
                         endPresent();
@@ -585,6 +676,11 @@ export function createBackend(options){
                 buffers: dynamicBuffers.map(buffer=>buffer.diagnostics()),
                 frameOpen: !!(openFrame && !openFrame.ended),
                 pendingTextureCopies: pendingCopies.length,
+                // Read against the page's own record of when it copied each
+                // frame: a write to a surface timed before that copy is the
+                // ordering violation, and it can be named frame by frame.
+                surfaceWrites: surfaceWrites.slice(),
+                presents: presentLog.slice(),
             };
         },
 

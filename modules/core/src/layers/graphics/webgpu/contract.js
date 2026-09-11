@@ -62,6 +62,8 @@
  * @typedef {Object} GpuCommandEncoderLike
  * @property {(desc: any)=>any} beginRenderPass
  * @property {(source: any, destination: any, size: any)=>void} copyBufferToTexture
+ * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,
+ *            size: number)=>void} copyBufferToBuffer
  * @property {(desc?: any)=>any} finish
  */
 
@@ -74,6 +76,7 @@
  * @property {number} width
  * @property {number} height
  * @property {string} format
+ * @property {number} [mipLevelCount]  One unless the surface carries a chain.
  * @property {string} label
  */
 

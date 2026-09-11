@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
-    D3DRS, D3DSWAPEFFECT, D3DZB, D3D_OK, dwordToFloat, floatToDword,
+    D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat, floatToDword,
 } from './constants.js';
 import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
@@ -544,5 +544,43 @@ test('a fresh device has a white material, not a black one', ()=>{
     assert.deepEqual(out.material.Emissive, { r: 0, g: 0, b: 0, a: 0 }, 'and no glow');
     assert.equal(out.material.Power, 0);
 
+    assertFullyReleased(device);
+});
+
+// --- the block-compressed formats ---
+
+test('a compressed texture is refused unless the backend can sample blocks', ()=>{
+    const device = createDevice();
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(
+        device.CreateTexture(256, 256, 1, 0, D3DFMT.DXT1, D3DPOOL.MANAGED, out),
+        D3DERR_INVALIDCALL,
+        'a format we could not then create must not be offered');
+    assert.equal(out.texture, undefined, 'a refused call leaves the caller record alone');
+    assertFullyReleased(device);
+});
+
+test('a compressed texture is created when the backend can sample blocks', ()=>{
+    const device = createDevice({ caps: { compressedTextures: true } });
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(
+        device.CreateTexture(256, 256, 1, 0, D3DFMT.DXT5, D3DPOOL.MANAGED, out),
+        D3D_OK);
+    assert.ok(out.texture, 'the texture reached the caller');
+    out.texture.release();
+    assertFullyReleased(device);
+});
+
+test('nothing may be rendered into a compressed texture', ()=>{
+    const device = createDevice({ caps: { compressedTextures: true } });
+    /** @type {{ texture?: any }} */
+    const out = {};
+    assert.equal(
+        device.CreateTexture(256, 256, 1, D3DUSAGE.RENDERTARGET, D3DFMT.DXT1,
+            D3DPOOL.DEFAULT, out),
+        D3DERR_INVALIDCALL,
+        'the blocks are not writable by the pipeline, whatever the adapter offers');
     assertFullyReleased(device);
 });

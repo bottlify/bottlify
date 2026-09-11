@@ -713,6 +713,9 @@ async function run(request){
         device: {
             device: handle.device,
             queue: handle.device.queue,
+            // Who made the hardware, for the program that asks before deciding
+            // how much to ask of it.
+            adapter: handle.adapter,
             // Where every draw of the last frame landed, when the run asked
             // for it. A frame is the only thing that says which draw painted a
             // given patch of the picture, and working that out costs a
@@ -724,6 +727,9 @@ async function run(request){
             // A draw's index in a frame moves between runs; the texture it
             // binds does not, so this is what removes the same draw twice.
             skipTexture: request.skipTexture ?? null,
+            // Fog off is the other half of a pair of runs: a wash that goes
+            // with it was fog, and one that stays was not.
+            fog: request.fog !== false,
             /** @param {any} frame */
             presentTo: frame=>{
                 presented = frame;

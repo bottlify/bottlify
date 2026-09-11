@@ -252,6 +252,17 @@ export const D3DFMT = Object.freeze({
     D24S8: 75,
     D24X8: 77,
     D16: 80,
+    // The block-compressed formats are named by four character codes rather
+    // than by a number in the enumeration, because they arrived as an
+    // extension. Every card of this era carried them, so a program that keeps
+    // its art compressed -- which is most of them, since it is four to eight
+    // times less memory -- expects to find them and has a slower path it falls
+    // back to when it does not.
+    DXT1: 0x31545844,
+    DXT2: 0x32545844,
+    DXT3: 0x33545844,
+    DXT4: 0x34545844,
+    DXT5: 0x35545844,
 });
 
 /**
@@ -268,7 +279,8 @@ export const D3DFMT = Object.freeze({
  * alpha, whatever the surface it is really rendered into happens to carry.
  *
  * @type {Readonly<Record<number,
- *     { bytesPerPixel: number, depth: boolean, alpha: boolean }>>}
+ *     { bytesPerPixel: number, depth: boolean, alpha: boolean,
+ *       blockBytes?: number, blockSize?: number }>>}
  */
 export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A8R8G8B8]: Object.freeze({ bytesPerPixel: 4, depth: false, alpha: true }),
@@ -289,7 +301,112 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D16]: Object.freeze({ bytesPerPixel: 2, depth: true, alpha: false }),
+    // A compressed format has no bytes per pixel at all: its unit is a 4x4
+    // block, and a size in pixels only becomes a size in bytes after rounding
+    // up to whole blocks. `bytesPerPixel` is left at zero deliberately -- any
+    // arithmetic that still reaches for it gives a zero-length surface, which
+    // fails loudly, rather than a plausible wrong answer.
+    [D3DFMT.DXT1]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 8, blockSize: 4 }),
+    // DXT2 and DXT4 differ from DXT3 and DXT5 only in whether the colour is
+    // premultiplied by the alpha, which the block layout does not record and
+    // the sampler cannot tell apart. The bytes are identical.
+    [D3DFMT.DXT2]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
+    [D3DFMT.DXT3]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
+    [D3DFMT.DXT4]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
+    [D3DFMT.DXT5]: Object.freeze({
+        bytesPerPixel: 0, depth: false, alpha: true, blockBytes: 16, blockSize: 4 }),
 });
+
+/**
+ * Where in a locked surface a sub-rectangle begins.
+ *
+ * A compressed surface can only be addressed by whole blocks, so a rectangle
+ * into one is counted in blocks; Direct3D requires such a rectangle to be
+ * block-aligned and this rounds down rather than inventing a partial block.
+ *
+ * @param {number} format  D3DFMT
+ * @param {number} pitch   As `surfacePitch` reports it.
+ * @param {{ top: number, left: number }} rect
+ * @returns {number} bytes from the start of the surface
+ */
+export function offsetOfRect(format, pitch, rect){
+    const info = FORMAT_INFO[format];
+    if (!info)
+    {
+        return 0;
+    }
+    const { blockBytes, blockSize } = info;
+    if (blockBytes === undefined || blockSize === undefined)
+    {
+        return (rect.top * pitch) + (rect.left * info.bytesPerPixel);
+    }
+    return (Math.floor(rect.top / blockSize) * pitch)
+        + (Math.floor(rect.left / blockSize) * blockBytes);
+}
+
+/**
+ * @param {number} format  D3DFMT
+ * @returns {boolean} whether its unit is a block rather than a pixel
+ */
+export function isCompressed(format){
+    const info = FORMAT_INFO[format];
+    return !!info && info.blockBytes !== undefined;
+}
+
+/**
+ * The distance in bytes between one row of a surface and the next.
+ *
+ * For a compressed format that is a row of blocks, not a row of pixels, and it
+ * covers four rows of pixels -- which is what Direct3D reports as the pitch of
+ * a locked DXT surface, and what a program writing into one relies on.
+ *
+ * @param {number} format  D3DFMT
+ * @param {number} width   In pixels.
+ * @returns {number}
+ */
+export function surfacePitch(format, width){
+    const info = FORMAT_INFO[format];
+    if (!info)
+    {
+        return 0;
+    }
+    const { blockBytes, blockSize } = info;
+    if (blockBytes === undefined || blockSize === undefined)
+    {
+        return width * info.bytesPerPixel;
+    }
+    return Math.ceil(width / blockSize) * blockBytes;
+}
+
+/**
+ * The bytes a whole surface level occupies.
+ *
+ * A compressed level is rounded up to whole blocks in both directions, so a
+ * 2x2 DXT1 level still costs one 8-byte block. Sizing it by pixels instead is
+ * how a texture ends up short of its last row and samples as garbage there.
+ *
+ * @param {number} format  D3DFMT
+ * @param {number} width   In pixels.
+ * @param {number} height  In pixels.
+ * @returns {number}
+ */
+export function surfaceBytes(format, width, height){
+    const info = FORMAT_INFO[format];
+    if (!info)
+    {
+        return 0;
+    }
+    const { blockSize } = info;
+    if (blockSize === undefined)
+    {
+        return width * height * info.bytesPerPixel;
+    }
+    return surfacePitch(format, width) * Math.ceil(height / blockSize);
+}
 
 const reinterpret = new DataView(new ArrayBuffer(4));
 

@@ -478,3 +478,42 @@ into initialising it, because a zero there would end every block immediately.
 iteration limit honours the same bound. What remains is not this: with the bound in place a slice
 still runs to some five million instructions now and then, at a film and at a load, and the shape of
 guest code that does it has not been found -- every loop tried in a probe stops where it is told.
+
+## A redistributable runtime is ours to reimplement, whoever ships the file
+
+The rule this project started with was "only Windows system libraries are reimplemented; anything
+that arrives with a program is loaded and executed as real x86". That rule exists to stop a per-title
+crutch, and for a program's own code it is exactly right: its logic is the thing being run, and
+replacing it would be replacing the program.
+
+Measurement moved the line. Profiling one title at its menu, by module and weighted by retired
+instructions, over a window in steady state:
+
+| module | share of the machine |
+|---|---|
+| the program's own code | 53.6% |
+| an MP3 decoder shipped beside it | 27.3% |
+| the program's archive library | 10.1% |
+| the sound runtime it links against | 4.9% |
+| our own thunks | **0.2%** |
+
+A third of the machine goes to decoding audio in emulated x86, and the stream is supplied at about
+60% of real time as a result — heard as a break in the music, and not fixable anywhere in the sound
+path, which measured clean at every stage. Our own layer is 0.2%, so there is nothing to win by
+optimising what we wrote.
+
+**The decision: a library is ours to reimplement when it is a redistributable runtime with a stable
+published API, regardless of who shipped the copy.** A system library is one case of that. A
+middleware runtime — a sound engine, a video codec, an archive library that ships in hundreds of
+titles — is another, and reimplementing one is the same act as reimplementing DirectSound: it helps
+every title on that path, which is the test rule 4 actually cares about. What stays off-limits is
+unchanged: the program's own code, and anything identified by which title shipped it.
+
+Two things make this safe rather than a licence to substitute anything inconvenient. A decoder is a
+pure function — bytes in, samples or frames out, no state of the program's own — so a host
+implementation cannot diverge in behaviour the way a stateful subsystem can. And this project already
+crossed the line deliberately for video: the `media` layer decodes a cinematic natively and says so
+in its own contract, including the case of "a library a program linked against directly".
+
+The obligation that comes with it: a substituted runtime reports its divergence the way every other
+one does, and it is chosen for what the target titles actually need rather than built speculatively.

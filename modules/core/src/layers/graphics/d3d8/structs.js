@@ -49,6 +49,35 @@ export const D3DCLIPSTATUS8 = Object.freeze({
     SIZE: 0x08,
 });
 
+/** The length of each of the identifier's two strings, terminator included. */
+export const ADAPTER_STRING_LENGTH = 512;
+
+/**
+ * D3DADAPTER_IDENTIFIER8: who made the adapter and what drives it.
+ *
+ * The one structure here with padding in it: the version is a LARGE_INTEGER
+ * and sits on an eight-byte boundary, which the two strings before it happen
+ * to satisfy, and the whole is rounded up to eight at the end -- 1072 bytes,
+ * where the fields alone end at 1068. Only the fields are ever written. A
+ * program built with the structure packed has a 1068-byte buffer with its
+ * stack cookie right after it, and the four padding bytes land on the cookie:
+ * the process then ends itself with STATUS_STACK_BUFFER_OVERRUN and no fault
+ * of its own to show for it.
+ */
+export const D3DADAPTER_IDENTIFIER8 = Object.freeze({
+    Driver: 0x000,
+    Description: 0x200,
+    DriverVersion: 0x400,
+    VendorId: 0x408,
+    DeviceId: 0x40c,
+    SubSysId: 0x410,
+    Revision: 0x414,
+    DeviceIdentifier: 0x418,
+    WHQLLevel: 0x428,
+    FIELDS: 0x42c,
+    SIZE: 0x430,
+});
+
 /** How many entries each channel of a gamma ramp has. */
 export const GAMMA_RAMP_ENTRIES = 256;
 
