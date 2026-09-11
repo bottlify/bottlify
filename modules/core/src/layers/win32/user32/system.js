@@ -148,6 +148,10 @@ const DISP_CHANGE_BADMODE = -2;
 /** The refresh rate reported for the one mode this build offers. */
 const REFRESH_HZ = 60;
 
+/** EnumDisplaySettings' named indices: the mode in effect, and the registry's. */
+const ENUM_CURRENT_SETTINGS = -1;
+const ENUM_REGISTRY_SETTINGS = -2;
+
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -310,9 +314,26 @@ export function createSystemFunctions({ host, live, windows, classes }){
             | wanted[3] << 24) >>> 0;
         const height = (wanted[4] | wanted[5] << 8 | wanted[6] << 16
             | wanted[7] << 24) >>> 0;
-        return width === screen.width && height === screen.height
-            ? DISP_CHANGE_SUCCESSFUL
-            : DISP_CHANGE_BADMODE;
+        if (width !== screen.width || height !== screen.height)
+        {
+            return DISP_CHANGE_BADMODE;
+        }
+        // The depth as well, when the caller named one. A program that walks
+        // its own list of modes takes the first this accepts as the depth of
+        // the display, and accepting a sixteen-bit request for a thirty-two-bit
+        // screen makes every surface it creates after sixteen bits deep.
+        const fields = host.readMemory(devMode + DEVMODEA.dmFields, 4);
+        const named = (fields[0] | fields[1] << 8 | fields[2] << 16 | fields[3] << 24) >>> 0;
+        if ((named & DM_BITSPERPEL) !== 0)
+        {
+            const depth = host.readMemory(devMode + DEVMODEA.dmBitsPerPel, 4);
+            const bits = (depth[0] | depth[1] << 8 | depth[2] << 16 | depth[3] << 24) >>> 0;
+            if (bits !== screen.bitsPerPixel)
+            {
+                return DISP_CHANGE_BADMODE;
+            }
+        }
+        return DISP_CHANGE_SUCCESSFUL;
     };
 
     /**
@@ -482,12 +503,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * One mode, and index one answers FALSE. A caller walks this until it
          * does, so an enumeration that never ends is a hang rather than a wrong
          * list.
+         *
+         * The two named indices answer the same mode: the current settings are
+         * the one mode there is, and so are the registry's. A program asks for
+         * the current settings to learn the desktop's depth before it picks
+         * its own, and one refused that answer settles for the shallowest
+         * depth it knows -- sixteen bits, for every surface it makes after.
          */
         EnumDisplaySettingsA: {
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, mode, devMode])=>{
-                if ((mode | 0) !== 0 || (devMode >>> 0) === 0)
+                const index = mode | 0;
+                if ((index !== 0 && index !== ENUM_CURRENT_SETTINGS
+                    && index !== ENUM_REGISTRY_SETTINGS) || (devMode >>> 0) === 0)
                 {
                     return 0;
                 }

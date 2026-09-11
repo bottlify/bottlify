@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ANY_WINDOW, WM_TIMER, createMessageQueue } from './messages.js';
-import { DEVMODEA, PAINTSTRUCT, RECT } from './structs.js';
+import { DEVMODEA, DM_BITSPERPEL, PAINTSTRUCT, RECT } from './structs.js';
 import { createWindowFunctions } from './windows.js';
 
 const CLASS_NAME = 0x10000;
@@ -37,6 +37,7 @@ const WS_OVERLAPPED = 0x00000000;
 const WS_CAPTION = 0x00c00000;
 const WS_THICKFRAME = 0x00040000;
 const WS_EX_CLIENTEDGE = 0x00000200;
+const WS_VISIBLE = 0x10000000;
 
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
@@ -361,6 +362,30 @@ test('EnableWindow answers with the state it found, not the one it set', ()=>{
     assert.equal(fns.EnableWindow.handler([0x9999, 1]), 0, 'and a window that is not one');
 });
 
+test('the foreground window is the one the program showed, never nothing while one shows', ()=>{
+    // A program told that nothing is in the foreground concludes it was put
+    // behind another window, and re-activates itself every frame -- bringing
+    // its window to the top and restarting what it plays on coming back.
+    const { memory, fns } = setup();
+    assert.equal(fns.GetForegroundWindow.handler([]), 0, 'no window yet');
+
+    const hidden = makeWindow(memory, fns);
+    assert.equal(fns.GetForegroundWindow.handler([]), 0, 'a window made hidden is not active');
+    assert.equal(fns.ShowWindow.handler([hidden, 5]), 0);
+    assert.equal(fns.GetForegroundWindow.handler([]), hidden, 'showing it activates it');
+    assert.equal(fns.GetActiveWindow.handler([]), hidden);
+    assert.equal(fns.GetFocus.handler([]), hidden);
+
+    const shown = makeWindow(memory, fns, WS_VISIBLE);
+    assert.equal(fns.GetForegroundWindow.handler([]), shown, 'a window made visible is active');
+    assert.equal(fns.SetFocus.handler([hidden]), shown, 'SetFocus answers the window that had it');
+    assert.equal(fns.GetForegroundWindow.handler([]), hidden);
+
+    assert.equal(fns.DestroyWindow.handler([hidden]), 1);
+    assert.equal(fns.GetForegroundWindow.handler([]), shown,
+        'the visible window that remains is the foreground, not nothing');
+});
+
 test('a class long is class data: every window of a class reads the same value', ()=>{
     const { memory, fns } = setup();
     const first = makeWindow(memory, fns);
@@ -400,6 +425,33 @@ test('ChangeDisplaySettingsA accepts the mode already in effect and refuses anot
 
     assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL,
         'a null mode means what is already on the screen');
+
+    // A depth the caller names is checked too: a program walks its own list
+    // of modes and takes the first accepted as the display's depth, so a
+    // sixteen-bit request for this screen has to be refused.
+    putMode(memory, SCREEN.width, SCREEN.height);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_BITSPERPEL]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [16]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_BADMODE, 'a shallower depth is another mode');
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [SCREEN.bitsPerPixel]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+        DISP_CHANGE_SUCCESSFUL, 'and the screen\'s own depth is the mode in effect');
+});
+
+test('the current settings are answered by name, and say how deep the screen is', ()=>{
+    // A program asks for ENUM_CURRENT_SETTINGS before choosing its own depth;
+    // refused, it settles for sixteen bits for everything it makes after.
+    const { memory, fns } = setup();
+    memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));
+    for (const index of [0xffffffff, 0xfffffffe])
+    {
+        assert.equal(fns.EnumDisplaySettingsA.handler([0, index, DEVMODE_BUFFER]), 1,
+            `index ${index.toString(16)} is a name for a mode, not a mode past the end`);
+        assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel), SCREEN.bitsPerPixel);
+        assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), SCREEN.width);
+        assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsHeight), SCREEN.height);
+    }
 });
 
 test('both ChangeDisplaySettings spellings pop the stack their signature declares', ()=>{

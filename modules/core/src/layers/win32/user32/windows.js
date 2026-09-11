@@ -122,6 +122,8 @@ const WS_VISIBLE = 0x10000000;
 
 /** Every ShowWindow command shows the window; this one alone hides it. */
 const SW_HIDE = 0;
+/** The ShowWindow commands that leave activation where it is. */
+const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
 /** The coordinate that asks the system to choose one. */
 const CW_USEDEFAULT = 0x80000000;
@@ -344,6 +346,39 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * The window the program is active through.
+     *
+     * There is one process on this machine and its windows are the only ones
+     * there are, so the foreground window is whichever of them was last shown
+     * or given the focus -- and never nothing while a visible top-level window
+     * exists. A program told that no window is in the foreground concludes it
+     * has been put behind another, and one of this era then re-activates
+     * itself every frame: it brings its window to the top, clips the cursor
+     * again, and restarts whatever it plays when it comes back -- the menu
+     * sliding in, the camera settling -- so the picture never stops arriving.
+     */
+    let focused = 0;
+    const activeWindow = ()=>{
+        if (focused !== 0 && live(focused))
+        {
+            return focused;
+        }
+        let candidate = 0;
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && (record.style & WS_VISIBLE) !== 0 && !record.parent)
+            {
+                candidate = record.hwnd;
+            }
+        }
+        return candidate;
+    };
+    /** @param {number} hwnd */
+    const activate = hwnd=>{
+        focused = hwnd >>> 0;
+    };
+
+    /**
      * @param {import('./structs.js').WindowClassFields} fields
      * @returns {number} the atom, or zero if the class cannot be registered
      */
@@ -406,6 +441,10 @@ export function createWindowFunctions(host){
         host.queue.post({ hwnd: record.hwnd, message: WM_DESTROY, wParam: 0, lParam: 0 });
         record.destroyed = true;
         host.handles.close(record.hwnd);
+        if (focused === record.hwnd)
+        {
+            focused = 0;
+        }
 
         for (const child of windows.values())
         {
@@ -524,6 +563,10 @@ export function createWindowFunctions(host){
         };
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
+        if ((record.style & WS_VISIBLE) !== 0 && !record.parent)
+        {
+            activate(record.hwnd);
+        }
         return record;
     };
 
@@ -656,7 +699,12 @@ export function createWindowFunctions(host){
     // each keeping a copy, which is why they are built here.
     return {
         ...createPaintFunctions({ host, live, queue: host.queue, WM_PAINT }),
-        ...createSystemFunctions({ host, live, windows, classes }),
+        // The focus lives with the windows, so the system half answers from
+        // it through a view of the host that carries it.
+        ...createSystemFunctions({
+            host: Object.assign(Object.create(host), { focus: activeWindow, setFocus: activate }),
+            live, windows, classes,
+        }),
         ...createObjectFunctions({ host, live }),
         ...createDialogFunctions({ host, live, windows, makeWindow, destroyWindow }),
 
@@ -804,6 +852,10 @@ export function createWindowFunctions(host){
                 record.style = (cmdShow | 0) === SW_HIDE
                     ? (record.style & ~WS_VISIBLE) >>> 0
                     : (record.style | WS_VISIBLE) >>> 0;
+                if (!SHOW_WITHOUT_ACTIVATING.has(cmdShow | 0) && !record.parent)
+                {
+                    activate(record.hwnd);
+                }
                 // The documented answer is the state it found, not the one it
                 // set: code that toggles a window reads this back.
                 return wasVisible ? 1 : 0;
