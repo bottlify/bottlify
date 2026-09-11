@@ -155,3 +155,33 @@ test('C strings are read up to the NUL, and a missing one is an error', ()=>{
     accessors.writeBytes(0x2200, new Uint8Array(8).fill(0x41));
     assert.throws(()=>accessors.readCString(0x2200, 8), /No NUL within 8 bytes/);
 });
+
+test('a dword read remembers its region and forgets it when the map changes', ()=>{
+    // Nearly every dword a host call reads falls in the region the last one
+    // did, so the region is remembered -- but a region added or re-protected
+    // after that read has to be seen, and the remembered span never lets a
+    // read run past its end.
+    const raw = fakeMemory();
+    const view = new DataView(raw.bytes.buffer);
+    /** @type {any} */ (raw).readU32 =
+        (/** @type {number} */ address)=>view.getUint32(address, true);
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    view.setUint32(0x2000, 1, true);
+    view.setUint32(0x2ffc, 2, true);
+    assert.equal(accessors.readU32(0x2000), 1);
+    assert.equal(accessors.readU32(0x2ffc), 2, 'the last dword of the remembered region');
+    assert.throws(()=>accessors.readU32(0x2ffe), /runs past/, 'straddling its end is refused');
+    assert.throws(()=>accessors.readU32(0x3000), /Unmapped/);
+
+    regions.register({
+        name: 'more', base: 0x3000, size: 0x1000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    view.setUint32(0x3000, 7, true);
+    assert.equal(accessors.readU32(0x3000), 7, 'a region added after the last read is found');
+    assert.equal(accessors.readU32(0x2000), 1, 'and the earlier one still is');
+    regions.protect('data', Access.NONE);
+    assert.throws(()=>accessors.readU32(0x2000), /does not permit/,
+        'a region re-protected after being remembered is asked again');
+});

@@ -172,6 +172,18 @@ export function createScheduler(options){
         }
     };
 
+    /**
+     * A time before which no deadline can pass: every deadline set since the
+     * last scan is at or after it. The scan for expired waits ran on every
+     * turn and looked at every thread, tens of thousands of times a second,
+     * to find nothing nearly every time; now it runs only once the clock has
+     * reached this. It is a lower bound, not the soonest deadline: a wait
+     * that ends early leaves it where it was, which costs one empty scan.
+     *
+     * @type {number | null}
+     */
+    let noDeadlineBefore = null;
+
     /** The soonest deadline any blocked thread is waiting on, or null. */
     const soonest = ()=>threads.reduce((best, thread)=>(
         thread.state === ThreadState.BLOCKED && thread.deadline !== null
@@ -188,7 +200,16 @@ export function createScheduler(options){
      * is told, so the list does not keep a thread that has stopped waiting.
      */
     const expire = ()=>{
+        if (noDeadlineBefore === null)
+        {
+            return;
+        }
         const at = now();
+        if (at < noDeadlineBefore)
+        {
+            return;
+        }
+        noDeadlineBefore = null;
         for (const thread of threads)
         {
             if (thread.state !== ThreadState.BLOCKED
@@ -207,6 +228,7 @@ export function createScheduler(options){
                 told(thread);
             }
         }
+        noDeadlineBefore = soonest();
     };
 
     return {
@@ -407,6 +429,11 @@ export function createScheduler(options){
             thread.lastWaitingOn = reason ?? null;
             thread.deadline = timed?.deadline ?? null;
             thread.timeoutResult = timed?.result ?? 0;
+            if (thread.deadline !== null
+                && (noDeadlineBefore === null || thread.deadline < noDeadlineBefore))
+            {
+                noDeadlineBefore = thread.deadline;
+            }
         },
 
         /** @param {any} thread */

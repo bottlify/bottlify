@@ -365,3 +365,34 @@ test('releasing an object nothing waits on is not an error', ()=>{
 
     assert.deepEqual(scheduler.log, []);
 });
+
+test('a wait that ran out of time leaves only the queues it stood in', ()=>{
+    // Told by the scheduler that a thread timed out, the objects have to drop
+    // it from their queues -- and only those it stood in: a scan of every
+    // object for every expiry was paid tens of thousands of times a second
+    // by a program that polls with a timeout.
+    const scheduler = fakeScheduler();
+    /** @type {((thread: any) => void)[]} */
+    const timeouts = [];
+    /** @type {any} */ (scheduler).onTimeout =
+        (/** @type {(thread: any) => void} */ handler)=>timeouts.push(handler);
+    const sync = createSyncObjects({ scheduler });
+    const one = sync.createEvent({ name: 'one' });
+    const two = sync.createEvent({ name: 'two' });
+    const other = sync.createEvent({ name: 'other' });
+    const a = thread('a');
+    const b = thread('b');
+    const c = thread('c');
+    sync.wait(one, a, { deadline: 10 });
+    sync.waitAny([one, two], b, { deadline: 10 });
+    sync.wait(other, c);
+    assert.deepEqual(one.waiters.map((/** @type {any} */ t)=>t.name), ['a', 'b']);
+
+    timeouts[0](a);
+    assert.deepEqual(one.waiters.map((/** @type {any} */ t)=>t.name), ['b'], 'a left the one queue it stood in');
+    timeouts[0](b);
+    assert.deepEqual(one.waiters, []);
+    assert.deepEqual(two.waiters, [], 'b left both of its queues');
+    assert.deepEqual(other.waiters.map((/** @type {any} */ t)=>t.name), ['c'],
+        'a queue nobody timed out of is untouched');
+});

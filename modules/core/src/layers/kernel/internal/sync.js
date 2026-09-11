@@ -45,8 +45,11 @@ export function createSyncObjects({ scheduler }){
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
     // nobody is waiting for, and losing the signal for whoever was.
+    // Only the queues it stood in are searched: a thread remembers them when
+    // it is queued, and a scan of every object for every expiry was a cost
+    // paid tens of thousands of times a second by a program that polls.
     scheduler.onTimeout?.((/** @type {any} */ thread)=>{
-        for (const object of objects)
+        for (const object of thread.queuedOn ?? objects)
         {
             const at = object.waiters.indexOf(thread);
             if (at >= 0)
@@ -54,6 +57,7 @@ export function createSyncObjects({ scheduler }){
                 object.waiters.splice(at, 1);
             }
         }
+        thread.queuedOn = null;
         thread.waitSet = null;
     });
 
@@ -300,6 +304,7 @@ export function createSyncObjects({ scheduler }){
             }
 
             thread.waitSet = null;
+            thread.queuedOn = [object];
             object.waiters.push(thread);
             scheduler.block(thread, `${object.kind} "${object.name}"`, timed);
             return null;
@@ -347,6 +352,7 @@ export function createSyncObjects({ scheduler }){
             if (!ready)
             {
                 thread.waitSet = { objects: objects_, all: true };
+                thread.queuedOn = objects_;
                 for (const object of objects_)
                 {
                     if (!object.waiters.includes(thread))
@@ -394,6 +400,7 @@ export function createSyncObjects({ scheduler }){
             // index of the object that came -- and by the time one does, the
             // call that named the set has long since returned.
             thread.waitSet = { objects: objects_, all: false };
+            thread.queuedOn = objects_;
             for (const object of objects_)
             {
                 object.waiters.push(thread);

@@ -275,3 +275,36 @@ test('the report says where the guest ran, by page and weighted by the slice', (
 
     assert.deepEqual(sched.pages(), { '0x400000': 200, '0x810000': 100 });
 });
+
+test('a deadline set later but sooner is the first to expire, and none expires early', ()=>{
+    // The scan for expired waits runs only once the clock reaches the
+    // soonest deadline known, so a deadline that arrives later but ends
+    // sooner has to move that mark, and a wait that ends early must not
+    // leave it pointing past a deadline that is still pending.
+    let clock = 0;
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        now: ()=>clock });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    const late = sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'late' });
+    const soon = sched.create({ entry: 0x5000, stackTop: 0x6000, tebAddress: 0, name: 'soon' });
+    sched.block(late, 'a long wait', { deadline: 100 });
+    sched.block(soon, 'a short wait', { deadline: 40 });
+
+    clock = 39;
+    sched.runOnce();
+    assert.equal(soon.state, ThreadState.BLOCKED, 'not before its time');
+    clock = 40;
+    sched.runOnce();
+    assert.notEqual(soon.state, ThreadState.BLOCKED, 'expired at its deadline');
+    assert.equal(late.state, ThreadState.BLOCKED, 'the later one still waits');
+
+    // The pending deadline ends early; a new, sooner one is set after it.
+    sched.wake(late);
+    const again = sched.create({ entry: 0x7000, stackTop: 0x8000, tebAddress: 0, name: 'again' });
+    sched.block(again, 'another short wait', { deadline: 60 });
+    clock = 60;
+    sched.runOnce();
+    assert.notEqual(again.state, ThreadState.BLOCKED, 'expired at its own deadline');
+    assert.equal(sched.diagnostics().expiries, 2);
+});

@@ -75,7 +75,17 @@ export function createRegionMap(){
     const overlapping = (base, size)=>regions.find(
         region=>base < region.base + region.size && region.base < base + size);
 
+    /**
+     * Bumped whenever the table or a region's permissions change, so a caller
+     * that remembers the region an address fell in can tell when that memory
+     * is stale rather than asking again on every read.
+     */
+    let version = 0;
+
     return {
+        get version(){
+            return version;
+        },
         /**
          * Records a region, refusing anything that collides with what is already
          * mapped. An overlap is a layout bug, and it is far cheaper to hear about
@@ -102,6 +112,7 @@ export function createRegionMap(){
                     + ` at 0x${clash.base.toString(16)}+0x${clash.size.toString(16)}`);
             }
             regions.push({ ...region });
+            version++;
             return region;
         },
 
@@ -126,6 +137,7 @@ export function createRegionMap(){
                 throw new Error(`Unknown access "${access}"`);
             }
             region.access = access;
+            version++;
         },
 
         /**
