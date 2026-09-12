@@ -16,9 +16,9 @@ under a scheduler whose quantum is retired guest instructions; the bridge marsha
 puts COM interfaces into guest memory; a program's files come out of a bundle read by byte range,
 and what it writes persists as a session.
 
-Measured in this repository's own browser runs: **Warcraft III boots to its main menu and draws it
-on a real GPU, with its music and sound.** That is one title, to its menu; nothing past it is
-claimed.
+Measured in this repository's own browser runs: **the engine has drawn and played a real title on
+a real GPU through Direct3D 8** — to its main menu, with its music and sound; nothing past that is
+claimed. The list of verified games will be published later.
 
 The drawing APIs present are DirectDraw, Direct3D 7, 8, 9 and 10 (with DXGI), OpenGL 1.x and
 Vulkan, every one rendering through the same WebGPU backend. Direct3D 8 is the one a real program

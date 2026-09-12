@@ -139,7 +139,7 @@ tens of thousands of calls a second was the garbage collector's whole share of a
 
 A host function that cannot answer yet — it is waiting, or it has ended the thread that called
 it — must not return a number, because the guest would take it as the answer. `park()` calls
-`kernel.parkThread` and returns a module-private frozen token; `isParkedCall` compares by
+`kernel.parkThread` and returns a module-private immutable token; `isParkedCall` compares by
 identity. Nothing else produces the token, so "returned an asynchronous result without parking"
 is not something a handler can say. `park` throws with no call in flight.
 

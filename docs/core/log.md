@@ -44,8 +44,8 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 
 | method | one line |
 |--------|----------|
-| `Level` | `{ OFF: 0, ERROR: 1, WARN: 2, INFO: 3, DEBUG: 4, TRACE: 5 }`, frozen. A category's level is the least severe it keeps. |
-| `PhaseKind` | `{ HOST: 'host', GUEST: 'guest', GPU: 'gpu', PRESENT: 'present' }`, frozen. |
+| `Level` | `{ OFF: 0, ERROR: 1, WARN: 2, INFO: 3, DEBUG: 4, TRACE: 5 }`, immutable (`Object.freeze`). A category's level is the least severe it keeps. |
+| `PhaseKind` | `{ HOST: 'host', GUEST: 'guest', GPU: 'gpu', PRESENT: 'present' }`, immutable (`Object.freeze`). |
 | `error(category, message, a?, b?, c?, d?)` … `trace(...)` | One writer per level. |
 | `write(level, category, message, a?, b?, c?, d?)` | The general writer. `level` is a `Level` number. |
 | `enabled(category, level)` | Whether a write at that level would be kept; worth asking only around work done solely to build the arguments. |

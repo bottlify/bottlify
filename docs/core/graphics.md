@@ -361,7 +361,7 @@ A call is answered one of three ways, and which one is decided where the call li
 ### What has drawn a real title
 
 Only Direct3D 8 has. This project's own CDP runs (`tools/cdp_test/game.mjs`, `npm run cdp:game`)
-bring Warcraft III up to its main menu on a real GPU, and `tools/cdp_test/triangle.mjs` runs a
+bring a real title up to its main menu on a real GPU, and `tools/cdp_test/triangle.mjs` runs a
 committed Direct3D 8 fixture (`modules/core/test/fixtures/triangle.exe`) on a real GPU and checks
 four named pixels byte for byte. DirectDraw, Direct3D 7, 9 and 10, OpenGL, Vulkan and the GDI
 drawing half are verified by the tests below and by nothing else.
@@ -440,7 +440,7 @@ predication, subroutines or vertex-shader texture reads.
 | kind | files |
 |---|---|
 | Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`. |
-| Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is frozen. |
+| Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
 | Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`. |
 | Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |

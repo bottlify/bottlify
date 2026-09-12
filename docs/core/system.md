@@ -98,7 +98,7 @@ exempt so the stub is not mistaken for something else: `marker` (the string `[st
 `then` (`undefined`, so an `await` does not treat it as a promise); symbol properties answer
 `undefined`.
 
-`createStubModule(name, version, requires = [])` wraps that in a frozen `BottlifyModule` whose
+`createStubModule(name, version, requires = [])` wraps that in an immutable (`Object.freeze`) `BottlifyModule` whose
 `diagnostics()` reports `status: 'stub'`. The registry installs stubs with an empty `requires`.
 
 A stub is a valid state of a build, not a gap: a program that reaches a disabled layer fails loudly

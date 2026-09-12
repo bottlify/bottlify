@@ -105,9 +105,9 @@ change and on a schedule.
 ## Current limitations
 
 - **A title reaches its menu; playing past it is unproven.** What has been measured in this
-  repository's own browser runs is one commercial title booting through `createApp`, drawing its
-  main menu on a real GPU through Direct3D 8, with music and sound. Nothing further is claimed for
-  any title.
+  repository's own browser runs is one real title booting through `createApp`, drawing its main
+  menu on a real GPU through Direct3D 8, with music and sound. Nothing further is claimed. The
+  list of verified games will be published later.
 - **Direct3D 8 is the only drawing API a real program has exercised.** DirectDraw, Direct3D 7, 9
   and 10, OpenGL and Vulkan are verified by the package's own tests — contract tests against
   observed behaviour and byte-exact frame comparison on the WebGPU backend — not yet by a title.
