@@ -366,10 +366,10 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
 
     assert.equal(ask('GetAdapterCount', []), 1);
-    // An 800x600 display of the era offers 640x480 and 800x600, each in 32-bit
-    // and 16-bit colour: four modes, and a program builds its menu from them.
+    // An 800x600 display offers 640x480 and 800x600, in 32-bit colour only:
+    // two modes, and a program builds its menu from them.
     const count = ask('GetAdapterModeCount', [0]);
-    assert.equal(count, 4);
+    assert.equal(count, 2);
 
     const mode = 0x1200;
     const seen = [];
@@ -380,8 +380,7 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
             h.fields.readU32(mode + D3DDISPLAYMODE.Height)}/${
             h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
     }
-    assert.deepEqual(seen, ['640x480/22', '640x480/23', '800x600/22', '800x600/23'],
-        'every size in every adapter format, smallest first');
+    assert.deepEqual(seen, ['640x480/22', '800x600/22'], 'every size, 32-bit, smallest first');
     assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
         'and the index past the end is refused, so a walk ends');
 

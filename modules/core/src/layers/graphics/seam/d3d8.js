@@ -1613,12 +1613,12 @@ export function createDirect3D8Seam(
     };
 
     /**
-     * The formats an adapter's mode list is offered in: 32-bit and 16-bit
-     * colour, which are what CheckDeviceType approves as an adapter format.
-     * Direct3D 8 lists every mode in every format under one index, so the
-     * list is the sizes crossed with these.
+     * The one format an adapter's mode list is offered in: 32-bit colour.
+     * Direct3D 8 lists every mode in every format under one index, and a
+     * display that can show 32 bits has no reason to offer 16 -- a program
+     * given both defaults to whichever it finds first and looks worse for it.
      */
-    const ADAPTER_FORMATS = Object.freeze([22, 23]);
+    const ADAPTER_FORMATS = Object.freeze([22]);
 
     /**
      * Every mode the adapter offers, in the order a program walks them: each

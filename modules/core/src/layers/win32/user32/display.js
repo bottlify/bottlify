@@ -20,16 +20,15 @@
 export const REFRESH_HZ = 60;
 
 /**
- * The sizes an adapter of the era lists, 4:3 first and then the wide ones,
- * in the order a program finds them.
+ * A handful of sizes, not a catalogue: the three every program of the era
+ * assumes exist, the two widescreen standards, and the display's own size
+ * added below. A long list is a menu nobody scrolls, and every size a person
+ * would actually pick is here.
  *
  * @type {readonly (readonly [number, number])[]}
  */
 const SIZES = Object.freeze([
-    [640, 480], [800, 600], [1024, 768], [1152, 864], [1280, 960], [1600, 1200],
-    [1280, 720], [1280, 768], [1280, 800], [1280, 1024], [1360, 768], [1366, 768],
-    [1440, 900], [1600, 900], [1680, 1050], [1920, 1080], [1920, 1200],
-    [2560, 1440], [2560, 1600], [3840, 2160],
+    [640, 480], [800, 600], [1024, 768], [1280, 720], [1920, 1080],
 ]);
 
 /**

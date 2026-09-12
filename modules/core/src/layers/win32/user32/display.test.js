@@ -37,6 +37,6 @@ test('a program in a small mode is still offered the whole display', ()=>{
     const sizes = modes.map(mode=>`${mode.width}x${mode.height}`);
     assert.ok(sizes.includes('800x600'), 'the mode in effect is listed');
     assert.ok(sizes.includes('1920x1080'), 'and so is the display itself');
-    assert.ok(sizes.includes('1024x768') && sizes.includes('1280x720'),
-        'and every size of the era between them');
+    assert.deepEqual(sizes, ['640x480', '800x600', '1024x768', '1280x720', '1920x1080'],
+        'and only the handful anyone would pick between them');
 });
