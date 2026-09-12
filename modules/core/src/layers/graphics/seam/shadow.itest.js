@@ -19,9 +19,11 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../cpu/internal/v86-host.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, lockCode, setIndicesCode, setRenderStateCode,
-    setStreamSourceCode, setTransformCode, setVertexShaderCode, unlockCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, lockCode, setIndicesCode, setMaterialCode,
+    setRenderStateCode, setStreamSourceCode, setTextureCode, setTextureStageStateCode,
+    setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
+import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
 const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
 
@@ -29,21 +31,24 @@ const PROGRAM = 0x8000;
 /** Past the program, which is a few hundred bytes of pushes and calls. */
 const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
-    stream: 0x8a00, indices: 0x8a80, shader: 0x8b00,
+    stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
+    material: 0x8c80,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
-const TRAP = 0x8b80;
+const TRAP = 0x8d00;
 const OBJECT = 0x9000;
 /** A buffer object, whose block names its bytes and the device's block. */
 const VBUF = 0x9400;
 /** An object whose state word is zero: one published before it had a block. */
 const BARE = 0x9800;
+/** Two pages, as the device's block is. */
 const BLOCK = 0xa000;
-const MATRIX = 0xb000;
-const VBLOCK = 0xb400;
-const VBASE = 0xc000;
+const MATRIX = 0xc000;
+const VBLOCK = 0xc400;
+const VBASE = 0xd000;
 const VLENGTH = 0x100;
-const OUT = 0xb800;
+const OUT = 0xc800;
+const MATERIAL = 0xcc00;
 const STACK = 0x300000;
 
 /** @param {number} value @returns {number[]} */
@@ -79,6 +84,14 @@ const STEPS = [
     step(ROUTINES.shader, OBJECT, [0x102]),              // 15: a vertex format
     step(ROUTINES.shader, OBJECT, [0x3]),                // 16: a shader handle: the trap
     step(ROUTINES.unlock, VBUF, []),                     // 17: with the ring full: the trap
+    step(ROUTINES.texture, OBJECT, [1, 0x4242]),         // 18: stage 1
+    step(ROUTINES.texture, OBJECT, [8, 0x4242]),         // 19: no such stage: refused here
+    step(ROUTINES.stageState, OBJECT, [2, D3DTSS.COLOROP, 5]),   // 20
+    step(ROUTINES.stageState, OBJECT, [2, 12, 5]),       // 21: not a type of this version: the trap
+    step(ROUTINES.stageState, OBJECT, [2, 40, 5]),       // 22: past the table: the trap
+    step(ROUTINES.stageState, OBJECT, [8, D3DTSS.COLOROP, 5]),   // 23: no such stage: refused here
+    step(ROUTINES.material, OBJECT, [MATERIAL]),         // 24: copied in
+    step(ROUTINES.material, OBJECT, [0]),                // 25: null: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -128,6 +141,9 @@ test('the guest routines write the blocks and leave what they cannot take to the
     host.writePhysical(ROUTINES.stream, setStreamSourceCode(ROUTINES.stream, TRAP));
     host.writePhysical(ROUTINES.indices, setIndicesCode(ROUTINES.indices, TRAP));
     host.writePhysical(ROUTINES.shader, setVertexShaderCode(ROUTINES.shader, TRAP));
+    host.writePhysical(ROUTINES.texture, setTextureCode(ROUTINES.texture, TRAP));
+    host.writePhysical(ROUTINES.stageState, setTextureStageStateCode(ROUTINES.stageState, TRAP));
+    host.writePhysical(ROUTINES.material, setMaterialCode(ROUTINES.material, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
     host.writePhysical(VBUF + 4, new Uint8Array(u32(VBLOCK)));
@@ -139,6 +155,8 @@ test('the guest routines write the blocks and leave what they cannot take to the
     ]));
     const matrix = new Float32Array(16).map((unused, i)=>i * 1.5);
     host.writePhysical(MATRIX, new Uint8Array(matrix.buffer));
+    const material = new Float32Array(17).map((unused, i)=>i + 0.25);
+    host.writePhysical(MATERIAL, new Uint8Array(material.buffer));
 
     const { bytes: image, starts, end } = program();
     host.writePhysical(PROGRAM, image);
@@ -172,8 +190,13 @@ test('the guest routines write the blocks and leave what they cannot take to the
         }
         const after = index + 1 < starts.length ? starts[index + 1] : end;
         assert.equal(eip(), after, `step ${index} halted after its call`);
-        assert.equal(host.cpu().reg32[0] >>> 0, 0, `step ${index} answered D3D_OK`);
         assert.equal(host.cpu().reg32[4] >>> 0, STACK, `step ${index} left the stack as it was`);
+        const answer = host.cpu().reg32[0] >>> 0;
+        if (answer === D3DERR_INVALIDCALL)
+        {
+            return 'invalid';
+        }
+        assert.equal(answer, 0, `step ${index} answered D3D_OK`);
         return 'ok';
     };
 
@@ -250,6 +273,27 @@ test('the guest routines write the blocks and leave what they cannot take to the
     write(BLOCK + SHADOW.RING_HEAD, SHADOW.RING_CAPACITY);
     assert.equal(run(17), 'trap', 'with the ring full, an unlock is the host\'s');
     assert.equal(read(VBLOCK + BUFFER.LOCKED), 1, 'and the lock is still held');
+
+    assert.equal(run(18), 'ok');
+    assert.equal(read(BLOCK + SHADOW.TEXTURES + 4), 0x4242);
+    assert.equal(read(BLOCK + SHADOW.TEXTURE_CALLS), 1);
+    assert.equal(run(19), 'invalid', 'a stage past the last is refused without the trap');
+    assert.equal(read(BLOCK + SHADOW.TEXTURE_CALLS), 1, 'and not counted');
+
+    assert.equal(run(20), 'ok');
+    assert.equal(read(BLOCK + SHADOW.STAGE_STATES + (2 * 32 + D3DTSS.COLOROP) * 4), 5);
+    assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
+    assert.equal(run(21), 'trap', 'a type this version has not got is the host\'s');
+    assert.equal(run(22), 'trap', 'a type past the table is the host\'s');
+    assert.equal(run(23), 'invalid');
+    assert.equal(read(BLOCK + SHADOW.STAGE_STATE_CALLS), 1);
+
+    assert.equal(run(24), 'ok');
+    const copied = new Float32Array(host.readPhysical(BLOCK + SHADOW.MATERIAL, 68).slice().buffer);
+    assert.deepEqual([...copied], [...material], 'the material copied into the block');
+    assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
+    assert.equal(run(25), 'trap', 'a null material is the host\'s to refuse');
+    assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
 
     host.stop();
 });

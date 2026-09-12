@@ -27,7 +27,7 @@
  * The block is one-way and untrusted. The guest writes it, and nothing the
  * host derives from state -- a pipeline, a shader, a binding -- is keyed on
  * the block directly. On every entry into the host the block is compared
- * whole with the host's own copy, and each difference goes through the same
+ * with the host's own copy, and each difference goes through the same
  * setter the trap would have called, which is where validation and
  * invalidation live. Nothing depends on the guest having set a flag, because
  * the guest can write the block by any means at all. The host writes the
@@ -43,19 +43,32 @@
  * difference is reported as a divergence once.
  *
  * The block also counts the calls it absorbed, because the host no longer
- * sees them and a saving nobody can measure is a belief.
+ * sees them and a saving nobody can measure is a belief. It counts them per
+ * group, and the host compares only the groups whose count moved: a burst of
+ * render states between two draws costs the next draw a scan of the render
+ * states, not of every word in the block.
+ *
+ * A pointer the guest wrote names an object only while the program holds
+ * it. When the last reference goes the host marks every slot still naming
+ * that pointer as stale -- in the block and in its copy -- so the device
+ * keeps what it had bound, as the runtime does, and a later write of the
+ * same pointer, which by then may name a new object, is seen as the change
+ * it is.
  */
 
-/** Byte offsets within the block. */
+import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
+
 /**
- * The block takes a page of its own. The routines that write it are guest
+ * The block takes pages of its own. The routines that write it are guest
  * code the emulator compiles, and a write into a page that holds compiled
  * code makes the emulator discard everything compiled for that page -- so a
  * block laid right after the routines, out of the same heap, would have every
  * SetRenderState throw the routines away and run them interpreted after.
  */
 const PAGE = 4096;
+const PAGES = 2;
 
+/** Byte offsets within the block. */
 export const SHADOW = {
     /** Bit 0 set by the host: take the slow path. */
     FLAGS: 0,
@@ -85,8 +98,43 @@ export const SHADOW = {
     /** The buffers unlocked since the host last looked, as their block addresses. */
     RING: 2988,
     RING_CAPACITY: 64,
-    SIZE: 2988 + 64 * 4,
+    /** Fast-path SetTexture, SetTextureStageState and SetMaterial calls. */
+    TEXTURE_CALLS: 3244,
+    STAGE_STATE_CALLS: 3248,
+    MATERIAL_CALLS: 3252,
+    /** 8 texture pointers, one per stage. */
+    TEXTURES: 3256,
+    STAGE_COUNT: 8,
+    /** D3DMATERIAL8: four colours of four floats and a power. */
+    MATERIAL: 3288,
+    MATERIAL_WORDS: 17,
+    /** 8 stages of 32 dwords, one per D3DTEXTURESTAGESTATETYPE below 32. */
+    STAGE_STATES: 3356,
+    STAGE_STATE_STRIDE: 32,
+    SIZE: 3356 + 8 * 32 * 4,
 };
+
+/**
+ * A pointer slot whose object the program let go of. Not an address a
+ * program can hold, so a slot reading it was written by the host, and a slot
+ * that still reads it was not written by the program since.
+ */
+export const STALE_POINTER = 0xffffffff;
+
+/** The counters, in the order the host keeps its copy of them. */
+const COUNTERS = [
+    SHADOW.RENDER_STATE_CALLS, SHADOW.TRANSFORM_CALLS, SHADOW.BINDING_CALLS, SHADOW.LOCK_CALLS,
+    SHADOW.UNLOCK_CALLS, SHADOW.RING_HEAD, SHADOW.TEXTURE_CALLS, SHADOW.STAGE_STATE_CALLS,
+    SHADOW.MATERIAL_CALLS,
+];
+const [RENDER_STATE_GROUP, TRANSFORM_GROUP, BINDING_GROUP, LOCK_GROUP, UNLOCK_GROUP,
+    RING_GROUP, TEXTURE_GROUP, STAGE_STATE_GROUP, MATERIAL_GROUP] = COUNTERS.keys();
+
+/**
+ * The stage state types this version has, as a bit per type: the guest
+ * routine takes those and leaves the rest to the host, which refuses them.
+ */
+const STAGE_STATE_TYPES = Object.values(D3DTSS).reduce((mask, type)=>mask | (1 << type), 0) >>> 0;
 
 /** Byte offsets within a buffer's block, which the device's block points at through a ring. */
 export const BUFFER = {
@@ -583,6 +631,186 @@ export function setVertexShaderCode(at, trap){
 }
 
 /**
+ * The tail a routine answers a stage past the last with: the refusal the
+ * interface documents, without a crossing to fetch it.
+ *
+ *   invalid:
+ *     mov eax, D3DERR_INVALIDCALL
+ *     ret n
+ *
+ * @param {number} popped
+ * @returns {(number[] | { label: string })[]}
+ */
+const invalidStage = popped=>[
+    { label: 'invalid' },
+    [0xb8, ...dword(D3DERR_INVALIDCALL)],                        // mov eax, D3DERR_INVALIDCALL
+    [0xc2, popped, 0x00],                                        // ret n
+];
+
+/**
+ * HRESULT SetTexture(this, DWORD stage, IDirect3DBaseTexture8*), as guest
+ * code. The pointer is stored as it is; the host turns it into the object it
+ * names when it next looks, and refuses one that names nothing.
+ *
+ *     mov eax, [esp+8]            ; stage
+ *     cmp eax, 8
+ *     jae invalid
+ *     mov edx, [esp+12]           ; the texture
+ *     mov [ecx + eax*4 + TEXTURES], edx
+ *     inc dword [ecx+TEXTURE_CALLS]
+ *     xor eax, eax
+ *     ret 12
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setTextureCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
+        { jcc: 0x73, to: 'invalid' },                            // jae invalid
+        [0x8b, 0x54, 0x24, 0x0c],                                // mov edx, [esp+12]
+        [0x89, 0x94, 0x81, ...dword(SHADOW.TEXTURES)],           // mov [ecx+eax*4+disp], edx
+        [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x0c, 0x00],                                      // ret 12
+        ...invalidStage(12),
+    ]);
+}
+
+/**
+ * HRESULT SetTextureStageState(this, DWORD stage, D3DTEXTURESTAGESTATETYPE
+ * type, DWORD value), as guest code. A type this version has not got is the
+ * host's, which refuses it; a stage past the last is refused here.
+ *
+ *     mov eax, [esp+12]           ; type
+ *     cmp eax, 32
+ *     jae slow
+ *     mov edx, STAGE_STATE_TYPES
+ *     bt edx, eax
+ *     jnc slow                    ; not a type of this version
+ *     mov eax, [esp+8]            ; stage
+ *     cmp eax, 8
+ *     jae invalid
+ *     shl eax, 5                  ; stage * 32
+ *     add eax, [esp+12]           ; + type
+ *     mov edx, [esp+16]           ; value
+ *     mov [ecx + eax*4 + STAGE_STATES], edx
+ *     inc dword [ecx+STAGE_STATE_CALLS]
+ *     xor eax, eax
+ *     ret 16
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setTextureStageStateCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x3d, ...dword(SHADOW.STAGE_STATE_STRIDE)],             // cmp eax, 32
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0xba, ...dword(STAGE_STATE_TYPES)],                     // mov edx, imm32
+        [0x0f, 0xa3, 0xc2],                                      // bt edx, eax
+        { jcc: 0x73, to: 'slow' },                               // jnc slow
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3d, ...dword(SHADOW.STAGE_COUNT)],                    // cmp eax, 8
+        { jcc: 0x73, to: 'invalid' },                            // jae invalid
+        [0xc1, 0xe0, 0x05],                                      // shl eax, 5
+        [0x03, 0x44, 0x24, 0x0c],                                // add eax, [esp+12]
+        [0x8b, 0x54, 0x24, 0x10],                                // mov edx, [esp+16]
+        [0x89, 0x94, 0x81, ...dword(SHADOW.STAGE_STATES)],       // mov [ecx+eax*4+disp], edx
+        [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x10, 0x00],                                      // ret 16
+        ...invalidStage(16),
+    ]);
+}
+
+/**
+ * HRESULT SetMaterial(this, const D3DMATERIAL8*), as guest code. Copies the
+ * seventeen floats into the block; a null pointer is the host's to refuse.
+ *
+ *     mov edx, [esp+8]            ; the material
+ *     test edx, edx
+ *     jz slow
+ *     lea eax, [ecx + MATERIAL]
+ *     inc dword [ecx+MATERIAL_CALLS]
+ *     push esi
+ *     push edi
+ *     mov esi, edx
+ *     mov edi, eax
+ *     mov ecx, 17
+ *     rep movsd
+ *     pop edi
+ *     pop esi
+ *     xor eax, eax
+ *     ret 8
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function setMaterialCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x54, 0x24, 0x08],                                // mov edx, [esp+8]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8d, 0x81, ...dword(SHADOW.MATERIAL)],                 // lea eax, [ecx+disp]
+        [0xff, 0x81, ...dword(SHADOW.MATERIAL_CALLS)],           // inc dword [ecx+disp]
+        [0x56],                                                  // push esi
+        [0x57],                                                  // push edi
+        [0x89, 0xd6],                                            // mov esi, edx
+        [0x89, 0xc7],                                            // mov edi, eax
+        [0xb9, ...dword(SHADOW.MATERIAL_WORDS)],                 // mov ecx, 17
+        [0xf3, 0xa5],                                            // rep movsd
+        [0x5f],                                                  // pop edi
+        [0x5e],                                                  // pop esi
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/**
+ * @typedef {Object} ShadowMaterial
+ * @property {{ r: number, g: number, b: number, a: number }} Diffuse
+ * @property {{ r: number, g: number, b: number, a: number }} Ambient
+ * @property {{ r: number, g: number, b: number, a: number }} Specular
+ * @property {{ r: number, g: number, b: number, a: number }} Emissive
+ * @property {number} Power
+ */
+
+/**
+ * A material from the seventeen floats D3DMATERIAL8 lays out.
+ *
+ * @param {ArrayLike<number>} f
+ * @returns {ShadowMaterial}
+ */
+export function materialOf(f){
+    const colour = (/** @type {number} */ at)=>(
+        { r: f[at], g: f[at + 1], b: f[at + 2], a: f[at + 3] });
+    return {
+        Diffuse: colour(0),
+        Ambient: colour(4),
+        Specular: colour(8),
+        Emissive: colour(12),
+        Power: f[16],
+    };
+}
+
+/**
+ * @param {ShadowMaterial} material
+ * @returns {Float32Array} the seventeen floats D3DMATERIAL8 lays out
+ */
+export function materialFloats(material){
+    const colours = [material.Diffuse, material.Ambient, material.Specular, material.Emissive];
+    return Float32Array.from([
+        ...colours.flatMap(one=>[one.r, one.g, one.b, one.a]),
+        material.Power,
+    ]);
+}
+
+/**
  * @typedef {Object} ShadowBuffer
  * @property {number} base        Where its bytes are in guest memory.
  * @property {number} length
@@ -606,6 +834,12 @@ export function setVertexShaderCode(at, trap){
  * @property {(out: { buffer?: any, baseVertexIndex?: number }) => number} GetIndices
  * @property {(handle: number) => number} SetVertexShader
  * @property {(out: { handle?: number }) => number} GetVertexShader
+ * @property {(stage: number, texture: any) => number} SetTexture
+ * @property {(stage: number, type: number, value: number) => number} SetTextureStageState
+ * @property {(stage: number, type: number, out: { value?: number }) => number
+ *     } GetTextureStageState
+ * @property {(material: ShadowMaterial) => number} SetMaterial
+ * @property {(out: { material?: ShadowMaterial }) => number} GetMaterial
  */
 
 /**
@@ -639,9 +873,19 @@ export function createShadow(deps){
     let seenIndices = 0;
     let seenBaseVertex = 0;
     let seenShader = 0;
-    /** The guest's counters as of the last sync; unchanged, there is nothing to adopt. */
-    const seenCounters = new Uint32Array(6);
-    let calls = { renderStates: 0, transforms: 0, bindings: 0, locks: 0, unlocks: 0 };
+    const seenTextures = new Uint32Array(SHADOW.STAGE_COUNT);
+    const seenStageStates = new Uint32Array(SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
+    const seenMaterial = new Uint32Array(SHADOW.MATERIAL_WORDS);
+    /**
+     * The guest's counters as of the last sync, in the order of COUNTERS;
+     * a group whose count is unchanged has nothing to adopt.
+     */
+    const seenCounters = new Uint32Array(COUNTERS.length);
+    const counters = new Uint32Array(COUNTERS.length);
+    let calls = {
+        renderStates: 0, transforms: 0, bindings: 0, locks: 0, unlocks: 0,
+        textures: 0, stageStates: 0, materials: 0,
+    };
     let refused = 0;
     let slow = false;
     let synced = 0;
@@ -742,6 +986,35 @@ export function createShadow(deps){
         seenShader = device.GetVertexShader(shader) === 0 ? (shader.handle ?? 0) >>> 0 : 0;
         deps.writeMemory(address + SHADOW.STREAMS,
             dwordsBytes([...seenStreams, seenIndices, seenBaseVertex, seenShader]));
+
+        // The textures are mirrored as stale rather than as pointers: a
+        // program that never writes a stage leaves the device with what it
+        // holds, and reading a bound texture back would take a reference on
+        // one the program may already have let go of.
+        seenTextures.fill(STALE_POINTER);
+        deps.writeMemory(address + SHADOW.TEXTURES, dwordsBytes([...seenTextures]));
+
+        for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+        {
+            for (let type = 0; type < SHADOW.STAGE_STATE_STRIDE; type++)
+            {
+                /** @type {{ value?: number }} */
+                const out = {};
+                const value = device.GetTextureStageState(stage, type, out) === 0
+                    ? (out.value ?? 0) >>> 0
+                    : 0;
+                seenStageStates[stage * SHADOW.STAGE_STATE_STRIDE + type] = value;
+            }
+        }
+        deps.writeMemory(address + SHADOW.STAGE_STATES, dwordsBytes([...seenStageStates]));
+
+        /** @type {{ material?: ShadowMaterial }} */
+        const held = {};
+        const material = device.GetMaterial(held) === 0 && held.material
+            ? materialFloats(held.material)
+            : new Float32Array(SHADOW.MATERIAL_WORDS);
+        seenMaterial.set(new Uint32Array(material.buffer));
+        deps.writeMemory(address + SHADOW.MATERIAL, new Uint8Array(material.buffer));
     };
 
     /**
@@ -794,11 +1067,189 @@ export function createShadow(deps){
         }
     };
 
+    // One scan per group, each over its own region of the block, so that
+    // a call that changed one group reads that group and no other. A
+    // difference goes through the device's own setter; a value the setter
+    // refuses is reported once and kept as the guest set it, so it is not
+    // reported again.
+    const syncRenderStates = ()=>{
+        const words = readWords(address + SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT);
+        for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
+        {
+            const value = words[state];
+            if (value === seenStates[state])
+            {
+                continue;
+            }
+            seenStates[state] = value;
+            if (device.SetRenderState(state, value) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetRenderState',
+                    `state ${state} set to ${value} in the guest was accepted;`
+                    + ' the device refuses it');
+            }
+        }
+    };
+
+    const syncTransforms = ()=>{
+        const words = readWords(address + SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16);
+        for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
+        {
+            let same = true;
+            for (let word = slot * 16; word < slot * 16 + 16; word++)
+            {
+                if (words[word] !== seenTransforms[word])
+                {
+                    same = false;
+                    break;
+                }
+            }
+            if (same)
+            {
+                continue;
+            }
+            seenTransforms.set(words.subarray(slot * 16, slot * 16 + 16), slot * 16);
+            const matrix = new Float32Array(words.buffer, words.byteOffset + slot * 64, 16);
+            if (device.SetTransform(transformType(slot), matrix) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetTransform',
+                    `type ${transformType(slot)} set in the guest was accepted;`
+                    + ' the device refuses it');
+            }
+        }
+    };
+
+    const syncBindings = ()=>{
+        const bound = readWords(address + SHADOW.STREAMS, SHADOW.STREAM_COUNT * 2 + 3);
+        for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+        {
+            const pointer = bound[index * 2];
+            const stride = bound[index * 2 + 1];
+            if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1])
+            {
+                continue;
+            }
+            seenStreams[index * 2] = pointer;
+            seenStreams[index * 2 + 1] = stride;
+            const buffer = pointer === 0 ? null : deps.objectAt(pointer);
+            if (pointer !== 0 && !buffer)
+            {
+                refuse('IDirect3DDevice8::SetStreamSource',
+                    `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
+                    + ' which is not an interface this device published');
+            }
+            else if (device.SetStreamSource(index, buffer, stride) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetStreamSource',
+                    `stream ${index} bound in the guest was accepted; the device refuses it`);
+            }
+        }
+        const indicesAt = SHADOW.STREAM_COUNT * 2;
+        if (bound[indicesAt] !== seenIndices || bound[indicesAt + 1] !== seenBaseVertex)
+        {
+            seenIndices = bound[indicesAt];
+            seenBaseVertex = bound[indicesAt + 1];
+            const buffer = seenIndices === 0 ? null : deps.objectAt(seenIndices);
+            if (seenIndices !== 0 && !buffer)
+            {
+                refuse('IDirect3DDevice8::SetIndices',
+                    `indices bound in the guest to 0x${seenIndices.toString(16)},`
+                    + ' which is not an interface this device published');
+            }
+            else if (device.SetIndices(buffer, seenBaseVertex) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetIndices',
+                    'indices bound in the guest were accepted; the device refuses them');
+            }
+        }
+        if (bound[indicesAt + 2] !== seenShader)
+        {
+            seenShader = bound[indicesAt + 2];
+            if (device.SetVertexShader(seenShader) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetVertexShader',
+                    `vertex format 0x${seenShader.toString(16)} set in the guest was`
+                    + ' accepted; the device refuses it');
+            }
+        }
+    };
+
+    const syncTextures = ()=>{
+        const bound = readWords(address + SHADOW.TEXTURES, SHADOW.STAGE_COUNT);
+        for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+        {
+            const pointer = bound[stage];
+            if (pointer === seenTextures[stage])
+            {
+                continue;
+            }
+            seenTextures[stage] = pointer;
+            const texture = pointer === 0 ? null : deps.objectAt(pointer);
+            if (pointer !== 0 && !texture)
+            {
+                refuse('IDirect3DDevice8::SetTexture',
+                    `stage ${stage} bound in the guest to 0x${pointer.toString(16)},`
+                    + ' which is not an interface this device published');
+            }
+            else if (device.SetTexture(stage, texture) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetTexture',
+                    `stage ${stage} bound in the guest was accepted; the device refuses it`);
+            }
+        }
+    };
+
+    const syncStageStates = ()=>{
+        const words = readWords(address + SHADOW.STAGE_STATES,
+            SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE);
+        for (let at = 0; at < words.length; at++)
+        {
+            const value = words[at];
+            if (value === seenStageStates[at])
+            {
+                continue;
+            }
+            seenStageStates[at] = value;
+            const stage = at >>> 5;
+            const type = at & (SHADOW.STAGE_STATE_STRIDE - 1);
+            if (device.SetTextureStageState(stage, type, value) !== 0)
+            {
+                refuse('IDirect3DDevice8::SetTextureStageState',
+                    `stage ${stage} state ${type} set to ${value} in the guest was accepted;`
+                    + ' the device refuses it');
+            }
+        }
+    };
+
+    const syncMaterial = ()=>{
+        const words = readWords(address + SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS);
+        let same = true;
+        for (let word = 0; word < SHADOW.MATERIAL_WORDS; word++)
+        {
+            if (words[word] !== seenMaterial[word])
+            {
+                same = false;
+                break;
+            }
+        }
+        if (same)
+        {
+            return;
+        }
+        seenMaterial.set(words);
+        const floats = new Float32Array(words.buffer, words.byteOffset, SHADOW.MATERIAL_WORDS);
+        if (device.SetMaterial(materialOf(floats)) !== 0)
+        {
+            refuse('IDirect3DDevice8::SetMaterial',
+                'a material set in the guest was accepted; the device refuses it');
+        }
+    };
+
     /** The block, made and mirrored on first use. */
     const place = ()=>{
         if (address === 0)
         {
-            address = allocatePage(PAGE);
+            address = allocatePage(PAGES * PAGE);
             if (address !== 0)
             {
                 deps.writeMemory(address, new Uint8Array(SHADOW.SIZE));
@@ -847,15 +1298,13 @@ export function createShadow(deps){
             {
                 return;
             }
-            const renderStates = readWord(address + SHADOW.RENDER_STATE_CALLS);
-            const transforms = readWord(address + SHADOW.TRANSFORM_CALLS);
-            const bindings = readWord(address + SHADOW.BINDING_CALLS);
-            const locks = readWord(address + SHADOW.LOCK_CALLS);
-            const unlocks = readWord(address + SHADOW.UNLOCK_CALLS);
-            const ringHead = readWord(address + SHADOW.RING_HEAD);
-            if (renderStates === seenCounters[0] && transforms === seenCounters[1]
-                && bindings === seenCounters[2] && locks === seenCounters[3]
-                && unlocks === seenCounters[4] && ringHead === seenCounters[5])
+            let moved = false;
+            for (let group = 0; group < COUNTERS.length; group++)
+            {
+                counters[group] = readWord(address + COUNTERS[group]);
+                moved ||= counters[group] !== seenCounters[group];
+            }
+            if (!moved)
             {
                 // Nothing was set and nothing unlocked since the last look;
                 // the block can only differ from the copy through the
@@ -863,115 +1312,46 @@ export function createShadow(deps){
                 skipped++;
                 return;
             }
-            seenCounters[0] = renderStates;
-            seenCounters[1] = transforms;
-            seenCounters[2] = bindings;
-            seenCounters[3] = locks;
-            seenCounters[4] = unlocks;
-            seenCounters[5] = ringHead;
             synced++;
-            calls = { renderStates, transforms, bindings, locks, unlocks };
+            calls = {
+                renderStates: counters[RENDER_STATE_GROUP],
+                transforms: counters[TRANSFORM_GROUP],
+                bindings: counters[BINDING_GROUP],
+                locks: counters[LOCK_GROUP],
+                unlocks: counters[UNLOCK_GROUP],
+                textures: counters[TEXTURE_GROUP],
+                stageStates: counters[STAGE_STATE_GROUP],
+                materials: counters[MATERIAL_GROUP],
+            };
+            /** @param {number} group */
+            const changed = group=>counters[group] !== seenCounters[group];
+            if (changed(RENDER_STATE_GROUP))
+            {
+                syncRenderStates();
+            }
+            if (changed(TRANSFORM_GROUP))
+            {
+                syncTransforms();
+            }
+            if (changed(BINDING_GROUP))
+            {
+                syncBindings();
+            }
+            if (changed(TEXTURE_GROUP))
+            {
+                syncTextures();
+            }
+            if (changed(STAGE_STATE_GROUP))
+            {
+                syncStageStates();
+            }
+            if (changed(MATERIAL_GROUP))
+            {
+                syncMaterial();
+            }
+            seenCounters.set(counters);
 
-            const states = deps.readMemory(address + SHADOW.RENDER_STATES,
-                SHADOW.RENDER_STATE_COUNT * 4);
-            const stateView = new DataView(states.buffer, states.byteOffset, states.byteLength);
-            for (let state = 0; state < SHADOW.RENDER_STATE_COUNT; state++)
-            {
-                const value = stateView.getUint32(state * 4, true);
-                if (value === seenStates[state])
-                {
-                    continue;
-                }
-                seenStates[state] = value;
-                if (device.SetRenderState(state, value) !== 0)
-                {
-                    refused++;
-                    deps.divergence?.('IDirect3DDevice8::SetRenderState',
-                        `state ${state} set to ${value} in the guest was accepted;`
-                        + ' the device refuses it');
-                }
-            }
-
-            const words = readWords(address + SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 16);
-            for (let slot = 0; slot < SHADOW.TRANSFORM_SLOTS; slot++)
-            {
-                let same = true;
-                for (let word = slot * 16; word < slot * 16 + 16; word++)
-                {
-                    if (words[word] !== seenTransforms[word])
-                    {
-                        same = false;
-                        break;
-                    }
-                }
-                if (same)
-                {
-                    continue;
-                }
-                seenTransforms.set(words.subarray(slot * 16, slot * 16 + 16), slot * 16);
-                const matrix = new Float32Array(words.buffer, words.byteOffset + slot * 64, 16);
-                if (device.SetTransform(transformType(slot), matrix) !== 0)
-                {
-                    refused++;
-                    deps.divergence?.('IDirect3DDevice8::SetTransform',
-                        `type ${transformType(slot)} set in the guest was accepted;`
-                        + ' the device refuses it');
-                }
-            }
-
-            const bound = readWords(address + SHADOW.STREAMS, SHADOW.STREAM_COUNT * 2 + 3);
-            for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
-            {
-                const pointer = bound[index * 2];
-                const stride = bound[index * 2 + 1];
-                if (pointer === seenStreams[index * 2] && stride === seenStreams[index * 2 + 1])
-                {
-                    continue;
-                }
-                seenStreams[index * 2] = pointer;
-                seenStreams[index * 2 + 1] = stride;
-                const buffer = pointer === 0 ? null : deps.objectAt(pointer);
-                if (pointer !== 0 && !buffer)
-                {
-                    refuse('IDirect3DDevice8::SetStreamSource',
-                        `stream ${index} bound in the guest to 0x${pointer.toString(16)},`
-                        + ' which is not an interface this device published');
-                }
-                else if (device.SetStreamSource(index, buffer, stride) !== 0)
-                {
-                    refuse('IDirect3DDevice8::SetStreamSource',
-                        `stream ${index} bound in the guest was accepted; the device refuses it`);
-                }
-            }
-            const indicesAt = SHADOW.STREAM_COUNT * 2;
-            if (bound[indicesAt] !== seenIndices || bound[indicesAt + 1] !== seenBaseVertex)
-            {
-                seenIndices = bound[indicesAt];
-                seenBaseVertex = bound[indicesAt + 1];
-                const buffer = seenIndices === 0 ? null : deps.objectAt(seenIndices);
-                if (seenIndices !== 0 && !buffer)
-                {
-                    refuse('IDirect3DDevice8::SetIndices',
-                        `indices bound in the guest to 0x${seenIndices.toString(16)},`
-                        + ' which is not an interface this device published');
-                }
-                else if (device.SetIndices(buffer, seenBaseVertex) !== 0)
-                {
-                    refuse('IDirect3DDevice8::SetIndices',
-                        'indices bound in the guest were accepted; the device refuses them');
-                }
-            }
-            if (bound[indicesAt + 2] !== seenShader)
-            {
-                seenShader = bound[indicesAt + 2];
-                if (device.SetVertexShader(seenShader) !== 0)
-                {
-                    refuse('IDirect3DDevice8::SetVertexShader',
-                        `vertex format 0x${seenShader.toString(16)} set in the guest was`
-                        + ' accepted; the device refuses it');
-                }
-            }
-
+            const ringHead = counters[RING_GROUP];
             if (ringHead !== 0)
             {
                 const ring = readWords(address + SHADOW.RING,
@@ -981,6 +1361,44 @@ export function createShadow(deps){
                     settle(block);
                 }
                 deps.writeMemory(address + SHADOW.RING_HEAD, dwordBytes(0));
+                seenCounters[RING_GROUP] = 0;
+            }
+        },
+
+        /**
+         * After the program let go of an object: every slot still naming its
+         * pointer is made stale, in the block and in the copy, so the device
+         * keeps what it had bound and the pointer's next appearance -- which
+         * may be a new object's -- is a change.
+         *
+         * @param {number} pointer
+         */
+        forgetPointer(pointer){
+            if (address === 0 || pointer === 0)
+            {
+                return;
+            }
+            const stale = dwordBytes(STALE_POINTER);
+            for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+            {
+                if (seenTextures[stage] === pointer)
+                {
+                    seenTextures[stage] = STALE_POINTER;
+                    deps.writeMemory(address + SHADOW.TEXTURES + stage * 4, stale);
+                }
+            }
+            for (let index = 0; index < SHADOW.STREAM_COUNT; index++)
+            {
+                if (seenStreams[index * 2] === pointer)
+                {
+                    seenStreams[index * 2] = STALE_POINTER;
+                    deps.writeMemory(address + SHADOW.STREAMS + index * 8, stale);
+                }
+            }
+            if (seenIndices === pointer)
+            {
+                seenIndices = STALE_POINTER;
+                deps.writeMemory(address + SHADOW.INDICES, stale);
             }
         },
 
@@ -1065,6 +1483,9 @@ export function createShadow(deps){
             bindingCalls: calls.bindings,
             lockCalls: calls.locks,
             unlockCalls: calls.unlocks,
+            textureCalls: calls.textures,
+            stageStateCalls: calls.stageStates,
+            materialCalls: calls.materials,
             buffers: blocks.size,
             // How often an entry found something to adopt, against how often
             // the counters said there was nothing.

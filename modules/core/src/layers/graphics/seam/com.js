@@ -36,6 +36,10 @@ import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
  *              guest?: (builder: { trap: number }) => number }[]} methods
  *           In vtable order, after IUnknown's three. `target` is the API object,
  *           not the adapter: an implementation never sees this file.
+ * @property {(target: any, pointers: Iterable<number>) => void} [released]
+ *           Told when the program lets go of the object's last reference,
+ *           while its pointers still name it: state the guest set by pointer
+ *           and the host has not yet read is adopted then, or never.
  */
 
 /**
@@ -142,6 +146,10 @@ function adapt(api, interfaces, onGone){
             const left = api.release(id);
             if (left === 0 && api.destroyed !== false)
             {
+                for (const descriptor of declared.values())
+                {
+                    descriptor.released?.(api, adapter.pointers);
+                }
                 onGone(adapter);
             }
             return left;

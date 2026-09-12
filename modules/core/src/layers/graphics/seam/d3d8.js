@@ -46,7 +46,8 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { expandTexels, vertexCountOf } from '../d3d8/render.js';
 import {
-    createShadow, lockCode, setIndicesCode, setRenderStateCode, setStreamSourceCode,
+    createShadow, lockCode, materialFloats, materialOf, setIndicesCode, setMaterialCode,
+    setRenderStateCode, setStreamSourceCode, setTextureCode, setTextureStageStateCode,
     setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
 
@@ -250,14 +251,35 @@ export function createDirect3D8Seam(
      */
     const shadows = new WeakMap();
     /**
-     * The shadow of the device each buffer belongs to, for the host's own
-     * lock and unlock to settle the guest's first.
+     * The shadow of the device each buffer and texture belongs to, for the
+     * host's own lock and unlock to settle the guest's first, and for a
+     * release to be seen by the block that may still name the object.
      *
      * @type {WeakMap<object, ReturnType<typeof createShadow>>}
      */
-    const bufferShadows = new WeakMap();
+    const resourceShadows = new WeakMap();
     /** @param {any} device */
     const shadowOf = device=>shadows.get(device) ?? null;
+    /**
+     * The program let go of a resource. A binding the guest wrote and the
+     * host has not read yet still names it, so it is adopted now, while the
+     * pointer resolves; after that the pointer is nobody's, and every slot
+     * holding it is made stale so the device keeps what it bound.
+     *
+     * @param {any} resource @param {Iterable<number>} pointers
+     */
+    const retire = (resource, pointers)=>{
+        const shadow = resourceShadows.get(resource);
+        if (!shadow)
+        {
+            return;
+        }
+        shadow.sync();
+        for (const pointer of pointers)
+        {
+            shadow.forgetPointer(pointer);
+        }
+    };
     /** @param {(at: number) => Uint8Array} code */
     const placeCode = code=>{
         if (!allocate)
@@ -412,7 +434,7 @@ export function createDirect3D8Seam(
         // Noted and nothing else: an unlock already marks the whole level for
         // upload, so there is no smaller area for this to narrow it to.
         AddDirtyRect: ()=>D3D_OK,
-    })];
+    }, {}, retire)];
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -427,7 +449,7 @@ export function createDirect3D8Seam(
     const bufferMethods = {
         /** @param {any} buffer @param {number[]} args */
         Lock: (buffer, [offset, size, out, flags])=>{
-            const shadow = bufferShadows.get(buffer);
+            const shadow = resourceShadows.get(buffer);
             shadow?.settleBuffer(buffer);
             /** @type {{ pBits?: number }} */
             const locked = {};
@@ -444,7 +466,7 @@ export function createDirect3D8Seam(
         },
         /** @param {any} buffer */
         Unlock: (/** @type {any} */ buffer)=>{
-            const shadow = bufferShadows.get(buffer);
+            const shadow = resourceShadows.get(buffer);
             shadow?.settleBuffer(buffer);
             const hr = buffer.Unlock();
             if (hr === D3D_OK)
@@ -464,11 +486,11 @@ export function createDirect3D8Seam(
 
     const vertexBufferInterfaces = [
         describe(IID_IDirect3DVertexBuffer8, IDIRECT3DVERTEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests),
+            bufferGuests, retire),
     ];
     const indexBufferInterfaces = [
         describe(IID_IDirect3DIndexBuffer8, IDIRECT3DINDEXBUFFER8_SLOTS, bufferMethods,
-            bufferGuests),
+            bufferGuests, retire),
     ];
 
     /**
@@ -482,7 +504,7 @@ export function createDirect3D8Seam(
         const shadow = shadowOf(device);
         if (shadow)
         {
-            bufferShadows.set(buffer, shadow);
+            resourceShadows.set(buffer, shadow);
             buffer.guestState = ()=>shadow.attachBuffer(buffer);
         }
     };
@@ -523,29 +545,11 @@ export function createDirect3D8Seam(
         }
     };
 
-    /** A colour in a material is four floats, and a material is four of those plus a power. */
-    const readMaterial = (/** @type {number} */ pointer)=>{
-        const f = readFloats(pointer, 17);
-        const colour = (/** @type {number} */ at)=>(
-            { r: f[at], g: f[at + 1], b: f[at + 2], a: f[at + 3] });
-        return {
-            Diffuse: colour(0),
-            Ambient: colour(4),
-            Specular: colour(8),
-            Emissive: colour(12),
-            Power: f[16],
-        };
-    };
+    /** @param {number} pointer */
+    const readMaterial = pointer=>materialOf(readFloats(pointer, 17));
 
     /** @param {number} address @param {any} material */
-    const writeMaterial = (address, material)=>{
-        const colours = [material.Diffuse, material.Ambient, material.Specular,
-            material.Emissive];
-        writeFloats(address, [
-            ...colours.flatMap(one=>[one.r, one.g, one.b, one.a]),
-            material.Power,
-        ]);
-    };
+    const writeMaterial = (address, material)=>writeFloats(address, materialFloats(material));
 
     /**
      * D3DLIGHT8, which is D3DLIGHT7's layout under D3D8's names: a type, three
@@ -747,6 +751,11 @@ export function createDirect3D8Seam(
                 format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
             {
+                const shadow = shadowOf(device);
+                if (shadow)
+                {
+                    resourceShadows.set(held.texture, shadow);
+                }
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }
@@ -1519,6 +1528,10 @@ export function createDirect3D8Seam(
             SetStreamSource: ({ trap })=>placeCode(at=>setStreamSourceCode(at, trap)),
             SetIndices: ({ trap })=>placeCode(at=>setIndicesCode(at, trap)),
             SetVertexShader: ({ trap })=>placeCode(at=>setVertexShaderCode(at, trap)),
+            SetTexture: ({ trap })=>placeCode(at=>setTextureCode(at, trap)),
+            SetTextureStageState: ({ trap })=>
+                placeCode(at=>setTextureStageStateCode(at, trap)),
+            SetMaterial: ({ trap })=>placeCode(at=>setMaterialCode(at, trap)),
         }
         : {};
     const deviceInterfaces = [

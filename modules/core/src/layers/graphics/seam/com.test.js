@@ -179,3 +179,28 @@ test('objects of one interface share one method list, and a call reaches its own
     draw.invoke?.(p.adapterFor(a), [9]);
     assert.deepEqual(seen, ['b:7', 'a:9'], 'the adapter the call arrived on names the object');
 });
+
+test('a descriptor is told of the last release while the pointers still resolve', ()=>{
+    // State the guest set by pointer and the host has not read yet is
+    // adopted then or never: after this the pointer names nothing.
+    const seam = publisher();
+    const api = counted(2);
+    /** @type {string[]} */
+    const seen = [];
+    const descriptors = [{
+        id: IID_ONE,
+        methods: [],
+        /** @param {any} target @param {Iterable<number>} pointers */
+        released: (target, pointers)=>{
+            seen.push(`${target === api} ${[...pointers].map(one=>one.toString(16)).join(',')}`
+                + ` ${seam.objectAt(pointer) === api}`);
+        },
+    }];
+    const pointer = seam.publish(api, descriptors, IID_ONE);
+
+    assert.equal(seam.adapterFor(api).release(IID_ONE), 1);
+    assert.deepEqual(seen, [], 'a reference remains');
+    assert.equal(seam.adapterFor(api).release(IID_ONE), 0);
+    assert.deepEqual(seen, [`true ${pointer.toString(16)} true`]);
+    assert.equal(seam.objectAt(pointer), null, 'and then it is gone');
+});

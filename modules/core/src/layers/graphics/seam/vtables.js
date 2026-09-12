@@ -46,11 +46,15 @@
  * @param {Record<string, (builder: { trap: number }) => number>} [guests]
  *        Methods that run in the guest, by name; each answers the address of
  *        its code, built with the method's own trap to fall back to.
+ * @param {(target: any, pointers: Iterable<number>) => void} [released]
+ *        Told when the program lets go of an object's last reference, before
+ *        its pointers stop naming it.
  * @returns {import('./com.js').InterfaceDescriptor}
  */
-export function describe(id, slots, implemented = {}, guests = {}){
+export function describe(id, slots, implemented = {}, guests = {}, released = undefined){
     return {
         id,
+        released,
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,

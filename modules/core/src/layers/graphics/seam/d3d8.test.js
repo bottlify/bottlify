@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
-import { BUFFER, SHADOW } from './shadow.js';
+import { BUFFER, SHADOW, STALE_POINTER } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
@@ -39,7 +39,7 @@ import {
 } from '../d3d8/structs.js';
 import { createDirect3D8 } from '../d3d8/device.js';
 import {
-    D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTS, D3DTSS, floatToDword,
+    D3DDEVTYPE, D3DFMT, D3DPOOL, D3DSBT, D3DTOP, D3DTS, D3DTSS, floatToDword,
 } from '../d3d8/constants.js';
 
 const D3D_OK = 0;
@@ -1226,4 +1226,80 @@ test('a device with no window of its own presents into the focus window', ()=>{
     const h = seamed();
     assert.notEqual(h.createDevice(h.create(), { Windowed: 0, hDeviceWindow: 0 }), 0);
     assert.equal(h.resolutions.at(-1)?.[2], HWND, 'hFocusWindow, as CreateDevice was given');
+});
+
+test('a texture, a stage state and a material the guest wrote reach the device', ()=>{
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+    const block = h.box.memory.readU32(device + 4);
+    const out = 0xe000;
+    const created = 0xe100;
+    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+        created]), D3D_OK);
+    const texture = h.box.memory.readU32(created);
+    const object = h.object(texture);
+
+    // What the guest routines leave: a pointer in a stage slot, a value in
+    // the stage table, seventeen floats, and a count for each.
+    h.box.memory.writeU32(block + SHADOW.TEXTURES + 3 * 4, texture);
+    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 1);
+    h.box.memory.writeU32(block + SHADOW.STAGE_STATES + (3 * 32 + D3DTSS.COLOROP) * 4, D3DTOP.ADD);
+    h.box.memory.writeU32(block + SHADOW.STAGE_STATE_CALLS, 1);
+    const material = 0xe300;
+    h.fields.writeF32(block + SHADOW.MATERIAL + 16 * 4, 12.5);   // Power
+    h.box.memory.writeU32(block + SHADOW.MATERIAL_CALLS, 1);
+
+    assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), texture, 'bound to the texture the guest named');
+    h.release(texture);   // GetTexture's own reference
+    assert.equal(h.device(device, 'GetTextureStageState', [3, D3DTSS.COLOROP, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), D3DTOP.ADD);
+    assert.equal(h.device(device, 'GetMaterial', [material]), D3D_OK);
+    assert.equal(h.fields.readF32(material + 16 * 4), 12.5);
+    assert.equal(h.libraries.shadow().textureCalls, 1);
+    assert.equal(h.libraries.shadow().stageStateCalls, 1);
+    assert.equal(h.libraries.shadow().materialCalls, 1);
+    assert.deepEqual(h.divergences, []);
+
+    // The program binds through the guest and lets go of its reference
+    // before the host has looked. The release adopts the binding while the
+    // pointer still names the texture -- adopted after, it would be a
+    // pointer nobody published, and a divergence -- and the slot reads
+    // stale after, so the device keeps the texture until the program binds
+    // something else there.
+    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+        created]), D3D_OK);
+    const second = h.box.memory.readU32(created);
+    h.box.memory.writeU32(block + SHADOW.TEXTURES, second);
+    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 2);
+    assert.equal(h.release(second), 0);
+    assert.equal(h.object(second), null, 'the program holds nothing');
+    assert.equal(h.box.memory.readU32(block + SHADOW.TEXTURES), STALE_POINTER);
+    assert.equal(h.libraries.shadow().textureCalls, 2, 'adopted by the release');
+    assert.deepEqual(h.divergences, []);
+
+    // The next texture may well be published at the released pointer; bound
+    // through the guest, the slot changes from stale and the new one is
+    // what the device gets.
+    assert.equal(h.device(device, 'CreateTexture', [8, 8, 1, 0, D3DFMT.X8R8G8B8, D3DPOOL.MANAGED,
+        created]), D3D_OK);
+    const third = h.box.memory.readU32(created);
+    h.box.memory.writeU32(block + SHADOW.TEXTURES, third);
+    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 3);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.object(h.box.memory.readU32(out)), h.object(third));
+    h.release(h.box.memory.readU32(out));
+
+    // Unbinding through the guest leaves it, and a stage the program never
+    // wrote is left alone whatever the device holds.
+    h.box.memory.writeU32(block + SHADOW.TEXTURES, 0);
+    h.box.memory.writeU32(block + SHADOW.TEXTURE_CALLS, 4);
+    assert.equal(h.device(device, 'GetTexture', [0, out]), D3D_OK);
+    assert.equal(h.box.memory.readU32(out), 0);
+    assert.equal(h.device(device, 'GetTexture', [3, out]), D3D_OK);
+    assert.equal(h.object(h.box.memory.readU32(out)), object);
+    h.release(h.box.memory.readU32(out));
+    h.release(third);
+    h.release(texture);
+    assert.deepEqual(h.divergences, []);
 });

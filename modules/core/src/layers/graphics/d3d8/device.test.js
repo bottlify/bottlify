@@ -784,6 +784,8 @@ test('binding a resource never changes its count', ()=>{
     assert.equal(texture.texture.refCount, 1, 'binding is not owning');
     assert.equal(device.SetTexture(0, null), D3D_OK);
     assert.equal(texture.texture.refCount, 1, 'and unbinding gives nothing back');
+    assert.equal(device.SetTexture(8, texture.texture), D3DERR_INVALIDCALL, 'eight stages');
+    assert.equal(device.GetTexture(8, texture), D3DERR_INVALIDCALL);
 
     assert.equal(device.SetStreamSource(0, vertices.buffer, 12), D3D_OK);
     assert.equal(vertices.buffer.refCount, 1);

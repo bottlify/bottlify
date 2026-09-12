@@ -7,10 +7,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, createShadow, lockCode, setIndicesCode,
-    setRenderStateCode, setStreamSourceCode, setTransformCode, setVertexShaderCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, STALE_POINTER, createShadow, lockCode, materialFloats,
+    materialOf, setIndicesCode, setMaterialCode, setRenderStateCode, setStreamSourceCode,
+    setTextureCode, setTextureStageStateCode, setTransformCode, setVertexShaderCode,
     transformSlot, transformType, unlockCode,
 } from './shadow.js';
+import { D3DTSS } from '../d3d8/constants.js';
 
 /**
  * A buffer that remembers its locks and refuses a second one, as the device's does.
@@ -58,10 +60,71 @@ function fakeDevice(){
     const transforms = new Map([[2, Float32Array.from({ length: 16 }, (unused, i)=>i)]]);
     /** @type {Map<number, { buffer: any, stride: number }>} */
     const streams = new Map();
+    /** @type {Map<number, any>} */
+    const textures = new Map();
+    /**
+     * Three stage states per stage, of the device's own choosing.
+     *
+     * @type {Map<number, number>[]}
+     */
+    const stageStates = Array.from({ length: 8 }, (unused, stage)=>new Map([
+        [D3DTSS.COLOROP, stage === 0 ? 4 : 1], [D3DTSS.COLORARG1, 2], [D3DTSS.MAGFILTER, 1],
+    ]));
+    let material = materialOf(Float32Array.from({ length: 17 }, (unused, i)=>i / 16));
     /** @type {string[]} */
     const calls = [];
     const device = {
-        states, transforms, calls, streams,
+        states, transforms, calls, streams, textures, stageStates,
+        get material(){
+            return material;
+        },
+        /** @param {number} stage @param {any} texture */
+        SetTexture(stage, texture){
+            calls.push(`tex ${stage}=${texture ? texture.name : 'none'}`);
+            if (stage >= 8)
+            {
+                return -1;
+            }
+            if (texture)
+            {
+                textures.set(stage, texture);
+            }
+            else
+            {
+                textures.delete(stage);
+            }
+            return 0;
+        },
+        /** @param {number} stage @param {number} type @param {number} value */
+        SetTextureStageState(stage, type, value){
+            calls.push(`tss ${stage}.${type}=${value}`);
+            if (stage >= 8 || !stageStates[stage].has(type))
+            {
+                return -1;
+            }
+            stageStates[stage].set(type, value);
+            return 0;
+        },
+        /** @param {number} stage @param {number} type @param {{ value?: number }} out */
+        GetTextureStageState(stage, type, out){
+            if (stage >= 8 || !stageStates[stage].has(type))
+            {
+                return -1;
+            }
+            out.value = stageStates[stage].get(type);
+            return 0;
+        },
+        /** @param {import('./shadow.js').ShadowMaterial} value */
+        SetMaterial(value){
+            calls.push(`mat ${value.Diffuse.r},${value.Power}`);
+            material = value;
+            return 0;
+        },
+        /** @param {{ material?: import('./shadow.js').ShadowMaterial }} out */
+        GetMaterial(out){
+            out.material = material;
+            return 0;
+        },
         indices: /** @type {any} */ (null), baseVertexIndex: 0, shader: 0x102,
         /** @param {number} state @param {number} value */
         SetRenderState(state, value){
@@ -151,7 +214,8 @@ function fakeDevice(){
 /** @param {{ readU32?: boolean }} [options] */
 function machine(options = {}){
     const memory = new Uint8Array(0x20000);
-    const reads = { memory: 0 };
+    /** How often the block was copied out, and which regions of it, by offset. */
+    const reads = { memory: 0, regions: /** @type {[number, number][]} */ ([]) };
     let free = 0x1008;
     const device = fakeDevice();
     /** @type {string[]} */
@@ -170,6 +234,7 @@ function machine(options = {}){
         },
         readMemory: (address, length)=>{
             reads.memory++;
+            reads.regions.push([address - shadow.address(), length]);
             return memory.slice(address, address + length);
         },
         readU32: options.readU32 ? address=>view.getUint32(address, true) : undefined,
@@ -218,11 +283,16 @@ test('the transform slots cover the types a device holds and refuse the rest', (
     }
 });
 
-test('the block fits its page and its regions follow one another', ()=>{
-    assert.ok(SHADOW.SIZE <= 4096);
-    assert.equal(SHADOW.RING + SHADOW.RING_CAPACITY * 4, SHADOW.SIZE);
+test('the block fits its two pages and its regions follow one another', ()=>{
+    assert.ok(SHADOW.SIZE > 4096, 'the stage states pushed it past one page');
+    assert.ok(SHADOW.SIZE <= 2 * 4096);
+    assert.equal(SHADOW.RING + SHADOW.RING_CAPACITY * 4, SHADOW.TEXTURE_CALLS);
     assert.equal(SHADOW.STREAMS + SHADOW.STREAM_COUNT * 8, SHADOW.INDICES);
     assert.equal(SHADOW.TRANSFORMS + SHADOW.TRANSFORM_SLOTS * 64, SHADOW.BINDING_CALLS);
+    assert.equal(SHADOW.TEXTURES + SHADOW.STAGE_COUNT * 4, SHADOW.MATERIAL);
+    assert.equal(SHADOW.MATERIAL + SHADOW.MATERIAL_WORDS * 4, SHADOW.STAGE_STATES);
+    assert.equal(SHADOW.STAGE_STATES + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4,
+        SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 32);
 });
 
@@ -253,6 +323,7 @@ test('the routines end in a jump to their own trap, and check the flag first', (
         stream: [setStreamSourceCode(0x20400, 0x105040), 16],
         indices: [setIndicesCode(0x20500, 0x105050), 12],
         shader: [setVertexShaderCode(0x20600, 0x105060), 8],
+        material: [setMaterialCode(0x20700, 0x105070), 8],
     };
     for (const [name, [code, popped]] of Object.entries(rets))
     {
@@ -263,6 +334,33 @@ test('the routines end in a jump to their own trap, and check the flag first', (
     }
     const lock = rets.lock[0];
     assert.equal(lock[lock.length - 11], 0x5b, 'the lock pops what it pushed first');
+
+    // The two that refuse a stage themselves end in that refusal, after the
+    // D3D_OK tail, and pop the same count either way.
+    /** @type {Record<string, [Uint8Array, number]>} */
+    const staged = {
+        texture: [setTextureCode(0x20800, 0x105080), 12],
+        stageState: [setTextureStageStateCode(0x20900, 0x105090), 16],
+    };
+    for (const [name, [code, popped]] of Object.entries(staged))
+    {
+        assert.equal(code[code.length - 5], 0xe9, `${name} ends in the jump`);
+        assert.deepEqual([...code.slice(code.length - 13, code.length - 5)],
+            [0xb8, 0x6c, 0x08, 0x76, 0x88, 0xc2, popped, 0x00],
+            `${name} answers D3DERR_INVALIDCALL for a stage past the last`);
+        assert.deepEqual([...code.slice(code.length - 18, code.length - 13)],
+            [0x31, 0xc0, 0xc2, popped, 0x00], `${name} answers D3D_OK and pops ${popped}`);
+        assert.deepEqual([...code.slice(0, 7)], [...rs.slice(0, 7)], `${name} starts the same`);
+    }
+    // The stage-state routine takes exactly this version's types: a bit per
+    // type, tested before the stage.
+    const tss = staged.stageState[0];
+    const mask = Object.values(D3DTSS).reduce((bits, type)=>bits | (1 << type), 0) >>> 0;
+    const at = [...tss].findIndex((byte, i)=>byte === 0xba
+        && new DataView(tss.buffer).getUint32(i + 1, true) === mask);
+    assert.notEqual(at, -1, 'the mask is an immediate in the routine');
+    assert.deepEqual([...tss.slice(at + 5, at + 8)], [0x0f, 0xa3, 0xc2], 'bt edx, eax');
+    assert.equal(tss[at + 8], 0x73, 'jnc to the slow path');
 });
 
 test('the block is made on first use and mirrors what the device holds', ()=>{
@@ -278,7 +376,7 @@ test('the block is made on first use and mirrors what the device holds', ()=>{
     assert.notEqual(at, 0);
     assert.equal(m.shadow.address(), at, 'once');
     assert.equal(at & 0xfff, 0, 'on a page boundary, whatever the heap handed out');
-    assert.ok(at + 0x1000 <= 0x1008 + 0x2000, 'the whole page is inside what was taken');
+    assert.ok(at + 0x2000 <= 0x1008 + 0x3000, 'both pages are inside what was taken');
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 8 * 4), 3, 'state 8 as the device holds it');
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 7 * 4), 1);
     assert.equal(m.u32(at + SHADOW.RENDER_STATES + 9 * 4), 0, 'a state the device has not got');
@@ -289,6 +387,19 @@ test('the block is made on first use and mirrors what the device holds', ()=>{
     assert.equal(m.u32(at + SHADOW.INDICES), 0);
     assert.equal(m.u32(at + SHADOW.VERTEX_SHADER), 0x102);
     assert.equal(m.u32(at + SHADOW.FLAGS), 0);
+    for (let stage = 0; stage < SHADOW.STAGE_COUNT; stage++)
+    {
+        assert.equal(m.u32(at + SHADOW.TEXTURES + stage * 4), STALE_POINTER,
+            'a stage is stale until the program writes it, whatever the device holds');
+    }
+    const tss = (/** @type {number} */ stage, /** @type {number} */ type)=>
+        m.u32(at + SHADOW.STAGE_STATES + (stage * SHADOW.STAGE_STATE_STRIDE + type) * 4);
+    assert.equal(tss(0, D3DTSS.COLOROP), 4, 'stage 0 as the device holds it');
+    assert.equal(tss(3, D3DTSS.COLOROP), 1);
+    assert.equal(tss(3, D3DTSS.MAGFILTER), 1);
+    assert.equal(tss(3, D3DTSS.ADDRESSU), 0, 'a type the device has not got');
+    assert.equal(view.getFloat32(at + SHADOW.MATERIAL + 16 * 4, true), 1, 'Power');
+    assert.equal(view.getFloat32(at + SHADOW.MATERIAL + 5 * 4, true), 5 / 16, 'Ambient.g');
     assert.deepEqual(m.device.calls, [], 'mirroring is reading the device, not setting it');
 });
 
@@ -337,8 +448,10 @@ test('a value the device refuses is reported once and not set again', ()=>{
     m.put32(at + SHADOW.RENDER_STATES + 9 * 4, 1);    // state 9: not the device's
     m.putF32(at + SHADOW.TRANSFORMS + 5 * 64, 1);     // type 5: refused
     m.bump(at + SHADOW.RENDER_STATE_CALLS);
+    m.bump(at + SHADOW.TRANSFORM_CALLS);
     m.shadow.sync();
     m.bump(at + SHADOW.RENDER_STATE_CALLS);
+    m.bump(at + SHADOW.TRANSFORM_CALLS);
     m.shadow.sync();
 
     assert.equal(m.device.calls.length, 2, 'each tried once');
@@ -534,9 +647,9 @@ test('a sync before the block exists is nothing', ()=>{
     assert.equal(m.shadow.diagnostics().placed, 0);
 });
 
-test('a call that changed nothing reads six words in place and copies none', ()=>{
+test('a call that changed nothing reads nine words in place and copies none', ()=>{
     // The block is looked at on every device call; with a dword reader the
-    // unchanged case costs six reads and no view of the block.
+    // unchanged case costs nine reads, one per counter, and no view of the block.
     const m = machine({ readU32: true });
     m.shadow.address();
     m.shadow.sync();
@@ -549,4 +662,167 @@ test('a call that changed nothing reads six words in place and copies none', ()=
     m.shadow.sync();
     assert.ok(m.reads.memory > before, 'a change is read out of the block');
     assert.equal(m.device.states.get(8), 5);
+});
+
+test('a sync reads the groups whose counters moved, and no other', ()=>{
+    const m = machine({ readU32: true });
+    const at = m.shadow.address();
+    m.shadow.sync();
+    /** The regions read by the next sync, as [offset, bytes]. */
+    const regionsOf = (/** @type {() => void} */ change)=>{
+        m.reads.regions.length = 0;
+        change();
+        m.shadow.sync();
+        return m.reads.regions.slice();
+    };
+
+    assert.deepEqual(regionsOf(()=>{
+        m.put32(at + SHADOW.RENDER_STATES + 8 * 4, 5);
+        m.bump(at + SHADOW.RENDER_STATE_CALLS);
+    }), [[SHADOW.RENDER_STATES, SHADOW.RENDER_STATE_COUNT * 4]], 'one state: the states');
+    assert.deepEqual(regionsOf(()=>{
+        m.putF32(at + SHADOW.TRANSFORMS + 24 * 64, 42);
+        m.bump(at + SHADOW.TRANSFORM_CALLS);
+    }), [[SHADOW.TRANSFORMS, SHADOW.TRANSFORM_SLOTS * 64]], 'one transform: the transforms');
+    assert.deepEqual(regionsOf(()=>{
+        m.put32(at + SHADOW.TEXTURES, 0);
+        m.bump(at + SHADOW.TEXTURE_CALLS);
+    }), [[SHADOW.TEXTURES, SHADOW.STAGE_COUNT * 4]], 'one texture: the textures');
+    assert.deepEqual(regionsOf(()=>{
+        m.put32(at + SHADOW.STAGE_STATES + D3DTSS.COLOROP * 4, 7);
+        m.bump(at + SHADOW.STAGE_STATE_CALLS);
+    }), [[SHADOW.STAGE_STATES, SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4]]);
+    assert.deepEqual(regionsOf(()=>{
+        m.putF32(at + SHADOW.MATERIAL + 16 * 4, 8);
+        m.bump(at + SHADOW.MATERIAL_CALLS);
+    }), [[SHADOW.MATERIAL, SHADOW.MATERIAL_WORDS * 4]], 'a material: the material');
+    assert.deepEqual(regionsOf(()=>{
+        m.put32(at + SHADOW.VERTEX_SHADER, 0x112);
+        m.bump(at + SHADOW.BINDING_CALLS);
+    }), [[SHADOW.STREAMS, (SHADOW.STREAM_COUNT * 2 + 3) * 4]], 'a binding: the bindings');
+    assert.deepEqual(regionsOf(()=>{
+        m.bump(at + SHADOW.LOCK_CALLS);
+    }), [], 'a lock held across the entry reads nothing of the device\'s block');
+    assert.deepEqual(m.device.calls,
+        ['rs 8=5', 'tr 256=42,0', 'tex 0=none', 'tss 0.1=7', 'mat 0,8', 'shader=0x112']);
+});
+
+test('textures the guest bound reach the device as the objects the pointers name', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+    const grass = { name: 'grass' };
+    const stone = { name: 'stone' };
+    m.published.set(0x6100, grass);
+    m.published.set(0x6200, stone);
+
+    m.put32(at + SHADOW.TEXTURES, 0x6100);
+    m.put32(at + SHADOW.TEXTURES + 4, 0x6200);
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, ['tex 0=grass', 'tex 1=stone']);
+    assert.equal(m.device.textures.get(0), grass);
+    assert.equal(m.shadow.diagnostics().textureCalls, 1);
+
+    // Unbinding is a null pointer; a pointer that names nothing is a
+    // divergence, reported once, and the device keeps what it had.
+    m.put32(at + SHADOW.TEXTURES, 0);
+    m.put32(at + SHADOW.TEXTURES + 4, 0x6300);
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.shadow.sync();
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls.slice(2), ['tex 0=none']);
+    assert.equal(m.device.textures.get(1), stone);
+    assert.equal(m.divergences.length, 1);
+    assert.match(m.divergences[0], /SetTexture.*stage 1.*0x6300.*not an interface/);
+});
+
+test('a texture the program let go of stays bound, and its pointer\'s next use is a change', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+    const grass = { name: 'grass' };
+    const vb = fakeBuffer(0x8000, 0x100);
+    vb.name = 'vb';
+    m.published.set(0x6100, grass);
+    m.published.set(0x5100, vb);
+    m.put32(at + SHADOW.TEXTURES + 2 * 4, 0x6100);
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.put32(at + SHADOW.STREAMS, 0x5100);
+    m.put32(at + SHADOW.STREAMS + 4, 32);
+    m.put32(at + SHADOW.INDICES, 0x5100);
+    m.bump(at + SHADOW.BINDING_CALLS);
+    m.shadow.sync();
+    m.device.calls.length = 0;
+
+    // The last reference went: the seam adopts what was pending, then
+    // forgets the pointer. The slots read stale, the device is not told.
+    m.published.delete(0x6100);
+    m.published.delete(0x5100);
+    m.shadow.forgetPointer(0x6100);
+    m.shadow.forgetPointer(0x5100);
+    assert.equal(m.u32(at + SHADOW.TEXTURES + 2 * 4), STALE_POINTER);
+    assert.equal(m.u32(at + SHADOW.STREAMS), STALE_POINTER);
+    assert.equal(m.u32(at + SHADOW.INDICES), STALE_POINTER);
+    assert.equal(m.u32(at + SHADOW.STREAMS + 4), 32, 'the stride is not a pointer');
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.bump(at + SHADOW.BINDING_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, [], 'the device keeps the texture it had bound');
+    assert.equal(m.device.textures.get(2), grass);
+    assert.deepEqual(m.divergences, []);
+
+    // A new object published at the old pointer, and the program binds it:
+    // the slot changed from stale, so the new object is what gets bound.
+    const stone = { name: 'stone' };
+    m.published.set(0x6100, stone);
+    m.put32(at + SHADOW.TEXTURES + 2 * 4, 0x6100);
+    m.bump(at + SHADOW.TEXTURE_CALLS);
+    m.shadow.sync();
+    assert.deepEqual(m.device.calls, ['tex 2=stone']);
+
+    // A pointer nobody bound is nothing to forget, and a block not yet made
+    // has nothing to forget it from.
+    m.shadow.forgetPointer(0x7777);
+    machine().shadow.forgetPointer(0x6100);
+});
+
+test('stage states the guest wrote reach the device by stage and type', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+    const slot = (/** @type {number} */ stage, /** @type {number} */ type)=>
+        at + SHADOW.STAGE_STATES + (stage * SHADOW.STAGE_STATE_STRIDE + type) * 4;
+
+    m.put32(slot(0, D3DTSS.COLOROP), 7);
+    m.put32(slot(5, D3DTSS.MAGFILTER), 2);
+    m.put32(slot(7, D3DTSS.ADDRESSU), 3);   // a type this device has not got
+    m.bump(at + SHADOW.STAGE_STATE_CALLS);
+    m.shadow.sync();
+    m.bump(at + SHADOW.STAGE_STATE_CALLS);
+    m.shadow.sync();
+
+    assert.deepEqual(m.device.calls, ['tss 0.1=7', 'tss 5.16=2', 'tss 7.13=3']);
+    assert.equal(m.device.stageStates[5].get(D3DTSS.MAGFILTER), 2);
+    assert.equal(m.divergences.length, 1);
+    assert.match(m.divergences[0], /SetTextureStageState.*stage 7 state 13 set to 3/);
+    assert.equal(m.shadow.diagnostics().stageStateCalls, 2);
+});
+
+test('a material the guest wrote reaches the device as its seventeen floats', ()=>{
+    const m = machine();
+    const at = m.shadow.address();
+    const floats = Float32Array.from({ length: 17 }, (unused, i)=>i + 0.5);
+    m.memory.set(new Uint8Array(floats.buffer), at + SHADOW.MATERIAL);
+    m.bump(at + SHADOW.MATERIAL_CALLS);
+    m.shadow.sync();
+
+    assert.deepEqual(m.device.calls, ['mat 0.5,16.5']);
+    assert.deepEqual([...materialFloats(m.device.material)], [...floats]);
+    assert.deepEqual(m.device.material.Specular, { r: 8.5, g: 9.5, b: 10.5, a: 11.5 });
+    assert.equal(m.shadow.diagnostics().materialCalls, 1);
+
+    // Set again with the same contents, as programs do: counted, not set.
+    m.bump(at + SHADOW.MATERIAL_CALLS);
+    m.shadow.sync();
+    assert.equal(m.device.calls.length, 1);
+    assert.equal(m.shadow.diagnostics().materialCalls, 2);
 });

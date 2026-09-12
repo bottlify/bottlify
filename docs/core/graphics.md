@@ -105,7 +105,7 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `seam.created`, `seam.interfaces` | Objects made through the entry points; interfaces published. |
 | `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. |
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
-| `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `buffers`, `synced`, `skipped`, `refused`. |
+| `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
 | `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `pending`, `claimed`, `failures`. |
 | `pacing` | `requests`, `delivered`, `coalesced`, `idleTicks`, `heldTicks`, `waiting`, and interval statistics (`count`, `minMs`, `maxMs`, `meanMs`, `deviationMs`, `p50Ms`, `p95Ms`, `p99Ms`, `fps`, `periods`). Null in a build with no scheduler. |
@@ -203,11 +203,18 @@ shifting the ones after it, and `argBytes` counts the interface pointer and ever
 the callee pops the stack.
 
 `shadow.js` is Direct3D 8's fast path. `SetRenderState`, `SetTransform`, `SetStreamSource`,
-`SetIndices`, `SetVertexShader`, `Lock` and `Unlock` are placed as x86 code that writes a block of
-guest memory the device owns and returns without trapping; on every entry into the host the block
-is compared whole against the host's copy and each difference goes through the real setter, where
-validation lives. The block is one-way and untrusted; a value the device would refuse is refused at
-the next entry and reported once as a divergence. The block counts the calls it absorbed.
+`SetIndices`, `SetVertexShader`, `SetTexture`, `SetTextureStageState`, `SetMaterial`, `Lock` and
+`Unlock` are placed as x86 code that writes a block of guest memory the device owns and returns
+without trapping; on every entry into the host the groups of the block whose call counter moved are
+compared against the host's copy and each difference goes through the real setter, where validation
+lives. The block is one-way and untrusted; a value the device would refuse is refused at the next
+entry and reported once as a divergence. A stage past the last is refused in the guest with
+`D3DERR_INVALIDCALL`; a stage state type this version has not got, and a null material, are left
+to the trap. A texture is bound by the pointer the guest wrote and resolved to its object when the
+host next looks; when the program releases its last reference the pending binding is adopted first
+and every slot still naming the pointer is marked stale, so the device keeps the texture bound and
+the pointer's next use -- possibly for a new object -- is seen as a change. The block counts the
+calls it absorbed, per group.
 
 Per API:
 

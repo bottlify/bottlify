@@ -1948,6 +1948,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {any} texture
          */
         SetTexture(stage, texture){
+            if (stage < 0 || stage >= STAGE_COUNT)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             if (texture)
             {
                 textures.set(stage, texture);
@@ -1965,6 +1969,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * @param {{ texture?: any }} out
          */
         GetTexture(stage, out){
+            if (stage < 0 || stage >= STAGE_COUNT)
+            {
+                return D3DERR_INVALIDCALL;
+            }
             const texture = textures.get(stage) ?? null;
             if (texture)
             {
