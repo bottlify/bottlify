@@ -28,6 +28,9 @@
 
 /** HRESULTs. The DXGI facility (0x87a) is distinct from Direct3D 10's own. */
 export const S_OK = 0x00000000;
+export const S_FALSE = 0x00000001;
+export const E_NOTIMPL = 0x80004001;
+export const E_FAIL = 0x80004005;
 export const E_INVALIDARG = 0x80070057;
 export const E_NOINTERFACE = 0x80004002;
 export const E_OUTOFMEMORY = 0x8007000e;
@@ -36,6 +39,7 @@ export const DXGI_ERROR_INVALID_CALL = 0x887a0001;
 export const DXGI_ERROR_NOT_FOUND = 0x887a0002;
 export const DXGI_ERROR_MORE_DATA = 0x887a0003;
 export const DXGI_ERROR_UNSUPPORTED = 0x887a0004;
+export const DXGI_ERROR_WAS_STILL_DRAWING = 0x887a000a;
 
 /**
  * The version tag `D3D10CreateDevice` is compiled with. It is not advisory:
@@ -89,10 +93,19 @@ export const DXGI_FORMAT = Object.freeze({
     R32G32B32A32_UINT: 0x03,
     R32G32B32A32_SINT: 0x04,
     R32G32B32_TYPELESS: 0x05,
+    R32G32B32_FLOAT: 0x06,
+    R32G32B32_UINT: 0x07,
+    R32G32B32_SINT: 0x08,
     R16G16B16A16_TYPELESS: 0x09,
     R16G16B16A16_FLOAT: 0x0a,
     R16G16B16A16_UNORM: 0x0b,
+    R16G16B16A16_UINT: 0x0c,
+    R16G16B16A16_SNORM: 0x0d,
+    R16G16B16A16_SINT: 0x0e,
     R32G32_TYPELESS: 0x0f,
+    R32G32_FLOAT: 0x10,
+    R32G32_UINT: 0x11,
+    R32G32_SINT: 0x12,
     R32G8X24_TYPELESS: 0x13,
     D32_FLOAT_S8X24_UINT: 0x14,
     R10G10B10A2_TYPELESS: 0x17,
@@ -104,8 +117,11 @@ export const DXGI_FORMAT = Object.freeze({
     R8G8B8A8_SNORM: 0x1f,
     R8G8B8A8_SINT: 0x20,
     R16G16_TYPELESS: 0x21,
+    R16G16_FLOAT: 0x22,
     R16G16_UNORM: 0x23,
+    R16G16_UINT: 0x24,
     R16G16_SNORM: 0x25,
+    R16G16_SINT: 0x26,
     R32_TYPELESS: 0x27,
     D32_FLOAT: 0x28,
     R32_FLOAT: 0x29,
@@ -116,7 +132,9 @@ export const DXGI_FORMAT = Object.freeze({
     R24_UNORM_X8_TYPELESS: 0x2e,
     R8G8_TYPELESS: 0x30,
     R8G8_UNORM: 0x31,
+    R8G8_UINT: 0x32,
     R8G8_SNORM: 0x33,
+    R8G8_SINT: 0x34,
     R16_TYPELESS: 0x35,
     R16_FLOAT: 0x36,
     D16_UNORM: 0x37,
@@ -125,6 +143,10 @@ export const DXGI_FORMAT = Object.freeze({
     R16_SINT: 0x3b,
     R8_TYPELESS: 0x3c,
     R8_UNORM: 0x3d,
+    R8_UINT: 0x3e,
+    R8_SNORM: 0x3f,
+    R8_SINT: 0x40,
+    A8_UNORM: 0x41,
     B8G8R8A8_UNORM: 0x57,
     B8G8R8X8_UNORM: 0x58,
 });
@@ -166,6 +188,15 @@ export const FORMAT_INFO = Object.freeze({
     [DXGI_FORMAT.R32G32B32_TYPELESS]: {
         kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
     },
+    [DXGI_FORMAT.R32G32B32_FLOAT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
+    },
+    [DXGI_FORMAT.R32G32B32_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
+    },
+    [DXGI_FORMAT.R32G32B32_SINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32B32_TYPELESS, bytesPerPixel: 12,
+    },
     [DXGI_FORMAT.R16G16B16A16_TYPELESS]: {
         kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
     },
@@ -175,8 +206,26 @@ export const FORMAT_INFO = Object.freeze({
     [DXGI_FORMAT.R16G16B16A16_UNORM]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
     },
+    [DXGI_FORMAT.R16G16B16A16_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
+    },
+    [DXGI_FORMAT.R16G16B16A16_SNORM]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
+    },
+    [DXGI_FORMAT.R16G16B16A16_SINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16B16A16_TYPELESS, bytesPerPixel: 8,
+    },
     [DXGI_FORMAT.R32G32_TYPELESS]: {
         kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
+    },
+    [DXGI_FORMAT.R32G32_FLOAT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
+    },
+    [DXGI_FORMAT.R32G32_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
+    },
+    [DXGI_FORMAT.R32G32_SINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R32G32_TYPELESS, bytesPerPixel: 8,
     },
     [DXGI_FORMAT.R32G8X24_TYPELESS]: {
         kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R32G8X24_TYPELESS, bytesPerPixel: 8,
@@ -211,7 +260,16 @@ export const FORMAT_INFO = Object.freeze({
     [DXGI_FORMAT.R16G16_TYPELESS]: {
         kind: FORMAT_KIND.TYPELESS, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
     },
+    [DXGI_FORMAT.R16G16_FLOAT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
+    },
     [DXGI_FORMAT.R16G16_UNORM]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
+    },
+    [DXGI_FORMAT.R16G16_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
+    },
+    [DXGI_FORMAT.R16G16_SINT]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R16G16_TYPELESS, bytesPerPixel: 4,
     },
     [DXGI_FORMAT.R16G16_SNORM]: {
@@ -247,6 +305,12 @@ export const FORMAT_INFO = Object.freeze({
     [DXGI_FORMAT.R8G8_UNORM]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
     },
+    [DXGI_FORMAT.R8G8_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
+    },
+    [DXGI_FORMAT.R8G8_SINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
+    },
     [DXGI_FORMAT.R8G8_SNORM]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8G8_TYPELESS, bytesPerPixel: 2,
     },
@@ -273,6 +337,18 @@ export const FORMAT_INFO = Object.freeze({
     },
     [DXGI_FORMAT.R8_UNORM]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
+    },
+    [DXGI_FORMAT.R8_UINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
+    },
+    [DXGI_FORMAT.R8_SNORM]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
+    },
+    [DXGI_FORMAT.R8_SINT]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.R8_TYPELESS, bytesPerPixel: 1,
+    },
+    [DXGI_FORMAT.A8_UNORM]: {
+        kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.A8_UNORM, bytesPerPixel: 1,
     },
     [DXGI_FORMAT.B8G8R8A8_UNORM]: {
         kind: FORMAT_KIND.COLOUR, family: DXGI_FORMAT.B8G8R8A8_UNORM, bytesPerPixel: 4,
@@ -341,7 +417,15 @@ export const IID = Object.freeze({
     IDXGIDevice: '{54EC77FA-1377-44E6-8C32-88FD5F44C84C}',
     IDXGIDevice1: '{77DB970F-6276-48BA-BA28-070143B4392C}',
     ID3D10Device: '{9B7E4C0F-342C-4106-A19F-4F2704F689F0}',
+    ID3D10Device1: '{9B7E4C8F-342C-4106-A19F-4F2704F689F0}',
     ID3D10Multithread: '{9B7E4E00-342C-4106-A19F-4F2704F689F0}',
+    ID3D10DeviceChild: '{9B7E4C00-342C-4106-A19F-4F2704F689F0}',
+    ID3D10Resource: '{9B7E4C01-342C-4106-A19F-4F2704F689F0}',
+    ID3D10View: '{C902B03F-60A7-49BA-9936-2A3AB37A7E33}',
+    ID3D10Asynchronous: '{9B7E4A00-342C-4106-A19F-4F2704F689F0}',
+    ID3D10Query: '{9B7E4C0E-342C-4106-A19F-4F2704F689F0}',
+    ID3D10Predicate: '{9B7E4C10-342C-4106-A19F-4F2704F689F0}',
+    ID3D10Counter: '{9B7E4C11-342C-4106-A19F-4F2704F689F0}',
     ID3D10Buffer: '{9B7E4C02-342C-4106-A19F-4F2704F689F0}',
     ID3D10Texture1D: '{9B7E4C03-342C-4106-A19F-4F2704F689F0}',
     ID3D10Texture2D: '{9B7E4C04-342C-4106-A19F-4F2704F689F0}',
@@ -390,6 +474,32 @@ export const D3D10_RESOURCE_MISC = Object.freeze({
     SHARED_KEYEDMUTEX: 0x10,
     GDI_COMPATIBLE: 0x20,
 });
+
+export const D3D10_MAP = Object.freeze({
+    READ: 1,
+    WRITE: 2,
+    READ_WRITE: 3,
+    WRITE_DISCARD: 4,
+    WRITE_NO_OVERWRITE: 5,
+});
+
+export const D3D10_MAP_FLAG_DO_NOT_WAIT = 0x100000;
+
+export const D3D10_CLEAR = Object.freeze({ DEPTH: 1, STENCIL: 2 });
+
+export const D3D10_QUERY = Object.freeze({
+    EVENT: 0,
+    OCCLUSION: 1,
+    TIMESTAMP: 2,
+    TIMESTAMP_DISJOINT: 3,
+    PIPELINE_STATISTICS: 4,
+    OCCLUSION_PREDICATE: 5,
+    SO_STATISTICS: 6,
+    SO_OVERFLOW_PREDICATE: 7,
+});
+
+/** In an input element, an offset that means "right after the previous element". */
+export const D3D10_APPEND_ALIGNED_ELEMENT = 0xffffffff;
 
 export const D3D10_RESOURCE_DIMENSION = Object.freeze({
     UNKNOWN: 0,

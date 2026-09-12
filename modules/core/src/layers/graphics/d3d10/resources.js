@@ -30,8 +30,9 @@
 
 import { attachCom } from './com.js';
 import {
-    ALL_REMAINING, D3D10_BIND, D3D10_DSV_DIMENSION, D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION,
-    D3D10_SRV_DIMENSION, E_INVALIDARG, FORMAT_INFO, FORMAT_KIND, IID, S_OK,
+    ALL_REMAINING, D3D10_BIND, D3D10_CPU_ACCESS, D3D10_DSV_DIMENSION, D3D10_MAP,
+    D3D10_RESOURCE_DIMENSION, D3D10_RTV_DIMENSION, D3D10_SRV_DIMENSION, D3D10_USAGE, E_INVALIDARG,
+    FORMAT_INFO, FORMAT_KIND, IID, S_OK,
 } from './constants.js';
 import { fullMipChainLength, levelExtent, resolveViewFormat } from './validity.js';
 
@@ -53,6 +54,21 @@ const VIEW_SHAPE = Object.freeze({
 });
 
 /**
+ * @typedef {Object} MappedSubresource
+ * @property {Uint8Array} data
+ * @property {number} rowPitch
+ * @property {number} depthPitch
+ */
+
+/**
+ * @typedef {Object} ResourceStorage
+ *     Where a resource's bytes live between the program and the GPU.
+ * @property {(resource: any, subresource: number) => MappedSubresource} map
+ * @property {(resource: any, subresource: number, discard: boolean,
+ *             noOverwrite: boolean) => void} unmap
+ */
+
+/**
  * @typedef {Object} ResourceOptions
  * @property {number} dimension          A D3D10_RESOURCE_DIMENSION.
  * @property {any} desc                  Already validated and resolved.
@@ -60,18 +76,96 @@ const VIEW_SHAPE = Object.freeze({
  * @property {() => void} retainDevice
  * @property {() => void} releaseDevice
  * @property {() => any} device
+ * @property {ResourceStorage} storage
  * @property {boolean} [implicit]        A swap chain's back buffer is not the caller's.
  * @property {() => void} [onFirstRef]
  * @property {() => void} [onLastRef]
  */
 
 /**
+ * Whether a map of this kind is allowed on a resource with this usage and
+ * CPU access, as the runtime decides it: reading needs read access, a plain
+ * write needs write access on something that is not dynamic, discarding is
+ * for dynamic resources only, and no-overwrite is a promise only a dynamic
+ * *buffer* can make -- a dynamic texture refuses it.
+ *
+ * @param {any} desc
+ * @param {number} mapType
+ * @param {boolean} isBuffer
+ * @returns {boolean}
+ */
+export function mapAllowed(desc, mapType, isBuffer){
+    const read = (desc.CPUAccessFlags & D3D10_CPU_ACCESS.READ) !== 0;
+    const write = (desc.CPUAccessFlags & D3D10_CPU_ACCESS.WRITE) !== 0;
+    const dynamic = desc.Usage === D3D10_USAGE.DYNAMIC;
+    switch (mapType)
+    {
+        case D3D10_MAP.READ:
+            return read;
+        case D3D10_MAP.WRITE:
+            return write && !dynamic;
+        case D3D10_MAP.READ_WRITE:
+            return read && write;
+        case D3D10_MAP.WRITE_DISCARD:
+            return dynamic;
+        case D3D10_MAP.WRITE_NO_OVERWRITE:
+            return dynamic && isBuffer;
+        default:
+            return false;
+    }
+}
+
+/**
  * @param {ResourceOptions} options
  */
 export function createResource(options){
+    const isBuffer = options.dimension === D3D10_RESOURCE_DIMENSION.BUFFER;
+    const subresources = isBuffer
+        ? 1
+        : options.desc.MipLevels * (options.desc.ArraySize ?? 1);
+    /** @type {Map<number, number>} subresource -> the map type it is held under */
+    const mapped = new Map();
+
     return attachCom({
         dimension: options.dimension,
         desc: options.desc,
+
+        /**
+         * @param {number} subresource
+         * @param {number} mapType
+         * @param {number} flags
+         * @param {{ data?: Uint8Array | null, rowPitch?: number, depthPitch?: number }} out
+         * @returns {number}
+         */
+        Map(subresource, mapType, flags, out){
+            out.data = null;
+            if (subresource >= subresources || !mapAllowed(options.desc, mapType, isBuffer))
+            {
+                return E_INVALIDARG;
+            }
+            const held = options.storage.map(this, subresource);
+            mapped.set(subresource, mapType);
+            out.data = held.data;
+            out.rowPitch = held.rowPitch;
+            out.depthPitch = held.depthPitch;
+            return S_OK;
+        },
+
+        /** @param {number} subresource */
+        Unmap(subresource){
+            const mapType = mapped.get(subresource);
+            if (mapType === undefined)
+            {
+                return;
+            }
+            mapped.delete(subresource);
+            if (mapType !== D3D10_MAP.READ)
+            {
+                options.storage.unmap(this, subresource,
+                    mapType === D3D10_MAP.WRITE_DISCARD,
+                    mapType === D3D10_MAP.WRITE_NO_OVERWRITE);
+            }
+        },
 
         /** @param {{ desc?: any }} out */
         GetDesc(out){
@@ -245,6 +339,7 @@ export function resolveViewDesc(request){
     const resolved = {
         Format: format,
         ViewDimension: dimensions[name],
+        dimensionName: name,
         MipSlice: mipSlice,
         FirstArraySlice: firstSlice,
         ArraySize: sliceCount,
@@ -290,6 +385,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
     return {
         Format: desc.Format,
         ViewDimension: dimensions.BUFFER,
+        dimensionName: 'BUFFER',
         ElementOffset: offset,
         ElementWidth: desc.ElementWidth,
     };
@@ -299,6 +395,7 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  * @typedef {Object} ViewOptions
  * @property {any} resource
  * @property {any} desc              The already-resolved description.
+ * @property {string} dimensionName  The shape the view looks at, by its enumeration name.
  * @property {string} iid
  * @property {() => void} retainDevice
  * @property {() => void} releaseDevice
@@ -310,6 +407,8 @@ function resolveBufferViewDesc(resource, desc, dimensions){
  */
 export function createView(options){
     return attachCom({
+        dimensionName: options.dimensionName,
+
         /** @param {{ desc?: any }} out */
         GetDesc(out){
             if (!out)
@@ -340,7 +439,7 @@ export function createView(options){
             return S_OK;
         },
     }, {
-        interfaces: [options.iid],
+        interfaces: [IID.ID3D10DeviceChild, IID.ID3D10View, options.iid],
         onFirstRef: options.retainDevice,
         onLastRef: options.releaseDevice,
     });
@@ -381,7 +480,8 @@ export const VIEW_KINDS = Object.freeze({
  * @returns {string[]}
  */
 export function textureInterfaces(desc, textureIid, dimension){
-    const base = [IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGIResource, textureIid];
+    const base = [IID.ID3D10DeviceChild, IID.ID3D10Resource, IID.IDXGIObject,
+        IID.IDXGIDeviceSubObject, IID.IDXGIResource, textureIid];
     const single = dimension !== D3D10_RESOURCE_DIMENSION.TEXTURE3D
         && desc.MipLevels === 1 && (desc.ArraySize ?? 1) === 1;
     return single ? [...base, IID.IDXGISurface] : base;

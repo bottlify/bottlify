@@ -364,6 +364,9 @@ function createSwapChain(requested, device, factory, windowClientSize){
             }
             presentCount++;
             currentBuffer = (currentBuffer + 1) % Math.max(1, desc.bufferCount);
+            // Buffer zero is the one a program draws into whatever the swap
+            // effect, so it is the one shown.
+            device.present(bufferFor(0));
             return S_OK;
         },
 

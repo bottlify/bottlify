@@ -36,11 +36,16 @@
 
 import { attachCom } from './com.js';
 import {
-    D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES, D3D10_LIMITS,
-    D3D10_PRIMITIVE_TOPOLOGY, D3D10_RESOURCE_DIMENSION, D3D10_SDK_VERSION, D3D10_USAGE,
-    DXGI_ERROR_INVALID_CALL, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_INVALIDARG, IID, S_OK,
+    D3D10_CREATE_DEVICE_MASK, D3D10_DEFAULTS, D3D10_DRIVER_TYPE, D3D10_DRIVER_TYPES,
+    D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_QUERY, D3D10_RESOURCE_DIMENSION,
+    D3D10_RESOURCE_MISC, D3D10_SDK_VERSION, D3D10_USAGE, DXGI_ERROR_INVALID_CALL,
+    DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL, E_INVALIDARG, E_NOTIMPL,
+    FORMAT_INFO, FORMAT_KIND, IID, S_FALSE, S_OK,
 } from './constants.js';
+import { SHADER_KIND, SYSTEM_VALUE, parseDxbc, parseShaderOfKind } from './dxbc.js';
 import { createFactory } from './dxgi.js';
+import { INDEX_FORMAT, TEXTURE_FORMAT, VERTEX_FORMAT } from './gpuformats.js';
+import { createRenderer } from './render.js';
 import {
     VIEW_KINDS, createResource, createView, resolveMipLevels, resolveViewDesc, textureInterfaces,
 } from './resources.js';
@@ -48,10 +53,48 @@ import { STATE_KIND, createStateStore } from './states.js';
 import { bindFlagsForUsage, bufferCreateResult, textureCreateResult } from './validity.js';
 
 /**
+ * @typedef {import('./render.js').SubresourceData} SubresourceData
+ * @typedef {import('./render.js').Box} Box
+ * @typedef {import('./render.js').StageBindings} StageBindings
+ * @typedef {import('./render.js').PipelineSnapshot} PipelineSnapshot
+ */
+
+/** D3D10_FORMAT_SUPPORT bits, the ones this device can claim. */
+const FORMAT_SUPPORT = Object.freeze({
+    BUFFER: 0x1,
+    IA_VERTEX_BUFFER: 0x2,
+    IA_INDEX_BUFFER: 0x4,
+    TEXTURE1D: 0x10,
+    TEXTURE2D: 0x20,
+    TEXTURE3D: 0x40,
+    TEXTURECUBE: 0x80,
+    SHADER_LOAD: 0x100,
+    SHADER_SAMPLE: 0x200,
+    SHADER_SAMPLE_COMPARISON: 0x400,
+    MIP: 0x1000,
+    MIP_AUTOGEN: 0x2000,
+    RENDER_TARGET: 0x4000,
+    BLENDABLE: 0x8000,
+    DEPTH_STENCIL: 0x10000,
+    CPU_LOCKABLE: 0x20000,
+    DISPLAY: 0x80000,
+});
+
+/** The query kinds that are also predicates. */
+const PREDICATE_QUERIES = new Set([
+    D3D10_QUERY.OCCLUSION_PREDICATE, D3D10_QUERY.SO_OVERFLOW_PREDICATE,
+]);
+
+/**
  * @typedef {Object} DeviceOptions
  * @property {any} [adapter]   The adapter the device runs on; one is made if absent.
  * @property {(format: number, sampleCount: number) => number} [multisampleQualityLevels]
  * @property {import('./dxgi.js').FactoryOptions} [factoryOptions]
+ * @property {any} [backend]   The GPU backend; absent, the device keeps state and never draws.
+ * @property {(descriptor: object) => any} [createSampler]
+ * @property {(descriptor: object) => any} [createTexture]
+ * @property {(api: string, detail: string) => void} [divergence]
+ *     Where a call that succeeded without doing all it promises is reported.
  */
 
 /**
@@ -259,6 +302,52 @@ export function createDevice(options = {}){
     const deviceHandle = ()=>self;
     const states = createStateStore({ retainDevice, releaseDevice, device: deviceHandle });
 
+    /** Said once per distinct detail, so a call in a loop does not flood. */
+    const divergences = new Set();
+    /** @param {string} detail */
+    const diverge = detail=>{
+        if (!options.divergence || divergences.has(detail))
+        {
+            return;
+        }
+        divergences.add(detail);
+        options.divergence('Direct3D 10', detail);
+    };
+
+    // With a backend the renderer draws; without one it still keeps every
+    // resource's bytes, so a map, a copy and an update mean the same thing in
+    // a headless build as under a GPU.
+    const renderer = createRenderer({
+        backend: options.backend ?? null,
+        createSampler: options.createSampler ?? (()=>null),
+        createTexture: options.createTexture ?? (()=>null),
+        divergence: options.divergence,
+    });
+    /** @type {import('./resources.js').ResourceStorage} */
+    const storage = {
+        map: (resource, subresource)=>renderer.map(resource, subresource),
+        unmap: (resource, subresource, discard, noOverwrite)=>
+            renderer.unmap(resource, subresource, discard, noOverwrite),
+    };
+
+    /**
+     * @param {SubresourceData | SubresourceData[] | null} initialData
+     * @returns {SubresourceData[] | null}
+     */
+    const asSubresources = initialData=>{
+        if (!initialData)
+        {
+            return null;
+        }
+        return Array.isArray(initialData) ? initialData : [initialData];
+    };
+
+    /**
+     * @param {SubresourceData[] | null} data
+     * @returns {boolean} whether any of it names no memory
+     */
+    const namesNoMemory = data=>!!data && data.some(entry=>!entry || !entry.pSysMem);
+
     const pipeline = {
         stages: { vs: createStage(), gs: createStage(), ps: createStage() },
         inputLayout: /** @type {any} */ (null),
@@ -281,7 +370,14 @@ export function createDevice(options = {}){
         viewports: [],
         /** @type {any[]} */
         scissorRects: [],
+        streamOutput: emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS),
+        /** @type {number[]} */
+        streamOutputOffsets: new Array(D3D10_LIMITS.SO_BUFFER_SLOTS).fill(0),
+        predicate: /** @type {any} */ (null),
+        predicateValue: false,
     };
+    let exceptionMode = 0;
+    let textFilter = { width: 0, height: 0 };
 
     /**
      * @param {any} desc
@@ -297,14 +393,15 @@ export function createDevice(options = {}){
         {
             return E_INVALIDARG;
         }
+        const data = asSubresources(initialData);
         // Initial data that names no memory is a caller's mistake, not an
         // absent argument: the two are different calls and only one of them
         // satisfies an immutable resource.
-        if (initialData && !initialData.pSysMem)
+        if (namesNoMemory(data))
         {
             return E_INVALIDARG;
         }
-        const hr = textureCreateResult(desc, dimension, caps, !!initialData);
+        const hr = textureCreateResult(desc, dimension, caps, !!data);
         if (hr !== S_OK)
         {
             return hr;
@@ -324,7 +421,9 @@ export function createDevice(options = {}){
             retainDevice,
             releaseDevice,
             device: deviceHandle,
+            storage,
         });
+        renderer.resourceCreated(out.resource, data);
         return S_OK;
     };
 
@@ -352,9 +451,11 @@ export function createDevice(options = {}){
         {
             return E_INVALIDARG;
         }
+        const { dimensionName, ...reported } = resolved;
         out.view = createView({
             resource,
-            desc: Object.freeze(resolved),
+            desc: Object.freeze(reported),
+            dimensionName,
             iid: kind.iid,
             retainDevice,
             releaseDevice,
@@ -364,25 +465,170 @@ export function createDevice(options = {}){
     };
 
     /**
+     * A shader is made from a container holding a program of the kind the
+     * create is for. Anything else -- an older shader model's tokens, a pixel
+     * shader handed to the vertex create -- is the plain bad-argument code.
+     *
      * @param {string} iid
+     * @param {number} kind  A SHADER_KIND.
      * @param {{ shader?: any }} out
-     * @param {any} bytecode
+     * @param {Uint8Array} bytecode
      * @returns {number}
      */
-    const createShader = (iid, out, bytecode)=>{
+    const createShader = (iid, kind, out, bytecode)=>{
         out.shader = null;
-        if (!bytecode)
+        const container = bytecode ? parseShaderOfKind(bytecode, kind) : null;
+        if (!container)
         {
             return E_INVALIDARG;
         }
-        // The bytecode is kept and not read: translating it is a separate piece
-        // of work, and everything this layer promises is observable without it.
-        out.shader = attachCom({ bytecode }, {
-            interfaces: [iid],
+        out.shader = attachCom({
+            container,
+            /** @param {{ device?: any }} target */
+            GetDevice(target){
+                retainDevice();
+                target.device = self;
+                return S_OK;
+            },
+        }, {
+            interfaces: [IID.ID3D10DeviceChild, iid],
             onFirstRef: retainDevice,
             onLastRef: releaseDevice,
         });
         return S_OK;
+    };
+
+    /**
+     * A device child with nothing to say for itself: a query, a counter.
+     *
+     * @param {readonly string[]} interfaces
+     * @param {any} desc
+     */
+    const createChild = (interfaces, desc)=>attachCom({
+        desc,
+        /** @param {{ device?: any }} target */
+        GetDevice(target){
+            retainDevice();
+            target.device = self;
+            return S_OK;
+        },
+        /** @param {{ desc?: any }} target */
+        GetDesc(target){
+            target.desc = desc;
+            return S_OK;
+        },
+    }, {
+        interfaces: [IID.ID3D10DeviceChild, ...interfaces],
+        onFirstRef: retainDevice,
+        onLastRef: releaseDevice,
+    });
+
+    /**
+     * @param {any} desc
+     * @param {{ query?: any } | null} out
+     * @param {boolean} predicate  Whether the create is for a predicate.
+     * @returns {number}
+     */
+    const createQuery = (desc, out, predicate)=>{
+        if (out)
+        {
+            out.query = null;
+        }
+        if (!desc || !Object.values(D3D10_QUERY).includes(desc.Query))
+        {
+            return E_INVALIDARG;
+        }
+        const isPredicate = PREDICATE_QUERIES.has(desc.Query);
+        if (predicate && !isPredicate)
+        {
+            return E_INVALIDARG;
+        }
+        // A null out pointer asks whether the query could be made.
+        if (!out)
+        {
+            return S_FALSE;
+        }
+        diverge('a query is created and never answers: nothing here measures the GPU');
+        /** @type {string[]} */
+        const interfaces = [IID.ID3D10Asynchronous, IID.ID3D10Query];
+        if (isPredicate)
+        {
+            interfaces.push(IID.ID3D10Predicate);
+        }
+        out.query = createChild(interfaces,
+            Object.freeze({ Query: desc.Query, MiscFlags: desc.MiscFlags ?? 0 }));
+        return S_OK;
+    };
+
+    /**
+     * Everything bound, with anything released since read as nothing: the
+     * one moment a draw looks at the pipeline.
+     *
+     * @returns {PipelineSnapshot}
+     */
+    const snapshot = ()=>{
+        /** @param {any[]} slots */
+        const live = slots=>slots.map(stillAlive);
+        /** @param {StageBindings} stage */
+        const stageOf = stage=>({
+            shader: stillAlive(stage.shader),
+            constantBuffers: live(stage.constantBuffers),
+            shaderResources: live(stage.shaderResources),
+            samplers: live(stage.samplers),
+        });
+        return {
+            stages: {
+                vs: stageOf(pipeline.stages.vs),
+                gs: stageOf(pipeline.stages.gs),
+                ps: stageOf(pipeline.stages.ps),
+            },
+            inputLayout: stillAlive(pipeline.inputLayout),
+            vertexBuffers: live(pipeline.vertexBuffers),
+            vertexStrides: pipeline.vertexStrides,
+            vertexOffsets: pipeline.vertexOffsets,
+            indexBuffer: stillAlive(pipeline.indexBuffer),
+            indexFormat: pipeline.indexFormat,
+            indexOffset: pipeline.indexOffset,
+            topology: pipeline.topology,
+            renderTargets: live(pipeline.renderTargets),
+            depthStencilView: stillAlive(pipeline.depthStencilView),
+            blendState: stillAlive(pipeline.blendState),
+            blendFactor: pipeline.blendFactor,
+            sampleMask: pipeline.sampleMask,
+            depthStencilState: stillAlive(pipeline.depthStencilState),
+            stencilRef: pipeline.stencilRef,
+            rasterizerState: stillAlive(pipeline.rasterizerState),
+            viewports: pipeline.viewports,
+            scissorRects: pipeline.scissorRects,
+        };
+    };
+
+    /**
+     * A copy's two resources have to be the same kind of thing; the runtime
+     * ignores a copy that is not, and so does this, saying so.
+     *
+     * @param {any} destination
+     * @param {any} source
+     * @param {string} call
+     * @returns {boolean}
+     */
+    const copyable = (destination, source, call)=>{
+        if (!destination || !source || destination === source)
+        {
+            diverge(`${call} between a resource and itself, or with a null resource, is ignored`);
+            return false;
+        }
+        if (destination.dimension !== source.dimension)
+        {
+            diverge(`${call} between resources of different kinds is ignored`);
+            return false;
+        }
+        if (destination.desc.Usage === D3D10_USAGE.IMMUTABLE)
+        {
+            diverge(`${call} into an immutable resource is ignored`);
+            return false;
+        }
+        return true;
     };
 
     /** @param {'vs' | 'gs' | 'ps'} stage */
@@ -445,11 +691,12 @@ export function createDevice(options = {}){
             {
                 return E_INVALIDARG;
             }
-            if (initialData && !initialData.pSysMem)
+            const data = asSubresources(initialData);
+            if (namesNoMemory(data))
             {
                 return E_INVALIDARG;
             }
-            const hr = bufferCreateResult(desc, !!initialData);
+            const hr = bufferCreateResult(desc, !!data);
             if (hr !== S_OK)
             {
                 return hr;
@@ -457,12 +704,14 @@ export function createDevice(options = {}){
             out.resource = createResource({
                 dimension: D3D10_RESOURCE_DIMENSION.BUFFER,
                 desc: Object.freeze({ ...desc, MipLevels: 1, ArraySize: 1 }),
-                interfaces: [IID.IDXGIObject, IID.IDXGIDeviceSubObject, IID.IDXGIResource,
-                    IID.ID3D10Buffer],
+                interfaces: [IID.ID3D10DeviceChild, IID.ID3D10Resource, IID.IDXGIObject,
+                    IID.IDXGIDeviceSubObject, IID.IDXGIResource, IID.ID3D10Buffer],
                 retainDevice,
                 releaseDevice,
                 device: deviceHandle,
+                storage,
             });
+            renderer.resourceCreated(out.resource, data);
             return S_OK;
         },
 
@@ -529,24 +778,47 @@ export function createDevice(options = {}){
 
         // --- shaders and the input layout ---
 
-        /** @param {any} bytecode @param {{ shader?: any }} out */
+        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
         CreateVertexShader(bytecode, out){
-            return createShader(IID.ID3D10VertexShader, out, bytecode);
+            return createShader(IID.ID3D10VertexShader, SHADER_KIND.VERTEX, out, bytecode);
         },
 
-        /** @param {any} bytecode @param {{ shader?: any }} out */
+        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
         CreateGeometryShader(bytecode, out){
-            return createShader(IID.ID3D10GeometryShader, out, bytecode);
-        },
-
-        /** @param {any} bytecode @param {{ shader?: any }} out */
-        CreatePixelShader(bytecode, out){
-            return createShader(IID.ID3D10PixelShader, out, bytecode);
+            return createShader(IID.ID3D10GeometryShader, SHADER_KIND.GEOMETRY, out, bytecode);
         },
 
         /**
+         * Stream output is not something this build can do, and a shader that
+         * promises it is refused rather than made to draw without it.
+         *
+         * @param {Uint8Array} bytecode
+         * @param {readonly any[]} declaration
+         * @param {number} outputStride
+         * @param {{ shader?: any }} out
+         */
+        CreateGeometryShaderWithStreamOutput(bytecode, declaration, outputStride, out){
+            void bytecode;
+            void declaration;
+            void outputStride;
+            out.shader = null;
+            diverge('a geometry shader with stream output is refused: nothing here writes'
+                + ' a stream-output buffer');
+            return E_NOTIMPL;
+        },
+
+        /** @param {Uint8Array} bytecode @param {{ shader?: any }} out */
+        CreatePixelShader(bytecode, out){
+            return createShader(IID.ID3D10PixelShader, SHADER_KIND.PIXEL, out, bytecode);
+        },
+
+        /**
+         * The layout is matched against the signature by semantic name and
+         * index: every input the shader declares has to be fed by some element,
+         * or the draw could never assemble a vertex.
+         *
          * @param {readonly any[]} elements
-         * @param {any} shaderBytecode  The signature the layout is matched against.
+         * @param {Uint8Array} shaderBytecode  A container with the input signature.
          * @param {{ layout?: any }} out
          * @returns {number}
          */
@@ -564,11 +836,126 @@ export function createDevice(options = {}){
                     return E_INVALIDARG;
                 }
             }
-            out.layout = attachCom({ elements: Object.freeze([...elements]) }, {
-                interfaces: [IID.ID3D10InputLayout],
+            const container = parseDxbc(shaderBytecode);
+            if (!container)
+            {
+                return E_INVALIDARG;
+            }
+            for (const input of container.inputs)
+            {
+                if (input.systemValue !== SYSTEM_VALUE.UNDEFINED)
+                {
+                    continue;
+                }
+                const fed = elements.some(element=>
+                    element.SemanticName.toUpperCase() === input.name.toUpperCase()
+                    && (element.SemanticIndex ?? 0) === input.index);
+                if (!fed)
+                {
+                    return E_INVALIDARG;
+                }
+            }
+            out.layout = attachCom({
+                elements: Object.freeze(elements.map(element=>Object.freeze({ ...element }))),
+                /** @param {{ device?: any }} target */
+                GetDevice(target){
+                    retainDevice();
+                    target.device = self;
+                    return S_OK;
+                },
+            }, {
+                interfaces: [IID.ID3D10DeviceChild, IID.ID3D10InputLayout],
                 onFirstRef: retainDevice,
                 onLastRef: releaseDevice,
             });
+            return S_OK;
+        },
+
+        // --- queries ---
+
+        /** @param {any} desc @param {{ query?: any } | null} out */
+        CreateQuery(desc, out){
+            return createQuery(desc, out, false);
+        },
+
+        /** @param {any} desc @param {{ query?: any } | null} out */
+        CreatePredicate(desc, out){
+            return createQuery(desc, out, true);
+        },
+
+        /** @param {any} desc @param {{ counter?: any } | null} out */
+        CreateCounter(desc, out){
+            if (out)
+            {
+                out.counter = null;
+            }
+            // No counter is offered, which is what a device without any says.
+            return desc ? DXGI_ERROR_UNSUPPORTED : E_INVALIDARG;
+        },
+
+        /** @param {{ info?: any }} out */
+        CheckCounterInfo(out){
+            out.info = { LastDeviceDependentCounter: 0, NumSimultaneousCounters: 0,
+                NumDetectableParallelUnits: 1 };
+        },
+
+        /** @returns {number} */
+        CheckCounter(){
+            return DXGI_ERROR_UNSUPPORTED;
+        },
+
+        /**
+         * What a format can be used for on this device, as the runtime reports
+         * it: from the format table for what a resource may be, and from the
+         * GPU spellings for what can be drawn.
+         *
+         * @param {number} format
+         * @param {{ support?: number }} out
+         * @returns {number}
+         */
+        CheckFormatSupport(format, out){
+            if (!out)
+            {
+                return E_INVALIDARG;
+            }
+            out.support = 0;
+            const info = FORMAT_INFO[format];
+            if (!info)
+            {
+                return E_FAIL;
+            }
+            let support = FORMAT_SUPPORT.BUFFER | FORMAT_SUPPORT.CPU_LOCKABLE;
+            if (VERTEX_FORMAT[format])
+            {
+                support |= FORMAT_SUPPORT.IA_VERTEX_BUFFER;
+            }
+            if (INDEX_FORMAT[format])
+            {
+                support |= FORMAT_SUPPORT.IA_INDEX_BUFFER;
+            }
+            if (TEXTURE_FORMAT[format] || info.kind === FORMAT_KIND.TYPELESS)
+            {
+                support |= FORMAT_SUPPORT.TEXTURE1D | FORMAT_SUPPORT.TEXTURE2D
+                    | FORMAT_SUPPORT.TEXTURE3D | FORMAT_SUPPORT.TEXTURECUBE | FORMAT_SUPPORT.MIP;
+            }
+            if (TEXTURE_FORMAT[format] && info.kind === FORMAT_KIND.COLOUR)
+            {
+                support |= FORMAT_SUPPORT.SHADER_LOAD | FORMAT_SUPPORT.RENDER_TARGET;
+                const spelling = TEXTURE_FORMAT[format];
+                if (/unorm|snorm|float/.test(spelling) && !spelling.startsWith('r32'))
+                {
+                    support |= FORMAT_SUPPORT.SHADER_SAMPLE | FORMAT_SUPPORT.BLENDABLE;
+                }
+                if (spelling.startsWith('rgba8unorm') || spelling.startsWith('bgra8unorm'))
+                {
+                    support |= FORMAT_SUPPORT.MIP_AUTOGEN | FORMAT_SUPPORT.DISPLAY;
+                }
+            }
+            if (info.kind === FORMAT_KIND.DEPTH)
+            {
+                support |= FORMAT_SUPPORT.DEPTH_STENCIL | FORMAT_SUPPORT.SHADER_SAMPLE_COMPARISON;
+            }
+            out.support = support;
             return S_OK;
         },
 
@@ -851,6 +1238,228 @@ export function createDevice(options = {}){
             out.stencilRef = pipeline.stencilRef;
         },
 
+        // --- drawing ---
+
+        /** @param {number} vertexCount @param {number} startVertex */
+        Draw(vertexCount, startVertex){
+            renderer.draw(snapshot(), { vertexCount, startVertex });
+        },
+
+        /** @param {number} indexCount @param {number} startIndex @param {number} baseVertex */
+        DrawIndexed(indexCount, startIndex, baseVertex){
+            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
+                baseVertex });
+        },
+
+        /**
+         * @param {number} vertexCount @param {number} instanceCount
+         * @param {number} startVertex @param {number} startInstance
+         */
+        DrawInstanced(vertexCount, instanceCount, startVertex, startInstance){
+            if (startInstance !== 0)
+            {
+                diverge('an instanced draw starts at instance zero whatever was asked');
+            }
+            renderer.draw(snapshot(), { vertexCount, startVertex, instanceCount });
+        },
+
+        /**
+         * @param {number} indexCount @param {number} instanceCount @param {number} startIndex
+         * @param {number} baseVertex @param {number} startInstance
+         */
+        DrawIndexedInstanced(indexCount, instanceCount, startIndex, baseVertex, startInstance){
+            if (startInstance !== 0)
+            {
+                diverge('an instanced draw starts at instance zero whatever was asked');
+            }
+            renderer.draw(snapshot(), { vertexCount: 0, startVertex: 0, indexCount, startIndex,
+                baseVertex, instanceCount });
+        },
+
+        DrawAuto(){
+            diverge('DrawAuto draws nothing: there is no stream-output buffer to count');
+        },
+
+        /** @param {any} view @param {readonly number[]} color */
+        ClearRenderTargetView(view, color){
+            if (!view || !color)
+            {
+                return;
+            }
+            renderer.clearRenderTargetView(view, [...color]);
+        },
+
+        /**
+         * @param {any} view @param {number} flags @param {number} depth @param {number} stencil
+         */
+        ClearDepthStencilView(view, flags, depth, stencil){
+            if (!view)
+            {
+                return;
+            }
+            renderer.clearDepthStencilView(view, flags, depth, stencil & 0xff);
+        },
+
+        // --- resource traffic ---
+
+        /**
+         * @param {any} resource
+         * @param {number} subresource
+         * @param {Box | null} box
+         * @param {Uint8Array} data
+         * @param {number} rowPitch
+         * @param {number} depthPitch
+         */
+        UpdateSubresource(resource, subresource, box, data, rowPitch, depthPitch){
+            if (!resource || !data)
+            {
+                return;
+            }
+            if (resource.desc.Usage !== D3D10_USAGE.DEFAULT)
+            {
+                diverge('UpdateSubresource on anything but a default-usage resource is'
+                    + ' ignored');
+                return;
+            }
+            if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))
+            {
+                return;
+            }
+            renderer.updateSubresource(resource, subresource, box, data, rowPitch, depthPitch);
+        },
+
+        /** @param {any} destination @param {any} source */
+        CopyResource(destination, source){
+            if (!copyable(destination, source, 'CopyResource'))
+            {
+                return;
+            }
+            renderer.copyResource(destination, source);
+        },
+
+        /**
+         * @param {any} destination @param {number} destinationSubresource
+         * @param {number} x @param {number} y @param {number} z
+         * @param {any} source @param {number} sourceSubresource @param {Box | null} box
+         */
+        CopySubresourceRegion(destination, destinationSubresource, x, y, z, source,
+            sourceSubresource, box)
+        {
+            if (!copyable(destination, source, 'CopySubresourceRegion'))
+            {
+                return;
+            }
+            if (box && (box.right <= box.left || box.bottom <= box.top || box.back <= box.front))
+            {
+                return;
+            }
+            renderer.copySubresourceRegion(destination, destinationSubresource, { x, y, z },
+                source, sourceSubresource, box);
+        },
+
+        /**
+         * Only a texture made for it gets levels generated; on any other the
+         * call does nothing, which is what the runtime does too.
+         *
+         * @param {any} view a shader resource view
+         */
+        GenerateMips(view){
+            if (!view)
+            {
+                return;
+            }
+            /** @type {{ resource?: any }} */
+            const held = {};
+            view.GetResource(held);
+            const resource = held.resource;
+            resource.release();
+            if ((resource.desc.MiscFlags & D3D10_RESOURCE_MISC.GENERATE_MIPS) === 0)
+            {
+                return;
+            }
+            renderer.generateMips(resource);
+        },
+
+        /**
+         * There is no multisampling here, so no resource can be a multisampled
+         * source and the call always names something it cannot resolve.
+         */
+        ResolveSubresource(){
+            diverge('ResolveSubresource does nothing: the source is not multisampled, and'
+                + ' resolving one that is not is refused');
+        },
+
+        Flush(){
+            // Frames reach the queue at present; nothing is held back between.
+        },
+
+        // --- stream output and predication ---
+
+        /** @param {readonly any[]} buffers @param {readonly number[]} offsets */
+        SOSetTargets(buffers, offsets){
+            if (buffers && buffers.some(buffer=>buffer))
+            {
+                diverge('a stream-output target is bound and never written');
+            }
+            pipeline.streamOutput = (buffers ?? []).slice(0, D3D10_LIMITS.SO_BUFFER_SLOTS);
+            pipeline.streamOutputOffsets = (offsets ?? []).slice(0, D3D10_LIMITS.SO_BUFFER_SLOTS);
+        },
+
+        /** @param {number} count @param {{ buffers?: any[], offsets?: number[] }} out */
+        SOGetTargets(count, out){
+            out.buffers = readSlots(pipeline.streamOutput, 0, count);
+            out.offsets = pipeline.streamOutputOffsets.slice(0, count);
+        },
+
+        /** @param {any} predicate @param {boolean} value */
+        SetPredication(predicate, value){
+            if (predicate)
+            {
+                diverge('predication is recorded and never consulted: every draw runs');
+            }
+            pipeline.predicate = predicate ?? null;
+            pipeline.predicateValue = !!value;
+        },
+
+        /** @param {{ predicate?: any, value?: boolean }} out */
+        GetPredication(out){
+            const predicate = stillAlive(pipeline.predicate);
+            if (predicate)
+            {
+                predicate.addRef();
+            }
+            out.predicate = predicate;
+            out.value = pipeline.predicateValue;
+        },
+
+        // --- odds and ends ---
+
+        /** @param {number} flags */
+        SetExceptionMode(flags){
+            exceptionMode = flags >>> 0;
+            return S_OK;
+        },
+
+        GetExceptionMode(){
+            return exceptionMode;
+        },
+
+        /** @param {number} width @param {number} height */
+        SetTextFilterSize(width, height){
+            textFilter = { width, height };
+        },
+
+        /** @param {{ width?: number, height?: number }} out */
+        GetTextFilterSize(out){
+            out.width = textFilter.width;
+            out.height = textFilter.height;
+        },
+
+        /** @returns {number} */
+        OpenSharedResource(){
+            return E_NOTIMPL;
+        },
+
         // --- device-wide ---
 
         /**
@@ -878,6 +1487,10 @@ export function createDevice(options = {}){
             pipeline.rasterizerState = null;
             pipeline.viewports = [];
             pipeline.scissorRects = [];
+            pipeline.streamOutput = emptySlots(D3D10_LIMITS.SO_BUFFER_SLOTS);
+            pipeline.streamOutputOffsets = new Array(D3D10_LIMITS.SO_BUFFER_SLOTS).fill(0);
+            pipeline.predicate = null;
+            pipeline.predicateValue = false;
         },
 
         /** @returns {number} always 10.0: this entry point has no other level */
@@ -926,6 +1539,27 @@ export function createDevice(options = {}){
         },
 
         /**
+         * A swap chain presenting: the recorded frame goes to the GPU and the
+         * buffer is shown.
+         *
+         * @param {any} backBuffer
+         * @returns {Promise<void>}
+         */
+        present(backBuffer){
+            return renderer.present(backBuffer);
+        },
+
+        /** @returns {Promise<void>} settled when every presented frame has been submitted */
+        idle(){
+            return renderer.idle();
+        },
+
+        /** What the renderer has done and declined to do. */
+        diagnostics(){
+            return renderer.diagnostics();
+        },
+
+        /**
          * A swap chain's back buffer, made here because a resource belongs to
          * the device however it was asked for.
          *
@@ -957,6 +1591,7 @@ export function createDevice(options = {}){
                 retainDevice,
                 releaseDevice,
                 device: deviceHandle,
+                storage,
                 implicit: true,
                 onFirstRef: request.onFirstRef,
                 onLastRef: request.onLastRef,

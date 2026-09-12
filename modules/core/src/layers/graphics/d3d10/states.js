@@ -33,6 +33,7 @@
  *   because it is the whole pipeline's, not just these objects'.
  */
 
+import { createPrivateData } from './com.js';
 import {
     D3D10_BLEND, D3D10_BLEND_OP, D3D10_COLOR_WRITE_ENABLE, D3D10_COMPARISON, D3D10_CULL_MODE,
     D3D10_DEFAULTS, D3D10_DEPTH_WRITE_MASK, D3D10_FILL_MODE, D3D10_FILTER,
@@ -332,6 +333,7 @@ export function createStateStore(options){
         options.retainDevice();
         const state = {
             kind,
+            ...createPrivateData(),
             get refCount(){
                 return count;
             },

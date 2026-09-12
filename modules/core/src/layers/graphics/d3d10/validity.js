@@ -434,6 +434,14 @@ export function textureCreateResult(desc, dimension, caps, hasInitialData){
         return E_INVALIDARG;
     }
 
+    // Generating a level means drawing into it from the one above, so the
+    // texture has to be both a target and something a shader can read.
+    const mipGeneration = D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE;
+    if ((desc.MiscFlags & D3D10_RESOURCE_MISC.GENERATE_MIPS) !== 0
+        && (desc.BindFlags & mipGeneration) !== mipGeneration)
+    {
+        return E_INVALIDARG;
+    }
     const shared = D3D10_RESOURCE_MISC.SHARED | D3D10_RESOURCE_MISC.SHARED_KEYEDMUTEX;
     if ((desc.MiscFlags & shared) === shared)
     {

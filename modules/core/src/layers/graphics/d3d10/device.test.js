@@ -11,11 +11,14 @@ import {
     D3D10_CPU_ACCESS, D3D10_CREATE_DEVICE, D3D10_CULL_MODE, D3D10_DEFAULTS,
     D3D10_DEPTH_WRITE_MASK, D3D10_DRIVER_TYPE, D3D10_DSV_DIMENSION, D3D10_FILL_MODE, D3D10_FILTER,
     D3D10_LIMITS, D3D10_PRIMITIVE_TOPOLOGY, D3D10_RESOURCE_MISC, D3D10_RTV_DIMENSION,
-    D3D10_SDK_VERSION, D3D10_SRV_DIMENSION, D3D10_STENCIL_OP, D3D10_TEXTURE_ADDRESS, D3D10_USAGE,
-    DXGI_ERROR_INVALID_CALL, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_INVALIDARG, IID, S_OK,
+    D3D10_MAP, D3D10_QUERY, D3D10_SDK_VERSION, D3D10_SRV_DIMENSION, D3D10_STENCIL_OP,
+    D3D10_TEXTURE_ADDRESS, D3D10_USAGE, DXGI_ERROR_INVALID_CALL, DXGI_ERROR_MORE_DATA,
+    DXGI_ERROR_NOT_FOUND, DXGI_ERROR_UNSUPPORTED, DXGI_FORMAT, D3D_FEATURE_LEVEL, E_FAIL,
+    E_INVALIDARG, IID, S_FALSE, S_OK,
 } from './constants.js';
 import { D3D10CreateDevice, D3D10CreateDeviceAndSwapChain } from './device.js';
 import { defaultSwapChainDesc } from './dxgi.js';
+import { passThroughVertexShader, solidPixelShader } from './shader-fixtures.js';
 
 /** @param {object} [options] */
 function createDevice(options = {}){
@@ -1008,7 +1011,7 @@ test('the input assembler records a layout, streams and a topology', ()=>{
         AlignedByteOffset: 0,
         InputSlotClass: 0,
         InstanceDataStepRate: 0,
-    }], { bytecode: [1] }, layout), S_OK);
+    }], passThroughVertexShader(), layout), S_OK);
 
     /** @type {{ resource?: any }} */
     const vertices = {};
@@ -1072,12 +1075,18 @@ test('an input layout needs elements and a signature to match them against', ()=
     };
     /** @type {{ layout?: any }} */
     const out = {};
-    assert.equal(device.CreateInputLayout([], { bytecode: [1] }, out), E_INVALIDARG);
+    const signature = passThroughVertexShader();
+    assert.equal(device.CreateInputLayout([], signature, out), E_INVALIDARG);
     assert.equal(device.CreateInputLayout([element], null, out), E_INVALIDARG);
-    assert.equal(device.CreateInputLayout([{ ...element, SemanticName: '' }], { bytecode: [1] },
+    assert.equal(device.CreateInputLayout([{ ...element, SemanticName: '' }], signature,
         out), E_INVALIDARG);
-    assert.equal(device.CreateInputLayout([{ ...element, InputSlot: 16 }], { bytecode: [1] },
+    assert.equal(device.CreateInputLayout([{ ...element, InputSlot: 16 }], signature,
         out), E_INVALIDARG);
+    // The shader reads POSITION0; a layout that feeds only NORMAL0 cannot assemble it.
+    assert.equal(device.CreateInputLayout([{ ...element, SemanticName: 'NORMAL' }], signature,
+        out), E_INVALIDARG);
+    assert.equal(device.CreateInputLayout([element], new Uint8Array([1, 2, 3, 4]), out),
+        E_INVALIDARG, 'the signature has to come in a container');
     assert.equal(out.layout, null);
     assertFullyReleased(device);
 });
@@ -1088,8 +1097,8 @@ test('each shader stage keeps its own bindings', ()=>{
     const vertexShader = {};
     /** @type {{ shader?: any }} */
     const pixelShader = {};
-    assert.equal(device.CreateVertexShader({ bytecode: [1] }, vertexShader), S_OK);
-    assert.equal(device.CreatePixelShader({ bytecode: [2] }, pixelShader), S_OK);
+    assert.equal(device.CreateVertexShader(passThroughVertexShader(), vertexShader), S_OK);
+    assert.equal(device.CreatePixelShader(solidPixelShader([1, 0, 0, 1]), pixelShader), S_OK);
 
     device.VSSetShader(vertexShader.shader);
     device.PSSetShader(pixelShader.shader);
@@ -1329,5 +1338,306 @@ test('a buffer honours the usage and access table the tables describe', ()=>{
     }, null, staging), S_OK);
     staging.resource.release();
 
+    assertFullyReleased(device);
+});
+
+// --- mapping ---
+
+/**
+ * Which maps a resource of each usage and access allows, as the runtime
+ * decides it. Every row is a resource that can be created; the columns are
+ * the five map kinds.
+ *
+ * @type {{ usage: number, access: number, read: boolean, write: boolean,
+ *          readWrite: boolean, discard: boolean, noOverwrite: boolean }[]}
+ */
+const MAP_TABLE = [
+    { usage: D3D10_USAGE.DEFAULT, access: 0,
+        read: false, write: false, readWrite: false, discard: false, noOverwrite: false },
+    { usage: D3D10_USAGE.DYNAMIC, access: D3D10_CPU_ACCESS.WRITE,
+        read: false, write: false, readWrite: false, discard: true, noOverwrite: true },
+    { usage: D3D10_USAGE.STAGING, access: D3D10_CPU_ACCESS.READ,
+        read: true, write: false, readWrite: false, discard: false, noOverwrite: false },
+    { usage: D3D10_USAGE.STAGING, access: D3D10_CPU_ACCESS.WRITE,
+        read: false, write: true, readWrite: false, discard: false, noOverwrite: false },
+    { usage: D3D10_USAGE.STAGING, access: D3D10_CPU_ACCESS.READ | D3D10_CPU_ACCESS.WRITE,
+        read: true, write: true, readWrite: true, discard: false, noOverwrite: false },
+];
+
+test('a buffer allows the maps its usage and access say, and no others', ()=>{
+    const device = createDevice();
+    for (const row of MAP_TABLE)
+    {
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateBuffer({
+            ByteWidth: 64,
+            Usage: row.usage,
+            BindFlags: row.usage === D3D10_USAGE.STAGING ? 0 : D3D10_BIND.VERTEX_BUFFER,
+            CPUAccessFlags: row.access,
+            MiscFlags: 0,
+        }, null, out), S_OK);
+        const buffer = out.resource;
+        const expectations = [
+            [D3D10_MAP.READ, row.read], [D3D10_MAP.WRITE, row.write],
+            [D3D10_MAP.READ_WRITE, row.readWrite], [D3D10_MAP.WRITE_DISCARD, row.discard],
+            [D3D10_MAP.WRITE_NO_OVERWRITE, row.noOverwrite],
+        ];
+        for (const [mapType, allowed] of expectations)
+        {
+            /** @type {{ data?: Uint8Array | null }} */
+            const mapped = {};
+            const hr = buffer.Map(0, mapType, 0, mapped);
+            assert.equal(hr, allowed ? S_OK : E_INVALIDARG,
+                `usage ${row.usage} access ${row.access} map ${mapType}`);
+            if (hr === S_OK)
+            {
+                assert.equal(/** @type {Uint8Array} */ (mapped.data).length, 64);
+                buffer.Unmap(0);
+            }
+            else
+            {
+                assert.equal(mapped.data, null);
+            }
+        }
+        assert.equal(buffer.Map(0, 0, 0, {}), E_INVALIDARG, 'zero is not a map type');
+        buffer.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a texture allows the same maps, except that no-overwrite is a buffer\'s promise', ()=>{
+    const device = createDevice();
+    for (const row of MAP_TABLE)
+    {
+        /** @type {{ resource?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture2D({
+            ...TEXTURE_2D,
+            Usage: row.usage,
+            BindFlags: row.usage === D3D10_USAGE.STAGING
+                ? 0
+                : D3D10_BIND.SHADER_RESOURCE,
+            CPUAccessFlags: row.access,
+        }, null, out), S_OK, `usage ${row.usage} access ${row.access}`);
+        const texture = out.resource;
+        const expectations = [
+            [D3D10_MAP.READ, row.read], [D3D10_MAP.WRITE, row.write],
+            [D3D10_MAP.READ_WRITE, row.readWrite], [D3D10_MAP.WRITE_DISCARD, row.discard],
+            [D3D10_MAP.WRITE_NO_OVERWRITE, false],
+        ];
+        for (const [mapType, allowed] of expectations)
+        {
+            /** @type {{ data?: Uint8Array | null, rowPitch?: number }} */
+            const mapped = {};
+            const hr = texture.Map(0, mapType, 0, mapped);
+            assert.equal(hr, allowed ? S_OK : E_INVALIDARG,
+                `usage ${row.usage} access ${row.access} map ${mapType}`);
+            if (hr === S_OK)
+            {
+                assert.equal(mapped.rowPitch, 512 * 4);
+                assert.equal(/** @type {Uint8Array} */ (mapped.data).length, 512 * 512 * 4);
+                texture.Unmap(0);
+            }
+        }
+        assert.equal(texture.Map(1, D3D10_MAP.READ, 0, {}), E_INVALIDARG,
+            'a subresource the texture does not have');
+        texture.release();
+    }
+    assertFullyReleased(device);
+});
+
+test('a mip level maps at its own pitch and size', ()=>{
+    const device = createDevice();
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({
+        ...TEXTURE_2D,
+        Width: 16,
+        Height: 8,
+        MipLevels: 0,
+        Usage: D3D10_USAGE.STAGING,
+        BindFlags: 0,
+        CPUAccessFlags: D3D10_CPU_ACCESS.READ,
+    }, null, out), S_OK);
+    const texture = out.resource;
+    /** @type {{ data?: Uint8Array | null, rowPitch?: number }} */
+    const level2 = {};
+    assert.equal(texture.Map(2, D3D10_MAP.READ, 0, level2), S_OK);
+    assert.equal(level2.rowPitch, 4 * 4);
+    assert.equal(/** @type {Uint8Array} */ (level2.data).length, 4 * 2 * 4);
+    texture.Unmap(2);
+    assert.equal(texture.Map(5, D3D10_MAP.READ, 0, {}), E_INVALIDARG, 'five levels: 0..4');
+    texture.release();
+    assertFullyReleased(device);
+});
+
+// --- generating mips ---
+
+test('a texture that will generate mips has to be a target and a shader resource', ()=>{
+    const device = createDevice();
+    const withMips = { ...TEXTURE_2D, MiscFlags: D3D10_RESOURCE_MISC.GENERATE_MIPS };
+    /** @type {{ resource?: any }} */
+    const out = {};
+    assert.equal(device.CreateTexture2D({ ...withMips, BindFlags: D3D10_BIND.SHADER_RESOURCE },
+        null, out), E_INVALIDARG);
+    assert.equal(device.CreateTexture2D({ ...withMips, BindFlags: D3D10_BIND.RENDER_TARGET },
+        null, out), E_INVALIDARG);
+    assert.equal(device.CreateTexture2D({
+        ...withMips, BindFlags: D3D10_BIND.RENDER_TARGET | D3D10_BIND.SHADER_RESOURCE,
+    }, null, out), S_OK);
+    out.resource.release();
+    assertFullyReleased(device);
+});
+
+// --- queries ---
+
+test('a query is made for every kind, and only two kinds are predicates', ()=>{
+    const device = createDevice();
+    assert.equal(device.CreateQuery(null, {}), E_INVALIDARG);
+    assert.equal(device.CreatePredicate(null, {}), E_INVALIDARG);
+    for (const kind of Object.values(D3D10_QUERY))
+    {
+        const desc = { Query: kind, MiscFlags: 0 };
+        const predicate = kind === D3D10_QUERY.OCCLUSION_PREDICATE
+            || kind === D3D10_QUERY.SO_OVERFLOW_PREDICATE;
+        assert.equal(device.CreateQuery(desc, null), S_FALSE, `query ${kind} can be made`);
+        /** @type {{ query?: any }} */
+        const out = {};
+        assert.equal(device.CreateQuery(desc, out), S_OK);
+        assert.equal(out.query.supports(IID.ID3D10Query), true);
+        assert.equal(out.query.supports(IID.ID3D10Asynchronous), true);
+        assert.equal(out.query.supports(IID.ID3D10Predicate), predicate);
+        /** @type {{ device?: any }} */
+        const owner = {};
+        out.query.GetDevice(owner);
+        assert.equal(owner.device, device);
+        device.release();
+        out.query.release();
+        assert.equal(device.CreatePredicate(desc, null), predicate ? S_FALSE : E_INVALIDARG);
+        /** @type {{ query?: any }} */
+        const made = {};
+        assert.equal(device.CreatePredicate(desc, made), predicate ? S_OK : E_INVALIDARG);
+        if (predicate)
+        {
+            made.query.release();
+        }
+        else
+        {
+            assert.equal(made.query, null);
+        }
+    }
+    assert.equal(device.CreateQuery({ Query: 8, MiscFlags: 0 }, null), E_INVALIDARG);
+    assert.equal(device.CreateCounter({ Counter: 0 }, {}), DXGI_ERROR_UNSUPPORTED);
+    assertFullyReleased(device);
+});
+
+// --- private data ---
+
+test('private data is kept per object and an interface entry holds a reference', ()=>{
+    const device = createDevice();
+    const guid = '{12345678-1234-1234-1234-123456789ABC}';
+    assert.equal(device.SetPrivateData(guid, 0, null), S_FALSE, 'nothing to clear');
+    assert.equal(device.SetPrivateDataInterface(guid, null), S_OK, 'a null interface is an entry');
+    assert.equal(device.SetPrivateData(guid, 0xffffffff, null), S_OK, 'which a clear removes');
+    assert.equal(device.SetPrivateData(guid, 0xffffffff, null), S_FALSE);
+
+    assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
+    assert.deepEqual(device.GetPrivateData(guid, { size: 8, wantsData: true }),
+        { hr: S_OK, size: 4, object: null });
+
+    const other = createDevice();
+    const before = other.refCount;
+    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    assert.equal(other.refCount, before + 1);
+    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK, 'setting it again');
+    assert.equal(other.refCount, before + 1, 'holds one reference, not two');
+    assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
+    assert.equal(other.refCount, before, 'and gives it back');
+
+    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    assert.equal(device.SetPrivateData(guid, 4, Uint8Array.from([1, 2, 3, 4])), S_OK);
+    assert.equal(other.refCount, before, 'bytes replace the interface and release it');
+    assert.equal(device.SetPrivateData(guid, 42, null), S_OK);
+    assert.equal(device.SetPrivateData(guid, 42, null), S_FALSE);
+
+    assert.equal(device.SetPrivateDataInterface(guid, other), S_OK);
+    const answered = device.GetPrivateData(guid, { size: 8, wantsData: true });
+    assert.equal(answered.hr, S_OK);
+    assert.equal(answered.size, 4);
+    assert.equal(answered.object, other);
+    assert.equal(other.refCount, before + 2, 'reading takes a reference for the caller');
+    other.release();
+
+    assert.deepEqual(device.GetPrivateData(guid, { size: 1, wantsData: false }),
+        { hr: S_OK, size: 4 }, 'no room is needed to ask the size');
+    assert.deepEqual(device.GetPrivateData(guid, { size: 1, wantsData: true }),
+        { hr: DXGI_ERROR_MORE_DATA, size: 4 });
+    assert.deepEqual(device.GetPrivateData(guid, { size: null, wantsData: true }),
+        { hr: E_INVALIDARG, size: 0 });
+    assert.deepEqual(
+        device.GetPrivateData('{00000000-0000-0000-0000-000000000001}',
+            { size: 8, wantsData: true }),
+        { hr: DXGI_ERROR_NOT_FOUND, size: 0 });
+
+    const texture = createTexture2D(device);
+    assert.equal(texture.SetPrivateData(guid, 2, Uint8Array.from([7, 8])), S_OK);
+    assert.deepEqual(texture.GetPrivateData(guid, { size: 2, wantsData: true }),
+        { hr: S_OK, size: 2, data: Uint8Array.from([7, 8]) });
+    texture.release();
+
+    assert.equal(device.SetPrivateDataInterface(guid, null), S_OK);
+    assert.equal(other.refCount, before);
+    assertFullyReleased(other);
+    assertFullyReleased(device);
+});
+
+// --- format support ---
+
+test('a format reports what it can be used for, and an unknown one fails', ()=>{
+    const device = createDevice();
+    /** @type {{ support?: number }} */
+    const out = {};
+    assert.equal(device.CheckFormatSupport(0xffffffff, out), E_FAIL);
+    assert.equal(out.support, 0);
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R8G8B8A8_UNORM, out), S_OK);
+    const rgba = /** @type {number} */ (out.support);
+    assert.ok(rgba & 0x200, 'sampled');
+    assert.ok(rgba & 0x4000, 'a render target');
+    assert.ok(rgba & 0x2, 'a vertex buffer');
+    assert.ok(!(rgba & 0x4), 'not an index buffer');
+    assert.ok(!(rgba & 0x800000), 'never gathered');
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R32G32B32A32_UINT, out), S_OK);
+    assert.ok(/** @type {number} */ (out.support) & 0x100, 'loaded');
+    assert.ok(!(/** @type {number} */ (out.support) & 0x200), 'integers are not sampled');
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.R16_UINT, out), S_OK);
+    assert.ok(/** @type {number} */ (out.support) & 0x4, 'an index buffer');
+    assert.equal(device.CheckFormatSupport(DXGI_FORMAT.D24_UNORM_S8_UINT, out), S_OK);
+    assert.ok(/** @type {number} */ (out.support) & 0x10000, 'a depth stencil');
+    assertFullyReleased(device);
+});
+
+test('a shader and an input layout answer for their device', ()=>{
+    const device = createDevice();
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    assert.equal(device.CreateVertexShader(passThroughVertexShader(), vs), S_OK);
+    /** @type {{ device?: any }} */
+    const owner = {};
+    vs.shader.GetDevice(owner);
+    assert.equal(owner.device, device);
+    device.release();
+    assert.equal(vs.shader.supports(IID.ID3D10DeviceChild), true);
+    assert.equal(vs.shader.supports(IID.ID3D10VertexShader), true);
+    assert.equal(vs.shader.supports(IID.ID3D10PixelShader), false);
+    vs.shader.release();
+
+    /** @type {{ shader?: any }} */
+    const wrong = { shader: 'untouched' };
+    assert.equal(device.CreateVertexShader(solidPixelShader([1, 1, 1, 1]), wrong), E_INVALIDARG,
+        'a pixel shader is not a vertex shader');
+    assert.equal(wrong.shader, null);
+    assert.equal(device.CreatePixelShader(new Uint8Array([0xff, 0xfe, 0, 3]), wrong),
+        E_INVALIDARG, 'a Shader Model 3 blob is no container');
     assertFullyReleased(device);
 });
