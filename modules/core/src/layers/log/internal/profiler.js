@@ -191,7 +191,9 @@ export function createProfiler(options){
          * already misbehaving has destroyed the evidence.
          *
          * @param {string} [name]
-         * @param {{ instructions?: number }} [detail]  What a guest slice retired.
+         * @param {{ instructions?: number, weight?: number }} [detail]
+         *     What a guest slice retired; and how many phases this one stands
+         *     for, when a caller times one in every few rather than each.
          * @returns {number} the phase's total duration
          */
         end(name, detail){
@@ -206,7 +208,8 @@ export function createProfiler(options){
             {
                 noteImbalance(`end(${name}) while ${entry.name} open at depth ${depth + 1}`);
             }
-            const elapsed = now() - entry.startedAt;
+            const weight = detail?.weight ?? 1;
+            const elapsed = (now() - entry.startedAt) * weight;
             const self = elapsed - entry.children;
             if (depth > 0)
             {
@@ -220,7 +223,7 @@ export function createProfiler(options){
                     worstMs: 0 };
                 rows.set(entry.name, row);
             }
-            row.count++;
+            row.count += weight;
             row.totalMs += elapsed;
             row.selfMs += self;
             if (elapsed > row.worstMs)

@@ -70,8 +70,9 @@ const DETAIL_RING = 4096;
  *        The running thread's last error, for the trace. Injected because it
  *        belongs to a layer above this one.
  * @param {boolean} [deps.traceStrings]
+ * @param {boolean} [deps.callPhases]  Time each call as a phase of its own.
  * @param {{ begin: (name: string, kind?: string) => void,
- *            end: (name?: string) => number }} [deps.profiler]
+ *            end: (name?: string, detail?: { weight?: number }) => number }} [deps.profiler]
  *        Where a host call's time is accounted. Optional: this layer is
  *        testable without one, and a phase nobody reads is work nobody asked
  *        for.
@@ -97,6 +98,17 @@ export function createDispatcher(deps){
      * that nobody reads is work nobody asked for.
      */
     const profiler = deps.profiler ?? null;
+    // Whether each call is timed as a phase of its own, under the crossing's.
+    // That is what a report's cost per API comes from, and it costs two clock
+    // readings per call -- measured at three percent of a frame in a match,
+    // where a frame makes fifteen hundred calls. Off unless a measurement
+    // asks; the crossing is always timed, so the host's share is always known.
+    const callPhases = deps.callPhases ?? false;
+    // The crossing is timed one call in this many, each standing for all of
+    // them: two clock readings a call were a measured share of a frame in a
+    // match, and a share is as true of a sample as of the whole.
+    const TRAP_SAMPLE = 8;
+    let crossings = 0;
     /** @type {Map<number, HostFunction>} */
     const functions = new Map();
     /**
@@ -261,14 +273,19 @@ export function createDispatcher(deps){
             // in the report costs a fraction of a millisecond a frame, and
             // until this existed there was no way to tell a machine slowed by
             // its own emulation from one slowed by leaving it so often.
-            profiler?.begin('trap', 'host');
+            if (profiler === null || (crossings++ & (TRAP_SAMPLE - 1)) !== 0)
+            {
+                this.dispatchNow(id);
+                return;
+            }
+            profiler.begin('trap', 'host');
             try
             {
                 this.dispatchNow(id);
             }
             finally
             {
-                profiler?.end('trap');
+                profiler.end('trap', { weight: TRAP_SAMPLE });
             }
         },
 
@@ -312,26 +329,40 @@ export function createDispatcher(deps){
 
             parking.beginCall(frame);
             let result;
-            const record = {
-                name: fn.name,
-                // Which instruction made this call. Read from the frame that was
-                // captured above rather than the stack, because a handler that
-                // calls the guest back has overwritten the stack by the time
-                // anybody reads this.
-                from: frame.hostReturn,
-                // Copied, because a handler that writes through a pointer can
-                // change what the arguments describe before anyone reads them.
-                args: args.slice(0, 6),
-                // Read now rather than later when asked for: a string a program
-                // assembled on its own stack has been overwritten several
-                // frames deep by the time anybody reads the trace, and what
-                // comes back then belongs to whatever ran next.
-                strings: traceStrings ? args.slice(0, 6).map(peekString) : null,
-                result: 'threw',
-                error: 0,
+            // The ring's records are made once and written over: a record and
+            // an argument array allocated per call, thirty thousand times a
+            // second, was the garbage collector's whole share of a frame.
+            // Whoever reads the ring gets a copy; a sink gets the record for
+            // the length of its call and nothing longer.
+            const slot = detailAt++ % DETAIL_RING;
+            const record = detailed[slot] ??= {
+                name: '', from: 0, args: [], strings: null, result: '', error: 0,
             };
-            detailed[detailAt++ % DETAIL_RING] = record;
-            profiler?.begin(fn.name, 'host');
+            record.name = fn.name;
+            // Which instruction made this call. Read from the frame that was
+            // captured above rather than the stack, because a handler that
+            // calls the guest back has overwritten the stack by the time
+            // anybody reads this.
+            record.from = frame.hostReturn;
+            // Copied, because a handler that writes through a pointer can
+            // change what the arguments describe before anyone reads them.
+            const kept = Math.min(args.length, 6);
+            record.args.length = kept;
+            for (let i = 0; i < kept; i++)
+            {
+                record.args[i] = args[i];
+            }
+            // Read now rather than later when asked for: a string a program
+            // assembled on its own stack has been overwritten several
+            // frames deep by the time anybody reads the trace, and what
+            // comes back then belongs to whatever ran next.
+            record.strings = traceStrings ? record.args.map(peekString) : null;
+            record.result = 'threw';
+            record.error = 0;
+            if (callPhases)
+            {
+                profiler?.begin(fn.name, 'host');
+            }
             try
             {
                 result = fn.handler(args, frame);
@@ -350,7 +381,10 @@ export function createDispatcher(deps){
             }
             finally
             {
-                profiler?.end(fn.name);
+                if (callPhases)
+                {
+                    profiler?.end(fn.name);
+                }
                 parking.endCall();
                 // What this call left in the thread's last error. A program
                 // reports a code long after whatever produced it returned, and
@@ -435,9 +469,12 @@ export function createDispatcher(deps){
             for (let back = kept; back > 0; back--)
             {
                 const record = detailed[(detailAt - back) % DETAIL_RING];
-                out.push(record.strings
-                    ? record
-                    : { ...record, strings: record.args.map(peekString) });
+                // A copy: the record is written over when the ring comes round.
+                out.push({
+                    ...record,
+                    args: record.args.slice(),
+                    strings: record.strings ? record.strings.slice() : record.args.map(peekString),
+                });
             }
             return out;
         },

@@ -1226,6 +1226,9 @@ const CLEAR_STRIDE = 20;
  * @typedef {Object} RendererOptions
  * @property {any} backend
  * @property {(address: number, length: number)=>Uint8Array} readMemory
+ * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ *     The same bytes without the copy, for a reader that is done with them
+ *     before the guest runs again. Absent, a copy is read.
  * @property {((descriptor: any)=>any) | null} [createSampler]
  *     The backend has no sampler of its own yet, so one is borrowed from
  *     whoever assembled the device. A textured draw without it is refused
@@ -1268,6 +1271,7 @@ const CLEAR_STRIDE = 20;
  */
 export function createRenderer(options){
     const { backend, readMemory } = options;
+    const windowMemory = options.windowMemory ?? readMemory;
     const createSampler = options.createSampler ?? null;
     const dumpDraws = options.dumpDraws === true;
     const maxDraws = options.maxDraws === undefined ? -1 : options.maxDraws;
@@ -2843,7 +2847,11 @@ export function createRenderer(options){
                 return;
             }
             const held = entry.held;
-            held.data.set(readMemory(buffer.base + held.offset, held.length));
+            // The bytes go straight into the staging copy: a window is
+            // enough, and the copy a read makes was a measured share of a
+            // frame in a match, where a program refills its buffers every
+            // draw.
+            held.data.set(windowMemory(buffer.base + held.offset, held.length));
             entry.gpu.unlock(held);
             entry.held = null;
         },

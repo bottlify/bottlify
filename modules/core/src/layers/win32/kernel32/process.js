@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+
+import { TEB } from './teb.js';
+
 /**
  * The kernel32 surface a program touches before it does anything interesting:
  * the last-error slot, thread-local storage, and the small queries about the
@@ -95,6 +98,10 @@ const MAX_MODULE_NAME = 260;
  * @property {() => number} [tlsBlock]  The running thread's array of TLS slots,
  *           as the compiler reaches it through FS; zero when there is none.
  *           Records that the guest asked to wait. Actually waiting is the scheduler's.
+ * @property {() => any[]} [allThreads]  Every thread, for what has to reach all
+ *           of their blocks.
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory the processor executes, for the fast paths.
  * @property {number} [processId]
  */
 
@@ -105,9 +112,15 @@ const MAX_MODULE_NAME = 260;
  * Two places building this shape independently is how one of them ends up
  * setting an error nothing ever reads.
  *
+ * The last error of a thread with a block lives in the block, at the offset
+ * the compiler and the guest-side GetLastError read it from; a thread without
+ * one (a test's) keeps it here.
+ *
  * @param {() => any} currentThread
+ * @param {{ readU32: (address: number) => number,
+ *           writeU32: (address: number, value: number) => void } | null} [memory]
  */
-export function createThreadState(currentThread){
+export function createThreadState(currentThread, memory = null){
     /**
      * @param {any} [thread]  Whose state. Defaults to the thread that is running.
      *   Naming one is for an answer produced on somebody else's turn: a call
@@ -125,13 +138,86 @@ export function createThreadState(currentThread){
         return thread.kernel32;
     };
 
+    /** @param {any} thread */
+    const blockOf = thread=>(memory ? (thread?.tebAddress ?? 0) : 0);
+
+    /** @param {any} thread @param {number} code */
+    const setErrorOn = (thread, code)=>{
+        const teb = blockOf(thread);
+        if (teb !== 0 && memory)
+        {
+            memory.writeU32(teb + TEB.LAST_ERROR, code >>> 0);
+        }
+        else
+        {
+            stateOf(thread).lastError = code >>> 0;
+        }
+    };
+
+    /** @param {any} [thread] */
+    const lastErrorOf = (thread = currentThread())=>{
+        const teb = blockOf(thread);
+        return teb !== 0 && memory
+            ? memory.readU32(teb + TEB.LAST_ERROR)
+            : stateOf(thread).lastError;
+    };
+
     return {
         stateOf,
+        lastErrorOf,
+        setErrorOn,
         /** @param {number} code */
-        setError: code=>{
-            stateOf().lastError = code >>> 0;
-        },
+        setError: code=>setErrorOn(currentThread(), code),
     };
+}
+
+/** @param {number} value */
+const dword = value=>[value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff];
+
+/**
+ * GetLastError as guest code: the block's field, through FS. Measured on a
+ * title in a match, it and SetLastError, TlsGetValue and FlsGetValue were
+ * four calls in five the program made into the host, each a crossing that
+ * cost more than the work.
+ */
+export function getLastErrorCode(){
+    return new Uint8Array([
+        0x64, 0xa1, ...dword(TEB.LAST_ERROR),                        // mov eax, fs:[0x34]
+        0xc3,                                                        // ret
+    ]);
+}
+
+/** SetLastError as guest code. */
+export function setLastErrorCode(){
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
+        0x64, 0xa3, ...dword(TEB.LAST_ERROR),                        // mov fs:[0x34], eax
+        0xc2, 0x04, 0x00,                                            // ret 4
+    ]);
+}
+
+/**
+ * TlsGetValue as guest code: a slot of the block's array, and success clears
+ * the error, as the host does. An index past the array goes to the host,
+ * which answers for it; a slot nobody allocated reads as whatever it holds,
+ * as it does on Windows.
+ *
+ * @param {number} at    Where the code lands, for the jump to the trap.
+ * @param {number} trap  The host's TlsGetValue.
+ */
+export function tlsGetValueCode(at, trap){
+    const slow = 33;
+    return new Uint8Array([
+        0x8b, 0x44, 0x24, 0x04,                                      // mov eax, [esp+4]
+        0x83, 0xf8, TLS_SLOTS_IN_BLOCK,                              // cmp eax, 64
+        0x73, slow - 9,                                              // jae slow
+        0x64, 0xc7, 0x05, ...dword(TEB.LAST_ERROR), ...dword(0),     // mov dword fs:[0x34], 0
+        0x64, 0x8b, 0x0d, ...dword(TEB.TLS_POINTER),                 // mov ecx, fs:[0x2c]
+        0x8b, 0x04, 0x81,                                            // mov eax, [ecx+eax*4]
+        0xc2, 0x04, 0x00,                                            // ret 4
+        // slow:
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
 }
 
 /**
@@ -156,7 +242,53 @@ export function createProcessFunctions(host){
     const slots = new Array(TLS_SLOTS).fill(null);
     let generation = 0;
 
-    const { stateOf, setError } = createThreadState(host.currentThread);
+    const memory = {
+        /** @param {number} address */
+        readU32: address=>{
+            const bytes = host.readMemory(address, 4);
+            return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
+        },
+        /** @param {number} address @param {number} value */
+        writeU32: (address, value)=>host.writeMemory(address, new Uint8Array(dword(value))),
+    };
+    const { stateOf, setError, lastErrorOf } = createThreadState(host.currentThread, memory);
+
+    /**
+     * The guest-side paths, placed once and shared by the exports that use
+     * them: reading and writing the last error, and reading a TLS slot.
+     *
+     * @type {{ getLastError: number, setLastError: number, tlsGetValue: number } | null}
+     */
+    let fastPaths = null;
+    /** @param {import('./sync.js').GuestBuilder} builder */
+    const placed = builder=>{
+        if (fastPaths)
+        {
+            return fastPaths;
+        }
+        if (!host.allocate)
+        {
+            throw new Error('kernel32: guest-side paths need memory to be placed in');
+        }
+        const allocate = host.allocate;
+        const getTrap = builder.register('<tls-get>', {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: args=>table.TlsGetValue.handler(args),
+        });
+        /** @param {(at: number) => Uint8Array} code */
+        const place = code=>{
+            const at = allocate(code(0).length);
+            host.writeMemory(at, code(at));
+            return at;
+        };
+        fastPaths = {
+            getLastError: place(()=>getLastErrorCode()),
+            setLastError: place(()=>setLastErrorCode()),
+            tlsGetValue: place(at=>tlsGetValueCode(at, getTrap)),
+        };
+        return fastPaths;
+    };
 
     /**
      * Mirrors a slot into the block the compiler reads.
@@ -197,7 +329,10 @@ export function createProcessFunctions(host){
 
     // Named, because the fibre-local entry points below are the thread-local
     // ones under different names and call them rather than repeating them.
-    /** @type {Record<string, { argBytes: number, handler: Function }>} */
+    /**
+     * @type {Record<string, { argBytes: number, handler: Function,
+     *     guest?: (builder: import('./sync.js').GuestBuilder) => number }>}
+     */
     const table = {
         /** VOID SetLastError(DWORD dwErrCode) */
         SetLastError: {
@@ -207,12 +342,16 @@ export function createProcessFunctions(host){
                 setError(code);
                 return 0;
             },
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).setLastError,
         },
 
         /** DWORD GetLastError(VOID) */
         GetLastError: {
             argBytes: 0,
-            handler: ()=>stateOf().lastError,
+            handler: ()=>lastErrorOf(),
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).getLastError,
         },
 
         /** DWORD GetCurrentThreadId(VOID) */
@@ -385,6 +524,21 @@ export function createProcessFunctions(host){
                     return 0;
                 }
                 slots[index >>> 0] = null;
+                // The slot reads as zero in every thread from now on, as it
+                // does on Windows, and the guest-side read has no generation
+                // to compare: every block is cleared.
+                if (index < TLS_SLOTS_IN_BLOCK && host.allThreads)
+                {
+                    for (const thread of host.allThreads())
+                    {
+                        const teb = thread.tebAddress ?? 0;
+                        const block = teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
+                        if (block !== 0)
+                        {
+                            memory.writeU32(block + index * 4, 0);
+                        }
+                    }
+                }
                 return 1;
             },
         },
@@ -407,6 +561,8 @@ export function createProcessFunctions(host){
                 const entry = stateOf().tls.get(slot);
                 return entry && entry.generation === slots[slot] ? entry.value : 0;
             },
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).tlsGetValue,
         },
 
         /** BOOL TlsSetValue(DWORD dwTlsIndex, LPVOID lpTlsValue) */
@@ -451,6 +607,8 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: args=>table.TlsGetValue.handler(args),
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placed(builder).tlsGetValue,
         },
         /** BOOL FlsSetValue(DWORD dwFlsIndex, PVOID lpFlsData) */
         FlsSetValue: {

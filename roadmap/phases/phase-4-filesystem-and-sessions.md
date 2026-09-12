@@ -225,9 +225,8 @@ unmeasured. And the decoder lives inside the emulator's own wasm memory, which i
 RAM lives, so a decode allocates against the guest's space — fine for a quarter-megabyte block that
 is freed immediately, and something to watch rather than assume.
 
-The predecessor had this listed as an open question ("бенчмарк компрессии бандла
-(store/deflate/LZMA/Brotli/Zstd) → выбор") and never got to it; its bundles stayed store-only ZIP,
-which is why it then needed ZIP64 to pass four gigabytes at all.
+The choice of compression (store, deflate, LZMA, Brotli, Zstd) is an open question with a benchmark
+behind it, not a default: a store-only container is what forces ZIP64 to pass four gigabytes at all.
 
 ### 1.3. Why not ZIP64
 

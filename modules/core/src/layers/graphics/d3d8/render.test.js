@@ -88,9 +88,15 @@ function harness(options = {}){
     const ram = new Uint8Array(RAM_SIZE);
     /** @type {any[]} */
     const samplers = [];
+    /** @type {number[]} */
+    const windows = [];
     const d3d = createDirect3D8({
         backend,
         readMemory: (address, length)=>ram.slice(address - RAM_BASE, address - RAM_BASE + length),
+        windowMemory: (address, length)=>{
+            windows.push(length);
+            return ram.subarray(address - RAM_BASE, address - RAM_BASE + length);
+        },
         createSampler: descriptor=>{
             const sampler = { kind: 'sampler', descriptor };
             samplers.push(sampler);
@@ -122,6 +128,7 @@ function harness(options = {}){
         backend,
         presented,
         samplers,
+        windows,
         device,
         /** @param {number} address @param {Uint8Array} bytes */
         write(address, bytes){
@@ -620,6 +627,32 @@ test('recorded: one encoder and one submit per frame, a target change is a new p
     assert.equal(passes[1].depthStencilAttachment, undefined, 'the new target has no depth');
     assert.equal(h.presented.length, 1);
     other.surface.release();
+});
+
+test('recorded: an unlocked buffer is read through a window, not a copy', async()=>{
+    // The bytes go straight into the staging copy the GPU gets, so the read
+    // needs no copy of its own; a program that refills its buffers every draw
+    // made that copy a measured share of a frame.
+    const h = harness();
+    const { device, gpu } = h;
+    /** @type {{ buffer?: any }} */
+    const out = {};
+    assert.equal(device.CreateVertexBuffer(60, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(out.buffer.Lock(0, 0, locked, D3DLOCK.DISCARD), D3D_OK);
+    h.write(/** @type {number} */ (locked.pBits), quad([0, 0, 4, 4], 0).subarray(0, 60));
+    assert.equal(out.buffer.Unlock(), D3D_OK);
+    assert.deepEqual(h.windows, [60], 'the unlock read the sixty bytes through a window');
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+    assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const written = gpu.of('writeBuffer').find((/** @type {any} */ call)=>call.bytes?.length === 60);
+    assert.ok(written, 'and the bytes reached the GPU');
+    assert.deepEqual([...written.bytes], [...quad([0, 0, 4, 4], 0).subarray(0, 60)]);
 });
 
 test('recorded: a draw binds its pipeline, its stream and a viewport inside its pass', async()=>{

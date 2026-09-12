@@ -19,8 +19,9 @@ import { createDispatcher } from './dispatch.js';
  * @param {number[]} [options.args]
  * @param {{ begin: (name: string, kind?: string) => void,
  *           end: (name?: string) => number }} [options.profiler]
+ * @param {boolean} [options.callPhases]
  */
-function machine({ esp = 0x3000, args = [], profiler } = {}){
+function machine({ esp = 0x3000, args = [], profiler, callPhases = false } = {}){
     /** @type {Map<number, number>} */
     const cells = new Map([[esp, 0x401234]]);
     args.forEach((value, index)=>cells.set(esp + 4 + index * 4, value));
@@ -59,7 +60,7 @@ function machine({ esp = 0x3000, args = [], profiler } = {}){
     };
 
     const parking = createParking({ kernel });
-    const dispatcher = createDispatcher({ cpu, memory, parking, profiler });
+    const dispatcher = createDispatcher({ cpu, memory, parking, profiler, callPhases });
     return { cpu, memory, registers, parking, dispatcher, parkedThreads, current };
 }
 
@@ -275,12 +276,64 @@ test('the crossing is timed apart from the handler it carries', ()=>{
     });
     built.dispatcher.dispatch(1);
 
+    assert.deepEqual(opened, ['begin trap', 'end trap'],
+        'the crossing is timed; the call is not, unless a measurement asks');
+    for (let more = 1; more < 16; more++)
+    {
+        built.dispatcher.dispatch(1);
+    }
+    assert.deepEqual(opened, ['begin trap', 'end trap', 'begin trap', 'end trap'],
+        'one crossing in eight is timed, standing for the eight');
+
+    opened.length = 0;
+    const timed = machine({
+        profiler: {
+            /** @param {string} name */
+            begin: name=>opened.push(`begin ${name}`),
+            /** @param {string} [name] @param {{ weight?: number }} [detail] */
+            end: (name, detail)=>opened.push(
+                `end ${name}${detail?.weight ? ` x${detail.weight}` : ''}`),
+        },
+        callPhases: true,
+    });
+    timed.dispatcher.register(1, {
+        name: 'TEST.dll!Something', convention: 'stdcall', argBytes: 0, handler: ()=>7,
+    });
+    timed.dispatcher.dispatch(1);
     assert.deepEqual(opened, [
         'begin trap',
         'begin TEST.dll!Something',
         'end TEST.dll!Something',
-        'end trap',
-    ], 'the handler runs inside the crossing, so the crossing keeps only its own time');
+        'end trap x8',
+    ], 'asked for, the handler runs inside the crossing, which keeps only its own time');
+});
+
+test('the detail ring hands out copies, and its records are written over, not remade', ()=>{
+    // A record and an argument array per call, thirty thousand times a second,
+    // was the garbage collector's whole share of a frame. The ring's records
+    // are reused, so what a reader was given has to be a copy that the next
+    // call cannot change.
+    const m = machine({ args: [1, 2] });
+    m.dispatcher.register(1, {
+        name: 'TEST.dll!First', convention: 'stdcall', argBytes: 8, handler: ()=>1,
+    });
+    m.dispatcher.dispatch(1);
+    const [first] = m.dispatcher.detailed(1);
+    assert.deepEqual(first.args, [1, 2]);
+    assert.equal(first.name, 'TEST.dll!First');
+
+    m.memory.writeU32(0x3004, 9);
+    m.memory.writeU32(0x3008, 8);
+    m.dispatcher.register(2, {
+        name: 'TEST.dll!Second', convention: 'stdcall', argBytes: 8, handler: ()=>2,
+    });
+    m.dispatcher.dispatch(2);
+    assert.deepEqual(first.args, [1, 2], 'the copy handed out earlier is untouched');
+    assert.equal(first.name, 'TEST.dll!First');
+    const [older, newer] = m.dispatcher.detailed(2);
+    assert.equal(older.name, 'TEST.dll!First');
+    assert.deepEqual(newer.args, [9, 8]);
+    assert.equal(newer.result, '0x2');
 });
 
 test('a call sink is handed the record as recorded, with nothing peeked for it', ()=>{

@@ -24,8 +24,8 @@ const ENTRY_VECTOR = 0x7000;
 const GUEST_CODE = 0x8000;
 const INITIAL_STACK = 0x200000;
 
-async function boot(){
-    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+async function boot(binary = 'v86.wasm'){
+    const wasm = await readFile(new URL(binary, PREBUILT));
     return createV86Host({
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
         wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
@@ -357,5 +357,753 @@ test('x87 arithmetic, rounding to integers and the widths a program stores in', 
     assert.equal(word(0x9040), 0, 'the double 1.5, low word');
     assert.equal(word(0x9044), 0x3ff80000, 'the double 1.5, high word');
     assert.equal(word(0x902c), 0x7f800000, 'a single that overflows is infinity');
+    host.stop();
+});
+
+test('a profiler build counts what it ran, by counter and by opcode', async()=>{
+    // The release build answers null; the profiler build beside it keeps the
+    // emulator's own event counters and the retired instructions by opcode,
+    // and the reader turns the enum order and the opcode tables into names.
+    const plain = await boot();
+    assert.equal(plain.instructionStats(), null, 'a release build keeps no counts');
+    plain.stop();
+
+    const host = await boot('v86-profiler.wasm');
+    // Enough iterations for the compiler to take the loop: it is compiled
+    // once a page has run a couple of hundred thousand instructions.
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(200000),      // mov ecx, 200000
+        0x49,                      // loop: dec ecx
+        0x75, 0xfd,                // jnz loop
+        0xf4,                      // hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const before = host.instructionStats();
+    assert.ok(before, 'the profiler build keeps counts');
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    const retiredBefore = host.instructionCount();
+    for (let slice = 0; slice < 5000 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(1000);
+        if (slice % 20 === 0)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], 'the loop ran to its end');
+    const retired = host.instructionCount() - retiredBefore;
+    const after = host.instructionStats();
+    assert.ok(after && before, 'counts before and after');
+    const steps = (after.counters.RUN_FROM_CACHE_STEPS - before.counters.RUN_FROM_CACHE_STEPS)
+        + (after.counters.RUN_INTERPRETED_STEPS - before.counters.RUN_INTERPRETED_STEPS);
+    assert.equal(steps, retired, 'the counters account for every instruction retired');
+    assert.ok(after.counters.RUN_FROM_CACHE_STEPS > before.counters.RUN_FROM_CACHE_STEPS,
+        'and the loop was compiled');
+    const executed = (/** @type {number} */ opcode)=>after.opcodes
+        .filter(o=>o.kind === 'executed' && !o.is0f && o.opcode === opcode)
+        .reduce((sum, o)=>sum + o.count, 0)
+        - before.opcodes
+            .filter(o=>o.kind === 'executed' && !o.is0f && o.opcode === opcode)
+            .reduce((sum, o)=>sum + o.count, 0);
+    // The opcode tables count what generated code ran; the stretch the
+    // interpreter ran before the loop was compiled is not in them.
+    assert.ok(executed(0x49) >= 50000, `dec ecx ran ${executed(0x49)} times in generated code`);
+    assert.ok(executed(0x75) >= 50000, `jnz ran ${executed(0x75)} times in generated code`);
+    host.stop();
+});
+
+test('generated code goes on into the next module, and the slice still bounds it', async()=>{
+    // A loop whose body calls routines four pages apart: a compiled module
+    // spans three pages at most, so every call and every return leaves the
+    // module. Chained, those exits go straight into the callee's module and
+    // back; the program computes the same, the slice is still honoured, and
+    // the counters say the chains were taken.
+    const host = await boot();
+    // Enough iterations for every callee's page to be compiled: a page is
+    // compiled once it has run two hundred thousand instructions, and a
+    // callee is two -- the add and the return the interpreter stops at.
+    const N = 300000;
+    const callees = [0x4000, 0x8000, 0xc000, 0x10000].map(offset=>GUEST_CODE + offset);
+    for (const at of callees)
+    {
+        host.writePhysical(at, new Uint8Array([0x01, 0xc8, 0xc3]));   // add eax, ecx; ret
+    }
+    const code = [0x31, 0xc0, 0xb9, ...u32(N)];                      // xor eax, eax; mov ecx, N
+    const loopAt = GUEST_CODE + code.length;
+    for (const at of callees)
+    {
+        const callAt = GUEST_CODE + code.length;
+        code.push(0xe8, ...u32(at - (callAt + 5)));                    // call callee
+    }
+    code.push(0x49);                                                 // dec ecx
+    const jnzAt = GUEST_CODE + code.length;
+    code.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    code.push(0xf4);                                                 // hlt
+    host.writePhysical(GUEST_CODE, new Uint8Array(code));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const expected = ((4 * N * (N + 1)) / 2) >>> 0;                  // sum over the loop of 4 * ecx
+
+    /** @param {number} chaining */
+    const run = async chaining=>{
+        host.cpu().wm.exports.set_jit_config(6, chaining);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        /** @returns {{ chained: number, chainMissed: number, chainRefused: number,
+         *     finalised: number, refused: string }} */
+        const counts = ()=>{
+            const state = host.jitState();
+            assert.notEqual(state, -1, 'the compiler reports its state');
+            return /** @type {any} */ (state);
+        };
+        const before = counts();
+        let worst = 0;
+        let slices = 0;
+        while (!host.cpu().in_hlt[0] && slices < 60000)
+        {
+            worst = Math.max(worst, host.cpu().run_slice(1000) >>> 0);
+            slices++;
+            if (slices % 20 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], `the loop ran to its end (${slices} slices)`);
+        const after = counts();
+        assert.equal(after.refused, '', 'every module the compiler made was accepted');
+        return { eax: host.readReg32('eax'), worst, chained: after.chained - before.chained,
+            missed: after.chainMissed - before.chainMissed,
+            budget: after.chainRefused - before.chainRefused, modules: after.finalised };
+    };
+
+    const plain = await run(0);
+    assert.equal(plain.eax, expected, 'the sum, without chaining');
+    assert.equal(plain.chained, 0, 'nothing chained while it was off');
+    const chained = await run(1);
+    assert.equal(chained.eax, expected, 'the same sum, chained');
+    assert.ok(chained.chained > N,
+        `the calls and returns chained (${JSON.stringify(chained)})`);
+    assert.ok(chained.worst <= 1000 + 16,
+        `a slice of a thousand retired at most ${chained.worst}, chains and all`);
+    host.stop();
+});
+
+test('a return into the module it left from stays in it, chained or not', async()=>{
+    // A loop calling four routines in its own page: every return lands in
+    // the module that made the call, and the one lookup an exit makes says
+    // so. With chaining on, nothing is chained -- the module goes on through
+    // its own dispatcher, as it did before chaining existed -- and the sum
+    // and the slice bound hold either way.
+    const host = await boot();
+    const N = 100000;
+    const callees = [0x400, 0x500, 0x600, 0x700].map(offset=>GUEST_CODE + offset);
+    for (const at of callees)
+    {
+        host.writePhysical(at, new Uint8Array([0x01, 0xc8, 0xc3]));   // add eax, ecx; ret
+    }
+    const code = [0x31, 0xc0, 0xb9, ...u32(N)];                      // xor eax, eax; mov ecx, N
+    const loopAt = GUEST_CODE + code.length;
+    for (const at of callees)
+    {
+        const callAt = GUEST_CODE + code.length;
+        code.push(0xe8, ...u32(at - (callAt + 5)));                    // call callee
+    }
+    code.push(0x49);                                                 // dec ecx
+    const jnzAt = GUEST_CODE + code.length;
+    code.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    code.push(0xf4);                                                 // hlt
+    host.writePhysical(GUEST_CODE, new Uint8Array(code));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const expected = ((4 * N * (N + 1)) / 2) >>> 0;
+
+    /** @param {number} chaining */
+    const run = async chaining=>{
+        host.cpu().wm.exports.set_jit_config(6, chaining);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        const counts = ()=>{
+            const state = host.jitState();
+            assert.notEqual(state, -1, 'the compiler reports its state');
+            return /** @type {{ chained: number, chainMissed: number, compiledSteps: number }} */ (state);
+        };
+        const before = counts();
+        let worst = 0;
+        let slices = 0;
+        while (!host.cpu().in_hlt[0] && slices < 60000)
+        {
+            worst = Math.max(worst, host.cpu().run_slice(1000) >>> 0);
+            slices++;
+            if (slices % 20 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], `the loop ran to its end (${slices} slices)`);
+        const after = counts();
+        return { eax: host.readReg32('eax'), worst,
+            compiled: after.compiledSteps - before.compiledSteps,
+            chained: after.chained - before.chained,
+            missed: after.chainMissed - before.chainMissed };
+    };
+
+    for (const chaining of [0, 1])
+    {
+        const result = await run(chaining);
+        assert.equal(result.eax, expected, `the sum, chaining ${chaining}`);
+        assert.ok(result.compiled > N, `most of it compiled (${JSON.stringify(result)})`);
+        assert.equal(result.chained, 0, `nothing to chain into: the returns stay in the module`);
+        assert.ok(result.worst <= 1000 + 16,
+            `a slice of a thousand retired at most ${result.worst}`);
+    }
+    host.stop();
+});
+
+test('x87 inline and through the helpers compute the same, compiled', async()=>{
+    // The inline path keeps a register as a tagged double and does the
+    // arithmetic in place; the helpers do it in the 80-bit format. A program
+    // mixing both -- loads, stores, arithmetic against memory and registers,
+    // an exchange, a compare, a square root the helpers keep -- is run
+    // compiled with the inline path off and on, and every result it stored
+    // is compared word for word, with the exact ones checked outright.
+    const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
+    const f64 = (/** @type {number} */ v)=>[...new Uint8Array(Float64Array.of(v).buffer)];
+    const DATA = 0x9000;
+    const [A, B, C, D, E, F, G] = [0x9000, 0x9004, 0x9008, 0x900c, 0x9010, 0x9018, 0x9020];
+    const RESULTS = 0x9100;
+    const [R1, R2, R3, R4, R5] = [0x9100, 0x9104, 0x9110, 0x9114, 0x9118];
+    const N = 20000;
+    const program = [
+        0xb9, ...u32(N),                    //       mov ecx, N
+        0xdb, 0xe3,                         // loop: fninit
+        0xd9, 0x05, ...u32(A),              //       fld dword [A]      1.5
+        0xd9, 0x05, ...u32(B),              //       fld dword [B]      2.25
+        0xde, 0xc9,                         //       fmulp              3.375
+        0xd8, 0x05, ...u32(C),              //       fadd dword [C]     4.125
+        0xd9, 0xc0,                         //       fld st(0)
+        0xd8, 0x2d, ...u32(D),              //       fsubr dword [D]    10 - 4.125 = 5.875
+        0xd9, 0xc9,                         //       fxch               st0 4.125, st1 5.875
+        0xd8, 0x35, ...u32(E),              //       fdiv dword [E]     1.03125
+        0xdd, 0x05, ...u32(F),              //       fld qword [F]      1.125
+        0xdc, 0x0d, ...u32(G),              //       fmul qword [G]     3.375
+        0xde, 0xc1,                         //       faddp              4.40625
+        0xd9, 0x15, ...u32(R1),             //       fst dword [R1]
+        0xdd, 0x1d, ...u32(R2),             //       fstp qword [R2]    st0 5.875
+        0xdb, 0x1d, ...u32(R3),             //       fistp dword [R3]   6
+        0xd9, 0x05, ...u32(A),              //       fld dword [A]
+        0xd9, 0x05, ...u32(B),              //       fld dword [B]
+        0xde, 0xd9,                         //       fcompp             2.25 > 1.5
+        0xdf, 0xe0,                         //       fnstsw ax
+        0xa3, ...u32(R4),                   //       mov [R4], eax
+        0xd9, 0x05, ...u32(A),              //       fld dword [A]
+        0xd9, 0xfa,                         //       fsqrt
+        0xd9, 0xe0,                         //       fchs
+        0xd9, 0x1d, ...u32(R5),             //       fstp dword [R5]
+        0x49,                               //       dec ecx
+    ];
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32((GUEST_CODE + 5) - (jnzAt + 6)));  // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    /** @param {number} inline @returns {Promise<Uint8Array>} */
+    const run = async inline=>{
+        const host = await boot();
+        host.cpu().wm.exports.set_jit_config(7, inline);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, new Uint8Array([
+            ...f32(1.5), ...f32(2.25), ...f32(0.75), ...f32(10), ...f32(4), 0, 0, 0, 0,
+            ...f64(1.125), ...f64(3),
+        ]));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slice = 0; slice < 5000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const state = host.jitState();
+        assert.ok(state !== -1 && state.compiledSteps > 0, 'and was compiled');
+        const results = host.readPhysical(RESULTS, 0x20);
+        host.stop();
+        return results;
+    };
+
+    const helpers = await run(0);
+    const inline = await run(1);
+    assert.deepEqual([...inline], [...helpers], 'the same results either way');
+    const word = (/** @type {Uint8Array} */ r, /** @type {number} */ at)=>{
+        const o = at - RESULTS;
+        return (r[o] | r[o + 1] << 8 | r[o + 2] << 16 | r[o + 3] << 24) >>> 0;
+    };
+    assert.equal(word(inline, R1), new Uint32Array(Float32Array.of(4.40625).buffer)[0],
+        'the chain of loads, arithmetic and an exchange, as a single');
+    assert.deepEqual([...inline.subarray(R2 - RESULTS, R2 - RESULTS + 8)], f64(4.40625),
+        'and as a double');
+    assert.equal(word(inline, R3), 6, 'the remaining value rounded to an integer');
+    assert.equal(word(inline, R4) & 0x4700, 0, 'a compare that found st(0) greater');
+    assert.equal(word(inline, R5), new Uint32Array(Float32Array.of(-Math.sqrt(1.5)).buffer)[0],
+        'a square root through the helper, negated, stored as a single');
+});
+
+test('flags nobody reads are left unrecorded, and every flag somebody reads is right', async()=>{
+    // A loop in which some arithmetic has its flags overwritten before any
+    // read -- an add followed by a store and a subtract, an increment before
+    // an exclusive-or, an and before an or -- and some has them read: through
+    // a move by a jump on carry, by a conditional set, by a subtract with
+    // borrow, by the loop's own jump. Compiled with the leaving-out off and
+    // on, every value it stores is compared, and the ones that depend on a
+    // read flag are checked outright; the counter says the leaving-out ran.
+    const DATA = 0x9000;
+    const [A, B, C] = [0x9000, 0x9004, 0x9008];
+    const RESULTS = 0x9100;
+    const [R1, R2, R3, R4, R5, R6] = [0x9100, 0x9104, 0x9108, 0x910c, 0x9110, 0x9114];
+    const N = 300000;
+    const program = [
+        0xb9, ...u32(N),                    //       mov ecx, N
+        0xba, ...u32(0),                    //       mov edx, 0
+    ];
+    const loopAt = GUEST_CODE + program.length;
+    program.push(
+        0xa1, ...u32(A),                    // loop: mov eax, [A]
+        0x8b, 0x1d, ...u32(B),              //       mov ebx, [B]
+        0x01, 0xd8,                         //       add eax, ebx        dead: a store, then sub
+        0xa3, ...u32(R1),                   //       mov [R1], eax
+        0x2d, ...u32(0x12345),              //       sub eax, 0x12345    live: inc keeps the carry
+        0xa3, ...u32(R2),                   //       mov [R2], eax
+        0x42,                               //       inc edx             dead: xor follows
+        0x31, 0xf6,                         //       xor esi, esi        dead: cmp follows
+        0x39, 0xd8,                         //       cmp eax, ebx        live: jne reads
+        0x75, 0x01,                         //       jne skip
+        0x46,                               //       inc esi
+        0x83, 0xc0, 0x01,                   // skip: add eax, 1          live: jc reads past a move
+        0x8b, 0x3d, ...u32(C),              //       mov edi, [C]
+        0x72, 0x02,                         //       jc carry
+        0xeb, 0x01,                         //       jmp nocarry
+        0x47,                               // carry: inc edi
+        0x89, 0x3d, ...u32(R3),             // nocarry: mov [R3], edi
+        0x84, 0xc0,                         //       test al, al         live: setnz reads
+        0x0f, 0x95, 0xc3,                   //       setnz bl
+        0x89, 0x1d, ...u32(R4),             //       mov [R4], ebx
+        0x83, 0xea, 0x01,                   //       sub edx, 1          live: sbb reads
+        0x83, 0xd8, 0x00,                   //       sbb eax, 0
+        0xa3, ...u32(R5),                   //       mov [R5], eax
+        0x25, ...u32(0xff),                 //       and eax, 0xff       dead: or follows
+        0x0d, ...u32(0x100),                //       or eax, 0x100       live: dec keeps the carry
+        0xa3, ...u32(R6),                   //       mov [R6], eax
+        0x49,                               //       dec ecx             live: jnz reads
+    );
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    /** @param {number} leaveOut @returns {Promise<{ results: Uint8Array, left: number }>} */
+    const run = async leaveOut=>{
+        const host = await boot();
+        host.cpu().wm.exports.set_jit_config(8, leaveOut);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, new Uint8Array([
+            ...u32(0x12345678), ...u32(0x11111111), ...u32(7),
+        ]));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        const before = /** @type {any} */ (host.jitState());
+        for (let slice = 0; slice < 20000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const after = /** @type {any} */ (host.jitState());
+        assert.ok(after.compiledSteps - before.compiledSteps > N, 'and was compiled');
+        const results = host.readPhysical(RESULTS, 0x18);
+        host.stop();
+        return { results, left: after.flagsDead - before.flagsDead };
+    };
+
+    const recorded = await run(0);
+    const left = await run(1);
+    assert.equal(recorded.left, 0, 'with the leaving-out off, every instruction records its flags');
+    assert.ok(left.left >= 4,
+        `with it on, the four whose flags are dead were left out (${left.left})`);
+    assert.deepEqual([...left.results], [...recorded.results], 'the same results either way');
+    const word = (/** @type {number} */ at)=>{
+        const o = at - RESULTS;
+        const r = left.results;
+        return (r[o] | r[o + 1] << 8 | r[o + 2] << 16 | r[o + 3] << 24) >>> 0;
+    };
+    assert.equal(word(R1), 0x23456789, 'the add whose flags were left out still adds');
+    assert.equal(word(R2), 0x23444444);
+    assert.equal(word(R3), 7, 'no carry out of the add, read through a move');
+    assert.equal(word(R4), 0x11111101, 'the low byte was not zero, by the conditional set');
+    assert.equal(word(R5), 0x23444445, 'no borrow out of the subtract, by the one with borrow');
+    assert.equal(word(R6), 0x145, 'the and whose flags were left out still masks');
+});
+
+test('a repeated string instruction runs to its end without leaving the module', async()=>{
+    // A loop that copies three pages and a bit with rep movsd, fills as much
+    // with rep stosb, measures a string with repne scasb and compares two
+    // buffers with repe cmpsb. The helper does a page at a time and asks to
+    // run again; compiled, that repetition stays inside the module, so the
+    // loop enters generated code a handful of times rather than once per
+    // page per iteration -- and copies, fills, measures and compares right.
+    const host = await boot();
+    const SRC = 0x20000;
+    const DST = 0x24000;
+    const FILL = 0x2c000;
+    const BYTES = 3 * 4096 + 100;
+    const TEXT = 0x28000;
+    const TEXT_LENGTH = 4096 + 37;
+    const RESULTS = 0x9100;
+    const [R1, R2, R3, R4] = [0x9100, 0x9104, 0x9108, 0x910c];
+    // Enough iterations for the loop's page to be compiled: a page is
+    // compiled once it has run two hundred thousand instructions.
+    const N = 40000;
+    const program = [
+        0xb9, ...u32(N),                    //       mov ecx, N
+        0x89, 0x0d, ...u32(0x9200),         // loop: mov [0x9200], ecx
+        0xfc,                               //       cld
+        0xbe, ...u32(SRC),                  //       mov esi, SRC
+        0xbf, ...u32(DST),                  //       mov edi, DST
+        0xb9, ...u32(BYTES / 4),            //       mov ecx, BYTES / 4
+        0xf3, 0xa5,                         //       rep movsd
+        0xbf, ...u32(FILL),                 //       mov edi, FILL
+        0xb9, ...u32(BYTES),                //       mov ecx, BYTES
+        0xb0, 0x5a,                         //       mov al, 0x5a
+        0xf3, 0xaa,                         //       rep stosb
+        0xbf, ...u32(TEXT),                 //       mov edi, TEXT
+        0xb9, ...u32(0x10000),              //       mov ecx, 0x10000
+        0x30, 0xc0,                         //       xor al, al
+        0xf2, 0xae,                         //       repne scasb
+        0x89, 0x0d, ...u32(R1),             //       mov [R1], ecx       0x10000 - length - 1
+        0xbe, ...u32(SRC),                  //       mov esi, SRC
+        0xbf, ...u32(DST),                  //       mov edi, DST
+        0xb9, ...u32(BYTES),                //       mov ecx, BYTES
+        0xf3, 0xa6,                         //       repe cmpsb
+        0x89, 0x0d, ...u32(R2),             //       mov [R2], ecx       none left: they are equal
+        0xbe, ...u32(FILL),                 //       mov esi, FILL
+        0xbf, ...u32(DST),                  //       mov edi, DST
+        0xb9, ...u32(BYTES),                //       mov ecx, BYTES
+        0xf3, 0xa6,                         //       repe cmpsb
+        0x89, 0x0d, ...u32(R4),             //       mov [R4], ecx       all but one: differ at once
+        0x8b, 0x0d, ...u32(0x9200),         //       mov ecx, [0x9200]
+        0x49,                               //       dec ecx
+    ];
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32((GUEST_CODE + 5) - (jnzAt + 6)));  // jnz loop
+    program.push(0x8b, 0x05, ...u32(DST + BYTES - 4));                  // mov eax, [last dword]
+    program.push(0xa3, ...u32(R3));                                     // mov [R3], eax
+    program.push(0xf4);                                                 // hlt
+
+    const source = new Uint8Array(BYTES);
+    for (let i = 0; i < BYTES; i++)
+    {
+        source[i] = (i * 7 + 3) & 0xff;
+    }
+    host.writePhysical(SRC, source);
+    const text = new Uint8Array(TEXT_LENGTH + 1).fill(0x41);
+    text[TEXT_LENGTH] = 0;
+    host.writePhysical(TEXT, text);
+    host.writePhysical(GUEST_CODE, new Uint8Array(program));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    host.writeReg32('esp', INITIAL_STACK);
+    const before = /** @type {any} */ (host.jitState());
+    for (let slice = 0; slice < 60000 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(10000);
+        if (slice % 10 === 0)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+    const after = /** @type {any} */ (host.jitState());
+    assert.ok(after.compiledSteps - before.compiledSteps > N * 10, 'and was compiled');
+    // Ending the block at each of the five string instructions, the loop
+    // entered generated code five times an iteration; staying inside, it
+    // enters once a slice.
+    const entries = after.entries - before.entries;
+    assert.ok(entries < N / 10, `entered generated code ${entries} times for ${N} iterations`);
+    const results = host.readPhysical(RESULTS, 16);
+    const word = (/** @type {number} */ at)=>{
+        const o = at - RESULTS;
+        return (results[o] | results[o + 1] << 8 | results[o + 2] << 16
+            | results[o + 3] << 24) >>> 0;
+    };
+    assert.equal(word(R1), 0x10000 - (TEXT_LENGTH + 1), 'the scan found the terminator');
+    assert.equal(word(R3), (source[BYTES - 4] | source[BYTES - 3] << 8
+        | source[BYTES - 2] << 16 | source[BYTES - 1] << 24) >>> 0, 'the copy reached its end');
+    assert.equal(word(R2), 0, 'the compare of the copy with its source ran to the end');
+    assert.equal(word(R4), BYTES - 1, 'the compare of the fill with the copy stopped at once');
+    const copied = host.readPhysical(DST, BYTES);
+    assert.deepEqual([...copied], [...source], 'the copy is the source, byte for byte');
+    const filled = host.readPhysical(FILL, BYTES);
+    assert.ok(filled.every(b=>b === 0x5a), 'the fill covered every byte');
+    host.stop();
+});
+
+test('a read compiled without paging checks a range, and reads what the TLB path reads', async()=>{
+    // With paging off the linear address is the physical one, and a read in
+    // plain RAM is compiled as a range check and a load. A loop reads a
+    // byte, a word, a dword, a double and sixteen bytes from plain RAM, the
+    // last dword of RAM, a dword straddling its end, a dword in the VGA
+    // window and one below it -- the last three go the slow way -- with the
+    // range check off and on, and every value stored is compared, the plain
+    // ones checked outright.
+    const host = await boot();
+    const ram = host.cpu().memory_size[0];
+    const DATA = 0x100000;
+    const RESULTS = 0x9100;
+    const [R1, R2, R3, R4, R5, R6, R7, R8, R9] = [
+        0x9100, 0x9104, 0x9108, 0x9110, 0x9120, 0x9130, 0x9134, 0x9138, 0x913c,
+    ];
+    const N = 200000;
+    const program = [
+        0xb9, ...u32(N),                    //       mov ecx, N
+    ];
+    const loopAt = GUEST_CODE + program.length;
+    program.push(
+        0x0f, 0xb6, 0x05, ...u32(DATA + 1), // loop: movzx eax, byte [DATA + 1]
+        0xa3, ...u32(R1),                   //       mov [R1], eax
+        0x0f, 0xb7, 0x05, ...u32(DATA + 2), //       movzx eax, word [DATA + 2]
+        0xa3, ...u32(R2),                   //       mov [R2], eax
+        0xa1, ...u32(DATA + 4),             //       mov eax, [DATA + 4]
+        0xa3, ...u32(R3),                   //       mov [R3], eax
+        0xdd, 0x05, ...u32(DATA + 8),       //       fld qword [DATA + 8]
+        0xdd, 0x1d, ...u32(R4),             //       fstp qword [R4]
+        0x0f, 0x10, 0x05, ...u32(DATA + 16), //      movups xmm0, [DATA + 16]
+        0x0f, 0x11, 0x05, ...u32(R5),       //       movups [R5], xmm0
+        0xa1, ...u32(ram - 4),              //       mov eax, [ram - 4]
+        0xa3, ...u32(R6),                   //       mov [R6], eax
+        0xa1, ...u32(ram - 2),              //       mov eax, [ram - 2]
+        0xa3, ...u32(R7),                   //       mov [R7], eax
+        0xa1, ...u32(0xa0000),              //       mov eax, [0xa0000]
+        0xa3, ...u32(R8),                   //       mov [R8], eax
+        0xa1, ...u32(GUEST_CODE),           //       mov eax, [GUEST_CODE]
+        0xa3, ...u32(R9),                   //       mov [R9], eax
+        0x49,                               //       dec ecx
+    );
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    const data = new Uint8Array(32);
+    for (let i = 0; i < 32; i++)
+    {
+        data[i] = 0x10 + i;
+    }
+    const f64 = [...new Uint8Array(Float64Array.of(-2.5).buffer)];
+    data.set(f64, 8);
+
+    /** @param {number} flat @returns {Promise<Uint8Array>} */
+    const run = async flat=>{
+        host.cpu().wm.exports.set_jit_config(9, flat);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, data);
+        host.writePhysical(ram - 4, new Uint8Array([0xde, 0xad, 0xbe, 0xef]));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.writePhysical(RESULTS, new Uint8Array(0x40));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        const before = /** @type {any} */ (host.jitState());
+        for (let slice = 0; slice < 60000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const after = /** @type {any} */ (host.jitState());
+        assert.ok(after.compiledSteps - before.compiledSteps > N * 10, 'and was compiled');
+        return host.readPhysical(RESULTS, 0x40);
+    };
+
+    const throughTlb = await run(0);
+    const flat = await run(1);
+    assert.deepEqual([...flat], [...throughTlb], 'the same values either way');
+    const word = (/** @type {number} */ at)=>{
+        const o = at - RESULTS;
+        return (flat[o] | flat[o + 1] << 8 | flat[o + 2] << 16 | flat[o + 3] << 24) >>> 0;
+    };
+    assert.equal(word(R1), 0x11, 'a byte');
+    assert.equal(word(R2), 0x1312, 'a word');
+    assert.equal(word(R3), 0x17161514, 'a dword');
+    assert.deepEqual([...flat.subarray(R4 - RESULTS, R4 - RESULTS + 8)], f64, 'a double');
+    assert.deepEqual([...flat.subarray(R5 - RESULTS, R5 - RESULTS + 16)],
+        [...data.subarray(16, 32)], 'sixteen bytes');
+    assert.equal(word(R6), 0xefbeadde, 'the last dword of RAM');
+    assert.equal(word(R9), (0xb9 | N << 8) >>> 0, 'the code itself, below the range');
+    host.stop();
+});
+
+test('an instruction left to the interpreter runs inside the block', async()=>{
+    // fnstsw m16 and the SSE control-word moves are run by the interpreter's
+    // helper rather than compiled. A loop of them, compiled, stores what they
+    // produce -- the status word after a compare, the control word round-
+    // tripped -- and enters generated code once a slice rather than at each.
+    const host = await boot();
+    const RESULTS = 0x9100;
+    const [R1, R2, R3] = [0x9100, 0x9104, 0x9108];
+    const SCRATCH = 0x9200;
+    const N = 40000;
+    const program = [
+        0xb9, ...u32(N),                    //       mov ecx, N
+    ];
+    const loopAt = GUEST_CODE + program.length;
+    program.push(
+        0xdb, 0xe3,                         // loop: fninit
+        0xd9, 0xe8,                         //       fld1
+        0xd9, 0xee,                         //       fldz
+        0xde, 0xd9,                         //       fcompp              0 < 1: C0 set
+        0xdd, 0x3d, ...u32(R1),             //       fnstsw word [R1]
+        0x0f, 0xae, 0x1d, ...u32(SCRATCH),  //       stmxcsr [SCRATCH]
+        0x81, 0x0d, ...u32(SCRATCH), ...u32(0x8000), // or dword [SCRATCH], 0x8000 (FTZ)
+        0x0f, 0xae, 0x15, ...u32(SCRATCH),  //       ldmxcsr [SCRATCH]
+        0x0f, 0xae, 0x1d, ...u32(R2),       //       stmxcsr [R2]
+        0x0f, 0xae, 0x15, ...u32(R3),       //       ldmxcsr [R3]        the default, kept there
+        0x49,                               //       dec ecx
+    );
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    program.push(0xf4);                                                 // hlt
+    host.writePhysical(R3, new Uint8Array(u32(0x1f80)));
+    host.writePhysical(GUEST_CODE, new Uint8Array(program));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    host.writeReg32('esp', INITIAL_STACK);
+    const before = /** @type {any} */ (host.jitState());
+    for (let slice = 0; slice < 60000 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(10000);
+        if (slice % 10 === 0)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+    const after = /** @type {any} */ (host.jitState());
+    // Most of the loop, not all: the compile lands a few thousand
+    // iterations in, at a moment that varies with the run.
+    assert.ok(after.compiledSteps - before.compiledSteps > N * 2,
+        `and was compiled (${after.compiledSteps - before.compiledSteps} steps)`);
+    const entries = after.entries - before.entries;
+    assert.ok(entries < N / 10, `entered generated code ${entries} times for ${N} iterations`);
+    const results = host.readPhysical(RESULTS, 12);
+    const word = (/** @type {number} */ at)=>{
+        const o = at - RESULTS;
+        return (results[o] | results[o + 1] << 8 | results[o + 2] << 16
+            | results[o + 3] << 24) >>> 0;
+    };
+    assert.equal(word(R1) & 0x4500, 0x0100, 'the compare set C0 alone: zero is below one');
+    assert.equal(word(R2), 0x9f80, 'the control word came back with flush-to-zero set');
+});
+
+test('without paging a loop runs across a page boundary inside generated code', async()=>{
+    // A loop laid across the end of a page, with one instruction straddling
+    // the boundary. Stopping short of the page's end, the compiler left the
+    // last bytes to the interpreter and the loop exited generated code twice
+    // an iteration; running to the boundary and across it, the loop stays in
+    // the module. Both ways compute the same, and the knob says which.
+    const host = await boot();
+    const PAGE_END = 0x9000;
+    const START = PAGE_END - 0x18;
+    // Enough iterations for the next page to be compiled even when it is
+    // the only one that can be: three instructions of the loop lie on it.
+    const N = 300000;
+    const program = [
+        0xb9, ...u32(N),                    // 8fe8: mov ecx, N
+        0x31, 0xc0,                         // 8fed: xor eax, eax
+        0x31, 0xd2,                         // 8fef: xor edx, edx
+    ];
+    const loopAt = START + program.length;  // 8ff1
+    program.push(
+        0x01, 0xc8,                         // 8ff1: add eax, ecx
+        0x81, 0xc2, ...u32(3),              // 8ff3: add edx, 3
+        0x89, 0xc3,                         // 8ff9: mov ebx, eax
+        0x31, 0xd3,                         // 8ffb: xor ebx, edx
+        0x81, 0xf3, ...u32(0x5a5a),         // 8ffd: xor ebx, 0x5a5a     straddles 9000
+        0x89, 0xde,                         // 9003: mov esi, ebx
+        0x49,                               // 9005: dec ecx
+    );
+    const jnzAt = START + program.length;
+    program.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));            // jnz loop
+    program.push(0xf4);                                                 // hlt
+    assert.equal(START + 0x15, PAGE_END - 3, 'the long xor starts three bytes before the end');
+
+    /**
+     * @param {number} across
+     * @param {boolean} warm  Keep what the last run compiled.
+     * @returns {Promise<{ eax: number, esi: number, entries: number, interpreted: number }>}
+     */
+    const run = async(across, warm)=>{
+        host.cpu().wm.exports.set_jit_config(10, across);
+        if (!warm)
+        {
+            host.cpu().wm.exports.jit_clear_cache_js();
+            // Written once: writing the code again would throw the module
+            // away, which is what a warm run is measuring the absence of.
+            host.writePhysical(START, new Uint8Array(program));
+            host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(START)));
+        }
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = START;
+        host.writeReg32('esp', INITIAL_STACK);
+        const before = /** @type {any} */ (host.jitState());
+        for (let slice = 0; slice < 60000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const after = /** @type {any} */ (host.jitState());
+        assert.ok(after.compiledSteps - before.compiledSteps > N, 'and was compiled');
+        return {
+            eax: host.readReg32('eax'), esi: host.readReg32('esi'),
+            entries: after.entries - before.entries,
+            interpreted: after.interpretedSteps - before.interpretedSteps,
+        };
+    };
+
+    const short = await run(0, false);
+    await run(1, false);
+    // Measured warm, so the iterations before the module was compiled --
+    // interpreted either way -- are not in the count.
+    const across = await run(1, true);
+    const expected = ((N * (N + 1)) / 2) >>> 0;
+    assert.equal(short.eax, expected, 'the sum, stopping short of the page end');
+    assert.equal(across.eax, expected, 'the sum, running across it');
+    assert.equal(across.esi, short.esi, 'and the straddling instruction computes the same');
+    assert.equal(across.esi, ((expected ^ (3 * N)) ^ 0x5a5a) >>> 0);
+    assert.ok(short.entries > N / 2,
+        `stopping short, generated code was entered ${short.entries} times`);
+    assert.ok(across.entries < N / 10,
+        `running across, ${across.entries} times for ${N} iterations`);
+    assert.ok(across.interpreted < N / 10,
+        `and the interpreter ran ${across.interpreted} instructions, not ${short.interpreted}`);
     host.stop();
 });

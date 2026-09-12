@@ -615,6 +615,9 @@ export function setVertexShaderCode(at, trap){
  *     May answer with the guest's own bytes rather than a copy; nothing here
  *     keeps what it returns past the call that read it.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number) => number} [readU32]
+ *     A dword read in place, for the six counters looked at on every call:
+ *     a view per call was a measured share of a frame.
  * @property {ShadowDevice} device
  * @property {(pointer: number) => any} objectAt    The object a pointer the guest wrote names.
  * @property {(buffer: ShadowBuffer) => number} pointerOf   The pointer a buffer is published as.
@@ -671,6 +674,8 @@ export function createShadow(deps){
             bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)));
     /** @param {number} at @param {number} words */
     const readWords = (at, words)=>wordsOf(deps.readMemory(at, words * 4));
+    /** @param {number} at */
+    const readWord = deps.readU32 ?? (at=>readWords(at, 1)[0]);
     /** @param {number} bytes @returns {number} a page-aligned span, or 0 */
     const allocatePage = bytes=>{
         // Two pages, so that a whole page is ours whichever boundary the
@@ -842,10 +847,15 @@ export function createShadow(deps){
             {
                 return;
             }
-            const head = readWords(address, 4);
-            const tail = readWords(address + SHADOW.BINDING_CALLS, 4);
-            const counters = [head[1], head[2], tail[0], tail[1], tail[2], tail[3]];
-            if (counters.every((value, index)=>value === seenCounters[index]))
+            const renderStates = readWord(address + SHADOW.RENDER_STATE_CALLS);
+            const transforms = readWord(address + SHADOW.TRANSFORM_CALLS);
+            const bindings = readWord(address + SHADOW.BINDING_CALLS);
+            const locks = readWord(address + SHADOW.LOCK_CALLS);
+            const unlocks = readWord(address + SHADOW.UNLOCK_CALLS);
+            const ringHead = readWord(address + SHADOW.RING_HEAD);
+            if (renderStates === seenCounters[0] && transforms === seenCounters[1]
+                && bindings === seenCounters[2] && locks === seenCounters[3]
+                && unlocks === seenCounters[4] && ringHead === seenCounters[5])
             {
                 // Nothing was set and nothing unlocked since the last look;
                 // the block can only differ from the copy through the
@@ -853,12 +863,14 @@ export function createShadow(deps){
                 skipped++;
                 return;
             }
-            seenCounters.set(counters);
+            seenCounters[0] = renderStates;
+            seenCounters[1] = transforms;
+            seenCounters[2] = bindings;
+            seenCounters[3] = locks;
+            seenCounters[4] = unlocks;
+            seenCounters[5] = ringHead;
             synced++;
-            calls = {
-                renderStates: head[1], transforms: head[2],
-                bindings: tail[0], locks: tail[1], unlocks: tail[2],
-            };
+            calls = { renderStates, transforms, bindings, locks, unlocks };
 
             const states = deps.readMemory(address + SHADOW.RENDER_STATES,
                 SHADOW.RENDER_STATE_COUNT * 4);
@@ -960,7 +972,6 @@ export function createShadow(deps){
                 }
             }
 
-            const ringHead = tail[3];
             if (ringHead !== 0)
             {
                 const ring = readWords(address + SHADOW.RING,

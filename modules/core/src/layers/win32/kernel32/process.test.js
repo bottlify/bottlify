@@ -6,7 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { TLS_SLOTS, createProcessFunctions } from './process.js';
+import { TEB } from './teb.js';
+import {
+    TLS_SLOTS, createProcessFunctions, getLastErrorCode, setLastErrorCode, tlsGetValueCode,
+} from './process.js';
 
 const TLS_OUT_OF_INDEXES = 0xffffffff;
 const ERROR_INVALID_PARAMETER = 87;
@@ -23,6 +26,7 @@ const FILETIME_AT_UNIX_EPOCH = 116444736000000000n;
 function fakeHost(){
     const bytes = new Uint8Array(0x2000);
     const view = new DataView(bytes.buffer);
+    /** @type {{ first: { id: number, tebAddress?: number }, second: { id: number, tebAddress?: number } }} */
     const threads = {
         first: { id: 0x100 },
         second: { id: 0x104 },
@@ -355,4 +359,63 @@ test('a decoded pointer is the pointer that was encoded', ()=>{
         assert.equal(table.DecodePointer.handler([table.EncodePointer.handler([pointer])]),
             pointer >>> 0);
     }
+});
+
+test('a thread with a block keeps its last error in the block', ()=>{
+    // GetLastError and SetLastError run as guest code reading the block
+    // through FS, so what the host writes has to be there, and what the
+    // guest writes has to be what the host reads back.
+    const host = fakeHost();
+    const teb = 0x1000;
+    host.threads.first.tebAddress = teb;
+    const fns = createProcessFunctions(host);
+    assert.equal(fns.SetLastError.handler([0x57]), 0);
+    assert.equal(host.view.getUint32(teb + TEB.LAST_ERROR, true), 0x57, 'written to the block');
+    host.view.setUint32(teb + TEB.LAST_ERROR, 0x7e, true);
+    assert.equal(fns.GetLastError.handler(), 0x7e, 'read from the block');
+    host.run(host.threads.second);
+    assert.equal(fns.GetLastError.handler(), 0, 'a thread without a block keeps its own');
+});
+
+test('freeing a slot zeroes it in the block of every thread', ()=>{
+    // The guest-side TlsGetValue reads the block and has no generation to
+    // compare against, so a freed slot has to read as zero everywhere at once.
+    const host = fakeHost();
+    const blocks = { first: 0x1100, second: 0x1300 };
+    host.threads.first.tebAddress = 0x1000;
+    host.threads.second.tebAddress = 0x1200;
+    host.view.setUint32(0x1000 + TEB.TLS_POINTER, blocks.first, true);
+    host.view.setUint32(0x1200 + TEB.TLS_POINTER, blocks.second, true);
+    const fns = createProcessFunctions({
+        ...host,
+        allThreads: ()=>[host.threads.first, host.threads.second],
+        tlsBlock: ()=>host.view.getUint32(host.currentThread().tebAddress + TEB.TLS_POINTER, true),
+    });
+    const slot = fns.TlsAlloc.handler();
+    assert.equal(fns.TlsSetValue.handler([slot, 0x11]), 1);
+    host.run(host.threads.second);
+    assert.equal(fns.TlsSetValue.handler([slot, 0x22]), 1);
+    assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0x11);
+    assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0x22);
+    assert.equal(fns.TlsFree.handler([slot]), 1);
+    assert.equal(host.view.getUint32(blocks.first + slot * 4, true), 0, 'cleared for the first');
+    assert.equal(host.view.getUint32(blocks.second + slot * 4, true), 0, 'and for the second');
+});
+
+test('the guest-side paths read the block and fall back to the host past it', ()=>{
+    // The bytes are checked where they carry an address: the jump the slow
+    // path takes to the host's trap, and the offset the fast path skips to it.
+    assert.deepEqual([...getLastErrorCode()], [0x64, 0xa1, 0x34, 0, 0, 0, 0xc3]);
+    assert.deepEqual([...setLastErrorCode()],
+        [0x8b, 0x44, 0x24, 0x04, 0x64, 0xa3, 0x34, 0, 0, 0, 0xc2, 0x04, 0x00]);
+    const at = 0x20000;
+    const trap = 0x7f000010;
+    const code = tlsGetValueCode(at, trap);
+    assert.equal(code[7], 0x73, 'jae');
+    const slow = 9 + code[8];
+    assert.equal(code[slow], 0xe9, 'the slow path is the jump to the trap');
+    const rel = new DataView(code.buffer).getInt32(slow + 1, true);
+    assert.equal((at + slow + 5 + rel) >>> 0, trap, 'which lands on the trap');
+    assert.equal(code[slow - 3], 0xc2, 'the fast path returns just before it');
+    assert.equal(code.length, slow + 5);
 });

@@ -32,6 +32,7 @@ it inherited.
 | `phases/phase-8-installers.md` | Phase 8 — acquiring a game: the bundler's input side | partly built |
 | `phases/phase-9-networking.md` | Phase 9 — Winsock, the transport seam, the relay | partly built |
 | `phases/phase-10-warcraft-iii.md` | Phase 10 — titles: bringing up the first one | **active** |
+| `phases/phase-11-generated-code.md` | Phase 11 — the generated code, and the frame it has to fit in | **active** |
 
 The order in the master plan is the plan, not a queue anyone is standing in. Phases 6 to 9 have work
 landed in them while Phase 5 is still open, because a title asks for what it asks for. Where a phase

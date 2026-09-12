@@ -164,7 +164,9 @@ export const win32Module = {
             typeOf: handle=>kernel.handles.typeOf(handle),
         };
 
-        const { setError, stateOf } = createThreadState(()=>kernel.currentThread());
+        const { setError, lastErrorOf, setErrorOn: setErrorOnBlock } = createThreadState(
+            ()=>kernel.currentThread(),
+            { readU32: memory.readU32, writeU32: memory.writeU32 });
         // Absent unless a bundle is mounted, in which case a read of a block
         // that is not here yet becomes a wait rather than a fault.
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
@@ -215,7 +217,7 @@ export const win32Module = {
         const setErrorOn = (thread, code)=>{
             if (thread)
             {
-                stateOf(thread).lastError = code >>> 0;
+                setErrorOnBlock(thread, code);
             }
         };
 
@@ -508,6 +510,9 @@ export const win32Module = {
                         const teb = kernel.currentThread()?.tebAddress ?? 0;
                         return teb === 0 ? 0 : memory.readU32(teb + TEB.TLS_POINTER);
                     },
+                    allThreads: ()=>kernel.threads(),
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
                 }),
                 ...createSyncFunctions({
                     kernel,
@@ -975,7 +980,7 @@ export const win32Module = {
             // Zero when there is no thread to ask: a call that ends its own
             // thread is still on the stack when this is read, and a thread that
             // has gone has no last error rather than an unknown one.
-            lastError: ()=>(kernel.currentThread() ? stateOf().lastError : 0),
+            lastError: ()=>(kernel.currentThread() ? lastErrorOf() : 0),
 
             /**
              * Where a COM class is registered. Whoever implements an interface

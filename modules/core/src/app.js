@@ -51,6 +51,8 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
  *           Defaults to everything above the libraries up to the end of RAM.
  * @property {boolean} [traceStrings]  Keep the text an argument pointed at, for a trace.
+ * @property {boolean} [profileCalls]  Time every host call as a phase of its own, for a
+ *                                     report's cost per API; two clock readings a call.
  * @property {() => boolean} [pageHidden]
  *     Whether nobody is looking at this run. A hidden page's timers are clamped
  *     by the browser, which stops the machine rather than slowing it, so the
@@ -1516,6 +1518,7 @@ async function buildApp(options){
             lastError: ()=>core.api('win32').lastError(),
             // Costly and off unless asked for; see the dispatcher.
             traceStrings: options.traceStrings ?? false,
+            callPhases: options.profileCalls ?? false,
             record: options.record ?? 0,
             onCall: (/** @type {any} */ call)=>{
                 journalCall(call);
@@ -3472,6 +3475,12 @@ async function buildApp(options){
          * it is started for a measurement and stopped after.
          */
         guestProfile: {
+            /**
+             * What a profiler build of the emulator counted since it started:
+             * its event counters by name and retired instructions by opcode.
+             * Null in a build without the profiler; a window is two readings.
+             */
+            instructionStats: ()=>core.api('cpu').profile?.instructionStats() ?? null,
             available: ()=>Boolean(core.api('cpu').profile?.available()),
             start: ()=>Boolean(core.api('cpu').profile?.start()),
             stop: ()=>core.api('cpu').profile?.stop(),

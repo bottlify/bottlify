@@ -133,6 +133,7 @@ export const bridgeModule = {
         dispatcher = createDispatcher({
             cpu, memory, parking, suspend, lastError: config?.lastError,
             traceStrings: config?.traceStrings ?? false,
+            callPhases: config?.callPhases ?? false,
             onCall: config?.onCall,
             // Where the time a host call takes is accounted. Nested inside the
             // guest phase the driver opens, so what is left as the guest's own

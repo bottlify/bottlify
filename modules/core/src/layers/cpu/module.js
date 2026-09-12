@@ -386,6 +386,8 @@ export const cpuModule = {
              * only by a build that carries it.
              */
             profile: {
+                /** The profiler build's counts, null without one. */
+                instructionStats: ()=>started().instructionStats(),
                 available: ()=>started().profile.available(),
                 start: ()=>started().profile.start(),
                 stop: ()=>started().profile.stop(),

@@ -34,12 +34,31 @@
  */
 export function createAccessors({ raw, regions }){
     /**
+     * The region the last dword read fell in, by its span and the table's
+     * version. A host call reads several dwords -- its arguments, the fields
+     * behind them -- and nearly all of them fall in the region the last one
+     * did; asking the table each time cost a fifth of what a call cost.
+     */
+    let readableFrom = 0;
+    let readableTo = 0;
+    let readableVersion = -1;
+
+    /**
      * @param {number} address
      * @param {number} length
      * @returns {Uint8Array}
      */
     const read = (address, length)=>{
-        regions.assert(address, length, 'read');
+        // The region the last read fell in, as for a dword below: a handler
+        // that reads a structure reads it out of the region its pointer is in.
+        if (readableVersion !== regions.version
+            || address < readableFrom || address + length > readableTo)
+        {
+            const region = regions.assert(address, length, 'read');
+            readableFrom = region.base;
+            readableTo = region.base + region.size;
+            readableVersion = regions.version;
+        }
         // A copy, not a window. The emulator hands back a subarray of its own
         // memory, and a caller that holds one has a value that changes under it
         // -- read two ranges, write one, and the other has silently moved. The
@@ -85,15 +104,6 @@ export function createAccessors({ raw, regions }){
     /** Scratch for the integer writers, so a dword does not cost an allocation. */
     const scratch = new Uint8Array(8);
 
-    /**
-     * The region the last dword read fell in, by its span and the table's
-     * version. A host call reads several dwords -- its arguments, the fields
-     * behind them -- and nearly all of them fall in the region the last one
-     * did; asking the table each time cost a fifth of what a call cost.
-     */
-    let readableFrom = 0;
-    let readableTo = 0;
-    let readableVersion = -1;
 
     /**
      * @param {number} address

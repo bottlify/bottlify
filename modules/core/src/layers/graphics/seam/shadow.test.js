@@ -148,8 +148,10 @@ function fakeDevice(){
     return device;
 }
 
-function machine(){
+/** @param {{ readU32?: boolean }} [options] */
+function machine(options = {}){
     const memory = new Uint8Array(0x20000);
+    const reads = { memory: 0 };
     let free = 0x1008;
     const device = fakeDevice();
     /** @type {string[]} */
@@ -166,7 +168,11 @@ function machine(){
             free += bytes;
             return at;
         },
-        readMemory: (address, length)=>memory.slice(address, address + length),
+        readMemory: (address, length)=>{
+            reads.memory++;
+            return memory.slice(address, address + length);
+        },
+        readU32: options.readU32 ? address=>view.getUint32(address, true) : undefined,
         writeMemory: (address, bytes)=>memory.set(bytes, address),
         device,
         objectAt: pointer=>published.get(pointer) ?? null,
@@ -184,6 +190,7 @@ function machine(){
     });
     const view = new DataView(memory.buffer);
     return {
+        reads,
         memory, device, shadow, divergences, published,
         /** @param {number} at */
         u32: at=>view.getUint32(at, true),
@@ -525,4 +532,21 @@ test('a sync before the block exists is nothing', ()=>{
     m.shadow.noteLocked(fakeBuffer(0, 16), true);
     assert.deepEqual(m.device.calls, []);
     assert.equal(m.shadow.diagnostics().placed, 0);
+});
+
+test('a call that changed nothing reads six words in place and copies none', ()=>{
+    // The block is looked at on every device call; with a dword reader the
+    // unchanged case costs six reads and no view of the block.
+    const m = machine({ readU32: true });
+    m.shadow.address();
+    m.shadow.sync();
+    const before = m.reads.memory;
+    m.shadow.sync();
+    m.shadow.sync();
+    assert.equal(m.reads.memory, before, 'no copy of the block for a call that changed nothing');
+    m.put32(m.shadow.address() + SHADOW.RENDER_STATES + 8 * 4, 5);
+    m.bump(m.shadow.address() + SHADOW.RENDER_STATE_CALLS);
+    m.shadow.sync();
+    assert.ok(m.reads.memory > before, 'a change is read out of the block');
+    assert.equal(m.device.states.get(8), 5);
 });

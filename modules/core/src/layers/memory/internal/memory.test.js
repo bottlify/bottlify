@@ -185,3 +185,23 @@ test('a dword read remembers its region and forgets it when the map changes', ()
     assert.throws(()=>accessors.readU32(0x2000), /does not permit/,
         'a region re-protected after being remembered is asked again');
 });
+
+test('a read of bytes remembers its region the way a dword read does', ()=>{
+    const raw = fakeMemory();
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    raw.bytes.set([1, 2, 3, 4], 0x2000);
+    assert.deepEqual([...accessors.readBytes(0x2000, 4)], [1, 2, 3, 4]);
+    assert.deepEqual([...accessors.readBytes(0x2ffc, 4)], [0, 0, 0, 0], 'to the end of the region');
+    assert.throws(()=>accessors.readBytes(0x2ffe, 4), /runs past/, 'not past it');
+    assert.throws(()=>accessors.readBytes(0x3000, 4), /Unmapped/);
+    regions.register({
+        name: 'more', base: 0x3000, size: 0x1000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    raw.bytes.set([5, 6], 0x3000);
+    assert.deepEqual([...accessors.readBytes(0x3000, 2)], [5, 6], 'a region added later is found');
+    regions.protect('data', Access.NONE);
+    assert.throws(()=>accessors.readBytes(0x2000, 4), /does not permit/,
+        'a region re-protected after being remembered is asked again');
+});

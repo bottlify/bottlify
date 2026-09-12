@@ -805,3 +805,324 @@ textures' own mips decoded by a second implementation (at most one level apart),
 its own encoder for the layouts a texture library uses. Measured after: the library gone from
 the guest's share, 1,877 decodes of a map load costing 1.9 s of host time in total, terrain
 and panels correct.
+
+## A trap pays for its record and its clock only when someone is reading them
+
+**The cause.** The browser's profiler on a title in a match, thirty-two thousand host calls a
+second: reading the arguments asked the region table for each word (2.3% of the page's time in
+`assert`, a linear scan of the regions); a record and an argument array were allocated per call
+for the detail ring (the garbage collector at 1.1%); and each call took two clock readings for a
+phase of its own besides the two the crossing takes (1.2% in `performance.now`). Where the
+launcher's stored settings still said to keep the text an argument pointed at, a fourth cost was
+the largest: 2.6% reading up to six strings a byte at a time.
+
+**The change.** The byte and word readers remember the region the last read fell in, by its span
+and the table's version, and ask the table only on a miss; a register or protection change bumps
+the version (B8). The detail ring's records and argument arrays are made once and written over,
+and a reader of the ring gets copies. The per-call phase is on only when a measurement asks
+(`profileCalls`, the launcher's `?profile=calls`); the crossing is always timed, so the host's
+share of a frame is always known.
+
+**The measurement.** Browser profiler on the saved battle, before and after: the region check
+behind the arguments 2.34 to 0.08%, the garbage collector 1.06 to 0.56%, the clock 2.7 to 1.4%
+(what is left is the crossing), the host's own code 22.8 to 19.9% of the page. Menu, settled,
+with the argument text off: host 5.6 to 5.3 ms of a 16.0 ms frame. The saved battle ran at
+25.5 ms a frame (guest 17.7, host 7.9), 43 fps on the canvas, in a scene the earlier runs did
+not hold still for -- the shares are the comparison, not the frame.
+
+**The tests.** The dispatcher's phase test expects only the crossing by default and all four
+phases when asked; a test hands a record out of the ring, makes another call, and checks the
+copy is untouched; a memory test reads bytes to the end of a region, past it, out of a region
+added later, and out of one re-protected after being remembered.
+
+## Without paging a block runs to its page's boundary and across it
+
+**The cause.** The profiler build, on a title in a match, after the exits above were dealt with:
+half of what remained ended at a page's end. The compiler stopped a block short of the last
+fifteen bytes of its page, because an instruction there might reach into a page that is not
+mapped; the instructions in those bytes ran in the interpreter after an exit and before an entry
+back, at every crossing, and an entry point in those bytes was refused outright.
+
+**The change.** With paging off the next page is always there (fork `2838382a`, `18c37ee5`): a
+block runs to the boundary; a plain instruction across it is kept and the block goes on into the
+next page by a jump of a page, the way a jump to another page does, so the page joins the module
+and a write to the instruction's tail bytes throws the module away; a page reached only by
+falling through joins without an entry point of its own. A jump, a boundary or an STI across the
+page, or a page the module has no room for, is still left to the interpreter with the block
+stopping short of it. Configuration index 10.
+
+**The measurement.** Menu, settled: entries into generated code 173k to 70k a second,
+instructions interpreted 490k to 160k a second (9k to 2k a frame); frame 14.8 ms, guest 9.3 ms
+against 9.6 to 9.9 in the runs before. Saved battle: entries 245k to 83k a second, interpreted
+33k to 4k a frame, guest speed 237 M instructions a second; a heavy moment of the same load loop
+ran at 240 M/s with 81k entries where the build before had 230k.
+
+**The tests.** A loop laid across the end of a page with one instruction straddling the boundary
+runs compiled with the knob off and on: the same sum and the same straddled result; stopping
+short, generated code was entered once an iteration, running across, once a slice, and warm the
+interpreter ran nothing.
+
+## The device block's six counters are read in place
+
+**The cause.** Browser profiler on a title's menu: the seam's `sync`, run before every device
+call to see whether the guest wrote to the block, was 1.4 to 2.2% of the page, and its unchanged
+path -- the common one -- made two views of the block and an array to compare six counters.
+
+**The change.** With a dword reader on the memory service the six counters are read in place and
+compared one by one; nothing is allocated on the path that finds nothing changed (`shadow.js`).
+
+**The measurement.** Menu, settled, before and after: `sync` 1.4 to 1.7% of the page in runs
+whose spread is that wide; no difference the profiler can see, the allocations gone from the
+path all the same.
+
+**The tests.** A device block that changed nothing is checked with six reads and no copy; a
+change is still read out of the block and reaches the device.
+
+## GetLastError, SetLastError and a TLS read are guest code
+
+**The cause.** The bridge's own count on a title loading a match: `TlsGetValue`, `GetLastError`,
+`FlsGetValue` and `SetLastError` were four calls in five the program made into the host -- some
+three and a half thousand a second of the four thousand -- and each is a crossing (an exit from
+generated code, the dispatcher, a handler that reads or writes one word, an entry back) for work
+that is one instruction.
+
+**The change.** The thread's last error lives in its block, at the offset the compiler reads it
+from (`TEB+0x34`), so the host's writes and the guest's reads agree; the three exports are guest
+code placed once (`process.js`: `getLastErrorCode`, `setLastErrorCode`, `tlsGetValueCode`), the
+way the critical-section fast paths already were. `TlsGetValue` reads the slot out of the block's
+array through FS, clears the error as the host did, and goes to the host's own handler for an
+index past the array; `FlsGetValue` is the same code. Freeing a slot clears it in every thread's
+block, since the guest-side read has no generation to compare. A slot nobody allocated reads as
+whatever it holds, as it does on Windows; the host path still refuses it.
+
+**The measurement.** Menu, settled: entries into generated code 173k a second where the build
+before had 230k -- the crossings that are gone. Frame 15.3 ms against 14.4 to 14.8 in the runs
+before, within their spread; the menu makes few of these calls, the loading screen and a match
+make most.
+
+**The tests.** A thread with a block keeps its last error in the block and a thread without one
+keeps its own; freeing a slot zeroes it in the block of every thread; the guest code's bytes are
+checked where they carry an address: the jump the slow path takes lands on the trap, and the
+fast path returns just before it.
+
+## An instruction left to the interpreter no longer ends the block
+
+**The cause.** The profiler build, on a title in a match, after the string instructions were
+kept inside their blocks: the instructions the compiler leaves to the interpreter's helper --
+`fnstsw m16`, `ldmxcsr`, `stmxcsr`, every non-custom form with a memory operand -- were a seventh
+of what remained of the exits. The helper may raise a fault into the guest, so the emulator ended
+the block after each with an exit and an entry back.
+
+**The change.** Such a block is of a new kind (fork `5b214566`): the previous eip is set on the
+instruction and eip after it, as for an exit; after the helper the block goes on to its
+continuation when eip is still there, and leaves only when a fault has moved it -- the same
+check the string instructions make. The SSE control-word moves, which the table ended blocks at
+by hand, are compiled this way too. An instruction marked as a boundary by hand (a control
+register write, a trap, a segment load) still ends its block.
+
+**The measurement.** Menu, settled: entries into generated code 230k to 188k a second; frame
+14.4 to 14.8 ms, within the run-to-run spread. The battle run of this build hung at the loading
+screen (the same picture as the one hang before: main spinning, every other thread waiting on an
+event), and the page died before its state could be read; a load loop with the state capture
+runs on.
+
+**The tests.** A loop with an x87 compare, a status-word store, and the control word read,
+changed and written back runs compiled: the stored status and control words are right, and
+generated code was entered fewer than once in ten iterations rather than three times each.
+
+## An unlocked buffer is read through a window, and the crossing is timed one call in eight
+
+**The cause.** Browser profiler on the saved battle, after the trap's own costs were cut: the
+largest host items left were the copy an unlock makes of a buffer's bytes before copying them
+again into the staging buffer (1.9% of the page: a program refills its vertex buffers every
+draw) and the two clock readings that time every crossing (1.7%: thirty-two thousand calls a
+second, and `performance.now` is not free).
+
+**The change.** The renderer reads an unlocked buffer through a window on guest memory and
+copies once, into the staging buffer (B9's first piece). The dispatcher times one crossing in
+eight and passes the eight as the phase's weight, so the profiler's rows and the frame's host
+share still count and time every crossing, from a sample; the per-call phases a measurement asks
+for are unchanged.
+
+**The measurement.** Saved battle: the host's share of the page 22.7 to 20.4%, the copy 1.9 to
+0.3%, the clock out of the top of the host list; host time in a settled frame 6.5 to 6.1 ms.
+Menu: unchanged at 4.8 ms of host time.
+
+**The tests.** A buffer locked, written and unlocked is read through the window, the bytes
+reach the GPU; sixteen crossings open two timed phases, the second call phase closes with a
+weight of eight; a weighted phase counts and times as all it stands for and relieves the phase
+around it of the same.
+
+## A read compiled while paging is off checks a range instead of the TLB
+
+**The cause.** The profiler build, on a title in a match: a third of every instruction retired
+has a memory operand, and a push or pop is a memory access too. Every read went through the
+TLB path -- the page's entry loaded, masked and compared, the offset checked against the page's
+end, the physical page folded into the address -- a dependent load and a dozen operations before
+the read itself. The machine runs without paging, so the linear address already is the physical
+one.
+
+**The change.** A read compiled while paging is off checks one unsigned range -- plain RAM,
+above the VGA window and below the end of memory -- and loads from the linear address plus the
+RAM's base (fork `2602314c`); anything outside goes to the slow path the TLB path has, which also
+raises the fault. Code compiled this way is thrown away when paging is switched on or off.
+Writes keep the TLB path: they need the page's has-code bit, which is in the entry, so the load
+would stay. Configuration index 9.
+
+**The measurement.** Menu, settled: frame 16.0 to 14.0 ms (guest 10.6 to 9.2), 63 to 69 fps,
+guest speed 209 to 218 M instructions a second. Saved battle: guest speed 221 to 248 M/s, the
+generated code's share of the page 55.7 to 53.8%, in a scene the runs did not hold still for.
+
+**The tests.** A loop reads a byte, a word, a dword, a double and sixteen bytes from plain RAM,
+the last dword of RAM, a dword straddling its end, one in the VGA window and one below the range,
+compiled with the check off and on: every value the same, the plain ones checked outright.
+
+## A string instruction runs to its end inside the block
+
+**The cause.** The profiler build, on a title in a match: `rep movs` was three exits from
+generated code in ten (a sixth, once a prefix and its opcode are counted as one), and in the menu
+a fifth. The helper that runs a repeated string instruction does a page's worth at a time and
+puts eip back on the instruction when there is more to do, so the emulator ended the block at
+every one: a copy of a few pages cost an exit, an interpreted chunk and an entry back per page.
+
+**The change.** The compiled form sets eip and the previous eip as the interpreter would, runs
+the helper, and runs it again while eip is back on the instruction; it leaves the block only
+when a fault has taken eip somewhere else (fork `1211df9b`, `38d0d5d6`). Every repeated form,
+and the compares and scans that used to end the block even unrepeated, is compiled this way.
+
+**The measurement.** Menu, settled: entries into generated code 401k to 206k a second, the
+runtime's share of the page 8.2 to 7.5%; frame 15.3 to 16.0 ms, within the run-to-run spread.
+Saved battle: entries 347k to 254k a second, runtime 7.2 to 6.8%, frame 23.0 to 23.1 ms (guest
+16.6 to 16.1) in scenes the runs did not hold still for.
+
+**The tests.** A loop copies three pages and a bit with `rep movsd`, fills as much with
+`rep stosb`, measures a string with `repne scasb` and compares two buffers with `repe cmpsb`,
+compiled: the copy is the source byte for byte, the fill covers every byte, the scan and the
+compares stop where they should, and generated code was entered fewer than once in ten
+iterations rather than five times an iteration.
+
+## fwait is compiled instead of ending the block
+
+**The cause.** The profiler build, on a title's menu: a quarter of all exits from generated code
+were `fwait`, and in the saved battle an eighth. The emulator left it a block boundary, because
+it can raise #NM; a compiler puts one before every `fnstsw`, so each status-word read -- every
+x87 compare a program branches on -- cost an exit to the runtime, an interpreted step and an
+entry back.
+
+**The change.** `fwait` is compiled (fork `59460919`): it raises #NM only when CR0's MP and TS
+bits are both set, and otherwise waits for nothing, so the generated code checks the two bits
+and goes on through the same fault exit every x87 instruction already has.
+
+**The measurement.** Menu, settled: entries into generated code 602k to 401k a second, frame
+15.9 to 15.3 ms (guest 10.6 to 10.3), 63 to 65 fps. Saved battle: entries 431k to 347k a second,
+guest speed 208 to 226 M instructions a second, in a scene the runs did not hold still for.
+
+**The tests.** The x87 semantics test, whose status-word reads go through `fwait`, runs through
+the compiled path unchanged; the profiler build's counters test says what ran compiled.
+
+## Flags nobody reads can go unrecorded, and here it made no difference
+
+**The cause.** Every add, subtract, and, or and xor generated code compiles records its operands
+for the lazy flags -- three stores -- and an increment first materialises the carry it keeps.
+Where the instructions that follow overwrite every flag before any reads them, the recording is
+work nobody uses.
+
+**The change.** Before compiling an instruction that writes flags, the compiler decodes what
+follows it within the block: one that overwrites all six (the eight arithmetic instructions,
+test, neg) proves the flags dead; a move, a push or pop, lea, an x87 instruction leaves them and
+the walk goes on; anything else, or the block's end, keeps them live (fork `71c38215`). Dead, the
+arithmetic keeps only the operation, an increment only the step, a compare or test nothing at all.
+The one observer traded away is a fault frame between: it holds the flags of an earlier
+instruction, which a program's own exception filter could see. Configuration index 8; counter 11
+says how many instructions were compiled that way.
+
+**The measurement.** Menu, settled, the same build with the knob off and on: frame 15.9 and 15.9
+ms, guest 10.6 and 10.6, guest speed 210 and 209 M instructions a second; the generated code's
+share of the page 47.1 and 45.4%. Saved battle: the generated code 55.5 to 55.6%. On the menu
+sixty-eight thousand instructions were compiled without their flags, for no time anyone could
+measure -- the stores were cheap, or the engine was already dropping them. Off by default
+(`137947a4`), kept behind the knob for a title whose frame says otherwise.
+
+**The tests.** A loop mixes arithmetic whose flags are dead (an add before a store and a
+subtract, an increment before an exclusive-or, an and before an or) with arithmetic whose flags
+are read (a jump on carry past a move, a conditional set, a subtract with borrow, the loop's own
+jump), compiled with the knob off and on: every stored value the same, the flag-dependent ones
+checked outright, and the counter says four were left out.
+
+## One lookup says whether an exit stays, chains or returns
+
+**The cause.** With chaining on, an indirect exit from generated code -- a `ret`, a `jmp [r]` --
+looked its page up twice: once to see whether the instruction pointer was still in the module,
+once more to see which other module held it. On a title in a match the two were 3.9% of the
+page's time (2.4 in the chain lookup, 1.5 in the in-page one); in the menu 2.4%.
+
+**The change.** The chain lookup takes the module's own table slot and answers all three at once
+(fork `a42a6804`): the dispatcher state when the pointer is in this module, the slot and state of
+another compiled module, or -1 for the runtime. A direct exit that lands back in its own module
+goes through the dispatcher rather than a tail call into itself. The registers are spilled and the
+instruction count folded only on the way out to another module; the count the module has not yet
+folded is passed in, so the slice's budget is judged on the same number as before.
+
+**The measurement.** Browser profiler on the saved battle: the two lookups 3.87% to 2.82% of the
+page, the runtime's share 8.2 to 6.9%; menu 2.42 to 2.32%, frame 16.0 to 15.5 ms at 63 to 65 fps.
+The battle frame 25.5 to 23.1 ms (guest 17.7 to 16.6) in scenes the runs did not hold still for.
+
+**The tests.** A loop calling four routines in its own page runs compiled with chaining off and
+on: the same sum, nothing chained -- every return stays in the module -- and no slice of a
+thousand retiring more than a block past that. The cross-page chaining test from before still
+chains every call and return.
+
+## Generated code goes on into the next module by a tail call
+
+**The cause.** The profiler build of the emulator, on a title in a match: three exits from
+generated code in four were a `call` or a `ret` crossing a page (33.7 / 23.7 / 16.1 / 5.5% for
+`call`, `ret n`, `ret`, `call [r]`), 2.4 million exits a second, each a return to the runtime, a
+lookup, a table call and the registers spilled and reloaded. The runtime around generated code
+was 11% of the page's time, its dispatch 4.3%.
+
+**The change.** An exit whose address another compiled module holds tail-calls that module
+(`jit_chain_target`, fork `f1901d93`): the direct jump out, the conditional one, and the return or
+indirect jump the module cannot resolve itself. The slice keeps its word -- a chain is refused
+once the slice's budget is spent, and the loop bound the next module reads is what is left of
+the slice. On when the engine accepts tail calls (configuration index 6); three counters say how
+often a chain was taken, missed, or refused.
+
+**The measurement.** Menu, settled: entries into generated code 2.25 M/s to 528 k/s, frame
+19.0 to 18.3 ms (guest 13.6 to 12.6), 48 to 55 fps. Saved battle, first thirty seconds: entries
+4.2 M/s to 406 k/s, guest speed 184 to 199 M instructions a second, frame 66.7 to 59.4 ms (guest
+48.6 to 45.3), 16.2 to 17.7 fps. Browser profiler: the runtime's share 11.3 to 7.5%, dispatch
+gone from the top; what remains is the lookup itself (`jit_chain_target` 2.1%, the in-page entry
+lookup 1.4%). In the emulator alone, in node, the same program ran no faster chained -- the
+gain is in what the browser's engine does with a tail call, and the browser is where it counts.
+
+**The tests.** An integration test runs a loop calling four routines four pages apart, with the
+knob off and on: the same sum, the calls and returns chained (790 thousand chains for 300
+thousand iterations), runtime entries cut sevenfold, and no slice of a thousand retiring more
+than a block past that.
+
+## x87 arithmetic, loads and stores emitted inline on tagged doubles
+
+**The cause.** With the arithmetic itself already cheap (the double shortcut), the x87 wrappers
+-- one call per operation, an 80-bit value passed through memory, the stack's empty bits checked
+in the runtime -- were 8.5% of the page's time in a match, and x87 is 12–17% of every instruction
+the title retires (`fld m32` 3.4%, `fstp m32` 2.6%, `fmul` 1.1%, `faddp` 0.8%).
+
+**The change.** Generated code keeps a register it writes as a double -- the bits in the mantissa
+word, a tag in the exponent word (fork `c99b50e8`). An add, subtract, multiply or divide whose
+operands carry the tag is one double operation; `fld m32`/`m64` push a tagged register; `fst` and
+`fstp` to memory narrow and write it; `fld st(i)` copies a tagged one. Everything else goes to the
+helper it always went to, and every helper turns a tagged register back into the 80-bit format
+before reading it (`fpu_canonical`), so the runtime never sees the tag. Given up on the inline
+path: the stack-fault and status-word bookkeeping. Configuration index 7; off, every operation is
+the call it was.
+
+**The measurement.** Menu, settled: frame 18.3 to 16.0 ms (guest 12.6 to 10.6), guest speed 179
+to 214 M instructions a second, 55 to 62 fps. Browser profiler on the saved battle: the x87 share
+7.4 to 3.5%, the remainder being the helpers still called (compares, integer stores, the
+canonicalisation of tagged registers they read, 1.5–2.9 million a second); guest speed there 199
+to 219 M/s.
+
+**The tests.** The x87 semantics test from before runs through the inline path unchanged, and an
+oracle test runs a program mixing loads, arithmetic against memory and registers, an exchange, a
+compare and a helper-kept square root, compiled, with the inline path off and on, and compares
+every stored result word for word, with the exact ones checked outright.

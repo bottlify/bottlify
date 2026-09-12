@@ -115,6 +115,7 @@ export const graphicsModule = {
                     ?? device?.device?.features?.has('texture-compression-bc') === true,
                 backend: api.backend(),
                 readMemory: services.readMemory,
+                windowMemory: services.windowMemory,
                 createSampler: (/** @type {any} */ descriptor)=>
                     device.device.createSampler(descriptor),
                 // Where a locked surface or buffer's bytes live. It has to be

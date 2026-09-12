@@ -177,6 +177,8 @@ function isTransformType(type){
  *     is the pure state model.
  * @property {any} [backend]         The rendering backend.
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
+ * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
+ *     The same bytes without the copy, for a reader done with them at once.
  * @property {(descriptor: any)=>any} [createSampler]
  * @property {(bytes: number)=>number} [allocate]
  *     Guest memory for a resource's bytes. A lock hands the program an address
@@ -298,14 +300,14 @@ function reportPresentParameters(parameters){
  */
 export function createDirect3D8(options = {}){
     const {
-        backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
+        backend, readMemory, windowMemory, createSampler, allocate: guestMemory, free: giveBack,
         dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips, ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
-        backend, readMemory, createSampler, allocate: guestMemory, free: giveBack,
+        backend, readMemory, windowMemory, createSampler, allocate: guestMemory, free: giveBack,
         dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
     };
     if (backend && !readMemory)
@@ -573,6 +575,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             backend: services.backend,
             readMemory: /** @type {(address: number, length: number)=>Uint8Array} */ (
                 services.readMemory),
+            windowMemory: services.windowMemory,
             createSampler: services.createSampler ?? null,
             dumpDraws: services.dumpDraws === true,
             maxDraws: services.maxDraws,

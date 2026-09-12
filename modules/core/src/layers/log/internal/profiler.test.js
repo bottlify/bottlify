@@ -199,3 +199,25 @@ test('a frame keeps what its owner counted into it, by name', ()=>{
     assert.deepEqual(at(3).endFrame().notes, {}, 'the next frame starts with none');
     assert.equal(frame.notes.instructions, 150, 'and the copy handed out keeps its own');
 });
+
+test('a phase can stand for several, and is weighed as all of them', ()=>{
+    // A caller that times one crossing in eight passes the eight as the
+    // weight: the row counts eight, its time is eight times the sample, and
+    // the phase around it is relieved of the same.
+    const { profiler, at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(10).begin('trap');
+    at(11).end('trap', { weight: 8 });
+    at(20).end('guest');
+    at(20).endFrame();
+
+    const rows = profiler.snapshot().phases;
+    const trap = rows.find((/** @type {any} */ row)=>row.name === 'trap');
+    assert.equal(trap.count, 8);
+    assert.equal(trap.totalMs, 8, 'one millisecond, eight times over');
+    assert.equal(trap.selfMs, 8);
+    const guest = rows.find((/** @type {any} */ row)=>row.name === 'guest');
+    assert.equal(guest.selfMs, 12, 'the guest phase gave up the eight, not the one');
+});
