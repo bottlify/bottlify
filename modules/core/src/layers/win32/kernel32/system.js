@@ -159,6 +159,29 @@ export function createSystemFunctions(host){
      */
     let errorMode = 0;
 
+    /**
+     * The lstr family catches the fault a bad pointer raises and answers NULL:
+     * Windows wraps each of them in an exception handler, and programs of the
+     * era lean on it -- a pointer that is -1 or garbage is handed to lstrcpy
+     * and the NULL is what they test for. Raised through to the machine, the
+     * same call stops the program with a fault it was written to survive.
+     *
+     * @template {number[]} A
+     * @param {(args: A) => number} handler
+     * @returns {(args: A) => number}
+     */
+    const survivesFault = handler=>args=>{
+        try
+        {
+            return handler(args);
+        }
+        catch (e){
+            void e;
+            host.setLastError(ERROR_INVALID_PARAMETER);
+            return 0;
+        }
+    };
+
     /** @param {number} address @param {number} maxLength */
     const readAnsi = (address, maxLength)=>{
         let text = '';
@@ -718,7 +741,7 @@ export function createSystemFunctions(host){
         lstrcatA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([first, second])=>{
+            handler: survivesFault(([first, second])=>{
                 if (first === 0 || second === 0)
                 {
                     return 0;
@@ -727,7 +750,7 @@ export function createSystemFunctions(host){
                 const tail = readAnsi(second >>> 0, MAX_STRING);
                 writeAnsi((first >>> 0) + head.length, tail);
                 return first >>> 0;
-            },
+            }),
         },
 
         /**
@@ -741,7 +764,7 @@ export function createSystemFunctions(host){
         lstrcpynA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([destination, source, max])=>{
+            handler: survivesFault(([destination, source, max])=>{
                 const room = max | 0;
                 if (destination === 0 || source === 0 || room <= 0)
                 {
@@ -750,7 +773,7 @@ export function createSystemFunctions(host){
                 const text = readAnsi(source >>> 0, MAX_STRING).slice(0, room - 1);
                 writeAnsi(destination >>> 0, text);
                 return destination >>> 0;
-            },
+            }),
         },
 
         /**
@@ -763,18 +786,18 @@ export function createSystemFunctions(host){
         lstrlenA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([text])=>((text >>> 0) === 0
+            handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readAnsi(text >>> 0, MAX_STRING).length),
+                : readAnsi(text >>> 0, MAX_STRING).length)),
         },
 
         /** int lstrlenW(LPCWSTR lpString) */
         lstrlenW: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([text])=>((text >>> 0) === 0
+            handler: survivesFault(([text])=>((text >>> 0) === 0
                 ? 0
-                : readWide(text >>> 0, MAX_STRING).length),
+                : readWide(text >>> 0, MAX_STRING).length)),
         },
 
         /**
@@ -787,14 +810,14 @@ export function createSystemFunctions(host){
         lstrcpyA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([destination, source])=>{
+            handler: survivesFault(([destination, source])=>{
                 if (destination === 0 || source === 0)
                 {
                     return 0;
                 }
                 writeAnsi(destination >>> 0, readAnsi(source >>> 0, MAX_STRING));
                 return destination >>> 0;
-            },
+            }),
         },
 
         /**
@@ -809,16 +832,16 @@ export function createSystemFunctions(host){
         lstrcmpA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([first, second])=>compare(
-                readAnsi(first >>> 0, MAX_STRING), readAnsi(second >>> 0, MAX_STRING)),
+            handler: survivesFault(([first, second])=>compare(
+                readAnsi(first >>> 0, MAX_STRING), readAnsi(second >>> 0, MAX_STRING))),
         },
 
         lstrcmpiA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([first, second])=>compare(
+            handler: survivesFault(([first, second])=>compare(
                 readAnsi(first >>> 0, MAX_STRING).toLowerCase(),
-                readAnsi(second >>> 0, MAX_STRING).toLowerCase()),
+                readAnsi(second >>> 0, MAX_STRING).toLowerCase())),
         },
     };
 }

@@ -91,6 +91,24 @@ test('the machine reported is one a program of the era knows what to do with', (
     assert.equal(host.view.getUint32(0x21c, true), 0x10000, 'allocation granularity');
 });
 
+test('the lstr family answers NULL to a pointer that faults, as the real one does', ()=>{
+    // Windows wraps these in an exception handler; a program of the era hands
+    // lstrcpy a -1 and tests the NULL. Raised through, the fault stops a
+    // program that was written to survive it.
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.writeMemory(0x200, Uint8Array.from([0x41, 0]));
+
+    assert.equal(fns.lstrcpyA.handler([0x300, 0xffffffff]), 0);
+    assert.equal(fns.lstrlenA.handler([0xffffffff]), 0);
+    assert.equal(fns.lstrcatA.handler([0x300, 0x10]), 0, 'below the mapped floor');
+    assert.equal(fns.lstrcmpA.handler([0x200, 0xffffffff]), 0);
+    assert.deepEqual(host.errors, [87, 87, 87, 87], 'ERROR_INVALID_PARAMETER each time');
+
+    assert.equal(fns.lstrcpyA.handler([0x300, 0x200]), 0x300, 'and a good pointer still copies');
+    assert.equal(fns.lstrlenA.handler([0x300]), 1);
+});
+
 test('MulDiv keeps the product a caller could not have kept itself', ()=>{
     // The whole point of the call: the intermediate does not fit in 32 bits.
     const host = fakeHost();
