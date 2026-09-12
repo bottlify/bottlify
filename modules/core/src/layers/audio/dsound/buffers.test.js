@@ -475,3 +475,74 @@ test('a buffer refilled ahead of the cursor has nothing stale', ()=>{
     assert.equal(sound.stale.bytes, 0);
     assert.equal(sound.stale.drains, 0);
 });
+
+test('a refill that resumes past where it left off plays a lap-old region, and that is stale', ()=>{
+    // A streaming loop as a sound library runs it: 44100 Hz stereo 16-bit,
+    // a buffer of 136704 bytes, refilled in 1424-byte pieces kept about
+    // 90 ms ahead of the play cursor, with the mixer draining every 20 ms.
+    const format = normaliseFormat({ channels: 2, sampleRate: 44100, bitsPerSample: 16 });
+    const rate = format.sampleRate * format.blockAlign;
+    const bytes = 136704;
+    const piece = 1424;
+    const time = clock();
+    const sound = createSoundBuffer({ bytes, address: 0x40000000, format, now: time.now });
+    sound.lockRange(0, 0, DSBLOCK_ENTIREBUFFER);
+    sound.unlock();
+    sound.play(DSBPLAY_LOOPING);
+    let elapsed = 0;
+    let end = 0;
+    const refill = ()=>{
+        const target = Math.floor(elapsed * rate / 1000) + Math.floor(rate * 0.09);
+        while (end < target)
+        {
+            sound.lockRange(end % bytes, piece, 0);
+            sound.unlock();
+            end += piece;
+        }
+    };
+    const run = (/** @type {number} */ ms)=>{
+        for (let at = 0; at < ms; at += 20)
+        {
+            time.advance(20);
+            elapsed += 20;
+            refill();
+            sound.drainPlayed();
+        }
+    };
+    run(2000);
+    assert.equal(sound.stale.bytes, 0, 'a refill that keeps ahead has nothing stale');
+    assert.deepEqual(sound.skipped, { bytes: 0, count: 0 });
+
+    // A stall: neither the refill nor the drain runs for 100 ms, and on
+    // resuming the refill continues six pieces past where it stopped, never
+    // coming back for what it passed over.
+    time.advance(100);
+    elapsed += 100;
+    end += 6 * piece;
+    refill();
+    assert.deepEqual(sound.skipped, { bytes: 6 * piece, count: 1 });
+    run(400);
+    assert.equal(sound.stale.bytes, 6 * piece,
+        'the six pieces passed over play as they were a lap ago');
+});
+
+test('a lock from the write cursor or over the whole buffer is not a skip', ()=>{
+    const { sound, time } = buffer();
+    sound.lockRange(0, 0, DSBLOCK_ENTIREBUFFER);
+    sound.unlock();
+    sound.play(DSBPLAY_LOOPING);
+    time.advance(100);
+    sound.lockRange(0, 4096, DSBLOCK_FROMWRITECURSOR);
+    sound.unlock();
+    time.advance(100);
+    sound.lockRange(0, 0, DSBLOCK_ENTIREBUFFER);
+    sound.unlock();
+    // Behind the stream is a rewrite of what was already written, not a jump.
+    sound.lockRange(SECOND / 2, 4096, 0);
+    sound.unlock();
+    assert.deepEqual(sound.skipped, { bytes: 0, count: 0 });
+    // Ahead of it, and only what lies between counts.
+    sound.lockRange(SECOND / 2 + 4096 + 512, 4096, 0);
+    sound.unlock();
+    assert.deepEqual(sound.skipped, { bytes: 512, count: 1 });
+});

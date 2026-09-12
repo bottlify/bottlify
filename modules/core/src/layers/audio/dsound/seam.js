@@ -1037,6 +1037,11 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             staleBytes: buffers.reduce((sum, buffer)=>sum + buffer.stale.bytes, 0),
             staleDrains: buffers.reduce((sum, buffer)=>sum + buffer.stale.drains, 0),
             staleByBuffer: buffers.map(buffer=>buffer.stale.bytes),
+            // And the cause, counted where it happens: a refill that began
+            // past where the previous one ended, leaving a lap-old region in
+            // between for the mixer to play.
+            skippedBytes: buffers.reduce((sum, buffer)=>sum + buffer.skipped.bytes, 0),
+            skips: buffers.reduce((sum, buffer)=>sum + buffer.skipped.count, 0),
         }),
     };
 }

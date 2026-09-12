@@ -153,6 +153,21 @@ export function createSoundBuffer(
     const written = new Uint8Array(bytes);
     let staleBytes = 0;
     let staleDrains = 0;
+    /**
+     * Where the last unlock ended, for telling a lock that continues the
+     * stream from one that jumped ahead of it.
+     *
+     * A program streaming into a looping buffer fills it in consecutive
+     * pieces. After a stall it may start again further along and never write
+     * what it passed over, and that region plays as it was a lap ago. The
+     * stale count above hears the result; this names the cause at the
+     * moment it happens, which is the only place it can be tied to the
+     * stall that produced it.
+     */
+    /** @type {number | null} */
+    let streamEnd = null;
+    let skippedBytes = 0;
+    let skips = 0;
 
     /** @param {number} from @param {number} count */
     const markWritten = (from, count)=>written.fill(1, from, from + count);
@@ -488,6 +503,15 @@ export function createSoundBuffer(
         },
 
         /**
+         * Locks that began past where the previous one ended, on a looping
+         * buffer being played: the bytes between were passed over and, unless
+         * a later lock comes back for them, will play as they were a lap ago.
+         */
+        get skipped(){
+            return { bytes: skippedBytes, count: skips };
+        },
+
+        /**
          * The one or two ranges a lock hands back.
          *
          * @param {number} offset
@@ -516,6 +540,20 @@ export function createSoundBuffer(
             const target = Math.min(wanted, bytes);
             const first = Math.min(target, bytes - start);
             const second = target - first;
+            // Only a lock at a place the program chose can skip: one placed
+            // at the write cursor or over the whole buffer says nothing about
+            // where the stream was. Forward by less than half a lap, because
+            // a lock behind the stream is a rewrite, not a jump over it.
+            if (playing && looping && streamEnd !== null
+                && (flags & (DSBLOCK_FROMWRITECURSOR | DSBLOCK_ENTIREBUFFER)) === 0)
+            {
+                const gap = (start - streamEnd + bytes) % bytes;
+                if (gap > 0 && gap < bytes / 2)
+                {
+                    skippedBytes += gap;
+                    skips++;
+                }
+            }
             lock = { offset: start, first, second };
             return {
                 first: { address: address + start, bytes: first },
@@ -532,6 +570,7 @@ export function createSoundBuffer(
                 // between, and what is heard is what was there when it let go.
                 markWritten(held.offset, held.first);
                 markWritten(0, held.second);
+                streamEnd = (held.offset + held.first + held.second) % bytes;
             }
             return held;
         },
