@@ -92,8 +92,12 @@ function fakeApp(){
         },
         registry: ()=>({ toJSON: ()=>({ HKLM: {} }) }),
         session: { export: ()=>[{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }] },
-        diagnostics: ()=>[{ name: 'cpu', metrics: { instructions: 5, ring: ()=>0,
-            tail: Uint8Array.of(1, 2), texels: new Uint8Array(4096) } }],
+        diagnostics: ()=>[
+            { name: 'cpu', metrics: { instructions: 5, ring: ()=>0,
+                tail: Uint8Array.of(1, 2), texels: new Uint8Array(4096),
+                handle: Object.create({ inherited: 1 }), pages: new Map([[1, 2]]) } },
+            { name: 'audio', metrics: { tracks: 2 } },
+        ],
         debug: { hook: ()=>({}) },
         dispose(){
             app.disposed++;
@@ -320,13 +324,21 @@ test('the journal mirror follows the ring and answers a drain as the ring would'
     await remote.dispose();
 });
 
-test('diagnostics cross even when a layer reports something a clone refuses', async()=>{
+test('diagnostics cross as they are, less what a clone refuses, whole or one layer', async()=>{
     const { remote } = await connect();
     const layers = await remote.diagnostics();
+    assert.equal(layers.length, 2);
     assert.equal(layers[0].metrics.instructions, 5);
-    assert.equal('ring' in layers[0].metrics, false);
-    assert.deepEqual(layers[0].metrics.tail, [1, 2]);
-    assert.deepEqual(layers[0].metrics.texels, { byteLength: 4096 });
+    assert.equal('ring' in layers[0].metrics, false, 'a function is left out');
+    assert.deepEqual(layers[0].metrics.tail, Uint8Array.of(1, 2), 'bytes stay bytes');
+    assert.equal(layers[0].metrics.texels.byteLength, 4096, 'large ones too, uncut');
+    assert.deepEqual(layers[0].metrics.handle, {}, 'an object with nothing of its own is empty');
+    assert.deepEqual(layers[0].metrics.pages, new Map([[1, 2]]));
+    const one = await remote.diagnostics('audio');
+    assert.deepEqual(one, [{ name: 'audio', metrics: { tracks: 2 } }]);
+    assert.deepEqual(await remote.diagnostics('nothing'), []);
+    const counted = remote.traffic();
+    assert.ok(counted.request >= 3 && counted.answer >= 3, 'the port counts what crossed');
     await remote.dispose();
 });
 

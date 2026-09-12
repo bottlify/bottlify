@@ -192,26 +192,50 @@ function cloneable(value){
 }
 
 /**
- * A diagnostics table as it can be posted: counters, names and small lists.
+ * A diagnostics table as it can be posted: the same shape, with what a clone
+ * refuses left out -- a function, a GPU handle, anything without data of its
+ * own. Byte arrays cross as they are; they are the reader's to want or not,
+ * and the reader that wants counters asks for one layer.
  *
- * Always through JSON rather than cloned as it is, because a layer's table
- * holds what the layer holds -- the last frame's recorded commands with their
- * GPU objects, uniform blocks, texels when a dump was asked for -- and a clone
- * of that per poll is megabytes for a reader after a few numbers. A large
- * byte array is reported by its size; a small one crosses as a list.
+ * Walked rather than passed through JSON: JSON writes the whole table out as
+ * text and reads it back, which for a graphics table with the last frame's
+ * commands in it cost tens of milliseconds of the engine's thread per call.
  *
- * @param {unknown} table
+ * @param {unknown} value
+ * @returns {unknown}
  */
-function reportable(table){
-    return JSON.parse(JSON.stringify(table, (key, value)=>{
-        if (ArrayBuffer.isView(value))
-        {
-            const view = /** @type {ArrayLike<number> & { byteLength: number }} */ (
-                /** @type {unknown} */ (value));
-            return view.length <= 64 ? Array.from(view) : { byteLength: view.byteLength };
-        }
+export function plain(value){
+    if (value === null || typeof value !== 'object')
+    {
+        return typeof value === 'function' ? undefined : value;
+    }
+    if (Array.isArray(value))
+    {
+        return value.map(plain);
+    }
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value instanceof Date)
+    {
         return value;
-    }));
+    }
+    if (value instanceof Map)
+    {
+        return new Map([...value].map(([key, held])=>[key, plain(held)]));
+    }
+    if (value instanceof Set)
+    {
+        return new Set([...value].map(plain));
+    }
+    /** @type {Record<string, unknown>} */
+    const copy = {};
+    for (const [key, held] of Object.entries(value))
+    {
+        const kept = plain(held);
+        if (kept !== undefined)
+        {
+            copy[key] = kept;
+        }
+    }
+    return copy;
 }
 
 /**
@@ -541,7 +565,18 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             device?.destroy?.();
             device = null;
         },
-        diagnostics: ()=>reportable(app.diagnostics()),
+        /**
+         * Every layer's table, or one layer's: a reader after a few counters
+         * pays for the one table it reads rather than for all of them.
+         *
+         * @param {string} [layer]
+         */
+        diagnostics: layer=>{
+            const tables = app.diagnostics();
+            return plain(layer === undefined
+                ? tables
+                : tables.filter((/** @type {{ name: string }} */ table)=>table.name === layer));
+        },
         trace: ()=>app.trace(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         'log.recent': (/** @type {number} */ count)=>app.log.recent(count),
@@ -593,7 +628,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                         throw new Error(`${message.method}: nothing has been started`);
                     }
                     const result = await method(...message.args);
-                    post({ type: 'answer', id: message.id, result: cloneable(result) });
+                    post({ type: 'answer', id: message.id,
+                        result: message.method === 'diagnostics' ? result : cloneable(result) });
                 }
                 catch (e){
                     post({ type: 'answer', id: message.id, error: describe(e) });

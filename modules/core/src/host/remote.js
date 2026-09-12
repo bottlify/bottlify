@@ -63,12 +63,15 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         && /** @type {any} */ (globalThis).crossOriginIsolated !== false
         ? new Int32Array(new SharedArrayBuffer(4))
         : null;
+    /** What crossed the port, by kind: the cost of the page's own tooling, counted. */
+    const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0 };
     /** @param {any} message @param {any[]} [handOver] */
     const send = (message, handOver)=>{
         if (signal)
         {
             Atomics.add(signal, 0, 1);
         }
+        traffic[/** @type {keyof typeof traffic} */ (message.type)]++;
         worker.postMessage(message, handOver);
     };
     /** @type {Map<string, Set<(payload: any) => void>>} */
@@ -116,6 +119,7 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
 
     worker.onmessage = (/** @type {{ data: import('./messages.js').FromEngine }} */ { data })=>{
         const message = data;
+        traffic[message.type]++;
         if (message.type === 'answer')
         {
             const waiting = pending.get(message.id);
@@ -233,8 +237,16 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         pause: ()=>request('pause'),
         resume: ()=>request('resume'),
         stop: ()=>request('stop'),
-        /** @returns {Promise<any[]>} */
-        diagnostics: ()=>request('diagnostics'),
+        /**
+         * Every layer's table, or one layer's by name -- the cheap read for
+         * a poll after a few counters.
+         *
+         * @param {string} [layer]
+         * @returns {Promise<any[]>}
+         */
+        diagnostics: layer=>request('diagnostics', layer === undefined ? [] : [layer]),
+        /** Messages by kind since the start, both ways. */
+        traffic: ()=>({ ...traffic }),
         /** @returns {Promise<string>} */
         trace: ()=>request('trace'),
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
