@@ -66,7 +66,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        Guest memory for the state a program sets without crossing into the host.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
- * @param {(width: number, height: number) => void} [deps.resolution]
+ * @param {(width: number, height: number,
+ *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
  * @returns {{ libraries: Record<string, Record<string, any>>,
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,

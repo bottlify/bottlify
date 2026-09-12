@@ -181,6 +181,7 @@ function seamed({ shadow = false } = {}){
     /** @type {any[]} */
     const cursors = [];
     /** @type {[number, number][]} */
+    /** @type {[number, number, number | undefined, boolean | undefined][]} */
     const resolutions = [];
     /** @type {any[]} */
     const roots = [];

@@ -161,6 +161,7 @@ function setup({ heap = false, reply } = {}){
     const released = [];
 
     /** @type {import('./windows.js').WindowService | null} */
+    /** @type {import('./windows.js').WindowService | null} */
     let service = null;
     const fns = createWindowFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
@@ -199,7 +200,8 @@ function setup({ heap = false, reply } = {}){
     };
 
     return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
-        service: /** @type {import('./windows.js').WindowService} */ (service) };
+        service: /** @type {import('./windows.js').WindowService} */ (
+            /** @type {unknown} */ (service)) };
 }
 
 /**
