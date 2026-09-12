@@ -98,6 +98,11 @@ import { createBlockCache, resolveBlockStore }
  *           Called with the guest's instruction pointer at every turn boundary.
  *           This is the only view of what a program is doing between host calls,
  *           which is where a program that fails on its own computed state fails.
+ * @property {RunPacing} [pacing]
+ *     How the run loop gives the thread away, and how it waits when the guest
+ *     has nothing to run. The default is a page's: it cannot block, so it
+ *     yields every turn and looks again on a short timer. A host on a thread
+ *     of its own waits for the next event instead; see `RunPacing`.
  * @property {string} [imagePath]    What the program believes it was loaded from.
  * @property {string} [commandLine]
  *           What the program believes it was started with. argv[0] ends at the
@@ -475,6 +480,75 @@ export function pageIsHidden(){
 export function timedWait({ hidden, macrotask, timer }){
     return hidden() ? macrotask() : timer();
 }
+
+/**
+ * What the loop is waiting on when nothing is pending: a turn boundary's yield
+ * and an idle wait are the two places the loop gives the thread away, and a
+ * host decides how, because the answer depends on whose thread it is.
+ *
+ * @typedef {Object} RunPacing
+ * @property {(pending: { suspended: number, fetching: number, idlers: number })
+ *     => Promise<void> | null} yield
+ *     At every turn boundary: a promise to await before the next turn, or
+ *     null to go straight on. `pending` says what the host may have an answer
+ *     for -- calls suspended on it, ranges in flight, callers on an empty
+ *     message queue -- so a host can yield only when there is something to
+ *     deliver.
+ * @property {(until: { timer: boolean, sleep: boolean, deadlineMs: number | null,
+ *     wakes: Promise<void>[] }) => Promise<void>} wait
+ *     The turn found something waiting on the host. `sleep` says nothing at
+ *     all can run until the host or the clock says so, and a host with a
+ *     thread of its own may then sleep: `deadlineMs` is how long, in wall
+ *     milliseconds, before the guest's own next deadline -- a timed wait, a
+ *     queue timer, a device that wants feeding -- or null when it has none,
+ *     and `wakes` settle when a host call answers or a range arrives. Without
+ *     `sleep` a thread is still getting work done and the wait is a yield.
+ *     `timer` is the page's own distinction, between a machine that has
+ *     stopped retiring instructions and one still spinning through turns,
+ *     which its default wait needs.
+ */
+
+/**
+ * The pacing of a thread that cannot block: a yield every turn so the page
+ * stays responsive, and an idle wait that looks again on a short timer, or on
+ * a macrotask when the page is hidden and its timers clamped.
+ *
+ * @param {Object} deps
+ * @param {() => Promise<void>} deps.macrotask
+ * @param {() => boolean} deps.hidden
+ * @param {number} deps.lookMs
+ * @returns {RunPacing}
+ */
+export function pagePacing({ macrotask, hidden, lookMs }){
+    return {
+        yield: ()=>macrotask(),
+        wait({ timer, wakes }){
+            if (!timer)
+            {
+                return macrotask();
+            }
+            const look = timedWait({
+                hidden,
+                macrotask,
+                timer: ()=>new Promise(resolve=>{
+                    setTimeout(resolve, lookMs);
+                }),
+            });
+            return wakes.length > 0 ? Promise.race([look, ...wakes]) : look;
+        },
+    };
+}
+
+/**
+ * How long a machine with a device to feed may wait between looks.
+ *
+ * A film's next frame and a wave buffer's completion are deadlines the guest
+ * owns without writing them down anywhere the loop can read, so while a
+ * device is open the loop looks this often at most. Long enough to be tens of
+ * looks a second rather than thousands, short against a ring that holds two
+ * hundred milliseconds.
+ */
+const DEVICE_LOOK_MS = 10;
 
 /**
  * Consecutive turns retiring no guest instruction at all before the run loop
@@ -2855,6 +2929,9 @@ async function buildApp(options){
 
     /** Which film that track is playing, so that the next one gets a fresh one. */
     let filmPlaying = 0;
+    /** When a film last handed anything over: one that did, recently, is still owed ticks. */
+    let filmTickedAt = -Infinity;
+    const FILM_ACTIVE_MS = 500;
 
     /**
      * Milliseconds of the running film's sound handed over and not played yet.
@@ -2896,6 +2973,7 @@ async function buildApp(options){
             return;
         }
         film.ticks++;
+        filmTickedAt = clockSource();
         if (shown.film !== filmPlaying)
         {
             // A new film gets a track of its own: what the last one left queued
@@ -3009,6 +3087,36 @@ async function buildApp(options){
     const TURNS_PER_YIELD = 1;
 
     const breathe = createMacrotask();
+    const pacing = options.pacing ?? pagePacing({
+        macrotask: breathe,
+        hidden: options.pageHidden ?? pageIsHidden,
+        lookMs: IDLE_LOOK_MS,
+    });
+
+    /**
+     * Wall milliseconds until the guest's own next deadline: the soonest of a
+     * thread's timed wait, a queue timer, and -- while a film or a track is
+     * open -- the next look a device needs. Null when it has none.
+     */
+    const nextDeadlineMs = ()=>{
+        /** @type {number | null} */
+        let soonest = null;
+        for (const due of [kernel.nextDeadline(), win32.queue?.()?.nextTimerDue?.() ?? null])
+        {
+            if (due !== null && (soonest === null || due < soonest))
+            {
+                soonest = due;
+            }
+        }
+        let wall = soonest === null ? null : Math.max(0, soonest - clock.virtualTime());
+        const feeding = clockSource() - filmTickedAt < FILM_ACTIVE_MS
+            || (sound?.diagnostics().tracks ?? 0) > 0;
+        if (feeding && (wall === null || wall > DEVICE_LOOK_MS))
+        {
+            wall = DEVICE_LOOK_MS;
+        }
+        return wall;
+    };
 
     /**
      * Pausing is a gate rather than a flag polled in a loop: a paused caller
@@ -3150,10 +3258,15 @@ async function buildApp(options){
                     sound?.pump();
                     journal.end('pump');
 
-                    if (turn % TURNS_PER_YIELD === 0)
+                    const turnYield = turn % TURNS_PER_YIELD === 0
+                        ? pacing.yield({
+                            suspended: bridge.suspended(), fetching, idlers: idlers.length,
+                        })
+                        : null;
+                    if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
-                        await breathe();
+                        await turnYield;
                         journal.end('yield');
                     }
 
@@ -3252,16 +3365,8 @@ async function buildApp(options){
                         // the only event that can put one back on the
                         // processor, and sleeping through it costs the whole
                         // of the look interval for every call the guest makes.
-                        const timer = wait.timer
-                            ? timedWait({
-                                hidden: options.pageHidden ?? pageIsHidden,
-                                macrotask: breathe,
-                                timer: ()=>new Promise(resolve=>{
-                                    setTimeout(resolve, IDLE_LOOK_MS);
-                                }),
-                            })
-                            : breathe();
-                        const wakes = [timer];
+                        /** @type {Promise<void>[]} */
+                        const wakes = [];
                         if (fetched && wait.timer)
                         {
                             wakes.push(fetched);
@@ -3270,7 +3375,10 @@ async function buildApp(options){
                         {
                             wakes.push(bridge.answered());
                         }
-                        await (wakes.length > 1 ? Promise.race(wakes) : timer);
+                        await pacing.wait({
+                            timer: wait.timer, sleep: wait.timer,
+                            deadlineMs: nextDeadlineMs(), wakes,
+                        });
                         // This time passed for the guest too, and it is the only
                         // time nothing credits. A thread suspended on a host call
                         // is parked on `hlt` and still counts as runnable, so the
@@ -3424,7 +3532,10 @@ async function buildApp(options){
                         if (waitingOnTime)
                         {
                             journal.begin('idle-deadline', journal.PhaseKind.HOST);
-                            await breathe();
+                            await pacing.wait({
+                                timer: false, sleep: true,
+                                deadlineMs: nextDeadlineMs(), wakes: [],
+                            });
                             journal.end('idle-deadline');
                             continue;
                         }

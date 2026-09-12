@@ -123,10 +123,14 @@ export const inputModule = {
              * one guest is two people playing one keyboard.
              *
              * @param {any} canvas
-             * @param {{ pointerLock?: boolean }} [options]
+             * @param {{ pointerLock?: boolean, listen?: boolean }} [options]
+             *     `listen: false` takes the canvas as the picture only -- an
+             *     OffscreenCanvas in a worker has no events of its own, and
+             *     the page that has them feeds `send` from where they happen.
              */
             attach(canvas, options){
                 attached?.detach();
+                attached = null;
                 // Wiring input to a window is when the program becomes the
                 // active one, and it stays active for the rest of the run.
                 router.arm();
@@ -134,6 +138,10 @@ export const inputModule = {
                 // what a pointer position is measured in and what the cursor
                 // may not leave. One number rather than two.
                 router.confineTo(()=>({ width: canvas.width, height: canvas.height }));
+                if (options?.listen === false)
+                {
+                    return null;
+                }
                 attached = createDomInput({
                     canvas,
                     /** @param {import('./router.js').HostInputEvent} event */

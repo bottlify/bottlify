@@ -103,12 +103,17 @@ const PIXELS_PER_NOTCH = 100;
  *     Whether pressing a mouse button asks for the pointer. Off by default: a
  *     lock is a thing done to a person, and a program that does not need
  *     relative motion should not take their cursor away.
+ * @property {() => { width: number, height: number }} [resolution]
+ *     The picture's own pixels, when the canvas's size attributes do not say:
+ *     a canvas whose control was transferred to a worker keeps the size the
+ *     page gave it while the worker draws at the program's.
  */
 
 /**
  * @param {DomInputOptions} options
  */
-export function createDomInput({ canvas, send, pointerLock = false }){
+export function createDomInput({ canvas, send, pointerLock = false, resolution }){
+    const pixels = resolution ?? (()=>({ width: canvas.width, height: canvas.height }));
     /** @type {[string, (event: any) => void, boolean][]} */
     const listeners = [];
     let focused = false;
@@ -189,11 +194,12 @@ export function createDomInput({ canvas, send, pointerLock = false }){
         }
         const width = rect.width - inset.x;
         const height = rect.height - inset.y;
+        const picture = pixels();
         return {
             left: rect.left + inset.left,
             top: rect.top + inset.top,
-            x: width > 0 ? canvas.width / width : 1,
-            y: height > 0 ? canvas.height / height : 1,
+            x: width > 0 ? picture.width / width : 1,
+            y: height > 0 ? picture.height / height : 1,
         };
     };
 

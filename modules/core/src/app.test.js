@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pageIsHidden, placePatches,
     withReadAhead,
-    resolveLibraryPath, timedWait,
+    resolveLibraryPath, timedWait, pagePacing,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
 } from './app.js';
@@ -415,6 +415,35 @@ test('a run that nobody is looking at does not wait on a clamped timer', async()
     await timedWait({ hidden: ()=>false, ...how });
 
     assert.deepEqual(took, ['timer', 'macrotask', 'timer']);
+});
+
+test("a page's pacing yields every turn and looks again on its timer or on a wake", async()=>{
+    // The default the loop ran with before a host could choose: it cannot
+    // block, so a turn boundary is a macrotask and an idle machine looks
+    // again on a short timer -- unless a wake comes first, or nothing has
+    // stopped yet, in which case it only breathes.
+    /** @type {string[]} */
+    const took = [];
+    const pacing = pagePacing({
+        macrotask: async()=>{
+            took.push('macrotask');
+        },
+        hidden: ()=>false,
+        lookMs: 1,
+    });
+    assert.ok(pacing.yield({ suspended: 0, fetching: 0, idlers: 0 }) instanceof Promise);
+    await pacing.wait({ timer: false, sleep: true, deadlineMs: 0, wakes: [] });
+    assert.deepEqual(took, ['macrotask', 'macrotask']);
+
+    let woke = false;
+    await pacing.wait({ timer: true, sleep: true, deadlineMs: 1000,
+        wakes: [Promise.resolve().then(()=>{
+            woke = true;
+        })] });
+    assert.equal(woke, true, 'a wake ends the wait before the timer');
+    const before = performance.now();
+    await pacing.wait({ timer: true, sleep: true, deadlineMs: null, wakes: [] });
+    assert.ok(performance.now() - before < 100, 'the look is short, whatever the deadline');
 });
 
 test('a run outside a page is never treated as hidden', ()=>{
