@@ -279,7 +279,11 @@ test('opening a stream reads until its first frame and describes it', async()=>{
 test('the rest of a stream is read as samples are asked for, continuing each time', async()=>{
     const file = mp3Stream(40); // 16680 bytes: five chunks of 4096
     const f = fixture({ file, held: true });
-    const handle = await f.call('ASI_stream_open', [1, FETCH, 4096]);
+    // Opening waits for the lead to be decoded out of the first chunk.
+    const opening = f.call('ASI_stream_open', [1, FETCH, 4096]);
+    await new Promise(resolve=>setImmediate(resolve));
+    f.release(8);
+    const handle = await opening;
     const buffer = 0x80000;
     const perFrame = 1152 * 2 * 2;
 
@@ -309,6 +313,48 @@ test('the rest of a stream is read as samples are asked for, continuing each tim
         'against what was read, since the size word was not the stream');
     assert.deepEqual(f.fetches().at(-1), [0x10000, -1], 'the read that answered nothing');
     assert.equal(f.provider.diagnostics().samplesOut, 40 * 1152 * 2);
+});
+
+test('a lead is decoded before a stream is handed over, and requests come out of it', async()=>{
+    const file = mp3Stream(40);
+    const f = fixture({ file, held: true });
+    const buffer = 0x80000;
+    const perFrame = 1152 * 2 * 2;
+
+    // Nine frames were fed out of the first chunk and none has come back: the
+    // open waits for eight of them, once, rather than every request waiting.
+    const opening = f.call('ASI_stream_open', [1, FETCH, 4096]);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(f.fed(), 9);
+    let opened = false;
+    opening.then(()=>{
+        opened = true;
+    });
+    f.release(7);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(opened, false, 'seven of eight is not the lead');
+    f.release(1);
+    const handle = await opening;
+    assert.equal(f.provider.streams().get(handle)?.decoded, 8 * 1152 * 2);
+
+    // Answered at once, without a promise, for as long as the lead covers it.
+    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame * 3]), perFrame * 3);
+    assert.equal(f.view.getInt16(buffer, true), 1);
+    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame * 5]), perFrame * 5);
+    assert.equal(f.view.getInt16(buffer + perFrame * 4, true), 8);
+    assert.equal(f.provider.diagnostics().waits, 0);
+
+    // Past the lead the request waits -- and the read that answers it runs a
+    // lead ahead of the request, so the wait that follows restores it.
+    const pending = f.call('ASI_stream_process', [handle, buffer, perFrame * 2]);
+    assert.ok(pending instanceof Promise);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.ok(f.fed() >= 8 + 2 + 8, `fed ${f.fed()}: the request and a lead past it`);
+    assert.equal(f.fetches().length, 2, 'the second chunk was read for it');
+    f.release(Infinity);
+    assert.equal(await pending, perFrame * 2);
+    assert.equal(f.view.getInt16(buffer, true), 9);
+    assert.equal(f.provider.diagnostics().waits, 1);
 });
 
 test('a request the decoder can already answer is answered at once', async()=>{
@@ -397,10 +443,13 @@ test('a decoder that fails ends the stream instead of hanging the caller', async
         failWith = onError;
         return { feed: ()=>{}, flush: ()=>Promise.resolve(), close: ()=>{} };
     } });
-    const handle = await f.call('ASI_stream_open', [1, FETCH, f.file.length]);
-    const pending = f.call('ASI_stream_process', [handle, 0x80000, 4608]);
+    // The open is waiting for its lead when the decoder gives up; it opens
+    // anyway, as a stream that is over, and every request answers zero.
+    const opening = f.call('ASI_stream_open', [1, FETCH, f.file.length]);
+    await new Promise(resolve=>setImmediate(resolve));
     failWith(new Error('no codec'));
-    assert.equal(await pending, 0);
+    const handle = await opening;
+    assert.equal(f.call('ASI_stream_process', [handle, 0x80000, 4608]), 0);
     assert.match(f.provider.diagnostics().lastError, /no codec/);
 });
 

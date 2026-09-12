@@ -86,6 +86,18 @@ const ENTRY_SIZE = 16;
 const FETCH_CHUNK = 0x10000;
 /** How far into a stream the first frame is looked for before giving up on it. */
 const OPEN_PROBE_BYTES = 0x40000;
+/**
+ * Frames decoded ahead of what the library has taken.
+ *
+ * The decoder answers on its own schedule -- measured at up to a second
+ * between an output and the next while a title starts -- and a request that
+ * finds nothing decoded holds the guest thread, and with it whatever lock that
+ * thread took before asking, until the output arrives. A lead is decoded before
+ * a stream is handed over and kept in front of the position, so the ordinary
+ * request is answered from what is already here and the guest waits only when
+ * the decoder has fallen this far behind.
+ */
+const LEAD_FRAMES = 8;
 
 /**
  * @typedef {Object} TableEntry
@@ -400,17 +412,34 @@ export function createMp3Provider(host){
         }
     };
 
+    /** @param {Stream} stream */
+    const leadSamples = stream=>LEAD_FRAMES * stream.first.samples * stream.first.channels;
+
+    /**
+     * Waits until `target` samples have been decoded, or the stream is over.
+     *
+     * @param {Stream} stream @param {number} target
+     */
+    const decodedUpTo = async(stream, target)=>{
+        while (!stream.done && stream.decoded < target)
+        {
+            await new Promise(resolve=>stream.waiting.push(()=>resolve(undefined)));
+        }
+    };
+
     /**
      * Makes `wanted` samples past the position available, or as many as the
-     * stream has: reading more input while the decoder has not been fed enough,
-     * waiting on it while it has, and flushing it once the input is spent.
+     * stream has: reading more input while the decoder has not been fed enough
+     * -- a lead past the request, so the wait that follows also restores what
+     * later requests are answered from -- waiting on it while it has, and
+     * flushing it once the input is spent.
      *
      * @param {Stream} stream @param {number} wanted @param {any} thread
      */
     const ensure = async(stream, wanted, thread)=>{
         while (!stream.done && stream.decoded - stream.position < wanted)
         {
-            if (stream.fed - stream.position < wanted && !stream.inputDone)
+            if (stream.fed - stream.position < wanted + leadSamples(stream) && !stream.inputDone)
             {
                 await readMore(stream, thread);
                 continue;
@@ -603,8 +632,13 @@ export function createMp3Provider(host){
                             return 0;
                         }
                         streams.set(stream.handle, stream);
+                        // The lead, out of what the first read fed: the wait
+                        // for it is paid here, once, and not by every request
+                        // the library makes while the decoder is warming up.
+                        await decodedUpTo(stream, Math.min(leadSamples(stream), stream.fed));
                         note(`open #${stream.handle} size=${stream.totalSize}`
                             + ` read=${stream.inputAt} frames=${stream.frames.length}`
+                            + ` decoded=${stream.decoded}`
                             + ` ${stream.first.sampleRate}Hz x${stream.first.channels}`);
                         return stream.handle;
                     })();
