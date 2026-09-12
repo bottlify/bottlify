@@ -30,7 +30,11 @@ jobs:
       - run: npm run fetch:v86
       # The build refuses to make a package that cannot boot, so the decoder has
       # to be here too -- and the release test packs and installs the result.
+      # It is a release of this repository, which is private: the plain download
+      # URL answers 404, so the fetch goes through the API with the job's token.
       - run: npm run fetch:video-decoder
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: npm run test:integration
       - run: npm run build
 

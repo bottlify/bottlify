@@ -1,7 +1,7 @@
 {
-  "repo": "mrwayer/FFmpeg",
-  "tag": "build-7f0f3d9",
+  "repo": "mrwayer/bottlify",
+  "tag": "video-decoder-83b157d",
   "artifacts": {
-    "video-decoder.wasm": "sha256:d892e447842c1ca241ab77270b9b214eed75cee03e481640c940c5aa3f8c7065"
+    "video-decoder.wasm": "sha256:179c64a43bea9e0160a1489dab11c31088921810a299cc8ba6fef04448d0f909"
   }
 }

@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { downloadAsset, ghAvailable } from './lib/release-download.mjs';
 
 /**
  * Fetches the prebuilt video decoder from a pinned release into
@@ -20,6 +21,10 @@ import { fileURLToPath } from 'node:url';
  * release of this repository; this script consumes them. The .wasm is a build
  * artifact and is never committed.
  *
+ * The repository is private, so the release is reachable only with credentials:
+ * a token in `GITHUB_TOKEN` or `GH_TOKEN` (CI's own, or `gh auth token`), or
+ * a logged-in `gh` on PATH.
+ *
  * Usage:
  *   node scripts/fetch-video-decoder.mjs                          download + verify
  *   node scripts/fetch-video-decoder.mjs --update TAG [--repo R]  re-pin the lock;
@@ -29,6 +34,8 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const LOCK_FILE = join(ROOT, 'video-decoder-lock.json');
 const OUT = join(ROOT, 'vendor', 'prebuilt');
+const TOKEN = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null;
+const GH = ghAvailable();
 
 /** @param {Uint8Array} bytes @returns {string} */
 const sha256 = bytes=>`sha256:${createHash('sha256').update(bytes).digest('hex')}`;
@@ -43,15 +50,8 @@ async function readLock(){
  * @param {string} repo @param {string} tag @param {string} name
  * @returns {Promise<Uint8Array>}
  */
-async function download(repo, tag, name){
-    const url = `https://github.com/${repo}/releases/download/${tag}/${name}`;
-    const response = await fetch(url, { redirect: 'follow' });
-    if (!response.ok)
-    {
-        throw new Error(`${url}: HTTP ${response.status}`);
-    }
-    return new Uint8Array(await response.arrayBuffer());
-}
+const download = (repo, tag, name)=>
+    downloadAsset({ repo, tag, name, token: TOKEN, ghAvailable: GH });
 
 /** @param {string} sums @returns {Record<string, string>} */
 function parseSums(sums){

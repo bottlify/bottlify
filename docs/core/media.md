@@ -37,7 +37,10 @@ Source: `src/layers/media/module.js`.
 Getting the binary: `npm run fetch:video-decoder` (`scripts/fetch-video-decoder.mjs`) downloads
 it into `vendor/prebuilt/` from a pinned release and verifies it against
 `modules/core/video-decoder-lock.json` (repository, tag, SHA-256 per artifact). It is a build
-artifact and is not in git.
+artifact and is not in git. The release belongs to this repository, which is private, so the
+download needs credentials: a token in `GITHUB_TOKEN` or `GH_TOKEN` (CI passes its own) goes
+through the GitHub API; without one the script tries the plain release URL and then a logged-in
+`gh` on PATH.
 
 ### Provided API
 
