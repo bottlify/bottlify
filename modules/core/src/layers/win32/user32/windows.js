@@ -206,7 +206,11 @@ function characterFor(key){
 /**
  * @typedef {Object} WindowService
  * @property {() => { hwnd: string, x: number, y: number, width: number, height: number,
- *            visible: boolean }[]} list
+ *            visible: boolean, className: string, title: string, parent: string | null,
+ *            id: number }[]} list
+ *           Every live window, children included: a dialog is its controls, and
+ *           a report that shows the frame and not the button under the pointer
+ *           says nothing about what a click would reach.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number) => boolean} place
  */
 
@@ -724,11 +728,15 @@ export function createWindowFunctions(host){
     // each keeping a copy, which is why they are built here.
     host.windowService?.({
         list: ()=>[...windows.values()]
-            .filter(record=>!record.destroyed && !record.parent)
+            .filter(record=>!record.destroyed)
             .map(record=>({
                 hwnd: `0x${record.hwnd.toString(16)}`,
                 x: record.x, y: record.y, width: record.width, height: record.height,
                 visible: (record.style & WS_VISIBLE) !== 0,
+                className: record.className,
+                title: record.title,
+                parent: record.parent ? `0x${record.parent.toString(16)}` : null,
+                id: record.id,
             })),
         /**
          * Places a window the way SetWindowPos does, and tells the program the
