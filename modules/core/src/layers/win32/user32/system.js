@@ -870,6 +870,42 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * LPSTR CharNextA(LPCSTR lpsz)
+         *
+         * The next character of a string, which for the single-byte text this
+         * build reads is the next byte -- except at the terminator, where the
+         * answer is the terminator itself. A program walks a path with this
+         * and stops when the pointer stops moving; a stub answering zero sends
+         * it on to copy from address zero.
+         */
+        CharNextA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([text])=>{
+                const at = text >>> 0;
+                if (at === 0)
+                {
+                    return 0;
+                }
+                return host.readMemory(at, 1)[0] === 0 ? at : at + 1;
+            },
+        },
+
+        /**
+         * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)
+         *
+         * The previous character, never before the start: at the start the
+         * answer is the start, which is how a caller walking backwards knows
+         * to stop.
+         */
+        CharPrevA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([start, current])=>(
+                (current >>> 0) > (start >>> 0) ? (current >>> 0) - 1 : start >>> 0),
+        },
+
+        /**
          * int wsprintfA(LPSTR lpOut, LPCSTR lpFmt, ...)
          *
          * cdecl, which is the part that matters: the caller pops the arguments,

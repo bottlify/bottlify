@@ -327,6 +327,21 @@ test('AdjustWindowRect is the same call without an extended style', ()=>{
     assert.deepEqual([memory.u32(RECT_BUFFER), memory.u32(RECT_BUFFER + 4)], plain);
 });
 
+test('CharNext walks a string a byte at a time and stops at its end', ()=>{
+    // A program walks a path with this and stops when the pointer stops
+    // moving; a stub that answered zero sent it on to copy from address zero.
+    const { memory, fns } = setup();
+    memory.putString(TEXT_BUFFER, 'ab');
+
+    assert.equal(fns.CharNextA.handler([TEXT_BUFFER]), TEXT_BUFFER + 1);
+    assert.equal(fns.CharNextA.handler([TEXT_BUFFER + 2]), TEXT_BUFFER + 2,
+        'the terminator is where it stays');
+    assert.equal(fns.CharNextA.handler([0]), 0);
+    assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER + 2]), TEXT_BUFFER + 1);
+    assert.equal(fns.CharPrevA.handler([TEXT_BUFFER, TEXT_BUFFER]), TEXT_BUFFER,
+        'and never before the start');
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.
