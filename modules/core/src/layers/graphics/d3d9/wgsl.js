@@ -16,26 +16,33 @@
  * disassembly and checked line by line.
  *
  * What the translation promises whoever binds it, and is the contract the
- * renderer has to meet:
+ * renderer meets:
  *
- * - **Inputs arrive by location.** A vertex shader's `dcl` registers are
- *   numbered in the order declared, and `inputs` says which usage each
- *   location carries, so the caller lays the vertex buffer out to match. A
- *   pixel shader's inputs are the vertex shader's outputs, at the locations
- *   `varyingLocation` gives a usage -- one table for both stages, so they
- *   agree without seeing each other.
- * - **Constants are three uniform arrays** at group 0, bindings 0 to 2: the
- *   floats, the integers, the booleans. Their sizes are the stage's register
- *   files, and the caller uploads the device's files as they stand at the
- *   draw.
- * - **Samplers are texture and sampler pairs** at group 1, two bindings per
+ * - **Vertex inputs arrive by location, typed as the declaration lays them.**
+ *   A vertex shader's `dcl` registers are numbered in the order declared, and
+ *   `inputs` says which usage each location carries. The caller says what
+ *   shape each element has -- how many components, of what scalar, and
+ *   whether it is a colour whose bytes arrive blue first -- and the shader
+ *   promotes each to the four floats Direct3D reads, filling what the element
+ *   lacks with (0, 0, 0, 1). A register declared and not supplied reads as
+ *   that default, so a declaration short of an element the shader names
+ *   draws rather than fails to bind.
+ * - **Varyings travel at the locations `varyingLocation` gives a usage**, one
+ *   table for both stages, so a vertex shader and a pixel shader that never
+ *   see each other agree.
+ * - **Constants are three uniform arrays** -- floats, integers, booleans --
+ *   at bindings 0 to 2 of group 0 for the vertex stage and group 1 for the
+ *   pixel stage. The float array is only as long as the shader reaches, so a
+ *   draw uploads what the shader reads and not the whole file.
+ * - **Samplers are texture and sampler pairs** at group 2, two bindings per
  *   sampler register, in the order `samplers` lists them.
  *
- * Three things are not translated and say so: the texture-addressing
+ * Four things are not translated and say so: the texture-addressing
  * instructions of the 1.x pixel shaders, which are a different machine with
- * six-way modes of their own; predicated execution; and subroutines, whose
- * body would need the entry point's registers. A shader using any of them is
- * reported as untranslatable rather than translated wrong.
+ * six-way modes of their own; predicated execution; subroutines, whose body
+ * would need the entry point's registers; and texture reads from a vertex
+ * shader. A shader using any of them is reported as untranslatable rather
+ * than translated wrong.
  */
 
 import { OPCODE, REGISTER, SHADER_KIND } from './shader.js';
@@ -71,10 +78,21 @@ const SAMPLER_TYPE = Object.freeze({
 /** The components, by swizzle code. */
 const COMPONENT = 'xyzw';
 
+/** Which bind group each stage's constants live in, and where the samplers go. */
+export const BIND_GROUP = Object.freeze({ VERTEX_CONSTANTS: 0, PIXEL_CONSTANTS: 1, SAMPLERS: 2 });
+
+/** The constant registers the fixed vertex stage of a hybrid reads. */
+export const HYBRID_CONSTANTS = Object.freeze({
+    /** Four rows of the world-view-projection, packed as the fixed-function block packs it. */
+    MATRIX: 0,
+    /** Viewport offset in x and y, then scale in z and w, for pre-transformed vertices. */
+    VIEWPORT: 4,
+    COUNT: 5,
+});
+
 /**
- * Where a varying of a given usage travels between the two stages. One table
- * for both, so a vertex shader and a pixel shader that never see each other
- * agree: colours first, then the coordinate sets, then everything else.
+ * Where a varying of a given usage travels between the two stages: colours
+ * first, then the coordinate sets, then everything else.
  *
  * @param {number} usage  D3DDECLUSAGE
  * @param {number} index
@@ -96,6 +114,14 @@ export function varyingLocation(usage, index){
 }
 
 /**
+ * @typedef {Object} InputShape
+ *     How one vertex element arrives, as the declaration lays it out.
+ * @property {number} components   1 to 4.
+ * @property {'f32' | 'u32' | 'i32'} scalar
+ * @property {boolean} bgra        A packed colour, whose bytes arrive blue first.
+ */
+
+/**
  * @typedef {Object} ShaderInput
  * @property {number} location
  * @property {number} usage       D3DDECLUSAGE
@@ -109,6 +135,7 @@ export function varyingLocation(usage, index){
  * @property {string} entry       The entry point's name.
  * @property {ShaderInput[]} inputs
  * @property {{ index: number, type: string }[]} samplers
+ * @property {number} constants   How many float registers the shader reaches.
  * @property {string | null} error
  */
 
@@ -155,15 +182,85 @@ function writeMasked(target, dest, value){
 }
 
 /**
+ * The WGSL type an input of this shape is declared as in the input structure.
+ *
+ * @param {InputShape} shape
+ */
+function inputType(shape){
+    const scalar = shape.scalar;
+    return shape.components === 1 ? scalar : `vec${shape.components}<${scalar}>`;
+}
+
+/**
+ * The expression that promotes an input of this shape to the four floats the
+ * shader reads: missing components are (0, 0, 0, 1), an integer is converted,
+ * and a colour's bytes are put back in red-first order.
+ *
+ * @param {string} name @param {InputShape} shape
+ */
+function promoteInput(name, shape){
+    const asFloat = shape.scalar === 'f32' ? name : `vec${shape.components}f(${name})`;
+    const filled = shape.components === 4
+        ? asFloat
+        : shape.components === 1
+            ? `vec4f(${asFloat}, 0.0, 0.0, 1.0)`
+            : shape.components === 2
+                ? `vec4f(${asFloat}, 0.0, 1.0)`
+                : `vec4f(${asFloat}, 1.0)`;
+    return shape.bgra ? `${filled}.zyxw` : filled;
+}
+
+/** The shape a test or a caller without a declaration gets: four floats. */
+const FOUR_FLOATS = Object.freeze({ components: 4, scalar: 'f32', bgra: false });
+
+/**
+ * The uniform declarations and the input and output structures a stage's
+ * module opens with, given what its body used.
+ *
+ * @param {Object} options
+ * @param {boolean} options.vertex
+ * @param {number} options.constants   Float registers to declare.
+ * @param {{ index: number, type: string }[]} options.samplers
+ * @param {string[]} options.inputFields    Lines inside the input structure.
+ * @param {string[]} options.outputFields   Lines inside the output structure.
+ */
+function moduleHeader(options){
+    const group = options.vertex ? BIND_GROUP.VERTEX_CONSTANTS : BIND_GROUP.PIXEL_CONSTANTS;
+    const header = [
+        `@group(${group}) @binding(0) var<uniform> c:`
+            + ` array<vec4f, ${Math.max(1, options.constants)}>;`,
+        `@group(${group}) @binding(1) var<uniform> ci: array<vec4i, 16>;`,
+        `@group(${group}) @binding(2) var<uniform> cb: array<vec4u, 4>;`,
+    ];
+    options.samplers.forEach((entry, at)=>{
+        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${at * 2}) var tex${entry.index}:`
+            + ` ${entry.type};`);
+        header.push(`@group(${BIND_GROUP.SAMPLERS}) @binding(${at * 2 + 1})`
+            + ` var samp${entry.index}: sampler;`);
+    });
+    const inName = options.vertex ? 'VsIn' : 'PsIn';
+    const outName = options.vertex ? 'VsOut' : 'PsOut';
+    header.push(`struct ${inName} {`, ...options.inputFields, '}');
+    header.push(`struct ${outName} {`, ...options.outputFields, '}');
+    return header;
+}
+
+/**
  * Translates one shader.
  *
  * @param {import('./shader.js').ParsedShader} parsed
+ * @param {{ inputs?: Map<number, InputShape> }} [options]
+ *        For a vertex shader, the shape of each v# the declaration supplies,
+ *        by register. Absent means every declared input arrives as four
+ *        floats; present, a declared register it does not name reads as the
+ *        default vertex.
  * @returns {TranslatedShader}
  */
-export function translateShader(parsed){
+export function translateShader(parsed, options = {}){
     const kind = parsed.version.kind;
     const vertex = kind === SHADER_KIND.VERTEX;
     const major = parsed.version.major;
+    const supplied = options.inputs ?? null;
     /** @type {ShaderInput[]} */
     const inputs = [];
     /** @type {{ index: number, type: string }[]} */
@@ -188,6 +285,8 @@ export function translateShader(parsed){
     /** @type {string | null} */
     let error = null;
     let indent = 1;
+    /** The highest float register read directly, or the whole file once one is indexed. */
+    let constants = 0;
     /**
      * The open blocks, innermost last, so that the one closing instruction
      * shared by three openers knows what it closes.
@@ -217,6 +316,8 @@ export function translateShader(parsed){
     const pixelOutputs = new Set();
     /** @type {Set<number>} */
     const vertexOutputs = new Set();
+    /** @type {Set<number>} the v# a vertex shader reads */
+    const vertexInputs = new Set();
 
     /**
      * The WGSL name of a register, declaring what needs declaring as a side
@@ -239,7 +340,8 @@ export function translateShader(parsed){
             case REGISTER.INPUT:
                 if (vertex)
                 {
-                    return `in.v${index}`;
+                    vertexInputs.add(index);
+                    return `v${index}`;
                 }
                 pixelInputs.add(index);
                 return `in.v${index}`;
@@ -248,6 +350,7 @@ export function translateShader(parsed){
                 {
                     return `k${index}`;
                 }
+                constants = relative ? Infinity : Math.max(constants, index + 1);
                 return `c[${index}${relative}]`;
             case REGISTER.CONSTINT:
                 if (definedInts.has(index) && !relative)
@@ -313,6 +416,10 @@ export function translateShader(parsed){
                 fail('subroutines are not translated');
                 return 'r0';
             case REGISTER.SAMPLER:
+                if (vertex)
+                {
+                    fail('a texture read from a vertex shader is not translated');
+                }
                 return `s${index}`;
             default:
                 fail(`register type ${operand.type} is not translated`);
@@ -432,6 +539,10 @@ export function translateShader(parsed){
         {
             fail(`sampler s${samplerOperand.index} is read without a declaration`);
             return 'vec4f(0.0)';
+        }
+        if (vertex)
+        {
+            fail('a texture read from a vertex shader is not translated');
         }
         const coordinates = entry.type === 'texture_2d<f32>' ? 'xy' : 'xyz';
         const project = (instruction.control & 0x1) !== 0;
@@ -826,51 +937,57 @@ export function translateShader(parsed){
     }
 
     /** @type {string[]} */
-    const header = [];
-    /** @type {string[]} */
     const declarations = [];
     for (const name of [...used].sort())
     {
-        if (name === 'aL')
-        {
-            declarations.push('    var aL: i32 = 0;');
-        }
-        else
-        {
-            declarations.push(`    var ${name}: vec4f = vec4f(0.0);`);
-        }
+        declarations.push(name === 'aL'
+            ? '    var aL: i32 = 0;'
+            : `    var ${name}: vec4f = vec4f(0.0);`);
     }
-    const fileCounts = vertex ? { floats: 256 } : { floats: 224 };
-    header.push(`@group(0) @binding(0) var<uniform> c: array<vec4f, ${fileCounts.floats}>;`);
-    header.push('@group(0) @binding(1) var<uniform> ci: array<vec4i, 16>;');
-    header.push('@group(0) @binding(2) var<uniform> cb: array<vec4u, 4>;');
-    samplers.sort((left, right)=>left.index - right.index);
-    samplers.forEach((entry, at)=>{
-        header.push(`@group(1) @binding(${at * 2}) var tex${entry.index}: ${entry.type};`);
-        header.push(`@group(1) @binding(${at * 2 + 1}) var samp${entry.index}: sampler;`);
-    });
 
+    /** @type {string[]} */
+    const inputFields = [];
+    /** @type {string[]} */
+    const outputFields = [];
+    /** @type {string[]} */
+    const prologue = [];
     let entry;
     if (vertex)
     {
-        header.push('struct VsIn {');
+        // Each declared input is promoted to the four floats the body reads,
+        // from the shape it arrives in; one the declaration does not supply
+        // is the default vertex.
         for (const input of inputs)
         {
-            header.push(`    @location(${input.location}) v${input.register}: vec4f,`);
+            const shape = supplied ? supplied.get(input.register) ?? null : FOUR_FLOATS;
+            const name = `v${input.register}`;
+            if (shape)
+            {
+                inputFields.push(`    @location(${input.location}) ${name}: ${inputType(shape)},`);
+                prologue.push(`    let ${name} = ${promoteInput(`in.${name}`, shape)};`);
+            }
+            else
+            {
+                prologue.push(`    let ${name} = vec4f(0.0, 0.0, 0.0, 1.0);`);
+            }
         }
-        header.push('}');
-        header.push('struct VsOut {');
-        header.push('    @builtin(position) oPos: vec4f,');
+        for (const register of vertexInputs)
+        {
+            if (!inputs.some(input=>input.register === register))
+            {
+                fail(`v${register} is read without a declaration`);
+            }
+        }
+        outputFields.push('    @builtin(position) oPos: vec4f,');
         if (major >= 3)
         {
             for (const [index, declaration] of semantics)
             {
-                if (declaration.usage === D3DDECLUSAGE.POSITION)
+                if (declaration.usage !== D3DDECLUSAGE.POSITION)
                 {
-                    continue;
+                    outputFields.push(`    @location(${varyingLocation(declaration.usage,
+                        declaration.usageIndex)}) o${index}: vec4f,`);
                 }
-                header.push(`    @location(${varyingLocation(declaration.usage,
-                    declaration.usageIndex)}) o${index}: vec4f,`);
             }
         }
         else
@@ -879,86 +996,156 @@ export function translateShader(parsed){
             {
                 if (output >= 200)
                 {
-                    header.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD,
+                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD,
                         output - 200)}) oT${output - 200}: vec4f,`);
                 }
                 else if (output >= 100)
                 {
-                    header.push(`    @location(${varyingLocation(D3DDECLUSAGE.COLOR,
+                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.COLOR,
                         output - 100)}) oD${output - 100}: vec4f,`);
                 }
                 else if (output === 1)
                 {
-                    header.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)})`
+                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)})`
                         + ' oFog: vec4f,');
                 }
                 else if (output === 2)
                 {
-                    header.push(`    @location(${varyingLocation(D3DDECLUSAGE.PSIZE, 0)})`
+                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.PSIZE, 0)})`
                         + ' oPts: vec4f,');
                 }
             }
         }
-        header.push('}');
         entry = 'vs_main';
-        header.push('@vertex');
-        header.push(`fn ${entry}(in: VsIn) -> VsOut {`);
-        header.push('    var out: VsOut;');
     }
     else
     {
-        header.push('struct PsIn {');
-        header.push('    @builtin(position) vPos: vec4f,');
-        header.push('    @builtin(front_facing) vFace: bool,');
+        inputFields.push('    @builtin(position) vPos: vec4f,');
+        inputFields.push('    @builtin(front_facing) vFace: bool,');
         for (const set of [...pixelCoordinates].sort((a, b)=>a - b))
         {
-            header.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, set)})`
+            inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, set)})`
                 + ` t${set}: vec4f,`);
         }
         for (const input of [...pixelInputs].sort((a, b)=>a - b))
         {
             const declaration = major >= 3 ? semantics.get(input) : undefined;
-            header.push(`    @location(${declaration
+            inputFields.push(`    @location(${declaration
                 ? varyingLocation(declaration.usage, declaration.usageIndex)
                 : varyingLocation(D3DDECLUSAGE.COLOR, input)}) v${input}: vec4f,`);
         }
-        header.push('}');
-        header.push('struct PsOut {');
         for (const output of [...pixelOutputs].sort((a, b)=>a - b))
         {
-            header.push(output < 0
+            outputFields.push(output < 0
                 ? '    @builtin(frag_depth) oDepth: f32,'
                 : `    @location(${output}) oC${output}: vec4f,`);
-        }
-        header.push('}');
-        entry = 'ps_main';
-        header.push('@fragment');
-        header.push(`fn ${entry}(in: PsIn) -> PsOut {`);
-        header.push('    var out: PsOut;');
-        for (const output of pixelOutputs)
-        {
             declarations.push(output < 0
                 ? '    var oDepth: vec4f = vec4f(0.0);'
                 : `    var oC${output}: vec4f = vec4f(0.0);`);
-        }
-        for (const output of pixelOutputs)
-        {
             body.push(output < 0
                 ? '    out.oDepth = oDepth.x;'
                 : `    out.oC${output} = oC${output};`);
         }
+        entry = 'ps_main';
     }
 
+    const reach = constants === Infinity ? Infinity : constants;
     const wgsl = [
-        ...header,
+        ...moduleHeader({
+            vertex, constants: reach === Infinity ? (vertex ? 256 : 224) : reach, samplers,
+            inputFields, outputFields,
+        }),
+        vertex ? '@vertex' : '@fragment',
+        `fn ${entry}(in: ${vertex ? 'VsIn' : 'PsIn'}) -> ${vertex ? 'VsOut' : 'PsOut'} {`,
+        `    var out: ${vertex ? 'VsOut' : 'PsOut'};`,
         ...declarations,
+        ...prologue,
         ...immediates,
         ...body,
         '    return out;',
         '}',
     ].join('\n');
 
-    return { wgsl, entry, inputs, samplers, error };
+    return {
+        wgsl, entry, inputs, samplers,
+        constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
+        error,
+    };
+}
+
+/**
+ * A vertex stage for a draw that binds a pixel shader and no vertex shader:
+ * fixed-function transform feeding a programmable pixel stage, which is the
+ * shape of a full-screen post-process quad. The position goes through the
+ * world-view-projection in `c[0..3]`, or through the viewport in `c[4]` when
+ * the vertex is already transformed; every colour and coordinate set the
+ * declaration carries is passed to the location the pixel shader reads it at.
+ *
+ * @param {readonly { usage: number, usageIndex: number, register: number }[]} elements
+ *        The declaration's elements, with the location each will arrive at
+ *        as its `register`.
+ * @param {Map<number, InputShape>} shapes  By register.
+ * @returns {TranslatedShader}
+ */
+export function fixedVertexStage(elements, shapes){
+    /** @type {string[]} */
+    const inputFields = [];
+    /** @type {string[]} */
+    const outputFields = ['    @builtin(position) oPos: vec4f,'];
+    /** @type {string[]} */
+    const body = [];
+    /** @type {ShaderInput[]} */
+    const inputs = [];
+    let position = null;
+    for (const element of elements)
+    {
+        const shape = shapes.get(element.register) ?? FOUR_FLOATS;
+        const name = `v${element.register}`;
+        inputFields.push(`    @location(${element.register}) ${name}: ${inputType(shape)},`);
+        inputs.push({
+            location: element.register, usage: element.usage, usageIndex: element.usageIndex,
+            register: element.register,
+        });
+        const value = promoteInput(`in.${name}`, shape);
+        if (element.usage === D3DDECLUSAGE.POSITION)
+        {
+            position = `mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(${value}.xyz, 1.0)`;
+        }
+        else if (element.usage === D3DDECLUSAGE.POSITIONT)
+        {
+            position = `viewportPosition(${value})`;
+        }
+        else if (element.usage === D3DDECLUSAGE.COLOR || element.usage === D3DDECLUSAGE.TEXCOORD)
+        {
+            const location = varyingLocation(element.usage, element.usageIndex);
+            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            body.push(`    out.o${location} = ${value};`);
+        }
+    }
+    body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`);
+    const wgsl = [
+        ...moduleHeader({
+            vertex: true, constants: HYBRID_CONSTANTS.COUNT, samplers: [], inputFields,
+            outputFields,
+        }),
+        // The viewport's inverse offset and scale, as the fixed-function stage
+        // applies them to a vertex given in target pixels.
+        'fn viewportPosition(vertex: vec4f) -> vec4f {',
+        `    let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
+            + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`,
+        '    return vec4f(screen.x - 1.0, screen.y + 1.0, vertex.z, 1.0);',
+        '}',
+        '@vertex',
+        'fn vs_main(in: VsIn) -> VsOut {',
+        '    var out: VsOut;',
+        ...body,
+        '    return out;',
+        '}',
+    ].join('\n');
+    return {
+        wgsl, entry: 'vs_main', inputs, samplers: [], constants: HYBRID_CONSTANTS.COUNT,
+        error: position ? null : 'the declaration carries no position',
+    };
 }
 
 /** @param {number} value @returns {string} a WGSL float literal */

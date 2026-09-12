@@ -235,8 +235,13 @@ test('a draw through a declaration with no format succeeds and is reported once'
 test('a device that advertises no shader refuses every create and says so once', ()=>{
     /** @type {string[]} */
     const reports = [];
-    const { device } = make({ services: { divergence: (/** @type {string} */ _api,
-        /** @type {string} */ detail)=>reports.push(detail) } });
+    const { device } = make({
+        caps: {
+            vertexShaderVersion: { major: 0, minor: 0 }, pixelShaderVersion: { major: 0, minor: 0 },
+        },
+        services: { divergence: (/** @type {string} */ _api,
+            /** @type {string} */ detail)=>reports.push(detail) },
+    });
     /** @type {{ shader?: any }} */
     const out = {};
     assert.equal(device.CreateVertexShader(VS_2_0_EMPTY, out), D3DERR_INVALIDCALL);
@@ -273,9 +278,10 @@ test('a device that advertises a version makes shaders up to it and binds them',
     assert.equal(bound.shader, vs.shader);
     assert.equal(vs.shader.refCount, 2, 'a get takes a reference');
     bound.shader.release();
-    assert.equal(device.stageProcessing.vertexShader, 1);
+    assert.equal(device.stageProcessing.vertexShader, vs.shader.id);
     assert.equal(device.stageProcessing.fixedFunctionVertex, false);
-    assert.equal(device.stageProcessing.pixelShader, 1);
+    assert.equal(device.stageProcessing.pixelShader, ps.shader.id);
+    assert.notEqual(vs.shader.id, ps.shader.id, 'ids are distinct across kinds');
 
     assert.equal(device.SetVertexShader(null), D3D_OK);
     assert.equal(device.SetPixelShader(null), D3D_OK);
@@ -286,7 +292,7 @@ test('a device that advertises a version makes shaders up to it and binds them',
     assert.equal(device.release(), 0);
 });
 
-test('a draw with a shader bound succeeds and is reported once per shader version', ()=>{
+test('a draw with a shader bound succeeds, and the renderer is handed the whole program', ()=>{
     /** @type {string[]} */
     const reports = [];
     const { device } = make({
@@ -299,13 +305,22 @@ test('a draw with a shader bound succeeds and is reported once per shader versio
     device.CreateVertexShader(VS_2_0_EMPTY, vs);
     device.SetVertexShader(vs.shader);
     device.SetFVF(FVF_XYZ);
+    device.SetVertexShaderConstantF(0, [1, 2, 3, 4], 1);
     device.BeginScene();
     const bytes = new Uint8Array(12 * 3);
     assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3D_OK);
-    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, bytes, 12), D3D_OK);
     device.EndScene();
-    assert.equal(reports.filter(line=>line.includes('vs_2_0')).length, 1);
+    assert.equal(reports.length, 0, 'the device reports nothing: the renderer decides');
+    const program = device.stageProcessing.program;
+    assert.ok(program);
+    assert.equal(program.vertex, vs.shader.parsed);
+    assert.equal(program.vertexId, vs.shader.id);
+    assert.equal(program.pixel, null);
+    assert.equal(program.declaration?.length, 1,
+        'the declaration the format stands for, as elements');
+    assert.deepEqual([...program.vertexConstants.floats.subarray(0, 4)], [1, 2, 3, 4]);
     device.SetVertexShader(null);
+    assert.equal(device.stageProcessing.program, null);
     vs.shader.release();
     assert.equal(device.release(), 0);
 });
@@ -511,35 +526,55 @@ test('patches, vertex processing and the front buffer are refused, and palettes 
 
 // --- queries ---
 
-test('an event query is offered, an occlusion query is not, and a null pointer only asks', ()=>{
-    const { device } = make();
-    assert.equal(device.CreateQuery(D3DQUERYTYPE.EVENT, null), D3D_OK);
-    assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, null), D3DERR_NOTAVAILABLE);
-    assert.equal(device.CreateQuery(D3DQUERYTYPE.TIMESTAMP, null), D3DERR_NOTAVAILABLE);
-    /** @type {{ query?: any }} */
-    const refused = {};
-    assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, refused), D3DERR_NOTAVAILABLE);
-    assert.equal(refused.query, undefined);
-    /** @type {{ query?: any }} */
-    const out = {};
-    assert.equal(device.CreateQuery(D3DQUERYTYPE.EVENT, out), D3D_OK);
-    const query = out.query;
-    assert.ok(query);
-    assert.equal(query.GetType(), D3DQUERYTYPE.EVENT);
-    assert.equal(query.GetDataSize(), 4);
+test('event and occlusion queries are offered, the timings are not, and a null pointer only asks',
+    ()=>{
+        /** @type {string[]} */
+        const reports = [];
+        const { device } = make({ services: { divergence: (/** @type {string} */ _api,
+            /** @type {string} */ detail)=>reports.push(detail) } });
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.EVENT, null), D3D_OK);
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, null), D3D_OK);
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.TIMESTAMP, null), D3DERR_NOTAVAILABLE);
+        /** @type {{ query?: any }} */
+        const refused = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.TIMESTAMP, refused), D3DERR_NOTAVAILABLE);
+        assert.equal(refused.query, undefined);
 
-    /** @type {{ value?: number }} */
-    const data = {};
-    assert.equal(query.GetData(data, 4), 1, 'S_FALSE before the query was issued');
-    assert.equal(query.Issue(D3DISSUE.BEGIN), D3DERR_INVALIDCALL, 'an event has no beginning');
-    assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
-    assert.equal(query.GetData(data, 1), D3DERR_INVALIDCALL, 'too small a buffer');
-    assert.equal(query.GetData(null, 0), D3D_OK, 'no buffer at all only asks');
-    assert.equal(query.GetData(data, 4), D3D_OK);
-    assert.equal(data.value, 1);
-    assert.equal(query.release(), 0);
-    assert.equal(device.release(), 0);
-});
+        // An occlusion query answers every pixel of the target, which never
+        // culls what should be drawn, and the device says so once.
+        /** @type {{ query?: any }} */
+        const occlusion = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.OCCLUSION, occlusion), D3D_OK);
+        assert.equal(occlusion.query.Issue(D3DISSUE.BEGIN), D3D_OK);
+        assert.equal(occlusion.query.GetData({}, 4), 1, 'S_FALSE until the end is issued');
+        assert.equal(occlusion.query.Issue(D3DISSUE.END), D3D_OK);
+        /** @type {{ value?: number }} */
+        const pixels = {};
+        assert.equal(occlusion.query.GetData(pixels, 4), D3D_OK);
+        assert.equal(pixels.value, 64 * 48);
+        assert.equal(reports.filter(line=>line.includes('occlusion')).length, 1);
+        assert.equal(occlusion.query.release(), 0);
+
+        /** @type {{ query?: any }} */
+        const out = {};
+        assert.equal(device.CreateQuery(D3DQUERYTYPE.EVENT, out), D3D_OK);
+        const query = out.query;
+        assert.ok(query);
+        assert.equal(query.GetType(), D3DQUERYTYPE.EVENT);
+        assert.equal(query.GetDataSize(), 4);
+
+        /** @type {{ value?: number }} */
+        const data = {};
+        assert.equal(query.GetData(data, 4), 1, 'S_FALSE before the query was issued');
+        assert.equal(query.Issue(D3DISSUE.BEGIN), D3DERR_INVALIDCALL, 'an event has no beginning');
+        assert.equal(query.Issue(D3DISSUE.END), D3D_OK);
+        assert.equal(query.GetData(data, 1), D3DERR_INVALIDCALL, 'too small a buffer');
+        assert.equal(query.GetData(null, 0), D3D_OK, 'no buffer at all only asks');
+        assert.equal(query.GetData(data, 4), D3D_OK);
+        assert.equal(data.value, 1);
+        assert.equal(query.release(), 0);
+        assert.equal(device.release(), 0);
+    });
 
 // --- reset ---
 
@@ -865,5 +900,24 @@ test('an index buffer describes itself with its index width', ()=>{
     assert.equal(out.desc.Type, D3DRTYPE.INDEXBUFFER);
     assert.equal(out.desc.Size, 6);
     held.buffer.release();
+    assert.equal(device.release(), 0);
+});
+
+test('a palette is kept and read back, and the current one remembered', ()=>{
+    const { device } = make();
+    const entries = Uint8Array.from({ length: 1024 }, (_, index)=>index & 0xff);
+    assert.equal(device.SetPaletteEntries(3, entries), D3D_OK);
+    assert.equal(device.SetPaletteEntries(4, new Uint8Array(12)), D3DERR_INVALIDCALL,
+        'a palette is 256 entries');
+    /** @type {{ entries?: Uint8Array }} */
+    const out = {};
+    assert.equal(device.GetPaletteEntries(3, out), D3D_OK);
+    assert.deepEqual([...(out.entries ?? [])], [...entries]);
+    assert.equal(device.GetPaletteEntries(4, out), D3DERR_INVALIDCALL, 'never set');
+    assert.equal(device.SetCurrentTexturePalette(3), D3D_OK);
+    /** @type {{ number?: number }} */
+    const current = {};
+    assert.equal(device.GetCurrentTexturePalette(current), D3D_OK);
+    assert.equal(current.number, 3);
     assert.equal(device.release(), 0);
 });

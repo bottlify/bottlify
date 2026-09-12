@@ -11,7 +11,8 @@ import {
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
-import { createReferenceCount, createTexture } from './resources.js';
+import { createReferenceCount, createSurface, createTexture } from './resources.js';
+import { SURFACE_TYPE } from './validity.js';
 
 const SIZE = 128;
 const BYTES_PER_PIXEL = 4;
@@ -206,10 +207,11 @@ test('a partial lock reports the pixel it names, at an unchanged pitch', ()=>{
     assertFullyReleased(device);
 });
 
-test('a malformed lock rectangle is accepted, and still reports where it points', ()=>{
+test('a malformed lock rectangle is refused by this version, and the record left alone', ()=>{
     /**
-     * Shapes a later Windows rejected and an earlier one did not. Programs were
-     * written against the lenient one, so the lenient one is what we implement.
+     * Shapes the later runtime rejects: empty, inverted, off either edge. A
+     * Direct3D 9 device refuses them before the lock is taken, so the caller's
+     * record keeps whatever it held and no unlock is owed.
      */
     const malformed = [
         { left: 60, top: 60, right: 60, bottom: 68 },
@@ -227,22 +229,38 @@ test('a malformed lock rectangle is accepted, and still reports where it points'
     assert.equal(
         device.CreateOffscreenPlainSurface(SIZE, SIZE, D3DFMT.A8R8G8B8, D3DPOOL.SCRATCH, out),
         D3D_OK);
-    const base = out.surface.base;
 
     for (const rect of malformed)
     {
-        const locked = { pBits: 0, Pitch: 0 };
+        const locked = { pBits: 7, Pitch: 7 };
         const label = `${rect.left},${rect.top},${rect.right},${rect.bottom}`;
-        assert.equal(out.surface.LockRect(locked, rect, 0), D3D_OK, label);
-        assert.equal(locked.pBits - base, (rect.top * PITCH) + (rect.left * BYTES_PER_PIXEL),
-            label);
-        assert.equal(locked.Pitch, PITCH, label);
-        assert.equal(out.surface.UnlockRect(), D3D_OK, label);
+        assert.equal(out.surface.LockRect(locked, rect, 0), D3DERR_INVALIDCALL, label);
+        assert.deepEqual(locked, { pBits: 7, Pitch: 7 }, label);
+        assert.equal(out.surface.UnlockRect(), D3DERR_INVALIDCALL, `${label}: nothing to unlock`);
     }
+    // A rectangle that is one is still located exactly.
+    const locked = { pBits: 0, Pitch: 0 };
+    assert.equal(out.surface.LockRect(locked, { left: 60, top: 60, right: 68, bottom: 68 }, 0),
+        D3D_OK);
+    assert.equal(locked.pBits - out.surface.base, (60 * PITCH) + (60 * BYTES_PER_PIXEL));
+    assert.equal(out.surface.UnlockRect(), D3D_OK);
 
     out.surface.release();
     assertFullyReleased(device);
 });
+
+test('a surface made without the rule accepts a malformed rectangle, as the earlier runtime did',
+    ()=>{
+        const lenient = createSurface({
+            type: SURFACE_TYPE.PLAIN, width: SIZE, height: SIZE, format: D3DFMT.A8R8G8B8,
+            pool: D3DPOOL.SCRATCH, usage: 0, base: 0x1000, count: createReferenceCount(),
+        });
+        const locked = { pBits: 0, Pitch: 0 };
+        assert.equal(lenient.LockRect(locked, { left: 68, top: 60, right: 60, bottom: 68 }, 0),
+            D3D_OK);
+        assert.equal(locked.pBits - 0x1000, (60 * PITCH) + (68 * BYTES_PER_PIXEL));
+        assert.equal(lenient.UnlockRect(), D3D_OK);
+    });
 
 test('locking a texture level and locking its surface are one lock', ()=>{
     const device = createDevice();

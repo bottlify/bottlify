@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, parseShader, versionToken } from './shader.js';
-import { translateShader, varyingLocation } from './wgsl.js';
+import { HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation } from './wgsl.js';
 import { D3DDECLUSAGE } from './declaration.js';
 
 /** @param {number} type @param {number} index @param {number} writeMask @param {number} result */
@@ -177,8 +177,8 @@ test('a cube sampler takes three coordinates, and a sampler read without a dcl i
     const translated = translateShader(parsed);
     assert.equal(translated.error, null);
     assertLine(translated.wgsl, 'r0 = textureSample(tex1, samp1, in.t0.xyz);');
-    assertLine(translated.wgsl, '@group(1) @binding(0) var tex1: texture_cube<f32>;');
-    assertLine(translated.wgsl, '@group(1) @binding(1) var samp1: sampler;');
+    assertLine(translated.wgsl, '@group(2) @binding(0) var tex1: texture_cube<f32>;');
+    assertLine(translated.wgsl, '@group(2) @binding(1) var samp1: sampler;');
     assert.deepEqual(translated.samplers, [{ index: 1, type: 'texture_cube<f32>' }]);
 
     const undeclared = translateShader(parseShader([PS_2_0,
@@ -294,17 +294,21 @@ test('a whole vertex shader declares its inputs by location and its outputs by s
         { location: 1, usage: D3DDECLUSAGE.TEXCOORD, usageIndex: 1, register: 3 },
         { location: 2, usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
     ]);
-    assertLine(translated.wgsl, '@location(0) v0: vec4f,');
-    assertLine(translated.wgsl, '@location(1) v3: vec4f,');
+    assertLine(translated.wgsl, '@location(0) v0: vec4<f32>,');
+    assertLine(translated.wgsl, '@location(1) v3: vec4<f32>,');
     assertLine(translated.wgsl, '@builtin(position) oPos: vec4f,');
     assertLine(translated.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.COLOR, 1)}) oD1: vec4f,`);
     assertLine(translated.wgsl,
         `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) oT2: vec4f,`);
     assertLine(translated.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.FOG, 0)}) oFog: vec4f,`);
-    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 256>;');
+    // The float file is declared only as far as the shader reaches: c0..c3
+    // for the matrix and c4 for the fog.
+    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 5>;');
+    assert.equal(translated.constants, 5);
     assertLine(translated.wgsl, 'fn vs_main(in: VsIn) -> VsOut {');
-    assertLine(translated.wgsl, 'out.oT2 = in.v3;');
-    assertLine(translated.wgsl, 'out.oD1 = in.v1;');
+    assertLine(translated.wgsl, 'let v3 = in.v3;');
+    assertLine(translated.wgsl, 'out.oT2 = v3;');
+    assertLine(translated.wgsl, 'out.oD1 = v1;');
     assertLine(translated.wgsl, 'return out;');
 });
 
@@ -326,7 +330,7 @@ test('a whole pixel shader reads the varyings the vertex shader wrote and writes
     assertLine(translated.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.COLOR, 1)}) v1: vec4f,`);
     assertLine(translated.wgsl, '@location(0) oC0: vec4f,');
     assertLine(translated.wgsl, '@builtin(frag_depth) oDepth: f32,');
-    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 224>;');
+    assertLine(translated.wgsl, '@group(1) @binding(0) var<uniform> c: array<vec4f, 1>;');
     assertLine(translated.wgsl, 'oC0 = (r0 * in.v1);');
     assertLine(translated.wgsl, 'out.oC0 = oC0;');
     assertLine(translated.wgsl, 'out.oDepth = oDepth.x;');
@@ -342,8 +346,8 @@ test('model 3 names its outputs and inputs by declared semantic', ()=>{
         op(OPCODE.MOV, 2), dst(REGISTER.OUTPUT, 1), src(REGISTER.INPUT, 0),
         END_TOKEN]));
     assert.equal(vs.error, null);
-    assertLine(vs.wgsl, 'out.oPos = in.v0;');
-    assertLine(vs.wgsl, 'out.o1 = in.v0;');
+    assertLine(vs.wgsl, 'out.oPos = v0;');
+    assertLine(vs.wgsl, 'out.o1 = v0;');
     assertLine(vs.wgsl, `@location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, 2)}) o1: vec4f,`);
 
     const ps = translateShader(parseShader([PS_3_0,
@@ -390,4 +394,79 @@ test('what is not translated is reported rather than emitted wrong', ()=>{
     const setp = vertexBody([op(OPCODE.SETP, 3, 1), dst(REGISTER.PREDICATE, 0),
         src(REGISTER.CONST, 0), src(REGISTER.CONST, 1)]);
     assert.match(setp.error ?? '', /predicated/);
+});
+
+test('a declared input takes the shape the declaration gives, and a missing one the default', ()=>{
+    const parsed = parseShader([VS_2_0,
+        ...dclInput(D3DDECLUSAGE.POSITION, 0),
+        ...dclInput(D3DDECLUSAGE.COLOR, 1),
+        ...dclInput(D3DDECLUSAGE.BLENDINDICES, 2),
+        ...dclInput(D3DDECLUSAGE.TEXCOORD, 3),
+        ...dclInput(D3DDECLUSAGE.NORMAL, 4),
+        op(OPCODE.MOV, 2), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0),
+        op(OPCODE.ADD, 3), dst(REGISTER.ATTROUT, 0), src(REGISTER.INPUT, 1), src(REGISTER.INPUT, 2),
+        op(OPCODE.ADD, 3), dst(REGISTER.OUTPUT, 0), src(REGISTER.INPUT, 3), src(REGISTER.INPUT, 4),
+        END_TOKEN]);
+    const translated = translateShader(parsed, { inputs: new Map([
+        [0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 4, scalar: 'f32', bgra: true }],
+        [2, { components: 4, scalar: 'u32', bgra: false }],
+        [3, { components: 2, scalar: 'f32', bgra: false }],
+    ]) });
+    assert.equal(translated.error, null);
+    assertLine(translated.wgsl, '@location(0) v0: vec3<f32>,');
+    assertLine(translated.wgsl, 'let v0 = vec4f(in.v0, 1.0);');
+    assertLine(translated.wgsl, '@location(1) v1: vec4<f32>,');
+    assertLine(translated.wgsl, 'let v1 = in.v1.zyxw;');
+    assertLine(translated.wgsl, '@location(2) v2: vec4<u32>,');
+    assertLine(translated.wgsl, 'let v2 = vec4f(in.v2);');
+    assertLine(translated.wgsl, '@location(3) v3: vec2<f32>,');
+    assertLine(translated.wgsl, 'let v3 = vec4f(in.v3, 0.0, 1.0);');
+    // The normal is declared and not supplied: the default vertex, and no
+    // input field for the pipeline to bind.
+    assertLine(translated.wgsl, 'let v4 = vec4f(0.0, 0.0, 0.0, 1.0);');
+    assert.ok(!translated.wgsl.includes('@location(4)'));
+});
+
+test('a relatively addressed constant file is declared whole', ()=>{
+    const translated = vertexBody([
+        op(OPCODE.MOV, 3), dst(REGISTER.TEMP, 0), (src(REGISTER.CONST, 4) | RELATIVE) >>> 0,
+        src(REGISTER.ADDR, 0, 0x00),
+    ]);
+    assert.equal(translated.constants, 256);
+    assertLine(translated.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 256>;');
+});
+
+test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes the varyings', ()=>{
+    const stage = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 1 },
+        { usage: D3DDECLUSAGE.TEXCOORD, usageIndex: 1, register: 2 },
+    ], new Map([
+        [0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 4, scalar: 'f32', bgra: true }],
+        [2, { components: 2, scalar: 'f32', bgra: false }],
+    ]));
+    assert.equal(stage.error, null);
+    assert.equal(stage.entry, 'vs_main');
+    assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 5>;');
+    assertLine(stage.wgsl,
+        'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
+    assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
+    assertLine(stage.wgsl,
+        `out.o${varyingLocation(D3DDECLUSAGE.TEXCOORD, 1)} = vec4f(in.v2, 0.0, 1.0);`);
+
+    const transformed = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },
+    ], new Map([[0, { components: 4, scalar: 'f32', bgra: false }]]));
+    assert.equal(transformed.error, null);
+    assertLine(transformed.wgsl, 'out.oPos = viewportPosition(in.v0);');
+    assertLine(transformed.wgsl, `let screen = (vertex.xy + c[${HYBRID_CONSTANTS.VIEWPORT}].xy)`
+        + ` * c[${HYBRID_CONSTANTS.VIEWPORT}].zw;`);
+
+    const none = fixedVertexStage([
+        { usage: D3DDECLUSAGE.COLOR, usageIndex: 0, register: 0 },
+    ], new Map());
+    assert.match(none.error ?? '', /no position/);
 });

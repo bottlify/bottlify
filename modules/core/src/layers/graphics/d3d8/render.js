@@ -43,6 +43,10 @@ import {
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { levelExtent } from '../d3d9/resources.js';
 import { resourceId } from '../webgpu/internal/bindings.js';
+import {
+    constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
+} from '../webgpu/internal/programmable.js';
+import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -804,7 +808,27 @@ export function eyePosition(view){
  * @property {number} [lightsVersion]   Raised whenever `lights` changes.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
- * @property {{ vertexShader: number, fvf: number, pixelShader: number }} stageProcessing
+ * @property {{ vertexShader: number, fvf: number, pixelShader: number,
+ *              program?: ProgramState | null }} stageProcessing
+ *     `program` is what a device that makes shader objects hands over: the
+ *     parsed shaders, the declaration and the constant files. Absent, a bound
+ *     shader is a draw this renderer declines.
+ */
+
+/**
+ * @typedef {Object} ProgramState
+ *     The programmable half of a draw, as the device holds it.
+ * @property {import('../d3d9/shader.js').ParsedShader | null} vertex
+ * @property {object | null} vertexShader   The shader object, for caching by identity.
+ * @property {number} vertexId
+ * @property {import('../d3d9/shader.js').ParsedShader | null} pixel
+ * @property {object | null} pixelShader
+ * @property {number} pixelId
+ * @property {readonly import('../webgpu/internal/programmable.js').VertexElement[] | null}
+ *           declaration
+ * @property {number} declarationId
+ * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} vertexConstants
+ * @property {{ floats: Float32Array, ints: Int32Array, bools: Uint32Array }} pixelConstants
  */
 
 /**
@@ -1345,7 +1369,11 @@ export function createRenderer(options){
             indexFormat: 0,
             stencilRect: 0,
             texture: 0,
+            /** A draw through shaders this renderer could not build a pipeline for. */
+            program: 0,
         },
+        /** Draws that ran through a program rather than the fixed-function pipeline. */
+        programmable: 0,
         /**
          * Draws that ran fewer stages than the program had set up.
          *
@@ -2662,6 +2690,244 @@ export function createRenderer(options){
         return frame;
     };
 
+    const programs = createProgramCache({ backend });
+    /**
+     * A shader's translations, by the shape of the inputs it was translated
+     * for; the object itself is the key, so a released shader takes its
+     * translations with it.
+     *
+     * @type {WeakMap<object, Map<string, any>>}
+     */
+    const translations = new WeakMap();
+    /** @type {Map<string, any>} the fixed vertex stages of hybrids, by declaration and shapes */
+    const hybridStages = new Map();
+    /** @type {Map<string, any>} real samplers for the program path, by descriptor */
+    const programSamplers = new Map();
+    /** What has been reported once already about a program. */
+    const programReports = new Set();
+
+    /**
+     * @param {object} shader @param {string} tag @param {() => any} make
+     */
+    const translationOf = (shader, tag, make)=>{
+        let held = translations.get(shader);
+        if (!held)
+        {
+            held = new Map();
+            translations.set(shader, held);
+        }
+        let made = held.get(tag);
+        if (!made)
+        {
+            made = make();
+            held.set(tag, made);
+        }
+        return made;
+    };
+
+    /**
+     * @param {string} key @param {string} detail
+     */
+    const reportProgram = (key, detail)=>{
+        if (programReports.has(key))
+        {
+            return;
+        }
+        programReports.add(key);
+        divergence?.('Direct3D', detail);
+    };
+
+    /**
+     * A real sampler for the program path, one per distinct state. The
+     * fixed-function path samples through one hardware sampler and applies
+     * the state in its own shader; a translated shader samples as it was
+     * written, so the state has to be in the sampler it is given.
+     *
+     * @param {Map<number, number>} states
+     */
+    const programSamplerFor = states=>{
+        const descriptor = samplerDescriptorOf(states, mipsApplied);
+        const key = Object.values(descriptor).join('|');
+        const existing = programSamplers.get(key);
+        if (existing)
+        {
+            return existing;
+        }
+        if (!createSampler)
+        {
+            throw new Error(
+                'graphics/d3d8: a textured draw needs a sampler factory and none was supplied');
+        }
+        const made = createSampler({ label: `sampler:${key}`, ...descriptor });
+        programSamplers.set(key, made);
+        return made;
+    };
+
+    /**
+     * The usages a hybrid's fixed vertex stage carries through: what a pixel
+     * shader can read from a fixed-function vertex.
+     */
+    const HYBRID_USAGES = new Set([0, 9, 10, 5]);
+
+    /**
+     * Everything a draw through shaders needs that is not its geometry, or
+     * null when no pipeline can be built for it -- counted and reported, not
+     * raised, because the program has already been told the call succeeded.
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     */
+    const prepareProgram = (model, stride, topology, program)=>{
+        if (!program.pixel)
+        {
+            // A vertex shader feeding the fixed-function pixel stage needs
+            // that stage's fragment formula driven by the shader's outputs,
+            // which the fixed-function generator does not yet do.
+            skip('program');
+            reportProgram('vs-only', 'a draw with a vertex shader and the fixed-function'
+                + ' pixel stage was not drawn: only a shader pair, or a pixel shader over'
+                + ' fixed-function vertices, is drawn');
+            return null;
+        }
+        if (!program.declaration)
+        {
+            skip('program');
+            return null;
+        }
+        const pixelShader = /** @type {object} */ (program.pixelShader);
+        const pixel = translationOf(pixelShader, 'ps', ()=>translateShader(
+            /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.pixel)));
+        if (pixel.error)
+        {
+            skip('program');
+            reportProgram(`ps:${program.pixelId}`,
+                `pixel shader ${program.pixelId} was not drawn: ${pixel.error}`);
+            return null;
+        }
+        /** @type {import('../webgpu/internal/programmable.js').DeclaredInput[]} */
+        let wanted;
+        if (program.vertex)
+        {
+            const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+                ()=>translateShader(
+                    /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
+            if (base.error)
+            {
+                skip('program');
+                reportProgram(`vs:${program.vertexId}`,
+                    `vertex shader ${program.vertexId} was not drawn: ${base.error}`);
+                return null;
+            }
+            wanted = base.inputs;
+        }
+        else
+        {
+            wanted = program.declaration
+                .filter(element=>HYBRID_USAGES.has(element.Usage))
+                .map((element, index)=>({
+                    location: index, usage: element.Usage, usageIndex: element.UsageIndex,
+                    register: index,
+                }));
+        }
+        const laid = vertexLayoutOf(program.declaration, wanted, stride);
+        if (!laid.layout)
+        {
+            skip('program');
+            reportProgram(`decl:${program.declarationId}`,
+                `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
+            return null;
+        }
+        const layout = laid.layout;
+        const shapes = shapeKey(layout);
+        const vertex = program.vertex
+            ? translationOf(/** @type {object} */ (program.vertexShader), `vs:${shapes}`,
+                ()=>translateShader(
+                    /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
+                    { inputs: layout.shapes }))
+            : hybridStageFor(`${program.declarationId}|${shapes}`, wanted, layout.shapes);
+        if (vertex.error)
+        {
+            skip('program');
+            reportProgram(`vs:${program.vertexId}:${program.declarationId}`,
+                `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
+            return null;
+        }
+        const samplerBindings = pixel.samplers.map((/** @type {any} */ entry)=>{
+            const texture = model.textures.get(entry.index);
+            return {
+                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                sampler: programSamplerFor(model.stageStates(entry.index)),
+                placeholder: !texture,
+            };
+        });
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = program.vertex
+            ? constantBlocks(program.vertexConstants, vertex.constants, take)
+            : hybridBlocks(model, take);
+        const pixelBlocks = constantBlocks(program.pixelConstants, pixel.constants, take);
+        const state = {
+            ...pipelineStateOf(model, {
+                fvf: 0, topology, ...formatsOf(model), stages: [], lighting: null, fog: false,
+            }),
+            vertexShader: program.vertex ? program.vertexId : -1,
+            pixelShader: program.pixelId,
+        };
+        return {
+            state,
+            uniforms: vertexBlocks[0],
+            stageBindings: samplerBindings,
+            layout: null,
+            textures: [],
+            truncated: false,
+            program: {
+                source: {
+                    key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
+                        + `/${shapes}/${stride}`,
+                    vertex, pixel, layout,
+                },
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+            },
+        };
+    };
+
+    /**
+     * @param {string} key
+     * @param {import('../webgpu/internal/programmable.js').DeclaredInput[]} wanted
+     * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
+     */
+    const hybridStageFor = (key, wanted, shapes)=>{
+        const existing = hybridStages.get(key);
+        if (existing)
+        {
+            return existing;
+        }
+        const made = fixedVertexStage(wanted, shapes);
+        hybridStages.set(key, made);
+        return made;
+    };
+
+    /**
+     * The constants a hybrid's fixed vertex stage reads: the same
+     * world-view-projection the fixed-function block carries, then the
+     * viewport's offset and scale.
+     *
+     * @param {RenderModel} model @param {(floats: number) => Float32Array} take
+     */
+    const hybridBlocks = (model, take)=>{
+        const floats = take(HYBRID_CONSTANTS.COUNT * 4);
+        const world = transformOf(model, D3DTS.WORLD);
+        const view = transformOf(model, D3DTS.VIEW);
+        floats.set(multiplyMatrices(multiplyMatrices(world, view),
+            transformOf(model, D3DTS.PROJECTION)), HYBRID_CONSTANTS.MATRIX * 4);
+        floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
+        floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
+        return [floats, take(64), take(16)];
+    };
+
     /**
      * Records one draw against the pass the model's targets name.
      *
@@ -2670,8 +2936,9 @@ export function createRenderer(options){
      * @param {Float32Array} uniforms
      * @param {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
      * @param {any} geometry
+     * @param {any} [program]  The programmable half, for a draw through shaders.
      */
-    const record = (model, state, uniforms, stageBindings, geometry)=>{
+    const record = (model, state, uniforms, stageBindings, geometry, program = null)=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
             return;
@@ -2691,9 +2958,11 @@ export function createRenderer(options){
         }
         const frame = ensureViewport(model);
         const pipeline = frame.pipelines.length;
-        frame.pipelines.push(backend.pipelineFor(state));
+        frame.pipelines.push(program
+            ? programs.get(state, program.source)
+            : backend.pipelineFor(state));
         frame.commands.push(
-            { kind: 'draw', pipeline, state, uniforms, stageBindings, ...geometry });
+            { kind: 'draw', pipeline, state, uniforms, stageBindings, program, ...geometry });
     };
 
     /**
@@ -2707,6 +2976,10 @@ export function createRenderer(options){
      */
     const prepare = (model, stride, topology)=>{
         const processing = model.stageProcessing;
+        if (processing.program && (processing.vertexShader !== 0 || processing.pixelShader !== 0))
+        {
+            return prepareProgram(model, stride, topology, processing.program);
+        }
         if (processing.vertexShader !== 0)
         {
             skip('vertexShader');
@@ -2762,6 +3035,7 @@ export function createRenderer(options){
             state, uniforms: uniformsOf(model, lighting, ensureFrame().arena.take, mipsApplied),
             stageBindings,
             layout, textures: cascade.textures, truncated: cascade.truncated,
+            program: null,
         };
     };
 
@@ -3081,8 +3355,8 @@ export function createRenderer(options){
                 ...(fan
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
-            });
-            if (dumpDraws)
+            }, prepared.program);
+            if (dumpDraws && !prepared.program)
             {
                 const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
                     count * stream.stride);
@@ -3127,8 +3401,8 @@ export function createRenderer(options){
                     count,
                     first: 0,
                     baseVertex: model.baseVertexIndex,
-                });
-                if (dumpDraws)
+                }, prepared.program);
+                if (dumpDraws && !prepared.program)
                 {
                     const bytes = readMemory(model.indices.base + byteOffset, count * format.bytes);
                     dumpIndexed(model, prepared, indicesFrom(bytes, format.bytes));
@@ -3142,8 +3416,8 @@ export function createRenderer(options){
             record(model, prepared.state, prepared.uniforms, prepared.stageBindings, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex),
-            });
-            if (dumpDraws)
+            }, prepared.program);
+            if (dumpDraws && !prepared.program)
             {
                 dumpIndexed(model, prepared, order);
             }
@@ -3170,8 +3444,8 @@ export function createRenderer(options){
                 ? expandedGeometry(type, ascending(count), 0)
                 : { indices: null, count, first: 0 };
             record(model, prepared.state, prepared.uniforms, prepared.stageBindings,
-                { vertices, ...geometry });
-            if (dumpDraws)
+                { vertices, ...geometry }, prepared.program);
+            if (dumpDraws && !prepared.program)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, count * stride), stride, null);
                 noteDumpVertices(prepared, vertexData.subarray(0, count * stride), 0, stride);
@@ -3217,8 +3491,8 @@ export function createRenderer(options){
                         baseVertex: 0,
                     }
                     : expandedGeometry(type, indices, 0)),
-            });
-            if (dumpDraws)
+            }, prepared.program);
+            if (dumpDraws && !prepared.program)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, numVertices * stride),
                     stride, indices);
@@ -3285,6 +3559,8 @@ export function createRenderer(options){
                 frames: counters.frames,
                 draws: counters.draws,
                 clears: counters.clears,
+                programmable: counters.programmable,
+                programs: programs.stats(),
                 skipped: { ...counters.skipped },
                 cascade: {
                     ...counters.cascade,
@@ -3451,6 +3727,43 @@ export function createRenderer(options){
     }
 
     /**
+     * One draw through shaders: its constants into the two stages' groups,
+     * its textures into the third, then the geometry.
+     *
+     * @param {any} pass @param {any} pipeline @param {any} command
+     */
+    function replayProgram(pass, pipeline, command){
+        const program = command.program;
+        pass.setPipeline(pipeline.gpu);
+        pass.setBindings(0, pipeline.bindGroupLayouts[0], program.vertexBlocks.map(
+            (/** @type {Float32Array} */ block, /** @type {number} */ binding)=>(
+                { binding, resource: pass.uniforms(block) })));
+        pass.setBindings(1, pipeline.bindGroupLayouts[1], program.pixelBlocks.map(
+            (/** @type {Float32Array} */ block, /** @type {number} */ binding)=>(
+                { binding, resource: pass.uniforms(block) })));
+        /** @type {any[]} */
+        const sampled = [];
+        program.samplerBindings.forEach((/** @type {any} */ bound, /** @type {number} */ index)=>{
+            sampled.push({ binding: index * 2, resource: bound.view },
+                { binding: index * 2 + 1, resource: bound.sampler });
+        });
+        pass.setBindings(2, pipeline.bindGroupLayouts[2], sampled);
+        pass.setVertexBuffer(0, command.vertices.gpu, command.vertices.offset);
+        if (command.indices)
+        {
+            pass.setIndexBuffer(command.indices.gpu, command.indices.format,
+                command.indices.offset);
+            pass.drawIndexed(command.count, 1, command.first, command.baseVertex);
+        }
+        else
+        {
+            pass.draw(command.count, 1, command.first);
+        }
+        counters.draws++;
+        counters.programmable++;
+    }
+
+    /**
      * @param {any} frame @param {any[]} pipelines
      * @param {any} recorded @param {any} surface
      */
@@ -3497,6 +3810,11 @@ export function createRenderer(options){
                 continue;
             }
             const pipeline = outcome.value;
+            if (command.program)
+            {
+                replayProgram(pass, pipeline, command);
+                continue;
+            }
             if (command.check?.probe && opened)
             {
                 // What the target held before this draw: a draw that seems to

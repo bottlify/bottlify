@@ -231,8 +231,8 @@ test('the root makes a device and describes itself in the shape the header gives
     h.box.services.writeMemory(caps, new Uint8Array(D3DCAPS9.SIZE).fill(0xcd));
     assert.equal(h.device(device, 'GetDeviceCaps', [caps]), D3D_OK);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.DeviceType), D3DDEVTYPE.HAL);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0000);
-    assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0000);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.VertexShaderVersion), 0xfffe0200);
+    assert.equal(h.fields.readU32(caps + D3DCAPS9.PixelShaderVersion), 0xffff0200);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxTextureWidth), 4096);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.NumSimultaneousRTs), 1);
     assert.equal(h.fields.readU32(caps + D3DCAPS9.MaxPixelShader30InstructionSlots), 0,
@@ -531,7 +531,7 @@ test('a shader is read from the guest up to its end token and handed back as byt
 });
 
 test('a shader on a device that runs none is refused with the pointer cleared', ()=>{
-    const h = seamed();
+    const h = seamed({ caps: { pixelShaderVersion: { major: 0, minor: 0 } } });
     const root = h.create();
     const { device } = h.createDevice(root);
     const at = 0x3000;
@@ -577,8 +577,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     const root = h.create();
     const { device } = h.createDevice(root);
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.EVENT, 0]), D3D_OK);
-    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, 0]),
-        D3DERR_NOTAVAILABLE);
+    assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.OCCLUSION, 0]), D3D_OK);
+    assert.equal(h.device(device, 'CreateQuery', [10, 0]), D3DERR_NOTAVAILABLE, 'a timestamp');
     const out = 0x3000;
     assert.equal(h.device(device, 'CreateQuery', [D3DQUERYTYPE.EVENT, out]), D3D_OK);
     const query = h.box.memory.readU32(out);
@@ -633,8 +633,16 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'DrawRectPatch', [1, 0, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'EndScene'), D3D_OK);
 
-        // Palettes are not there; patches and processing are refused.
-        assert.equal(h.device(device, 'SetPaletteEntries', [0, 0x4000]), D3DERR_INVALIDCALL);
+        // A palette round-trips through memory; patches and processing are refused.
+        h.box.services.writeMemory(0x4000, Uint8Array.from({ length: 1024 }, (_, i)=>i & 0xff));
+        assert.equal(h.device(device, 'SetPaletteEntries', [2, 0x4000]), D3D_OK);
+        assert.equal(h.device(device, 'SetPaletteEntries', [2, 0]), D3DERR_INVALIDCALL);
+        assert.equal(h.device(device, 'GetPaletteEntries', [2, 0x4800]), D3D_OK);
+        assert.deepEqual(h.box.services.readMemory(0x4800, 1024),
+            h.box.services.readMemory(0x4000, 1024));
+        assert.equal(h.device(device, 'SetCurrentTexturePalette', [2]), D3D_OK);
+        assert.equal(h.device(device, 'GetCurrentTexturePalette', [0x4c00]), D3D_OK);
+        assert.equal(h.fields.readU32(0x4c00), 2);
         assert.equal(h.device(device, 'ProcessVertices', [0, 0, 0, 0, 0, 0]), D3DERR_INVALIDCALL);
         assert.equal(h.device(device, 'SetSoftwareVertexProcessing', [0]), D3D_OK);
         assert.equal(h.device(device, 'GetSoftwareVertexProcessing', []), 0);

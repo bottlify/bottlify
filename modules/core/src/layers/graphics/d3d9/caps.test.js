@@ -43,7 +43,11 @@ test('no reserved bit is set in the words a conformance test masks', ()=>{
 });
 
 test('a device that runs no shader says so with the version macros at zero', ()=>{
-    const words = capabilityWords(DEFAULT_CAPS);
+    const words = capabilityWords({
+        ...DEFAULT_CAPS,
+        vertexShaderVersion: { major: 0, minor: 0 },
+        pixelShaderVersion: { major: 0, minor: 0 },
+    });
     assert.equal(words.VertexShaderVersion, 0xfffe0000);
     assert.equal(words.PixelShaderVersion, 0xffff0000);
     assert.equal(words.MaxVertexShaderConst, 0);
@@ -67,6 +71,13 @@ test('a device that advertises shaders fills the fields a program checks alongsi
     assert.ok(words.MaxVertexShader30InstructionSlots >= 512);
     assert.equal(words.MaxPixelShader30InstructionSlots, 0);
     assert.equal(words.PixelShader1xMaxValue, 1.0);
+});
+
+test('the default device advertises the model the renderer draws whole', ()=>{
+    const words = capabilityWords(DEFAULT_CAPS);
+    assert.equal(words.VertexShaderVersion, 0xfffe0200);
+    assert.equal(words.PixelShaderVersion, 0xffff0200);
+    assert.ok(words.MaxVertexShaderConst >= 96);
 });
 
 test('what the renderer does not do is not claimed', ()=>{

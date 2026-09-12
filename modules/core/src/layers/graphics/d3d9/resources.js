@@ -143,6 +143,11 @@ export function createReferenceCount(options = {}){
  * @property {ReferenceCount} count
  * @property {boolean} [lockable]     Only a render target is asked this at creation.
  * @property {boolean} [forgivesDoubleUnlock]
+ * @property {boolean} [rejectsMalformedRects]
+ *           Whether a lock rectangle outside the surface, or with its edges
+ *           the wrong way round, is refused. The later runtime refuses it;
+ *           the earlier accepted it and programs relied on that, so which
+ *           applies is the device's to say.
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
  * @property {((api: string, detail: string) => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
@@ -159,6 +164,7 @@ export function createSurface(options){
     const pitch = surfacePitch(options.format, options.width);
     const lockable = surfaceIsLockable(options);
     const forgivesDoubleUnlock = options.forgivesDoubleUnlock === true;
+    const rejectsMalformedRects = options.rejectsMalformedRects === true;
     let locked = false;
     let lockFlags = 0;
 
@@ -190,9 +196,9 @@ export function createSurface(options){
 
         /**
          * A rectangle outside the surface, or with its edges the wrong way
-         * round, is accepted: a later Windows rejected those, but programs were
-         * written against the version that did not, and rejecting them breaks
-         * them for no gain.
+         * round, is accepted unless the device says otherwise: the later
+         * runtime rejects it, the earlier did not, and programs were written
+         * against each.
          *
          * @param {LockedRect} out
          *        Left exactly as it was when the lock fails -- callers read it
@@ -203,6 +209,13 @@ export function createSurface(options){
          */
         LockRect(out, rect = null, flags = 0){
             if (locked || !lockable)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            if (rect && rejectsMalformedRects
+                && !(rect.left >= 0 && rect.top >= 0 && rect.left < rect.right
+                    && rect.top < rect.bottom && rect.right <= options.width
+                    && rect.bottom <= options.height))
             {
                 return D3DERR_INVALIDCALL;
             }
@@ -268,6 +281,7 @@ export function levelExtent(size, level){
  *     Gives a level's storage back when the last reference goes. Absent in a
  *     build whose storage is a fabricated address rather than guest memory.
  * @property {boolean} [cube]
+ * @property {boolean} [rejectsMalformedRects]  Passed to every level's surface.
  */
 
 /**
@@ -316,6 +330,7 @@ export function createTexture(options){
             // does not owe; a cube face does not, and that difference is
             // measured rather than reasoned about.
             forgivesDoubleUnlock: !cube,
+            rejectsMalformedRects: options.rejectsMalformedRects,
         });
         surfaces.set(key, surface);
         return surface;

@@ -53,7 +53,7 @@ import {
 import { D3DFMT_INDEX, D3DFMT, D3DRTYPE } from '../d3d8/constants.js';
 import { expandTexels, vertexCountOf } from '../d3d8/render.js';
 import { capabilityWords } from '../d3d9/caps.js';
-import { D3DCREATE, D3DDEVTYPE } from '../d3d9/device.js';
+import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
 import { END_TOKEN } from '../d3d9/shader.js';
 import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
@@ -578,9 +578,11 @@ export function createDirect3D9Seam(
             /** @type {{ pBits?: number }} */
             const locked = {};
             const hr = buffer.Lock(offset >>> 0, size >>> 0, locked, flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
+            if ((out >>> 0) !== 0)
             {
-                fields.writeU32(out >>> 0, locked.pBits ?? 0);
+                // Cleared on a refusal: a program that reads the pointer
+                // rather than the result writes through whatever was there.
+                fields.writeU32(out >>> 0, hr === D3D_OK ? locked.pBits ?? 0 : 0);
             }
             return hr;
         },
@@ -1507,11 +1509,46 @@ export function createDirect3D9Seam(
             return hr;
         },
 
-        // No format here is palettised, so a palette could never reach a texel.
-        SetPaletteEntries: ()=>D3DERR_INVALIDCALL,
-        GetPaletteEntries: ()=>D3DERR_INVALIDCALL,
-        SetCurrentTexturePalette: ()=>D3DERR_INVALIDCALL,
-        GetCurrentTexturePalette: ()=>D3DERR_INVALIDCALL,
+        // A palette is state a program sets and reads back; no texel here is
+        // ever looked up through one.
+        /** @param {any} device @param {number[]} args */
+        SetPaletteEntries: (device, [number, entries])=>((entries >>> 0) === 0
+            ? D3DERR_INVALIDCALL
+            : device.SetPaletteEntries(number >>> 0,
+                memory.readMemory(entries >>> 0, PALETTE_BYTES))),
+        /** @param {any} device @param {number[]} args */
+        GetPaletteEntries: (device, [number, out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ entries?: Uint8Array }} */
+            const held = {};
+            const hr = device.GetPaletteEntries(number >>> 0, held);
+            if (hr === D3D_OK && held.entries)
+            {
+                memory.writeMemory(out >>> 0, held.entries);
+            }
+            return hr;
+        },
+        /** @param {any} device @param {number[]} args */
+        SetCurrentTexturePalette: (device, [number])=>
+            device.SetCurrentTexturePalette(number >>> 0),
+        /** @param {any} device @param {number[]} args */
+        GetCurrentTexturePalette: (device, [out])=>{
+            if ((out >>> 0) === 0)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            /** @type {{ number?: number }} */
+            const held = {};
+            const hr = device.GetCurrentTexturePalette(held);
+            if (hr === D3D_OK)
+            {
+                fields.writeU32(out >>> 0, held.number ?? 0);
+            }
+            return hr;
+        },
 
         /** @param {any} device @param {number[]} args */
         SetScissorRect: (device, [pointer])=>((pointer >>> 0) === 0

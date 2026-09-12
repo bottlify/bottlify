@@ -349,6 +349,7 @@ export function fvfOfElements(elements){
 
 /**
  * @typedef {Object} VertexDeclaration
+ * @property {number} id   Distinct per declaration, for a pipeline key.
  * @property {readonly VertexElement[]} elements  Without the sentinel.
  * @property {number} fvf   The format this was made from, or zero when it was
  *                          made by the program -- even when the elements
@@ -363,6 +364,9 @@ export function fvfOfElements(elements){
 /** D3DERR_MOREDATA: the caller's array is too short, and the count says how long it must be. */
 export const D3DERR_MOREDATA = 0x8876086d;
 
+/** Declaration ids are never reused: a pipeline keyed by one must not find another. */
+let lastDeclarationId = 0;
+
 /**
  * @param {Object} options
  * @param {readonly VertexElement[]} options.elements  Without the sentinel.
@@ -373,6 +377,7 @@ export const D3DERR_MOREDATA = 0x8876086d;
 export function createVertexDeclaration(options){
     const elements = Object.freeze(options.elements.map(element=>({ ...element })));
     return {
+        id: ++lastDeclarationId,
         elements,
         fvf: options.fvf ?? 0,
         get refCount(){

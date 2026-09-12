@@ -469,6 +469,7 @@ export function functionOf(tokens){
 
 /**
  * @typedef {Object} Shader
+ * @property {number} id      Distinct per shader object, for a pipeline key.
  * @property {string} kind
  * @property {ShaderVersion} version
  * @property {Uint32Array} tokens   The function, end token included.
@@ -479,6 +480,9 @@ export function functionOf(tokens){
  * @property {(out: { bytes?: number, tokens?: Uint32Array }, room?: number | null) => number}
  *           GetFunction
  */
+
+/** Shader ids are never reused: a pipeline keyed by one must not find another. */
+let lastShaderId = 0;
 
 /**
  * A shader object: the bytecode it was made from, read once.
@@ -493,6 +497,7 @@ export function createShader(options){
     const tokens = functionOf(options.tokens);
     const parsed = parseShader(tokens);
     return {
+        id: ++lastShaderId,
         kind: options.kind,
         version: parsed.version,
         tokens,

@@ -27,11 +27,12 @@
  *
  * What the renderer does not draw, this device refuses or reports. A shader is
  * created only when the device advertises the version it is written for, and
- * this build advertises none: a program that checks -- most do -- takes the
- * fixed-function path it also has, and one that does not is told no at the
- * create rather than drawn nothing at every frame after it. A vertex
- * declaration is drawn when it describes a flexible vertex format, which is
- * what most fixed-function programs make, and reported once when it does not.
+ * the version advertised is the one the renderer's translator builds a
+ * pipeline from whole: a program that checks -- most do -- takes a path the
+ * renderer draws, and one asking past it is told no at the create rather
+ * than drawn wrong at every frame after it. A fixed-function draw through a
+ * vertex declaration is drawn when the declaration describes a flexible
+ * vertex format, and reported once when it does not.
  *
  * Three conventions run through the whole file:
  *
@@ -66,7 +67,7 @@ import {
     MAX_STREAMS, createVertexDeclaration, elementsOfFvf, fvfOfElements, validateElements,
 } from './declaration.js';
 import {
-    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader,
+    CONSTANT_FILE, SHADER_KIND, createConstantFile, createShader, validateShader, versionOf,
 } from './shader.js';
 import {
     D3DSBT, applyRecord, captureRecord, createStateBlock, emptyRecord, fillRecord,
@@ -145,6 +146,9 @@ const AVAILABLE_TEXTURE_MEMORY = 256 << 20;
 /** How many entries each channel of a gamma ramp has. */
 const GAMMA_RAMP_ENTRIES = 256;
 
+/** A palette: 256 entries of PALETTEENTRY, four bytes each. */
+export const PALETTE_BYTES = 256 * 4;
+
 /**
  * @typedef {Object} DeviceCaps
  * @property {number} maxPointSize     Decides the POINTSIZE_MAX default.
@@ -153,8 +157,8 @@ const GAMMA_RAMP_ENTRIES = 256;
  * @property {boolean} depthPlain      and as offscreen plain surfaces.
  * @property {boolean} [compressedTextures]  Whether the backend samples DXT blocks.
  * @property {{ major: number, minor: number }} vertexShaderVersion
- *     The highest vertex shader a create accepts. Zero is what this build can
- *     honour: the renderer draws the fixed-function pipeline and nothing else.
+ *     The highest vertex shader a create accepts, which is the highest the
+ *     renderer's translator builds a pipeline from.
  * @property {{ major: number, minor: number }} pixelShaderVersion
  * @property {number} maxUserClipPlanes
  * @property {number} maxActiveLights
@@ -177,8 +181,11 @@ export const DEFAULT_CAPS = Object.freeze({
     compressedTextures: false,
     depthCube: false,
     depthPlain: false,
-    vertexShaderVersion: Object.freeze({ major: 0, minor: 0 }),
-    pixelShaderVersion: Object.freeze({ major: 0, minor: 0 }),
+    // Model 2: what the translator turns into a pipeline whole. Model 3 adds
+    // predication and vertex texture reads, which it does not, and a program
+    // told 3.0 takes paths that use them.
+    vertexShaderVersion: Object.freeze({ major: 2, minor: 0 }),
+    pixelShaderVersion: Object.freeze({ major: 2, minor: 0 }),
     // None: the renderer clips against no user plane, and a plane a program
     // sets and finds not clipping is worse than a plane it is refused.
     maxUserClipPlanes: 0,
@@ -585,6 +592,15 @@ function createDeviceObject(parameters, caps, services, identity){
     let dialogBoxMode = false;
     let softwareVertexProcessing =
         (identity.BehaviorFlags & D3DCREATE.SOFTWARE_VERTEXPROCESSING) !== 0;
+    /**
+     * The palettes a program sets, by number, each 256 entries of four bytes.
+     * Nothing here is palettised, so none is ever read by a draw; they are
+     * kept because a program sets them and reads them back regardless.
+     *
+     * @type {Map<number, Uint8Array>}
+     */
+    const palettes = new Map();
+    let currentPalette = 0;
     const mixedVertexProcessing =
         (identity.BehaviorFlags & D3DCREATE.MIXED_VERTEXPROCESSING) !== 0;
     /** @type {{ hotSpot: { x: number, y: number }, surface: any, shown: boolean }} */
@@ -782,6 +798,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 lockable: presentParameters.lockableBackBuffer === true,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: implicitCount(),
+                rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
             }));
         }
@@ -796,6 +813,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 usage: D3DUSAGE.DEPTHSTENCIL,
                 base: allocate(surfaceBytes(depthFormat, width, height)),
                 count: implicitCount(),
+                rejectsMalformedRects: true,
             })
             : null;
     };
@@ -1129,17 +1147,10 @@ function createDeviceObject(parameters, caps, services, identity){
      * as declined on its own.
      */
     const noteUndrawable = ()=>{
-        if (vertexShader)
+        if (vertexShader || pixelShader)
         {
-            report(`vs:${vertexShader.version.major}.${vertexShader.version.minor}`,
-                `a draw with a vs_${vertexShader.version.major}_${vertexShader.version.minor}`
-                + ' bound was not drawn: this device runs the fixed-function pipeline only');
-        }
-        if (pixelShader)
-        {
-            report(`ps:${pixelShader.version.major}.${pixelShader.version.minor}`,
-                `a draw with a ps_${pixelShader.version.major}_${pixelShader.version.minor}`
-                + ' bound was not drawn: this device runs the fixed-function pipeline only');
+            // The renderer builds the program and says what it could not.
+            return;
         }
         if (vertexDeclaration.declaration && effectiveFvf() === 0)
         {
@@ -1318,6 +1329,8 @@ function createDeviceObject(parameters, caps, services, identity){
             count: explicitCount(spec.pool),
             allocate,
             free,
+            // This version refuses a lock rectangle that is not one.
+            rejectsMalformedRects: true,
         });
         renderer?.trackTexture?.(texture, spec);
         return texture;
@@ -1946,6 +1959,48 @@ function createDeviceObject(parameters, caps, services, identity){
         },
 
         /**
+         * A palette is kept as given and read back the same; no format here is
+         * palettised, so no draw ever consults one.
+         *
+         * @param {number} number
+         * @param {Uint8Array} entries  256 entries of four bytes.
+         */
+        SetPaletteEntries(number, entries){
+            if (!entries || entries.length !== PALETTE_BYTES)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            palettes.set(number >>> 0, Uint8Array.from(entries));
+            return D3D_OK;
+        },
+
+        /**
+         * @param {number} number
+         * @param {{ entries?: Uint8Array }} out
+         */
+        GetPaletteEntries(number, out){
+            const held = palettes.get(number >>> 0);
+            if (!held)
+            {
+                return D3DERR_INVALIDCALL;
+            }
+            out.entries = Uint8Array.from(held);
+            return D3D_OK;
+        },
+
+        /** @param {number} number */
+        SetCurrentTexturePalette(number){
+            currentPalette = number >>> 0;
+            return D3D_OK;
+        },
+
+        /** @param {{ number?: number }} out */
+        GetCurrentTexturePalette(out){
+            out.number = currentPalette;
+            return D3D_OK;
+        },
+
+        /**
          * Noted and nothing else. The mode exists so that a GDI dialog can be
          * drawn over a full-screen device; here the window is the browser's
          * and every dialog is drawn by the same path as the frame.
@@ -2093,7 +2148,7 @@ function createDeviceObject(parameters, caps, services, identity){
          * A shader is made only when the device advertises its version: a
          * program that checked the capability block has already taken the other
          * path, and one that did not is told at the create rather than drawn
-         * nothing at every frame after it.
+         * wrong at every frame after it.
          *
          * @param {Uint32Array | ArrayLike<number> | null} tokens
          * @param {{ shader?: any }} out
@@ -2187,16 +2242,31 @@ function createDeviceObject(parameters, caps, services, identity){
         GetPixelShaderConstantB: (start, n, out)=>pixelConstants.getB(start, n, out),
 
         /**
-         * What the two stages are running. The renderer draws only the
-         * fixed-function pipeline; a bound shader is reported to it as such,
-         * and it declines the draw and counts it.
+         * What the two stages are running: the format a fixed-function draw
+         * reads, and -- when a shader is bound -- everything the renderer
+         * needs to build the program: the parsed shaders, the declaration
+         * and the constant files, all live views.
          */
         get stageProcessing(){
             return {
-                vertexShader: vertexShader ? 1 : 0,
+                vertexShader: vertexShader ? vertexShader.id : 0,
                 fvf: effectiveFvf(),
                 fixedFunctionVertex: !vertexShader,
-                pixelShader: pixelShader ? 1 : 0,
+                pixelShader: pixelShader ? pixelShader.id : 0,
+                program: vertexShader || pixelShader
+                    ? {
+                        vertex: vertexShader?.parsed ?? null,
+                        vertexShader: vertexShader ?? null,
+                        vertexId: vertexShader?.id ?? 0,
+                        pixel: pixelShader?.parsed ?? null,
+                        pixelShader: pixelShader ?? null,
+                        pixelId: pixelShader?.id ?? 0,
+                        declaration: vertexDeclaration.declaration?.elements ?? null,
+                        declarationId: vertexDeclaration.declaration?.id ?? 0,
+                        vertexConstants,
+                        pixelConstants,
+                    }
+                    : null,
             };
         },
 
@@ -2719,6 +2789,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
+                rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
             });
             return D3D_OK;
@@ -2745,6 +2816,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 usage: D3DUSAGE.DEPTHSTENCIL,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
+                rejectsMalformedRects: true,
             });
             return D3D_OK;
         },
@@ -2772,6 +2844,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 usage: 0,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(pool),
+                rejectsMalformedRects: true,
             });
             return D3D_OK;
         },
@@ -3079,13 +3152,13 @@ function createDeviceObject(parameters, caps, services, identity){
         // --- queries ---
 
         /**
-         * An event query, which asks whether the GPU has caught up, is the one
-         * kind this device answers: it has, as far as the program can tell,
-         * the moment it asks. An occlusion query asks how many pixels a set of
-         * draws produced, and this device cannot count them -- so it is not
-         * offered, which sends a program to the path it has for a card
-         * without them, rather than told a number that would cull what it
-         * should draw.
+         * Two kinds are offered. An event query asks whether the GPU has
+         * caught up, and it has, as far as the program can tell, the moment it
+         * asks. An occlusion query asks how many pixels a set of draws
+         * produced, which this device cannot count: it answers with every
+         * pixel of the target, the one number that never culls what should be
+         * drawn, and says so once. Every other kind is the timing family, and
+         * is not offered.
          *
          * A null out-pointer is the documented way to ask whether a kind is
          * offered at all.
@@ -3094,18 +3167,18 @@ function createDeviceObject(parameters, caps, services, identity){
          * @param {{ query?: any } | null} out
          */
         CreateQuery(type, out){
-            if (type !== D3DQUERYTYPE.EVENT)
+            if (type !== D3DQUERYTYPE.EVENT && type !== D3DQUERYTYPE.OCCLUSION)
             {
-                if (type === D3DQUERYTYPE.OCCLUSION)
-                {
-                    report('occlusion', 'an occlusion query was refused: this device cannot'
-                        + ' count the pixels a draw produced');
-                }
                 return D3DERR_NOTAVAILABLE;
             }
             if (!out)
             {
                 return D3D_OK;
+            }
+            if (type === D3DQUERYTYPE.OCCLUSION)
+            {
+                report('occlusion', 'an occlusion query reports every pixel of the target'
+                    + ' visible: this device does not count the pixels a draw produced');
             }
             out.query = createQuery(type);
             return D3D_OK;
@@ -3141,11 +3214,12 @@ function createDeviceObject(parameters, caps, services, identity){
         const hr = validateShader(tokens, kind, supported);
         if (hr !== D3D_OK)
         {
-            if (supported.major === 0)
-            {
-                report(`create:${kind}`, `a ${kind} shader was refused: this device runs the`
-                    + ' fixed-function pipeline only, and says so in its capabilities');
-            }
+            const version = versionOf(tokens[0]);
+            report(`create:${kind}:${version ? `${version.major}.${version.minor}` : 'bad'}`,
+                version && version.kind === kind
+                    ? `a ${kind} shader of version ${version.major}.${version.minor} was refused:`
+                        + ` this device advertises ${supported.major}.${supported.minor}`
+                    : `a ${kind} shader was refused: its bytecode could not be read`);
             return hr;
         }
         out.shader = createShader({ kind, tokens, count: explicitCount() });
@@ -3218,6 +3292,7 @@ function createDeviceObject(parameters, caps, services, identity){
     /** @param {number} type */
     const createQuery = type=>{
         const queryCount = explicitCount();
+        const occlusion = type === D3DQUERYTYPE.OCCLUSION;
         let issued = false;
         return {
             type,
@@ -3227,25 +3302,33 @@ function createDeviceObject(parameters, caps, services, identity){
             addRef: ()=>queryCount.addRef(),
             release: ()=>queryCount.release(),
             GetType: ()=>type,
-            /** Four bytes: a BOOL. */
+            /** Four bytes: a BOOL, or a pixel count. */
             GetDataSize: ()=>4,
             /**
-             * An event query has no beginning; only the end may be issued.
+             * An event query has no beginning and only its end may be issued;
+             * an occlusion query has both, and its answer is complete at the
+             * end.
              *
              * @param {number} flags  D3DISSUE
              */
             Issue(flags){
                 if ((flags & D3DISSUE.BEGIN) !== 0)
                 {
-                    return D3DERR_INVALIDCALL;
+                    if (!occlusion)
+                    {
+                        return D3DERR_INVALIDCALL;
+                    }
+                    issued = false;
+                    return D3D_OK;
                 }
                 issued = true;
                 return D3D_OK;
             },
             /**
-             * The answer, which for an event is that the work is done. A
-             * buffer too small for it is refused; a query never issued has
-             * nothing to say and says so with S_FALSE.
+             * The answer: for an event that the work is done, for an
+             * occlusion query every pixel of the current target. A buffer too
+             * small for it is refused; a query never issued has nothing to
+             * say and says so with S_FALSE.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
@@ -3261,7 +3344,15 @@ function createDeviceObject(parameters, caps, services, identity){
                 }
                 if (out && size >= 4)
                 {
-                    out.value = 1;
+                    if (occlusion)
+                    {
+                        const target = describe(renderTargets.get(0));
+                        out.value = target.Width * target.Height;
+                    }
+                    else
+                    {
+                        out.value = 1;
+                    }
                 }
                 return D3D_OK;
             },
