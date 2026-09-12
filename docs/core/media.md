@@ -178,5 +178,5 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 19 
 | `src/layers/media/internal/ijl.test.js` | Contract, over a flat guest memory | Ordinals; `ijlInit` clears the structure and sets the default quality; parameters without decoding; the whole image lands in the DIB four channels as they lie; row order, negative height and padding; refusals with the library's own codes and names. |
 | `src/layers/media/internal/jpeg.test.js` | Byte-exact, against pictures computed from the definition of the transform | Streams built from coefficients with the file's own Huffman tables: no fixture from anywhere and nothing taken on trust from another decoder. |
 
-No test in the tree decodes a video stream; the decoder's video path is exercised only through a
-title in a CDP run, and no tracked scenario asserts on a decoded frame.
+No test in the tree decodes a video stream; the decoder's video path is reachable only through
+the browser harness, and no tracked scenario asserts on a decoded frame.

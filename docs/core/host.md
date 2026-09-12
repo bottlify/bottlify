@@ -204,8 +204,8 @@ with `Atomics.load` between turns; where the origin has no shared memory the loo
 clock (`YIELD_MS`) instead.
 
 `'page'` is the default in the worker too, on the strength of one measurement recorded in
-`src/host/messages.js`: on a real title's menu, the same build in the same worker over thirty
-seconds, `page` ran 1.95 G guest instructions and presented 866 frames, `event` 1.07 G and 469 —
+`src/host/messages.js`: on a harness run through the launcher path, the same build in the same
+worker over thirty seconds, `page` ran 1.95 G guest instructions and presented 866 frames, `event` 1.07 G and 469 —
 because a host call answering woke the loop for a turn that retired nothing, seventy thousand
 times, where the page's short look batches those answers. `'event'` stays available for the change
 that batches those wakes, and is not the default until a measurement says it should be.
@@ -256,7 +256,7 @@ host is closed and the canvas forgotten.
   session provider throws saying so. Use `'opfs'`, or seed with `{ files }`.
 - **No audio worker yet.** Output already runs on the audio thread (the worklet), but the mixer's
   pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's decoder callbacks
-  run on the engine's thread. Measured on a real title's main menu over 60 000 scheduler turns with
+  run on the engine's thread. Measured on a harness run over 60 000 scheduler turns with
   the engine in a worker, the pump's self time was 921 ms of a 186 s run (0.5 %, 11 µs a turn); a
   device drawing under one percent of the thread is not what to move first. The seam a split would
   need — buffer writes copied into a block the audio worker owns, cursors in a shared control block

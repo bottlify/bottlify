@@ -16,16 +16,15 @@ under a scheduler whose quantum is retired guest instructions; the bridge marsha
 puts COM interfaces into guest memory; a program's files come out of a bundle read by byte range,
 and what it writes persists as a session.
 
-Measured in this repository's own browser runs: **the engine has drawn and played a real title on
-a real GPU through Direct3D 8** — to its main menu, with its music and sound; nothing past that is
-claimed. The list of verified games will be published later.
-
 The drawing APIs present are DirectDraw, Direct3D 7, 8, 9 and 10 (with DXGI), OpenGL 1.x and
-Vulkan, every one rendering through the same WebGPU backend. Direct3D 8 is the one a real program
-has exercised; the others are verified by the package's own tests — contract tests against observed
-behaviour and byte-exact frame comparison — and not yet by a title. Sound goes through a mixer into
-a ring an `AudioWorklet` reads; DirectSound and waveOut sit on top of it. Video decoding is an
-FFmpeg build compiled to WebAssembly behind the DirectShow graph.
+Vulkan, every one rendering through the same WebGPU backend. All of them are covered by unit and
+contract tests and by byte-exact frame comparison against the backend's reference model; Direct3D
+8 is additionally exercised on a real GPU by the browser harness (`tools/cdp_test/triangle.mjs`,
+a committed fixture checked at named pixels). Sound goes through a mixer into a ring an
+`AudioWorklet` reads; DirectSound and waveOut sit on top of it. Video decoding is an FFmpeg build
+compiled to WebAssembly behind the DirectShow graph.
+
+The list of supported games will be filled in later.
 
 Every layer is real — `cpu`, `memory`, `kernel`, `bridge`, `loader`, `log`, `filesystem`, `win32`,
 `graphics`, `audio`, `input`, `media` — and each is a module with a declared interface that the
@@ -49,7 +48,7 @@ Building the vendored v86 from source needs Docker (`npm run build:v86 -- --dock
 - `modules/core/` — `@bottlify/core`, the engine package: `src/system/` is the module contract,
   `src/layers/<name>/` one directory per layer, `src/host/` the page and worker ends of
   `createApp`, `vendor/v86` the emulator submodule.
-- `modules/networking/`, `modules/installer/` — the Winsock relay, and adding a title by running
+- `modules/networking/`, `modules/installer/` — the Winsock relay, and adding a program by running
   its installer; each a workspace of its own.
 - `tools/cdp_test/` — dev-only browser harness (`npm run cdp:probe`, `cdp:game`, `cdp:frames`).
 - `docs/core/` — documentation of the core package: [`README.md`](docs/core/README.md) is the

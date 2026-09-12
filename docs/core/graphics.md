@@ -358,13 +358,14 @@ A call is answered one of three ways, and which one is decided where the call li
   done. Every reporter de-duplicates.
 - **Absent.** A slot with no implementation answers `E_NOTIMPL` from the right index.
 
-### What has drawn a real title
+### What the browser harness exercises
 
-Only Direct3D 8 has. This project's own CDP runs (`tools/cdp_test/game.mjs`, `npm run cdp:game`)
-bring a real title up to its main menu on a real GPU, and `tools/cdp_test/triangle.mjs` runs a
-committed Direct3D 8 fixture (`modules/core/test/fixtures/triangle.exe`) on a real GPU and checks
-four named pixels byte for byte. DirectDraw, Direct3D 7, 9 and 10, OpenGL, Vulkan and the GDI
-drawing half are verified by the tests below and by nothing else.
+`tools/cdp_test/triangle.mjs` runs a committed Direct3D 8 fixture
+(`modules/core/test/fixtures/triangle.exe`) on a real GPU and checks four named pixels byte for
+byte; `tools/cdp_test/game.mjs` (`npm run cdp:game`) drives a program bundle through the same page
+and reports what the run cost. Direct3D 8 is the only API with a real-GPU fixture; DirectDraw,
+Direct3D 7, 9 and 10, OpenGL, Vulkan and the GDI drawing half are verified by the tests below and
+by nothing else.
 
 ## Limitations and divergences
 
@@ -448,5 +449,5 @@ predication, subroutines or vertex-shader texture reads.
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a
-Direct3D 8 fixture, four named pixels) and `game.mjs` (a title's bring-up), both driving a headless
+Direct3D 8 fixture, four named pixels) and `game.mjs` (drives a program bundle), both driving a headless
 or headed Chromium over CDP. Only the browser probe runs in CI.

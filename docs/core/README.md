@@ -96,7 +96,7 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |
 | `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |
-| `npm run cdp:game`, `npm run cdp:frames` | Drive a bundled title in a real browser on a real GPU; report what a run cost, and where a frame's time goes once the title has settled. Development tooling in `tools/cdp_test/`, not tests. |
+| `npm run cdp:game`, `npm run cdp:frames` | Drive a program bundle in a real browser on a real GPU; report what a run cost, and where a frame's time goes once the program has settled. Development tooling in `tools/cdp_test/`, not tests. |
 
 CI runs `core` (typecheck, lint, tests, boundaries, integration tests, build) and `probe` on every
 push; `vendor` (the containerised v86 build and reproducibility check) runs when its own inputs
@@ -104,13 +104,12 @@ change and on a schedule.
 
 ## Current limitations
 
-- **A title reaches its menu; playing past it is unproven.** What has been measured in this
-  repository's own browser runs is one real title booting through `createApp`, drawing its main
-  menu on a real GPU through Direct3D 8, with music and sound. Nothing further is claimed. The
-  list of verified games will be published later.
-- **Direct3D 8 is the only drawing API a real program has exercised.** DirectDraw, Direct3D 7, 9
-  and 10, OpenGL and Vulkan are verified by the package's own tests — contract tests against
-  observed behaviour and byte-exact frame comparison on the WebGPU backend — not yet by a title.
+- **What is verified is what the tests and the harness cover.** Every layer has unit and
+  contract tests; the drawing APIs are checked by byte-exact frame comparison against the WebGPU
+  backend's reference model; the browser harness in `tools/cdp_test/` runs the engine in a real
+  Chromium on a real GPU, where only Direct3D 8 has a committed fixture (`triangle.mjs`). The
+  other drawing APIs have no real-GPU fixture yet. The list of supported games will be filled in
+  later.
 - **Some options cannot cross to the worker.** Function-valued options (`watchImport`, `sample`,
   `onCall`, a storage provider, a `bundle.fetch`) are only reachable by importing the engine
   directly; `storage: 'local'` needs `localStorage`, which a worker lacks; pointer lock is not

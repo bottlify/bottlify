@@ -178,7 +178,7 @@ without it, or per stream when the media layer answers null, the platform's `Aud
 interleaved 16-bit samples. Before the stream is handed over, `LEAD_FRAMES` (8) frames are read
 ahead and kept in front of the position; an `ASI_stream_process` that has fed enough and finds
 it not yet decoded -- only the platform decoder, which was measured answering up to a second
-late while a title starts -- waits (counted in `waits`) rather than answering short, which holds
+late while a program starts -- waits (counted in `waits`) rather than answering short, which holds
 the guest thread and whatever lock it took. With the hosted decoder `waits` stays at zero. `seek` finds
 the frame at or after the byte offset, `attribute` answers rates, widths, channels, position and
 percent done, `set_preference` records requested rate, width and channels.
