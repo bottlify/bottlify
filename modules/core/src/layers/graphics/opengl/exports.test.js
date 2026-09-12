@@ -17,8 +17,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ARGUMENT_WORDS, createOpengl } from './exports.js';
-import { GL, PFD } from './constants.js';
-import { PIXELFORMATDESCRIPTOR, encodePixelFormat } from './pixelformat.js';
+import { GL, PFD, WGL } from './constants.js';
+import { PIXELFORMATDESCRIPTOR, PIXEL_FORMATS, encodePixelFormat } from './pixelformat.js';
 
 /** The dword a guest pushes for a GLfloat. @param {number} value */
 function floatBits(value){
@@ -195,12 +195,13 @@ test('an unimplemented export cleans its stack, answers zero, and is counted', (
     const { table, opengl } = library();
     startDrawing(table);
 
-    assert.equal(table.glFogf.argBytes, 8);
-    assert.equal(table.glFogf.handler([GL.FOG_MODE, floatBits(1)]), 0);
-    table.glFogf.handler([GL.FOG_MODE, floatBits(1)]);
-    table.glLightfv.handler([0, 0, 0]);
+    // The evaluators are the one part of GL 1.1 nothing here implements.
+    assert.equal(table.glMap1f.argBytes, 24);
+    assert.equal(table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]), 0);
+    table.glMap1f.handler([0, floatBits(0), floatBits(1), 3, 4, 0]);
+    table.glEvalCoord1f.handler([floatBits(0.5)]);
 
-    assert.deepEqual(opengl.diagnostics().unimplemented, { glFogf: 2, glLightfv: 1 },
+    assert.deepEqual(opengl.diagnostics().unimplemented, { glMap1f: 2, glEvalCoord1f: 1 },
         'which entry points a program reached for is what a run that drew nothing has to say');
 });
 
@@ -290,3 +291,202 @@ function startDrawing(table){
     assert.equal(table.wglMakeCurrent.handler([hdc, context]), 1);
     return context;
 }
+
+// --- the typed variants and the memory paths ---
+
+/**
+ * A 4x4 drawable with a pixel-per-unit projection, through the table.
+ *
+ * @param {any} table
+ */
+function pixelProjection(table){
+    const [ll, lh] = doubleBits(0);
+    const [rl, rh] = doubleBits(4);
+    const [nl, nh] = doubleBits(-1);
+    const [fl, fh] = doubleBits(1);
+    table.glMatrixMode.handler([GL.PROJECTION]);
+    table.glLoadIdentity.handler([]);
+    table.glOrtho.handler([ll, lh, rl, rh, ll, lh, rl, rh, nl, nh, fl, fh]);
+    table.glMatrixMode.handler([GL.MODELVIEW]);
+    table.glLoadIdentity.handler([]);
+}
+
+test('an integer colour is normalised and an integer vertex is not', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const out = 0x2000;
+
+    table.glColor3ub.handler([255, 128, 0]);
+    table.glGetFloatv.handler([GL.CURRENT_COLOR, out]);
+    const colour = new DataView(box.bytes.buffer, out, 16);
+    assert.equal(colour.getFloat32(0, true), 1);
+    assert.equal(colour.getFloat32(4, true), Math.fround(128 / 255));
+    assert.equal(colour.getFloat32(12, true), 1, 'three components imply an alpha of one');
+
+    // glColor4b: -128 maps to (2 * -128 + 1) / 255, which is below zero.
+    table.glColor4b.handler([127, 0x80, 0, 127]);
+    table.glGetFloatv.handler([GL.CURRENT_COLOR, out]);
+    assert.equal(colour.getFloat32(0, true), 1);
+    assert.equal(colour.getFloat32(4, true), Math.fround(-255 / 255));
+
+    // glColor3usv reads three shorts.
+    box.bytes.set([0xff, 0xff, 0, 0x80, 0, 0], 0x3000);
+    table.glColor3usv.handler([0x3000]);
+    table.glGetFloatv.handler([GL.CURRENT_COLOR, out]);
+    assert.equal(colour.getFloat32(0, true), 1);
+    assert.equal(colour.getFloat32(4, true), Math.fround(0x8000 / 65535));
+
+    // glVertex3i keeps its integers and glVertex3d reads doubles: a point at
+    // (3, 2) -- which covers the pixel whose centre is within half a pixel of
+    // it, the third from the left -- and one at (1.5, 1.5), on a 4x4 frame.
+    pixelProjection(table);
+    table.glColor3f.handler([floatBits(1), floatBits(1), floatBits(1)]);
+    table.glBegin.handler([GL.POINTS]);
+    table.glVertex3i.handler([3, 2, 0]);
+    const [xl, xh] = doubleBits(1.5);
+    const [zl, zh] = doubleBits(0);
+    table.glVertex3d.handler([xl, xh, xl, xh, zl, zh]);
+    table.glEnd.handler([]);
+    table.glReadPixels.handler([0, 0, 4, 4, GL.RED, GL.UNSIGNED_BYTE, out]);
+    const rows = [0, 1, 2, 3].map(y=>[...box.bytes.subarray(out + y * 4, out + y * 4 + 4)]);
+    assert.deepEqual(rows, [
+        [0, 0, 0, 0],
+        [0, 255, 0, 0],
+        [0, 0, 255, 0],
+        [0, 0, 0, 0],
+    ]);
+});
+
+test('a texture is read out of guest memory through the unpack state', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    pixelProjection(table);
+    // A 2x1 RGB texture: six bytes, one row, so the alignment does not bite.
+    box.bytes.set([255, 0, 0, 0, 0, 255], 0x3000);
+    const names = 0x3100;
+    table.glGenTextures.handler([1, names]);
+    table.glBindTexture.handler([GL.TEXTURE_2D, box.bytes[names]]);
+    table.glTexImage2D.handler([GL.TEXTURE_2D, 0, GL.RGB, 2, 1, 0, GL.RGB, GL.UNSIGNED_BYTE,
+        0x3000]);
+    table.glTexParameteri.handler([GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST]);
+    table.glTexParameteri.handler([GL.TEXTURE_2D, GL.TEXTURE_MAG_FILTER, GL.NEAREST]);
+    table.glEnable.handler([GL.TEXTURE_2D]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+
+    table.glBegin.handler([GL.QUADS]);
+    table.glTexCoord2f.handler([floatBits(0), floatBits(0)]);
+    table.glVertex2f.handler([floatBits(0), floatBits(0)]);
+    table.glTexCoord2f.handler([floatBits(1), floatBits(0)]);
+    table.glVertex2f.handler([floatBits(4), floatBits(0)]);
+    table.glTexCoord2f.handler([floatBits(1), floatBits(1)]);
+    table.glVertex2f.handler([floatBits(4), floatBits(4)]);
+    table.glTexCoord2f.handler([floatBits(0), floatBits(1)]);
+    table.glVertex2f.handler([floatBits(0), floatBits(4)]);
+    table.glEnd.handler([]);
+
+    // Read back through glReadPixels into guest memory: bottom row first.
+    const out = 0x4000;
+    table.glReadPixels.handler([0, 0, 4, 1, GL.RGBA, GL.UNSIGNED_BYTE, out]);
+    assert.deepEqual([...box.bytes.subarray(out, out + 4)], [255, 0, 0, 255]);
+    assert.deepEqual([...box.bytes.subarray(out + 12, out + 16)], [0, 0, 255, 255]);
+});
+
+test('glDrawElements and glGetIntegerv cross guest memory both ways', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    pixelProjection(table);
+    const view = new DataView(box.bytes.buffer);
+    [0, 0, 4, 0, 0, 4].forEach((value, i)=>view.setFloat32(0x3000 + i * 4, value, true));
+    box.bytes.set([0, 1, 2], 0x3100);
+    table.glVertexPointer.handler([2, GL.FLOAT, 0, 0x3000]);
+    table.glEnableClientState.handler([GL.VERTEX_ARRAY]);
+    table.glColor3f.handler([floatBits(1), floatBits(1), floatBits(1)]);
+    table.glDrawElements.handler([GL.TRIANGLES, 3, GL.UNSIGNED_BYTE, 0x3100]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    const out = 0x4000;
+    table.glReadPixels.handler([0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE, out]);
+    assert.deepEqual([...box.bytes.subarray(out, out + 4)], [255, 255, 255, 255]);
+
+    table.glGetIntegerv.handler([GL.MAX_TEXTURE_UNITS, out]);
+    assert.equal(view.getInt32(out, true), 4);
+    table.glGetPointerv.handler([GL.VERTEX_ARRAY_POINTER, out]);
+    assert.equal(view.getUint32(out, true), 0x3000);
+});
+
+test('an integer light colour is normalised and an integer position is not', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    [0x7fffffff, 0, 0, 0x7fffffff].forEach((value, i)=>view.setInt32(0x3000 + i * 4, value, true));
+    table.glLightiv.handler([GL.LIGHT0, GL.DIFFUSE, 0x3000]);
+    [1, 2, 3, 1].forEach((value, i)=>view.setInt32(0x3000 + i * 4, value, true));
+    table.glLightiv.handler([GL.LIGHT0, GL.POSITION, 0x3000]);
+    const out = 0x4000;
+    table.glGetLightfv.handler([GL.LIGHT0, GL.DIFFUSE, out]);
+    assert.equal(view.getFloat32(out, true), 1);
+    assert.equal(view.getFloat32(out + 4, true), Math.fround(1 / 4294967295));
+    table.glGetLightfv.handler([GL.LIGHT0, GL.POSITION, out]);
+    assert.deepEqual([0, 4, 8, 12].map(k=>view.getFloat32(out + k, true)), [1, 2, 3, 1]);
+    table.glGetLightiv.handler([GL.LIGHT0, GL.DIFFUSE, out]);
+    assert.equal(view.getInt32(out, true), 0x7fffffff, 'and reads back onto the integer range');
+});
+
+test('a mapped buffer lives in guest memory the program writes through', ()=>{
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    const names = 0x3000;
+    table.glGenBuffersARB.handler([1, names]);
+    const name = view.getUint32(names, true);
+    assert.ok(name > 0);
+    table.glBindBufferARB.handler([GL.ARRAY_BUFFER, name]);
+    table.glBufferDataARB.handler([GL.ARRAY_BUFFER, 8, 0, GL.DYNAMIC_DRAW]);
+    const address = table.glMapBufferARB.handler([GL.ARRAY_BUFFER, GL.WRITE_ONLY]);
+    assert.notEqual(address, 0);
+    box.bytes.set([1, 2, 3, 4, 5, 6, 7, 8], address);
+    assert.equal(table.glUnmapBufferARB.handler([GL.ARRAY_BUFFER]), 1);
+    const out = 0x4000;
+    table.glGetBufferSubDataARB.handler([GL.ARRAY_BUFFER, 4, 4, out]);
+    assert.deepEqual([...box.bytes.subarray(out, out + 4)], [5, 6, 7, 8]);
+    table.glGetBufferParameterivARB.handler([GL.ARRAY_BUFFER, GL.BUFFER_SIZE, out]);
+    assert.equal(view.getInt32(out, true), 8);
+});
+
+test('WGL_ARB_pixel_format answers attributes and chooses by them', ()=>{
+    const { table, box } = library();
+    const view = new DataView(box.bytes.buffer);
+    const hdc = 0x900d;
+    const attributes = 0x3000;
+    [WGL.NUMBER_PIXEL_FORMATS_ARB, WGL.COLOR_BITS_ARB, WGL.DOUBLE_BUFFER_ARB]
+        .forEach((value, i)=>view.setUint32(attributes + i * 4, value, true));
+    const out = 0x4000;
+    assert.equal(table.wglGetPixelFormatAttribivARB.handler([hdc, 1, 0, 3, attributes, out]), 1);
+    assert.equal(view.getInt32(out, true), PIXEL_FORMATS.length);
+    assert.equal(view.getInt32(out + 4, true), PIXEL_FORMATS[0].cColorBits);
+    assert.equal(view.getInt32(out + 8, true),
+        (PIXEL_FORMATS[0].dwFlags & PFD.DOUBLEBUFFER) ? 1 : 0);
+    view.setUint32(attributes, 0xdead, true);
+    assert.equal(table.wglGetPixelFormatAttribivARB.handler([hdc, 1, 0, 1, attributes, out]), 0,
+        'an unknown attribute fails the whole query');
+
+    const request = 0x3100;
+    [WGL.DRAW_TO_WINDOW_ARB, 1, WGL.SUPPORT_OPENGL_ARB, 1, WGL.DOUBLE_BUFFER_ARB, 1,
+        WGL.COLOR_BITS_ARB, 32, WGL.DEPTH_BITS_ARB, 24, 0, 0]
+        .forEach((value, i)=>view.setInt32(request + i * 4, value, true));
+    const formats = 0x4100;
+    const count = 0x4200;
+    assert.equal(table.wglChoosePixelFormatARB.handler([hdc, request, 0, 1, formats, count]), 1);
+    assert.equal(view.getUint32(count, true), 1);
+    const chosen = view.getUint32(formats, true);
+    assert.ok(chosen >= 1 && chosen <= PIXEL_FORMATS.length);
+    assert.ok(PIXEL_FORMATS[chosen - 1].dwFlags & PFD.DOUBLEBUFFER, 'double buffered as asked');
+    assert.ok(PIXEL_FORMATS[chosen - 1].cDepthBits >= 24);
+});
+
+test('the swap interval is remembered', ()=>{
+    const { table } = library();
+    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 1);
+    assert.equal(table.wglSwapIntervalEXT.handler([0]), 1);
+    assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
+    assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
+});

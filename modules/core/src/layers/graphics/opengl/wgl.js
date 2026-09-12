@@ -79,8 +79,12 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *           Extension name -> the functions it adds. What is not in here is
  *           not reported and is not obtainable, which is the honest answer.
  * @property {{ readMemory: (address: number, length: number) => Uint8Array,
- *              writeMemory: (address: number, bytes: Uint8Array) => void }} [memory]
- *           Only DescribePixelFormat needs it, and only when given an address.
+ *              writeMemory: (address: number, bytes: Uint8Array) => void,
+ *              allocate?: (bytes: number) => number }} [memory]
+ *           DescribePixelFormat writes through it when given an address, and
+ *           every context made here reads its pixels and arrays through it.
+ * @property {(detail: string) => void} [divergence]
+ *           Handed to every context, for the calls it accepts and cannot honour.
  */
 
 /**
@@ -109,9 +113,19 @@ export function createWgl(options){
     const swaps = new Map();
 
     /**
-     * @type {Map<any, { key: string, formatIndex: number, doubleBuffered: boolean }>}
+     * @type {Map<any, { key: string, formatIndex: number, doubleBuffered: boolean,
+     *                   depthBits: number }>}
      */
     const live = new Map();
+
+    /** @type {import('./kernel.js').ContextMemory | undefined} */
+    const contextMemory = options.memory
+        ? {
+            read: options.memory.readMemory,
+            write: options.memory.writeMemory,
+            allocate: options.memory.allocate,
+        }
+        : undefined;
 
     /** @type {Map<number, { context: any, hdc: number }>} thread -> what it holds */
     const current = new Map();
@@ -258,11 +272,18 @@ export function createWgl(options){
                 return null;
             }
             const format = PIXEL_FORMATS[index - 1];
-            const context = createGlContext({ extensions: Object.keys(extensions) });
+            // The WGL extensions are looked up here and reported through
+            // their own string; the GL string names only GL extensions.
+            const context = createGlContext({
+                extensions: Object.keys(extensions).filter(name=>!name.startsWith('WGL_')),
+                memory: contextMemory,
+                divergence: options.divergence,
+            });
             live.set(context, {
                 key: drawable.key,
                 formatIndex: index,
                 doubleBuffered: (format.dwFlags & PFD.DOUBLEBUFFER) !== 0,
+                depthBits: format.cDepthBits,
             });
             return context;
         },
@@ -341,6 +362,7 @@ export function createWgl(options){
                 width: drawable.width,
                 height: drawable.height,
                 doubleBuffered: record.doubleBuffered,
+                depthBits: record.depthBits,
             });
             current.set(thread, { context, hdc });
             return true;

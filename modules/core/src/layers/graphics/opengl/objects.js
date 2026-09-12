@@ -35,11 +35,11 @@
 import { GL } from './constants.js';
 
 /**
- * The colour an incomplete texture samples as. A texture whose minification
- * filter wants mipmaps and has none is incomplete, which is not an error and
- * is not reported anywhere -- it just draws black, opaque, everywhere.
+ * An incomplete texture -- one whose minification filter wants mipmaps it
+ * does not have -- is not an error and is not reported anywhere. Its unit
+ * draws as if texturing were off, which is why an unfiltered upload shows up
+ * as untextured white rather than as black or as a fault.
  */
-export const INCOMPLETE_TEXTURE_SAMPLE = Object.freeze([0, 0, 0, 1]);
 
 /**
  * The four minification filters that need a complete mipmap pyramid. The
@@ -60,6 +60,11 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} height
  * @property {number} internalFormat
  * @property {number} border
+ * @property {number} baseFormat   what the internal format reduces to
+ * @property {Uint8Array | null} texels   RGBA, or null when the level was
+ *           given a shape and no data
+ * @property {number} [compressedFormat]  the S3TC format the data arrived in
+ * @property {number} [compressedBytes]   and how many bytes it took
  */
 
 /**
@@ -67,8 +72,31 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} name
  * @property {number} target
  * @property {Map<number, number>} parameters
- * @property {Map<number, TextureLevel>} levels
+ * @property {number[]} borderColour
+ * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
  */
+
+/**
+ * @typedef {Object} BufferObject
+ * @property {number} name
+ * @property {number} size
+ * @property {number} usage
+ * @property {number} access
+ * @property {Uint8Array} data
+ * @property {number} mapped  the guest address it is mapped at, or zero
+ */
+
+/** Cube map levels are kept in one map, six faces apart. */
+const FACE_STRIDE = 32;
+
+/**
+ * @param {number} level
+ * @param {number} [face]  0..5 for a cube map
+ * @returns {number}
+ */
+export function levelKey(level, face = 0){
+    return face * FACE_STRIDE + level;
+}
 
 /**
  * @typedef {Object} DisplayList
@@ -87,8 +115,13 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
     [GL.TEXTURE_MAG_FILTER, GL.LINEAR],
     [GL.TEXTURE_WRAP_S, GL.REPEAT],
     [GL.TEXTURE_WRAP_T, GL.REPEAT],
+    [GL.TEXTURE_WRAP_R, GL.REPEAT],
     [GL.TEXTURE_BASE_LEVEL, 0],
     [GL.TEXTURE_MAX_LEVEL, 1000],
+    [GL.TEXTURE_MIN_LOD, -1000],
+    [GL.TEXTURE_MAX_LOD, 1000],
+    [GL.TEXTURE_PRIORITY, 1],
+    [GL.GENERATE_MIPMAP, 0],
 ]);
 
 /**
@@ -97,7 +130,22 @@ export const DEFAULT_TEXTURE_PARAMETERS = Object.freeze([
  * @returns {TextureObject}
  */
 export function createTextureObject(name, target){
-    return { name, target, parameters: new Map(DEFAULT_TEXTURE_PARAMETERS), levels: new Map() };
+    return {
+        name,
+        target,
+        parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
+        borderColour: [0, 0, 0, 0],
+        levels: new Map(),
+    };
+}
+
+/**
+ * @param {number} name
+ * @returns {BufferObject}
+ */
+export function createBufferObject(name){
+    return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
+        mapped: 0 };
 }
 
 /**
@@ -109,28 +157,40 @@ export function createTextureObject(name, target){
  * @returns {boolean}
  */
 export function isTextureComplete(texture){
-    const base = texture.levels.get(0);
-    if (!base)
+    const faces = texture.target === GL.TEXTURE_CUBE_MAP ? 6 : 1;
+    const base = texture.levels.get(levelKey(0));
+    if (!base || base.width === 0 || base.height === 0)
     {
         return false;
     }
-    if (!MIPMAP_FILTERS.has(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0))
+    for (let face = 0; face < faces; face++)
     {
-        return true;
-    }
-    let width = base.width;
-    let height = base.height;
-    let level = 0;
-    while (width > 1 || height > 1)
-    {
-        level++;
-        width = Math.max(1, width >> 1);
-        height = Math.max(1, height >> 1);
-        const image = texture.levels.get(level);
-        if (!image || image.width !== width || image.height !== height
-            || image.internalFormat !== base.internalFormat)
+        const first = texture.levels.get(levelKey(0, face));
+        // A cube map's faces have to be square and all the same size, or
+        // there is no cube to sample.
+        if (!first || first.width !== base.width || first.height !== base.height
+            || (faces > 1 && first.width !== first.height))
         {
             return false;
+        }
+        if (!MIPMAP_FILTERS.has(texture.parameters.get(GL.TEXTURE_MIN_FILTER) ?? 0))
+        {
+            continue;
+        }
+        let width = base.width;
+        let height = base.height;
+        let level = 0;
+        while (width > 1 || height > 1)
+        {
+            level++;
+            width = Math.max(1, width >> 1);
+            height = Math.max(1, height >> 1);
+            const image = texture.levels.get(levelKey(level, face));
+            if (!image || image.width !== width || image.height !== height
+                || image.internalFormat !== base.internalFormat)
+            {
+                return false;
+            }
         }
     }
     return true;
@@ -223,12 +283,14 @@ function createNamespace(){
 /**
  * @returns {{ textures: ReturnType<typeof createNamespace>,
  *             lists: ReturnType<typeof createNamespace>,
+ *             buffers: ReturnType<typeof createNamespace>,
  *             contexts: number, used: boolean }}
  */
 export function createShareGroup(){
     return {
         textures: createNamespace(),
         lists: createNamespace(),
+        buffers: createNamespace(),
         /** How many contexts name this group. The objects outlive all but the last. */
         contexts: 0,
         /**

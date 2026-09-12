@@ -5,16 +5,11 @@
  */
 
 /**
- * The GL context as a program observes it between draws.
+ * The GL context: the state a program observes, and the draw that reads it.
  *
- * **Nothing here draws.** What it models is everything a program can find out
- * about a context without a single pixel changing: what a state reads back as,
- * what a failed call reports, what a name refers to, and what was submitted.
- * All of it is checked on startup and between frames by code that never looks
- * at the screen, and all of it is wrong in a way that surfaces much later if
- * it is guessed at.
- *
- * Four conventions run through the file:
+ * Four conventions run through this file and the files that extend it
+ * (`context-*.js`, one per area of the API, each installing its entry points
+ * on the same object through the same kernel):
  *
  * - **A call that fails sets an error and does nothing else.** No half-applied
  *   state, no output written. Programs poll `glGetError` in a loop and expect
@@ -30,22 +25,37 @@
  *   decision across the entry points is how the two halves drift apart.
  * - **Objects live in the share group, state lives here.** Which texture is
  *   bound is this context's business; the texture itself is not.
+ *
+ * What a program passes as a pointer is read through the memory the context
+ * was given, at the moment of the call -- never earlier, because a program
+ * fills its arrays after setting the pointers, and never later, because a
+ * display list keeps what the pointer held when it was compiled.
  */
 
 import { GL } from './constants.js';
+import { EXTENSION_FUNCTIONS } from './extensions.js';
 import {
-    createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, transform,
-    translation,
+    createMatrixStacks, frustum, identity, multiply, ortho, rotation, scaling, translation,
 } from './matrix.js';
-import { createShareGroup, createTextureObject, isTextureComplete } from './objects.js';
+import { createShareGroup } from './objects.js';
 import { createDefaultState, readState } from './state.js';
-import { createFramebuffer, fillBox, fillTriangle, toByte, wholeOf } from './raster.js';
+import { createFramebuffer, fillBox, fillDepth, toByte, wholeOf } from './raster.js';
+import { CLIENT_BITS, SERVER_BITS, queriesSavedBy } from './attributes.js';
+import { compare } from './pipeline.js';
+import { installTextureCalls } from './context-textures.js';
+import { installLightingCalls } from './context-lighting.js';
+import { installArrayCalls } from './context-arrays.js';
+import { installPixelCalls } from './context-pixels.js';
+import { createSceneBuilder } from './context-scene.js';
 
-/** What this implementation answers glGetString with, absent a real backend. */
+/** What this implementation answers glGetString with. */
 const STRINGS = Object.freeze({
     [GL.VENDOR]: 'Bottlify Project',
     [GL.RENDERER]: 'Bottlify OpenGL',
-    [GL.VERSION]: '2.1',
+    // The version is what the core entry points implement; everything past it
+    // is reported as an extension, which is how a program of the era expects
+    // to find it.
+    [GL.VERSION]: '1.1',
 });
 
 /**
@@ -56,7 +66,8 @@ const STRINGS = Object.freeze({
 const ALLOWED_IN_BEGIN = new Set([
     'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
-    'glCallList', 'glEnd',
+    'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
+    'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -70,16 +81,23 @@ const CLEAR_BITS = GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT | GL.STENCIL_BUFFER
  */
 const NOT_COMPILABLE = new Set([
     'glGetError', 'glGetBooleanv', 'glGetIntegerv', 'glGetFloatv', 'glGetString',
-    'glGetTexParameteriv', 'glIsEnabled', 'glIsTexture', 'glIsList', 'glGenTextures',
-    'glGenLists', 'glDeleteTextures', 'glDeleteLists', 'glNewList', 'glEndList',
-    'glPixelStorei', 'glFlush', 'glFinish',
+    'glGetPointerv', 'glGetTexParameteriv', 'glGetTexParameterfv', 'glGetTexLevelParameteriv',
+    'glGetTexEnviv', 'glGetTexEnvfv', 'glGetTexGenfv', 'glGetTexImage', 'glGetLightfv',
+    'glGetMaterialfv', 'glGetClipPlane', 'glIsEnabled', 'glIsTexture', 'glIsList',
+    'glGenTextures', 'glGenLists', 'glDeleteTextures', 'glDeleteLists', 'glNewList',
+    'glEndList', 'glPixelStorei', 'glFlush', 'glFinish', 'glReadPixels', 'glRenderMode',
+    'glAreTexturesResident', 'glVertexPointer', 'glNormalPointer', 'glColorPointer',
+    'glTexCoordPointer', 'glIndexPointer', 'glEdgeFlagPointer', 'glSecondaryColorPointerEXT',
+    'glFogCoordPointerEXT', 'glInterleavedArrays', 'glEnableClientState',
+    'glDisableClientState', 'glClientActiveTextureARB', 'glPushClientAttrib',
+    'glPopClientAttrib', 'glGenBuffersARB', 'glBindBufferARB', 'glDeleteBuffersARB',
+    'glIsBufferARB', 'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB',
+    'glMapBufferARB', 'glUnmapBufferARB', 'glGetBufferParameterivARB',
+    'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT',
+    'glGetCompressedTexImageARB',
 ]);
 
-/**
- * The primitive modes glBegin accepts. Anything else is GL_INVALID_ENUM.
- *
- * @type {Set<number>}
- */
+/** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([
     GL.POINTS, GL.LINES, GL.LINE_LOOP, GL.LINE_STRIP, GL.TRIANGLES, GL.TRIANGLE_STRIP,
     GL.TRIANGLE_FAN, GL.QUADS, GL.QUAD_STRIP, GL.POLYGON,
@@ -92,7 +110,6 @@ const MATRIX_STACK_OF = Object.freeze({
     [GL.TEXTURE]: 'texture',
 });
 
-/** Which query reads which stack's current matrix, and which its depth. */
 const MATRIX_QUERIES = Object.freeze({
     [GL.MODELVIEW_MATRIX]: 'modelview',
     [GL.PROJECTION_MATRIX]: 'projection',
@@ -105,7 +122,7 @@ const STACK_DEPTH_QUERIES = Object.freeze({
 });
 
 /** @type {Set<number>} */
-const COMPARE_FUNCTIONS = new Set([
+export const COMPARE_FUNCTIONS = new Set([
     GL.NEVER, GL.LESS, GL.EQUAL, GL.LEQUAL, GL.GREATER, GL.NOTEQUAL, GL.GEQUAL, GL.ALWAYS,
 ]);
 
@@ -116,61 +133,72 @@ const BLEND_FACTORS = new Set([
     GL.SRC_ALPHA_SATURATE,
 ]);
 
-/**
- * The base internal formats, plus the four component counts GL 1.0 took.
- *
- * @type {Set<number>}
- */
-const INTERNAL_FORMATS = new Set([
-    1, 2, 3, 4, GL.ALPHA, GL.LUMINANCE, GL.LUMINANCE_ALPHA, GL.RGB, GL.RGBA,
-    GL.DEPTH_COMPONENT,
+/** @type {Set<number>} */
+const LOGIC_OPS = new Set([
+    GL.CLEAR, GL.AND, GL.AND_REVERSE, GL.COPY, GL.AND_INVERTED, GL.NOOP, GL.XOR, GL.OR, GL.NOR,
+    GL.EQUIV, GL.INVERT, GL.OR_REVERSE, GL.COPY_INVERTED, GL.OR_INVERTED, GL.NAND, GL.SET,
 ]);
 
 /** @type {Set<number>} */
-const PIXEL_FORMATS_2D = new Set([
-    GL.COLOR_INDEX, GL.STENCIL_INDEX, GL.DEPTH_COMPONENT, GL.RED, GL.GREEN, GL.BLUE, GL.ALPHA,
-    GL.RGB, GL.RGBA, GL.BGR, GL.BGRA, GL.LUMINANCE, GL.LUMINANCE_ALPHA,
+const STENCIL_OPS = new Set([
+    GL.KEEP, GL.ZERO, GL.REPLACE, GL.INCR, GL.DECR, GL.INVERT, GL.INCR_WRAP, GL.DECR_WRAP,
 ]);
 
 /** @type {Set<number>} */
-const PIXEL_TYPES = new Set([
-    GL.BYTE, GL.UNSIGNED_BYTE, GL.SHORT, GL.UNSIGNED_SHORT, GL.INT, GL.UNSIGNED_INT, GL.FLOAT,
-    GL.BITMAP, GL.UNSIGNED_BYTE_3_3_2, GL.UNSIGNED_SHORT_4_4_4_4, GL.UNSIGNED_SHORT_5_5_5_1,
-    GL.UNSIGNED_INT_8_8_8_8, GL.UNSIGNED_INT_10_10_10_2, GL.UNSIGNED_SHORT_5_6_5,
+const HINTS = new Set([
+    GL.PERSPECTIVE_CORRECTION_HINT, GL.POINT_SMOOTH_HINT, GL.LINE_SMOOTH_HINT,
+    GL.POLYGON_SMOOTH_HINT, GL.FOG_HINT, GL.GENERATE_MIPMAP_HINT, GL.TEXTURE_COMPRESSION_HINT,
 ]);
 
-/**
- * Packed types, and the formats whose component count they can carry.
- *
- * @type {Map<number, number[]>}
- */
-const PACKED_TYPE_FORMATS = new Map([
-    [GL.UNSIGNED_BYTE_3_3_2, [GL.RGB]],
-    [GL.UNSIGNED_SHORT_5_6_5, [GL.RGB]],
-    [GL.UNSIGNED_SHORT_4_4_4_4, [GL.RGBA, GL.BGRA]],
-    [GL.UNSIGNED_SHORT_5_5_5_1, [GL.RGBA, GL.BGRA]],
-    [GL.UNSIGNED_INT_8_8_8_8, [GL.RGBA, GL.BGRA]],
-    [GL.UNSIGNED_INT_10_10_10_2, [GL.RGBA, GL.BGRA]],
+/** @type {Set<number>} */
+const HINT_MODES = new Set([GL.DONT_CARE, GL.FASTEST, GL.NICEST]);
+
+/** @type {Set<number>} */
+const FACES = new Set([GL.FRONT, GL.BACK, GL.FRONT_AND_BACK]);
+
+/** @type {Set<number>} */
+const POLYGON_MODES = new Set([GL.POINT, GL.LINE, GL.FILL]);
+
+/** @type {Set<number>} */
+const RENDER_MODES = new Set([GL.RENDER, GL.SELECT, GL.FEEDBACK]);
+
+/** @type {Set<number>} */
+const BUFFERS = new Set([
+    GL.NONE, GL.FRONT_LEFT, GL.FRONT_RIGHT, GL.BACK_LEFT, GL.BACK_RIGHT, GL.FRONT, GL.BACK,
+    GL.LEFT, GL.RIGHT, GL.FRONT_AND_BACK, GL.AUX0,
 ]);
 
-/** Which query reports the binding of which texture target. */
-const TEXTURE_BINDING_QUERY = Object.freeze({
-    [GL.TEXTURE_1D]: GL.TEXTURE_BINDING_1D,
-    [GL.TEXTURE_2D]: GL.TEXTURE_BINDING_2D,
-});
+/** @type {Set<number>} */
+const PIXEL_STORE_PARAMETERS = new Set([
+    GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
+    GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
+    GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
+]);
+
+/** How many pushes the attribute stacks take. */
+const ATTRIB_STACK_LIMIT = 16;
 
 /**
  * @typedef {Object} Drawable
  * @property {number} width
  * @property {number} height
  * @property {boolean} doubleBuffered
+ * @property {number} [depthBits]
  */
+
+/** @typedef {import('./kernel.js').ContextMemory} ContextMemory */
 
 /**
  * @typedef {Object} GlContextOptions
  * @property {ReturnType<typeof createShareGroup>} [shareGroup]
  * @property {readonly string[]} [extensions]  what glGetString(GL_EXTENSIONS) reports
+ * @property {ContextMemory} [memory]
+ * @property {(detail: string) => void} [divergence]
+ *           Told, once per distinct message, when a call was accepted but
+ *           its effect is not what the real API would have had.
  */
+
+/** @typedef {import('./kernel.js').ContextKernel} ContextKernel */
 
 /**
  * @param {GlContextOptions} [options]
@@ -179,11 +207,10 @@ export function createGlContext(options = {}){
     let shareGroup = options.shareGroup ?? createShareGroup();
     shareGroup.contexts++;
     const extensions = [...(options.extensions ?? [])];
+    const memory = options.memory ?? null;
 
-    /** The drawable's geometry, unknown until the context is first attached. */
     let attached = false;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
-    /** Nothing can be drawn before there is a drawable to draw into. */
     let framebuffer = createFramebuffer(0, 0);
 
     /** @type {number} */
@@ -194,23 +221,24 @@ export function createGlContext(options = {}){
     /** @type {number} */
     let matrixMode = GL.MODELVIEW;
 
-    /** @type {Map<number, number>} target -> bound texture name, zero being the default */
-    const bindings = new Map([[GL.TEXTURE_1D, 0], [GL.TEXTURE_2D, 0]]);
-    /** @type {Map<number, import('./objects.js').TextureObject>} the per-target default objects */
-    const defaultTextures = new Map([
-        [GL.TEXTURE_1D, createTextureObject(0, GL.TEXTURE_1D)],
-        [GL.TEXTURE_2D, createTextureObject(0, GL.TEXTURE_2D)],
-    ]);
-
     /** @type {import('./objects.js').DisplayList | null} */
     let compiling = null;
     /** @type {number} */
     let compileMode = GL.COMPILE;
+    let listNesting = 0;
 
     /** @type {{ mode: number, vertices: any[] } | null} */
     let primitive = null;
     /** @type {{ mode: number, vertices: any[] }[]} */
     const submitted = [];
+
+    /** @type {any[]} */
+    const attribStack = [];
+    /** @type {any[]} */
+    const clientAttribStack = [];
+
+    /** @type {Set<string>} */
+    const diverged = new Set();
 
     /** @param {number} code */
     const setError = code=>{
@@ -228,6 +256,15 @@ export function createGlContext(options = {}){
     /** @param {number} query @param {number[]} values */
     const setState = (query, values)=>{
         record(query).values = values;
+    };
+
+    /** @param {string} detail */
+    const diverge = detail=>{
+        if (!diverged.has(detail))
+        {
+            diverged.add(detail);
+            options.divergence?.(detail);
+        }
     };
 
     /**
@@ -252,6 +289,24 @@ export function createGlContext(options = {}){
         return true;
     };
 
+    /** @type {ContextKernel} */
+    const kernel = {
+        enter,
+        setError,
+        record,
+        setState,
+        diverge,
+        shareGroup: ()=>shareGroup,
+        memory: ()=>memory,
+        framebuffer: ()=>framebuffer,
+        inPrimitive: ()=>primitive !== null,
+        scissorBox,
+        stacks,
+        drawVertices,
+        currentVertex,
+        side: {},
+    };
+
     const context = {
         get shareGroup(){
             return shareGroup;
@@ -259,7 +314,7 @@ export function createGlContext(options = {}){
         get destroyed(){
             return destroyed;
         },
-        /** What glBegin/glEnd accumulated. Nothing was drawn; this is the record. */
+        /** What glBegin/glEnd accumulated: the record of every primitive drawn. */
         get submittedPrimitives(){
             return submitted;
         },
@@ -269,6 +324,10 @@ export function createGlContext(options = {}){
         /** The colour buffer as it stands. BGRX, row zero at the top. */
         get framebuffer(){
             return framebuffer;
+        },
+        /** For the installers' tests: the kernel's side state. */
+        get side(){
+            return kernel.side;
         },
 
         /**
@@ -286,14 +345,11 @@ export function createGlContext(options = {}){
             }
             attached = true;
             state = createDefaultState(drawable);
-            framebuffer = createFramebuffer(drawable.width, drawable.height);
+            framebuffer = createFramebuffer(drawable.width, drawable.height,
+                { depth: (drawable.depthBits ?? 0) > 0 });
         },
 
-        /**
-         * Joins another context's share group. Only wglShareLists calls this.
-         *
-         * @param {ReturnType<typeof createShareGroup>} group
-         */
+        /** @param {ReturnType<typeof createShareGroup>} group */
         adoptShareGroup(group){
             shareGroup.contexts--;
             shareGroup = group;
@@ -317,32 +373,12 @@ export function createGlContext(options = {}){
 
         /** @param {number} cap */
         glEnable(cap){
-            if (!enter('glEnable', [cap]))
-            {
-                return;
-            }
-            const entry = state.get(cap);
-            if (!entry || entry.kind !== 'bool')
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            entry.values = [1];
+            setEnabled('glEnable', cap, 1);
         },
 
         /** @param {number} cap */
         glDisable(cap){
-            if (!enter('glDisable', [cap]))
-            {
-                return;
-            }
-            const entry = state.get(cap);
-            if (!entry || entry.kind !== 'bool')
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            entry.values = [0];
+            setEnabled('glDisable', cap, 0);
         },
 
         /** @param {number} cap @returns {number} GL_TRUE or GL_FALSE */
@@ -351,13 +387,13 @@ export function createGlContext(options = {}){
             {
                 return GL.FALSE;
             }
-            const entry = state.get(cap);
-            if (!entry || entry.kind !== 'bool')
+            const values = kernel.side.unitValue(cap) ?? state.get(cap)?.values;
+            if (!values || state.get(cap)?.kind !== 'bool')
             {
                 setError(GL.INVALID_ENUM);
                 return GL.FALSE;
             }
-            return entry.values[0] !== 0 ? GL.TRUE : GL.FALSE;
+            return values[0] !== 0 ? GL.TRUE : GL.FALSE;
         },
 
         // --- typed queries ---
@@ -404,7 +440,8 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_ENUM);
                 return null;
             }
-            return readState(entry, as);
+            const perUnit = kernel.side.unitValue(query);
+            return readState(perUnit ? { ...entry, values: perUnit } : entry, as);
         },
 
         /** @param {number} name @returns {string | null} */
@@ -426,6 +463,20 @@ export function createGlContext(options = {}){
             return value;
         },
 
+        /** @param {number} target @param {number} mode */
+        glHint(target, mode){
+            if (!enter('glHint', [target, mode]))
+            {
+                return;
+            }
+            if (!HINTS.has(target) || !HINT_MODES.has(mode))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(target, [mode]);
+        },
+
         // --- the state a program sets before it draws ---
 
         /**
@@ -435,36 +486,46 @@ export function createGlContext(options = {}){
          * @param {number} alpha
          */
         glClearColor(red, green, blue, alpha){
-            if (!enter('glClearColor', [red, green, blue, alpha]))
+            if (enter('glClearColor', [red, green, blue, alpha]))
             {
-                return;
+                setState(GL.COLOR_CLEAR_VALUE, [red, green, blue, alpha].map(clamp01));
             }
-            setState(GL.COLOR_CLEAR_VALUE, [red, green, blue, alpha]);
         },
 
         /** @param {number} depth */
         glClearDepth(depth){
-            if (!enter('glClearDepth', [depth]))
+            if (enter('glClearDepth', [depth]))
             {
-                return;
+                setState(GL.DEPTH_CLEAR_VALUE, [clamp01(depth)]);
             }
-            setState(GL.DEPTH_CLEAR_VALUE, [Math.min(1, Math.max(0, depth))]);
         },
 
         /** @param {number} value */
         glClearStencil(value){
-            if (!enter('glClearStencil', [value]))
+            if (enter('glClearStencil', [value]))
             {
-                return;
+                setState(GL.STENCIL_CLEAR_VALUE, [value | 0]);
             }
-            setState(GL.STENCIL_CLEAR_VALUE, [value | 0]);
         },
 
         /**
-         * Only the colour buffer is written: this context has no depth,
-         * stencil or accumulation storage yet, so naming those bits is
-         * accepted and does nothing. A bit outside the four is GL_INVALID_VALUE
-         * -- not GL_INVALID_ENUM, because the argument is a mask.
+         * @param {number} red
+         * @param {number} green
+         * @param {number} blue
+         * @param {number} alpha
+         */
+        glClearAccum(red, green, blue, alpha){
+            if (enter('glClearAccum', [red, green, blue, alpha]))
+            {
+                setState(GL.ACCUM_CLEAR_VALUE, [red, green, blue, alpha].map(clamp01));
+            }
+        },
+
+        /**
+         * The colour and depth buffers are cleared; there is no stencil or
+         * accumulation storage, so naming those bits is accepted and does
+         * nothing. A bit outside the four is GL_INVALID_VALUE -- not
+         * GL_INVALID_ENUM, because the argument is a mask.
          *
          * @param {number} mask
          */
@@ -478,11 +539,16 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_VALUE);
                 return;
             }
-            if ((mask & GL.COLOR_BUFFER_BIT) === 0)
+            const box = scissorBox();
+            if (mask & GL.COLOR_BUFFER_BIT)
             {
-                return;
+                fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), box,
+                    record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0));
             }
-            fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), scissorBox());
+            if ((mask & GL.DEPTH_BUFFER_BIT) && record(GL.DEPTH_WRITEMASK).values[0] !== 0)
+            {
+                fillDepth(framebuffer, record(GL.DEPTH_CLEAR_VALUE).values[0], box);
+            }
         },
 
         /**
@@ -519,25 +585,23 @@ export function createGlContext(options = {}){
 
         /** @param {number} func */
         glDepthFunc(func){
-            if (!enter('glDepthFunc', [func]))
-            {
-                return;
-            }
-            if (!COMPARE_FUNCTIONS.has(func))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            setState(GL.DEPTH_FUNC, [func]);
+            setEnum('glDepthFunc', GL.DEPTH_FUNC, func, COMPARE_FUNCTIONS);
         },
 
         /** @param {number} flag */
         glDepthMask(flag){
-            if (!enter('glDepthMask', [flag]))
+            if (enter('glDepthMask', [flag]))
             {
-                return;
+                setState(GL.DEPTH_WRITEMASK, [flag ? 1 : 0]);
             }
-            setState(GL.DEPTH_WRITEMASK, [flag ? 1 : 0]);
+        },
+
+        /** @param {number} near @param {number} far */
+        glDepthRange(near, far){
+            if (enter('glDepthRange', [near, far]))
+            {
+                setState(GL.DEPTH_RANGE, [clamp01(near), clamp01(far)]);
+            }
         },
 
         /**
@@ -547,54 +611,31 @@ export function createGlContext(options = {}){
          * @param {number} alpha
          */
         glColorMask(red, green, blue, alpha){
-            if (!enter('glColorMask', [red, green, blue, alpha]))
+            if (enter('glColorMask', [red, green, blue, alpha]))
             {
-                return;
+                setState(GL.COLOR_WRITEMASK,
+                    [red ? 1 : 0, green ? 1 : 0, blue ? 1 : 0, alpha ? 1 : 0]);
             }
-            setState(GL.COLOR_WRITEMASK,
-                [red ? 1 : 0, green ? 1 : 0, blue ? 1 : 0, alpha ? 1 : 0]);
         },
 
         /** @param {number} mode */
         glCullFace(mode){
-            if (!enter('glCullFace', [mode]))
-            {
-                return;
-            }
-            if (mode !== GL.FRONT && mode !== GL.BACK && mode !== GL.FRONT_AND_BACK)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            setState(GL.CULL_FACE_MODE, [mode]);
+            setEnum('glCullFace', GL.CULL_FACE_MODE, mode, FACES);
         },
 
         /** @param {number} mode */
         glFrontFace(mode){
-            if (!enter('glFrontFace', [mode]))
-            {
-                return;
-            }
-            if (mode !== GL.CW && mode !== GL.CCW)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            setState(GL.FRONT_FACE, [mode]);
+            setEnum('glFrontFace', GL.FRONT_FACE, mode, new Set([GL.CW, GL.CCW]));
         },
 
         /** @param {number} mode */
         glShadeModel(mode){
-            if (!enter('glShadeModel', [mode]))
-            {
-                return;
-            }
-            if (mode !== GL.FLAT && mode !== GL.SMOOTH)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            setState(GL.SHADE_MODEL, [mode]);
+            setEnum('glShadeModel', GL.SHADE_MODEL, mode, new Set([GL.FLAT, GL.SMOOTH]));
+        },
+
+        /** @param {number} opcode */
+        glLogicOp(opcode){
+            setEnum('glLogicOp', GL.LOGIC_OP_MODE, opcode, LOGIC_OPS);
         },
 
         /** @param {number} func @param {number} ref */
@@ -609,13 +650,96 @@ export function createGlContext(options = {}){
                 return;
             }
             setState(GL.ALPHA_TEST_FUNC, [func]);
-            setState(GL.ALPHA_TEST_REF, [Math.min(1, Math.max(0, ref))]);
+            setState(GL.ALPHA_TEST_REF, [clamp01(ref)]);
         },
 
-        /**
-         * @param {number} parameter
-         * @param {number} value
-         */
+        /** @param {number} func @param {number} ref @param {number} mask */
+        glStencilFunc(func, ref, mask){
+            if (!enter('glStencilFunc', [func, ref, mask]))
+            {
+                return;
+            }
+            if (!COMPARE_FUNCTIONS.has(func))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.STENCIL_FUNC, [func]);
+            setState(GL.STENCIL_REF, [ref | 0]);
+            setState(GL.STENCIL_VALUE_MASK, [mask >>> 0]);
+        },
+
+        /** @param {number} fail @param {number} zfail @param {number} zpass */
+        glStencilOp(fail, zfail, zpass){
+            if (!enter('glStencilOp', [fail, zfail, zpass]))
+            {
+                return;
+            }
+            if (!STENCIL_OPS.has(fail) || !STENCIL_OPS.has(zfail) || !STENCIL_OPS.has(zpass))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.STENCIL_FAIL, [fail]);
+            setState(GL.STENCIL_PASS_DEPTH_FAIL, [zfail]);
+            setState(GL.STENCIL_PASS_DEPTH_PASS, [zpass]);
+        },
+
+        /** @param {number} mask */
+        glStencilMask(mask){
+            if (enter('glStencilMask', [mask]))
+            {
+                setState(GL.STENCIL_WRITEMASK, [mask >>> 0]);
+            }
+        },
+
+        /** @param {number} face @param {number} mode */
+        glPolygonMode(face, mode){
+            if (!enter('glPolygonMode', [face, mode]))
+            {
+                return;
+            }
+            if (!FACES.has(face) || !POLYGON_MODES.has(mode))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            const [front, back] = record(GL.POLYGON_MODE).values;
+            setState(GL.POLYGON_MODE, [
+                face === GL.BACK ? front : mode,
+                face === GL.FRONT ? back : mode,
+            ]);
+        },
+
+        /** @param {number} factor @param {number} units */
+        glPolygonOffset(factor, units){
+            if (enter('glPolygonOffset', [factor, units]))
+            {
+                setState(GL.POLYGON_OFFSET_FACTOR, [factor]);
+                setState(GL.POLYGON_OFFSET_UNITS, [units]);
+            }
+        },
+
+        /** @param {number} width */
+        glLineWidth(width){
+            setPositive('glLineWidth', GL.LINE_WIDTH, width);
+        },
+
+        /** @param {number} size */
+        glPointSize(size){
+            setPositive('glPointSize', GL.POINT_SIZE, size);
+        },
+
+        /** @param {number} factor @param {number} pattern */
+        glLineStipple(factor, pattern){
+            if (enter('glLineStipple', [factor, pattern]))
+            {
+                setState(GL.LINE_STIPPLE_REPEAT, [Math.min(256, Math.max(1, factor | 0))]);
+                setState(GL.LINE_STIPPLE_PATTERN, [pattern & 0xffff]);
+            }
+        },
+
+        /** @param {number} parameter @param {number} value */
         glPixelStorei(parameter, value){
             if (!enter('glPixelStorei', [parameter, value]))
             {
@@ -650,16 +774,7 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glViewport(x, y, width, height){
-            if (!enter('glViewport', [x, y, width, height]))
-            {
-                return;
-            }
-            if (width < 0 || height < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            setState(GL.VIEWPORT, [x, y, width, height]);
+            setBox('glViewport', GL.VIEWPORT, x, y, width, height);
         },
 
         /**
@@ -669,16 +784,43 @@ export function createGlContext(options = {}){
          * @param {number} height
          */
         glScissor(x, y, width, height){
-            if (!enter('glScissor', [x, y, width, height]))
+            setBox('glScissor', GL.SCISSOR_BOX, x, y, width, height);
+        },
+
+        /** @param {number} mode */
+        glDrawBuffer(mode){
+            setBuffer('glDrawBuffer', GL.DRAW_BUFFER, mode);
+        },
+
+        /** @param {number} mode */
+        glReadBuffer(mode){
+            setBuffer('glReadBuffer', GL.READ_BUFFER, mode);
+        },
+
+        /**
+         * Selection and feedback are accepted as state and never entered:
+         * neither has a buffer here to write into.
+         *
+         * @param {number} mode
+         * @returns {number}
+         */
+        glRenderMode(mode){
+            if (!enter('glRenderMode', [mode]))
             {
-                return;
+                return 0;
             }
-            if (width < 0 || height < 0)
+            if (!RENDER_MODES.has(mode))
             {
-                setError(GL.INVALID_VALUE);
-                return;
+                setError(GL.INVALID_ENUM);
+                return 0;
             }
-            setState(GL.SCISSOR_BOX, [x, y, width, height]);
+            if (mode !== GL.RENDER)
+            {
+                diverge('selection and feedback modes are accepted and record nothing:'
+                    + ' a program that picks objects with them finds no hits');
+            }
+            setState(GL.RENDER_MODE, [mode]);
+            return 0;
         },
 
         // --- the matrix stacks ---
@@ -728,40 +870,36 @@ export function createGlContext(options = {}){
         },
 
         glLoadIdentity(){
-            if (!enter('glLoadIdentity', []))
+            if (enter('glLoadIdentity', []))
             {
-                return;
+                currentStack().current = identity();
             }
-            currentStack().current = identity();
         },
 
         /** @param {ArrayLike<number>} m 16 elements, column major */
         glLoadMatrixf(m){
-            if (!enter('glLoadMatrixf', [m]))
+            if (enter('glLoadMatrixf', [m]))
             {
-                return;
+                currentStack().current = Float64Array.from(m);
             }
-            currentStack().current = Float64Array.from(m);
         },
 
         /** @param {ArrayLike<number>} m */
         glMultMatrixf(m){
-            if (!enter('glMultMatrixf', [m]))
+            if (enter('glMultMatrixf', [m]))
             {
-                return;
+                const stack = currentStack();
+                stack.current = multiply(stack.current, m);
             }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, m);
         },
 
         /** @param {number} x @param {number} y @param {number} z */
         glTranslatef(x, y, z){
-            if (!enter('glTranslatef', [x, y, z]))
+            if (enter('glTranslatef', [x, y, z]))
             {
-                return;
+                const stack = currentStack();
+                stack.current = multiply(stack.current, translation(x, y, z));
             }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, translation(x, y, z));
         },
 
         /**
@@ -771,22 +909,20 @@ export function createGlContext(options = {}){
          * @param {number} z
          */
         glRotatef(angle, x, y, z){
-            if (!enter('glRotatef', [angle, x, y, z]))
+            if (enter('glRotatef', [angle, x, y, z]))
             {
-                return;
+                const stack = currentStack();
+                stack.current = multiply(stack.current, rotation(angle, x, y, z));
             }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, rotation(angle, x, y, z));
         },
 
         /** @param {number} x @param {number} y @param {number} z */
         glScalef(x, y, z){
-            if (!enter('glScalef', [x, y, z]))
+            if (enter('glScalef', [x, y, z]))
             {
-                return;
+                const stack = currentStack();
+                stack.current = multiply(stack.current, scaling(x, y, z));
             }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, scaling(x, y, z));
         },
 
         /**
@@ -798,18 +934,8 @@ export function createGlContext(options = {}){
          * @param {number} far
          */
         glOrtho(left, right, bottom, top, near, far){
-            if (!enter('glOrtho', [left, right, bottom, top, near, far]))
-            {
-                return;
-            }
-            const m = ortho(left, right, bottom, top, near, far);
-            if (!m)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, m);
+            multiplyBy('glOrtho', [left, right, bottom, top, near, far],
+                ortho(left, right, bottom, top, near, far));
         },
 
         /**
@@ -821,211 +947,8 @@ export function createGlContext(options = {}){
          * @param {number} far
          */
         glFrustum(left, right, bottom, top, near, far){
-            if (!enter('glFrustum', [left, right, bottom, top, near, far]))
-            {
-                return;
-            }
-            const m = frustum(left, right, bottom, top, near, far);
-            if (!m)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            const stack = currentStack();
-            stack.current = multiply(stack.current, m);
-        },
-
-        // --- texture objects ---
-
-        /** @param {number} count @returns {number[]} */
-        glGenTextures(count){
-            if (!enter('glGenTextures', [count]))
-            {
-                return [];
-            }
-            if (count < 0)
-            {
-                setError(GL.INVALID_VALUE);
-                return [];
-            }
-            return shareGroup.textures.reserve(count);
-        },
-
-        /** @param {number} target @param {number} name */
-        glBindTexture(target, name){
-            if (!enter('glBindTexture', [target, name]))
-            {
-                return;
-            }
-            if (!bindings.has(target))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (name === 0)
-            {
-                bindings.set(target, 0);
-                setState(/** @type {any} */ (TEXTURE_BINDING_QUERY)[target], [0]);
-                return;
-            }
-            const existing = shareGroup.textures.objects.get(name);
-            if (existing && existing.target !== target)
-            {
-                // A name belongs to the target it was first bound to, for life.
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (!existing)
-            {
-                shareGroup.textures.define(name, createTextureObject(name, target));
-                shareGroup.used = true;
-            }
-            bindings.set(target, name);
-            setState(/** @type {any} */ (TEXTURE_BINDING_QUERY)[target], [name]);
-        },
-
-        /** @param {number[]} names */
-        glDeleteTextures(names){
-            if (!enter('glDeleteTextures', [names]))
-            {
-                return;
-            }
-            for (const name of names)
-            {
-                if (name === 0)
-                {
-                    // Silently ignored, not an error: programs delete arrays
-                    // they only partly filled.
-                    continue;
-                }
-                const texture = shareGroup.textures.objects.get(name);
-                shareGroup.textures.remove(name);
-                if (texture && bindings.get(texture.target) === name)
-                {
-                    // Deleting a bound texture rebinds the default object.
-                    bindings.set(texture.target, 0);
-                    setState(/** @type {any} */ (TEXTURE_BINDING_QUERY)[texture.target], [0]);
-                }
-            }
-        },
-
-        /** @param {number} name @returns {number} */
-        glIsTexture(name){
-            if (!enter('glIsTexture', [name]))
-            {
-                return GL.FALSE;
-            }
-            // A generated name is not a texture until it has been bound, and
-            // asking about a name that was never generated is not an error.
-            return shareGroup.textures.objects.has(name) ? GL.TRUE : GL.FALSE;
-        },
-
-        /**
-         * @param {number} target
-         * @param {number} parameter
-         * @param {number} value
-         */
-        glTexParameteri(target, parameter, value){
-            if (!enter('glTexParameteri', [target, parameter, value]))
-            {
-                return;
-            }
-            const texture = textureFor(target);
-            if (!texture)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (!texture.parameters.has(parameter))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            texture.parameters.set(parameter, value);
-        },
-
-        /**
-         * @param {number} target
-         * @param {number} parameter
-         * @returns {number[] | null}
-         */
-        glGetTexParameteriv(target, parameter){
-            if (!enter('glGetTexParameteriv', [target, parameter]))
-            {
-                return null;
-            }
-            const texture = textureFor(target);
-            if (!texture || !texture.parameters.has(parameter))
-            {
-                setError(GL.INVALID_ENUM);
-                return null;
-            }
-            const value = /** @type {number} */ (texture.parameters.get(parameter));
-            return [value];
-        },
-
-        /**
-         * @param {number} target
-         * @param {number} level
-         * @param {number} internalFormat
-         * @param {number} width
-         * @param {number} height
-         * @param {number} border
-         * @param {number} format
-         * @param {number} type
-         */
-        glTexImage2D(target, level, internalFormat, width, height, border, format, type){
-            const args = [target, level, internalFormat, width, height, border, format, type];
-            if (!enter('glTexImage2D', args))
-            {
-                return;
-            }
-            if (target !== GL.TEXTURE_2D)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if (!PIXEL_FORMATS_2D.has(format) || !PIXEL_TYPES.has(type))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            if ((type === GL.BITMAP) !== (format === GL.COLOR_INDEX))
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            const packed = PACKED_TYPE_FORMATS.get(type);
-            if (packed && !packed.includes(format))
-            {
-                setError(GL.INVALID_OPERATION);
-                return;
-            }
-            if (!INTERNAL_FORMATS.has(internalFormat))
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            const maxSize = record(GL.MAX_TEXTURE_SIZE).values[0];
-            if (level < 0 || border < 0 || border > 1
-                || width < 0 || height < 0 || width > maxSize || height > maxSize)
-            {
-                setError(GL.INVALID_VALUE);
-                return;
-            }
-            const texture = textureFor(target);
-            if (!texture)
-            {
-                setError(GL.INVALID_ENUM);
-                return;
-            }
-            texture.levels.set(level, { width, height, internalFormat, border });
-        },
-
-        /** @param {number} target @returns {boolean} */
-        isTextureComplete(target){
-            const texture = textureFor(target);
-            return !!texture && isTextureComplete(texture);
+            multiplyBy('glFrustum', [left, right, bottom, top, near, far],
+                frustum(left, right, bottom, top, near, far));
         },
 
         // --- display lists ---
@@ -1100,20 +1023,30 @@ export function createGlContext(options = {}){
 
         /** @param {number} name */
         glCallList(name){
-            if (!enter('glCallList', [name]))
+            if (enter('glCallList', [name]))
+            {
+                callList(name);
+            }
+        },
+
+        /**
+         * @param {number} count
+         * @param {readonly number[]} offsets  already read as the type given
+         */
+        glCallLists(count, offsets){
+            if (!enter('glCallLists', [count, offsets]))
             {
                 return;
             }
-            const list = shareGroup.lists.objects.get(name);
-            if (!list)
+            if (count < 0)
             {
-                // Calling a name that is not a list is defined to be ignored,
-                // not to fail: programs call a range they only partly built.
+                setError(GL.INVALID_VALUE);
                 return;
             }
-            for (const command of list.commands)
+            const base = record(GL.LIST_BASE).values[0];
+            for (const offset of offsets)
             {
-                /** @type {any} */ (context)[command.call](...command.args);
+                callList(base + offset);
             }
         },
 
@@ -1145,14 +1078,13 @@ export function createGlContext(options = {}){
 
         /** @param {number} base */
         glListBase(base){
-            if (!enter('glListBase', [base]))
+            if (enter('glListBase', [base]))
             {
-                return;
+                setState(GL.LIST_BASE, [base]);
             }
-            setState(GL.LIST_BASE, [base]);
         },
 
-        // --- immediate mode, recorded and not drawn ---
+        // --- immediate mode ---
 
         /** @param {number} mode */
         glBegin(mode){
@@ -1186,9 +1118,10 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            submitted.push(primitive);
-            draw(primitive);
+            const finished = primitive;
             primitive = null;
+            submitted.push(finished);
+            draw(finished.mode, finished.vertices);
         },
 
         /** @param {number} x @param {number} y */
@@ -1219,12 +1152,7 @@ export function createGlContext(options = {}){
                 // and still run.
                 return;
             }
-            primitive.vertices.push({
-                position: [x, y, z, w],
-                color: [...record(GL.CURRENT_COLOR).values],
-                normal: [...record(GL.CURRENT_NORMAL).values],
-                texCoord: [...record(GL.CURRENT_TEXTURE_COORDS).values],
-            });
+            primitive.vertices.push({ ...currentVertex(), position: [x, y, z, w] });
         },
 
         /**
@@ -1234,29 +1162,18 @@ export function createGlContext(options = {}){
          * @param {number} alpha
          */
         glColor4f(red, green, blue, alpha){
-            if (!enter('glColor4f', [red, green, blue, alpha]))
+            if (enter('glColor4f', [red, green, blue, alpha]))
             {
-                return;
+                setState(GL.CURRENT_COLOR, [red, green, blue, alpha]);
             }
-            setState(GL.CURRENT_COLOR, [red, green, blue, alpha]);
         },
 
         /** @param {number} red @param {number} green @param {number} blue */
         glColor3f(red, green, blue){
-            if (!enter('glColor3f', [red, green, blue]))
+            if (enter('glColor3f', [red, green, blue]))
             {
-                return;
+                setState(GL.CURRENT_COLOR, [red, green, blue, 1]);
             }
-            setState(GL.CURRENT_COLOR, [red, green, blue, 1]);
-        },
-
-        /** @param {number} x @param {number} y @param {number} z */
-        glNormal3f(x, y, z){
-            if (!enter('glNormal3f', [x, y, z]))
-            {
-                return;
-            }
-            setState(GL.CURRENT_NORMAL, [x, y, z]);
         },
 
         /**
@@ -1277,12 +1194,26 @@ export function createGlContext(options = {}){
          * @param {number} alpha
          */
         glColor4ub(red, green, blue, alpha){
-            if (!enter('glColor4ub', [red, green, blue, alpha]))
+            if (enter('glColor4ub', [red, green, blue, alpha]))
             {
-                return;
+                setState(GL.CURRENT_COLOR, [red / 255, green / 255, blue / 255, alpha / 255]);
             }
-            setState(GL.CURRENT_COLOR,
-                [red / 255, green / 255, blue / 255, alpha / 255]);
+        },
+
+        /** @param {number} index */
+        glIndexi(index){
+            if (enter('glIndexi', [index]))
+            {
+                setState(GL.CURRENT_INDEX, [index]);
+            }
+        },
+
+        /** @param {number} x @param {number} y @param {number} z */
+        glNormal3f(x, y, z){
+            if (enter('glNormal3f', [x, y, z]))
+            {
+                setState(GL.CURRENT_NORMAL, [x, y, z]);
+            }
         },
 
         /** @param {number} s @param {number} t */
@@ -1302,30 +1233,282 @@ export function createGlContext(options = {}){
          * @param {number} q
          */
         glTexCoord4f(s, t, r, q){
-            if (!enter('glTexCoord4f', [s, t, r, q]))
+            if (enter('glTexCoord4f', [s, t, r, q]))
             {
-                return;
+                kernel.side.texCoords[0] = [s, t, r, q];
             }
-            setState(GL.CURRENT_TEXTURE_COORDS, [s, t, r, q]);
         },
 
         /**
          * Recorded and otherwise ignored: an edge flag decides which edges of
-         * a polygon are drawn in GL_LINE polygon mode, and this rasteriser
-         * fills.
+         * a polygon are drawn in GL_LINE polygon mode, and this pipeline draws
+         * them all.
          *
          * @param {number} flag
          */
         glEdgeFlag(flag){
             enter('glEdgeFlag', [flag]);
         },
+
+        /**
+         * @param {number} x1
+         * @param {number} y1
+         * @param {number} x2
+         * @param {number} y2
+         */
+        glRectf(x1, y1, x2, y2){
+            if (!enter('glRectf', [x1, y1, x2, y2]))
+            {
+                return;
+            }
+            context.glBegin(GL.POLYGON);
+            context.glVertex2f(x1, y1);
+            context.glVertex2f(x2, y1);
+            context.glVertex2f(x2, y2);
+            context.glVertex2f(x1, y2);
+            context.glEnd();
+        },
+
+        // --- the attribute stacks ---
+
+        /** @param {number} mask */
+        glPushAttrib(mask){
+            if (!enter('glPushAttrib', [mask]))
+            {
+                return;
+            }
+            if (attribStack.length >= ATTRIB_STACK_LIMIT)
+            {
+                setError(GL.STACK_OVERFLOW);
+                return;
+            }
+            attribStack.push({
+                mask,
+                values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
+                textures: kernel.side.saveServerTextures(mask),
+                lighting: kernel.side.saveServerLighting(mask),
+            });
+            setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
+        },
+
+        glPopAttrib(){
+            if (!enter('glPopAttrib', []))
+            {
+                return;
+            }
+            const saved = attribStack.pop();
+            if (!saved)
+            {
+                setError(GL.STACK_UNDERFLOW);
+                return;
+            }
+            restore(saved.values);
+            kernel.side.restoreServerTextures(saved.mask, saved.textures);
+            kernel.side.restoreServerLighting(saved.lighting);
+            setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
+        },
+
+        /** @param {number} mask */
+        glPushClientAttrib(mask){
+            if (!enter('glPushClientAttrib', [mask]))
+            {
+                return;
+            }
+            if (clientAttribStack.length >= ATTRIB_STACK_LIMIT)
+            {
+                setError(GL.STACK_OVERFLOW);
+                return;
+            }
+            clientAttribStack.push({
+                mask,
+                values: snapshot(queriesSavedBy(CLIENT_BITS, mask)),
+                arrays: kernel.side.saveClient(mask),
+            });
+            setState(GL.CLIENT_ATTRIB_STACK_DEPTH, [clientAttribStack.length]);
+        },
+
+        glPopClientAttrib(){
+            if (!enter('glPopClientAttrib', []))
+            {
+                return;
+            }
+            const saved = clientAttribStack.pop();
+            if (!saved)
+            {
+                setError(GL.STACK_UNDERFLOW);
+                return;
+            }
+            restore(saved.values);
+            kernel.side.restoreClient(saved.mask, saved.arrays);
+            setState(GL.CLIENT_ATTRIB_STACK_DEPTH, [clientAttribStack.length]);
+        },
+
+        // Exposed for the drawing tests, which set up a scene and want to
+        // know what the depth test and the compare functions decided.
+        compare,
     };
 
+    installTextureCalls(context, kernel);
+    installLightingCalls(context, kernel);
+    installArrayCalls(context, kernel);
+    installPixelCalls(context, kernel);
+    const scenes = createSceneBuilder(kernel);
+    kernel.side.scene = ()=>scenes.scene();
+
+    // The texture stack the queries read is the active unit's.
+    Object.defineProperty(stacks, 'texture', { get: ()=>kernel.side.textureStack() });
+
+    /** @param {number} value @returns {number} */
+    function clamp01(value){
+        return value < 0 ? 0 : value > 1 ? 1 : value;
+    }
+
     /**
-     * What the scissor test leaves of the framebuffer.
-     *
-     * @returns {import('./raster.js').Box}
+     * @param {string} name
+     * @param {number} cap
+     * @param {number} value
      */
+    function setEnabled(name, cap, value){
+        if (!enter(name, [cap]))
+        {
+            return;
+        }
+        if (kernel.side.setUnitEnable(cap, value))
+        {
+            return;
+        }
+        const entry = state.get(cap);
+        // A client array is a client state and is not this call's to set;
+        // the specification makes that an enum error, and programs rely on
+        // glEnable(GL_VERTEX_ARRAY) failing loudly rather than working.
+        if (!entry || entry.kind !== 'bool' || CLIENT_BITS.has(cap))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        if (value && cap === GL.STENCIL_TEST)
+        {
+            diverge('the stencil test was enabled and there is no stencil buffer: every'
+                + ' fragment passes it, and a program that masks with stencil draws unmasked');
+        }
+        entry.values = [value];
+    }
+
+    /**
+     * @param {string} name
+     * @param {number} query
+     * @param {number} value
+     * @param {Set<number>} allowed
+     */
+    function setEnum(name, query, value, allowed){
+        if (!enter(name, [value]))
+        {
+            return;
+        }
+        if (!allowed.has(value))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        setState(query, [value]);
+    }
+
+    /** @param {string} name @param {number} query @param {number} value */
+    function setPositive(name, query, value){
+        if (!enter(name, [value]))
+        {
+            return;
+        }
+        if (!(value > 0))
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        setState(query, [value]);
+    }
+
+    /**
+     * @param {string} name
+     * @param {number} query
+     * @param {number} x
+     * @param {number} y
+     * @param {number} width
+     * @param {number} height
+     */
+    function setBox(name, query, x, y, width, height){
+        if (!enter(name, [x, y, width, height]))
+        {
+            return;
+        }
+        if (width < 0 || height < 0)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        setState(query, [x, y, width, height]);
+    }
+
+    /** @param {string} name @param {number} query @param {number} mode */
+    function setBuffer(name, query, mode){
+        if (!enter(name, [mode]))
+        {
+            return;
+        }
+        if (!BUFFERS.has(mode))
+        {
+            setError(GL.INVALID_ENUM);
+            return;
+        }
+        const doubleBuffered = record(GL.DOUBLEBUFFER).values[0] !== 0;
+        if ((mode === GL.BACK || mode === GL.BACK_LEFT) && !doubleBuffered
+            || mode === GL.AUX0 || mode === GL.FRONT_RIGHT || mode === GL.BACK_RIGHT
+            || mode === GL.RIGHT)
+        {
+            // Naming a buffer the format does not have is an operation error.
+            setError(GL.INVALID_OPERATION);
+            return;
+        }
+        setState(query, [mode]);
+    }
+
+    /**
+     * @param {string} name
+     * @param {number[]} args
+     * @param {Float64Array | null} m
+     */
+    function multiplyBy(name, args, m){
+        if (!enter(name, args))
+        {
+            return;
+        }
+        if (!m)
+        {
+            setError(GL.INVALID_VALUE);
+            return;
+        }
+        const stack = currentStack();
+        stack.current = multiply(stack.current, m);
+    }
+
+    /** @param {number} name */
+    function callList(name){
+        const list = shareGroup.lists.objects.get(name);
+        if (!list || listNesting >= 64)
+        {
+            // Calling a name that is not a list is defined to be ignored, not
+            // to fail: programs call a range they only partly built. A list
+            // that calls itself is cut at the nesting limit.
+            return;
+        }
+        listNesting++;
+        for (const command of list.commands)
+        {
+            /** @type {any} */ (context)[command.call](...command.args);
+        }
+        listNesting--;
+    }
+
+    /** @returns {import('./raster.js').Box} what the scissor test leaves */
     function scissorBox(){
         if (record(GL.SCISSOR_TEST).values[0] === 0)
         {
@@ -1343,134 +1526,46 @@ export function createGlContext(options = {}){
         };
     }
 
+    /** @returns {any} the current attributes, as a vertex with no position */
+    function currentVertex(){
+        const side = kernel.side;
+        return {
+            position: [0, 0, 0, 1],
+            color: [...record(GL.CURRENT_COLOR).values],
+            secondary: [...record(GL.CURRENT_SECONDARY_COLOR).values],
+            normal: [...record(GL.CURRENT_NORMAL).values],
+            texCoord: [...side.texCoords[0]],
+            texCoords: side.texCoords.map((/** @type {number[]} */ coords)=>[...coords]),
+            fogCoord: record(GL.CURRENT_FOG_COORDINATE).values[0],
+        };
+    }
+
     /**
-     * Which vertices make which triangles, by index.
-     *
-     * ponytail: points and lines are collected and not drawn. They need a
-     * different rule from the one in `raster.js` -- a line has width and no
-     * area -- rather than a different set of indices.
+     * A primitive assembled by a draw call rather than glBegin. Recorded
+     * into a list with its vertices already dereferenced, which is what the
+     * specification says a compiled glDrawArrays holds.
      *
      * @param {number} mode
-     * @param {number} count
-     * @returns {number[][]}
+     * @param {any[]} vertices
      */
-    function trianglesOf(mode, count){
-        /** @type {number[][]} */
-        const triangles = [];
-        if (mode === GL.TRIANGLES)
+    function drawVertices(mode, vertices){
+        if (enter('drawVertices', [mode, vertices]))
         {
-            for (let i = 0; i + 2 < count; i += 3)
-            {
-                triangles.push([i, i + 1, i + 2]);
-            }
+            submitted.push({ mode, vertices });
+            draw(mode, vertices);
         }
-        else if (mode === GL.TRIANGLE_STRIP)
-        {
-            for (let i = 0; i + 2 < count; i++)
-            {
-                // Every second triangle in a strip is wound the other way
-                // round, and two of its indices are swapped to put it back --
-                // otherwise a strip alternates facing and culling eats half
-                // of it.
-                triangles.push(i % 2 === 0 ? [i, i + 1, i + 2] : [i + 1, i, i + 2]);
-            }
-        }
-        else if (mode === GL.TRIANGLE_FAN || mode === GL.POLYGON)
-        {
-            for (let i = 1; i + 1 < count; i++)
-            {
-                triangles.push([0, i, i + 1]);
-            }
-        }
-        else if (mode === GL.QUADS)
-        {
-            for (let i = 0; i + 3 < count; i += 4)
-            {
-                triangles.push([i, i + 1, i + 2], [i, i + 2, i + 3]);
-            }
-        }
-        else if (mode === GL.QUAD_STRIP)
-        {
-            for (let i = 0; i + 3 < count; i += 2)
-            {
-                triangles.push([i, i + 1, i + 3], [i, i + 3, i + 2]);
-            }
-        }
-        return triangles;
     }
 
     /**
-     * @param {readonly import('./raster.js').RasterVertex[]} triangle
-     * @returns {boolean}
+     * @param {number} mode
+     * @param {any[]} vertices
      */
-    function culled(triangle){
-        if (record(GL.CULL_FACE).values[0] === 0)
+    function draw(mode, vertices){
+        if (vertices.length === 0 || framebuffer.width === 0)
         {
-            return false;
+            return;
         }
-        const mode = record(GL.CULL_FACE_MODE).values[0];
-        if (mode === GL.FRONT_AND_BACK)
-        {
-            return true;
-        }
-        const [a, b, c] = triangle;
-        const area = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-        if (area === 0)
-        {
-            return true;
-        }
-        // Counter-clockwise in GL's window coordinates is clockwise in the
-        // framebuffer's, because y grows the other way.
-        const isFront = (record(GL.FRONT_FACE).values[0] === GL.CCW) === (area > 0);
-        return isFront === (mode === GL.FRONT);
-    }
-
-    /**
-     * A finished primitive, transformed and filled.
-     *
-     * The matrices are read once here rather than at each glVertex: they
-     * cannot change between a glBegin and a glEnd, so the two are equivalent
-     * and this one is a matrix product per primitive instead of per vertex.
-     *
-     * @param {{ mode: number, vertices: any[] }} assembled
-     */
-    function draw(assembled){
-        const [vx, vy, vw, vh] = record(GL.VIEWPORT).values;
-        const mvp = multiply(stacks.projection.current, stacks.modelview.current);
-        /** @type {(import('./raster.js').RasterVertex | null)[]} */
-        const points = assembled.vertices.map(vertex=>{
-            const clip = transform(mvp, vertex.position);
-            const w = clip[3];
-            if (w === 0)
-            {
-                // Nothing can be divided by it, and a vertex on the eye plane
-                // has no window position. The triangles using it are dropped.
-                return null;
-            }
-            return {
-                x: (clip[0] / w * 0.5 + 0.5) * vw + vx,
-                y: framebuffer.height - ((clip[1] / w * 0.5 + 0.5) * vh + vy),
-                colour: vertex.color.map(toByte),
-            };
-        });
-        const flat = record(GL.SHADE_MODEL).values[0] === GL.FLAT;
-        const box = scissorBox();
-        for (const [i, j, k] of trianglesOf(assembled.mode, points.length))
-        {
-            const a = points[i];
-            const b = points[j];
-            const c = points[k];
-            if (!a || !b || !c || culled([a, b, c]))
-            {
-                continue;
-            }
-            // Flat shading takes the colour of the triangle's last vertex,
-            // which is the provoking one for every mode here.
-            const triangle = flat
-                ? [a, b, c].map(point=>({ ...point, colour: c.colour }))
-                : [a, b, c];
-            fillTriangle(framebuffer, triangle, box);
-        }
+        scenes.draw(mode, vertices);
     }
 
     /** @returns {import('./matrix.js').MatrixStack} */
@@ -1479,27 +1574,32 @@ export function createGlContext(options = {}){
     }
 
     /**
-     * @param {number} target
-     * @returns {import('./objects.js').TextureObject | null}
+     * @param {number[]} queries
+     * @returns {Map<number, number[]>}
      */
-    function textureFor(target){
-        if (!bindings.has(target))
-        {
-            return null;
-        }
-        const name = bindings.get(target) ?? 0;
-        if (name === 0)
-        {
-            return /** @type {any} */ (defaultTextures.get(target));
-        }
-        return shareGroup.textures.objects.get(name) ?? null;
+    function snapshot(queries){
+        return new Map(queries.map(query=>[query, [...record(query).values]]));
     }
+
+    /** @param {Map<number, number[]>} values */
+    function restore(values){
+        for (const [query, saved] of values)
+        {
+            record(query).values = [...saved];
+        }
+        matrixMode = record(GL.MATRIX_MODE).values[0];
+    }
+
+    // A list replays a drawVertices as a call on the context.
+    /** @type {any} */ (context).drawVertices = drawVertices;
 
     return context;
 }
 
 /**
- * The GL entry points this implementation exports directly.
+ * The GL entry points this implementation exports directly: everything on
+ * the context that a program links against rather than obtains through
+ * wglGetProcAddress.
  *
  * Derived from the context rather than written out beside it, because the two
  * would drift and the consequence of drift is silent: wglGetProcAddress must
@@ -1508,15 +1608,5 @@ export function createGlContext(options = {}){
  * extension is present.
  */
 export const CORE_FUNCTIONS = Object.freeze(new Set(
-    Object.keys(createGlContext()).filter(name=>name.startsWith('gl'))));
-
-/**
- * The parameters glPixelStorei accepts. Anything else is an enum error.
- *
- * @type {Set<number>}
- */
-const PIXEL_STORE_PARAMETERS = new Set([
-    GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
-    GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
-    GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
-]);
+    Object.keys(createGlContext())
+        .filter(name=>name.startsWith('gl') && !EXTENSION_FUNCTIONS.has(name))));

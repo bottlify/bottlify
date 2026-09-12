@@ -44,7 +44,7 @@ import { STACK_LIMITS } from './matrix.js';
  * @property {boolean} [normalised]
  *           A colour or normal component, whose integer form is the mapped
  *           range rather than the rounded number.
- * @property {'drawable' | 'buffer'} [dependsOn]
+ * @property {'drawable' | 'buffer' | 'depth' | 'double'} [dependsOn]
  *           Names what the value is derived from, in which case `value` is
  *           only the placeholder `resolveStateDefault` replaces.
  */
@@ -54,6 +54,9 @@ import { STACK_LIMITS } from './matrix.js';
  * @property {number} width           the drawable's width when first attached
  * @property {number} height
  * @property {boolean} doubleBuffered
+ * @property {number} [depthBits]     what the pixel format promised; zero when
+ *                                    it promised nothing, and then there is no
+ *                                    depth buffer to test against
  */
 
 /**
@@ -80,11 +83,60 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.STENCIL_TEST, name: 'GL_STENCIL_TEST', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_1D, name: 'GL_TEXTURE_1D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_2D, name: 'GL_TEXTURE_2D', kind: 'bool', value: [0] },
+    { query: GL.LIGHT1, name: 'GL_LIGHT1', kind: 'bool', value: [0] },
+    { query: GL.LIGHT2, name: 'GL_LIGHT2', kind: 'bool', value: [0] },
+    { query: GL.LIGHT3, name: 'GL_LIGHT3', kind: 'bool', value: [0] },
+    { query: GL.LIGHT4, name: 'GL_LIGHT4', kind: 'bool', value: [0] },
+    { query: GL.LIGHT5, name: 'GL_LIGHT5', kind: 'bool', value: [0] },
+    { query: GL.LIGHT6, name: 'GL_LIGHT6', kind: 'bool', value: [0] },
+    { query: GL.LIGHT7, name: 'GL_LIGHT7', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_CUBE_MAP, name: 'GL_TEXTURE_CUBE_MAP', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_GEN_S, name: 'GL_TEXTURE_GEN_S', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_GEN_T, name: 'GL_TEXTURE_GEN_T', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_GEN_R, name: 'GL_TEXTURE_GEN_R', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_GEN_Q, name: 'GL_TEXTURE_GEN_Q', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE0, name: 'GL_CLIP_PLANE0', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE1, name: 'GL_CLIP_PLANE1', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE2, name: 'GL_CLIP_PLANE2', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE3, name: 'GL_CLIP_PLANE3', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE4, name: 'GL_CLIP_PLANE4', kind: 'bool', value: [0] },
+    { query: GL.CLIP_PLANE5, name: 'GL_CLIP_PLANE5', kind: 'bool', value: [0] },
+    { query: GL.COLOR_LOGIC_OP, name: 'GL_COLOR_LOGIC_OP', kind: 'bool', value: [0] },
+    { query: GL.INDEX_LOGIC_OP, name: 'GL_INDEX_LOGIC_OP', kind: 'bool', value: [0] },
+    { query: GL.POLYGON_OFFSET_POINT, name: 'GL_POLYGON_OFFSET_POINT', kind: 'bool', value: [0] },
+    { query: GL.POLYGON_OFFSET_LINE, name: 'GL_POLYGON_OFFSET_LINE', kind: 'bool', value: [0] },
+    { query: GL.LINE_STIPPLE, name: 'GL_LINE_STIPPLE', kind: 'bool', value: [0] },
+    { query: GL.POLYGON_STIPPLE, name: 'GL_POLYGON_STIPPLE', kind: 'bool', value: [0] },
+    { query: GL.RESCALE_NORMAL, name: 'GL_RESCALE_NORMAL', kind: 'bool', value: [0] },
+    { query: GL.COLOR_SUM, name: 'GL_COLOR_SUM', kind: 'bool', value: [0] },
+    { query: GL.AUTO_NORMAL, name: 'GL_AUTO_NORMAL', kind: 'bool', value: [0] },
+]);
+
+/**
+ * The client-side arrays, which glEnableClientState turns on rather than
+ * glEnable -- and which glIsEnabled still reports, because the specification
+ * says it does.
+ *
+ * @type {readonly StateDefault[]}
+ */
+export const DEFAULT_CLIENT_ENABLES = Object.freeze([
+    { query: GL.VERTEX_ARRAY, name: 'GL_VERTEX_ARRAY', kind: 'bool', value: [0] },
+    { query: GL.NORMAL_ARRAY, name: 'GL_NORMAL_ARRAY', kind: 'bool', value: [0] },
+    { query: GL.COLOR_ARRAY, name: 'GL_COLOR_ARRAY', kind: 'bool', value: [0] },
+    { query: GL.INDEX_ARRAY, name: 'GL_INDEX_ARRAY', kind: 'bool', value: [0] },
+    { query: GL.TEXTURE_COORD_ARRAY, name: 'GL_TEXTURE_COORD_ARRAY', kind: 'bool', value: [0] },
+    { query: GL.EDGE_FLAG_ARRAY, name: 'GL_EDGE_FLAG_ARRAY', kind: 'bool', value: [0] },
+    {
+        query: GL.SECONDARY_COLOR_ARRAY, name: 'GL_SECONDARY_COLOR_ARRAY', kind: 'bool',
+        value: [0],
+    },
+    { query: GL.FOG_COORDINATE_ARRAY, name: 'GL_FOG_COORDINATE_ARRAY', kind: 'bool', value: [0] },
 ]);
 
 /** @type {readonly StateDefault[]} */
 export const DEFAULT_STATE = Object.freeze([
     ...DEFAULT_ENABLES,
+    ...DEFAULT_CLIENT_ENABLES,
 
     // --- current vertex attributes ---
     {
@@ -99,6 +151,35 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.CURRENT_TEXTURE_COORDS, name: 'GL_CURRENT_TEXTURE_COORDS', kind: 'float',
         value: [0, 0, 0, 1],
+    },
+    {
+        query: GL.CURRENT_SECONDARY_COLOR, name: 'GL_CURRENT_SECONDARY_COLOR', kind: 'float',
+        value: [0, 0, 0, 1], normalised: true,
+    },
+    {
+        query: GL.CURRENT_FOG_COORDINATE, name: 'GL_CURRENT_FOG_COORDINATE', kind: 'float',
+        value: [0],
+    },
+    {
+        query: GL.CURRENT_RASTER_POSITION, name: 'GL_CURRENT_RASTER_POSITION', kind: 'float',
+        value: [0, 0, 0, 1],
+    },
+    {
+        query: GL.CURRENT_RASTER_COLOR, name: 'GL_CURRENT_RASTER_COLOR', kind: 'float',
+        value: [1, 1, 1, 1], normalised: true,
+    },
+    { query: GL.CURRENT_RASTER_INDEX, name: 'GL_CURRENT_RASTER_INDEX', kind: 'float', value: [1] },
+    {
+        query: GL.CURRENT_RASTER_TEXTURE_COORDS, name: 'GL_CURRENT_RASTER_TEXTURE_COORDS',
+        kind: 'float', value: [0, 0, 0, 1],
+    },
+    {
+        query: GL.CURRENT_RASTER_POSITION_VALID, name: 'GL_CURRENT_RASTER_POSITION_VALID',
+        kind: 'bool', value: [1],
+    },
+    {
+        query: GL.CURRENT_RASTER_DISTANCE, name: 'GL_CURRENT_RASTER_DISTANCE', kind: 'float',
+        value: [0],
     },
 
     // --- the framebuffer clear values ---
@@ -139,6 +220,11 @@ export const DEFAULT_STATE = Object.freeze([
         value: [GL.KEEP],
     },
     { query: GL.COLOR_WRITEMASK, name: 'GL_COLOR_WRITEMASK', kind: 'bool', value: [1, 1, 1, 1] },
+    { query: GL.LOGIC_OP_MODE, name: 'GL_LOGIC_OP_MODE', kind: 'enum', value: [GL.COPY] },
+    {
+        query: GL.BLEND_COLOR, name: 'GL_BLEND_COLOR', kind: 'float',
+        value: [0, 0, 0, 0], normalised: true,
+    },
 
     // --- rasterisation ---
     { query: GL.CULL_FACE_MODE, name: 'GL_CULL_FACE_MODE', kind: 'enum', value: [GL.BACK] },
@@ -147,6 +233,42 @@ export const DEFAULT_STATE = Object.freeze([
     { query: GL.POLYGON_MODE, name: 'GL_POLYGON_MODE', kind: 'enum', value: [GL.FILL, GL.FILL] },
     { query: GL.POINT_SIZE, name: 'GL_POINT_SIZE', kind: 'float', value: [1] },
     { query: GL.LINE_WIDTH, name: 'GL_LINE_WIDTH', kind: 'float', value: [1] },
+    {
+        query: GL.LINE_STIPPLE_PATTERN, name: 'GL_LINE_STIPPLE_PATTERN', kind: 'int',
+        value: [0xffff],
+    },
+    { query: GL.LINE_STIPPLE_REPEAT, name: 'GL_LINE_STIPPLE_REPEAT', kind: 'int', value: [1] },
+    {
+        query: GL.POLYGON_OFFSET_FACTOR, name: 'GL_POLYGON_OFFSET_FACTOR', kind: 'float',
+        value: [0],
+    },
+    { query: GL.POLYGON_OFFSET_UNITS, name: 'GL_POLYGON_OFFSET_UNITS', kind: 'float', value: [0] },
+    { query: GL.RENDER_MODE, name: 'GL_RENDER_MODE', kind: 'enum', value: [GL.RENDER] },
+    {
+        query: GL.PERSPECTIVE_CORRECTION_HINT, name: 'GL_PERSPECTIVE_CORRECTION_HINT',
+        kind: 'enum', value: [GL.DONT_CARE],
+    },
+    {
+        query: GL.POINT_SMOOTH_HINT, name: 'GL_POINT_SMOOTH_HINT', kind: 'enum',
+        value: [GL.DONT_CARE],
+    },
+    {
+        query: GL.LINE_SMOOTH_HINT, name: 'GL_LINE_SMOOTH_HINT', kind: 'enum',
+        value: [GL.DONT_CARE],
+    },
+    {
+        query: GL.POLYGON_SMOOTH_HINT, name: 'GL_POLYGON_SMOOTH_HINT', kind: 'enum',
+        value: [GL.DONT_CARE],
+    },
+    { query: GL.FOG_HINT, name: 'GL_FOG_HINT', kind: 'enum', value: [GL.DONT_CARE] },
+    {
+        query: GL.GENERATE_MIPMAP_HINT, name: 'GL_GENERATE_MIPMAP_HINT', kind: 'enum',
+        value: [GL.DONT_CARE],
+    },
+    {
+        query: GL.TEXTURE_COMPRESSION_HINT, name: 'GL_TEXTURE_COMPRESSION_HINT', kind: 'enum',
+        value: [GL.DONT_CARE],
+    },
 
     // --- fog and lighting ---
     { query: GL.FOG_MODE, name: 'GL_FOG_MODE', kind: 'enum', value: [GL.EXP] },
@@ -167,6 +289,22 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0],
     },
     { query: GL.LIGHT_MODEL_TWO_SIDE, name: 'GL_LIGHT_MODEL_TWO_SIDE', kind: 'bool', value: [0] },
+    {
+        query: GL.LIGHT_MODEL_COLOR_CONTROL, name: 'GL_LIGHT_MODEL_COLOR_CONTROL', kind: 'enum',
+        value: [GL.SINGLE_COLOR],
+    },
+    {
+        query: GL.COLOR_MATERIAL_FACE, name: 'GL_COLOR_MATERIAL_FACE', kind: 'enum',
+        value: [GL.FRONT_AND_BACK],
+    },
+    {
+        query: GL.COLOR_MATERIAL_PARAMETER, name: 'GL_COLOR_MATERIAL_PARAMETER', kind: 'enum',
+        value: [GL.AMBIENT_AND_DIFFUSE],
+    },
+    {
+        query: GL.FOG_COORDINATE_SOURCE, name: 'GL_FOG_COORDINATE_SOURCE', kind: 'enum',
+        value: [GL.FRAGMENT_DEPTH],
+    },
 
     // --- the transformation state that is not a matrix ---
     { query: GL.MATRIX_MODE, name: 'GL_MATRIX_MODE', kind: 'enum', value: [GL.MODELVIEW] },
@@ -178,6 +316,10 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.SCISSOR_BOX, name: 'GL_SCISSOR_BOX', kind: 'int',
         value: [0, 0, 0, 0], dependsOn: 'drawable',
     },
+
+    // --- pixel transfer ---
+    { query: GL.ZOOM_X, name: 'GL_ZOOM_X', kind: 'float', value: [1] },
+    { query: GL.ZOOM_Y, name: 'GL_ZOOM_Y', kind: 'float', value: [1] },
 
     // --- pixel storage ---
     { query: GL.UNPACK_ALIGNMENT, name: 'GL_UNPACK_ALIGNMENT', kind: 'int', value: [4] },
@@ -196,6 +338,96 @@ export const DEFAULT_STATE = Object.freeze([
     // --- texture and list bookkeeping ---
     { query: GL.TEXTURE_BINDING_1D, name: 'GL_TEXTURE_BINDING_1D', kind: 'int', value: [0] },
     { query: GL.TEXTURE_BINDING_2D, name: 'GL_TEXTURE_BINDING_2D', kind: 'int', value: [0] },
+    {
+        query: GL.TEXTURE_BINDING_CUBE_MAP, name: 'GL_TEXTURE_BINDING_CUBE_MAP', kind: 'int',
+        value: [0],
+    },
+    { query: GL.ACTIVE_TEXTURE, name: 'GL_ACTIVE_TEXTURE', kind: 'enum', value: [GL.TEXTURE0] },
+    {
+        query: GL.CLIENT_ACTIVE_TEXTURE, name: 'GL_CLIENT_ACTIVE_TEXTURE', kind: 'enum',
+        value: [GL.TEXTURE0],
+    },
+
+    // --- vertex arrays ---
+    { query: GL.VERTEX_ARRAY_SIZE, name: 'GL_VERTEX_ARRAY_SIZE', kind: 'int', value: [4] },
+    { query: GL.VERTEX_ARRAY_TYPE, name: 'GL_VERTEX_ARRAY_TYPE', kind: 'enum', value: [GL.FLOAT] },
+    { query: GL.VERTEX_ARRAY_STRIDE, name: 'GL_VERTEX_ARRAY_STRIDE', kind: 'int', value: [0] },
+    { query: GL.NORMAL_ARRAY_TYPE, name: 'GL_NORMAL_ARRAY_TYPE', kind: 'enum', value: [GL.FLOAT] },
+    { query: GL.NORMAL_ARRAY_STRIDE, name: 'GL_NORMAL_ARRAY_STRIDE', kind: 'int', value: [0] },
+    { query: GL.COLOR_ARRAY_SIZE, name: 'GL_COLOR_ARRAY_SIZE', kind: 'int', value: [4] },
+    { query: GL.COLOR_ARRAY_TYPE, name: 'GL_COLOR_ARRAY_TYPE', kind: 'enum', value: [GL.FLOAT] },
+    { query: GL.COLOR_ARRAY_STRIDE, name: 'GL_COLOR_ARRAY_STRIDE', kind: 'int', value: [0] },
+    { query: GL.INDEX_ARRAY_TYPE, name: 'GL_INDEX_ARRAY_TYPE', kind: 'enum', value: [GL.FLOAT] },
+    { query: GL.INDEX_ARRAY_STRIDE, name: 'GL_INDEX_ARRAY_STRIDE', kind: 'int', value: [0] },
+    {
+        query: GL.TEXTURE_COORD_ARRAY_SIZE, name: 'GL_TEXTURE_COORD_ARRAY_SIZE', kind: 'int',
+        value: [4],
+    },
+    {
+        query: GL.TEXTURE_COORD_ARRAY_TYPE, name: 'GL_TEXTURE_COORD_ARRAY_TYPE', kind: 'enum',
+        value: [GL.FLOAT],
+    },
+    {
+        query: GL.TEXTURE_COORD_ARRAY_STRIDE, name: 'GL_TEXTURE_COORD_ARRAY_STRIDE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.EDGE_FLAG_ARRAY_STRIDE, name: 'GL_EDGE_FLAG_ARRAY_STRIDE', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.SECONDARY_COLOR_ARRAY_SIZE, name: 'GL_SECONDARY_COLOR_ARRAY_SIZE', kind: 'int',
+        value: [3],
+    },
+    {
+        query: GL.SECONDARY_COLOR_ARRAY_TYPE, name: 'GL_SECONDARY_COLOR_ARRAY_TYPE', kind: 'enum',
+        value: [GL.FLOAT],
+    },
+    {
+        query: GL.SECONDARY_COLOR_ARRAY_STRIDE, name: 'GL_SECONDARY_COLOR_ARRAY_STRIDE',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.FOG_COORDINATE_ARRAY_TYPE, name: 'GL_FOG_COORDINATE_ARRAY_TYPE', kind: 'enum',
+        value: [GL.FLOAT],
+    },
+    {
+        query: GL.FOG_COORDINATE_ARRAY_STRIDE, name: 'GL_FOG_COORDINATE_ARRAY_STRIDE',
+        kind: 'int', value: [0],
+    },
+    { query: GL.ARRAY_BUFFER_BINDING, name: 'GL_ARRAY_BUFFER_BINDING', kind: 'int', value: [0] },
+    {
+        query: GL.ELEMENT_ARRAY_BUFFER_BINDING, name: 'GL_ELEMENT_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.VERTEX_ARRAY_BUFFER_BINDING, name: 'GL_VERTEX_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.NORMAL_ARRAY_BUFFER_BINDING, name: 'GL_NORMAL_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.COLOR_ARRAY_BUFFER_BINDING, name: 'GL_COLOR_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.INDEX_ARRAY_BUFFER_BINDING, name: 'GL_INDEX_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.TEXTURE_COORD_ARRAY_BUFFER_BINDING, name: 'GL_TEXTURE_COORD_ARRAY_BUFFER_BINDING',
+        kind: 'int', value: [0],
+    },
+    {
+        query: GL.ARRAY_ELEMENT_LOCK_FIRST, name: 'GL_ARRAY_ELEMENT_LOCK_FIRST', kind: 'int',
+        value: [0],
+    },
+    {
+        query: GL.ARRAY_ELEMENT_LOCK_COUNT, name: 'GL_ARRAY_ELEMENT_LOCK_COUNT', kind: 'int',
+        value: [0],
+    },
     { query: GL.LIST_BASE, name: 'GL_LIST_BASE', kind: 'int', value: [0] },
     { query: GL.LIST_INDEX, name: 'GL_LIST_INDEX', kind: 'int', value: [0] },
     { query: GL.LIST_MODE, name: 'GL_LIST_MODE', kind: 'enum', value: [0] },
@@ -210,8 +442,92 @@ export const DEFAULT_STATE = Object.freeze([
         value: [0], dependsOn: 'buffer',
     },
 
+    // --- the framebuffer's own shape ---
+    { query: GL.RED_BITS, name: 'GL_RED_BITS', kind: 'int', value: [8] },
+    { query: GL.GREEN_BITS, name: 'GL_GREEN_BITS', kind: 'int', value: [8] },
+    { query: GL.BLUE_BITS, name: 'GL_BLUE_BITS', kind: 'int', value: [8] },
+    { query: GL.ALPHA_BITS, name: 'GL_ALPHA_BITS', kind: 'int', value: [8] },
+    { query: GL.DEPTH_BITS, name: 'GL_DEPTH_BITS', kind: 'int', value: [0], dependsOn: 'depth' },
+    { query: GL.STENCIL_BITS, name: 'GL_STENCIL_BITS', kind: 'int', value: [0] },
+    { query: GL.INDEX_BITS, name: 'GL_INDEX_BITS', kind: 'int', value: [0] },
+    { query: GL.ACCUM_RED_BITS, name: 'GL_ACCUM_RED_BITS', kind: 'int', value: [0] },
+    { query: GL.ACCUM_GREEN_BITS, name: 'GL_ACCUM_GREEN_BITS', kind: 'int', value: [0] },
+    { query: GL.ACCUM_BLUE_BITS, name: 'GL_ACCUM_BLUE_BITS', kind: 'int', value: [0] },
+    { query: GL.ACCUM_ALPHA_BITS, name: 'GL_ACCUM_ALPHA_BITS', kind: 'int', value: [0] },
+    { query: GL.AUX_BUFFERS, name: 'GL_AUX_BUFFERS', kind: 'int', value: [0] },
+    { query: GL.SUBPIXEL_BITS, name: 'GL_SUBPIXEL_BITS', kind: 'int', value: [4] },
+    {
+        query: GL.DOUBLEBUFFER, name: 'GL_DOUBLEBUFFER', kind: 'bool', value: [0],
+        dependsOn: 'double',
+    },
+    { query: GL.STEREO, name: 'GL_STEREO', kind: 'bool', value: [0] },
+    { query: GL.RGBA_MODE, name: 'GL_RGBA_MODE', kind: 'bool', value: [1] },
+    { query: GL.INDEX_MODE, name: 'GL_INDEX_MODE', kind: 'bool', value: [0] },
+
     // --- implementation limits ---
     { query: GL.MAX_TEXTURE_SIZE, name: 'GL_MAX_TEXTURE_SIZE', kind: 'int', value: [2048] },
+    {
+        query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',
+        value: [2048],
+    },
+    { query: GL.MAX_TEXTURE_UNITS, name: 'GL_MAX_TEXTURE_UNITS', kind: 'int', value: [4] },
+    { query: GL.MAX_LIGHTS, name: 'GL_MAX_LIGHTS', kind: 'int', value: [8] },
+    { query: GL.MAX_CLIP_PLANES, name: 'GL_MAX_CLIP_PLANES', kind: 'int', value: [6] },
+    { query: GL.MAX_VIEWPORT_DIMS, name: 'GL_MAX_VIEWPORT_DIMS', kind: 'int', value: [4096, 4096] },
+    {
+        query: GL.MAX_ATTRIB_STACK_DEPTH, name: 'GL_MAX_ATTRIB_STACK_DEPTH', kind: 'int',
+        value: [16],
+    },
+    {
+        query: GL.MAX_CLIENT_ATTRIB_STACK_DEPTH, name: 'GL_MAX_CLIENT_ATTRIB_STACK_DEPTH',
+        kind: 'int', value: [16],
+    },
+    { query: GL.ATTRIB_STACK_DEPTH, name: 'GL_ATTRIB_STACK_DEPTH', kind: 'int', value: [0] },
+    {
+        query: GL.CLIENT_ATTRIB_STACK_DEPTH, name: 'GL_CLIENT_ATTRIB_STACK_DEPTH', kind: 'int',
+        value: [0],
+    },
+    { query: GL.MAX_LIST_NESTING, name: 'GL_MAX_LIST_NESTING', kind: 'int', value: [64] },
+    { query: GL.MAX_NAME_STACK_DEPTH, name: 'GL_MAX_NAME_STACK_DEPTH', kind: 'int', value: [64] },
+    { query: GL.MAX_EVAL_ORDER, name: 'GL_MAX_EVAL_ORDER', kind: 'int', value: [8] },
+    { query: GL.MAX_PIXEL_MAP_TABLE, name: 'GL_MAX_PIXEL_MAP_TABLE', kind: 'int', value: [32] },
+    {
+        query: GL.MAX_ELEMENTS_VERTICES, name: 'GL_MAX_ELEMENTS_VERTICES', kind: 'int',
+        value: [4096],
+    },
+    {
+        query: GL.MAX_ELEMENTS_INDICES, name: 'GL_MAX_ELEMENTS_INDICES', kind: 'int',
+        value: [4096],
+    },
+    { query: GL.POINT_SIZE_RANGE, name: 'GL_POINT_SIZE_RANGE', kind: 'float', value: [1, 64] },
+    {
+        query: GL.POINT_SIZE_GRANULARITY, name: 'GL_POINT_SIZE_GRANULARITY', kind: 'float',
+        value: [1],
+    },
+    { query: GL.LINE_WIDTH_RANGE, name: 'GL_LINE_WIDTH_RANGE', kind: 'float', value: [1, 1] },
+    {
+        query: GL.LINE_WIDTH_GRANULARITY, name: 'GL_LINE_WIDTH_GRANULARITY', kind: 'float',
+        value: [1],
+    },
+    {
+        query: GL.ALIASED_POINT_SIZE_RANGE, name: 'GL_ALIASED_POINT_SIZE_RANGE', kind: 'float',
+        value: [1, 64],
+    },
+    {
+        query: GL.ALIASED_LINE_WIDTH_RANGE, name: 'GL_ALIASED_LINE_WIDTH_RANGE', kind: 'float',
+        value: [1, 1],
+    },
+    {
+        query: GL.NUM_COMPRESSED_TEXTURE_FORMATS, name: 'GL_NUM_COMPRESSED_TEXTURE_FORMATS',
+        kind: 'int', value: [4],
+    },
+    {
+        query: GL.COMPRESSED_TEXTURE_FORMATS, name: 'GL_COMPRESSED_TEXTURE_FORMATS', kind: 'enum',
+        value: [
+            GL.COMPRESSED_RGB_S3TC_DXT1_EXT, GL.COMPRESSED_RGBA_S3TC_DXT1_EXT,
+            GL.COMPRESSED_RGBA_S3TC_DXT3_EXT, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
+        ],
+    },
     {
         query: GL.MAX_MODELVIEW_STACK_DEPTH, name: 'GL_MAX_MODELVIEW_STACK_DEPTH', kind: 'int',
         value: [STACK_LIMITS.modelview],
@@ -238,6 +554,10 @@ export function resolveStateDefault(entry, inputs){
             return [0, 0, inputs.width, inputs.height];
         case 'buffer':
             return [inputs.doubleBuffered ? GL.BACK : GL.FRONT];
+        case 'double':
+            return [inputs.doubleBuffered ? 1 : 0];
+        case 'depth':
+            return [inputs.depthBits ?? 0];
         default:
             return [...entry.value];
     }

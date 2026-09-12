@@ -53,7 +53,9 @@ function fixture(){
 
 test('a fresh context reads back the documented default of every state', ()=>{
     const { gl, done } = fixture();
-    const inputs = { width: WIDTH, height: HEIGHT, doubleBuffered: true };
+    // The fixture asked for a 24-bit depth buffer, and the depth bits it
+    // reads back are the format's, not a constant.
+    const inputs = { width: WIDTH, height: HEIGHT, doubleBuffered: true, depthBits: 24 };
 
     // A repeated query would silently drop one of the two entries, and the one
     // that survives is whichever the table happens to list second.

@@ -1,0 +1,178 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * Which attribute group each piece of state belongs to: the specification's
+ * table behind glPushAttrib and glPushClientAttrib.
+ *
+ * The table is kept apart from the state defaults on purpose. A default is a
+ * value; a group is a promise about what a pop restores, and a program that
+ * pushes GL_ENABLE_BIT, changes its colour and pops expects the colour to
+ * survive. A state with no group here is never restored, which is why the
+ * test insists that every query in the default table is either grouped or
+ * named in `NOT_SAVED` deliberately.
+ *
+ * GL_ENABLE_BIT overlaps the others: every capability is in it and also in
+ * the group its feature belongs to, so a push of either restores it.
+ */
+
+import { GL } from './constants.js';
+import { DEFAULT_CLIENT_ENABLES, DEFAULT_ENABLES, DEFAULT_STATE } from './state.js';
+
+/** @type {[number, readonly number[]][]} */
+const SERVER_GROUPS = [
+    [GL.CURRENT_BIT, [
+        GL.CURRENT_COLOR, GL.CURRENT_INDEX, GL.CURRENT_NORMAL, GL.CURRENT_TEXTURE_COORDS,
+        GL.CURRENT_SECONDARY_COLOR, GL.CURRENT_FOG_COORDINATE, GL.CURRENT_RASTER_POSITION,
+        GL.CURRENT_RASTER_COLOR, GL.CURRENT_RASTER_INDEX, GL.CURRENT_RASTER_TEXTURE_COORDS,
+        GL.CURRENT_RASTER_POSITION_VALID, GL.CURRENT_RASTER_DISTANCE,
+    ]],
+    [GL.POINT_BIT, [GL.POINT_SIZE, GL.POINT_SMOOTH]],
+    [GL.LINE_BIT, [
+        GL.LINE_WIDTH, GL.LINE_SMOOTH, GL.LINE_STIPPLE, GL.LINE_STIPPLE_PATTERN,
+        GL.LINE_STIPPLE_REPEAT,
+    ]],
+    [GL.POLYGON_BIT, [
+        GL.CULL_FACE, GL.CULL_FACE_MODE, GL.FRONT_FACE, GL.POLYGON_MODE, GL.POLYGON_SMOOTH,
+        GL.POLYGON_STIPPLE, GL.POLYGON_OFFSET_FACTOR, GL.POLYGON_OFFSET_UNITS,
+        GL.POLYGON_OFFSET_POINT, GL.POLYGON_OFFSET_LINE, GL.POLYGON_OFFSET_FILL,
+    ]],
+    [GL.PIXEL_MODE_BIT, [GL.ZOOM_X, GL.ZOOM_Y, GL.READ_BUFFER]],
+    [GL.LIGHTING_BIT, [
+        GL.COLOR_MATERIAL_FACE, GL.COLOR_MATERIAL_PARAMETER, GL.COLOR_MATERIAL, GL.LIGHTING,
+        GL.LIGHT0, GL.LIGHT1, GL.LIGHT2, GL.LIGHT3, GL.LIGHT4, GL.LIGHT5, GL.LIGHT6, GL.LIGHT7,
+        GL.LIGHT_MODEL_AMBIENT, GL.LIGHT_MODEL_LOCAL_VIEWER, GL.LIGHT_MODEL_TWO_SIDE,
+        GL.LIGHT_MODEL_COLOR_CONTROL, GL.SHADE_MODEL,
+    ]],
+    [GL.FOG_BIT, [
+        GL.FOG, GL.FOG_COLOR, GL.FOG_DENSITY, GL.FOG_START, GL.FOG_END, GL.FOG_INDEX,
+        GL.FOG_MODE, GL.FOG_COORDINATE_SOURCE,
+    ]],
+    [GL.DEPTH_BUFFER_BIT, [
+        GL.DEPTH_TEST, GL.DEPTH_FUNC, GL.DEPTH_CLEAR_VALUE, GL.DEPTH_WRITEMASK,
+    ]],
+    [GL.ACCUM_BUFFER_BIT, [GL.ACCUM_CLEAR_VALUE]],
+    [GL.STENCIL_BUFFER_BIT, [
+        GL.STENCIL_TEST, GL.STENCIL_FUNC, GL.STENCIL_REF, GL.STENCIL_VALUE_MASK,
+        GL.STENCIL_FAIL, GL.STENCIL_PASS_DEPTH_FAIL, GL.STENCIL_PASS_DEPTH_PASS,
+        GL.STENCIL_WRITEMASK, GL.STENCIL_CLEAR_VALUE,
+    ]],
+    [GL.VIEWPORT_BIT, [GL.VIEWPORT, GL.DEPTH_RANGE]],
+    [GL.TRANSFORM_BIT, [
+        GL.MATRIX_MODE, GL.NORMALIZE, GL.RESCALE_NORMAL, GL.CLIP_PLANE0, GL.CLIP_PLANE1,
+        GL.CLIP_PLANE2, GL.CLIP_PLANE3, GL.CLIP_PLANE4, GL.CLIP_PLANE5,
+    ]],
+    [GL.ENABLE_BIT, DEFAULT_ENABLES.map(entry=>entry.query)],
+    [GL.COLOR_BUFFER_BIT, [
+        GL.ALPHA_TEST, GL.ALPHA_TEST_FUNC, GL.ALPHA_TEST_REF, GL.BLEND, GL.BLEND_SRC,
+        GL.BLEND_DST, GL.BLEND_COLOR, GL.COLOR_LOGIC_OP, GL.INDEX_LOGIC_OP, GL.LOGIC_OP_MODE,
+        GL.DITHER, GL.DRAW_BUFFER, GL.COLOR_WRITEMASK, GL.COLOR_CLEAR_VALUE,
+        GL.INDEX_CLEAR_VALUE,
+    ]],
+    [GL.HINT_BIT, [
+        GL.PERSPECTIVE_CORRECTION_HINT, GL.POINT_SMOOTH_HINT, GL.LINE_SMOOTH_HINT,
+        GL.POLYGON_SMOOTH_HINT, GL.FOG_HINT, GL.GENERATE_MIPMAP_HINT,
+        GL.TEXTURE_COMPRESSION_HINT,
+    ]],
+    [GL.EVAL_BIT, [GL.AUTO_NORMAL]],
+    [GL.LIST_BIT, [GL.LIST_BASE]],
+    [GL.TEXTURE_BIT, [
+        GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP, GL.TEXTURE_BINDING_1D,
+        GL.TEXTURE_BINDING_2D, GL.TEXTURE_BINDING_CUBE_MAP, GL.TEXTURE_GEN_S, GL.TEXTURE_GEN_T,
+        GL.TEXTURE_GEN_R, GL.TEXTURE_GEN_Q, GL.ACTIVE_TEXTURE, GL.COLOR_SUM,
+    ]],
+    [GL.SCISSOR_BIT, [GL.SCISSOR_TEST, GL.SCISSOR_BOX]],
+];
+
+/** @type {[number, readonly number[]][]} */
+const CLIENT_GROUPS = [
+    [GL.CLIENT_PIXEL_STORE_BIT, [
+        GL.UNPACK_ALIGNMENT, GL.UNPACK_ROW_LENGTH, GL.UNPACK_SKIP_ROWS, GL.UNPACK_SKIP_PIXELS,
+        GL.UNPACK_SWAP_BYTES, GL.UNPACK_LSB_FIRST, GL.PACK_ALIGNMENT, GL.PACK_ROW_LENGTH,
+        GL.PACK_SKIP_ROWS, GL.PACK_SKIP_PIXELS, GL.PACK_SWAP_BYTES, GL.PACK_LSB_FIRST,
+    ]],
+    [GL.CLIENT_VERTEX_ARRAY_BIT, [
+        ...DEFAULT_CLIENT_ENABLES.map(entry=>entry.query),
+        GL.VERTEX_ARRAY_SIZE, GL.VERTEX_ARRAY_TYPE, GL.VERTEX_ARRAY_STRIDE, GL.NORMAL_ARRAY_TYPE,
+        GL.NORMAL_ARRAY_STRIDE, GL.COLOR_ARRAY_SIZE, GL.COLOR_ARRAY_TYPE, GL.COLOR_ARRAY_STRIDE,
+        GL.INDEX_ARRAY_TYPE, GL.INDEX_ARRAY_STRIDE, GL.TEXTURE_COORD_ARRAY_SIZE,
+        GL.TEXTURE_COORD_ARRAY_TYPE, GL.TEXTURE_COORD_ARRAY_STRIDE, GL.EDGE_FLAG_ARRAY_STRIDE,
+        GL.SECONDARY_COLOR_ARRAY_SIZE, GL.SECONDARY_COLOR_ARRAY_TYPE,
+        GL.SECONDARY_COLOR_ARRAY_STRIDE, GL.FOG_COORDINATE_ARRAY_TYPE,
+        GL.FOG_COORDINATE_ARRAY_STRIDE, GL.ARRAY_BUFFER_BINDING, GL.ELEMENT_ARRAY_BUFFER_BINDING,
+        GL.VERTEX_ARRAY_BUFFER_BINDING, GL.NORMAL_ARRAY_BUFFER_BINDING,
+        GL.COLOR_ARRAY_BUFFER_BINDING, GL.INDEX_ARRAY_BUFFER_BINDING,
+        GL.TEXTURE_COORD_ARRAY_BUFFER_BINDING, GL.CLIENT_ACTIVE_TEXTURE,
+        GL.ARRAY_ELEMENT_LOCK_FIRST, GL.ARRAY_ELEMENT_LOCK_COUNT,
+    ]],
+];
+
+/**
+ * State that no push saves: the implementation's limits, the framebuffer's
+ * shape, and bookkeeping that describes the moment rather than a setting.
+ *
+ * @type {Set<number>}
+ */
+export const NOT_SAVED = new Set([
+    GL.LIST_INDEX, GL.LIST_MODE, GL.RENDER_MODE, GL.ATTRIB_STACK_DEPTH,
+    GL.CLIENT_ATTRIB_STACK_DEPTH, GL.RED_BITS, GL.GREEN_BITS, GL.BLUE_BITS, GL.ALPHA_BITS,
+    GL.DEPTH_BITS, GL.STENCIL_BITS, GL.INDEX_BITS, GL.ACCUM_RED_BITS, GL.ACCUM_GREEN_BITS,
+    GL.ACCUM_BLUE_BITS, GL.ACCUM_ALPHA_BITS, GL.AUX_BUFFERS, GL.SUBPIXEL_BITS, GL.DOUBLEBUFFER,
+    GL.STEREO, GL.RGBA_MODE, GL.INDEX_MODE, GL.MAX_TEXTURE_SIZE, GL.MAX_CUBE_MAP_TEXTURE_SIZE,
+    GL.MAX_TEXTURE_UNITS, GL.MAX_LIGHTS, GL.MAX_CLIP_PLANES, GL.MAX_VIEWPORT_DIMS,
+    GL.MAX_ATTRIB_STACK_DEPTH, GL.MAX_CLIENT_ATTRIB_STACK_DEPTH, GL.MAX_LIST_NESTING,
+    GL.MAX_NAME_STACK_DEPTH, GL.MAX_EVAL_ORDER, GL.MAX_PIXEL_MAP_TABLE,
+    GL.MAX_ELEMENTS_VERTICES, GL.MAX_ELEMENTS_INDICES, GL.POINT_SIZE_RANGE,
+    GL.POINT_SIZE_GRANULARITY, GL.LINE_WIDTH_RANGE, GL.LINE_WIDTH_GRANULARITY,
+    GL.ALIASED_POINT_SIZE_RANGE, GL.ALIASED_LINE_WIDTH_RANGE,
+    GL.NUM_COMPRESSED_TEXTURE_FORMATS, GL.COMPRESSED_TEXTURE_FORMATS,
+    GL.MAX_MODELVIEW_STACK_DEPTH, GL.MAX_PROJECTION_STACK_DEPTH, GL.MAX_TEXTURE_STACK_DEPTH,
+]);
+
+/**
+ * @param {readonly [number, readonly number[]][]} groups
+ * @returns {Map<number, number>} query -> the bits that save it
+ */
+function bitsByQuery(groups){
+    /** @type {Map<number, number>} */
+    const bits = new Map();
+    for (const [bit, queries] of groups)
+    {
+        for (const query of queries)
+        {
+            bits.set(query, (bits.get(query) ?? 0) | bit);
+        }
+    }
+    return bits;
+}
+
+/** Server state: query -> the glPushAttrib bits that save it. */
+export const SERVER_BITS = bitsByQuery(SERVER_GROUPS);
+
+/** Client state: query -> the glPushClientAttrib bits that save it. */
+export const CLIENT_BITS = bitsByQuery(CLIENT_GROUPS);
+
+/**
+ * The queries a mask saves, for either stack.
+ *
+ * @param {Map<number, number>} bits
+ * @param {number} mask
+ * @returns {number[]}
+ */
+export function queriesSavedBy(bits, mask){
+    const saved = [];
+    for (const [query, group] of bits)
+    {
+        if ((group & mask) !== 0)
+        {
+            saved.push(query);
+        }
+    }
+    return saved;
+}
+
+/** The whole state table, for the test that checks the groups cover it. */
+export const ALL_QUERIES = DEFAULT_STATE.map(entry=>entry.query);
