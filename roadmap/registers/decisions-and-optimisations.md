@@ -1037,6 +1037,47 @@ generated code's share of the page 55.7 to 53.8%, in a scene the runs did not ho
 the last dword of RAM, a dword straddling its end, one in the VGA window and one below the range,
 compiled with the check off and on: every value the same, the plain ones checked outright.
 
+## A write compiled while paging is off checks a range and a byte instead of the TLB
+
+**The cause.** With reads on the flat path, every store, push, call and read-modify-write still
+went through the TLB entry -- loaded, masked, compared, the page's end checked, the physical page
+folded in -- and the entry is where the has-code bit lives, the one that sends a write into a page
+holding code the slow way so the code is thrown away. Per hundred instructions retired in a match:
+seventeen stores, eight pushes or calls, one or two read-modify-writes, each a dependent load and
+some thirty operations before the store itself.
+
+**The change.** A write compiled while paging is off checks the same range a read does, that it
+stays within its page, and one byte per physical page saying whether the page holds code -- a
+table kept beside the TLB entry's bit, set and cleared where that bit is -- and stores through the
+linear address plus the RAM's base. A write across a page, into a page with code, into the VGA
+window or past the end of RAM goes to the slow path the TLB path has, which dirties the page,
+bails out of a module writing itself, and raises the fault. Pushes, calls, `enter` and the
+read-modify-write forms share the emitter and take the same path. Configuration index 11, apart
+from the reads' 9 so each side measures alone; the counter at index 12 says how many writes from
+generated code took the slow path.
+
+**A page that mixes data with code.** The battle profile named a heap page written over a million
+times a window while holding code that executes; every write threw the page's modules away and
+its hotness with them, so the code there ran interpreted. The has-code check is per page, and
+stays so on the fast path; on the slow path a compiled page now keeps a bit per byte its
+instructions occupy, taken from the blocks' extents when the module is made, and a write -- from
+generated code, the interpreter, a string run or the host, each carrying its length -- throws the
+code away, and a module being compiled from it, only when a byte lands on an instruction.
+Otherwise the code, the entry points and the hotness stay, since a compile reads the bytes as they
+are then. The counter at index 13 says how many writes into a code page were kept.
+
+**The measurement.** Awaits the browser run: menu frame ms and battle guest M/s at 640x480 against
+the 240 M/s the flat reads left, and `hotnessLostToWrites` against its 2441/s.
+
+**The tests.** In the fork, a program stores at every width, adds, increments and exchanges into
+memory, pushes, calls and pops, compiled and compared against hardware. Here, the same forms in a
+loop with the path off and on, memory and registers compared, then a store into the loop's own
+page that patches an instruction of a second loop, which must run, and be compiled again, as
+patched; another program writes only where the slow path is needed -- straddling the end of RAM,
+in the VGA window, below the range, across a page, and into its own page beside the loop's
+instructions -- and the counters show the first program's writes took the fast path, the second's
+did not, and the writes beside the instructions kept the module.
+
 ## A string instruction runs to its end inside the block
 
 **The cause.** The profiler build, on a title in a match: `rep movs` was three exits from

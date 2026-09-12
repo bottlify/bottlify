@@ -1107,3 +1107,212 @@ test('without paging a loop runs across a page boundary inside generated code', 
         `and the interpreter ran ${across.interpreted} instructions, not ${short.interpreted}`);
     host.stop();
 });
+
+test('a write compiled without paging checks a range and a byte, and matches the TLB', async()=>{
+    // With paging off a write in plain RAM is compiled as a range check, a
+    // check that it stays in its page, one byte saying whether the page
+    // holds code, and the store. A loop stores a byte, a word, a dword, a
+    // double and sixteen bytes, pushes, calls and pops, adds into memory at
+    // three widths and writes the last dword of RAM; after it, a store into
+    // its own page patches an instruction of a second loop, which must then
+    // run, and be compiled again, as patched -- a write the fast path may
+    // not take. Another program writes only where the slow path is needed:
+    // a dword straddling the end of RAM, one in the VGA window, one below
+    // the range, one across a page, and one into its own page beside the
+    // loop's instructions, which must keep the module. Both run with the
+    // fast path off and on, memory and registers are compared, and the
+    // counters say which path was taken and what the code pages kept.
+    const host = await boot();
+    const exports = host.cpu().wm.exports;
+    const slowWrites = ()=>exports.bottlify_stat(12);
+    assert.notEqual(slowWrites(), -1, 'a build that counts slow-path writes');
+    const ram = host.cpu().memory_size[0];
+    const DATA = 0x100000;
+    const RESULT = 0x9100;
+    const BELOW = 0x7f00;
+    const ACROSS = 0x101ffe;
+    const N = 200000;
+
+    /** @param {number} callee @returns {number[]} */
+    const forms = callee=>{
+        const program = [0xb9, ...u32(N)];                          // mov ecx, N
+        const loopAt = GUEST_CODE + program.length;
+        program.push(
+            0x89, 0xc8,                                             // mov eax, ecx
+            0xa2, ...u32(DATA),                                     // mov [DATA], al
+            0x66, 0xa3, ...u32(DATA + 2),                           // mov [DATA + 2], ax
+            0xa3, ...u32(DATA + 4),                                 // mov [DATA + 4], eax
+            0x51,                                                   // push ecx
+            0x50,                                                   // push eax
+        );
+        const callAt = GUEST_CODE + program.length;
+        program.push(
+            0xe8, ...u32(callee - (callAt + 5)),                    // call callee
+            0x58,                                                   // pop eax
+            0x59,                                                   // pop ecx
+            0x01, 0x05, ...u32(DATA + 8),                           // add [DATA + 8], eax
+            0xfe, 0x05, ...u32(DATA + 12),                          // inc byte [DATA + 12]
+            0x66, 0x01, 0x05, ...u32(DATA + 14),                    // add [DATA + 14], ax
+            0xdf, 0x05, ...u32(DATA + 4),                           // fild dword [DATA + 4]
+            0xdd, 0x1d, ...u32(DATA + 16),                          // fstp qword [DATA + 16]
+            0x0f, 0x10, 0x05, ...u32(DATA),                         // movups xmm0, [DATA]
+            0x0f, 0x11, 0x05, ...u32(DATA + 32),                    // movups [DATA + 32], xmm0
+            0xa3, ...u32(ram - 4),                                  // mov [ram - 4], eax
+            0x49,                                                   // dec ecx
+        );
+        const jnzAt = GUEST_CODE + program.length;
+        program.push(0x0f, 0x85, ...u32(loopAt - (jnzAt + 6)));    // jnz loop
+        const patchAt = GUEST_CODE + program.length + 15;
+        program.push(
+            0xc7, 0x05, ...u32(patchAt + 1), ...u32(7),             // mov dword [patch + 1], 7
+            0xb9, ...u32(N),                                        // mov ecx, N
+            0xb8, ...u32(0),                                        // patch: mov eax, 0
+            0x01, 0x05, ...u32(DATA + 0x30),                        // add [DATA + 0x30], eax
+            0x49,                                                   // dec ecx
+        );
+        const againAt = GUEST_CODE + program.length;
+        program.push(
+            0x0f, 0x85, ...u32(patchAt - (againAt + 6)),            // jnz patch
+            0xa3, ...u32(RESULT),                                   // mov [RESULT], eax
+            0xf4,                                                   // hlt
+            0xc3,                                                   // callee: ret
+        );
+        return program;
+    };
+    const formsProgram = forms(GUEST_CODE + forms(0).length - 1);
+
+    const edges = [0xb9, ...u32(N)];                                // mov ecx, N
+    const edgesLoopAt = GUEST_CODE + edges.length;
+    edges.push(
+        0x89, 0xc8,                                                 // mov eax, ecx
+        0xa3, ...u32(ram - 2),                                      // mov [ram - 2], eax
+        0xa3, ...u32(0xa0000),                                      // mov [0xa0000], eax
+        0xa3, ...u32(BELOW),                                        // mov [BELOW], eax
+        0xa3, ...u32(ACROSS),                                       // mov [ACROSS], eax
+        0xa3, ...u32(GUEST_CODE + 0x800),                           // mov [GUEST_CODE + 0x800], eax
+        0x49,                                                       // dec ecx
+    );
+    const edgesJnzAt = GUEST_CODE + edges.length;
+    edges.push(0x0f, 0x85, ...u32(edgesLoopAt - (edgesJnzAt + 6)));    // jnz loop
+    edges.push(0xf4);                                               // hlt
+
+    /**
+     * @param {number[]} program
+     * @param {number} flat
+     * @param {boolean} warm  Keep the code, and whatever was compiled of it.
+     */
+    const run = async(program, flat, warm)=>{
+        exports.set_jit_config(11, flat);
+        if (!warm)
+        {
+            exports.jit_clear_cache_js();
+            host.writePhysical(GUEST_CODE, new Uint8Array(program));
+            host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        }
+        host.writePhysical(DATA, new Uint8Array(0x40));
+        host.writePhysical(RESULT, new Uint8Array(4));
+        host.writePhysical(BELOW, new Uint8Array(4));
+        host.writePhysical(ACROSS - 2, new Uint8Array(8));
+        host.writePhysical(ram - 4, new Uint8Array(4));
+        host.writePhysical(GUEST_CODE + 0x800, new Uint8Array(4));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        const before = /** @type {any} */ (host.jitState());
+        const slowBefore = slowWrites();
+        const keptBefore = exports.bottlify_stat(13);
+        for (let slice = 0; slice < 60000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const after = /** @type {any} */ (host.jitState());
+        assert.ok(after.compiledSteps - before.compiledSteps > N * 4, 'and was compiled');
+        return {
+            data: host.readPhysical(DATA, 0x40),
+            result: host.readPhysical(RESULT, 4),
+            below: host.readPhysical(BELOW, 4),
+            across: host.readPhysical(ACROSS - 2, 8),
+            last: host.readPhysical(ram - 4, 4),
+            beside: host.readPhysical(GUEST_CODE + 0x800, 4),
+            stack: host.readPhysical(INITIAL_STACK - 16, 16),
+            eax: host.readReg32('eax'), ecx: host.readReg32('ecx'), esp: host.readReg32('esp'),
+            slow: slowWrites() - slowBefore,
+            kept: exports.bottlify_stat(13) - keptBefore,
+            modules: after.finalised - before.finalised,
+            discarded: after.discarded - before.discarded,
+        };
+    };
+    /** @param {Uint8Array} bytes @param {number} at */
+    const word = (bytes, at)=>
+        (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
+    /** @param {Uint8Array} bytes @param {number} at */
+    const half = (bytes, at)=>bytes[at] | bytes[at + 1] << 8;
+
+    const throughTlb = await run(formsProgram, 0, false);
+    const flat = await run(formsProgram, 1, false);
+    const again = await run(formsProgram, 1, true);
+    /** @param {string} name @param {typeof flat} one */
+    const same = (name, one)=>{
+        const base = throughTlb;
+        assert.deepEqual([...one.data], [...base.data], `${name}: the data written`);
+        assert.deepEqual([...one.stack], [...base.stack], `${name}: the stack written`);
+        assert.deepEqual(
+            [...one.result, ...one.last, one.eax, one.ecx, one.esp],
+            [...base.result, ...base.last, base.eax, base.ecx, base.esp],
+            `${name}: the rest`);
+    };
+    same('flat', flat);
+    same('again', again);
+    const sum = ((N * (N + 1)) / 2) >>> 0;
+    assert.equal(flat.data[0], 1, 'a byte');
+    assert.equal(half(flat.data, 2), 1, 'a word');
+    assert.equal(word(flat.data, 4), 1, 'a dword');
+    assert.equal(word(flat.data, 8), sum, 'a dword added into');
+    assert.equal(flat.data[12], N & 0xff, 'a byte incremented');
+    assert.equal(half(flat.data, 14), sum & 0xffff, 'a word added into');
+    assert.deepEqual([...flat.data.subarray(16, 24)],
+        [...new Uint8Array(Float64Array.of(1).buffer)], 'a double');
+    assert.deepEqual([...flat.data.subarray(32, 48)], [...flat.data.subarray(0, 16)],
+        'sixteen bytes');
+    assert.equal(word(flat.last, 0), 1, 'the last dword of RAM');
+    assert.equal(word(flat.stack, 12), 1, 'ecx pushed');
+    assert.equal(word(flat.stack, 8), 1, 'eax pushed');
+    const returnAddress = word(flat.stack, 4);
+    assert.ok(returnAddress > GUEST_CODE && returnAddress < GUEST_CODE + formsProgram.length,
+        'the return address pushed by call');
+    assert.equal(word(flat.data, 0x30), (7 * N) >>> 0,
+        'the store into the code page took, and the second loop ran as patched');
+    assert.equal(word(flat.result, 0), 7);
+    assert.equal(flat.eax, 7);
+    assert.ok(flat.modules >= 2, `${flat.modules} modules: one before the patch, one after`);
+    assert.ok(again.modules >= 2, `${again.modules} modules on the warm run`);
+    assert.equal(flat.esp, INITIAL_STACK, 'and the stack is balanced');
+    assert.ok(flat.slow < 8, `${flat.slow} writes took the slow path, out of ${N} iterations`);
+    assert.ok(again.slow < 8, `${again.slow} on the warm run`);
+
+    const edgesThroughTlb = await run(edges, 0, false);
+    const edgesFlat = await run(edges, 1, false);
+    assert.deepEqual([...edgesFlat.below], [...edgesThroughTlb.below], 'below the range');
+    assert.deepEqual([...edgesFlat.across], [...edgesThroughTlb.across], 'across a page');
+    assert.deepEqual([...edgesFlat.last], [...edgesThroughTlb.last], 'straddling the end');
+    assert.equal(word(edgesFlat.below, 0), 1);
+    assert.equal(word(edgesFlat.across, 2), 1);
+    assert.deepEqual([...edgesFlat.last], [0, 0, 1, 0], 'the bytes past the end are dropped');
+    /** @param {string} name @param {typeof edgesFlat} one */
+    const keptItsCode = (name, one)=>{
+        assert.equal(word(one.beside, 0), 1, `${name}: the write beside the instructions`);
+        assert.ok(one.discarded <= 2,
+            `${name}: ${one.discarded} modules discarded by ${N} writes beside the instructions`);
+        assert.ok(one.kept >= N / 2, `${name}: ${one.kept} writes kept the page's code`);
+    };
+    keptItsCode('through the TLB', edgesThroughTlb);
+    keptItsCode('flat', edgesFlat);
+    assert.ok(edgesFlat.slow >= N,
+        `${edgesFlat.slow} writes took the slow path, out of ${5 * N}`);
+    host.stop();
+});

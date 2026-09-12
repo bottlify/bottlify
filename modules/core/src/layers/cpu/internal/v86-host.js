@@ -625,6 +625,12 @@ export async function createV86Host(config){
                     // Instructions compiled without recording their flags,
                     // because what follows overwrites them before any read.
                     flagsDead: read(11),
+                    // Writes from generated code that took the slow path;
+                    // with paging off nearly none should.
+                    slowWrites: read(12),
+                    // Writes into a page holding code that landed beside its
+                    // instructions and so kept the code and the page's hotness.
+                    codePageWritesKept: read(13),
                     dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,

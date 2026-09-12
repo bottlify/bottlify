@@ -1,12 +1,12 @@
 {
   "repo": "mrwayer/v86",
-  "tag": "build-18c37ee",
+  "tag": "build-90020c5",
   "artifacts": {
     "libv86.js": "sha256:c3405fcaeeea5085a4d95ec845bc81342f2bfd5a479658558b96e2cf4f66f685",
     "libv86.mjs": "sha256:ea9634b81088f8852dbbf321ade9da5a89b890d5c592235f964f573d17afb594",
     "seabios.bin": "sha256:73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
-    "v86-profiler.wasm": "sha256:59c92e3f94b8c2ef45b5cf7290cddc130a484e02c2603cc3188bc44821b7b188",
-    "v86.wasm": "sha256:dab49783f34d0c256b0bb1fedd3f0d52fe1fb3afccb20d500867ef26b405bc33",
+    "v86-profiler.wasm": "sha256:98adec492987b8d699748e4e59a8c6a307462277f66c520af149434b87ed8831",
+    "v86.wasm": "sha256:b130518a07b84cecec8ebbf572e1885831a2ebda943dfe9bbec538c4aa676078",
     "vgabios.bin": "sha256:a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
   }
 }
