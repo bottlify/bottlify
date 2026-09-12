@@ -587,6 +587,7 @@ async function run(request){
     /** @type {any} */
     let presented = null;
     let presents = 0;
+    let pointerDown = false;
     /** @type {any} */
     const collected = { failures: [], missing: [], output: [], events: [] };
 
@@ -736,6 +737,20 @@ async function run(request){
             presentTo: frame=>{
                 presented = frame;
                 presents++;
+                // A pointer the run asked to hold somewhere, put there every
+                // frame: a program that hit-tests the cursor against its own
+                // controls draws a different cursor over one than over none,
+                // and this page has no mouse of its own to hold still.
+                if (request.pointer)
+                {
+                    app.input.send({ kind: 'pointerMove',
+                        x: request.pointer.x, y: request.pointer.y, dx: 0, dy: 0 });
+                    if (request.pointer.down && !pointerDown)
+                    {
+                        pointerDown = true;
+                        app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                    }
+                }
             },
         },
         bundle: {

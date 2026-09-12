@@ -140,6 +140,13 @@ function parse(argv){
         // Every draw rendered as if D3DRS_FOGENABLE were clear, so a run
         // differs from an ordinary one by fog and nothing else.
         probeTexture: argv.includes('--probe') ? argv[argv.indexOf('--probe') + 1] : null,
+        // Where to hold the pointer, in the program's own pixels, as `x,y`.
+        pointer: argv.includes('--pointer')
+            ? (()=>{
+                const [x, y, down] = argv[argv.indexOf('--pointer') + 1].split(',');
+                return { x: Number(x), y: Number(y), down: down === 'down' };
+            })()
+            : null,
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
         // Guest instructions per scheduler turn when a profile is asked for.
@@ -609,6 +616,7 @@ export async function game(options){
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
             fog: options.fog,
+            pointer: options.pointer,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
