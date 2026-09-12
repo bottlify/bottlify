@@ -39,6 +39,13 @@ import { readRect, writeU16, writeU32s } from '../user32/structs.js';
 import { BITMAPINFOHEADER, PALETTEENTRY_SIZE, readBitmapInfoHeader }
     from './structs.js';
 
+/** iUsage of the DIB functions: a colour table of RGBQUADs, not palette indices. */
+const DIB_RGB_COLORS = 0;
+/** BI_RGB: the one compression the DIB decoder reads. */
+const BI_RGB = 0;
+/** Bits per pixel the DIB decoder reads. */
+const DIB_BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
+
 /** CombineRgn's modes. */
 const RGN_AND = 1;
 const RGN_OR = 2;
@@ -206,6 +213,38 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         return interfaces;
     };
 
+    /**
+     * A DIB as a program hands one to the device: the header, the colour
+     * table that follows it when the format has one, and the bits, read from
+     * guest memory into the shape the drawing layer decodes.
+     *
+     * @param {number} info @param {number} bits
+     * @returns {{ header: import('./structs.js').BitmapInfoHeaderFields, bits: Uint8Array,
+     *             colors: number[] } | null}
+     */
+    const readDib = (info, bits)=>{
+        const header = readBitmapInfoHeader(host, info);
+        if (header.size < BITMAPINFOHEADER.SIZE || header.width <= 0 || header.height === 0
+            || !DIB_BIT_COUNTS.has(header.bitCount) || header.compression !== BI_RGB)
+        {
+            return null;
+        }
+        const stride = ((header.width * header.bitCount + 31) >> 5) * 4;
+        const rows = Math.abs(header.height);
+        const colors = [];
+        if (header.bitCount <= 8)
+        {
+            const used = header.clrUsed || (1 << header.bitCount);
+            const table = host.readMemory(info + header.size, used * 4);
+            for (let index = 0; index < used; index++)
+            {
+                colors.push((table[index * 4] | table[index * 4 + 1] << 8
+                    | table[index * 4 + 2] << 16) >>> 0);
+            }
+        }
+        return { header, bits: host.readMemory(bits, stride * rows), colors };
+    };
+
     /** @param {number} handle @returns {any | null} */
     const regionOf = handle=>{
         const record = objects.get(handle);
@@ -243,6 +282,98 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 }
                 return interfaces.bitBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
                     (source >>> 0) || null, x1 | 0, y1 | 0, rop >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL PatBlt(HDC hdc, int x, int y, int w, int h, DWORD rop)
+         *
+         * A blit with no source: the raster operation combines the brush with
+         * what is there, which is how a program clears a rectangle to its
+         * background or inverts one.
+         */
+        PatBlt: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, rop])=>{
+                const interfaces = bound(dest);
+                return interfaces && interfaces.patBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
+                    rop >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL StretchBlt(HDC hdc, int x, int y, int w, int h, HDC hdcSrc,
+         *                 int x1, int y1, int w1, int h1, DWORD rop)
+         */
+        StretchBlt: {
+            argBytes: 44,
+            /** @param {number[]} args */
+            handler: ([dest, x, y, cx, cy, source, x1, y1, cx1, cy1, rop])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || !bound(source))
+                {
+                    return 0;
+                }
+                return interfaces.stretchBlt(dest >>> 0, x | 0, y | 0, cx | 0, cy | 0,
+                    source >>> 0, x1 | 0, y1 | 0, cx1 | 0, cy1 | 0, rop >>> 0) ? 1 : 0;
+            },
+        },
+
+        /**
+         * int StretchDIBits(HDC hdc, int xDest, int yDest, int DestWidth, int DestHeight,
+         *                   int xSrc, int ySrc, int SrcWidth, int SrcHeight,
+         *                   const VOID *lpBits, const BITMAPINFO *lpbmi, UINT iUsage,
+         *                   DWORD rop)
+         *
+         * The bits are read as the header describes them and the colour table
+         * that follows it; a palette-relative table (DIB_PAL_COLORS) is not
+         * decoded, which is reported as zero lines rather than drawn wrongly.
+         */
+        StretchDIBits: {
+            argBytes: 52,
+            /** @param {number[]} args */
+            handler: ([dest, xDest, yDest, destWidth, destHeight, xSrc, ySrc, srcWidth,
+                srcHeight, bits, info, usage, rop])=>{
+                const interfaces = bound(dest);
+                if (!interfaces || (bits >>> 0) === 0 || (info >>> 0) === 0
+                    || (usage >>> 0) !== DIB_RGB_COLORS)
+                {
+                    return 0;
+                }
+                const image = readDib(info >>> 0, bits >>> 0);
+                if (!image)
+                {
+                    return 0;
+                }
+                return interfaces.stretchDIBits(dest >>> 0, {
+                    xDest: xDest | 0, yDest: yDest | 0,
+                    destWidth: destWidth | 0, destHeight: destHeight | 0,
+                    xSrc: xSrc | 0, ySrc: ySrc | 0,
+                    srcWidth: srcWidth | 0, srcHeight: srcHeight | 0,
+                    image,
+                    rop: rop >>> 0,
+                });
+            },
+        },
+
+        /** int SetStretchBltMode(HDC hdc, int mode) -- the previous mode, or zero */
+        SetStretchBltMode: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, mode])=>{
+                const interfaces = bound(handle);
+                return interfaces ? interfaces.setStretchBltMode(handle >>> 0, mode | 0) : 0;
+            },
+        },
+
+        /** int GetStretchBltMode(HDC hdc) */
+        GetStretchBltMode: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const interfaces = bound(handle);
+                return interfaces ? interfaces.getStretchBltMode(handle >>> 0) : 0;
             },
         },
 

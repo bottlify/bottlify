@@ -31,6 +31,9 @@ const RGN_COPY = 5;
 const NULLREGION = 1;
 const SIMPLEREGION = 2;
 
+const PATCOPY = 0x00f00021;
+const DIB_RGB_COLORS = 0;
+const DIB_PAL_COLORS = 1;
 const SRCCOPY = 0x00cc0020;
 
 function fakeMemory(size = 0x33000){
@@ -122,6 +125,33 @@ function fakeDrawing(){
             calls.push(['bitBlt']);
             return true;
         },
+        /** @param {number[]} args */
+        patBlt(...args){
+            calls.push(['patBlt', ...args]);
+            return true;
+        },
+        /** @param {number[]} args */
+        stretchBlt(...args){
+            calls.push(['stretchBlt', ...args]);
+            return true;
+        },
+        /** @param {number} hdc @param {any} request */
+        stretchDIBits(hdc, request){
+            const { header, colors, bits } = request.image;
+            calls.push(['stretchDIBits', hdc, header.width, header.bitCount, colors.length,
+                bits.length, request.destWidth]);
+            return Math.abs(request.image.header.height);
+        },
+        stretchMode: 1,
+        /** @param {number} hdc @param {number} mode */
+        setStretchBltMode(hdc, mode){
+            const previous = this.stretchMode;
+            this.stretchMode = mode;
+            return previous;
+        },
+        getStretchBltMode(){
+            return this.stretchMode;
+        },
         /** @param {number} hdc @param {number} x @param {number} y */
         lineTo(hdc, x, y){
             calls.push(['lineTo', hdc, x, y]);
@@ -210,6 +240,38 @@ test('with one, the calls reach it with the arguments they were given', ()=>{
         [['setPixel', hdc, 9, 10, 0x00abcdef]]);
     assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 1,
         'the surface is bound once, not on every call');
+});
+
+test('the blits that need no source, and the ones that scale, reach the service', ()=>{
+    // An installer paints its banner with PatBlt and StretchDIBits; a missing
+    // import there was a zero answer that popped nothing, and eight calls
+    // later the program returned into its own stack.
+    const graphics = fakeDrawing();
+    const { fns, hdc, memory } = setup(graphics.services);
+
+    assert.equal(fns.PatBlt.handler([hdc, 1, 2, 30, 40, PATCOPY]), 1);
+    assert.equal(fns.StretchBlt.handler([hdc, 0, 0, 10, 10, hdc, 0, 0, 5, 5, SRCCOPY]), 1);
+    assert.equal(fns.SetStretchBltMode.handler([hdc, 3]), 1, 'the previous mode comes back');
+    assert.equal(fns.GetStretchBltMode.handler([hdc]), 3);
+
+    // A 4-bit DIB: header, sixteen colours, then two rows of two pixels.
+    const INFO = 0x800;
+    const BITS = 0x900;
+    memory.putU32s(INFO, [40, 2, 2]);
+    memory.bytes[INFO + 12] = 1;
+    memory.bytes[INFO + 14] = 4;
+    memory.putU32s(INFO + 16, [0, 0, 0, 0, 16, 0]);
+    memory.putU32s(INFO + 40, Array.from({ length: 16 }, (_, index)=>index * 0x111111));
+    memory.bytes.set([0x01, 0, 0, 0, 0x23, 0, 0, 0], BITS);
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_RGB_COLORS, SRCCOPY]), 2);
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'stretchDIBits'),
+        [['stretchDIBits', hdc, 2, 4, 16, 8, 4]]);
+    assert.equal(fns.StretchDIBits.handler(
+        [hdc, 0, 0, 4, 4, 0, 0, 2, 2, BITS, INFO, DIB_PAL_COLORS, SRCCOPY]), 0,
+    'a palette-relative table is not decoded, and says so with zero lines');
+    assert.equal(fns.PatBlt.argBytes, 24);
+    assert.equal(fns.StretchDIBits.argBytes, 52);
 });
 
 // --- regions ---
