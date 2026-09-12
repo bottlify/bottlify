@@ -156,6 +156,12 @@ function parse(argv){
         quantum: argv.includes('--profile')
             ? number('--profile', 2000) || 2000
             : 0,
+        // The engine in a worker, with the page's canvas transferred to it;
+        // otherwise on the page's own thread.
+        worker: argv.includes('--worker'),
+        // How the loop waits in the worker: `page` (a look every few
+        // milliseconds) or `event` (sleep until something happens).
+        pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
     };
 }
 
@@ -465,6 +471,21 @@ function describe(result, context, calls){
     }
 
     say(`  frames presented: ${result.presents ?? 0}`);
+    // The gaps between presents are the shape a stutter has, and the page's
+    // long tasks say whether the thread the person's browser lives on was held.
+    const gaps = [...result.presentGaps ?? []].sort((left, right)=>left - right);
+    if (gaps.length > 0)
+    {
+        const at = (/** @type {number} */ share)=>gaps[Math.min(gaps.length - 1,
+            Math.floor(gaps.length * share))].toFixed(1);
+        say(`  present gap ms: median ${at(0.5)}, p90 ${at(0.9)}, max ${at(1)}`);
+    }
+    if (result.longTasks)
+    {
+        say(`  page long tasks: ${result.longTasks.count}, `
+            + `${result.longTasks.totalMs.toFixed(0)}ms total, `
+            + `${result.longTasks.maxMs.toFixed(0)}ms longest`);
+    }
     if (result.frame)
     {
         say(`  frame: ${JSON.stringify(result.frame)}`);
@@ -568,7 +589,8 @@ export async function game(options){
     const browser = await launchWithGpu();
     mkdirSync(REPORTS_DIR, { recursive: true });
 
-    const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`;
+    const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
+        + (options.worker ? `?worker=1&pacing=${options.pacing}` : '');
     /** @type {CdpEndpoint | null} */
     let cdp = null;
     try
@@ -747,7 +769,7 @@ const options = parse(process.argv.slice(2));
 if (!options.id)
 {
     console.error(
-        'usage: node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS]');
+        'usage: node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--worker]');
     process.exit(2);
 }
 
