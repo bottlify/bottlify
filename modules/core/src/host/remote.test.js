@@ -7,7 +7,8 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
-import { serveEngine, watchFrom, workerPacing } from './serve.js';
+import { serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS } from './serve.js';
+import { PAGE_YIELD_MS } from '../app.js';
 
 /**
  * Both ends of the wire, joined by a real MessageChannel: what the page sends
@@ -168,7 +169,7 @@ function fakeViewport({ width, height }){
 
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
- * @param {{ threaded?: boolean }} [deps]
+ * @param {{ threaded?: boolean, now?: () => number }} [deps]
  */
 async function connect(options = {}, deps = {}){
     const channel = new MessageChannel();
@@ -434,7 +435,7 @@ test('a watch spec names libraries whole or by ordinal', ()=>{
     assert.equal(watch('c.dll', '_Name@12', 9), null);
 });
 
-test('a worker runs turns back to back and yields only for something pending', ()=>{
+test('a worker runs turns back to back and yields for something pending or on its clock', async()=>{
     let now = 0;
     let signalled = false;
     let yields = 0;
@@ -446,19 +447,26 @@ test('a worker runs turns back to back and yields only for something pending', (
         signalled: ()=>signalled,
         now: ()=>now,
     });
-    const nothing = { suspended: 0, fetching: 0, idlers: 0 };
+    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
     assert.equal(pacing.yield(nothing), null);
     assert.equal(pacing.yield(nothing), null);
-    assert.ok(pacing.yield({ ...nothing, suspended: 1 }), 'a call suspended on the host');
-    assert.ok(pacing.yield({ ...nothing, fetching: 1 }), 'a range in flight');
-    assert.ok(pacing.yield({ ...nothing, idlers: 1 }), 'a caller on an empty queue');
+    await pacing.yield({ ...nothing, suspended: 1 });
+    await pacing.yield({ ...nothing, fetching: 1 });
+    await pacing.yield({ ...nothing, idlers: 1 });
+    await pacing.yield({ ...nothing, spun: 1 });
+    assert.equal(yields, 4, 'a call suspended, a range in flight, a caller on an empty '
+        + 'queue and a turn that retired nothing each yield at once');
     signalled = true;
-    assert.ok(pacing.yield(nothing), 'the page posted something');
+    await pacing.yield(nothing);
+    assert.equal(yields, 5, 'the page posted something');
     signalled = false;
     assert.equal(pacing.yield(nothing), null);
-    now += 2;
-    assert.ok(pacing.yield(nothing), 'a millisecond of turns without a yield');
-    assert.equal(yields, 5);
+    now += WORKER_YIELD_MS - 1;
+    assert.equal(pacing.yield(nothing), null, 'the interval is not up');
+    now += 1;
+    await pacing.yield(nothing);
+    assert.equal(yields, 6, 'the interval is up');
+    assert.equal(pacing.yield(nothing), null, 'and the clock was reset');
 });
 
 test('an idle worker sleeps to the deadline, or until the page or the host speaks', async()=>{
@@ -494,17 +502,28 @@ test('an idle worker sleeps to the deadline, or until the page or the host speak
 });
 
 test('the page counts what it posts, and the worker sees it between two turns', async()=>{
-    const same = await connect();
-    assert.equal(same.built().pacing, undefined, 'a port on the same thread keeps the page pacing');
+    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
+    let clock = 0;
+    const now = ()=>clock;
+
+    const same = await connect({}, { now });
+    assert.equal(same.built().pacing.yield(nothing), null);
+    clock = PAGE_YIELD_MS;
+    assert.ok(same.built().pacing.yield(nothing),
+        "a port on the same thread yields on the page's clock");
     await same.remote.dispose();
 
-    const looks = await connect({}, { threaded: true });
-    assert.equal(looks.built().pacing, undefined, 'a worker keeps the page pacing unless asked');
+    clock = 0;
+    const looks = await connect({}, { threaded: true, now });
+    clock = PAGE_YIELD_MS;
+    assert.equal(looks.built().pacing.yield(nothing), null,
+        "a worker holds its thread past the page's interval");
+    clock = WORKER_YIELD_MS;
+    assert.ok(looks.built().pacing.yield(nothing), 'and yields on its own');
     await looks.remote.dispose();
 
     const { remote, built } = await connect({ pacing: 'event' }, { threaded: true });
     const pacing = built().pacing;
-    const nothing = { suspended: 0, fetching: 0, idlers: 0 };
     assert.equal(typeof pacing.yield, 'function');
     assert.equal(pacing.yield(nothing), null, 'nothing posted since start');
     remote.input.send({ kind: 'key', code: 'KeyA', down: true });

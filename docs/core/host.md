@@ -106,7 +106,8 @@ The same engine, behind the same port protocol, on the calling thread: `openHost
 is what a runtime without `Worker` falls back to and what a headless test uses
 (`src/host/create.itest.js` runs a fixture program this way with no canvas and checks the
 controller answers exactly as it would from a worker). On the calling thread the run loop always
-keeps the page's pacing whatever `pacing` asks, because that thread cannot block.
+keeps the page's pacing, with the page's short yield interval, whatever `pacing` asks, because
+that thread cannot block.
 
 ## 4. The message protocol (`src/host/messages.js`)
 
@@ -190,18 +191,30 @@ The controller does not carry the engine's `debug`, `post`, `guestProfile`, `mai
 
 The engine's run loop hands out scheduler turns and, between them, has to give the thread away
 somehow. `src/app.js` takes that policy as `RunPacing` (`{ yield(pending), wait(until) }`) and
-defaults to `pagePacing`: a yield through a `MessageChannel` macrotask every turn, and, when
-nothing can run, a look again on a 4 ms timer (`IDLE_LOOK_MS`), or on a macrotask when the page is
-hidden because a browser clamps a hidden page's timers to about a second and that stops the
-machine rather than slowing it.
+defaults to `pagePacing`: a yield through a `MessageChannel` macrotask, and, when nothing can run,
+a look again on a 4 ms timer (`IDLE_LOOK_MS`), or on a macrotask when the page is hidden because a
+browser clamps a hidden page's timers to about a second and that stops the machine rather than
+slowing it.
+
+The yield is by need and by time, never by turn (`pacedYield`). The loop leaves the microtask
+queue at once when the host may have something to deliver — a host call is suspended, a range is
+in flight, a caller sits on an empty message queue, the last turn retired no instruction, or the
+page's signal word says a message is waiting — and otherwise only once a bounded interval has
+passed since the last trip ended: `PAGE_YIELD_MS` (2 ms) on a page's thread, where the gap between
+tasks is where input, composition and the launcher's own interface happen, and `WORKER_YIELD_MS`
+(4 ms) in a worker, whose thread is nobody else's and where the bound only limits how long a
+decoder's output, a fetch's answer or the frame the guest just presented wait behind the guest. A
+yield every turn was measured on a real title at fourteen hundred trips a second of over a
+hundred microseconds each — the largest host phase of the run — because whatever the browser runs
+in the gap is paid on every trip. The sound ring holds 200 ms and is topped up every turn, so it
+needs no yield at all.
 
 `serve.js` offers a second policy, `workerPacing`, when it is `threaded` and the start asked for
-`pacing: 'event'`: turns run back to back until a host answer, a range or a message from the page
-is pending, and an idle machine sleeps until the guest's own next deadline — a timed wait, a queue
-timer, a device that wants feeding — or until the page posts. To see a waiting message without
-yielding, the page counts every post in one shared `Int32Array` word (`signal`) that the loop reads
-with `Atomics.load` between turns; where the origin has no shared memory the loop yields on a 1 ms
-clock (`YIELD_MS`) instead.
+`pacing: 'event'`: the same yield on the worker's clock, and an idle machine that sleeps until the
+guest's own next deadline — a timed wait, a queue timer, a device that wants feeding — or until a
+host answer or a message from the page. To see a waiting message without yielding, the page counts
+every post in one shared `Int32Array` word (`signal`) that the loop reads with `Atomics.load`
+between turns; where the origin has no shared memory a message waits for the timed yield instead.
 
 `'page'` is the default in the worker too, on the strength of one measurement recorded in
 `src/host/messages.js`: on a harness run through the launcher path, the same build in the same
@@ -264,7 +277,8 @@ host is closed and the canvas forgotten.
   waits for a measurement that says the pump has become material.
 - **`pacing: 'event'` is slower today** (section 6).
 - **The engine's shared-memory signal needs a cross-origin-isolated page.** Without
-  `SharedArrayBuffer` the worker still runs; it looks for messages on a clock instead.
+  `SharedArrayBuffer` the worker still runs; a message waits for the next timed yield, at most
+  `WORKER_YIELD_MS`, instead of being seen between two turns.
 - **Function-valued options do not cross** (section 2).
 - **One program per worker at a time.** A second `start` is refused; a child process the program
   asks for replaces it inside the same engine.

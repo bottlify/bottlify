@@ -20,18 +20,29 @@
  * worker at all; `engine.worker.js` is the two lines that bind it to a real one.
  */
 
-import { createMacrotask } from '../app.js';
+import { createMacrotask, pacedYield, pagePacing } from '../app.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
 
 /**
  * How long a worker runs turns back to back before giving its event loop a
- * turn regardless. Nothing the page sends needs it -- the signal word says
- * when a message is waiting -- but a decoder's output and a fetch's answer
- * are tasks too, and a loop that never yields never sees them.
+ * turn regardless.
+ *
+ * The thread is nobody else's, so the bound is only about what queues behind
+ * the guest: input from the page and its requests -- the signal word yields
+ * for those at once wherever the origin has shared memory, and this is the
+ * bound where it has not -- a decoder's output, a fetch's answer, and the
+ * frame the guest just presented, which the browser composes only at a task
+ * boundary. Four milliseconds is a quarter of a frame at sixty and well
+ * under what a person notices as lag between the mouse and the screen; the
+ * sound ring holds two hundred milliseconds and is topped up every turn, so
+ * it needs no yield at all. A yield every turn, measured on a real title,
+ * was fourteen hundred trips a second at over a hundred microseconds each,
+ * the largest host phase of the run; a bound this wide keeps the trips to a
+ * few hundred and the latency where nobody feels it.
  */
-const YIELD_MS = 1;
+export const WORKER_YIELD_MS = 4;
 
 /** `GPUTextureUsage` bits, as numbers: the typecheck has no WebGPU library. */
 const TEXTURE_USAGE = { COPY_DST: 0x02, RENDER_ATTACHMENT: 0x10 };
@@ -45,9 +56,10 @@ const TEXTURE_USAGE = { COPY_DST: 0x02, RENDER_ATTACHMENT: 0x10 };
  *     the canvas; a test hands in a canvas that is only a size and a context
  *     of its own.
  * @property {boolean} [threaded]
- *     Whether this end has a thread of its own. It does in a worker, where a
- *     run may ask for the event-driven pacing; on a page's thread, behind a
- *     MessageChannel, the loop keeps the page's pacing whatever is asked.
+ *     Whether this end has a thread of its own. It does in a worker, where
+ *     the loop holds the thread for the worker's interval between yields and
+ *     a run may ask for the event-driven pacing; on a page's thread, behind
+ *     a MessageChannel, the loop keeps the page's pacing whatever is asked.
  * @property {() => number} [now]
  */
 
@@ -65,18 +77,8 @@ const TEXTURE_USAGE = { COPY_DST: 0x02, RENDER_ATTACHMENT: 0x10 };
  * @returns {import('../app.js').RunPacing}
  */
 export function workerPacing({ macrotask, poke, signalled, now }){
-    let yielded = now();
     return {
-        yield(pending){
-            const at = now();
-            if (pending.suspended > 0 || pending.fetching > 0 || pending.idlers > 0
-                || signalled() || at - yielded >= YIELD_MS)
-            {
-                yielded = at;
-                return macrotask();
-            }
-            return null;
-        },
+        yield: pacedYield({ macrotask, now, intervalMs: WORKER_YIELD_MS, signalled }),
         wait({ sleep, deadlineMs, wakes }){
             if (!sleep)
             {
@@ -478,9 +480,15 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             void word;
             app = await createApp({
                 ...rest,
+                // The page's pacing either way unless asked, with the signal
+                // word in both: a message the page posted is seen between
+                // two turns rather than at the next timed yield.
                 pacing: threaded && options.pacing === 'event'
                     ? workerPacing({ macrotask: breathe, poke, signalled, now: clock })
-                    : undefined,
+                    : pagePacing({
+                        macrotask: breathe, hidden: ()=>hidden, now: clock, signalled,
+                        yieldMs: threaded ? WORKER_YIELD_MS : undefined,
+                    }),
                 bundle: bundle ? {
                     ...bundle,
                     fetch: rangeFetcher(bundle.url),

@@ -12,9 +12,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    createMacrotask, groupBlocks, idleWait, inParallel, pageIsHidden, placePatches,
+    createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
     withReadAhead, withWindow, refetchedIn,
-    resolveLibraryPath, timedWait, pagePacing,
+    resolveLibraryPath, timedWait, pagePacing, PAGE_YIELD_MS,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
 } from './app.js';
@@ -471,21 +471,72 @@ test('a run that nobody is looking at does not wait on a clamped timer', async()
     assert.deepEqual(took, ['timer', 'macrotask', 'timer']);
 });
 
-test("a page's pacing yields every turn and looks again on its timer or on a wake", async()=>{
-    // The default the loop ran with before a host could choose: it cannot
-    // block, so a turn boundary is a macrotask and an idle machine looks
-    // again on a short timer -- unless a wake comes first, or nothing has
-    // stopped yet, in which case it only breathes.
+test('the loop yields at once for something pending, otherwise on a clock it resets', async()=>{
+    // A trip round the event loop is paid for whatever the browser runs in the
+    // gap, and one per turn was the largest host phase of a run. So the loop
+    // yields when the host may have something to deliver and otherwise only
+    // once the interval is up -- counted from when the last trip ended, so a
+    // trip the browser stretched does not earn another at once.
+    let now = 0;
+    let trips = 0;
+    const yieldNow = pacedYield({
+        macrotask: async()=>{
+            trips++;
+            now += 3;
+        },
+        now: ()=>now,
+        intervalMs: 4,
+    });
+    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
+    assert.equal(yieldNow(nothing), null, 'nothing pending and the interval not up');
+    now = 3;
+    assert.equal(yieldNow(nothing), null);
+    for (const pending of [{ suspended: 1 }, { fetching: 1 }, { idlers: 1 }, { spun: 1 }])
+    {
+        await yieldNow({ ...nothing, ...pending });
+    }
+    assert.equal(trips, 4, 'each kind of pending work yields at once');
+    assert.equal(yieldNow(nothing), null, 'and a trip resets the clock');
+    now += 4;
+    await yieldNow(nothing);
+    assert.equal(trips, 5, 'the interval is up');
+    assert.equal(yieldNow(nothing), null, 'once');
+    now += 3;
+    assert.equal(yieldNow(nothing), null,
+        'six since the trip began and three since it ended: the clock runs from the end');
+    now += 1;
+    assert.ok(yieldNow(nothing));
+
+    let posted = false;
+    const signalled = pacedYield({
+        macrotask: async()=>{}, now: ()=>0, intervalMs: 4, signalled: ()=>posted,
+    });
+    assert.equal(signalled(nothing), null);
+    posted = true;
+    assert.ok(signalled(nothing), 'a message known to be waiting yields at once');
+});
+
+test("a page's pacing yields on its own clock and looks again on its timer or on a wake", async()=>{
+    // The default the loop runs with when a host does not choose: it cannot
+    // block, so a turn boundary is a macrotask when the page's interval is
+    // up, and an idle machine looks again on a short timer -- unless a wake
+    // comes first, or nothing has stopped yet, in which case it only
+    // breathes.
     /** @type {string[]} */
     const took = [];
+    let now = 0;
     const pacing = pagePacing({
         macrotask: async()=>{
             took.push('macrotask');
         },
         hidden: ()=>false,
         lookMs: 1,
+        now: ()=>now,
     });
-    assert.ok(pacing.yield({ suspended: 0, fetching: 0, idlers: 0 }) instanceof Promise);
+    const nothing = { suspended: 0, fetching: 0, idlers: 0, spun: 0 };
+    assert.equal(pacing.yield(nothing), null, 'a turn straight after a yield goes on');
+    now = PAGE_YIELD_MS;
+    assert.ok(pacing.yield(nothing) instanceof Promise, "the page's bound is a few milliseconds");
     await pacing.wait({ timer: false, sleep: true, deadlineMs: 0, wakes: [] });
     assert.deepEqual(took, ['macrotask', 'macrotask']);
 

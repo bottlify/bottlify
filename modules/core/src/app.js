@@ -101,8 +101,9 @@ import { createBlockCache, resolveBlockStore }
  * @property {RunPacing} [pacing]
  *     How the run loop gives the thread away, and how it waits when the guest
  *     has nothing to run. The default is a page's: it cannot block, so it
- *     yields every turn and looks again on a short timer. A host on a thread
- *     of its own waits for the next event instead; see `RunPacing`.
+ *     yields when something is pending or a few milliseconds have passed,
+ *     and looks again on a short timer. A host on a thread of its own waits
+ *     for the next event instead; see `RunPacing`.
  * @property {string} [imagePath]    What the program believes it was loaded from.
  * @property {string} [commandLine]
  *           What the program believes it was started with. argv[0] ends at the
@@ -556,13 +557,12 @@ export function timedWait({ hidden, macrotask, timer }){
  * host decides how, because the answer depends on whose thread it is.
  *
  * @typedef {Object} RunPacing
- * @property {(pending: { suspended: number, fetching: number, idlers: number })
- *     => Promise<void> | null} yield
+ * @property {(pending: YieldPending) => Promise<void> | null} yield
  *     At every turn boundary: a promise to await before the next turn, or
  *     null to go straight on. `pending` says what the host may have an answer
  *     for -- calls suspended on it, ranges in flight, callers on an empty
- *     message queue -- so a host can yield only when there is something to
- *     deliver.
+ *     message queue, a turn that retired nothing -- so a host can yield only
+ *     when there is something to deliver.
  * @property {(until: { timer: boolean, sleep: boolean, deadlineMs: number | null,
  *     wakes: Promise<void>[] }) => Promise<void>} wait
  *     The turn found something waiting on the host. `sleep` says nothing at
@@ -578,19 +578,80 @@ export function timedWait({ hidden, macrotask, timer }){
  */
 
 /**
- * The pacing of a thread that cannot block: a yield every turn so the page
- * stays responsive, and an idle wait that looks again on a short timer, or on
- * a macrotask when the page is hidden and its timers clamped.
+ * What a turn boundary knows about whether the host has anything to deliver.
+ *
+ * @typedef {Object} YieldPending
+ * @property {number} suspended   Host calls suspended on anything at all.
+ * @property {number} fetching    Range requests outstanding.
+ * @property {number} idlers      Callers parked on an empty message queue.
+ * @property {number} spun        Turns in a row that retired no instruction.
+ */
+
+/**
+ * How long a page's thread may run turns back to back before it is given to
+ * the browser regardless.
+ *
+ * On a page the gap between tasks is where everything else happens: a click
+ * is delivered, a frame is composed, the launcher's own interface repaints.
+ * The bound is tight because all of that is felt directly -- and a yield every
+ * turn, measured on a real title, was the largest host phase of the run at
+ * over a hundred microseconds each, because whatever the browser does in the
+ * gap is paid on every trip. A few turns between trips keep the page as
+ * responsive as a frame needs and cut the trips by that factor.
+ */
+export const PAGE_YIELD_MS = 2;
+
+/**
+ * A yield by need and by time, not by turn.
+ *
+ * The loop leaves the microtask queue when the host may have something to
+ * deliver -- a call answered, a range arrived, a message posted, a turn that
+ * retired nothing and so is waiting on the host -- and otherwise at most once
+ * per `intervalMs`, which is what bounds how long an input event or a
+ * decoder's output waits behind the guest. The clock is reset when the trip
+ * ends, not when it begins: a trip the browser stretched to compose a frame
+ * has already given the thread away for that long.
+ *
+ * @param {Object} deps
+ * @param {() => Promise<void>} deps.macrotask
+ * @param {() => number} deps.now             Wall milliseconds.
+ * @param {number} deps.intervalMs
+ * @param {() => boolean} [deps.signalled]    Whether a message is known to be waiting.
+ * @returns {RunPacing['yield']}
+ */
+export function pacedYield({ macrotask, now, intervalMs, signalled = ()=>false }){
+    let rested = now();
+    return pending=>{
+        if (pending.suspended === 0 && pending.fetching === 0 && pending.idlers === 0
+            && pending.spun === 0 && !signalled() && now() - rested < intervalMs)
+        {
+            return null;
+        }
+        return macrotask().then(()=>{
+            rested = now();
+        });
+    };
+}
+
+/**
+ * The pacing of a thread that cannot block: a yield when something is pending
+ * or the page's interval is up, and an idle wait that looks again on a short
+ * timer, or on a macrotask when the page is hidden and its timers clamped.
  *
  * @param {Object} deps
  * @param {() => Promise<void>} deps.macrotask
  * @param {() => boolean} deps.hidden
- * @param {number} deps.lookMs
+ * @param {number} [deps.lookMs]
+ * @param {number} [deps.yieldMs]
+ * @param {() => number} [deps.now]
+ * @param {() => boolean} [deps.signalled]
  * @returns {RunPacing}
  */
-export function pagePacing({ macrotask, hidden, lookMs }){
+export function pagePacing({ macrotask, hidden, lookMs = IDLE_LOOK_MS, yieldMs = PAGE_YIELD_MS,
+    now = ()=>performance.now(), signalled })
+{
     return {
-        yield: ()=>macrotask(),
+        yield: pacedYield({ macrotask, now, intervalMs: yieldMs, signalled }),
         wait({ timer, wakes }){
             if (!timer)
             {
@@ -3251,24 +3312,10 @@ async function buildApp(options){
     const CLOCK_CREDIT_CAP_MS = 250;
     const creditClock = clockCredit(clockSource, clock, CLOCK_CREDIT_CAP_MS);
 
-    /**
-     * How often the run loop leaves the microtask queue entirely.
-     *
-     * Every turn. A presented frame reaches the screen only when the browser
-     * finds the thread free at the moment it composes, and it looks between
-     * tasks: with a yield every sixteen turns, measured on the launcher, nine
-     * frames a second reached the screen of the forty the engine presented.
-     * A trip round the task queue costs microseconds, a turn is a hundred
-     * thousand guest instructions, and the guest never waits on anything --
-     * no timer, no animation frame -- so a covered tab slows nothing.
-     */
-    const TURNS_PER_YIELD = 1;
-
     const breathe = createMacrotask();
     const pacing = options.pacing ?? pagePacing({
         macrotask: breathe,
         hidden: options.pageHidden ?? pageIsHidden,
-        lookMs: IDLE_LOOK_MS,
     });
 
     /**
@@ -3394,7 +3441,7 @@ async function buildApp(options){
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
-            for (let turn = 0; worked < maxTurns && !expired(); turn++)
+            while (worked < maxTurns && !expired())
             {
                 if (paused)
                 {
@@ -3429,14 +3476,18 @@ async function buildApp(options){
                     await Promise.resolve();
                     journal.end('microtasks');
 
-                    // And a real one now and then, because that one is a
-                    // microtask and microtasks do not let anything else happen.
-                    // A program running hot never leaves the microtask queue, so
-                    // nothing outside gets a turn: a click on a pause button is
-                    // not delivered, a timer does not fire, and a page looks hung
-                    // while the guest is working perfectly. Every few turns is
-                    // enough to keep the outside responsive and rare enough that
-                    // the cost of going round the event loop does not show.
+                    // And a real one when the host says so, because that one
+                    // is a microtask and microtasks do not let anything else
+                    // happen. A program running hot never leaves the microtask
+                    // queue, so nothing outside gets a turn: a click on a pause
+                    // button is not delivered, a timer does not fire, a
+                    // presented frame is not composed, and a page looks hung
+                    // while the guest is working perfectly. When is the host's
+                    // call -- by what is pending and by a clock, never by turn:
+                    // a trip round the event loop is paid for whatever the
+                    // browser runs in the gap, and one per turn was the largest
+                    // host phase of a run.
+                    //
                     // Sound is written ahead before the turn yields to the
                     // browser, not after: the device reads on a thread of its
                     // own, and a yield is where the browser may take the thread
@@ -3447,11 +3498,9 @@ async function buildApp(options){
                     sound?.pump();
                     journal.end('pump');
 
-                    const turnYield = turn % TURNS_PER_YIELD === 0
-                        ? pacing.yield({
-                            suspended: bridge.suspended(), fetching, idlers: idlers.length,
-                        })
-                        : null;
+                    const turnYield = pacing.yield({
+                        suspended: bridge.suspended(), fetching, idlers: idlers.length, spun,
+                    });
                     if (turnYield)
                     {
                         journal.begin('yield', journal.PhaseKind.HOST);
