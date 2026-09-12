@@ -144,6 +144,12 @@ export const mediaModule = {
                 // with no binary at all until this is read.
                 configured: binary !== null,
                 ...(decoder ? decoder.diagnostics() : {}),
+                // Which libraries a program can reach this layer through,
+                // reported the way every other exporting layer reports its
+                // own: a tally of what the loader synthesised is taken across
+                // all of them, and a library missing here is an image nobody
+                // accounts for.
+                libraries: ijl ? Object.keys(ijl.libraries) : [],
                 jpeg: ijl ? ijl.diagnostics() : null,
             },
             issues: [...issues],

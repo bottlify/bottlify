@@ -97,7 +97,14 @@ test('the whole path was used, not shortcut', async()=>{
     assert.equal(called, 'KERNEL32.dll!ExitProcess', 'it ended by asking, not by running out');
 });
 
-test('a program with nothing to do waits instead of spinning', async()=>{
+/**
+ * An app disposed when the test ends, however it ends: the machine is one per
+ * process, and an app a failed assertion left behind fails every later test
+ * with "already booted" and keeps the process alive after the run.
+ *
+ * @param {import('node:test').TestContext} t
+ */
+async function startApp(t){
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(FIXTURE),
@@ -109,16 +116,34 @@ test('a program with nothing to do waits instead of spinning', async()=>{
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
     });
+    t.after(()=>app.dispose());
+    return app;
+}
+
+test('a program with nothing to do waits instead of spinning', async t=>{
+    const app = await startApp(t);
 
     // Nothing is ever posted, so the program sits in GetMessage. What must not
     // happen is the loop deciding that is a deadlock or a program that ended:
     // waiting for input is the normal state of a windowed program.
-    const finished = app.run({ maxTurns: 400 });
-    await assert.rejects(finished, /did not finish within/);
-    await app.dispose();
+    //
+    // Bounded by the clock and not by turns: the turn budget counts turns the
+    // guest worked, and a program with nothing to do works none, so a budget
+    // of turns never runs out on it. That is the contract, not a defect -- a
+    // wait of seconds is tens of thousands of idle turns -- and a caller who
+    // needs such a program back asks for a time.
+    const startedAt = Date.now();
+    const finished = app.run({ timeoutMs: 500 });
+    await assert.rejects(finished, /did not finish within 500 ms/);
+    const took = Date.now() - startedAt;
+    assert.ok(took < 2500, `the bound is a bound: back after ${took}ms, not whenever`);
+
+    const kernel = app.diagnostics().find((/** @type {any} */ layer)=>layer.name === 'kernel');
+    assert.ok(kernel.metrics.turns < 100,
+        `waiting cost ${kernel.metrics.turns} scheduler turns: the machine looked, not spun`);
 });
 
-test('a machine waiting for a message still lets its own clock run', async()=>{
+test('a machine waiting for a message still lets its own clock run', async t=>{
     // A thread suspended on a host call is parked on `hlt` and still counts as
     // runnable, so the scheduler never reaches the branch that jumps the clock
     // to the next deadline; and the loop credits the guest only for the turns
@@ -131,23 +156,12 @@ test('a machine waiting for a message still lets its own clock run', async()=>{
     // produced the message the machine is idling for. Measured on a real title,
     // crediting this took a run from three presented frames to two hundred and
     // twenty-one.
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
-    const app = await createApp({
-        executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-    });
+    const app = await startApp(t);
 
-    await assert.rejects(app.run({ maxTurns: 600 }), /did not finish within/);
+    await assert.rejects(app.run({ timeoutMs: 500 }), /did not finish within/);
     const kernel = app.diagnostics()
         .find((/** @type {any} */ layer)=>layer.name === 'kernel');
     const time = kernel.metrics.time;
-    await app.dispose();
 
     assert.ok(time.wallMs > 0, 'the run took measurable time');
     assert.ok(time.virtualMs > time.wallMs / 2,

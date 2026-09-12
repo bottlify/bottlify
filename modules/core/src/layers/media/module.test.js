@@ -31,6 +31,26 @@ test('a configured build is not instantiated until something is opened', async()
     await mediaModule.dispose();
 });
 
+test('the diagnostics name every library the layer stands in for', async()=>{
+    await mediaModule.create({});
+    assert.deepEqual(mediaModule.diagnostics().metrics?.libraries, [],
+        'no way into guest memory, so no hosted library');
+    await mediaModule.dispose();
+
+    const memory = new Uint8Array(0x1000);
+    const api = await mediaModule.create({
+        readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
+            memory.subarray(address, address + length),
+        writeMemory: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            memory.set(bytes, address),
+        allocate: ()=>0,
+    });
+    assert.deepEqual(mediaModule.diagnostics().metrics?.libraries, Object.keys(api.libraries()),
+        'every library the loader is handed is one the diagnostics report');
+    assert.ok(api.libraries()['ijl15.dll']);
+    await mediaModule.dispose();
+});
+
 test('closing everything is safe before anything was opened', async()=>{
     const api = await mediaModule.create({});
     api.closeAll();

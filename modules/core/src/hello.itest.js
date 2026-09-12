@@ -24,23 +24,32 @@ const FIXTURE = new URL('../test/fixtures/hello.exe', import.meta.url);
 /** What the same binary prints when Windows runs it. */
 const EXPECTED_OUTPUT = 'Hello from Bottlify\r\n';
 
-async function startApp(){
+/**
+ * Disposed when the test ends, however it ends: the machine is a singleton
+ * per process, so an app left behind by a failed assertion makes every later
+ * test fail with "already booted" and keeps the process alive after the run.
+ *
+ * @param {import('node:test').TestContext} t
+ */
+async function startApp(t){
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(FIXTURE),
     ]);
 
-    return createApp({
+    const app = await createApp({
         executable: new Uint8Array(exe),
         v86: {
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
     });
+    t.after(()=>app.dispose());
+    return app;
 }
 
-test('hello.exe prints what it prints on Windows, then exits cleanly', async()=>{
-    const app = await startApp();
+test('hello.exe prints what it prints on Windows, then exits cleanly', async t=>{
+    const app = await startApp(t);
     /** @type {string[]} */
     const output = [];
     app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
@@ -49,21 +58,19 @@ test('hello.exe prints what it prints on Windows, then exits cleanly', async()=>
 
     assert.equal(output.join(''), EXPECTED_OUTPUT, 'same bytes real Windows writes to stdout');
     assert.equal(code, 0, "the guest's own exit code");
-    await app.dispose();
 });
 
-test('the image lands where its headers ask, and every import is bound', async()=>{
-    const app = await startApp();
+test('the image lands where its headers ask, and every import is bound', async t=>{
+    const app = await startApp(t);
     await app.run({ timeoutMs: 8000 });
 
     assert.equal(app.image.base, 0x400000, 'the fixture has no relocations and cannot move');
     assert.equal(app.image.entryPoint, 0x401000);
     assert.deepEqual(app.image.unresolved, [], 'nothing the fixture imports is missing');
-    await app.dispose();
 });
 
-test('diagnostics describe the run afterwards', async()=>{
-    const app = await startApp();
+test('diagnostics describe the run afterwards', async t=>{
+    const app = await startApp(t);
     await app.run({ timeoutMs: 8000 });
 
     const byName = Object.fromEntries(app.diagnostics().map((/** @type {any} */ d)=>[d.name, d]));
@@ -114,11 +121,10 @@ test('diagnostics describe the run afterwards', async()=>{
     {
         assert.ok(layout.includes(region), `${region} is mapped`);
     }
-    await app.dispose();
 });
 
-test('a detached log sink stops receiving output', async()=>{
-    const app = await startApp();
+test('a detached log sink stops receiving output', async t=>{
+    const app = await startApp(t);
     /** @type {string[]} */
     const kept = [];
     /** @type {string[]} */
@@ -134,5 +140,4 @@ test('a detached log sink stops receiving output', async()=>{
 
     assert.equal(kept.join(''), EXPECTED_OUTPUT);
     assert.deepEqual(dropped, [], 'detached before the run, so it saw nothing');
-    await app.dispose();
 });

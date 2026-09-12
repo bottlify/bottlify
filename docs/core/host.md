@@ -146,7 +146,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 
 | member | answers | notes |
 |---|---|---|
-| `run(runOptions?)` | `Promise<number>` | Exit code, once the journal mirror has caught up. `runOptions.maxTurns` bounds the run. |
+| `run(runOptions?)` | `Promise<number>` | Exit code, once the journal mirror has caught up. `runOptions.maxTurns` bounds the turns the guest worked; `runOptions.timeoutMs` bounds the wall clock, which is the only bound a program that just waits ever reaches. |
 | `pause()`, `resume()`, `stop()` | `Promise` | |
 | `dispose()` | `Promise` | Ends the program and its device. With a canvas the worker stays alive for the next program in the same canvas; without one it is terminated. |
 | `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's — the cheap read for a poll. |

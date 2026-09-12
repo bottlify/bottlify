@@ -3215,16 +3215,27 @@ async function buildApp(options){
          *     is the machine waiting -- on a fetch, on a timer -- and waiting
          *     is not the work this bounds: with a yield every turn, a wait of
          *     a few seconds is tens of thousands of such turns.
+         * @param {number | null} [runOptions.timeoutMs]
+         *     Wall milliseconds the run may take, whatever it did with them.
+         *     The bound for a program that only waits: the turn budget never
+         *     runs out on a machine that does nothing, so a caller that needs
+         *     a windowed program with an empty queue to come back at all
+         *     bounds it here.
          * @returns {Promise<number>} the guest's exit code
          */
-        async run({ maxTurns = 200000 } = {}){
+        async run({ maxTurns = 200000, timeoutMs = null } = {}){
             let worked = 0;
+            const startedAt = clockSource();
+            // Read at the top of a turn, where a bounded wait has just
+            // returned: a machine sleeping between looks overruns by one
+            // look at most.
+            const expired = ()=>timeoutMs !== null && clockSource() - startedAt >= timeoutMs;
             // How many turns in a row have retired nothing. This is what tells
             // a machine waiting on its own next instruction from one waiting on
             // the host, which are the same shape from here and want opposite
             // waits.
             let spun = 0;
-            for (let turn = 0; worked < maxTurns; turn++)
+            for (let turn = 0; worked < maxTurns && !expired(); turn++)
             {
                 if (paused)
                 {
@@ -3576,8 +3587,9 @@ async function buildApp(options){
                     journal.end('turn');
                 }
             }
-            throw fail('runaway',
-                new Error(`program did not finish within ${maxTurns} turns`));
+            throw fail('runaway', new Error(worked < maxTurns
+                ? `program did not finish within ${timeoutMs} ms`
+                : `program did not finish within ${maxTurns} turns`));
         },
 
         /** The program's first thread. */
