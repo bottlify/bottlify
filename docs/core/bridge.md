@@ -130,9 +130,9 @@ that calls the guest back overwrites that part of the stack — brackets the han
 An unimplemented id or a second implementation of the same id throws. A handler that throws
 still ends its call (`finally`), so the bridge is never left inside one.
 
-The crossing is timed as a `trap` phase one call in eight (weighted by eight), so the host's
-share of a frame is always known without two clock readings per call; `callPhases` adds a phase
-per handler. The rings are fixed-size and their records are reused, because a record per call at
+The crossing is timed as a `trap` phase one call in eight (weighted by eight, which scales the
+profiler's sums and never its per-occurrence figures), so the host's share of a frame is always
+known without two clock readings per call; `callPhases` adds a phase per handler. The rings are fixed-size and their records are reused, because a record per call at
 tens of thousands of calls a second was the garbage collector's whole share of a frame.
 
 ### Parking (`internal/parking.js`)

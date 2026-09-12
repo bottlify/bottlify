@@ -18,7 +18,11 @@
  * The journal is the one thing kept in step on this side. A reader polls it
  * synchronously, so the page keeps a mirror that follows the worker's ring
  * a few times a second; `log.recent` and `log.drain` read the mirror, and a
- * mirror that falls behind reads as the gap the ring would have shown.
+ * mirror that falls behind reads as the gap the ring would have shown. A
+ * flood laps the ring between two refreshes, and a reader slower than the
+ * mirror is lapped by the mirror: both leave holes in the sequence the
+ * mirror holds, and a drain counts every sequence it was asked for and
+ * cannot hand over, so `lost` is exact whichever side lost it.
  */
 
 import { createDomInput } from '../layers/input/dom.js';
@@ -295,18 +299,21 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
             recent: (count = 100)=>records.slice(Math.max(0, records.length - count)),
             /** @param {number} [since] @param {number} [limit] */
             drain(since = 0, limit = 1000){
-                const oldest = records.length > 0 ? records[0].sequence : next;
-                const from = Math.max(since, oldest);
                 const taken = [];
                 for (const record of records)
                 {
-                    if (record.sequence >= from && taken.length < limit)
+                    if (record.sequence >= since && taken.length < limit)
                     {
                         taken.push(record);
                     }
                 }
+                const oldest = records.length > 0 ? records[0].sequence : next;
+                const from = taken.length > 0 ? taken[0].sequence : Math.max(since, oldest);
                 const end = taken.length > 0 ? taken[taken.length - 1].sequence + 1 : from;
-                return { records: taken, from, next: end, lost: 0 };
+                // Every sequence from `since` up to where this read ends that
+                // is not in what it hands over was written over somewhere.
+                const lost = Math.max(0, end - since - taken.length);
+                return { records: taken, from, next: end, lost };
             },
             /** @param {string} category @param {string | number} level */
             setLevel: (category, level)=>request('log.setLevel', [category, level]),

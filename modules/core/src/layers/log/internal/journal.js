@@ -71,6 +71,9 @@ export function toLevel(value){
  */
 const ARGS = 4;
 
+/** How often a drain reader's lap is written into the log, at most. */
+const WARN_EVERY_MS = 1000;
+
 /** `{0}` names an argument, `{0:x}` asks for it as hex. */
 const FIELD = /\{(\d+)(:x)?\}/g;
 
@@ -189,10 +192,37 @@ export function createJournal(options){
     let delivered = 0;
     let lost = 0;
     let rejected = 0;
+    /**
+     * Records a drain reader was lapped past and has not yet been told about
+     * in the log itself, and when it was last told. The figure in each
+     * answer is exact; the line is for whoever reads the log without one.
+     */
+    let unreported = 0;
+    let warnedAt = -Infinity;
 
     const levelOf = (/** @type {string} */ category)=>levels.get(category) ?? fallback;
 
-    return {
+    /** The category with the most records in the ring: whose flood this is. */
+    const floodingCategory = ()=>{
+        /** @type {Map<string, number>} */
+        const counts = new Map();
+        ring.each(ring.oldest(), record=>{
+            counts.set(record.category, (counts.get(record.category) ?? 0) + 1);
+        });
+        let most = '';
+        let mostCount = 0;
+        for (const [category, count] of counts)
+        {
+            if (count > mostCount)
+            {
+                most = category;
+                mostCount = count;
+            }
+        }
+        return most;
+    };
+
+    const journal = {
         Level,
 
         /** @param {string} category @param {number} level */
@@ -324,8 +354,17 @@ export function createJournal(options){
          * the clock, so resuming from the number this returns is exact.
          *
          * A caller that has fallen further behind than the ring is deep gets
-         * what survives, and `from` in the answer says where that actually
-         * starts -- a gap is reported rather than papered over.
+         * what survives, `from` in the answer says where that actually
+         * starts, and `lost` is how many records between `since` and there
+         * were written over before this read -- a gap is reported rather
+         * than papered over. A reader at 0 on a ring that has already lapped
+         * is told how much it missed by arriving late, which is the truth.
+         *
+         * The lap is also written into the log, as a warning naming the
+         * count and the category writing most of what the ring holds: the
+         * flood is what a person reading the log needs explained, and the
+         * ring's contents are the flood. Once per burst, at most one a
+         * second of the journal's clock, with the count since the last.
          *
          * @param {number} [since]  The `next` of the previous read; 0 to start.
          * @param {number} [limit]  At most this many records.
@@ -343,7 +382,22 @@ export function createJournal(options){
                     records.push(detach(record));
                 }
             });
-            return { records, from: start, next: end, lost };
+            const lapped = start - since;
+            if (lapped > 0)
+            {
+                unreported += lapped;
+                const at = now();
+                if (at - warnedAt >= WARN_EVERY_MS)
+                {
+                    warnedAt = at;
+                    const count = unreported;
+                    unreported = 0;
+                    journal.write(Level.WARN, 'log',
+                        '{0} records were written over before they were read; '
+                        + 'most of the ring is {1}', count, floodingCategory());
+                }
+            }
+            return { records, from: start, next: end, lost: lapped };
         },
 
         /** @returns {{ message: string, category: string, level: number, count: number }[]} */
@@ -364,4 +418,5 @@ export function createJournal(options){
             };
         },
     };
+    return journal;
 }

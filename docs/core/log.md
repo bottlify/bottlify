@@ -53,10 +53,10 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 | `addSink(sink) → remove` | Register a sink; the returned function removes it. |
 | `flush() → number` | Hands everything written since the last flush to every sink, as detached copies; returns how many. |
 | `recent(count = 100)` | The tail of the ring, formatted, without moving the flush position. |
-| `drain(since = 0, limit = 1000)` | `{ records, from, next, lost }` — everything from sequence `since`, and where to resume. |
+| `drain(since = 0, limit = 1000)` | `{ records, from, next, lost }` — everything from sequence `since`, where to resume, and how many records between `since` and `from` were written over before this read. |
 | `templates()` | Every distinct message template seen, with its category, level and count, most frequent first. |
 | `begin(name, kind = 'host')` | Open a phase. An unrecognised kind is `host`. |
-| `end(name?, { instructions?, weight? }?) → ms` | Close the innermost phase. A name that does not match is counted as an imbalance, never thrown. `weight` lets one timed phase stand for several. |
+| `end(name?, { instructions?, weight? }?) → ms` | Close the innermost phase; returns what the clock measured. A name that does not match is counted as an imbalance, never thrown. `weight` lets one timed phase stand for several in the sums, never in a single-occurrence figure. |
 | `compiled(count = 1)` | Modules the emulator compiled during the open frame. |
 | `note(name, amount)` | Any number the frame's owner counts into it, summed by name. |
 | `beginFrame()` / `endFrame()` | Bracket one frame; `endFrame` returns a copy of the `FrameRecord`. |
@@ -114,9 +114,12 @@ the last flush (`lost`), then hands the sinks one batch of detached, formatted c
 explicit because a sink is I/O, and I/O inside a guest call turns the log into the thing being
 measured; the assembler decides when. `recent(count)` reads the tail without moving the flush
 position — what a crash snapshot wants. `drain(since, limit)` reads forward from a sequence number
-and returns `next` to resume from and `from` to say where it actually started, so a live view that
-polls neither repeats what it drew nor misses what happened in between; a caller further behind
-than the ring is deep is told so rather than served a silent gap.
+and returns `next` to resume from, `from` to say where it actually started and `lost` for how many
+records between the two were written over before the read, so a live view that polls neither
+repeats what it drew nor misses what happened in between; a caller further behind than the ring is
+deep is told exactly how far rather than served a silent gap. The lap is also written into the log
+as a `log` warning naming the count and the category most of the ring belongs to — the flood a
+reader needs explained — once per burst and at most once a second of the journal's clock.
 
 Ordering never depends on the clock: the sequence is monotonic, the time is whatever `now`
 returned.
@@ -136,7 +139,15 @@ entries by depth, so a phase costs no allocation. On `end`, the elapsed time is 
   its longest guest slice (with the instruction count passed in `detail`), counts wait turns (a
   phase named `idle-*-wait`) and compiled modules, and sums whatever `note()` was told.
 
-Frames are a ring of `FrameRecord`s (`index, startedAt, ms, byKind, hostShare, longest,
+A `weight` passed to `end` says the phase stands for that many — a caller that times one crossing
+in eight. It scales only what is summed over a window: a row's `count`, `totalMs` and `selfMs`,
+and the frame's `sampled` (per kind, `(weight − 1)` × the phase's self time, the estimate for the
+untimed ones). A row's `worstMs`, a frame's `longest` and its `byKind` split are what the clock
+measured, so one long sampled crossing never reads as a freeze eight times its length, and a frame
+never reports the guest at less than nothing. `snapshot().hostShare` over the window adds `sampled`
+to `byKind`; a frame's own `hostShare` is measured only.
+
+Frames are a ring of `FrameRecord`s (`index, startedAt, ms, byKind, sampled, hostShare, longest,
 longestGuest, waits, compiles, notes`), 240 deep by default; the frame still being measured is never
 reported. `snapshot(worst)` sorts every phase row (`name, kind, count, totalMs, selfMs, worstMs`)
 by self time, names the `worst` slowest frames, and takes `hostShare` over the whole history rather
@@ -187,5 +198,5 @@ All are `node:test` unit tests with a hand-stepped clock; run with `npm test` fr
 |------|--------|
 | `src/layers/log/internal/ring.test.js` | Slots are made once and reused; a lagging reader gets the surviving tail; `each` visits only what was asked. |
 | `src/layers/log/internal/journal.test.js` | Level filtering; the message stays a template until read; unnamed arguments appended; timestamps from the clock, order from the sequence; sinks get detached copies once; lapped records counted; `recent` does not move the flush position; template summary; level names; bounded storage; `drain` semantics, resume, limit and gap reporting. |
-| `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases. |
+| `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases scale the sums and never a single occurrence. |
 | `src/layers/log/module.test.js` | The module keeps its contract; configuration by name; the no-clock issue; diagnostics carry `hostShare`; phases use the host clock, not the guest's; sub-millisecond resolution without a configured clock; the phase table holds the loop and the calls together. |

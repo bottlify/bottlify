@@ -157,7 +157,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
 | `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |
-| `log.recent(count?)`, `log.drain(since?, limit?)` | synchronous | From the page's mirror of the journal, refreshed every 200 ms, 4000 records a refresh, holding `log.capacity` or 4096 records. |
+| `log.recent(count?)`, `log.drain(since?, limit?)` | synchronous | From the page's mirror of the journal, refreshed every 200 ms, 4000 records a refresh, holding `log.capacity` or 4096 records. A drain's `lost` counts every sequence asked for that the mirror cannot hand over, whether the worker's ring lapped between two refreshes or the mirror lapped a slower reader. |
 | `log.setLevel`, `log.setDefaultLevel`, `log.profile`, `log.frames` | `Promise` | |
 | `log.areas()` | `string[]` | The `call.*` categories. |
 | `audio.ring()` | `{ memory }` | The ring's shared buffers, handed over at start. Throws `this run has no sound ring` without a mixer. Synchronous. |

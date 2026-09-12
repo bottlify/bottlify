@@ -170,7 +170,6 @@ test('the journal holds a bounded amount however much is written', ()=>{
     }
 
     assert.equal(journal.recent(1_000_000).length, 64, 'the ring is the whole memory');
-    assert.equal(journal.drain(0, 1_000_000).records.length, 64);
     assert.equal(journal.diagnostics().capacity, 64, 'and it never grew');
     assert.equal(journal.diagnostics().written, 100_000, 'while still counting everything');
 
@@ -178,6 +177,9 @@ test('the journal holds a bounded amount however much is written', ()=>{
     // whatever the arguments, and a category level only where one was set.
     assert.equal(journal.diagnostics().templates, 1);
     assert.deepEqual(journal.diagnostics().categories, {});
+
+    // Last, since a drain that finds itself lapped writes a line of its own.
+    assert.equal(journal.drain(0, 1_000_000).records.length, 64);
 });
 
 test('a drain reads forward and says where to resume', ()=>{
@@ -214,6 +216,57 @@ test('a reader that falls behind the ring is told where it actually resumes', ()
     assert.equal(caught.from, 6, 'the first six were lapped before anyone read them');
     assert.equal(caught.records.length, 4);
     assert.equal(caught.next, 10);
+    assert.equal(caught.lost, 6, 'and the reader is told exactly how many');
+});
+
+test('a drain counts what was written over since its last read, and says so in the log', ()=>{
+    // A reader told "0 lost" over a sequence with holes in it has been lied
+    // to. The count is exact per read; the line in the log is for whoever
+    // reads it without the count, and names whose flood it is.
+    const { journal, time } = journalWith({ capacity: 4 });
+    for (let at = 0; at < 3; at++)
+    {
+        journal.write(Level.INFO, 'boot', '{0}', at);
+    }
+    const first = journal.drain(0);
+    assert.equal(first.lost, 0);
+    assert.equal(journal.diagnostics().written, 3, 'nothing to say about a read that kept up');
+
+    for (let at = 3; at < 13; at++)
+    {
+        journal.write(Level.INFO, at < 5 ? 'boot' : 'call.com', '{0}', at);
+    }
+    const lapped = journal.drain(first.next);
+    assert.equal(lapped.from, 9);
+    assert.equal(lapped.lost, 6, 'sequences three to eight are gone');
+    assert.deepEqual(lapped.records.map((/** @type {any} */ record)=>record.text),
+        ['9', '10', '11', '12'], 'the line about it comes after this read, not inside it');
+    const [line] = journal.drain(lapped.next).records;
+    assert.equal(line.category, 'log');
+    assert.equal(line.level, Level.WARN);
+    assert.equal(line.text,
+        '6 records were written over before they were read; most of the ring is call.com');
+
+    // Lapped again within the second: counted exactly, but not another line
+    // yet -- the line itself must not be what floods the ring.
+    for (let at = 14; at < 30; at++)
+    {
+        journal.write(Level.INFO, 'call.com', '{0}', at);
+    }
+    time.step(500);
+    const again = journal.drain(14);
+    assert.equal(again.lost, 12);
+    assert.equal(journal.recent(1).at(0)?.category, 'call.com', 'no line yet');
+    for (let at = 30; at < 40; at++)
+    {
+        journal.write(Level.INFO, 'call.com', '{0}', at);
+    }
+    time.step(500);
+    const later = journal.drain(again.next);
+    assert.equal(later.lost, 6);
+    assert.equal(journal.recent(1).at(0)?.text,
+        '18 records were written over before they were read; most of the ring is call.com',
+        'a second on, one line carrying everything lost since the last');
 });
 
 test('a drain honours its limit and resumes exactly where it stopped', ()=>{

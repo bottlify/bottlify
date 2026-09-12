@@ -221,3 +221,51 @@ test('a phase can stand for several, and is weighed as all of them', ()=>{
     const guest = rows.find((/** @type {any} */ row)=>row.name === 'guest');
     assert.equal(guest.selfMs, 12, 'the guest phase gave up the eight, not the one');
 });
+
+test('a weight scales the estimate over a window, never what one occurrence measured', ()=>{
+    // One crossing of ten milliseconds timed as eight: the aggregate rises by
+    // eighty, which is what the eight are estimated to have cost. The frame it
+    // ended in saw one ten-millisecond phase, and says so -- a longest of
+    // eighty would name a freeze that never happened.
+    const { profiler, at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(20).begin('trap');
+    assert.equal(at(30).end('trap', { weight: 8 }), 10, 'end() answers what was measured');
+    at(60).end('guest');
+    const frame = at(100).endFrame();
+
+    const trap = profiler.snapshot().phases.find((/** @type {any} */ row)=>row.name === 'trap');
+    assert.equal(trap.totalMs, 80);
+    assert.equal(trap.selfMs, 80);
+    assert.equal(trap.worstMs, 10, 'the worst occurrence is one occurrence');
+    assert.deepEqual(frame.longest, { name: 'guest', ms: 60 },
+        'the sixty-millisecond slice, not a trap of eighty that never happened');
+    assert.equal(frame.byKind.host, 10, 'the frame measured ten milliseconds of ours');
+    assert.equal(frame.byKind.guest, 50);
+    assert.equal(frame.sampled.host, 70, 'and estimates seventy more for the untimed seven');
+    assert.equal(frame.sampled.guest, -70, 'which the guest stood for');
+    assert.equal(frame.hostShare, 0.1, 'a frame is measured, not estimated');
+    assert.equal(profiler.snapshot().hostShare, 0.8, 'the window is estimated');
+});
+
+test('a frame whose one sample outweighs it never reports the guest at less than nothing', ()=>{
+    // A thirty-seven millisecond crossing in a forty millisecond frame, weighed
+    // as eight, stands for far more than the frame held. The frame's split is
+    // what the clock saw; the surplus is an estimate and is kept as one.
+    const { at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(1).begin('trap');
+    at(38).end('trap', { weight: 8 });
+    at(40).end('guest');
+    const frame = at(40).endFrame();
+
+    assert.equal(frame.byKind.guest, 3);
+    assert.equal(frame.byKind.host, 37);
+    assert.equal(frame.byKind.host + frame.byKind.guest, frame.ms, 'the split is the frame');
+    assert.deepEqual(frame.longest, { name: 'guest', ms: 40 });
+    assert.equal(frame.sampled.host, 37 * 7);
+});

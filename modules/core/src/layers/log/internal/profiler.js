@@ -27,6 +27,15 @@ import { createRing } from './ring.js';
  * on inside it, which the thread waited on too -- and that hold is the cost
  * that matters more here than throughput: the average stays fine while one of
  * them stutters.
+ *
+ * A caller may time one phase in every few and pass the few as a weight, and
+ * the weight means one thing: an estimate of what all of them cost together.
+ * It scales what is summed over a window -- a row's count, total and self
+ * time, and the frame's `sampled` -- and nothing that describes one
+ * occurrence: a row's worst, a frame's longest, and the frame's split by
+ * kind are what the clock measured. A single crossing weighed as eight would
+ * otherwise show as a freeze eight times longer than it was, and a frame
+ * whose one sample outweighed it would report the guest at less than nothing.
  */
 
 /** Whose time a phase is. Attribution is by these, and nothing else. */
@@ -45,7 +54,13 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * @property {number} index
  * @property {number} startedAt
  * @property {number} ms                        Wall time of the whole frame.
- * @property {Record<string, number>} byKind    Self time per PhaseKind.
+ * @property {Record<string, number>} byKind
+ *     Self time per PhaseKind, as measured: a weighted phase counts once here.
+ * @property {Record<string, number>} sampled
+ *     Per PhaseKind, what the phases that were not timed are estimated to
+ *     have cost, from the ones that were: `(weight - 1)` times each weighted
+ *     phase's self time. A window's share by kind is `byKind` plus this;
+ *     one frame's is `byKind` alone, since an estimate can exceed a frame.
  * @property {number} hostShare                 `byKind.host / ms`, the watched metric.
  * @property {{ name: string, ms: number }} longest
  *     The single longest phase that ended inside the frame, whole: the one
@@ -78,6 +93,7 @@ const blankFrame = ()=>({
     startedAt: 0,
     ms: 0,
     byKind: { host: 0, guest: 0, gpu: 0, present: 0 },
+    sampled: { host: 0, guest: 0, gpu: 0, present: 0 },
     hostShare: 0,
     longest: { name: '', ms: 0 },
     longestGuest: { ms: 0, instructions: 0 },
@@ -93,6 +109,7 @@ const isWait = (/** @type {string} */ name)=>name.startsWith('idle-') && name.en
 const copyFrame = frame=>({
     ...frame,
     byKind: { ...frame.byKind },
+    sampled: { ...frame.sampled },
     longest: { ...frame.longest },
     longestGuest: { ...frame.longestGuest },
     notes: { ...frame.notes },
@@ -111,8 +128,11 @@ export function createProfiler(options){
     /**
      * The open phases, innermost last. Entries are reused by depth: a profiler
      * that allocates per phase cannot be left on in the build being measured.
+     * `children` is what the nested phases measured; `weighed` is that with
+     * their weights, which is what the parent's row gives up.
      *
-     * @type {{ name: string, kind: string, startedAt: number, children: number }[]}
+     * @type {{ name: string, kind: string, startedAt: number, children: number,
+     *          weighed: number }[]}
      */
     const stack = [];
     let depth = 0;
@@ -174,13 +194,14 @@ export function createProfiler(options){
             let entry = stack[depth];
             if (!entry)
             {
-                entry = { name: '', kind: '', startedAt: 0, children: 0 };
+                entry = { name: '', kind: '', startedAt: 0, children: 0, weighed: 0 };
                 stack[depth] = entry;
             }
             depth++;
             entry.name = name;
             entry.kind = KINDS.includes(kind) ? kind : PhaseKind.HOST;
             entry.children = 0;
+            entry.weighed = 0;
             entry.startedAt = now();
         },
 
@@ -194,7 +215,7 @@ export function createProfiler(options){
          * @param {{ instructions?: number, weight?: number }} [detail]
          *     What a guest slice retired; and how many phases this one stands
          *     for, when a caller times one in every few rather than each.
-         * @returns {number} the phase's total duration
+         * @returns {number} the phase's measured duration, unweighted
          */
         end(name, detail){
             if (depth === 0)
@@ -209,11 +230,13 @@ export function createProfiler(options){
                 noteImbalance(`end(${name}) while ${entry.name} open at depth ${depth + 1}`);
             }
             const weight = detail?.weight ?? 1;
-            const elapsed = (now() - entry.startedAt) * weight;
+            const elapsed = now() - entry.startedAt;
             const self = elapsed - entry.children;
+            const weighedSelf = elapsed * weight - entry.weighed;
             if (depth > 0)
             {
                 stack[depth - 1].children += elapsed;
+                stack[depth - 1].weighed += elapsed * weight;
             }
 
             let row = rows.get(entry.name);
@@ -224,8 +247,8 @@ export function createProfiler(options){
                 rows.set(entry.name, row);
             }
             row.count += weight;
-            row.totalMs += elapsed;
-            row.selfMs += self;
+            row.totalMs += elapsed * weight;
+            row.selfMs += weighedSelf;
             if (elapsed > row.worstMs)
             {
                 row.worstMs = elapsed;
@@ -233,6 +256,7 @@ export function createProfiler(options){
             if (open)
             {
                 open.byKind[entry.kind] += self;
+                open.sampled[entry.kind] += weighedSelf - self;
                 if (elapsed > open.longest.ms)
                 {
                     open.longest.name = entry.name;
@@ -285,6 +309,7 @@ export function createProfiler(options){
             for (const kind of KINDS)
             {
                 slot.byKind[kind] = 0;
+                slot.sampled[kind] = 0;
             }
             slot.longest.name = '';
             slot.longest.ms = 0;
@@ -326,7 +351,7 @@ export function createProfiler(options){
             for (const frame of recent)
             {
                 totalMs += frame.ms;
-                hostMs += frame.byKind.host;
+                hostMs += frame.byKind.host + frame.sampled.host;
             }
             return {
                 frames: frameIndex,
@@ -334,7 +359,8 @@ export function createProfiler(options){
                 imbalances: imbalances.slice(),
                 openPhases: depth,
                 // Over the whole ring rather than the last frame: the threshold
-                // is about sustained cost, and one frame is noise.
+                // is about sustained cost, and one frame is noise -- which is
+                // also why the sampled estimate belongs here and not in a frame.
                 hostShare: totalMs > 0 ? hostMs / totalMs : 0,
                 averageFrameMs: recent.length > 0 ? totalMs / recent.length : 0,
                 phases: [...rows.values()].sort((one, two)=>two.selfMs - one.selfMs),
