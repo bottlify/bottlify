@@ -594,7 +594,8 @@ export function generateFixedFunction(state, layout){
     alphaRef: f32,
     stage0: u32,
     stage1: u32,
-    stage2: u32,${lightCount === 0 ? '' : `
+    stage2: u32,
+    texTransform: array<vec4f, 6>,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -696,8 +697,20 @@ function sampleFunctions(count){
     for (let index = 0; index < count; index++)
     {
         const flags = index < 3 ? `uniforms.stage${index}` : '0u';
-        lines.push(`fn sampleStage${index}(raw: vec2f) -> vec4f {
-    let flags = ${flags};
+        // The stage's texture transform, as Direct3D applies it to a
+        // two-dimensional coordinate: (u, v, 1) through the first three rows,
+        // so a translation is the third row and not the fourth. Identity rows
+        // are carried for a stage without one, so the sample is one expression.
+        const transformed = index < 3
+            ? [
+                '    let extended = vec3f(carried, 1.0);',
+                `    let raw = vec2f(dot(uniforms.texTransform[${index * 2}].xyz, extended),`,
+                `        dot(uniforms.texTransform[${index * 2 + 1}].xyz, extended));`,
+                '',
+            ].join('\n')
+            : '    let raw = carried;\n';
+        lines.push(`fn sampleStage${index}(carried: vec2f) -> vec4f {
+${transformed}    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));
     let dx = dpdx(raw * size);
     let dy = dpdy(raw * size);

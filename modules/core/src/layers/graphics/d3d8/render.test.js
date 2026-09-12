@@ -35,7 +35,7 @@ import { createDirect3D8 } from './device.js';
 import {
     IDENTITY, LIGHT_FLOATS, UNIFORM_AT, UNIFORM_FLOATS, colorToFloats, expandTexels, eyePosition,
     HARDWARE_SAMPLER, listIndices, multiplyMatrices, packLight, pipelineStateOf, samplerFlagsOf,
-    screenExtent, transformPosition,
+    screenExtent, transformPosition, uniformBlock,
     vertexCountOf,
 } from './render.js';
 import { createBackend } from '../webgpu/backend.js';
@@ -275,9 +275,24 @@ function rasterise(h, width, height){
             alphaTest: state.alphaTest,
             alphaFunc: state.alphaFunc,
             alphaRef: Math.round(command.uniforms[UNIFORM_AT.alphaRef] * 255),
+            textureTransform: planarTransform(command.uniforms, 0),
         });
     }
     return surface;
+}
+
+/**
+ * The six planar elements of a stage's texture transform, read back from the
+ * rows the block carries for the shader: (m11, m21, m31) then (m12, m22, m32).
+ *
+ * @param {Float32Array} uniforms @param {number} stage
+ */
+function planarTransform(uniforms, stage){
+    const at = UNIFORM_AT.textureTransforms + stage * 8;
+    return [
+        uniforms[at], uniforms[at + 1], uniforms[at + 2],
+        uniforms[at + 4], uniforms[at + 5], uniforms[at + 6],
+    ];
 }
 
 /** @param {any} state */
@@ -1816,20 +1831,127 @@ test('a frame can be cut short after a given number of draws', async()=>{
     assert.equal(device.diagnostics().draws, 2, 'the rest never reached the queue');
 });
 
-test('the dump reports a texture transform this engine accepts and does not apply', async()=>{
-    // Recorded commands. A stage that transforms its coordinates and a stage
-    // that does not are indistinguishable in every other field of a draw, and
-    // this engine samples the untransformed coordinate either way -- so the
-    // dump has to say which one a draw asked for, or the difference cannot be
-    // seen at all.
+test('byte-exact: a two-coordinate texture transform moves the sample by its third row', async()=>{
+    // Direct3D puts (u, v, 1) through the matrix for D3DTTFF_COUNT2, so a
+    // scroll is _31/_32 and the fourth row never reaches a two-dimensional
+    // coordinate. A sprite sheet's cell is chosen exactly this way: the
+    // vertex names the first cell and the matrix offsets to the one wanted.
+    // Read from the wrong row, every offset is zero and every sheet shows its
+    // first cell -- a picture that looks deliberate.
+    const h = harness({ width: 2, height: 2 });
+    const { device } = h;
+    // Four different texels, B G R A each, as A8R8G8B8 lies in memory.
+    const texture = textureFrom(h, 2, 2, D3DFMT.A8R8G8B8, Uint8Array.from([
+        0, 0, 255, 255, 0, 255, 0, 255,
+        255, 0, 0, 255, 0, 255, 255, 255,
+    ]));
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    selectTexture(device);
+    assert.equal(device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    // One pixel per draw, its centre at (0.5, 0.5) of the texture: the
+    // bottom-right texel, yellow, when nothing moves it.
+    assert.equal(device.SetTransform(D3DTS.TEXTURE0, [...IDENTITY]), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 1, 1], argb(255, 255, 255), true), 28), D3D_OK);
+    // Half the texture back along both axes, in the third row: the top-left
+    // texel, red.
+    assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        -0.5, -0.5, 1, 0,
+        0, 0, 0, 1,
+    ]), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([1, 0, 2, 1], argb(255, 255, 255), true), 28), D3D_OK);
+    // The same numbers in the fourth row move nothing: still yellow.
+    assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        0, 0, 1, 0,
+        -0.5, -0.5, 0, 1,
+    ]), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 1, 1, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    // Half a texture along u only, from the third row: bottom-left, blue.
+    assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
+        1, 0, 0, 0,
+        0, 1, 0, 0,
+        -0.5, 0, 1, 0,
+        0, 0, 0, 1,
+    ]), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([1, 1, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    const surface = rasterise(h, 2, 2);
+    assert.deepEqual(pixelAt(surface, 0, 0), [0, 255, 255, 255], 'untransformed: yellow');
+    assert.deepEqual(pixelAt(surface, 1, 0), [0, 0, 255, 255], 'third row moved it: red');
+    assert.deepEqual(pixelAt(surface, 0, 1), [0, 255, 255, 255], 'fourth row moved nothing');
+    assert.deepEqual(pixelAt(surface, 1, 1), [255, 0, 0, 255], 'u alone: blue');
+    assert.equal(toBase64(surface), 'AP///wAA//8A/////wAA/w==');
+    // What the shader is handed is what the evaluator read: two rows per
+    // stage, (m11, m21, m31, 0) and (m12, m22, m32, 0), at the documented place.
+    const draws = h.device.diagnostics().lastFrame.filter(
+        (/** @type {any} */ command)=>command.kind === 'draw');
+    assert.equal(draws.length, 4);
+    assert.deepEqual([...draws[1].uniforms.subarray(
+        UNIFORM_AT.textureTransforms, UNIFORM_AT.textureTransforms + 8)],
+    [1, 0, -0.5, 0, 0, 1, -0.5, 0]);
+    assert.deepEqual([...draws[2].uniforms.subarray(
+        UNIFORM_AT.textureTransforms, UNIFORM_AT.textureTransforms + 8)],
+    [1, 0, 0, 0, 0, 1, 0, 0]);
+});
+
+test('the block lays a texture transform out as two rows per sampled stage', ()=>{
+    // The shader reads array<vec4f, 6> at float 76 -- byte 304, sixteen-aligned
+    // after the three sampler words -- and the lights from byte 400. A row at
+    // the wrong index is read as another stage's, or as a light.
+    assert.equal(UNIFORM_AT.textureTransforms, 76);
+    assert.equal(UNIFORM_AT.lights, 100);
+    assert.equal(UNIFORM_FLOATS, 100);
+    const block = uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 1, height: 1 }),
+        textureFactor: 0,
+        fogColor: 0,
+        alphaRef: 0,
+        textureTransforms: [[2, 3, 4, 5, 6, 7], [1, 0, 0, 0, 1, 0], [0.5, 0, 0.25, 0, 0.5, 0.75]],
+    });
+    assert.equal(block.length, UNIFORM_FLOATS);
+    assert.deepEqual([...block.subarray(76, 100)], [
+        2, 3, 4, 0, 5, 6, 7, 0,
+        1, 0, 0, 0, 0, 1, 0, 0,
+        0.5, 0, 0.25, 0, 0, 0.5, 0.75, 0,
+    ]);
+    // A block with no transforms at all still carries identities: a stage's
+    // sample always goes through its rows.
+    const plain = uniformBlock({
+        worldViewProjection: IDENTITY,
+        viewport: viewportState({ x: 0, y: 0, width: 1, height: 1 }),
+        textureFactor: 0,
+        fogColor: 0,
+        alphaRef: 0,
+    });
+    assert.deepEqual([...plain.subarray(76, 100)], [
+        1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0,
+    ]);
+});
+
+test('the dump prints a texture transform as the elements a coordinate travels through', async()=>{
+    // Recorded commands. The flags and the six planar elements, u's then
+    // v's, with the offset from the third row -- so a sheet's cell can be
+    // read off a draw without the whole matrix.
     const h = harness({ width: 640, height: 480, dumpDraws: true });
     const device = h.device;
     assert.equal(device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
     assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
         0.5, 0, 0, 0,
         0, 0.25, 0, 0,
-        0, 0, 1, 0,
-        0.125, 0.375, 0, 1,
+        0.125, 0.375, 1, 0,
+        0.9, 0.9, 0, 1,
     ]), D3D_OK);
     assert.equal(device.BeginScene(), D3D_OK);
     assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
@@ -1839,22 +1961,18 @@ test('the dump reports a texture transform this engine accepts and does not appl
     await h.present();
 
     assert.match(device.diagnostics().lastDump[0],
-        / texXform=2:0.5,0,0,0.25,0.125,0.375 /,
-        'the flags and the rows a coordinate travels through');
+        / texXform=2:0.5,0,0.125,0,0.25,0.375 /,
+        'm11, m21, m31 then m12, m22, m32; the fourth row is not part of it');
 });
 
-test('a texture transform that moves a coordinate is reported as a divergence', async()=>{
-    // Recorded commands. The state is accepted and not acted on, which is the
-    // one case that has to speak: refusing it would change what the program
-    // does, and accepting it in silence is what produces a picture instead of
-    // an error. An identity transform moves nothing and must stay quiet, or
-    // the warning lands on every frame of every title and says nothing.
+test('a texture transform of more than two coordinates is reported, two are not', async()=>{
+    // Recorded commands. Two coordinates through the matrix are applied at
+    // the sample, so a program asking for that -- moving or not -- gets what
+    // it asked for and nothing is said. Three or four, or a projected divide,
+    // are accepted and not acted on, which is the one case that has to speak:
+    // in silence it produces a picture instead of an error.
     /** @type {string[]} */
     const said = [];
-    const quiet = harness({
-        dumpDraws: true,
-        divergence: (api, detail)=>said.push(`${api}: ${detail}`),
-    });
     // Textured, because a transform on a stage the cascade never runs moves
     // nothing and should stay as quiet as an identity one.
     const draw = (/** @type {any} */ h)=>{
@@ -1868,25 +1986,37 @@ test('a texture transform that moves a coordinate is reported as a divergence', 
             quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
         assert.equal(h.device.EndScene(), D3D_OK);
     };
-    assert.equal(quiet.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
-    assert.equal(quiet.device.SetTransform(D3DTS.TEXTURE0, [...IDENTITY]), D3D_OK);
-    draw(quiet);
-    assert.equal(said.length, 0, 'two coordinates through an identity matrix move nothing');
-
-    const moved = harness({
+    const scaled = [
+        2, 0, 0, 0,
+        0, 2, 0, 0,
+        0.5, 0.5, 1, 0,
+        0, 0, 0, 1,
+    ];
+    const quiet = harness({
         dumpDraws: true,
         divergence: (api, detail)=>said.push(`${api}: ${detail}`),
     });
-    assert.equal(moved.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
-    assert.equal(moved.device.SetTransform(D3DTS.TEXTURE0, [
-        2, 0, 0, 0,
-        0, 2, 0, 0,
-        0, 0, 1, 0,
-        0, 0, 0, 1,
-    ]), D3D_OK);
-    draw(moved);
-    assert.equal(said.length, 1);
-    assert.match(said[0], /^Direct3D 8: a texture transform is accepted and not applied/);
+    assert.equal(quiet.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
+    assert.equal(quiet.device.SetTransform(D3DTS.TEXTURE0, scaled), D3D_OK);
+    draw(quiet);
+    assert.equal(said.length, 0, 'two coordinates through a moving matrix are applied');
+
+    for (const flags of [3, 4, 0x100 | 2])
+    {
+        const h = harness({
+            dumpDraws: true,
+            divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+        });
+        assert.equal(h.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, flags),
+            D3D_OK);
+        assert.equal(h.device.SetTransform(D3DTS.TEXTURE0, scaled), D3D_OK);
+        draw(h);
+    }
+    assert.equal(said.length, 3, 'three, four and projected each spoke once');
+    for (const line of said)
+    {
+        assert.match(line, /^Direct3D 8: a texture transform of more than two coordinates, or a projected one, is accepted and not applied/);
+    }
 });
 
 test('every draw sampling one texture can be dropped, by the id the dump names it', async()=>{

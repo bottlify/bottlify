@@ -70,7 +70,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '279f8a01f046905b');
+    assert.equal(digest(first), 'e022536f5b267812');
 });
 
 test('a vertex colour is swizzled back from B,G,R,A', ()=>{
@@ -196,9 +196,46 @@ test('a stage samples the coordinate set it names, not its own number', ()=>{
     // The stage samples through the one hardware sampler with its own state
     // from the block: the address mode, the filters and the mip mode are
     // applied in the shader, and the level is chosen there.
-    assert.match(code, /fn sampleStage1\(raw: vec2f\) -> vec4f \{\n {4}let flags = uniforms\.stage1;/);
+    assert.match(code,
+        /fn sampleStage1\(carried: vec2f\) -> vec4f \{\n(.*\n){3} {4}let flags = uniforms\.stage1;/);
     assert.match(code, /textureSampleLevel\(texture1, sampler1, uv, level\)/);
     assert.match(code, /fn addressCoordinate\(t: f32, mode: u32, texels: f32\) -> f32/);
+});
+
+test('a stage puts its coordinate through its own texture transform before sampling', ()=>{
+    // Direct3D applies D3DTS_TEXTURE0..7 to (u, v, 1) for a two-coordinate
+    // set: two dot products against the rows the block carries, computed
+    // before the level and the address mode, which see the moved coordinate.
+    // A sprite sheet's cell is chosen this way, so a stage that sampled the
+    // carried coordinate would draw every sheet's first cell.
+    const textured = {
+        colorOp: D3DTOP.MODULATE, colorArg1: D3DTA.TEXTURE, colorArg2: D3DTA.CURRENT,
+        alphaOp: D3DTOP.SELECTARG1, alphaArg1: D3DTA.TEXTURE, alphaArg2: D3DTA.CURRENT,
+        texCoordIndex: 0,
+    };
+    const code = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT),
+        stages: [textured, textured, textured, textured],
+    })).code;
+
+    assert.match(code, /texTransform: array<vec4f, 6>,/);
+    for (const stage of [0, 1, 2])
+    {
+        const rows = `${stage * 2}`;
+        const next = `${stage * 2 + 1}`;
+        assert.match(code, new RegExp(
+            `fn sampleStage${stage}\\(carried: vec2f\\) -> vec4f \\{\\n`
+            + ` {4}let extended = vec3f\\(carried, 1\\.0\\);\\n`
+            + ` {4}let raw = vec2f\\(dot\\(uniforms\\.texTransform\\[${rows}\\]\\.xyz,`
+            + ` extended\\),\\n`
+            + ` {8}dot\\(uniforms\\.texTransform\\[${next}\\]\\.xyz, extended\\)\\);\\n`
+            + ` {4}let flags = uniforms\\.stage${stage};\\n`
+            + ` {4}let size = vec2f\\(textureDimensions\\(texture${stage}, 0\\)\\);`),
+        `stage ${stage} transforms with its own two rows, then measures its level`);
+    }
+    // The block carries rows for three stages; a fourth samples as carried.
+    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let raw = carried;\n {4}let flags = 0u;/);
+    assert.doesNotMatch(code, /texTransform\[[6-9]\]/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{

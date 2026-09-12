@@ -272,12 +272,24 @@ export function alphaPasses(func, alpha, reference){
  * `graphics/gdi` already uses; two conventions in one engine is a bug
  * generator.
  *
+ * A texture transform, when given, is the six planar elements of the stage's
+ * matrix as `d3d8/render.js` packs them -- (m11, m21, m31) then (m12, m22, m32)
+ * -- applied to (u, v, 1) before the sample, which is what Direct3D does with a
+ * two-coordinate set.
+ *
  * @param {ReferenceSurface} target
  * @param {{ x0: number, y0: number, x1: number, y1: number }} rect
  * @param {any} options
  */
 export function fillRect(target, rect, options){
     const stages = options.stages === undefined ? [] : options.stages;
+    const planar = options.textureTransform === undefined
+        ? [1, 0, 0, 0, 1, 0]
+        : options.textureTransform;
+    /** @param {number} u @param {number} v */
+    const sampleTexture = (u, v)=>sampleNearest(options.texture,
+        planar[0] * u + planar[1] * v + planar[2],
+        planar[3] * u + planar[4] * v + planar[5]);
     for (let y = rect.y0; y < rect.y1; y++)
     {
         for (let x = rect.x0; x < rect.x1; x++)
@@ -292,7 +304,7 @@ export function fillRect(target, rect, options){
                     : options.textureFactor,
                 texture: options.texture === undefined
                     ? { r: 255, g: 255, b: 255, a: 255 }
-                    : sampleNearest(options.texture,
+                    : sampleTexture(
                         (x - rect.x0 + 0.5) / (rect.x1 - rect.x0),
                         (y - rect.y0 + 0.5) / (rect.y1 - rect.y0)),
             };

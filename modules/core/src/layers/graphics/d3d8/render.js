@@ -82,11 +82,18 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * @property {number} Phi           The outer cone's.
  */
 
-/** The matrix elements a two-dimensional texture coordinate passes through. */
-const PLANAR_ROWS = Object.freeze([0, 1, 4, 5, 12, 13]);
+/**
+ * The matrix elements a two-dimensional texture coordinate passes through:
+ * Direct3D extends (u, v) with a third component of one, so the coordinate
+ * goes through the first two columns of the first three rows, and a program
+ * that scrolls a texture puts its offset in the third row. Read from the
+ * fourth, every such offset is zero and every sprite sheet shows its first
+ * cell -- a picture, not an error.
+ */
+const PLANAR_ROWS = Object.freeze([0, 4, 8, 1, 5, 9]);
 
-/** What those elements hold when the transform moves nothing. */
-const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 1, 0, 0]);
+/** What those elements hold when the transform moves nothing: u' = u, v' = v. */
+const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 1, 0]);
 
 /** D3DTTFF_COUNT2: two coordinates through the matrix, and no projection. */
 const TTFF_COUNT2 = 2;
@@ -555,9 +562,10 @@ const hasStencil = format=>format.endsWith('stencil8');
  *
  * This is WGSL's own layout for the struct the generator declares, worked out
  * once here rather than at each `set`: two mat4x4f, two vec2f, ten vec4f, an
- * f32, and then the lights, which start at the next multiple of four floats
- * because a uniform array is aligned to sixteen bytes. A field written at the
- * wrong index is read as a different one, and every one of them is a plausible
+ * f32 with three u32 in its padding, six vec4f of texture transform rows, and
+ * then the lights, which start at the next multiple of four floats because a
+ * uniform array is aligned to sixteen bytes. A field written at the wrong
+ * index is read as a different one, and every one of them is a plausible
  * number, so nothing reports it.
  */
 export const UNIFORM_AT = Object.freeze({
@@ -580,7 +588,10 @@ export const UNIFORM_AT = Object.freeze({
     stage0: 73,
     stage1: 74,
     stage2: 75,
-    lights: 76,
+    // Two vec4f rows per sampled stage: (m11, m21, m31, 0) makes u and
+    // (m12, m22, m32, 0) makes v from (u, v, 1).
+    textureTransforms: 76,
+    lights: 100,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -667,6 +678,8 @@ function putDword(block, at, dword){
  * @property {Material} [material]
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
+ * @property {(readonly number[])[]} [textureTransforms]
+ *     Per stage, the six planar elements in `PLANAR_ROWS` order; identity when absent.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -709,6 +722,13 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
         words[at.stage0 + index] = (stages[index] ?? 0) >>> 0;
+    }
+    const transforms = values.textureTransforms ?? [];
+    for (let index = 0; index < SAMPLED_STAGES; index++)
+    {
+        const planar = transforms[index] ?? PLANAR_IDENTITY;
+        put4(block, at.textureTransforms + index * 8, planar[0], planar[1], planar[2], 0);
+        put4(block, at.textureTransforms + index * 8 + 4, planar[3], planar[4], planar[5], 0);
     }
     for (let index = 0; index < lights.length; index++)
     {
@@ -935,6 +955,7 @@ export function uniformsOf(model, lighting, take, mips = true){
         ],
         alphaRef: rs('ALPHAREF'),
         stages: stageFlags(model, mips),
+        textureTransforms: stageTransforms(model),
         material: model.material,
         ambient: rs('AMBIENT'),
         eye: eyePosition(view),
@@ -944,6 +965,27 @@ export function uniformsOf(model, lighting, take, mips = true){
         lights: lighting ? enabledLights(model) : [],
     }, take);
 }
+
+/**
+ * The planar transform of each sampled stage, when the stage's flags say
+ * its two coordinates go through the matrix. Any other flag value -- more
+ * coordinates, a projective divide -- is not applied and is reported per draw.
+ *
+ * @param {RenderModel} model
+ */
+const stageTransforms = model=>{
+    /** @type {(readonly number[])[]} */
+    const transforms = [];
+    for (let index = 0; index < SAMPLED_STAGES; index++)
+    {
+        const flags = model.stageStates(index)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        const matrix = model.transforms.get(D3DTS.TEXTURE0 + index);
+        transforms.push(flags === TTFF_COUNT2 && matrix
+            ? PLANAR_ROWS.map(at=>matrix[at])
+            : PLANAR_IDENTITY);
+    }
+    return transforms;
+};
 
 /** @param {RenderModel} model @param {boolean} mips */
 const stageFlags = (model, mips)=>{
@@ -1872,13 +1914,13 @@ export function createRenderer(options){
     };
 
     /**
-     * The texture transform a stage asks for, which this engine accepts and
-     * does not apply. A program that scrolls, scales or projects a coordinate
-     * set through D3DTS_TEXTURE0 gets the untransformed coordinate instead --
-     * a sprite sampled over the wrong part of its own texture, with every
-     * other piece of state around it reading correct. So the flags and the
-     * matrix are printed whenever either is set, and nothing at all when the
-     * stage genuinely wants the coordinate as it lies.
+     * The texture transform a stage asks for. A program that scrolls or
+     * scales a coordinate set through D3DTS_TEXTURE0 samples a different part
+     * of its texture than the vertex names -- a sprite sheet's cell is chosen
+     * this way -- with every other piece of state around the draw reading the
+     * same. So the flags and the matrix are printed whenever either is set,
+     * and nothing at all when the stage genuinely wants the coordinate as it
+     * lies.
      *
      * @param {RenderModel} model
      * @param {number} stage
@@ -1891,39 +1933,24 @@ export function createRenderer(options){
         {
             return '-';
         }
-        // The rows a two-dimensional texture coordinate actually travels
-        // through: the two it is scaled and sheared by, and the one it is
-        // offset by. The rest of the matrix cannot reach it.
+        // The elements a two-dimensional coordinate actually travels through,
+        // as u then v: the two each is scaled and sheared by, and the offset
+        // from the third row. The rest of the matrix cannot reach it.
         return `${flags}:${(matrix ? PLANAR_ROWS.map(at=>matrix[at]) : PLANAR_IDENTITY)
             .map(round).join(',')}`;
     };
 
     /**
-     * Whether a stage's transform would move a coordinate at all.
+     * Whether a stage's transform asks for what the sampler does not do.
      *
-     * A program that asks for two-dimensional coordinates through an identity
-     * matrix -- which is the common case, and what a fixed-function pipeline
-     * does by default once the flag is set -- gets the same texel either way,
-     * so calling that a divergence would put a warning on every frame of every
-     * title and say nothing.
+     * Two coordinates through the matrix are applied at the sample. Three or
+     * four, or a projected divide, are not, whatever the matrix holds.
      *
      * @param {RenderModel} model @param {number} stage
      */
     const transformMoves = (model, stage)=>{
         const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-        if (flags === 0)
-        {
-            return false;
-        }
-        if (flags !== TTFF_COUNT2)
-        {
-            // Three or four coordinates, or a projected divide: none of which
-            // this engine does, whatever the matrix holds.
-            return true;
-        }
-        const matrix = model.transforms.get(D3DTS.TEXTURE0 + stage);
-        return matrix !== undefined
-            && PLANAR_ROWS.some((at, index)=>matrix[at] !== PLANAR_IDENTITY[index]);
+        return flags !== 0 && flags !== TTFF_COUNT2;
     };
 
     /**
@@ -2336,7 +2363,8 @@ export function createRenderer(options){
     };
 
     /**
-     * Says once that a stage asked for a texture transform and did not get one.
+     * Says once that a stage asked for a texture transform this engine does
+     * not do: three or four coordinates, or a projected divide.
      *
      * The state is accepted -- refusing SetTransform or the stage state would
      * change what a program does -- and then not acted on, which is the defect
@@ -2356,7 +2384,8 @@ export function createRenderer(options){
             if (transformMoves(model, stage))
             {
                 divergence('Direct3D 8',
-                    'a texture transform is accepted and not applied'
+                    'a texture transform of more than two coordinates, or a'
+                    + ' projected one, is accepted and not applied'
                     + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
                     + ' coordinates are sampled as the vertex carries them');
                 return;
