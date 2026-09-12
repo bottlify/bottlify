@@ -1,114 +1,149 @@
-# `@bottlify/core` — layer directory layout
+# `@bottlify/core` — source layout
 
-Durable, git-tracked record of how `modules/core/src/layers/` is physically organized: naming
-conventions, the full directory tree (including the per-DLL/per-backend layout inside `win32`,
-`graphics`, `audio`, `input`), and the a few DLLs that don't fit cleanly in one layer. The module
-graph itself (`requires`, enforced by `scripts/check-boundaries.mjs`) is documented in
-[`README.md`](./README.md) and doesn't change here — this file only records how that graph maps onto
-directories inside each already-existing layer.
+How `modules/core/src/` is physically organised: naming conventions, the directory tree as it
+stands, and how a guest DLL whose two halves live in different layers is joined. The module graph
+itself (`requires`, enforced by `scripts/check-boundaries.mjs`) is in [`system.md`](./system.md);
+this file records how that graph maps onto directories.
 
 ## 1. Naming conventions
 
-- **No `.dll` suffix in directory names**: `win32/kernel32/`, not `win32/kernel32.dll/`. This is
-  what Wine does (`dlls/kernel32/`, `dlls/user32/`, …) — a convention proven on exactly this class
-  of problem; a `.dll` suffix on a directory name is visually confused with a file extension.
+- **No `.dll` suffix in directory names**: `win32/kernel32/`, not `win32/kernel32.dll/`. A suffix
+  on a directory reads as a file extension.
 - **No nesting by guest filesystem path**: not `win32/system32/kernel32/`. Which guest path a DLL
-  resolves from (`System32`, `SysWOW64`, the game's own directory) is the concern of
-  loader/filesystem at runtime (KnownDLLs, PATH, SxS), not source organization. The source layout
-  encodes the implementation boundary, not a fact about the guest filesystem.
-- **The layer is called `win32`, not `win`.** "Win32" is the name of the API contract itself, not a
-  claim about the guest's bitness: Wine calls it Win32 in 64-bit builds too. Bitness (win64
-  someday) is a matter of a given DLL implementation's configuration/build, not a directory rename:
-  real DLL names don't change between x86 and x64 Windows.
+  resolves from is the loader's and filesystem's concern at runtime; the source layout encodes the
+  implementation boundary, not a fact about the guest.
+- **The layer is called `win32`, not `win`.** Win32 is the name of the API contract, not a claim
+  about the guest's bitness.
+- **A layer's own machinery goes in `internal/`**; a guest-visible library or a backend gets a
+  directory named for it. `api.js` is the layer's JSDoc interface, `module.js` its
+  `BottlifyModule`, and `*.test.js` sits beside what it tests.
 
-## 2. The full layer tree
+## 2. The tree
+
+Test files are omitted. Every `src/layers/<name>/` has `api.js` and `module.js`; they are not
+repeated below.
 
 ```
-modules/core/src/layers/
-├── cpu/                  # bridge to v86 — one implementation, the only layer with access to vendor/v86
-├── memory/                # address space: regions, permissions, leases — one implementation
-├── kernel/                # threads, scheduler, context switch, time, synchronization, handles
-│                          #   (this is OUR execution engine — not the guest-facing kernel32 facade, see win32/kernel32/)
-├── bridge/                # traps, calling-convention marshaling, callbacks, async parking
-├── loader/                # PE: headers, relocations, imports, TLS, in-guest module synthesis
-├── log/                   # ✦ levels, categories, ring buffers, sinks
-├── filesystem/            # ✦ VFS, OPFS, CoW overlay, sessions, registry
-├── media/                 # ✦ cinematics: containers and codecs decoded to BGRA frames + PCM
-│                          #   (requires log only — a clip carries video and audio at once, so this
-│                          #    sits beside filesystem rather than inside graphics or audio)
+modules/core/src/
+├── index.js               # what the package exports: createApp, assembleModules
+├── core.js                # assembleModules: registry → plan → scoped hosts → CoreInstance
+├── app.js                 # the engine: assembles the layers, maps the process, binds imports,
+│                          #   the run loop and its pacing, process replacement
+├── events.js              # the event registry a consumer's `on` hooks into
+├── storage.js             # sessions: files + registry, packed; 'local', 'opfs', a provider
+├── letterbox.js           # fitting a clip onto a display of another shape
+├── trace.js               # what was happening when it went wrong: registers, stack scan
+├── *.itest.js             # whole fixture programs through the engine
 │
-├── win32/                 # guest-visible ABI — one directory per DLL
-│   ├── kernel32/
-│   ├── user32/
-│   ├── gdi32/             # device contexts, bitmaps, text — the non-rendering half (see §3)
-│   ├── advapi32/
-│   ├── ole32/
-│   ├── oleaut32/
-│   ├── msvcrt/
-│   ├── comctl32/
-│   ├── shell32/
-│   ├── winmm/              # timers/joystick only — the audio half lives elsewhere (see §3)
-│   └── winsock/             # a thin stub/error only — the real implementation lives in @bottlify/networking (see §3)
+├── system/                # the module contract; imports no layer
+│   ├── contract.js        #   typedefs only
+│   ├── config.js          #   { name: boolean | object } → toggles
+│   ├── registry.js        #   active set, topological order, stub installation
+│   ├── host.js            #   the scoped host a module is handed
+│   └── stub.js            #   NOT_IMPLEMENTED stand-ins
 │
-├── graphics/               # ✦ sibling of win32 (requires win32+bridge+memory), not nested inside it
-│   ├── webgpu/              # our own compositor/presentation backend, no guest DLL
-│   ├── gdi/                 # BitBlt/StretchBlt — the rendering half of gdi32.dll
-│   ├── ddraw/
-│   ├── d3d7/
-│   ├── d3d8/
-│   ├── d3d9/
-│   ├── opengl/
-│   └── glide/               # "as needed" — the lowest-priority target class
+├── host/                  # where the engine runs: the page's end and the worker's end
+│   ├── create.js          #   createApp as exported: picks worker or thread, keeps the canvas's host
+│   ├── messages.js        #   the port protocol, typedefs only
+│   ├── remote.js          #   the page's controller: requests, events, input capture, journal mirror
+│   ├── serve.js           #   the engine's end: method table, device, presenter, pacing
+│   └── engine.worker.js   #   the worker entry: serveEngine on the worker's global scope
 │
-├── audio/                  # ✦ sibling of win32
-│   ├── webaudio/            # SAB ring + AudioWorklet, our own backend
-│   ├── dsound/
-│   ├── asi/                 # the MPEG decoder a sound middleware loads as a
-│   │                        #   provider of its own, hosted; see §3
-│   ├── dshow/               # video playback
-│   ├── winmm/               # waveOut/waveIn/MCI-audio — the audio half of winmm.dll
-│   └── msacm/               # audio compression manager; some titles' own audio
-│                            #   libraries import it and will not load without it
-│
-└── input/                   # ✦ sibling of win32
-    ├── keyboard/
-    ├── mouse/                # including capture and relative movement
-    ├── gamepad/              # including a virtual gamepad for touch devices
-    └── dinput/
+└── layers/
+    ├── index.js           # defaultModules(), in dependency order
+    ├── log/internal/      # journal.js profiler.js ring.js
+    ├── cpu/internal/      # boot-rom.js context.js faults.js fpu.js thunks.js v86-host.js
+    │                      #   (the only layer that may import vendor/v86)
+    ├── memory/internal/   # regions.js accessors.js
+    ├── kernel/internal/   # threads.js switch.js sync.js handles.js time.js processes.js
+    ├── bridge/            # replay.js — recorded sessions replayed through the real bridge
+    │   ├── internal/      #   conventions.js dispatch.js parking.js callback.js vtable.js
+    │   └── sessions/      #   recorded runs that went wrong, one JSON each, with a README
+    ├── loader/internal/   # pe.js image.js dependencies.js delayload.js tls.js resources.js
+    │                      #   synth.js (in-guest module synthesis) init.js
+    ├── filesystem/internal/
+    │   ├── tree.js paths.js handles.js errors.js memory-store.js opfs-store.js
+    │   └── bundle/        #   format.js source.js cache.js crc32.js
+    ├── media/internal/    # decoder.js (FFmpeg wasm) jpeg.js ijl.js (the hosted JPEG library)
+    │
+    ├── win32/             # one directory per guest-visible library
+    │   ├── kernel32/      #   process, threading, sync, heap, files, vfs, mapping, modules,
+    │   │                  #   resources, seh, exceptions, iocp, console, locale, environment, spawn
+    │   ├── user32/        #   windows, messages, paint, dialogs, display, objects, system
+    │   ├── gdi32/         #   objects, drawing (the ABI in front of an injected drawing service), structs
+    │   ├── advapi32/      #   the registry and the rest
+    │   ├── ole32/  oleaut32/
+    │   ├── msvcrt/  ntdll/
+    │   ├── winmm/         #   timeGetTime, the wave-out queue, notifications, its thread
+    │   ├── wsock32/       #   sockets, loopback, sockaddr, the transport contract (also ws2_32, mswsock)
+    │   ├── quartz/        #   the DirectShow filter graph and its interfaces
+    │   ├── shell32/  comctl32/  comdlg32/  imm32/  version/  wininet/
+    │
+    ├── graphics/          # requires win32, bridge, memory — a sibling of win32, not inside it
+    │   ├── webgpu/        #   the one backend: backend.js contract.js
+    │   │   └── internal/  #   pipeline, shaders, fixedfunction, programmable, textures, buffers,
+    │   │                  #   bindings, vertexformat, viewport, presenter, pacer, profiler,
+    │   │                  #   reference (the software model frames are checked against), fake-device
+    │   ├── gdi/           #   the drawing half of gdi32: blit, brush, context, dib, rop, shapes, surface, text
+    │   ├── ddraw/         #   objects, blit, caps, constants, structs
+    │   ├── d3d7/          #   device, caps, constants
+    │   ├── d3d8/          #   device, render, renderstates, stagestates, structs, validity
+    │   ├── d3d9/          #   device, interfaces, resources, declaration, shader, wgsl, stateblock, caps, …
+    │   ├── d3d10/         #   device, dxgi, resources, states, render, sm4, dxbc, wgsl, gpuformats, com
+    │   ├── opengl/        #   context*, state, matrix, lighting, texture, arrays, pipeline, raster,
+    │   │                  #   pixelformat, wgl, extensions, exports
+    │   ├── vulkan/        #   instance, physical, device, commands, handles, spirv, runtime
+    │   └── seam/          #   what the guest sees: exports.js vtables.js iids.js com.js structs.js
+    │                      #   shadow.js, and one file per library — ddraw, d3d7, d3d8, d3d9, d3d10, vulkan
+    │
+    ├── audio/             # requires win32, bridge, memory
+    │   ├── output/        #   mixer.js ring.js worklet.js (the AudioWorkletProcessor, shipped as dist/worklet.js)
+    │   ├── dsound/        #   buffers.js seam.js
+    │   └── asi/           #   provider.js mp3.js — the MPEG provider a sound middleware loads, hosted
+    │
+    └── input/             # requires win32, bridge, memory
+        ├── router.js      #   one event stream into the message queue and the polled state
+        ├── dom.js         #   keyboard and mouse captured on a canvas (runs on the page)
+        ├── keys.js
+        └── dinput/        #   devices.js seam.js — DirectInput and DirectInput8
 ```
 
-The order of directories inside `win32/graphics/audio/input` doesn't dictate implementation order —
-that's set by the phase plan (see `CLAUDE.md` for the current phase and the six governing rules).
+Libraries a program sees, by the layer that publishes them: `win32` synthesises `KERNEL32`,
+`USER32`, `GDI32`, `ADVAPI32`, `ole32`, `OLEAUT32`, `msvcrt`, `ntdll`, `WINMM`, `WSOCK32`,
+`WS2_32`, `MSWSOCK`, `SHELL32`, `COMCTL32`, `COMDLG32`, `IMM32`, `VERSION`, `WININET`; `graphics`
+publishes `DDRAW`, `D3D8`, `D3D9`, `D3D10`, `DXGI`, `OPENGL32`, `vulkan-1`; `audio` publishes
+`DSOUND` and answers as `Mp3dec.asi` to a program's `mss32`; `input` publishes `DINPUT` and
+`DINPUT8`; `media` answers as `ijl15`. Direct3D 7 is reached through `DDRAW`, DirectShow through
+`ole32`'s class factory.
 
-## 3. Cross-cutting splits: a DLL that doesn't fit in one layer
+## 3. A DLL whose halves live in two layers
 
-Three DLLs conceptually belong to `win32`, but really split into two halves: the one that just keeps
-OS-level bookkeeping — pure `win32`; the one that actually does something (draws pixels, plays
-sound, moves packets) — needs a resource that `win32` can't reach by the dependency graph (`win32`
-has no `requires` on graphics/audio/networking).
+`win32` requires neither `graphics`, `audio`, `media` nor `input` (the graph would otherwise have a
+cycle: those three require `win32`), yet several of its libraries need them. The mechanism is
+decided and in use: the upper layer's service arrives in win32's **configuration** as a thunk the
+assembler (`src/app.js`) hands down, resolved lazily through `core.api(...)`, and the win32 file is
+the guest ABI in front of it. A build without the upper layer gets a thunk that answers `null`, and
+the entry points then fail truthfully — `FALSE`, a null handle, a cursor that advances on the clock
+— rather than reporting success and doing nothing.
 
-| DLL         | half in `win32/`                       | half elsewhere                                          |
-|-------------|-----------------------------------------|-----------------------------------------------------------|
-| `gdi32.dll` | device contexts, bitmaps, text          | `graphics/gdi/` — BitBlt/StretchBlt, the real blitting     |
-| `winmm.dll` | timers, joystick                        | `audio/winmm/` — waveOut/waveIn/MCI-audio                  |
-| `winsock.dll` | a stub/error code when networking isn't installed | `@bottlify/networking` — a separate npm package, not part of `@bottlify/core` at all |
+| library | half in `win32/` | half elsewhere | joined by |
+|---|---|---|---|
+| `gdi32` | `win32/gdi32/` — handles, objects, regions, palettes, the argument reading | `graphics/gdi/` — the pixels: blit, shapes, text, DIBs | `config.graphics` |
+| `winmm` | `win32/winmm/` — the clock, the wave-out queue and its done flags | `audio/output/` — the mixer the queue's play cursor comes from | `config.output` |
+| `quartz` | `win32/quartz/` — the filter graph, its events and interfaces | `media/internal/` — the decoder that gives it frames | `config.video` |
+| `user32` cursor and key state | `win32/user32/` — `GetCursorPos`, `ClipCursor`, `GetKeyState` | `input/router.js` — the polled state | `config.cursor`, `config.clipCursor`, `config.keyState` |
+| `wsock32` | `win32/wsock32/` — sockets, the loopback address space | outside the package: the embedder's transport (`@bottlify/networking` is one) | `transport.js`, a callback contract |
 
-This isn't a problem invented here — each of these DLLs legitimately belongs both to `win32`'s
-enumeration and to the phase that actually implements its working half (winmm's audio half lands
-with the audio phase, winsock's real implementation with the networking phase). The layout above
-makes that explicit in the directory tree instead of leaving it an implicit overlap between
-documents.
+The same pattern runs downwards too. `audio` cannot reach `kernel` to set an event, so the
+assembler hands it `signal(handle)`; `media` cannot reach `memory` or win32's heap, so it gets
+`readMemory`, `writeMemory`, `allocate`. What the graph does not express as an edge, the
+assembler expresses as configuration, and nothing else may.
 
 ## 4. Open questions
 
-- **DX10 isn't in the graphics phase's declared scope.** The current backend order is:
-  `ddraw → d3d7 → d3d8 → d3d9 → opengl 1.x/2.x → glide` (targets: WC3, WoW, CS 1.6, titles up to
-  2010). If DX10 is a deliberate scope expansion rather than an oversight, it needs writing in
-  explicitly before creating `graphics/d3d10/`.
-- **The physical mechanism for the gdi32/winmm split.** Two neighboring directories for one guest
-  DLL (as above) is the simplest option, but not the only one: an alternative is a single DLL entry
-  point in `win32/` that, when an active `graphics`/`audio` module is present, delegates the call
-  through an explicit port (not via `requires`, but through something like optional injection at
-  `create` time). Decide this before `win32`, `graphics`, and `audio` reach the implementation of
-  these specific functions — right now this is only directory layout, behavior hasn't been written
-  yet.
+- **A React binding.** A `@bottlify/core/react` subpath keeps one version and one release; a
+  separate package keeps the dependency graph cleaner for non-React consumers. Not started; the
+  core stays framework-agnostic either way.
+- **A second worker for the audio layer.** The seam is designed and the reason it is not crossed
+  is a measurement; see [`host.md`](./host.md) §9.
+- **Glide.** The one drawing API in the original scope with no directory and no code.

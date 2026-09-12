@@ -1,0 +1,227 @@
+# `filesystem` — the volume a Win32 program sees
+
+Source: `modules/core/src/layers/filesystem/`. Module contract and host machinery:
+[`system.md`](./system.md), [`host.md`](./host.md); layer index: [`README.md`](./README.md). The
+Win32 file API built on top of this layer is described in [`win32.md`](./win32.md).
+
+## 1. Purpose
+
+`filesystem` is the volume: drive letters, Windows path rules, a read-only source under a writable
+layer (copy-on-write), open files with positions and sharing, and the bundle reader that turns a
+`.btl` container into that read-only source. It reports failures by name and hands back handle
+objects rather than numbers.
+
+It is not the Win32 file API. Which error number `CreateFile` answers with, what a `HANDLE` is
+worth, and how a read that cannot be served yet parks a guest thread are decisions of the caller
+implementing that API (`src/layers/win32/kernel32/vfs.js`). Nothing here reaches for a browser API
+on its own: the stores are injected, and the one browser-backed store in the tree (OPFS) is used
+only where the assembler hands it in. It requires `log`.
+
+## 2. Contract
+
+| field      | value |
+|------------|-------|
+| `name`     | `filesystem` |
+| `version`  | `0.1.0` |
+| `requires` | `['log']` |
+
+### Configuration (`src/layers/filesystem/api.js`, `src/layers/filesystem/module.js`)
+
+| option          | type                                                        | default                      | meaning |
+|-----------------|-------------------------------------------------------------|------------------------------|---------|
+| `drives`        | `{ [letter]: { source?: SourceStore \| null, writable?: WritableStore } }` | `{}` → `C:` on an in-memory writable store | Volumes to mount. A missing `writable` is an in-memory store; a missing `source` is a drive with no read-only layer. |
+| `openFileLimit` | `number`                                                    | `4096`                       | Most files open at once. |
+| `onChanged`     | `(changes: { path, kind }[]) => void`                       | none                         | Told, once per file and after the writes settle, that the writable layer changed. |
+
+The store contracts are in `src/layers/filesystem/internal/memory-store.js`: a `SourceStore` is
+`{ list(), stat(path), read(path, offset, length) }`, and a `WritableStore` adds `write`,
+`truncate`, `remove`, `mkdir`. Store paths are backslash-separated and relative to the mount root; a
+store folds no case and invents no directories — every Windows rule lives one level up.
+
+### Provided API
+
+| method | one line |
+|--------|----------|
+| `ErrorCode`, `Disposition`, `SeekFrom` | The vocabularies (below). |
+| `mount(letter, { source?, writable? })` | Mount or replace a drive. `letter` must be a single letter. |
+| `drives() → string[]` | Mounted letters, in mount order. |
+| `resolve(path)` | `{ drive, components, device, wildcard, path }` without touching the volume — how a caller learns a path names a device before opening it. |
+| `currentDirectory() → string` | The current directory as a full path. |
+| `setCurrentDirectory(path)` | Move it; refuses a path that is not an existing directory. |
+| `stat(path)` | `{ name, path, directory, size }` or `null`. |
+| `list(path, pattern?)` | Entries of a directory, filtered by a wildcard; a trailing wildcard component of `path` is taken as the pattern when none is given. |
+| `createDirectory(path) → boolean` | `true` when created, `false` when it was already there. |
+| `removeDirectory(path)` / `deleteFile(path)` | Remove; a directory must be empty. |
+| `rename(from, to)` | Copy then delete, chunked, so a file from the read-only source can be moved. |
+| `open(path, { read?, write?, shareRead?, shareWrite?, disposition? })` | A handle object. Defaults: read `true`, write `false`, share read `true`, share write `false`, `OPEN_EXISTING`. |
+| `read(handle, length) → Uint8Array` / `write(handle, bytes) → number` | At the handle's position, which moves. |
+| `seek(handle, offset, from?)` / `position(handle)` / `size(handle)` | Position and size; a seek may land past the end. |
+| `setEndOfFile(handle)` | Cut or extend the file at the position. |
+| `close(handle)` | Release it. |
+| `openFiles()` | Every open handle, for diagnostics and `apply`. |
+| `onChanged(handler)` | Replace the change listener. |
+| `apply(batch) → number` | Put files in from outside: `{ path, bytes?, delete? }[]`, through the overlay; refused whole if any named file is open. |
+| `export(letter?) → { path, bytes }[]` | Everything the writable layer holds — what a session is made of. The source is never in it. |
+
+`ErrorCode` (`src/layers/filesystem/internal/errors.js`): `INVALID_PATH`, `INVALID_PARAMETER`,
+`NO_SUCH_DRIVE`, `NOT_FOUND`, `PATH_NOT_FOUND`, `ALREADY_EXISTS`, `NOT_A_DIRECTORY`,
+`IS_A_DIRECTORY`, `DIRECTORY_NOT_EMPTY`, `ACCESS_DENIED`, `SHARING_VIOLATION`, `IS_DEVICE`,
+`INVALID_HANDLE`. `NOT_FOUND` and `PATH_NOT_FOUND` are told apart because Win32 tells them apart.
+Every failure is an `Error` with a `code` from this set. `Disposition` is `CREATE_NEW`,
+`CREATE_ALWAYS`, `OPEN_EXISTING`, `OPEN_ALWAYS`, `TRUNCATE_EXISTING`; `SeekFrom` is `BEGIN`,
+`CURRENT`, `END`.
+
+### `diagnostics()` metrics
+
+| field | what it is |
+|-------|------------|
+| `volumes["C:"].files` / `.directories` | Nodes indexed in the overlay tree. |
+| `volumes["C:"].tombstones` | Source entries deleted by the program and hidden. |
+| `volumes["C:"].copied` | Files present in both layers — copied up on first write. |
+| `volumes["C:"].layered` | Whether the drive has a source. |
+| `handles.open` / `.opened` / `.closed` | Open handles now, and totals. |
+| `handles.byPath` | Up to forty paths, ordered by bytes read, as `"n opens, m bytes"` — which files a run actually spent its reads on. |
+| `current` | The current directory as a full path. |
+
+## 3. How it works
+
+### Paths (`src/layers/filesystem/internal/paths.js`)
+
+- Both `\` and `/` separate; the canonical separator is `\`. `formatPath` renders `C:\` for a root
+  and `C:\Game\Data` otherwise.
+- Names fold with the invariant lower-case mapping (`foldName`), never the locale. Lookup is
+  case-insensitive; enumeration reports the spelling a name was created with.
+- Trailing dots and spaces are stripped from a component before lookup, as Win32 does, so
+  `"file.txt "` finds `file.txt`. A component containing `< > : " |` or a control character is
+  `INVALID_PATH`. `*` and `?` are legal in a pattern and refused by anything that opens a file.
+- `.` and `..` survive parsing and are applied by `normalise`; `..` at a root stays at the root.
+- Reserved device names (`CON PRN AUX NUL COM1–9 LPT1–9`, with or without an extension or a
+  trailing colon) are devices in every directory: `C:\Game\nul` is the null device. `resolve`
+  reports the device; every call that would touch the volume fails with `IS_DEVICE` carrying the
+  device's name.
+- UNC paths and the `\\?\` namespaces are refused (`INVALID_PATH`) rather than half-supported.
+- The current directory is kept the way Win32 keeps it: one current drive plus a directory
+  remembered per drive visited, so `C:data` and `D:data` are two files. The process starts at the
+  root of the first drive mounted.
+- `matchName` implements enumeration's wildcard rules rather than shell globbing: `*.` matches only
+  names without an extension, `*.*` matches `readme`, and `?` may match nothing at the end of a name
+  or before its last dot.
+
+### The overlay (`src/layers/filesystem/internal/tree.js`)
+
+One read-only source and one writable layer are indexed into a single tree of nodes at mount
+(`SourceStore.list()` is called once and never again — a source that changes behind the overlay's
+back is out of contract). Three rules do the work: a lookup finds the writable layer first, then the
+source; the first write to a source-only file copies it up (`copyUp`), so the source is never
+modified; deleting something that came from the source leaves a **tombstone**, because the source
+would otherwise hand it back on the next enumeration. Creating a directory over a source directory
+joins it rather than hiding what the source put in it; a directory is refused for removal while
+anything — including source-only content — is still in it. A node is the single answer to "does
+this exist, in which layer, under what spelling".
+
+### Open files (`src/layers/filesystem/internal/handles.js`)
+
+A handle carries an intent, a position and nothing else; the bytes live in the overlay, so two
+handles on one file see each other's writes immediately. Sharing is checked in both directions,
+as Win32 does: a second open is refused when its access is not covered by what the first shared,
+*and* when its sharing does not cover what the first already took. A write past the end extends the
+file with zeroes. The table hands back objects; the win32 layer gives them numbers.
+
+### Bundles as the read-only source
+
+`tools/btl.mjs` writes the `.btl` container; `src/layers/filesystem/internal/bundle/` reads it.
+
+- **Format** (`format.js`): a 0x28-byte header — magic `BTL1`, format version (1 or 2 readable),
+  block size, index offset/length/codec — then blocks back to back, then a deflated JSON index
+  listing files (`path, size, firstBlock, blocks, sha256`), blocks (`offset, packed, codec, crc`
+  from version 2) and recorded empty directories. Blocks are numbered across the container; a file
+  is a run of them. The writer's default block size is 256 KiB (`DEFAULT_BLOCK_SIZE = 1 << 18`).
+  Each block is stored with its own codec — `STORED` (0), `DEFLATE_RAW` (1) or `ZSTD` (2) — chosen
+  per block by the writer. `openBundle(fetchRange, decode, { verifyIndex })` reads only the header
+  and index, checks them against each other, and answers `rangesFor(file, offset, length)`: the
+  blocks a read touches and which bytes of each.
+- **Source** (`source.js`): `createBundleSource({ bundle, readBlock, decode, cacheBlocks = 16,
+  prefix })` is a `SourceStore`. A guest read is synchronous, so `read` serves only blocks already
+  resident: it asks `readBlock(index, offset, packed)` for the stored bytes, decodes them, keeps the
+  last sixteen decoded blocks in an LRU, and if any block is absent throws an error with
+  `code === 'BLOCK_MISS'` and `blocks: [{ index, offset, packed }]` naming *every* missing block in
+  ascending order, so one round trip satisfies the retry. `BLOCK_MISS` is deliberately not an
+  `ErrorCode`: it is a request for bytes, not a failure. `prefix` places the whole bundle under a
+  directory: the engine mounts it under `App`, so a game lives at `C:\App\…` rather than at the
+  root, where "where do I live" would happen to work whether the program answered it right or not.
+- **Block cache** (`cache.js`): where fetched blocks live between the network and a read. With a
+  synchronous store (`resolveBlockStore('local')` → OPFS through `createOpfsStore`, worker-only) a
+  block occupies the fixed slot `index * blockSize` in `/<name>.blocks`, and a presence bitmap
+  `/<name>.present` makes a second session cheap; a bitmap of the wrong size belongs to another
+  bundle and is discarded. A zstd block is stored packed (the emulator's zstd decoder answers
+  synchronously); a deflate block is stored inflated at fetch time, because no synchronous inflate
+  exists in a browser. Without a store the fallback is a bounded heap LRU (at least 64 MiB or 32
+  blocks) that pins the blocks of the read being served, so a single large read cannot evict its
+  own blocks and deadlock.
+- **Fetching, read-ahead and prefetch** live in the assembler, `src/app.js` (`mountBundle`), not in
+  this layer: a retrying range fetch that treats a short read as a failure, groups of absent blocks
+  fetched in requests of up to 16 MiB with six in flight, per-block CRC-32 checks (a damaged group
+  is re-asked whole), 2 MiB of read-ahead when a miss lands where a forward reader was expected,
+  and a background fill of the whole bundle in container order, one request at a time, that stands
+  aside whenever a read is parked and is off when there is no durable store.
+
+### The session (what the program wrote)
+
+The writable layer of the volume is in-memory in every configuration `createApp` builds; what
+persists is a **session**: `export()` of the writable layer plus the registry (see
+[`win32.md`](./win32.md)). The overlay announces a change once per path on a microtask after the
+writes settle (`onChanged`), and the assembler's `storage` option (`'local'` for `localStorage`,
+`'opfs'`, a provider with `load`/`save`, or a bare loader) decides where it goes. A restored
+session comes back through `apply()` before the program's first instruction. Nothing is ever pulled
+in behind a running program's back, and the source is never uploaded — a bundle is named by its
+digest and fetched.
+
+### The OPFS store (`src/layers/filesystem/internal/opfs-store.js`)
+
+A `WritableStore` over `FileSystemSyncAccessHandle`. `open(path)` is asynchronous and makes a file
+answerable; every byte operation is synchronous on what is already open, and a byte operation on a
+path nobody opened is `INVALID_HANDLE`. Sync handles exist only inside a worker, so on the main
+thread `open` fails with `ACCESS_DENIED` rather than hanging. A sync handle is an origin-wide
+exclusive lock, so handles are pooled, bounded and closed least-recently-used first. In the current
+tree its consumer is the bundle block cache.
+
+## 4. Limitations and divergences
+
+- **No UNC, no `\\?\`**, no alternate data streams, no reparse points, no junctions.
+- **No timestamps or attributes.** `stat` reports `directory` and `size` only; the win32 layer
+  synthesises file times.
+- **Sources are indexed once.** A source that gains or loses files after mount is not seen.
+- **Rename is copy-and-delete**, chunked by 1 MiB. It is not atomic, and a rename onto an existing
+  name is `ALREADY_EXISTS`.
+- **`apply` refuses the whole batch** if any entry names a file the program holds open.
+- **`export` reads whole files into memory**, one per writable file.
+- **A bundle read is served or missed, never awaited** here; a caller that does not handle
+  `BLOCK_MISS` gets a thrown error. The engine's `vfs.js` fetches once and retries once — a second
+  miss is a fetch that did not deliver.
+- **Format versions 1 and 2 only**; version 1 blocks arrive without checksums.
+- **The heap block cache is not persistence**: a build without OPFS pays the network again for
+  anything it let go.
+- **`handles.byPath` tracks at most 4096 distinct paths.**
+
+Nothing in this layer reports at runtime on its own; failures are thrown to the caller, and the
+engine journals what its callers decide to say.
+
+## 5. Tests
+
+`node:test` unit tests over the in-memory store, no browser needed; run with `npm test` from
+`modules/core`. The bundle tests write a fixture with `tools/btl.mjs` and read it back.
+
+| file | covers |
+|------|--------|
+| `src/layers/filesystem/internal/paths.test.js` | Drive parsing, separators, trailing dots/spaces, `.`/`..`, devices everywhere, refused namespaces, wildcard rules, per-drive current directory. |
+| `src/layers/filesystem/internal/tree.test.js` | Both layers as one volume, case-preserving enumeration, copy-up on write, tombstones, merge with source directories, distinct failures, diagnostics. |
+| `src/layers/filesystem/internal/handles.test.js` | Positions, reads past the end, zero-filled extension, dispositions, sharing in both directions, `SetEndOfFile`, closed handles, the per-path report. |
+| `src/layers/filesystem/internal/memory-store.test.js` | The seeded store. |
+| `src/layers/filesystem/internal/opfs-store.test.js` | Over a fake OPFS: mount walk, synchronous read/write, zero-fill, nested directories, the handle pool, the exclusive lock, main-thread refusal. |
+| `src/layers/filesystem/internal/bundle/bundle.test.js` | Byte-exact round trip through all three codecs, ranges across blocks, reads past the end, case folding, empty directories, `BLOCK_MISS` naming every absent block, LRU eviction, header checks. |
+| `src/layers/filesystem/internal/bundle/cache.test.js` | Slot arithmetic, the presence bitmap across sessions, a foreign bitmap discarded, the heap fallback and its pinning. |
+| `src/layers/filesystem/internal/bundle/crc32.test.js` | The checksum. |
+| `src/layers/filesystem/module.test.js` | The module comes up with no configuration; case; relative paths; drives isolated; search patterns; wildcards refused outside enumeration; devices reported; the source survives everything; diagnostics before and after. |
+
+Integration tests that drive a bundle and a session through the whole engine live beside the
+application entry point (`src/bundle.itest.js`, `src/session.itest.js`; `npm run test:integration`).

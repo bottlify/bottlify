@@ -1,0 +1,186 @@
+# `memory` — the guest address space
+
+What is mapped, who may touch it, and typed access to it. Sits directly on [`cpu`](./cpu.md),
+which holds the raw bytes; every layer above reads and writes guest memory through this one.
+Module machinery is described in [`README.md`](./README.md) and [`system.md`](./system.md).
+
+## 1. Purpose
+
+`memory` is a **registry and a validator, not an allocator**. Callers decide where things go —
+an image loads at the base its headers demand, a stack is placed by the kernel, the heap by the
+process assembler — and this layer records the decision, refuses layouts that overlap, and
+answers whether a given access is legal. Every typed read and write is checked against that map
+before it reaches the emulator, so an unmapped or wrongly-permitted access is an error with an
+address in it rather than a silent write into whatever happened to be there.
+
+It does not allocate, does not own the layout (the assembler in `src/app.js` does; see
+[`host.md`](./host.md)), and does not implement guest-visible memory APIs such as
+`VirtualAlloc` or heaps — those are `win32`'s, built on top of the regions registered here.
+
+## 2. Contract
+
+| field      | value      |
+|------------|------------|
+| `name`     | `memory`   |
+| `version`  | `0.1.0`    |
+| `requires` | `['cpu']`  |
+
+Source: `src/layers/memory/module.js`, `src/layers/memory/internal/regions.js`,
+`src/layers/memory/internal/accessors.js`.
+
+### Configuration
+
+The module reads no configuration options. `true`, `{}` and `undefined` are equivalent.
+
+### API
+
+Constants:
+
+| member | values | meaning |
+|--------|--------|---------|
+| `Access` | `NONE 'none'`, `READ 'r'`, `READ_WRITE 'rw'`, `READ_EXECUTE 'rx'`, `READ_WRITE_EXECUTE 'rwx'` | What a region permits. |
+| `RegionKind` | `LOW_MEM`, `IMAGE`, `THUNK_CODE`, `THUNK_DATA`, `STACK`, `RESERVED` | What a region holds; descriptive, for diagnostics. Permissions come from `access`, not from the kind. |
+
+Region map:
+
+| member | signature | meaning |
+|--------|-----------|---------|
+| `register` | `({ name, base, size, kind, access }) => Region` | Records a region. Throws on non-positive size, unknown access, or overlap with anything already mapped. |
+| `protect` | `(name, access) => void` | Changes what a named region permits, the way `VirtualProtect` does. Throws for an unknown name or access. |
+| `find` | `(address) => Region \| undefined` | The region containing an address. |
+| `list` | `() => Region[]` | Every region, lowest address first (a copy). |
+| `assert` | `(address, length, 'read' \| 'write' \| 'execute') => Region` | Throws unless the whole span sits inside **one** region that permits the mode. A span across two adjacent regions is refused. |
+
+Accessors (all validated through `assert`):
+
+| member | signature | meaning |
+|--------|-----------|---------|
+| `readBytes` | `(address, length) => Uint8Array` | A **copy** of guest bytes. |
+| `window` | `(address, length) => Uint8Array` | The emulator's own bytes, valid only until control returns to the guest. For a measured hot path. |
+| `writeBytes` | `(address, bytes) => void` | Writes; routes to `cpu.writeData` when the target region is not executable, `cpu.writePhysical` otherwise. |
+| `readU8` / `readU16` / `readU32` | `(address) => number` | Little-endian unsigned integers. `readU32` reads in place through `cpu.readU32` with nothing allocated. |
+| `writeU8` / `writeU16` / `writeU32` | `(address, value) => void` | Little-endian writes through a shared scratch buffer. |
+| `readCString` | `(address, limit = 4096) => string` | NUL-terminated Latin-1 string. Throws if no NUL within `limit` bytes (clamped to the region). |
+| `readWideString` | `(address, limit = 8192) => string` | NUL-terminated UTF-16LE string; `limit` is in bytes. Throws if no terminator within it. |
+
+### Diagnostics
+
+`status` is `'created'` before `create()` and `'ready'` after.
+
+| metric    | meaning | when it moves |
+|-----------|---------|---------------|
+| `regions` | Number of regions registered. | Every `register`. |
+| `layout`  | One string per region, `name 0xbase+0xsize access`, lowest first. | Every `register` and `protect`. A layout that looks wrong usually explains a fault faster than the fault does. |
+
+## 3. How it works
+
+### The region map
+
+`createRegionMap()` keeps a flat array of `{ name, base, size, kind, access }`. Registration
+scans for overlap and throws — an overlap is a layout bug, and it is far cheaper to hear about
+it at registration than to debug a guest whose stack grew into its own code. Regions are only
+ever added; `protect` changes permissions in place. A `version` counter is bumped by both so a
+caller that cached a region can tell when the cache is stale.
+
+`find` is asked on every host read and write, thousands of times a frame, nearly always in the
+region the last one hit, so the last hit is tried first and the fallback walk allocates nothing.
+
+`executable(address)` (internal, not on the API) answers whether anything at an address could
+be executed — `true` when nothing is known, which is the safe answer. The accessors use it to
+pick between the two write paths the cpu layer offers.
+
+### Accessors
+
+`createAccessors({ raw, regions })` takes the cpu layer's API as `RawMemory`
+(`readPhysical`, `writePhysical`, and optionally `readU32` and `writeData`). Three decisions
+shape it:
+
+- **Reads copy.** The emulator hands back a subarray of its own memory, and a caller holding two
+  such windows and writing through one finds the other silently moved. `readBytes` slices;
+  `window` is the explicit opt-out.
+- **Dword reads are cached by region.** A host call reads several dwords — arguments, the
+  fields behind them — almost all in one region; the accessor remembers the span and version of
+  the region the last read fell in and skips `assert` while the next read stays inside it.
+  Asking the map every time cost a fifth of a call.
+- **Writes that cannot be code skip the compiler.** `writeBytes` calls `cpu.writeData` unless
+  the region is executable, in which case it calls `cpu.writePhysical`, which tells the
+  emulator to discard compiled code on those pages. The cpu layer explains why the ordinary
+  path is expensive; this is where the choice is made.
+
+A string scan may read up to `limit` bytes but is clamped to the region, so a string at the end
+of a mapped span is ordinary and the scan cannot wander into the next region.
+
+### The address space, as it is laid out today
+
+The memory layer does not choose the layout; the process assembler (`src/app.js`) and the
+layers that own each piece register it. What a booted process looks like:
+
+| region | placed by | kind / access | where |
+|--------|-----------|---------------|-------|
+| `entry-vector` | assembler | `THUNK_DATA` rw | 4 bytes at `cpu.layout.entryVector` (`0x7000`) |
+| `boot-rom` | assembler | `LOW_MEM` rx | `0xF0000`, 64 KiB — registered so a fault report can name the engine's own stub |
+| `thunks` | assembler | `THUNK_CODE`, rwx while written then `protect`ed to rx | `cpu.layout.thunkBase` (`0x100000`), `thunkCapacity` bytes |
+| `stack` | assembler | `STACK` rw | Below `cpu.layout.initialStack` (`0x300000`), sized from the image's `SizeOfStackReserve` (floored at 64 KiB, clamped to the room above the thunks) |
+| the program image | [`loader`](./loader.md) | `IMAGE` rwx | Its own `ImageBase` |
+| system modules | loader `synthesise` | `IMAGE`, rwx then rx | `0x02000000 + index * 0x00100000` |
+| libraries the program ships | loader `map` | `IMAGE` rwx | Above the system modules |
+| `process-startup` | assembler | `THUNK_CODE` rwx | 1 MiB after the last library: TLS blocks and the stub that attaches libraries |
+| `stack-N` | [`kernel`](./kernel.md) | `STACK` rw | Pool at `0x08000000`, 64 MiB, one image-sized stack per thread |
+| `heap` | assembler | `THUNK_DATA` rw | `0x0c000000` to the end of RAM |
+
+The heap is last and takes everything left because it is the part that has to be big. The
+sizes and bases above are the assembler's constants, not this layer's; they are listed so a
+reader of a `layout` diagnostic knows what to expect.
+
+### How other layers use it
+
+`kernel` reads and writes stack words (`readU32`/`writeU32`) when priming a thread and parking
+one. `bridge` reads call frames through the guest's ESP — deliberately through this layer so a
+wild ESP fails against the map rather than marshalling whatever lives there — and writes
+callback frames and COM tables. `loader` registers each image and writes its bytes.
+`win32` and the layers above it read arguments, structures and strings and write results
+through the typed accessors.
+
+## 4. Limitations and divergences
+
+- **Not an allocator.** There is no `allocate`/`free`; `RegionKind.RESERVED` exists as a kind
+  but nothing reserves guard bands today.
+- **Regions are never removed.** `list()` and the overlap check only grow; there is no
+  `unregister`. A library that is unloaded keeps its region.
+- **Coarse permissions.** One `access` per region. The loader maps an image as a single `rwx`
+  span rather than per section (see [`loader.md`](./loader.md)); a guest writing into its own
+  code is not caught here.
+- **Permissions apply to the host's accesses**, not the guest's. A region marked `rx` refuses
+  a host `writeU32`; the emulated processor runs at ring 0 with flat segments and no paging, so
+  guest instructions are not checked against the map at all.
+- **No canaries, no leases.** The layer's own `api.js` comment lists "leases on locked
+  surfaces, canaries" among intended responsibilities; neither is implemented.
+- **A span across two regions is refused** even when they are adjacent — adjacency is a
+  coincidence of layout, not permission to treat them as one buffer.
+- **Strings are Latin-1 / UTF-16LE**, decoded with `TextDecoder`; a code page other than that
+  is not applied here.
+- **Every failure is a thrown `Error`** with the address, length and region name in its
+  message; nothing is reported as a Win32 status. Whoever handles the trap decides what the
+  guest sees.
+
+## 5. Tests
+
+Unit tests (`npm test`, filter with `node --test src/layers/memory/internal/memory.test.js`
+from `modules/core/`):
+
+| test | what it pins |
+|------|--------------|
+| a layout that overlaps is refused when it is registered | Partial overlap is refused; butting up against a region's end is not an overlap. |
+| access is checked against the region that holds it | `assert` per mode. |
+| protect tightens a region after it has been filled in | `protect` and the `rwx → rx` pattern the thunk table uses. |
+| a span may not run past its region, even into an adjacent one | The one-region rule. |
+| typed accessors round-trip little-endian values | `readU8/16/32`, `writeU8/16/32`. |
+| accessors refuse what the region map refuses | Accessors go through `assert`. |
+| a read is a snapshot, not a window onto guest memory | `readBytes` copies. |
+| C strings are read up to the NUL, and a missing one is an error | `readCString` and its limit. |
+| a dword read remembers its region and forgets it when the map changes | The read cache and `version`. |
+| a read of bytes remembers its region the way a dword read does | The same cache on `readBytes`. |
+
+The tests drive the accessors against an in-memory `RawMemory` and need no emulator. The
+layer's behaviour under a running guest is exercised indirectly by every integration test
+(`src/*.itest.js`) and by the kernel and bridge module tests, which use a real region map.
