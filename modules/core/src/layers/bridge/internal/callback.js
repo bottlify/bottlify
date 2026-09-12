@@ -41,6 +41,15 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     let deepest = 0;
     let pending = 0;
     /**
+     * Whoever is waiting for the next host call to answer, and the promise
+     * they hold. Made when first asked for and settled by the next `finish`,
+     * so a run loop with nothing to do sleeps until something has changed
+     * rather than waking to look.
+     *
+     * @type {{ promise: Promise<void>, settle: () => void } | null}
+     */
+    let answered = null;
+    /**
      * The last few routines the guest was sent to, and who sent it.
      *
      * A fault inside guest code says where the processor stopped and nothing
@@ -282,6 +291,12 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             }
             pending--;
             thread.awaitingHost = false;
+            if (answered)
+            {
+                const open = answered.settle;
+                answered = null;
+                open();
+            }
             kernel.scheduleResume(thread, {
                 eip: call.hostReturn,
                 esp: call.restingStack,
@@ -298,6 +313,25 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
          * would spin until it gave up.
          */
         pendingCalls: ()=>pending,
+
+        /**
+         * Settles when the next suspended host call answers. The one thing
+         * that can change a machine whose every thread is parked on the host,
+         * so it is what the run loop waits on instead of a timer.
+         */
+        answered: ()=>{
+            if (!answered)
+            {
+                /** @type {() => void} */
+                let settle = ()=>{};
+                /** @type {Promise<void>} */
+                const promise = new Promise(resolve=>{
+                    settle = ()=>resolve();
+                });
+                answered = { promise, settle };
+            }
+            return answered.promise;
+        },
 
         diagnostics: ()=>({
             callbacks: calls,

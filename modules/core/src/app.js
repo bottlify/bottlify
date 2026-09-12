@@ -496,6 +496,25 @@ export function timedWait({ hidden, macrotask, timer }){
 const IDLE_SPINS_BEFORE_TIMER = 4;
 
 /**
+ * How long the run loop sleeps between looks when nothing can run, unless
+ * something wakes it sooner.
+ *
+ * Not zero. A zero timeout is no longer clamped by a browser that is not
+ * nesting them, and the loop breaks the nesting every few turns by yielding
+ * through a message port -- so a zero timeout here came round fifty thousand
+ * times a second. That is a busy loop with extra steps, and it starved the
+ * very thing the machine was waiting for: a decoder on the same thread whose
+ * output took a second to be delivered instead of a millisecond, while every
+ * guest thread sat blocked behind the one waiting on it.
+ *
+ * The sleep is short because it is not what ends the wait -- a host call
+ * answering does, and that wakes the loop at once. It only bounds how long
+ * the guest's own deadlines and the sound ring go unattended: the ring holds
+ * two hundred milliseconds and the pump runs on every look.
+ */
+const IDLE_LOOK_MS = 4;
+
+/**
  * What the run loop is waiting on when it cannot go straight on, and how.
  *
  * A range request, a message queue with nothing in it, and some other host call
@@ -3227,18 +3246,31 @@ async function buildApp(options){
                         // stops the machine for the whole of a request that can
                         // take four seconds -- measured at two and a half times
                         // the wall clock of looking again and finding work.
+                        //
+                        // And a host call answering ends the wait at once:
+                        // when every thread is parked on the host, that is
+                        // the only event that can put one back on the
+                        // processor, and sleeping through it costs the whole
+                        // of the look interval for every call the guest makes.
                         const timer = wait.timer
                             ? timedWait({
                                 hidden: options.pageHidden ?? pageIsHidden,
                                 macrotask: breathe,
                                 timer: ()=>new Promise(resolve=>{
-                                    setTimeout(resolve, 0);
+                                    setTimeout(resolve, IDLE_LOOK_MS);
                                 }),
                             })
                             : breathe();
-                        await (fetched && wait.timer
-                            ? Promise.race([fetched, timer])
-                            : timer);
+                        const wakes = [timer];
+                        if (fetched && wait.timer)
+                        {
+                            wakes.push(fetched);
+                        }
+                        if (wait.timer && bridge.suspended() > 0)
+                        {
+                            wakes.push(bridge.answered());
+                        }
+                        await (wakes.length > 1 ? Promise.race(wakes) : timer);
                         // This time passed for the guest too, and it is the only
                         // time nothing credits. A thread suspended on a host call
                         // is parked on `hlt` and still counts as runnable, so the

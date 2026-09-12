@@ -74,6 +74,37 @@ test('a call that answered is no longer named as holding anything', ()=>{
         'and the thread went back to its own code where the call left it');
 });
 
+test('a driver waiting for an answer is woken by the next call that finishes', async()=>{
+    // A machine whose every thread is parked on the host can only move when a
+    // host call answers. A driver that slept on a timer instead woke fifty
+    // thousand times a second to find nothing changed -- and that spin starved
+    // the decoder the parked call was waiting on. So the wake is the answer
+    // itself, and it is one wake per answer: a promise taken before the call
+    // finishes settles then, and one taken afterwards waits for the next.
+    const worker = thread('thread-2');
+    const { made } = callbacks([worker]);
+    made.suspended(worker, { name: 'KERNEL32.dll!ReadFile', restingStack: 0x40, hostReturn: 0x50 });
+
+    let woken = false;
+    const wake = made.answered().then(()=>{
+        woken = true;
+    });
+    assert.equal(made.answered(), made.answered(), 'one promise for everyone waiting');
+    await Promise.resolve();
+    assert.equal(woken, false, 'nothing has answered yet');
+
+    made.finish(worker, 7);
+    await wake;
+    assert.equal(woken, true);
+
+    let again = false;
+    made.answered().then(()=>{
+        again = true;
+    });
+    await Promise.resolve();
+    assert.equal(again, false, 'an answer already given does not wake a later waiter');
+});
+
 test('a callback made from inside a callback goes below the stack in use', async()=>{
     // The defect this pins stopped a real program dead with nothing to show for
     // it. A window procedure that subclasses another calls back into the guest

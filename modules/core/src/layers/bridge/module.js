@@ -331,6 +331,13 @@ export const bridgeModule = {
             suspended: ()=>callbacks.pendingCalls(),
 
             /**
+             * Settles when the next suspended call answers: what a driver loop
+             * with nothing else to do waits on, so it wakes when the machine
+             * can move rather than on a schedule of its own.
+             */
+            answered: ()=>callbacks.answered(),
+
+            /**
              * Whose call is being handled right now.
              *
              * Read at the top of a handler that is going to await and then call
