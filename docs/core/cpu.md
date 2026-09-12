@@ -25,7 +25,7 @@ layer adds on top.
 |------------|--------------------------|
 | `name`     | `cpu`                    |
 | `version`  | `0.1.0`                  |
-| `requires` | `[]`                     |
+| `requires` | `['log']`                |
 
 Source: `src/layers/cpu/module.js`. The layer is the only one allowed to touch `vendor/`
 (enforced by `scripts/check-boundaries.mjs`), and it does so by dynamic `import(moduleUrl)` at
@@ -100,6 +100,13 @@ otherwise.
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it
 reads zero always); `compiledSteps` versus `interpretedSteps` is the number that says whether the
 compiler is alive.
+
+`diagnostics()` is the cold path: it reads thirty emulator exports and builds an object, and is
+for a one-off look. The same figures are published once a frame into the `cpu/counters` table of
+the log layer (`CPU_COUNTERS` in `module.js`: `running`, `instructions`, `protectedMode`, `traps`,
+`trapCapacity`, `eip`, and every numeric `jit.*` field), sampled when the profiler's frame closes;
+a reader elsewhere takes them from shared memory and never asks this thread. `jit.dirtyPages` and
+`jit.refused` are strings and stay in `diagnostics()` only.
 
 ## 3. How it works
 

@@ -6,7 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ThreadState, absolutePriority, createScheduler } from './threads.js';
+import {
+    SCHEDULER_COUNTERS, SLOW_SLICE_COLUMNS, THREAD_COLUMNS, THREAD_STATES, ThreadState,
+    absolutePriority, createScheduler,
+} from './threads.js';
 import { createSwitcher } from './switch.js';
 
 /**
@@ -402,4 +405,100 @@ test('the report says what priority each thread runs at and how often it was boo
     assert.match(sched.diagnostics().byThread, /main 1000 ready p8 b1/,
         'the starved one ran, boosted, and the count says so');
     assert.match(sched.diagnostics().byThread, /feeder 0 ready p10 b0/);
+});
+
+test('instructions are credited into a flat page array, and nothing is walked to do it', ()=>{
+    // One add per turn into an array a reader elsewhere sorts for itself:
+    // there is no bound on how many pages count and nothing here to sort.
+    let at = 0x00401000;
+    const cpu = { ...fakeCpu(), eip: ()=>at, runSlice: ()=>100 };
+    const pages = new Float64Array(0x1000 + 1);
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000, pages });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+
+    sched.runOnce();
+    at = 0x00810000;
+    sched.runOnce();
+    // Past the array: credited to the last entry rather than lost or thrown.
+    at = 0xfffe0000;
+    sched.runOnce();
+
+    assert.equal(pages[0x40], 100);
+    assert.equal(pages[0x81], 100);
+    assert.equal(pages[0x1000], 100, 'an address outside guest memory goes to the last entry');
+    assert.deepEqual(sched.pages(), { '0x400000': 100, '0x810000': 100, '0x10000000': 100 });
+});
+
+test('the counters and the thread table are published once a frame, not built on request', ()=>{
+    const cpu = { ...fakeCpu(), runSlice: ()=>100 };
+    /** @type {string[]} */
+    const words = [];
+    const intern = (/** @type {string} */ text)=>{
+        const known = words.indexOf(text);
+        return known >= 0 ? known : words.push(text) - 1;
+    };
+    const counters = new Float64Array(SCHEDULER_COUNTERS.length);
+    /** @type {number[][]} */
+    const rows = Array.from({ length: 4 }, ()=>new Array(THREAD_COLUMNS.length).fill(0));
+    let used = 0;
+    const threadTable = {
+        rows: 4,
+        /** @param {number} row @param {number} column @param {number} value */
+        set: (row, column, value)=>{ rows[row][column] = value; },
+        /** @param {number} count */
+        used: count=>{ used = count; },
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        counters, threadTable, intern });
+    const main = sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'worker' });
+    sched.runOnce();
+    sched.runOnce();
+    sched.block(main, 'an event');
+
+    assert.equal(used, 0, 'nothing is published until a frame asks');
+    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('turns')], 2,
+        'except the turn count, which is one store where the turn happens');
+
+    sched.publish();
+    assert.equal(used, 2);
+    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('threads')], 2);
+    assert.equal(counters[SCHEDULER_COUNTERS.indexOf('quantum')], 1000);
+    const [first, second] = rows;
+    assert.equal(words[first[THREAD_COLUMNS.indexOf('name')]], 'main');
+    assert.equal(first[THREAD_COLUMNS.indexOf('instructions')], 100);
+    assert.equal(THREAD_STATES[first[THREAD_COLUMNS.indexOf('state')]], 'blocked');
+    assert.equal(words[first[THREAD_COLUMNS.indexOf('waitingOn')]], 'an event');
+    assert.equal(words[second[THREAD_COLUMNS.indexOf('name')]], 'worker');
+    assert.equal(second[THREAD_COLUMNS.indexOf('waitingOn')], -1);
+    assert.equal(THREAD_STATES[second[THREAD_COLUMNS.indexOf('state')]], sched.all()[1].state,
+        'the table says what the scheduler says');
+});
+
+test('a slow slice is written into its table when it is recorded', ()=>{
+    let cost = 0;
+    let tick = 0;
+    const cpu = { ...fakeCpu(), runSlice: ()=>{ tick += cost; return 500; }, eip: ()=>0x4000 };
+    /** @type {number[][]} */
+    const rows = Array.from({ length: 8 }, ()=>new Array(SLOW_SLICE_COLUMNS.length).fill(0));
+    let used = 0;
+    const slowSliceTable = {
+        rows: 8,
+        /** @param {number} row @param {number} column @param {number} value */
+        set: (row, column, value)=>{ rows[row][column] = value; },
+        /** @param {number} count */
+        used: count=>{ used = count; },
+    };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        wall: ()=>tick, slowSliceTable, intern: ()=>7 });
+    sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+    sched.runOnce();
+    assert.equal(used, 0, 'a quick slice is not a slow one');
+    cost = 120;
+    sched.runOnce();
+    cost = 300;
+    sched.runOnce();
+    assert.equal(used, 2);
+    assert.deepEqual(rows[0], [300, 500, 0x4000, 0x4000, 7], 'longest first');
+    assert.equal(rows[1][0], 120);
 });

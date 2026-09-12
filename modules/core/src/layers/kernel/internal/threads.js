@@ -35,6 +35,27 @@ export const ThreadState = {
 /** How finely the guest's whereabouts are recorded: one entry per 64 KiB. */
 const PAGE = 0x10000;
 
+/**
+ * What the scheduler publishes as numbers, for a reader on another thread.
+ *
+ * The counters are one row in this order; the thread table has a row per
+ * thread with names as dictionary ids; the slow-slice table the eight slices
+ * that held the machine longest. Written where the figure changes or once a
+ * frame -- never walked on request.
+ */
+export const SCHEDULER_COUNTERS = [
+    'quantum', 'turns', 'overruns', 'worstSlice', 'worstSliceAt', 'worstSliceFrom',
+    'worstSliceMs', 'expiries', 'boosts', 'stackEscapes', 'threads', 'current',
+];
+export const THREAD_COLUMNS = [
+    'id', 'name', 'instructions', 'state', 'priority', 'boosts', 'boosted', 'waitingOn',
+    'stackUsed', 'stackSize',
+];
+export const THREAD_ROWS = 512;
+export const SLOW_SLICE_COLUMNS = ['ms', 'instructions', 'from', 'at', 'thread'];
+/** A thread's state as the table stores it. */
+export const THREAD_STATES = ['ready', 'running', 'blocked', 'terminated'];
+
 /** The base of the normal priority class, and the two relative values pinned outside it. */
 const NORMAL_BASE = 8;
 const THREAD_PRIORITY_IDLE = -15;
@@ -75,9 +96,26 @@ export function absolutePriority(relative){
  * @param {(thread: any, reason: string | null, value: number) => void} [options.onResume]
  *        Told what a parked thread is resumed with, and from which wait.
  * @param {() => number} [options.wall]  The host's clock, for how long a slice held the machine.
+ * @param {Float64Array} [options.pages]
+ *        Retired instructions by 64 KiB page, one entry per page of guest
+ *        memory and a last one for anywhere else. Credited in place.
+ * @param {Float64Array} [options.counters]   One entry per `SCHEDULER_COUNTERS`.
+ * @param {{ set: (row: number, column: number, value: number) => void,
+ *     used: (count: number) => void, rows: number }} [options.threadTable]
+ * @param {{ set: (row: number, column: number, value: number) => void,
+ *     used: (count: number) => void, rows: number }} [options.slowSliceTable]
+ * @param {(text: string) => number} [options.intern]  A name as a dictionary id.
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    // A gigabyte's worth of pages when nobody says: what a machine is given
+    // by default, and small enough to make for every scheduler a test builds.
+    const pages = options.pages ?? new Float64Array(1024 * 1024 * 1024 / PAGE + 1);
+    const counters = options.counters ?? new Float64Array(SCHEDULER_COUNTERS.length);
+    const threadTable = options.threadTable ?? null;
+    const slowSliceTable = options.slowSliceTable ?? null;
+    const intern = options.intern ?? (()=>-1);
+    counters[0] = quantum;
     const starvation = options.starvation ?? 4000;
     /** Turns given to a thread because it had been passed over too long. */
     let boosts = 0;
@@ -132,24 +170,19 @@ export function createScheduler(options){
      * thousands of slices that averages out to where the guest actually is, and
      * it is the only account of that available -- the emulator's own profiler
      * is compiled out of the build we vendor. Coarse deliberately: a page is
-     * enough to name the module, and per-address would cost a map entry for
+     * enough to name the module, and per-address would cost an entry for
      * every basic block the guest ever entered.
      *
-     * @type {Map<number, number>}
+     * One add into a flat array, indexed by page: no map, no bound to hit,
+     * nothing to sort here. Whoever reads it sorts it on their own thread.
+     * An address past the array's span -- the guest jumped somewhere that is
+     * not memory -- is credited to the last entry.
+     *
+     * @param {number} address @param {number} instructions
      */
-    const pages = new Map();
-    /** @param {number} address @param {number} instructions */
     const creditPage = (address, instructions)=>{
         const page = Math.floor((address >>> 0) / PAGE);
-        const known = pages.get(page);
-        if (known !== undefined)
-        {
-            pages.set(page, known + instructions);
-        }
-        else if (pages.size < 4096)
-        {
-            pages.set(page, instructions);
-        }
+        pages[page < pages.length - 1 ? page : pages.length - 1] += instructions;
     };
     let expiries = 0;
     /**
@@ -454,9 +487,25 @@ export function createScheduler(options){
                 });
                 slowSlices.sort((a, b)=>b.ms - a.ms);
                 slowSlices.length = Math.min(slowSlices.length, SLOW_SLICES_KEPT);
+                if (slowSliceTable)
+                {
+                    // Rare by definition -- forty milliseconds and up -- so
+                    // rewriting the eight rows here costs nothing that matters.
+                    for (let row = 0; row < slowSlices.length; row++)
+                    {
+                        const slice = slowSlices[row];
+                        slowSliceTable.set(row, 0, slice.ms);
+                        slowSliceTable.set(row, 1, slice.instructions);
+                        slowSliceTable.set(row, 2, slice.from);
+                        slowSliceTable.set(row, 3, slice.at);
+                        slowSliceTable.set(row, 4, intern(slice.thread ?? '?'));
+                    }
+                    slowSliceTable.used(slowSlices.length);
+                }
             }
             creditPage(from, instructions);
             turns++;
+            counters[1] = turns;
             // Whether the slice we asked for is the slice we got.
             //
             // A quantum is how long a thread may hold the machine before
@@ -567,16 +616,65 @@ export function createScheduler(options){
          * that slice retired. Addresses rather than names: what a page belongs
          * to is known where the images are mapped, not here.
          *
+         * A walk of every page of guest memory, for a caller on this thread
+         * that wants the table as an object. A reader elsewhere has the array
+         * itself and never asks.
+         *
          * @returns {Record<string, number>} page base in hex, to instructions
          */
         pages(){
             /** @type {Record<string, number>} */
             const report = {};
-            for (const [page, instructions] of pages)
+            for (let page = 0; page < pages.length; page++)
             {
-                report[`0x${(page * PAGE).toString(16)}`] = instructions;
+                if (pages[page] > 0)
+                {
+                    report[`0x${(page * PAGE).toString(16)}`] = pages[page];
+                }
             }
             return report;
+        },
+
+        /**
+         * Copies what changes too often to store as it changes -- a thread's
+         * state, its instructions, what it waits on -- into the shared
+         * tables. Once a frame, a few stores per thread.
+         */
+        publish(){
+            counters[2] = overruns;
+            counters[3] = worstSlice;
+            counters[4] = worstSliceAt;
+            counters[5] = worstSliceFrom;
+            counters[6] = slowSlices.length > 0 ? slowSlices[0].ms : 0;
+            counters[7] = expiries;
+            counters[8] = boosts;
+            counters[9] = escaped.length;
+            counters[10] = threads.length;
+            counters[11] = current ? current.id : -1;
+            if (!threadTable)
+            {
+                return;
+            }
+            const rows = Math.min(threads.length, threadTable.rows);
+            for (let row = 0; row < rows; row++)
+            {
+                const thread = threads[row];
+                threadTable.set(row, 0, thread.id);
+                threadTable.set(row, 1, intern(thread.name));
+                threadTable.set(row, 2, thread.instructions);
+                threadTable.set(row, 3, THREAD_STATES.indexOf(thread.state));
+                threadTable.set(row, 4, absolutePriority(thread.priority));
+                threadTable.set(row, 5, thread.boosts);
+                threadTable.set(row, 6, thread.boosted ? 1 : 0);
+                threadTable.set(row, 7, thread.waitingOn ? intern(thread.waitingOn) : -1);
+                const low = lowWater.get(thread);
+                threadTable.set(row, 8, low !== undefined && thread.stackTop !== undefined
+                    ? thread.stackTop - low : 0);
+                threadTable.set(row, 9,
+                    thread.stackTop !== undefined && thread.stackLimit !== undefined
+                        ? thread.stackTop - thread.stackLimit : 0);
+            }
+            threadTable.used(rows);
         },
 
         diagnostics(){

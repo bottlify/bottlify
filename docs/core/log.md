@@ -33,6 +33,9 @@ injected by whoever assembles the engine (`src/app.js` in this package). It requ
 | `level`      | level name or `Level` number           | `'info'`                        | The level of any category nobody names. |
 | `categories` | `Record<string, level>`                | `{}`                            | Per-category levels. |
 | `capacity`   | `number`                               | `4096`                          | Journal records held before the oldest is lapped. |
+| `bytes`      | `number`                               | `1 MiB`                         | Bytes of record storage behind them; a record's bytes may be written over before its index slot is, and a reader is told either way. |
+| `dictionary` | `number`                               | `512 KiB`                       | Bytes for the words records and tables refer to by id: templates, categories, thread and region and phase names. |
+| `shared`     | `boolean`                              | `true`                          | Ask for `SharedArrayBuffer` where the platform has it. With `false`, or without cross-origin isolation, the same layout lives in an `ArrayBuffer` and the reader is on this thread. |
 | `frames`     | `number`                               | `240`                           | Frames of profiler history kept. |
 | `sinks`      | `((records) => void)[]`                | `[]`                            | Where `flush()` delivers detached copies. |
 
@@ -62,6 +65,14 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 | `beginFrame()` / `endFrame()` | Bracket one frame; `endFrame` returns a copy of the `FrameRecord`. |
 | `frames(count = 240)` | The most recent completed frames, oldest first, as copies. |
 | `profile(worst = 5)` | The snapshot: every phase by self time, the `worst` slowest frames, `hostShare`, imbalances. |
+| `intern(text) → id` | The id a word is known by in the journal's dictionary, written once on first sight; -1 when the dictionary is full. For names a table stores as numbers. |
+| `metrics` | The registry: `counters(layer, names) → Float64Array`, `table(layer, name, { rows, columns }) → TableWriter`, `onFrame(sampler) → remove`, `sample()`, `describe()`. A layer registers at `create` and writes in place from then on. |
+| `memory()` | `{ journal, tables }` — the journal's block and every table's descriptor, for a reader on another thread. Made once, after every layer has registered. |
+
+`recent`, `drain`, `frames` and `profile` still answer from this thread, for the thread that owns
+the engine and for the transition; each is a read of the same memory a reader elsewhere has, not a
+walk of anything else. `endFrame()` also runs every registered sampler, which is the one moment
+figures nobody keeps as they change are copied into their tables.
 
 ### `diagnostics()` metrics
 
@@ -83,6 +94,51 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 `issues` carries the "no clock configured" notice when `now` was not a function.
 
 ## 3. How it works
+
+### The journal's memory (`src/layers/log/internal/shared-journal.js`)
+
+One block, three regions, so that handing it over is one object: a dictionary of strings written
+once each; an index of the last `capacity` records' byte offsets; a ring of `bytes` the records are
+encoded into. A record is `length, sequence, time (f64), level, argc, topic id, template id`, then
+its arguments — a number as a float64, anything else as UTF-16 code units of the string it prints
+as. A template the dictionary has no room for travels inline instead (`INLINE_TEMPLATE`).
+
+The writer reserves the record's bytes by storing the head with `Atomics.store` *before* writing
+them, writes them, sets the index slot, then publishes the record count. A reader loads the count,
+copies the record, and only then checks that the head has not reached its bytes and that the index
+slot still names its sequence; a copy that fails either check is discarded and counted. That is
+what makes "lost" exact per reader without the writer ever waiting: every counter is 32-bit and
+compared by unsigned difference, exact until a reader falls 2^31 behind.
+
+`createJournalCursor(memory)` is the decoding side — `word(id)`, `written()`, `oldest()`,
+`read(sequence)` — used by the engine-side journal for its own `recent`/`drain`/`flush` and by
+the reader below.
+
+### Tables and the registry (`src/layers/log/internal/table.js`, `metrics.js`)
+
+A table is rows of float64 columns behind a small header (`used` rows, `written` for a ring of
+rows), with the column names published once in its descriptor. Float64 rather than an atomic
+integer because a retired-instruction count passes 2^31 in seconds and the one writer is the engine
+thread; an aligned eight-byte store is one instruction on every platform this runs on, and a torn
+read would be one bad sample, not a bad count. Strings go in the journal's dictionary and a table
+holds the id.
+
+The registry hands tables out by layer and name, keeps the descriptors for `describe()`, and runs
+the samplers registered with `onFrame` when `endFrame()` closes a frame. The profiler mirrors each
+closed frame into `log/frames` (`FRAME_COLUMNS`) and every phase row into `log/phases`
+(`PHASE_COLUMNS`) as the row changes.
+
+### The reader (`src/layers/log/internal/reader.js`, re-exported from `src/layers/log/reader.js`)
+
+`createLogReader({ memory })`, where `memory` is what `log.memory()` answered, is the other side:
+`poll(limit)` drains what was written since the last poll and hands it to subscribers —
+`subscribe(topics, sink, { level })`, any number of them, each for the categories and the level it
+wants — and counts exactly what it was lapped past; `recent(count)` and `drain(since, limit)` answer
+what the engine-side calls used to; `counters(layer)`, `table(layer, name)`, `word(id)` read the
+tables; `frames(count)`, `profile(worst)`, `guestByModule()` and `threads()` are the derived views
+the diagnostics tables used to carry, computed on the reader's thread from the kernel's, the
+memory's and the profiler's tables. Nothing here schedules itself: whoever owns the thread calls
+`poll()`.
 
 ### The ring (`src/layers/log/internal/ring.js`)
 
@@ -188,6 +244,17 @@ under the event's name as its category (`divergence`, `unimplemented`, `bundle-r
 - **Profiler phases are global, not per thread.** The stack is one stack; phases opened on behalf
   of different guest threads must still nest.
 - **`imbalances` is capped at eight names**; beyond that only `unbalancedPhases` grows.
+- **Arguments that are not numbers are stringified when written.** A string argument is copied
+  into the ring as it is; an object becomes `String(value)` at the call, which is what a reader
+  would have made of it anyway. Strings are cut at 1024 code units.
+- **The dictionary is append-only and bounded.** A word it cannot hold is counted
+  (`journal.unnamed`); a template then travels inline, a category reads as `#65535`, a table's name
+  id as -1. Half a megabyte holds tens of thousands of words, so this is an alarm, not a case.
+- **Tables are sampled, not transactional.** A reader may see a row from between two stores of one
+  frame; the next frame corrects it.
+- **The engine still answers `recent`/`drain`/`frames`/`profile` on its own thread** until the host
+  hands `memory()` to a reader elsewhere; those calls read the same memory and cost what the reader
+  would have paid, on the wrong thread.
 
 ## 5. Tests
 
@@ -197,6 +264,10 @@ All are `node:test` unit tests with a hand-stepped clock; run with `npm test` fr
 | file | covers |
 |------|--------|
 | `src/layers/log/internal/ring.test.js` | Slots are made once and reused; a lagging reader gets the surviving tail; `each` visits only what was asked. |
+| `src/layers/log/internal/shared-journal.test.js` | A record round-trips with numbers as numbers and words by id; non-string arguments stringify; layout from options; an inline template when the dictionary is full; lapped sequences refused and counted exactly; bytes written over under a live index slot refused; the writer never waits and never grows (200 k records, under 10 µs each); a `worker_threads` reader sees every record whole and in order. |
+| `src/layers/log/internal/table.test.js` | A store where it happens is what a reader picks up; a ring of rows reads oldest first; a reader on another thread sees a later store. |
+| `src/layers/log/internal/metrics.test.js` | Counters registered once and updated in place; a duplicate name refused; samplers run on `sample()` only. |
+| `src/layers/log/internal/reader.test.js` | Subscribers get their topics at their level; removal; `recent`/`drain` as the engine answered them; exact lost count on a lagging poll; counters and tables read from the same memory; a reader on another thread drains without the engine answering; `guestByModule` from the kernel's pages and the memory's regions; frames and the profile from the profiler's tables. |
 | `src/layers/log/internal/journal.test.js` | Level filtering; the message stays a template until read; unnamed arguments appended; timestamps from the clock, order from the sequence; sinks get detached copies once; lapped records counted; `recent` does not move the flush position; template summary; level names; bounded storage; `drain` semantics, resume, limit and gap reporting. |
 | `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases scale the sums and never a single occurrence. |
 | `src/layers/log/module.test.js` | The module keeps its contract; configuration by name; the no-clock issue; diagnostics carry `hostShare`; phases use the host clock, not the guest's; sub-millisecond resolution without a configured clock; the phase table holds the loop and the calls together. |

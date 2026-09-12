@@ -6,7 +6,10 @@
 
 import { createHandleTable } from './internal/handles.js';
 import { createSwitcher } from './internal/switch.js';
-import { ThreadState, createScheduler } from './internal/threads.js';
+import {
+    SCHEDULER_COUNTERS, SLOW_SLICE_COLUMNS, THREAD_COLUMNS, THREAD_ROWS, ThreadState,
+    createScheduler,
+} from './internal/threads.js';
 import { WaitResult, createSyncObjects } from './internal/sync.js';
 import { createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
@@ -31,6 +34,37 @@ let clock = null;
 let switcher = null;
 /** @type {any} */
 let processes = null;
+
+/**
+ * The scheduler's shared tables, registered with the log layer when there is
+ * one to register with. Without a registry -- a test's fake, a build with the
+ * log layer switched off -- the scheduler keeps the same figures in arrays of
+ * its own, and nothing about how it runs changes.
+ *
+ * The page array spans the guest's memory: one entry per 64 KiB, and one
+ * more for an address outside it.
+ *
+ * @param {any} cpu @param {any} log
+ */
+function published(cpu, log){
+    const memorySize = cpu.layout?.memorySize ?? 1024 * 1024 * 1024;
+    const pageRows = Math.ceil(memorySize / 0x10000) + 1;
+    const metrics = typeof log.metrics?.table === 'function' ? log.metrics : null;
+    if (!metrics)
+    {
+        return { pages: new Float64Array(pageRows) };
+    }
+    return {
+        pages: metrics.table('kernel', 'pages', { rows: pageRows, columns: ['instructions'] })
+            .values,
+        counters: metrics.counters('kernel', SCHEDULER_COUNTERS),
+        threadTable: metrics.table('kernel', 'threads',
+            { rows: THREAD_ROWS, columns: THREAD_COLUMNS }),
+        slowSliceTable: metrics.table('kernel', 'slowSlices',
+            { rows: 8, columns: SLOW_SLICE_COLUMNS }),
+        intern: (/** @type {string} */ text)=>log.intern(text),
+    };
+}
 
 export const kernelModule = {
     name: 'kernel',
@@ -83,7 +117,12 @@ export const kernelModule = {
             // Below a page the emulator cannot honour a smaller quantum anyway,
             // so asking for one would only be a lie in the configuration.
             quantum: config?.quantum ?? 100_000,
+            ...published(cpu, log),
         });
+        if (typeof log.metrics?.onFrame === 'function')
+        {
+            log.metrics.onFrame(()=>scheduler.publish());
+        }
         sync = createSyncObjects({ scheduler });
         handles = createHandleTable();
         processes = createProcessTable();
@@ -229,8 +268,17 @@ export const kernelModule = {
             /**
              * Where the guest ran, by page of guest code, weighted by retired
              * instructions. Addresses, because naming them needs the image map.
+             * A walk of every page: for a caller on this thread that asks
+             * once, not for a poll. The `kernel/pages` table is the same
+             * figures with no walk.
              */
             pages: ()=>scheduler.pages(),
+            /**
+             * Every synchronisation object ever made, one row each. Thousands
+             * in a running program, so asked for by name rather than carried
+             * in the diagnostics table.
+             */
+            syncObjects: ()=>sync.diagnostics(),
 
             /**
              * The soonest guest time a blocked thread is waiting for, or null.
@@ -385,7 +433,7 @@ export const kernelModule = {
                     ...scheduler.diagnostics(),
                     ...switcher.diagnostics(),
                     handles: handles.diagnostics(),
-                    sync: sync.diagnostics(),
+                    sync: sync.summary(),
                     processes: processes.diagnostics(),
                     time: clock.diagnostics(),
                 }

@@ -67,7 +67,8 @@ Threads and turns:
 | `onTimeout` | `(handler) => void` | Told when a timed wait expires, so an external queue can drop the thread. |
 | `sleep` | `(thread, milliseconds) => void` | Block until a guest-time deadline, answering 0. |
 | `diagnosticsSnapshot` | `() => object` | The scheduler's metrics alone. |
-| `pages` | `() => Record<string, number>` | Retired instructions by 64 KiB page of guest code. |
+| `pages` | `() => Record<string, number>` | Retired instructions by 64 KiB page of guest code. A walk of every page of guest memory: for a one-off call on this thread, not a poll; the `kernel/pages` table is the same figures with no walk. |
+| `syncObjects` | `() => { kind, name, waiters, state }[]` | Every synchronisation object ever made, one row each. Thousands in a running program, so asked for by name rather than carried in the diagnostics table. |
 
 Synchronisation (`internal/sync.js`):
 
@@ -122,9 +123,24 @@ sub-record each for handles, sync objects, processes and time:
 | `threads`, `byState`, `byThread`, `current`, `waiting` | Counts, per-state counts, `name instructions state` per thread, who is on the CPU, and what each blocked thread waits on. | Continuously. |
 | `switches`, `selfSwitches` | Real context switches; switches to the thread already running (no-ops). | Each `switchTo`. |
 | `handles` | `{ open, opened, closed, pendingReuse, byType }`. | Each open/close. |
-| `sync` | One `{ kind, name, waiters, state }` per object. | Each create/wait/release. |
+| `sync` | `{ objects, event, mutex, semaphore }` — counts only; the rows are `syncObjects()`. | Each create. |
 | `processes` | `{ created, suspended, pending }`. | Each `processes.create`. |
 | `time` | `{ virtualMs, wallMs, creditedMs, capped, ignored, skippedMs, overtaken }`. | Each `advance`/`resume`/`skipTo`. |
+
+`diagnostics()` builds this object on request — the `byThread` strings, the per-state counts, the
+handle walk — and is the cold path, for a one-off look. What a reader polls comes from the tables
+the kernel publishes through the log layer's registry, written in place and never walked here:
+
+| table | rows | columns | when written |
+|-------|------|---------|--------------|
+| `kernel/counters` | 1 | `SCHEDULER_COUNTERS`: `quantum`, `turns`, `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceMs`, `expiries`, `boosts`, `stackEscapes`, `threads`, `current` (thread id). | `turns` on every turn; the rest once a frame. |
+| `kernel/threads` | up to 512 | `THREAD_COLUMNS`: `id`, `name` (dictionary id), `instructions`, `state` (index in `THREAD_STATES`), `priority`, `boosts`, `boosted`, `waitingOn` (dictionary id or -1), `stackUsed`, `stackSize`. | Once a frame, by `publish()`. |
+| `kernel/slowSlices` | 8 | `SLOW_SLICE_COLUMNS`: `ms`, `instructions`, `from`, `at`, `thread` (dictionary id). Longest first. | When a slice of 40 ms or more is recorded. |
+| `kernel/pages` | one per 64 KiB of guest memory, plus one | `instructions`. | One add per turn. An address outside guest memory goes to the last row. |
+
+"Once a frame" is the log layer's `endFrame()`, which runs every registered sampler; with no
+registry (the log layer stubbed, a test's fake) the scheduler keeps the same figures in arrays of
+its own and nothing about how it runs changes.
 
 ## 3. How it works
 

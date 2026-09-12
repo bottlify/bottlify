@@ -41,6 +41,8 @@ export const SyncKind = {
 export function createSyncObjects({ scheduler }){
     /** @type {any[]} */
     const objects = [];
+    /** How many of each kind were ever made; the cheap answer about the table. */
+    const created = { [SyncKind.EVENT]: 0, [SyncKind.MUTEX]: 0, [SyncKind.SEMAPHORE]: 0 };
 
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
@@ -243,6 +245,7 @@ export function createSyncObjects({ scheduler }){
                 manualReset, signalled, waiters: [],
             };
             objects.push(object);
+            created[SyncKind.EVENT]++;
             return object;
         },
 
@@ -253,6 +256,7 @@ export function createSyncObjects({ scheduler }){
                 owner: null, recursion: 0, abandoned: false, waiters: [],
             };
             objects.push(object);
+            created[SyncKind.MUTEX]++;
             return object;
         },
 
@@ -272,6 +276,7 @@ export function createSyncObjects({ scheduler }){
                 count: initial, maximum, waiters: [],
             };
             objects.push(object);
+            created[SyncKind.SEMAPHORE]++;
             return object;
         },
 
@@ -503,6 +508,16 @@ export function createSyncObjects({ scheduler }){
             return previous;
         },
 
+        /** The counts alone: what a snapshot taken often can afford. */
+        summary(){
+            return { objects: objects.length, ...created };
+        },
+
+        /**
+         * One row per object ever created. A program makes thousands of these
+         * and never lets one go, so this is asked for on purpose, not carried
+         * in every snapshot.
+         */
         diagnostics(){
             return objects.map(object=>({
                 kind: object.kind,

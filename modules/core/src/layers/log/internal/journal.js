@@ -4,17 +4,22 @@
  * See LICENSE for details
  */
 
-import { createRing } from './ring.js';
+import {
+    createJournalCursor, createJournalMemory, createJournalWriter, INLINE_TEMPLATE,
+} from './shared-journal.js';
 
 /**
- * The journal: levels, categories, a ring of recent entries, and sinks.
+ * The journal: levels, categories, a ring of recent entries in memory any
+ * thread can read, and sinks for the thread that owns this one.
  *
  * Written so that leaving it on in a shipping build costs nothing worth
  * measuring. A call that its category's level rejects is one map lookup and a
- * comparison. A call that is kept writes into a slot that already exists and
- * stores its arguments as they were passed -- no array, no interpolated string,
- * no object. The message stays a template until something asks to read it, and
- * only a reader pays for formatting.
+ * comparison. A call that is kept encodes its arguments into a ring that
+ * already exists -- a number as a number, a string as its code units, the
+ * template and the category as the id each was given the first time it was
+ * seen -- and nothing here waits for a reader. The message stays a template
+ * until something asks to read it, and only a reader pays for formatting,
+ * wherever that reader is.
  *
  * Sinks come from whoever assembles the engine. This layer never picks one, and
  * never writes anywhere by itself: with no sink at all the ring still holds the
@@ -40,6 +45,9 @@ const LEVEL_NAMES = {
     5: 'trace',
 };
 
+/** @param {number} level */
+export const levelName = level=>LEVEL_NAMES[level] ?? String(level);
+
 /**
  * A level as configuration writes it. Data has to survive being serialized, so
  * `"debug"` is as valid as `Level.DEBUG`, and an unrecognised value is a
@@ -64,13 +72,6 @@ export function toLevel(value){
     throw new Error(`"${String(value)}" is not a log level`);
 }
 
-/**
- * How many arguments a record carries. Fixed, and passed as separate
- * parameters rather than as a rest list, because a rest list allocates an array
- * on every call -- including the calls that turn out to be worth keeping.
- */
-const ARGS = 4;
-
 /** How often a drain reader's lap is written into the log, at most. */
 const WARN_EVERY_MS = 1000;
 
@@ -78,15 +79,10 @@ const WARN_EVERY_MS = 1000;
 const FIELD = /\{(\d+)(:x)?\}/g;
 
 /**
- * @typedef {Object} LogRecord
- * @property {number} sequence   Monotonic; ordering never depends on the clock.
- * @property {number} time       Whatever the injected clock returned.
- * @property {number} level
- * @property {string} category
- * @property {string} message    The template, uninterpolated.
- * @property {number} argc
- * @property {any[]} args        Opaque to this layer: exactly what was passed.
+ * A category the dictionary had no room to name. Its records still travel;
+ * a reader sees the id and knows it was never given a word.
  */
+const UNNAMED_TOPIC = 0xffff;
 
 /**
  * @typedef {Object} FormattedRecord
@@ -95,13 +91,13 @@ const FIELD = /\{(\d+)(:x)?\}/g;
  * @property {number} level
  * @property {string} levelName
  * @property {string} category
- * @property {string} message
- * @property {any[]} args
+ * @property {string} message    The template, uninterpolated.
+ * @property {(number | string)[]} args
  * @property {string} text
  */
 
 /**
- * @param {any} value
+ * @param {number | string} value
  * @param {boolean} hex
  * @returns {string}
  */
@@ -114,77 +110,64 @@ function render(value, hex){
 }
 
 /**
- * Interpolates a record's template. Arguments the template does not name are
- * appended, so a message that outgrew its placeholders still shows its values
- * instead of dropping them.
+ * Interpolates a template. Arguments the template does not name are appended,
+ * so a message that outgrew its placeholders still shows its values instead
+ * of dropping them.
  *
- * @param {LogRecord} record
+ * @param {string} message
+ * @param {(number | string)[]} args
  * @returns {string}
  */
-export function format(record){
+export function formatText(message, args){
     const used = [false, false, false, false];
-    let text = record.message.replace(FIELD, (whole, index, spec)=>{
+    let text = message.replace(FIELD, (whole, index, spec)=>{
         const at = Number(index);
-        if (at >= record.argc)
+        if (at >= args.length)
         {
             return whole;
         }
         used[at] = true;
-        return render(record.args[at], spec === ':x');
+        return render(args[at], spec === ':x');
     });
-    for (let at = 0; at < record.argc; at++)
+    for (let at = 0; at < args.length; at++)
     {
         if (!used[at])
         {
-            text += ` ${render(record.args[at], false)}`;
+            text += ` ${render(args[at], false)}`;
         }
     }
     return text;
-}
-
-/** @returns {LogRecord} */
-const blankRecord = ()=>({
-    sequence: 0,
-    time: 0,
-    level: 0,
-    category: '',
-    message: '',
-    argc: 0,
-    args: new Array(ARGS).fill(null),
-});
-
-/**
- * @param {LogRecord} record
- * @returns {FormattedRecord}
- */
-function detach(record){
-    return {
-        sequence: record.sequence,
-        time: record.time,
-        level: record.level,
-        levelName: LEVEL_NAMES[record.level] ?? String(record.level),
-        category: record.category,
-        message: record.message,
-        args: record.args.slice(0, record.argc),
-        text: format(record),
-    };
 }
 
 /**
  * @param {Object} options
  * @param {() => number} options.now
  * @param {number} [options.capacity]   Records held before the oldest is lapped.
+ * @param {number} [options.bytes]      Bytes of record storage behind them.
+ * @param {number} [options.dictionary] Bytes for the words records refer to.
+ * @param {boolean} [options.shared]    Shared memory when the platform has it.
  * @param {number} [options.level]      The level of a category nobody set.
  * @param {Record<string, number>} [options.categories]  Per-category levels.
  * @returns {any}
  */
 export function createJournal(options){
     const now = options.now;
-    const ring = createRing(options.capacity ?? 4096, blankRecord);
+    const memory = createJournalMemory({
+        records: options.capacity ?? 4096,
+        bytes: options.bytes,
+        dictionary: options.dictionary,
+        shared: options.shared,
+    });
+    const writer = createJournalWriter(memory);
+    // This thread's own reader, for the sinks and the calls that still ask
+    // the engine directly. It costs nothing until one of them is made.
+    const cursor = createJournalCursor(memory);
 
     /** @type {Map<string, number>} */
     const levels = new Map(Object.entries(options.categories ?? {}));
     let fallback = options.level ?? Level.INFO;
+    /** @type {Map<string, number>} */
+    const topics = new Map();
     /** @type {Map<string, { message: string, category: string, level: number, count: number }>} */
     const templates = new Map();
     /** @type {((records: FormattedRecord[]) => void)[]} */
@@ -202,13 +185,64 @@ export function createJournal(options){
 
     const levelOf = (/** @type {string} */ category)=>levels.get(category) ?? fallback;
 
+    /** @param {string} category */
+    const topicOf = category=>{
+        let id = topics.get(category);
+        if (id === undefined)
+        {
+            const given = writer.intern(category);
+            id = given < 0 || given > UNNAMED_TOPIC ? UNNAMED_TOPIC : given;
+            topics.set(category, id);
+        }
+        return id;
+    };
+
+    /**
+     * @param {import('./shared-journal.js').DecodedRecord} record
+     * @returns {FormattedRecord}
+     */
+    const detach = record=>{
+        const message = record.template === INLINE_TEMPLATE
+            ? record.inline
+            : cursor.word(record.template);
+        return {
+            sequence: record.sequence,
+            time: record.time,
+            level: record.level,
+            levelName: levelName(record.level),
+            category: cursor.word(record.topic),
+            message,
+            args: record.args,
+            text: formatText(message, record.args),
+        };
+    };
+
+    /**
+     * @param {number} from @param {number} to
+     * @returns {FormattedRecord[]}
+     */
+    const collect = (from, to)=>{
+        /** @type {FormattedRecord[]} */
+        const out = [];
+        for (let sequence = from; sequence < to; sequence++)
+        {
+            const record = cursor.read(sequence);
+            if (record)
+            {
+                out.push(detach(record));
+            }
+        }
+        return out;
+    };
+
     /** The category with the most records in the ring: whose flood this is. */
     const floodingCategory = ()=>{
         /** @type {Map<string, number>} */
         const counts = new Map();
-        ring.each(ring.oldest(), record=>{
+        for (const record of collect(cursor.oldest(), cursor.written()))
+        {
             counts.set(record.category, (counts.get(record.category) ?? 0) + 1);
-        });
+        }
         let most = '';
         let mostCount = 0;
         for (const [category, count] of counts)
@@ -224,6 +258,18 @@ export function createJournal(options){
 
     const journal = {
         Level,
+
+        /** The block the records live in, for whoever reads them elsewhere. */
+        memory: ()=>memory.buffer,
+
+        /**
+         * The id a word is known by in the block, for a table that wants to
+         * name something -- a thread, a region, a phase -- by number.
+         *
+         * @param {string} text
+         * @returns {number} -1 when there is no room left
+         */
+        intern: text=>writer.intern(text),
 
         /** @param {string} category @param {number} level */
         setLevel(category, level){
@@ -257,20 +303,11 @@ export function createJournal(options){
                 rejected++;
                 return;
             }
-            const record = ring.next();
-            record.sequence = ring.written() - 1;
-            record.time = now();
-            record.level = level;
-            record.category = category;
-            record.message = message;
-            record.args[0] = a;
-            record.args[1] = b;
-            record.args[2] = c;
-            record.args[3] = d;
-            record.argc = d !== undefined ? 4
+            const argc = d !== undefined ? 4
                 : c !== undefined ? 3
                     : b !== undefined ? 2
                         : a !== undefined ? 1 : 0;
+            writer.write(now(), level, topicOf(category), message, argc, a, b, c, d);
 
             // A summary by template, because a megabyte of lines does not grep:
             // the count of a template is usually the answer, and the first sight
@@ -309,16 +346,14 @@ export function createJournal(options){
          * @returns {number} how many records were delivered
          */
         flush(){
-            lost += Math.max(0, ring.oldest() - delivered);
-            const from = delivered;
-            delivered = ring.written();
+            lost += Math.max(0, cursor.oldest() - delivered);
+            const from = Math.max(delivered, cursor.oldest());
+            delivered = cursor.written();
             if (sinks.length === 0)
             {
                 return 0;
             }
-            /** @type {FormattedRecord[]} */
-            const batch = [];
-            ring.each(from, record=>batch.push(detach(record)));
+            const batch = collect(from, delivered);
             if (batch.length > 0)
             {
                 for (const sink of sinks)
@@ -337,11 +372,8 @@ export function createJournal(options){
          * @returns {FormattedRecord[]}
          */
         recent(count = 100){
-            const from = Math.max(ring.oldest(), ring.written() - Math.max(0, count));
-            /** @type {FormattedRecord[]} */
-            const out = [];
-            ring.each(from, record=>out.push(detach(record)));
-            return out;
+            const written = cursor.written();
+            return collect(Math.max(cursor.oldest(), written - Math.max(0, count)), written);
         },
 
         /**
@@ -372,16 +404,9 @@ export function createJournal(options){
          *             lost: number }}
          */
         drain(since = 0, limit = 1000){
-            const start = Math.max(since, ring.oldest());
-            const end = Math.min(ring.written(), start + Math.max(0, limit));
-            /** @type {FormattedRecord[]} */
-            const records = [];
-            ring.each(start, (record, sequence)=>{
-                if (sequence < end)
-                {
-                    records.push(detach(record));
-                }
-            });
+            const start = Math.max(since, cursor.oldest());
+            const end = Math.min(cursor.written(), start + Math.max(0, limit));
+            const records = collect(start, end);
             const lapped = start - since;
             if (lapped > 0)
             {
@@ -403,10 +428,13 @@ export function createJournal(options){
         /** @returns {{ message: string, category: string, level: number, count: number }[]} */
         templates: ()=>[...templates.values()].sort((one, two)=>two.count - one.count),
 
+        /** Calls a category's level turned away, for the layer's counters. */
+        rejected: ()=>rejected,
+
         diagnostics(){
             return {
-                capacity: ring.capacity,
-                written: ring.written(),
+                capacity: memory.records,
+                written: writer.written(),
                 // Records lapped before a sink saw them: the honest answer to
                 // "why is there a gap", rather than a silently shorter log.
                 lost,
@@ -415,6 +443,10 @@ export function createJournal(options){
                 defaultLevel: fallback,
                 categories: Object.fromEntries(levels),
                 templates: templates.size,
+                // Words the dictionary had no room for, and records too big
+                // for the ring: both zero unless something is badly wrong.
+                unnamed: writer.refused(),
+                oversized: writer.oversized(),
             };
         },
     };

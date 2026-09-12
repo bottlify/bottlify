@@ -21,10 +21,19 @@ let regions = null;
 /** @type {any} */
 let accessors = null;
 
+/**
+ * The layout as published: name as a dictionary id, base, size, and access
+ * as its index in `Access`. A program of this era maps a few hundred images
+ * and stacks; the rows past that are not published, and `regions` in the
+ * diagnostics says how many there really are.
+ */
+export const REGION_COLUMNS = ['name', 'base', 'size', 'access'];
+export const REGION_ROWS = 1024;
+
 export const memoryModule = {
     name: 'memory',
     version: '0.1.0',
-    requires: /** @type {readonly string[]} */ (['cpu']),
+    requires: /** @type {readonly string[]} */ (['cpu', 'log']),
 
     /**
      * @param {any} config
@@ -36,17 +45,50 @@ export const memoryModule = {
         // this layer needs from cpu is asserted here rather than inferred.
         const cpu = /** @type {import('./internal/accessors.js').RawMemory} */ (
             /** @type {unknown} */ (host.requireApi('cpu')));
+        const log = host.requireApi('log');
         regions = createRegionMap();
         accessors = createAccessors({ raw: cpu, regions });
+
+        // The layout as a table a reader elsewhere can name a page from:
+        // one row per region, its name as a dictionary id. Written when a
+        // region is registered or reprotected, which is rare, and never
+        // walked on request.
+        const table = typeof log.metrics?.table === 'function'
+            ? log.metrics.table('memory', 'regions', { rows: REGION_ROWS, columns: REGION_COLUMNS })
+            : null;
+        const publish = ()=>{
+            if (!table)
+            {
+                return;
+            }
+            const mapped = regions.list();
+            const rows = Math.min(mapped.length, table.rows);
+            for (let row = 0; row < rows; row++)
+            {
+                const region = mapped[row];
+                table.set(row, 0, log.intern(region.name));
+                table.set(row, 1, region.base);
+                table.set(row, 2, region.size);
+                table.set(row, 3, Object.values(Access).indexOf(region.access));
+            }
+            table.used(rows);
+        };
 
         return {
             Access,
             RegionKind,
 
             /** @param {any} region */
-            register: region=>regions.register(region),
+            register: region=>{
+                const made = regions.register(region);
+                publish();
+                return made;
+            },
             /** @param {string} name @param {string} access */
-            protect: (name, access)=>regions.protect(name, access),
+            protect: (name, access)=>{
+                regions.protect(name, access);
+                publish();
+            },
             /** @param {number} address */
             find: address=>regions.find(address),
             list: ()=>regions.list(),

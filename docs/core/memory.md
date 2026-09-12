@@ -23,7 +23,7 @@ It does not allocate, does not own the layout (the assembler in `src/app.js` doe
 |------------|------------|
 | `name`     | `memory`   |
 | `version`  | `0.1.0`    |
-| `requires` | `['cpu']`  |
+| `requires` | `['cpu', 'log']`  |
 
 Source: `src/layers/memory/module.js`, `src/layers/memory/internal/regions.js`,
 `src/layers/memory/internal/accessors.js`.
@@ -71,6 +71,13 @@ Accessors (all validated through `assert`):
 |-----------|---------|---------------|
 | `regions` | Number of regions registered. | Every `register`. |
 | `layout`  | One string per region, `name 0xbase+0xsize access`, lowest first. | Every `register` and `protect`. A layout that looks wrong usually explains a fault faster than the fault does. |
+
+`diagnostics()` builds those strings on request and is for a one-off look. The layout is also
+published as the `memory/regions` table of the log layer (`REGION_COLUMNS`: `name` as a journal
+dictionary id, `base`, `size`, `access` as its index in `Access`; up to `REGION_ROWS` = 1024 rows,
+lowest first), rewritten on every `register` and `protect`, which is rare. A reader elsewhere names
+a page of guest code from it without asking this thread; with no registry (the log layer stubbed)
+nothing is published and nothing else changes.
 
 ## 3. How it works
 

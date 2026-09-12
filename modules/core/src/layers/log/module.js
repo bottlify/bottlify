@@ -5,7 +5,10 @@
  */
 
 import { Level, createJournal, toLevel } from './internal/journal.js';
-import { PhaseKind, createProfiler } from './internal/profiler.js';
+import {
+    FRAME_COLUMNS, PHASE_COLUMNS, PHASE_ROWS, PhaseKind, createProfiler,
+} from './internal/profiler.js';
+import { createMetrics } from './internal/metrics.js';
 
 /**
  * log -- what the engine says about itself while it runs, and where its time
@@ -21,6 +24,14 @@ import { PhaseKind, createProfiler } from './internal/profiler.js';
  * step by hand; the sinks are injected because where a line ends up -- a
  * console, a collector, a transport out of the worker -- is the decision of
  * whoever assembles the engine, not of the thing being logged.
+ *
+ * Nothing the engine writes here is read back through the engine. The journal,
+ * the frames, the phase rows and every layer's counters live in memory that
+ * `memory()` hands out once, and a reader built over it -- on the page, in a
+ * worker of its own -- reads and formats there. The calls that still answer
+ * from this side (`recent`, `drain`, `frames`, `profile`) exist for the
+ * thread that owns the engine and for the transition; each is a read of the
+ * same memory, not a walk of anything else.
  */
 
 /**
@@ -38,6 +49,10 @@ let journal = null;
 let profiler = null;
 /** @type {string[]} */
 let issues = [];
+
+/** The layer's own counters, in the order they are published. */
+const REJECTED = 0;
+const UNBALANCED = 1;
 
 export const logModule = {
     name: 'log',
@@ -70,9 +85,19 @@ export const logModule = {
         journal = createJournal({
             now,
             capacity: config?.capacity,
+            bytes: config?.bytes,
+            dictionary: config?.dictionary,
+            shared: config?.shared,
             level: config?.level === undefined ? undefined : toLevel(config.level),
             categories,
         });
+        const registry = createMetrics({ shared: config?.shared });
+        const own = registry.counters('log', ['rejected', 'unbalancedPhases']);
+        const tables = {
+            frames: registry.table('log', 'frames',
+                { rows: config?.frames ?? 240, columns: FRAME_COLUMNS }),
+            phases: registry.table('log', 'phases', { rows: PHASE_ROWS, columns: PHASE_COLUMNS }),
+        };
         // The profiler is given the *host's* clock, not the guest's.
         //
         // A journal entry is stamped with guest time, because that is the time
@@ -90,6 +115,12 @@ export const logModule = {
                 ? ()=>Date.now()
                 : ()=>performance.now()),
             frames: config?.frames,
+            tables,
+            intern: journal.intern,
+        });
+        registry.onFrame(()=>{
+            own[REJECTED] = journal.rejected();
+            own[UNBALANCED] = profiler.unbalanced();
         });
 
         for (const sink of config?.sinks ?? [])
@@ -136,6 +167,24 @@ export const logModule = {
             flush: ()=>journal.flush(),
             /** @param {number} [count] */
             recent: count=>journal.recent(count),
+            /** @param {string} text @returns {number} its id in the journal's dictionary */
+            intern: text=>journal.intern(text),
+
+            /**
+             * Where the layers publish their figures, and what a reader
+             * elsewhere needs to find them. A layer registers at create and
+             * writes in place from then on.
+             */
+            metrics: registry,
+
+            /**
+             * Everything a reader elsewhere is built over: the journal's block
+             * and every layer's tables. Made once, after every layer has
+             * registered, and handed across a thread boundary as it is.
+             *
+             * @returns {import('./internal/reader.js').LogMemory}
+             */
+            memory: ()=>({ journal: journal.memory(), tables: registry.describe() }),
             /**
              * @param {number} [since] @param {number} [limit]
              * @returns {any}
@@ -155,7 +204,13 @@ export const logModule = {
             /** @param {string} name @param {number} amount */
             note: (name, amount)=>profiler.note(name, amount),
             beginFrame: ()=>profiler.beginFrame(),
-            endFrame: ()=>profiler.endFrame(),
+            // The one moment on the engine thread when figures nobody keeps
+            // as they run are copied into their tables.
+            endFrame: ()=>{
+                const frame = profiler.endFrame();
+                registry.sample();
+                return frame;
+            },
             /** @param {number} [count] */
             frames: count=>profiler.frames(count),
             /** @param {number} [worst] */

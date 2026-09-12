@@ -16,7 +16,7 @@ import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
  * committed: the host pays only for what the guest touches.
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
-import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE } from './internal/boot-rom.js';
+import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
 import { readFault, describeFault } from './internal/faults.js';
 
 /**
@@ -50,16 +50,62 @@ let running = false;
 /** Whether the stub table has been put into guest memory yet. */
 let tableWritten = false;
 
+/**
+ * What this layer publishes as numbers, once a frame: the counters the
+ * diagnostics table carries at the top level, and the emulator's own
+ * counters under `jit.`. Read from the emulator's exports when sampled --
+ * nobody keeps them as they change, and reading thirty exports once a frame
+ * is nothing -- rather than on every request for them.
+ */
+const JIT_FIELDS = [
+    'disabled', 'maxPages', 'loopSafety', 'cache', 'tableFree', 'compiledSteps',
+    'interpretedSteps', 'entries', 'interpretedDispatches', 'f80Conversions', 'codePageWrites',
+    'modulesLostToWrites', 'hotnessLostToWrites', 'chaining', 'chained', 'chainMissed',
+    'chainRefused', 'flagsDead', 'slowWrites', 'finalised', 'discarded', 'hostWrites',
+    'hostWrittenBytes',
+];
+export const CPU_COUNTERS = [
+    'running', 'instructions', 'protectedMode', 'traps', 'trapCapacity', 'eip',
+    ...JIT_FIELDS.map(field=>`jit.${field}`),
+];
+
 export const cpuModule = {
     name: 'cpu',
     version: '0.1.0',
-    requires: /** @type {readonly string[]} */ ([]),
+    requires: /** @type {readonly string[]} */ (['log']),
 
     /**
      * @param {any} config
+     * @param {import('../../system/contract.js').ScopedModuleHost} [moduleHost]
      * @returns {Promise<any>}
      */
-    async create(config){
+    async create(config, moduleHost){
+        const log = moduleHost?.requireApi('log');
+        if (typeof log?.metrics?.counters === 'function')
+        {
+            const counters = log.metrics.counters('cpu', CPU_COUNTERS);
+            log.metrics.onFrame(()=>{
+                if (!host)
+                {
+                    return;
+                }
+                counters[0] = running ? 1 : 0;
+                counters[1] = host.instructionCount();
+                counters[2] = host.inProtectedMode() ? 1 : 0;
+                counters[3] = thunks ? thunks.size : 0;
+                counters[4] = thunks ? thunks.capacity : 0;
+                counters[5] = host.eip();
+                const jit = host.jitState();
+                if (jit)
+                {
+                    for (let field = 0; field < JIT_FIELDS.length; field++)
+                    {
+                        const value = jit[JIT_FIELDS[field]];
+                        counters[6 + field] = typeof value === 'number' ? value : Number(value);
+                    }
+                }
+            });
+        }
         const settings = {
             // Half a gigabyte, because that is the order a program of this era
             // expects once it starts loading its own data. Two different things
@@ -162,7 +208,7 @@ export const cpuModule = {
                     // would come back as "trap has no implementation" -- true,
                     // and the wrong thing to have been told.
                     const vector = id - FAULT_TRAP_BASE;
-                    if (vector >= 0 && vector < 32)
+                    if (vector >= 0 && vector < VECTORS)
                     {
                         const fault = readFault(
                             vector,

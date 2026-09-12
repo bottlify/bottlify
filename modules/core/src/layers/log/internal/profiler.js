@@ -50,6 +50,25 @@ export const PhaseKind = Object.freeze({
 const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT];
 
 /**
+ * How a frame is laid out in the shared frame table, one row per frame: the
+ * split by kind as measured and as estimated, the longest phase by name id,
+ * and up to eight notes as (name id, amount) pairs. Names are dictionary
+ * ids, which is what `intern` answers.
+ */
+export const NOTES_PER_FRAME = 8;
+export const FRAME_COLUMNS = [
+    'index', 'startedAt', 'ms',
+    'host', 'guest', 'gpu', 'present',
+    'sampledHost', 'sampledGuest', 'sampledGpu', 'sampledPresent',
+    'hostShare', 'longest', 'longestMs', 'longestGuestMs', 'longestGuestInstructions',
+    'waits', 'compiles',
+    ...Array.from({ length: NOTES_PER_FRAME }, (_, i)=>[`note${i}`, `amount${i}`]).flat(),
+];
+/** One row per phase name, kept up to date as phases close. */
+export const PHASE_COLUMNS = ['name', 'kind', 'count', 'totalMs', 'selfMs', 'worstMs'];
+export const PHASE_ROWS = 512;
+
+/**
  * @typedef {Object} FrameRecord
  * @property {number} index
  * @property {number} startedAt
@@ -82,6 +101,7 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * @property {number} totalMs    Including everything nested inside it.
  * @property {number} selfMs     Excluding it: this is what attribution uses.
  * @property {number} worstMs    The worst single occurrence, measured whole.
+ * @property {number} slot       Its row in the shared phase table, or -1.
  */
 
 /** How many imbalances are described by name; the rest are only counted. */
@@ -119,11 +139,16 @@ const copyFrame = frame=>({
  * @param {Object} options
  * @param {() => number} options.now
  * @param {number} [options.frames]  Frames of history kept.
+ * @param {{ frames: import('./table.js').TableWriter, phases: import('./table.js').TableWriter }}
+ *     [options.tables]  Where each frame and each phase row is mirrored for a reader elsewhere.
+ * @param {(text: string) => number} [options.intern]  Names as ids, for those tables.
  * @returns {any}
  */
 export function createProfiler(options){
     const now = options.now;
     const history = createRing(options.frames ?? 240, blankFrame);
+    const tables = options.tables ?? null;
+    const intern = options.intern ?? (()=>-1);
 
     /**
      * The open phases, innermost last. Entries are reused by depth: a profiler
@@ -178,6 +203,53 @@ export function createProfiler(options){
             }
         });
         return out;
+    };
+
+    /**
+     * One row of the shared frame table, stored once per frame: a few dozen
+     * numbers, which is the whole cost of a reader elsewhere seeing frames.
+     *
+     * @param {FrameRecord} frame
+     * @param {import('./table.js').TableWriter} table
+     */
+    const publishFrame = (frame, table)=>{
+        const row = table.advance();
+        let column = 0;
+        const put = (/** @type {number} */ value)=>{ table.set(row, column++, value); };
+        put(frame.index);
+        put(frame.startedAt);
+        put(frame.ms);
+        for (const kind of KINDS)
+        {
+            put(frame.byKind[kind]);
+        }
+        for (const kind of KINDS)
+        {
+            put(frame.sampled[kind]);
+        }
+        put(frame.hostShare);
+        put(intern(frame.longest.name));
+        put(frame.longest.ms);
+        put(frame.longestGuest.ms);
+        put(frame.longestGuest.instructions);
+        put(frame.waits);
+        put(frame.compiles);
+        let noted = 0;
+        for (const name in frame.notes)
+        {
+            if (noted === NOTES_PER_FRAME)
+            {
+                break;
+            }
+            put(intern(name));
+            put(frame.notes[name]);
+            noted++;
+        }
+        for (; noted < NOTES_PER_FRAME; noted++)
+        {
+            put(-1);
+            put(0);
+        }
     };
 
     return {
@@ -242,9 +314,16 @@ export function createProfiler(options){
             let row = rows.get(entry.name);
             if (!row)
             {
+                const slot = tables && rows.size < tables.phases.rows ? rows.size : -1;
                 row = { name: entry.name, kind: entry.kind, count: 0, totalMs: 0, selfMs: 0,
-                    worstMs: 0 };
+                    worstMs: 0, slot };
                 rows.set(entry.name, row);
+                if (tables && slot >= 0)
+                {
+                    tables.phases.set(slot, 0, intern(entry.name));
+                    tables.phases.set(slot, 1, KINDS.indexOf(entry.kind));
+                    tables.phases.used(rows.size);
+                }
             }
             row.count += weight;
             row.totalMs += elapsed * weight;
@@ -252,6 +331,13 @@ export function createProfiler(options){
             if (elapsed > row.worstMs)
             {
                 row.worstMs = elapsed;
+            }
+            if (tables && row.slot >= 0)
+            {
+                tables.phases.set(row.slot, 2, row.count);
+                tables.phases.set(row.slot, 3, row.totalMs);
+                tables.phases.set(row.slot, 4, row.selfMs);
+                tables.phases.set(row.slot, 5, row.worstMs);
             }
             if (open)
             {
@@ -332,10 +418,17 @@ export function createProfiler(options){
             open = null;
             slot.ms = now() - slot.startedAt;
             slot.hostShare = slot.ms > 0 ? slot.byKind.host / slot.ms : 0;
+            if (tables)
+            {
+                publishFrame(slot, tables.frames);
+            }
             return copyFrame(slot);
         },
 
         frames,
+
+        /** Phases ended out of order or with none open, in total. */
+        unbalanced: ()=>unbalanced,
 
         /**
          * The table a reader actually looks at: every phase by self time, the
