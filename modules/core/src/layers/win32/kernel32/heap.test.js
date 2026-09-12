@@ -411,3 +411,34 @@ test('a refused allocation says what was asked and what was left', ()=>{
     assert.match(reports[0][1], /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks$/);
     assert.equal(reports[1][0], 'VirtualAlloc');
 });
+
+test('a reservation is a whole granule, and a commit inside it is whole pages', ()=>{
+    // Windows reserves in 64K granules whatever size was asked, so a program
+    // that reserves a size and commits up to the granule's end is within its
+    // rights; and a commit names a byte, not a page, and covers the pages the
+    // bytes lie in.
+    const host = fakeHost({ base: 0x100000, size: 0x200000 });
+    /** @type {string[]} */
+    const reports = [];
+    const fns = createHeapFunctions({
+        ...host,
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>{
+            reports.push(`${api}: ${detail}`);
+        },
+    });
+    const reserved = fns.VirtualAlloc.handler([0, 0x11000, MEM_RESERVE, 4]);
+    assert.notEqual(reserved, 0);
+    assert.equal(reserved % 0x10000, 0, 'granule aligned');
+    // The last page of the granule, past the size that was asked for.
+    assert.equal(fns.VirtualAlloc.handler([reserved + 0x1f000, 0x1000, MEM_COMMIT, 4]),
+        reserved + 0x1f000, 'the last page of the granule is the program to commit');
+    // An unaligned address and a size that reach into the next page.
+    assert.equal(fns.VirtualAlloc.handler([reserved + 0x1010, 0x1000, MEM_COMMIT, 4]),
+        reserved + 0x1000, 'answered with the page the address is in');
+    assert.deepEqual(reports, [], 'nothing was refused');
+    // Past the granule is another matter, and says so.
+    assert.equal(fns.VirtualAlloc.handler([reserved + 0x20000, 0x1000, MEM_COMMIT, 4]), 0);
+    assert.equal(reports.length, 1);
+    assert.match(reports[0], /^VirtualAlloc: commit of 4096 bytes at 0x[0-9a-f]+ refused/);
+});

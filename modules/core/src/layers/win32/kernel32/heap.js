@@ -535,6 +535,7 @@ export function createHeapFunctions(host){
                 const rounded = roundUp(size, PAGE_SIZE);
 
                 let address;
+                let span;
                 if (requested !== 0)
                 {
                     // Reserve-then-commit is a common two-step, and the second
@@ -549,19 +550,38 @@ export function createHeapFunctions(host){
                     //
                     // An address we never gave out is still refused: this
                     // allocator places memory, it does not map it.
+                    //
+                    // The range committed is whole pages: from the page the
+                    // address is in to the end of the page the last byte is
+                    // in, as Windows rounds it.
+                    const page = requested & ~(PAGE_SIZE - 1);
+                    const needed = roundUp(requested + size - page, PAGE_SIZE);
                     const existing = allocator.blockContaining(requested);
-                    const offset = existing ? requested - existing.address : 0;
+                    const offset = existing ? page - existing.address : 0;
                     if (!existing || existing.owner !== VIRTUAL
-                        || existing.capacity - offset < rounded)
+                        || existing.capacity - offset < needed)
                     {
                         host.setLastError(ERROR_INVALID_ADDRESS);
+                        host.divergence?.('VirtualAlloc', `commit of ${size} bytes at 0x${
+                            requested.toString(16)} refused: ${existing
+                            ? `the reservation at 0x${existing.address.toString(16)} holds ${
+                                existing.capacity} bytes, ${existing.owner === VIRTUAL
+                                ? 'virtual' : 'not virtual'}`
+                            : 'no reservation there'}`);
                         return 0;
                     }
-                    address = requested;
+                    address = page;
+                    span = needed;
                 }
                 else
                 {
-                    address = allocator.allocate(rounded,
+                    // A reservation is granted in whole allocation granules,
+                    // as Windows grants it: a program that reserves a size and
+                    // commits pages up to the granule's end is within its
+                    // rights, and was refused here as if it had left its
+                    // reservation.
+                    span = roundUp(size, ALLOCATION_GRANULARITY);
+                    address = allocator.allocate(span,
                         { alignment: ALLOCATION_GRANULARITY, owner: VIRTUAL });
                     if (address === 0)
                     {
@@ -589,7 +609,7 @@ export function createHeapFunctions(host){
                 // Reading zero where Windows would fault is the more forgiving
                 // of the two wrong answers, and the only one that cannot be
                 // mistaken for data.
-                zero(address, rounded);
+                zero(address, span);
                 return address;
             },
         },

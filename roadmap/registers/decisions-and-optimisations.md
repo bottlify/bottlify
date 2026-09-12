@@ -854,9 +854,17 @@ failed, in the win32 diagnostics.
 the save maps no file at all (views 0). The refused-allocation report is what the next crash is
 caught with; the load loop polls the log for it.
 
+A second silent path was `VirtualAlloc` committing inside a reservation: the reservation was
+granted page-rounded where Windows grants whole 64 KB granules, so a program committing up to the
+granule's end was refused as if it had left its reservation, with a code and no report; and a
+commit named by an unaligned address was measured from that address rather than from its page.
+Reservations are granules now, a commit covers the pages its bytes lie in, and a refused commit
+is reported with the reservation it fell outside of.
+
 **The tests.** A map whose bytes arrive later answers when they do, with the bytes and no error;
 one whose bytes never come fails on the thread that asked, with `ERROR_IO_DEVICE`; a refused heap
-or virtual allocation reports its size against the arena's state.
+or virtual allocation reports its size against the arena's state; a reservation's last granule
+page and an unaligned commit are accepted, a commit past the granule is refused and reported.
 
 ## Without paging a block runs to its page's boundary and across it
 
