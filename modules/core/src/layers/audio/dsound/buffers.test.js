@@ -365,3 +365,43 @@ test('a one-shot that finishes before it is ever drained still hands over its so
     assert.equal(ranges[0].bytes, SECOND, 'the whole buffer, once');
     assert.deepEqual(sound.drainPlayed(), [], 'and not a second time');
 });
+
+test('a lap replayed because the refill was late is counted as stale', ()=>{
+    // Everything a program can observe is right when its refill is late: the
+    // cursor moves on and the bytes it passes are handed over as usual. What
+    // is heard is the previous lap again, and this is the only count of it.
+    const { sound, time } = buffer();
+    sound.lockRange(0, SECOND / 2, 0);
+    sound.unlock();
+    sound.play(DSBPLAY_LOOPING);
+    const lead = sound.cursors().write;
+    for (let quarter = 0; quarter < 4; quarter++)
+    {
+        time.advance(250);
+        sound.drainPlayed();
+    }
+    // The half that was never written, plus the write lead that ran past the
+    // end of the lap into bytes already handed over once.
+    assert.equal(sound.stale.bytes, SECOND / 2 + lead);
+    assert.equal(sound.stale.drains, 3, 'the first quarter was written; the rest were not');
+});
+
+test('a buffer refilled ahead of the cursor has nothing stale', ()=>{
+    const { sound, time } = buffer();
+    sound.lockRange(0, 0, DSBLOCK_ENTIREBUFFER);
+    sound.unlock();
+    sound.play(DSBPLAY_LOOPING);
+    // Two laps, each quarter refilled from the write cursor just before the
+    // drain that hands it over -- the streaming loop every program runs. A
+    // little past the quarter, as a program does: a quarter of a second is
+    // not a whole number of frames, and the cursor rounds each one its way.
+    for (let quarter = 0; quarter < 8; quarter++)
+    {
+        time.advance(250);
+        sound.lockRange(0, aligned(SECOND / 4) + 64, DSBLOCK_FROMWRITECURSOR);
+        sound.unlock();
+        sound.drainPlayed();
+    }
+    assert.equal(sound.stale.bytes, 0);
+    assert.equal(sound.stale.drains, 0);
+});

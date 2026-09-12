@@ -140,6 +140,48 @@ export function createSoundBuffer(
     let reachedEnd = false;
     /** @type {{ offset: number, first: number, second: number } | null} */
     let lock = null;
+    /**
+     * Which bytes the program has written since they were last handed over.
+     *
+     * Everything a program can observe is right when its refill is late: the
+     * cursor keeps moving and the bytes it passes are handed to the mixer as
+     * usual. What a listener hears is the previous lap again, and this map is
+     * the only thing that tells a lap replayed from a lap refilled.
+     */
+    const written = new Uint8Array(bytes);
+    let staleBytes = 0;
+    let staleDrains = 0;
+
+    /** @param {number} from @param {number} count */
+    const markWritten = (from, count)=>written.fill(1, from, from + count);
+
+    /**
+     * Clears what a drain hands over and counts what was already clear.
+     *
+     * A byte per byte rather than a coarser map: a lock and the drain that
+     * follows it end in the same place, and any cell shared between the two
+     * is either cleared under a fresh write or left marked for ever. The walk
+     * is over what one turn played, which is the byte rate and no more.
+     *
+     * @param {{ from: number, bytes: number }[]} ranges
+     */
+    const takeWritten = ranges=>{
+        let stale = 0;
+        for (const range of ranges)
+        {
+            const end = range.from + range.bytes;
+            for (let at = range.from; at < end; at++)
+            {
+                stale += 1 - written[at];
+            }
+            written.fill(0, range.from, end);
+        }
+        if (stale > 0)
+        {
+            staleBytes += stale;
+            staleDrains++;
+        }
+    };
 
     /** Bytes a second of playback consumes, honouring a program's own rate. */
     const byteRate = ()=>Math.max(1, frequency) * format.blockAlign;
@@ -184,6 +226,62 @@ export function createSoundBuffer(
         Math.max(format.blockAlign, alignDown(Math.floor(byteRate() * milliseconds / 1000))),
         alignDown(Math.floor(bytes / 2)),
     );
+
+    /**
+     * The bytes playback has passed since this was last asked, as the one or
+     * two ranges a circular buffer's span becomes.
+     *
+     * A lap is the most that can come back at once. Falling a whole buffer
+     * behind means the machine spent longer between turns than the buffer
+     * is long -- at which point the audio for that gap is already too late
+     * to play, and handing it over would only push everything after it
+     * further behind.
+     *
+     * @returns {{ from: number, bytes: number }[]}
+     */
+    const played = ()=>{
+        const play = playCursor();
+        if (reachedEnd)
+        {
+            // Everything from the last look to the end, once. The buffer
+            // plays start to end and is not circular in doing it, so this
+            // is a single contiguous range and never wraps.
+            reachedEnd = false;
+            const from = fedByte;
+            fedByte = 0;
+            return from < bytes ? [{ from, bytes: bytes - from }] : [];
+        }
+        const ahead = playing ? span(WRITE_LEAD_MS) : 0;
+        if (!looping)
+        {
+            // Start to end and never round: the read runs up to the write
+            // cursor and stops at the end of the buffer, where the rest
+            // is handed over by the branch above once playback gets there.
+            const target = Math.min(play + ahead, bytes);
+            if (target <= fedByte)
+            {
+                return [];
+            }
+            const from = fedByte;
+            fedByte = target;
+            return [{ from, bytes: target - from }];
+        }
+        // Forward around the circle: a cursor that reads as behind the last
+        // one has wrapped, and the span is the rest of the buffer plus what
+        // it has covered since.
+        const target = (play + ahead) % bytes;
+        const covered = (target - fedByte + bytes) % bytes;
+        if (covered === 0)
+        {
+            return [];
+        }
+        const from = fedByte;
+        fedByte = target;
+        const first = Math.min(covered, bytes - from);
+        return first === covered
+            ? [{ from, bytes: covered }]
+            : [{ from, bytes: first }, { from: 0, bytes: covered - first }];
+    };
 
     return {
         get bytes(){
@@ -357,62 +455,26 @@ export function createSoundBuffer(
         },
 
         /**
-         * The bytes playback has passed since this was last asked, as the one
-         * or two ranges a circular buffer's span becomes.
+         * The bytes playback has passed since this was last asked.
          *
          * This is the whole of what makes a buffer audible. A caller mixes
          * these; a build with nobody asking is the silent one this used to be.
          *
-         * A lap is the most that can come back at once. Falling a whole buffer
-         * behind means the machine spent longer between turns than the buffer
-         * is long -- at which point the audio for that gap is already too late
-         * to play, and handing it over would only push everything after it
-         * further behind.
-         *
          * @returns {{ from: number, bytes: number }[]}
          */
         drainPlayed(){
-            const play = playCursor();
-            if (reachedEnd)
-            {
-                // Everything from the last look to the end, once. The buffer
-                // plays start to end and is not circular in doing it, so this
-                // is a single contiguous range and never wraps.
-                reachedEnd = false;
-                const from = fedByte;
-                fedByte = 0;
-                return from < bytes ? [{ from, bytes: bytes - from }] : [];
-            }
-            const ahead = playing ? span(WRITE_LEAD_MS) : 0;
-            if (!looping)
-            {
-                // Start to end and never round: the read runs up to the write
-                // cursor and stops at the end of the buffer, where the rest
-                // is handed over by the branch above once playback gets there.
-                const target = Math.min(play + ahead, bytes);
-                if (target <= fedByte)
-                {
-                    return [];
-                }
-                const from = fedByte;
-                fedByte = target;
-                return [{ from, bytes: target - from }];
-            }
-            // Forward around the circle: a cursor that reads as behind the last
-            // one has wrapped, and the span is the rest of the buffer plus what
-            // it has covered since.
-            const target = (play + ahead) % bytes;
-            const covered = (target - fedByte + bytes) % bytes;
-            if (covered === 0)
-            {
-                return [];
-            }
-            const from = fedByte;
-            fedByte = target;
-            const first = Math.min(covered, bytes - from);
-            return first === covered
-                ? [{ from, bytes: covered }]
-                : [{ from, bytes: first }, { from: 0, bytes: covered - first }];
+            const ranges = played();
+            takeWritten(ranges);
+            return ranges;
+        },
+
+        /**
+         * Bytes handed over that the program had not written since they were
+         * last handed over: a lap replayed because the refill was late, or a
+         * region played before it was ever filled. Heard as a short repeat.
+         */
+        get stale(){
+            return { bytes: staleBytes, drains: staleDrains };
         },
 
         /**
@@ -454,6 +516,13 @@ export function createSoundBuffer(
         unlock(){
             const held = lock;
             lock = null;
+            if (held)
+            {
+                // Counted at the unlock, not the lock: the program writes in
+                // between, and what is heard is what was there when it let go.
+                markWritten(held.offset, held.first);
+                markWritten(0, held.second);
+            }
             return held;
         },
         get locked(){

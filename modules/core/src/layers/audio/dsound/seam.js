@@ -1030,6 +1030,13 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             enumerations,
             playing: buffers.filter(buffer=>(buffer.status() & 1) !== 0).length,
             published: publisher.count(),
+            // Bytes the mixer was handed that the program had not written
+            // since they were last played: a looping buffer whose refill came
+            // late, heard as a short repeat. Per buffer as well, because the
+            // one that streams music is the one that matters.
+            staleBytes: buffers.reduce((sum, buffer)=>sum + buffer.stale.bytes, 0),
+            staleDrains: buffers.reduce((sum, buffer)=>sum + buffer.stale.drains, 0),
+            staleByBuffer: buffers.map(buffer=>buffer.stale.bytes),
         }),
     };
 }
