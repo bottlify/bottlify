@@ -1216,16 +1216,32 @@ decoder. The decoder build moves into this repository (`scripts/Dockerfile.video
 `scripts/video-decoder/`, `build-video-decoder.mjs`, a job in the vendor workflow that publishes
 a release on dispatch) against upstream FFmpeg at `n6.1` pinned by commit.
 
-**The measurement.** Awaits the rebuilt binary: the pinned `video-decoder.wasm` lacks the entry,
-so today every stream still falls back to the platform decoder and the numbers above stand. To
-be taken with `dbg/cdp_test/musicrepeat.mjs` on two cold starts once the vendor workflow has
-published a decoder and the lock is re-pinned to it: stale bytes in the first 30 s, `waits`,
-threads parked on the host in that window, and the frame rate.
+**The measurement.** Two cold starts through the launcher with the rebuilt binary, the same
+sampler, the audio layer reporting the synchronous decoder in use and no fallback opened. The
+provider never fell behind: fed and decoded samples equal in every sample, `waits` 0 against 39
+and 42, no request answered short. The main thread was never blocked on the sound library's lock
+(13 samples of it before), and the second hold -- a worker stall of 0.5 to 1.8 s at 20 to 35 s
+with the machine retiring nothing -- did not recur. Stale bytes replayed by the music buffer in
+the first 90 s: 199 and 283 KB against 680 and 1522; in the 10 to 15 s bin 13 and 21 KB against
+626 and 149. The first draw of the menu came at 8.1 and 9.9 s after the engine was up against
+10.7 and 12.9; frames on the canvas in the 10 to 15 s window 28 and 13 a second against 15 and
+3.6. The decoder's own cost is not visible: the pump phase fell from 1.0 to 0.2 % of the frame
+and the trap share, where the feed runs, did not move.
+
+What remains is not the decoder. The stale bytes left come in two pieces: a few tens of
+kilobytes before the stream is opened at all, while the guest waits on range requests for the
+bundle, and a burst of 100 to 140 KB exactly at the first draws, when the main thread is in the
+draw traps with seventy to eighty compilations in a frame and the streaming thread gets no
+quantum -- the machine is slow there, and the scheduler hands the thread that feeds a device no
+more than any other. The steady frame rate after the menu settled read lower than one earlier
+run (50 and 39 a second against 63) with another process on the machine during the second
+start; the two starts differ from each other by as much, so it is noise until a paired run in a
+quiet machine says otherwise.
 
 **The tests.** The decoder wrapper feeds silent Layer 3 frames and gets 1152 stereo samples of
 zeros back per frame, in the call, and a tag the build cannot serve fails by name (skipped, with
-the reason printed, until the binary is rebuilt; the pinned binary is tested to answer null
-rather than fail). The synchronous decoder is tested against a fake stream: samples arrive
+the reason printed, on a binary without the path, which is tested to answer null rather than
+fail). The synchronous decoder is tested against a fake stream: samples arrive
 before `feed` returns, `flush` delivers the rest in the call, a short frame is padded, a failing
 one is reported, and a null stream goes to the fallback. The provider is tested with a decoder
 that answers in the call: every request is answered whole, a request within the lead without a
