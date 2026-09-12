@@ -36,7 +36,7 @@ marshalling whatever bytes live at it.
 | option | type | default | meaning |
 |--------|------|---------|---------|
 | `record` | number | `0` | How many seam events to keep for `recorded()`; 0 disables recording. |
-| `lastError` | `() => number` | `undefined` | Reads the running thread's last error after each call, for the detailed trace. Handed down by the assembler because it belongs to `win32`, which is above this layer. |
+| `lastError` | `() => number` | `undefined` | Reads the running thread's last error after each call that can have set it, for the detailed trace. Handed down by the assembler because it belongs to `win32`, which is above this layer. |
 | `traceStrings` | boolean | `false` | Read the text behind pointer arguments at call time (a scan of guest memory per pointer per call). |
 | `callPhases` | boolean | `false` | Time every handler as a phase of its own in the profiler; the crossing itself is always sampled. |
 | `onCall` | `(record) => void` | `undefined` | A sink handed every call record as it is made (and again when a waiting call answers). |
@@ -46,7 +46,7 @@ marshalling whatever bytes live at it.
 | member | signature | meaning |
 |--------|-----------|---------|
 | `Convention` | `{ STDCALL, CDECL, THISCALL }` | |
-| `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult? }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. |
+| `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult?, lastError = true }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. `lastError: false` says the function never sets the thread's error, so the trace does not read it afterwards; COM methods are registered so. |
 | `watch` | `(name, { argBytes, target, convention?, handler }) => number` | A forwarding stub: `handler` sees the marshalled arguments, then the call goes on into `target`. For observing calls between guest modules. |
 | `park` | `(thread?) => ParkedToken` | Parks the calling thread and returns the only value a handler may return instead of an answer. Throws outside a call. |
 | `callGuest` | `({ entry, args?, thread? }) => Promise<number>` | Runs a guest routine and resolves with EAX. A handler that awaited before calling must pass `thread`. |
@@ -71,6 +71,12 @@ A handler is called as `handler(args: number[], frame)` where `frame` is
 the guest pushed them. A handler returns a number (placed in EAX as `>>> 0`), the parked token,
 or a promise (the call suspends and the thread parks until it settles).
 
+Both `args` and `frame` are the dispatcher's own and are **written over by the next call**: a
+handler that answers at once reads them and copies whatever it keeps. A handler that answers
+later — it parked, or returned a promise — keeps the ones it was given, and the next call gets
+fresh ones; so an `async` handler may read `args` after an `await`. A COM method's `invoke`
+gets its arguments the same way.
+
 ### Diagnostics
 
 `status` is `'ready'` once created. Metrics:
@@ -81,7 +87,7 @@ or a promise (the call suspends and the thread parks until it settles).
 | `calls` | Total traps dispatched. | Each call. |
 | `lastCall` | Name of the most recent. | Each call. |
 | `hot` | The forty commonest names in the 4096-entry ring, with counts. | Each call. |
-| `recentDetailed` | Up to 4096 records `{ name, from, args[≤6], strings, result, error }`, oldest first. | Each call. |
+| `recentDetailed` | Up to 4096 records `{ name, from, args[≤6], strings, result, error }`, oldest first. `result` is the answer in hex, or `parked`, `waiting`, `forwarded`, `threw`; `error` is 0 for a function registered with `lastError: false`. | Each call. |
 | `sequence` | The last eighty names in order. | Each call. |
 | `parked` | Calls that parked their caller. | Each `park`. |
 | `callbacks`, `deepestCallback` | Guest callbacks started, and the deepest nesting seen. | Each `callGuest`. |
@@ -115,11 +121,12 @@ uses `THISCALL` today; it exists for a C++ runtime library's real member exports
 
 ### Dispatch (`internal/dispatch.js`)
 
-`dispatch(id)` reads ESP (plus `forwardSave` for a forwarding stub), marshals the arguments,
-records the name in a ring and a detail record in another, builds the `frame` — everything a
-handler might need about where it was called from, read **before** it runs because a handler
-that calls the guest back overwrites that part of the stack — brackets the handler with
-`parking.beginCall/endCall`, and then places the result:
+`dispatch(id)` reads ESP (plus `forwardSave` for a forwarding stub), reads the arguments off
+the stack into the function's own array (the convention was worked out once, at registration),
+records the name in a ring and a detail record in another, fills the `frame` for this depth of
+nesting — everything a handler might need about where it was called from, read **before** it
+runs because a handler that calls the guest back overwrites that part of the stack — brackets
+the handler with `parking.beginCall/endCall`, and then places the result:
 
 - a number → `EAX = result >>> 0`;
 - the parked token → EAX is left alone; whatever wakes the thread supplies it;
@@ -132,8 +139,12 @@ still ends its call (`finally`), so the bridge is never left inside one.
 
 The crossing is timed as a `trap` phase one call in eight (weighted by eight, which scales the
 profiler's sums and never its per-occurrence figures), so the host's share of a frame is always
-known without two clock readings per call; `callPhases` adds a phase per handler. The rings are fixed-size and their records are reused, because a record per call at
-tens of thousands of calls a second was the garbage collector's whole share of a frame.
+known without two clock readings per call; `callPhases` adds a phase per handler. A prompt
+call allocates nothing: the argument array, the frame and the ring's records are made once and
+written over, the answer is kept as a number and rendered as text only when a reader asks, and
+the last error is read only after a function that can have set it. A call that answers late
+keeps the array and frame it was given, and the next call is given new ones.
+`internal/crossing.test.js` times a million of each kind and prints the figure.
 
 ### Parking (`internal/parking.js`)
 

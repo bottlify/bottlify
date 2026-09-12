@@ -75,11 +75,15 @@ export const bridgeModule = {
 
         parking = createParking({
             kernel,
-            /** @param {any} frame */
-            onBegin: frame=>record({
-                t: 'call', name: frame.name, thread: frame.thread?.name,
-                freeStack: frame.freeStack, restingStack: frame.restingStack,
-            }),
+            // Wired only when recording: the event is built before it is
+            // kept or dropped, and building one per call for nobody was an
+            // allocation on every crossing.
+            onBegin: recording === 0
+                ? undefined
+                : /** @param {any} frame */ frame=>record({
+                    t: 'call', name: frame.name, thread: frame.thread?.name,
+                    freeStack: frame.freeStack, restingStack: frame.restingStack,
+                }),
         });
 
         /**
@@ -101,19 +105,18 @@ export const bridgeModule = {
          */
         const suspend = (answer, frame)=>{
             const thread = kernel.currentThread();
-            record({ t: 'park', name: frame.name, thread: thread?.name });
+            // Everything wanted of the frame is taken now: it describes this
+            // call only until the dispatcher's next one.
+            const { name, restingStack, hostReturn } = frame;
+            record({ t: 'park', name, thread: thread?.name });
             // Where it returns to was read before the handler ran: a handler
             // that called the guest back has since written over that part of
             // the stack, so reading it now would find an argument.
             kernel.holdThread();
-            callbacks.suspended(thread, {
-                name: frame.name,
-                restingStack: frame.restingStack,
-                hostReturn: frame.hostReturn,
-            });
+            callbacks.suspended(thread, { name, restingStack, hostReturn });
             answer.then(
                 value=>{
-                    record({ t: 'finish', name: frame.name, thread: thread?.name });
+                    record({ t: 'finish', name, thread: thread?.name });
                     callbacks.finish(thread, value | 0);
                 },
                 // Nothing above is waiting on this promise, so a handler that
@@ -172,18 +175,25 @@ export const bridgeModule = {
              * @param {boolean} [fn.preserveResult]
              *     For a stub a `ret` lands on rather than a `call`: whatever
              *     EAX held arrives in ECX, since the trap needs EAX itself.
+             * @param {boolean} [fn.lastError]
+             *     Whether the function can set the thread's last error, which
+             *     the trace reads after each call that can. A COM method
+             *     cannot, and says so.
              * @returns {number} the guest address that calls it
              */
             register(
                 name,
-                { convention = Convention.STDCALL, argBytes, handler, preserveResult = false })
+                {
+                    convention = Convention.STDCALL, argBytes, handler,
+                    preserveResult = false, lastError = true,
+                })
             {
                 // Before the first import, so the slot a callback returns to is
                 // in the table that gets written into guest memory.
                 callbacks.reserve();
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes), { preserveResult });
-                dispatcher.register(id, { name, convention, argBytes, handler });
+                dispatcher.register(id, { name, convention, argBytes, handler, lastError });
                 dispatcher.placed(address, name);
                 return address;
             },

@@ -119,17 +119,25 @@ export function createVtables({ memory, register, heap }){
         try
         {
             slots = table.map((method, index)=>{
+                // The arguments after the interface pointer, in an array the
+                // method keeps between calls: made once, not per call. An
+                // implementation that answers with a promise still holds it
+                // when the next call comes, so that call gets a new one.
+                /** @type {number[]} */
+                let rest = new Array((method.argBytes >>> 2) - 1);
                 const trap = register(`${interfaceId}::${method.name}`, {
                     convention: Convention.STDCALL,
                     argBytes: method.argBytes,
+                    // An HRESULT is the whole answer; nothing here sets the
+                    // thread's error, so the trace need not read it.
+                    lastError: false,
                     /** @param {number[]} args */
                     handler: args=>{
                         // The first argument is the interface pointer the guest
                         // called through, not the object. What it identifies is
                         // settled here so no implementation has to know how an
                         // interface is laid out.
-                        const [self, ...rest] = args;
-                        const owner = owners.get(self >>> 0);
+                        const owner = owners.get(args[0] >>> 0);
                         if (!owner)
                         {
                             // A pointer nobody published, or one whose object
@@ -137,7 +145,18 @@ export function createVtables({ memory, register, heap }){
                             // whatever the memory now holds.
                             return 0x80004003;
                         }
-                        return dispatch(owner.object, owner.interfaceId, index, method, rest);
+                        const given = rest;
+                        for (let i = 1; i < args.length; i++)
+                        {
+                            given[i - 1] = args[i];
+                        }
+                        const answer = dispatch(
+                            owner.object, owner.interfaceId, index, method, given);
+                        if (typeof answer?.then === 'function')
+                        {
+                            rest = new Array(given.length);
+                        }
+                        return answer;
                     },
                 });
                 // A method that runs in the guest keeps its trap: that is

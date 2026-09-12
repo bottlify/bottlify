@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { calleeCleanup, readArguments } from './conventions.js';
+import { Convention, calleeCleanup } from './conventions.js';
 import { isParkedCall } from './parking.js';
 
 /**
@@ -28,6 +28,26 @@ import { isParkedCall } from './parking.js';
  * @property {number} [saved]  Bytes of registers the stub pushed below the
  *     caller's frame before trapping, to be restored and dropped afterwards:
  *     a forwarding stub keeps the registers the real function will read.
+ * @property {boolean} [lastError]  Whether the function can leave a thread
+ *     error behind, so the trace reads it afterwards. Default true; a COM
+ *     method answers with an HRESULT and never touches it.
+ */
+
+/**
+ * A registered function with everything the crossing needs worked out once:
+ * what the convention means in words and bytes, and the array a call fills.
+ *
+ * @typedef {Object} Entry
+ * @property {HostFunction} fn
+ * @property {string} name
+ * @property {Function} handler
+ * @property {boolean} thisFirst    `this` comes from ECX, ahead of the stack.
+ * @property {number} stackWords
+ * @property {number} cleanup       What the stub's `ret` pops.
+ * @property {number} saved
+ * @property {boolean} forwards
+ * @property {boolean} readsError
+ * @property {number[]} args        The argument array, reused while answers are prompt.
  */
 
 /**
@@ -84,7 +104,8 @@ const DETAIL_RING = 4096;
  *        which by the end of a run is somebody else's stack.
  */
 export function createDispatcher(deps){
-    const { cpu, memory, parking, suspend, lastError } = deps;
+    const { cpu, memory, parking, suspend } = deps;
+    const lastError = deps.lastError ?? (()=>0);
     const traceStrings = deps.traceStrings ?? false;
     // A ring holds the end of a run, and the end of a run is rarely where the
     // decision was made: a program that gives up after opening its archives
@@ -104,13 +125,24 @@ export function createDispatcher(deps){
     // where a frame makes fifteen hundred calls. Off unless a measurement
     // asks; the crossing is always timed, so the host's share is always known.
     const callPhases = deps.callPhases ?? false;
+    const phased = profiler !== null && callPhases;
     // The crossing is timed one call in this many, each standing for all of
     // them: two clock readings a call were a measured share of a frame in a
     // match, and a share is as true of a sample as of the whole.
     const TRAP_SAMPLE = 8;
     let crossings = 0;
-    /** @type {Map<number, HostFunction>} */
-    const functions = new Map();
+    // Indexed by trap id: the cpu hands them out in sequence from zero.
+    /** @type {(Entry | undefined)[]} */
+    const functions = [];
+    let implemented = 0;
+    /**
+     * Frames by depth of nesting, reused: a guest callback can trap into
+     * another host call, so there is one per level rather than one.
+     *
+     * @type {(CallFrame | undefined)[]}
+     */
+    const frames = [];
+    let depth = 0;
     /**
      * The names of recent calls, as a ring.
      *
@@ -127,11 +159,51 @@ export function createDispatcher(deps){
     const called = new Array(CALL_RING);
     let ringAt = 0;
     /**
-     * @type {{ name: string, from: number, args: number[], result: string,
-     *          error: number, strings: (string | null)[] | null }[]}
+     * @typedef {Object} CallRecord
+     * @property {string} name
+     * @property {number} from
+     * @property {number[]} args
+     * @property {(string | null)[] | null} strings
+     * @property {number} error
+     * @property {number} answer   What the handler returned, when it returned a number.
+     * @property {string} kind     How the call ended: 'answered', 'parked', 'waiting',
+     *     'forwarded' or 'threw'.
+     * @property {string} result   The answer as a reader wants it, made when read.
      */
+
+    /** @type {CallRecord[]} */
     const detailed = new Array(DETAIL_RING);
     let detailAt = 0;
+
+    /**
+     * @param {CallRecord} record
+     * @returns {string}
+     */
+    const describe = record=>record.kind === 'answered'
+        ? `0x${(record.answer >>> 0).toString(16)}`
+        : record.kind;
+
+    /**
+     * A ring record. The text of the answer is the one thing about a call that
+     * costs an allocation to write down, and almost nobody reads it: so it is
+     * made from the number when it is read, not when the call is made.
+     *
+     * @returns {CallRecord}
+     */
+    const makeRecord = ()=>({
+        name: '',
+        from: 0,
+        /** @type {number[]} */
+        args: [],
+        /** @type {(string | null)[] | null} */
+        strings: null,
+        error: 0,
+        answer: 0,
+        kind: 'threw',
+        get result(){
+            return describe(this);
+        },
+    });
 
     /**
      * The most-called names in the ring, with their counts, commonest first.
@@ -204,6 +276,21 @@ export function createDispatcher(deps){
     };
 
     /**
+     * A record as a reader may keep it: the ring writes over its own when it
+     * comes round.
+     *
+     * @param {CallRecord} record
+     */
+    const copyOf = record=>({
+        name: record.name,
+        from: record.from,
+        args: record.args.slice(),
+        strings: record.strings ? record.strings.slice() : null,
+        result: describe(record),
+        error: record.error,
+    });
+
+    /**
      * The last `count` calls, oldest first.
      *
      * @param {number} count
@@ -230,15 +317,32 @@ export function createDispatcher(deps){
          * @param {HostFunction} fn
          */
         register(id, fn){
-            if (functions.has(id))
+            if (functions[id] !== undefined)
             {
                 throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
             }
-            functions.set(id, fn);
+            const thisFirst = fn.convention === Convention.THISCALL;
+            // Validates the convention and the byte count here, once, rather
+            // than on every call.
+            const cleanup = calleeCleanup(fn.convention, fn.argBytes);
+            const stackWords = (thisFirst ? fn.argBytes - 4 : fn.argBytes) >>> 2;
+            functions[id] = {
+                fn,
+                name: fn.name,
+                handler: fn.handler,
+                thisFirst,
+                stackWords,
+                cleanup,
+                saved: fn.saved ?? 0,
+                forwards: fn.forwards === true,
+                readsError: deps.lastError !== undefined && fn.lastError !== false,
+                args: new Array(stackWords + (thisFirst ? 1 : 0)),
+            };
+            implemented++;
         },
 
         /** @param {number} id */
-        lookup: id=>functions.get(id) ?? null,
+        lookup: id=>functions[id]?.fn ?? null,
 
         /**
          * What lives at a guest address, when it is one of our stubs.
@@ -295,22 +399,31 @@ export function createDispatcher(deps){
          * @param {number} id
          */
         dispatchNow(id){
-            const fn = functions.get(id);
-            if (!fn)
+            const entry = functions[id];
+            if (entry === undefined)
             {
                 throw new Error(`bridge: trap ${id} has no implementation`);
             }
 
             const pushed = cpu.readReg32('esp');
-            const esp = pushed + (fn.saved ?? 0);
-            const args = readArguments(fn.convention, fn.argBytes, {
-                esp,
-                ecx: cpu.readReg32('ecx'),
-                read32: (/** @type {number} */ address)=>memory.readU32(address),
-            });
+            const esp = pushed + entry.saved;
+            // Straight off the stack into the entry's own array, which the
+            // handler reads and this layer writes over on the next call. A
+            // handler that answers later than it returns -- a promise, a
+            // parked thread -- keeps the array: see below.
+            const args = entry.args;
+            let at = 0;
+            if (entry.thisFirst)
+            {
+                args[at++] = cpu.readReg32('ecx') | 0;
+            }
+            for (let word = 0; word < entry.stackWords; word++)
+            {
+                args[at++] = memory.readU32(esp + 4 + word * 4) | 0;
+            }
 
             calls++;
-            called[ringAt++ % CALL_RING] = fn.name;
+            called[ringAt++ % CALL_RING] = entry.name;
 
             // Everything the handler might need about where it was called from,
             // read before it runs: a handler that calls the guest back writes
@@ -318,27 +431,23 @@ export function createDispatcher(deps){
             // read. `freeStack` is what is safe to write below *now*, while the
             // return address at ESP is still live; `restingStack` is where the
             // stack will be once the stub has returned.
-            /** @type {CallFrame} */
-            const frame = {
-                name: fn.name,
-                freeStack: pushed,
-                callerStack: esp,
-                restingStack: esp + 4 + calleeCleanup(fn.convention, fn.argBytes),
-                hostReturn: memory.readU32(esp),
+            const frame = frames[depth] ??= {
+                name: '', freeStack: 0, callerStack: 0, restingStack: 0, hostReturn: 0,
             };
+            frame.name = entry.name;
+            frame.freeStack = pushed;
+            frame.callerStack = esp;
+            frame.restingStack = esp + 4 + entry.cleanup;
+            frame.hostReturn = memory.readU32(esp);
 
-            parking.beginCall(frame);
-            let result;
             // The ring's records are made once and written over: a record and
             // an argument array allocated per call, thirty thousand times a
             // second, was the garbage collector's whole share of a frame.
             // Whoever reads the ring gets a copy; a sink gets the record for
             // the length of its call and nothing longer.
             const slot = detailAt++ % DETAIL_RING;
-            const record = detailed[slot] ??= {
-                name: '', from: 0, args: [], strings: null, result: '', error: 0,
-            };
-            record.name = fn.name;
+            const record = detailed[slot] ??= makeRecord();
+            record.name = entry.name;
             // Which instruction made this call. Read from the frame that was
             // captured above rather than the stack, because a handler that
             // calls the guest back has overwritten the stack by the time
@@ -357,40 +466,62 @@ export function createDispatcher(deps){
             // frames deep by the time anybody reads the trace, and what
             // comes back then belongs to whatever ran next.
             record.strings = traceStrings ? record.args.map(peekString) : null;
-            record.result = 'threw';
+            record.kind = 'threw';
             record.error = 0;
-            if (callPhases)
+
+            parking.beginCall(frame);
+            depth++;
+            let result;
+            let late = false;
+            if (phased)
             {
-                profiler?.begin(fn.name, 'host');
+                profiler.begin(entry.name, 'host');
             }
             try
             {
-                result = fn.handler(args, frame);
+                result = entry.handler(args, frame);
                 // A promise is neither a value nor the parked token: it is a
                 // call that has not finished, and the thread is about to be
                 // parked on it. Rendering it as a number turns every such call
                 // into a plain zero -- a failure under most conventions -- and
                 // a reader then chases a failure that did not happen.
-                record.result = fn.forwards
-                    ? 'forwarded'
-                    : isParkedCall(result)
-                        ? 'parked'
-                        : (typeof (/** @type {any} */ (result))?.then === 'function'
-                            ? 'waiting'
-                            : `0x${(Number(result) >>> 0).toString(16)}`);
+                if (entry.forwards)
+                {
+                    record.kind = 'forwarded';
+                }
+                else if (isParkedCall(result))
+                {
+                    record.kind = 'parked';
+                    late = true;
+                }
+                else if (typeof (/** @type {any} */ (result))?.then === 'function')
+                {
+                    record.kind = 'waiting';
+                    late = true;
+                }
+                else
+                {
+                    record.kind = 'answered';
+                    record.answer = Number(result);
+                }
             }
             finally
             {
-                if (callPhases)
+                if (phased)
                 {
-                    profiler?.end(fn.name);
+                    profiler.end(entry.name);
                 }
+                depth--;
                 parking.endCall();
                 // What this call left in the thread's last error. A program
                 // reports a code long after whatever produced it returned, and
-                // this is the only record that ties the two together.
-                record.error = lastError ? lastError() : 0;
-                if (onCall)
+                // this is the only record that ties the two together. Not read
+                // for a function that cannot have set it.
+                if (entry.readsError)
+                {
+                    record.error = lastError();
+                }
+                if (onCall !== null)
                 {
                     // As recorded, strings included only when tracing asked
                     // for them. Peeking every argument for a sink that does
@@ -400,19 +531,28 @@ export function createDispatcher(deps){
                 }
             }
 
+            if (late)
+            {
+                // The handler still holds these and will read them after
+                // whatever it is waiting for: they are its now, and the next
+                // call gets fresh ones. Paid only by a call that already costs
+                // a wait, never by the prompt ones.
+                entry.args = new Array(args.length);
+                frames[depth] = undefined;
+            }
             // A parked call's EAX belongs to whatever wakes the thread, and it
             // carries the wait's own result. Writing a placeholder here would
             // overwrite the answer before the guest ever sees it.
-            if (isParkedCall(result))
+            if (record.kind === 'parked')
             {
                 return;
             }
-            if (typeof result?.then === 'function')
+            if (record.kind === 'waiting')
             {
                 if (!suspend)
                 {
                     throw new Error(
-                        `bridge: ${fn.name} answered asynchronously with nowhere to wait`);
+                        `bridge: ${entry.name} answered asynchronously with nowhere to wait`);
                 }
                 // The trace says "waiting" and nothing after it, which for a
                 // read of a game's own archive is the whole question: whether
@@ -420,18 +560,18 @@ export function createDispatcher(deps){
                 // answer arrives, as a line of its own -- the first line is
                 // already written and in order, and moving it would put the
                 // call somewhere it did not happen.
-                if (onCall)
+                if (onCall !== null)
                 {
-                    const asked = record;
-                    result.then((/** @type {number} */ value)=>onCall({
-                        ...asked,
-                        result: `0x${(value >>> 0).toString(16)} (was waiting)`,
-                    }));
+                    const asked = copyOf(record);
+                    result.then((/** @type {number} */ value)=>{
+                        asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
+                        onCall(asked);
+                    });
                 }
                 suspend(result, frame);
                 return;
             }
-            if (fn.saved)
+            if (entry.saved !== 0)
             {
                 // The stub saved with `pushad`, EAX first and EDI last; the
                 // trap spent EAX and DX and nothing else. Put those two back
@@ -446,7 +586,7 @@ export function createDispatcher(deps){
         },
 
         diagnostics: ()=>({
-            implemented: functions.size,
+            implemented,
             calls,
             lastCall: ringAt === 0 ? null : called[(ringAt - 1) % CALL_RING],
             // What the guest has been doing, rather than the one thing it did
@@ -469,12 +609,9 @@ export function createDispatcher(deps){
             for (let back = kept; back > 0; back--)
             {
                 const record = detailed[(detailAt - back) % DETAIL_RING];
-                // A copy: the record is written over when the ring comes round.
-                out.push({
-                    ...record,
-                    args: record.args.slice(),
-                    strings: record.strings ? record.strings.slice() : record.args.map(peekString),
-                });
+                const copy = copyOf(record);
+                copy.strings ??= record.args.map(peekString);
+                out.push(copy);
             }
             return out;
         },

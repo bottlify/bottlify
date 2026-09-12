@@ -20,14 +20,17 @@ import { createDispatcher } from './dispatch.js';
  * @param {{ begin: (name: string, kind?: string) => void,
  *           end: (name?: string) => number }} [options.profiler]
  * @param {boolean} [options.callPhases]
+ * @param {() => number} [options.lastError]
+ * @param {number} [options.ecx]
  */
-function machine({ esp = 0x3000, args = [], profiler, callPhases = false } = {}){
+function machine(options = {}){
+    const { esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0 } = options;
     /** @type {Map<number, number>} */
     const cells = new Map([[esp, 0x401234]]);
     args.forEach((value, index)=>cells.set(esp + 4 + index * 4, value));
 
     /** @type {Record<string, number>} */
-    const registers = { esp, ecx: 0, eax: 0 };
+    const registers = { esp, ecx, eax: 0 };
     const cpu = {
         /** @param {string} name */
         readReg32: name=>registers[name] ?? 0,
@@ -60,9 +63,15 @@ function machine({ esp = 0x3000, args = [], profiler, callPhases = false } = {})
     };
 
     const parking = createParking({ kernel });
-    const dispatcher = createDispatcher({ cpu, memory, parking, profiler, callPhases });
+    const dispatcher = createDispatcher({
+        cpu, memory, parking, profiler, callPhases, lastError,
+        suspend: ()=>{},
+    });
     return { cpu, memory, registers, parking, dispatcher, parkedThreads, current };
 }
+
+/** A handler description with the shape the module registers. */
+const STDCALL = { convention: Convention.STDCALL };
 
 test('a call is marshalled, invoked, and its result left in EAX', ()=>{
     const { dispatcher, registers } = machine({ args: [7, 5] });
@@ -75,7 +84,7 @@ test('a call is marshalled, invoked, and its result left in EAX', ()=>{
         argBytes: 8,
         /** @param {number[]} args */
         handler: args=>{
-            seen.push(args);
+            seen.push(args.slice());
             return args[0] + args[1];
         },
     });
@@ -83,6 +92,140 @@ test('a call is marshalled, invoked, and its result left in EAX', ()=>{
 
     assert.deepEqual(seen, [[7, 5]]);
     assert.equal(registers.eax, 12);
+});
+
+test('arguments arrive signed, as the guest pushed them', ()=>{
+    // Guest code pushes 32-bit words; a handler that wants an unsigned value
+    // says so itself. Silently widening here would make -1 and 0xffffffff
+    // different values to a handler that compares against one of them.
+    const { dispatcher } = machine({ args: [0xffffffff] });
+    let seen = 0;
+    dispatcher.register(1, {
+        name: 'X!Signed', ...STDCALL, argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([value])=>{
+            seen = value;
+            return 0;
+        },
+    });
+    dispatcher.dispatch(1);
+    assert.equal(seen, -1);
+});
+
+test('thiscall takes `this` from ECX and the rest from the stack; cdecl pops nothing', ()=>{
+    const { dispatcher } = machine({ args: [22, 33], ecx: 0x401000 });
+    /** @type {number[][]} */
+    const seen = [];
+    /** @type {number[]} */
+    const resting = [];
+    dispatcher.register(1, {
+        name: 'X!Method', convention: Convention.THISCALL, argBytes: 12,
+        /** @param {number[]} args @param {{ restingStack: number }} frame */
+        handler: (args, frame)=>{
+            seen.push(args.slice());
+            resting.push(frame.restingStack);
+            return 0;
+        },
+    });
+    dispatcher.register(2, {
+        name: 'X!printf', convention: Convention.CDECL, argBytes: 8,
+        /** @param {number[]} args @param {{ restingStack: number }} frame */
+        handler: (args, frame)=>{
+            seen.push(args.slice());
+            resting.push(frame.restingStack);
+            return 0;
+        },
+    });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.deepEqual(seen, [[0x401000, 22, 33], [22, 33]],
+        '`this` comes first in declaration order even though it never was on the stack');
+    // The return address and what the callee pops: eight bytes for the
+    // thiscall (`this` was never pushed), nothing for cdecl.
+    assert.deepEqual(resting, [0x3000 + 4 + 8, 0x3000 + 4]);
+});
+
+test('a prompt call allocates nothing: the arguments, the frame and the record are reused', ()=>{
+    // Thirty thousand crossings a second in a menu, a thousand a frame in a
+    // battle: an object per call here is the garbage collector's share of
+    // the frame. The handler is given the dispatcher's own arrays, which are
+    // written over on the next call -- so what it keeps, it copies.
+    const { dispatcher } = machine({ args: [1, 2, 3] });
+    /** @type {any[]} */
+    const givenArgs = [];
+    /** @type {any[]} */
+    const givenFrames = [];
+    dispatcher.register(1, {
+        name: 'X!Three', ...STDCALL, argBytes: 12,
+        /** @param {number[]} args @param {any} frame */
+        handler: (args, frame)=>{
+            givenArgs.push(args);
+            givenFrames.push(frame);
+            return 0;
+        },
+    });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(1);
+    assert.equal(givenArgs[0], givenArgs[1], 'the same argument array both times');
+    assert.equal(givenFrames[0], givenFrames[1], 'and the same frame');
+    assert.deepEqual(givenArgs[1], [1, 2, 3]);
+    const [first, second] = dispatcher.detailed(2);
+    assert.notEqual(first, second, 'a reader gets a copy each');
+    assert.deepEqual([first.result, second.result], ['0x0', '0x0']);
+});
+
+test('a call that answers later keeps its arguments; the next call gets fresh ones', ()=>{
+    // A handler that parks or returns a promise reads its arguments after
+    // the dispatcher has moved on. Writing the next call's arguments into the
+    // array it holds would hand it another call's values, silently.
+    const { dispatcher, parking } = machine({ args: [5] });
+    /** @type {any[]} */
+    const givenArgs = [];
+    /** @type {any[]} */
+    const givenFrames = [];
+    let park = false;
+    dispatcher.register(1, {
+        name: 'X!Maybe', ...STDCALL, argBytes: 4,
+        /** @param {number[]} args @param {any} frame */
+        handler: (args, frame)=>{
+            givenArgs.push(args);
+            givenFrames.push(frame);
+            return park ? parking.park() : Promise.resolve(1);
+        },
+    });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(1);
+    assert.notEqual(givenArgs[0], givenArgs[1], 'after a promise, a new array');
+    assert.notEqual(givenFrames[0], givenFrames[1], 'and a new frame');
+    park = true;
+    dispatcher.dispatch(1);
+    assert.notEqual(givenArgs[1], givenArgs[2], 'after parking too');
+    assert.deepEqual(givenArgs[0], [5], 'what the first call was given is still its own');
+    const [waiting, parked] = dispatcher.detailed(3).slice(1);
+    assert.deepEqual([waiting.result, parked.result], ['waiting', 'parked']);
+});
+
+test('the last error is read after a call that can set it, and not after one that cannot', ()=>{
+    // A COM method answers with an HRESULT and never touches the thread's
+    // error, and there are a thousand of them a frame; the read is a trip
+    // into another layer for a value that did not change.
+    let reads = 0;
+    const { dispatcher } = machine({ lastError: ()=>{
+        reads++;
+        return 87;
+    } });
+    dispatcher.register(1, {
+        name: 'KERNEL32.dll!CreateFileA', ...STDCALL, argBytes: 0, handler: ()=>0,
+    });
+    dispatcher.register(2, {
+        name: '{IID}::SetTexture', ...STDCALL, argBytes: 0, handler: ()=>0, lastError: false,
+    });
+    dispatcher.dispatch(1);
+    dispatcher.dispatch(2);
+    assert.equal(reads, 1);
+    const [plain, com] = dispatcher.detailed(2);
+    assert.equal(plain.error, 87);
+    assert.equal(com.error, 0, 'nothing to report, rather than a stale reading');
 });
 
 test('a negative result reaches the guest as the guest reads it', ()=>{
@@ -124,7 +267,7 @@ test('a forwarding call reads the frame above the saved registers and restores t
         saved: 32,
         /** @param {number[]} args @param {any} frame */
         handler: (args, frame)=>{
-            seen.push(args, frame.callerStack, frame.hostReturn);
+            seen.push(args.slice(), frame.callerStack, frame.hostReturn);
             return 0;
         },
     });
@@ -365,6 +508,24 @@ test('a call sink is handed the record as recorded, with nothing peeked for it',
 
     assert.equal(seen.length, 1);
     assert.deepEqual(seen[0].args, [0x5000, 0x6000]);
+    assert.equal(seen[0].result, '0x1');
     assert.equal(seen[0].strings, null, 'no strings without tracing');
     assert.deepEqual(reads, [], 'and no byte of guest memory was peeked');
+});
+
+test('a waiting call is reported to the sink twice: once as asked, once as answered', async()=>{
+    const m = machine({ args: [1, 2] });
+    /** @type {any[]} */
+    const seen = [];
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory: m.memory, parking: m.parking, suspend: ()=>{},
+        onCall: (/** @type {any} */ call)=>seen.push({ ...call }),
+    });
+    dispatcher.register(3, {
+        name: 'X.dll!Read', ...STDCALL, argBytes: 8, handler: ()=>Promise.resolve(0x40),
+    });
+    dispatcher.dispatch(3);
+    await Promise.resolve();
+    assert.deepEqual(seen.map(call=>call.result), ['waiting', '0x40 (was waiting)']);
+    assert.deepEqual(seen[1].args, [1, 2], 'the second line carries what was asked');
 });

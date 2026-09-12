@@ -217,6 +217,8 @@ test('objects of one interface share its stubs, and a call still finds its own o
     draw([pointerB, 7]);
     draw([pointerA, 9]);
     assert.deepEqual(drawn, ['b:7', 'a:9']);
+    assert.equal(handlers.get(`${IID}::Draw`).lastError, false,
+        'an HRESULT is the whole answer; the trace has no error to read after it');
     assert.equal(draw([0x9999, 1]) >>> 0, 0x80004003, 'a pointer nobody published is E_POINTER');
 
     // The last release forgets the pointer: the same words can be another
@@ -226,4 +228,60 @@ test('objects of one interface share its stubs, and a call still finds its own o
     assert.equal(draw([pointerA, 1]) >>> 0, 0x80004003);
     assert.equal(table.diagnostics().comInterfaces, 1);
     assert.notEqual(table.publish(a, IID), pointerA, 'published again, it is a new pointer');
+});
+
+test('a method hands its implementation one argument array, until a call answers late', ()=>{
+    // The arguments after the interface pointer are copied into an array the
+    // method keeps: one allocation at registration, none per call. An
+    // implementation that returns a promise still holds that array when the
+    // next call comes, so the next call is given a new one.
+    /** @type {Map<string, any>} */
+    const handlers = new Map();
+    let next = 0x2000;
+    const table = createVtables({
+        memory: {
+            writeU32: ()=>{},
+            /** @param {number} address @param {number} length */
+            readBytes: (address, length)=>new Uint8Array(length),
+        },
+        /** @param {string} name @param {any} fn */
+        register: (name, fn)=>{
+            handlers.set(name, fn);
+            return 0x1000 + handlers.size * 0x10;
+        },
+        heap: { allocate: (/** @type {number} */ bytes)=>{
+            const at = next;
+            next += bytes;
+            return at;
+        } },
+    });
+    /** @type {number[][]} */
+    const given = [];
+    let slow = false;
+    const methods = [
+        ...METHODS.slice(0, 3),
+        { name: 'Draw', argBytes: 12,
+            /** @param {any} self @param {number[]} args */
+            invoke: (self, args)=>{
+                given.push(args);
+                return slow ? Promise.resolve(0) : 0;
+            } },
+    ];
+    const pointer = table.publish({
+        /** @param {string} id */
+        interfaceFor: id=>(id === IID ? { id, methods } : null),
+        addRef: ()=>2,
+        release: ()=>1,
+    }, IID);
+    const draw = handlers.get(`${IID}::Draw`).handler;
+    draw([pointer, 1, 2]);
+    draw([pointer, 3, 4]);
+    assert.equal(given[0], given[1], 'the same array for two prompt calls');
+    assert.deepEqual(given[1], [3, 4], 'holding the latest arguments, without the pointer');
+    slow = true;
+    draw([pointer, 5, 6]);
+    draw([pointer, 7, 8]);
+    assert.equal(given[1], given[2], 'the call that answers late was given the shared array');
+    assert.notEqual(given[2], given[3], 'and keeps it: the next call gets another');
+    assert.deepEqual(given[2], [5, 6]);
 });
