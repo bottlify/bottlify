@@ -61,6 +61,30 @@ test('the predefined roots exist and nothing else does', ()=>{
     assert.equal(hive.root(4), null, 'an ordinary handle value is not a root');
 });
 
+test('the keys every machine carries are there before any program writes', ()=>{
+    // An installer opens SharedDLLs, Uninstall and the shell folders without
+    // creating them, and takes a missing one for a broken machine: measured
+    // as a program that installed the same file for ever after the open
+    // failed.
+    const hive = createHive();
+    const local = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+    const shared = hive.open(local, 'Software\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
+    assert.ok(shared, 'found whatever the case');
+    const version = hive.open(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion');
+    const files = version && hive.getValue(version, 'ProgramFilesDir');
+    assert.equal(files && String.fromCharCode(...files.data.subarray(0, files.data.length - 1)),
+        'C:\\Program Files');
+
+    // A restore keeps what a program wrote and puts back what it deleted.
+    hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
+    const { key } = hive.create(local, 'SOFTWARE\\Vendor');
+    hive.setValue(key, 'Path', REG_SZ, Uint8Array.of(67, 0));
+    hive.fromJSON(hive.toJSON());
+    const restored = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
+    assert.ok(hive.open(restored, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs'));
+    assert.ok(hive.open(restored, 'SOFTWARE\\Vendor'));
+});
+
 test('a key path is created once and found again whatever its case', ()=>{
     const hive = createHive();
     const root = /** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE));
@@ -106,7 +130,7 @@ test('values are found without regard to case, and a missing one is null', ()=>{
 
 test('string data is stored with its terminator counted', ()=>{
     const hive = createHive();
-    const key = machine(hive, 'Software');
+    const key = machine(hive, 'Software\\Test');
 
     // A guest that passes strlen as the byte count is the common case, and the
     // reader on the other side expects to find the NUL anyway.
@@ -126,7 +150,7 @@ test('string data is stored with its terminator counted', ()=>{
 
 test('binary and dword data are stored byte for byte', ()=>{
     const hive = createHive();
-    const key = machine(hive, 'Software');
+    const key = machine(hive, 'Software\\Test');
 
     const dword = hive.setValue(key, 'Count', REG_DWORD, Uint8Array.from([7, 0, 0, 0]));
     assert.deepEqual([...dword.data], [7, 0, 0, 0], 'a trailing zero is data, not a terminator');
@@ -137,7 +161,7 @@ test('binary and dword data are stored byte for byte', ()=>{
 
 test('enumeration order is insertion order and survives an overwrite', ()=>{
     const hive = createHive();
-    const key = machine(hive, 'Software');
+    const key = machine(hive, 'Software\\Test');
 
     hive.create(key, 'Beta');
     hive.create(key, 'Alpha');
@@ -166,7 +190,7 @@ test('a key with subkeys is refused rather than deleted', ()=>{
 
 test('deleting a value reports whether there was one', ()=>{
     const hive = createHive();
-    const key = machine(hive, 'Software');
+    const key = machine(hive, 'Software\\Test');
     hive.setValue(key, 'Gone', REG_SZ, latin1('x'));
 
     assert.equal(hive.deleteValue(key, 'GONE'), true);
@@ -205,8 +229,9 @@ test('restoring a partial save leaves the other roots usable', ()=>{
     const hive = createHive();
     hive.fromJSON({ roots: [{ id: HKEY_UNKNOWN_ROOT, key: { name: 'x', values: [], keys: [] } }] });
 
-    assert.ok(hive.root(HKEY_LOCAL_MACHINE), 'a root nobody saved is empty, not absent');
-    assert.equal(hive.subkeys(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE))).length, 0);
+    assert.ok(hive.root(HKEY_LOCAL_MACHINE), 'a root nobody saved is there, not absent');
+    assert.deepEqual(hive.subkeys(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE))),
+        ['SOFTWARE', 'SYSTEM'], 'holding only what every machine holds');
     assert.equal(hive.root(HKEY_UNKNOWN_ROOT), null);
 });
 
@@ -217,5 +242,5 @@ test('a restore discards what the hive was holding', ()=>{
     hive.fromJSON(createHive().toJSON());
 
     assert.equal(
-        hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), 'Software'), null);
+        hive.open(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE)), 'Software\\Stale'), null);
 });

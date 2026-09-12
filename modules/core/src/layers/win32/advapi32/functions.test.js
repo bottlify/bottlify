@@ -181,7 +181,7 @@ test('creating reports whether the key was already there', ()=>{
 
 test('a query with no buffer reports the size, and does not need one', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'Path', 'abcd');
 
     // The first of the two calls well-behaved code makes.
@@ -204,7 +204,7 @@ test('a query with no buffer reports the size, and does not need one', ()=>{
 
 test('a buffer one byte short is ERROR_MORE_DATA with the size that would fit', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'Path', 'abcd');
 
     memory.putString(NAME, 'Path');
@@ -218,7 +218,7 @@ test('a buffer one byte short is ERROR_MORE_DATA with the size that would fit', 
 
 test('asking for data without a size is the one combination that is refused', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'Path', 'abcd');
     memory.putString(NAME, 'Path');
 
@@ -233,7 +233,7 @@ test('asking for data without a size is the one combination that is refused', ()
 
 test('a value that is not there is ERROR_FILE_NOT_FOUND, buffer or no buffer', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     memory.putString(NAME, 'Absent');
     memory.putDword(OUT_SIZE, 0x40);
 
@@ -268,7 +268,7 @@ test('the unnamed default value is the one with no name', ()=>{
 
 test('what a value was written from can change without changing the value', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     memory.putString(NAME, 'Blob');
     memory.bytes.set([1, 2, 3, 4], INPUT);
 
@@ -283,7 +283,7 @@ test('what a value was written from can change without changing the value', ()=>
 
 test('a closed handle is an error code, and the roots never close', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
 
     assert.equal(fns.RegCloseKey.handler([key]), ERROR_SUCCESS);
     assert.equal(fns.RegCloseKey.handler([key]), ERROR_INVALID_HANDLE, 'closing twice fails');
@@ -326,9 +326,9 @@ test('a handle nobody was given is an error code, not a crash', ()=>{
 
 test('keys enumerate in a stable order and then run out', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
-    create('Software\\Beta');
-    create('Software\\Alpha');
+    const key = create('Software\\Test');
+    create('Software\\Test\\Beta');
+    create('Software\\Test\\Alpha');
 
     const names = [];
     for (let index = 0; ; index++)
@@ -356,8 +356,8 @@ test('keys enumerate in a stable order and then run out', ()=>{
 
 test('an enumeration name buffer that is one character short is ERROR_MORE_DATA', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
-    create('Software\\Beta');
+    const key = create('Software\\Test');
+    create('Software\\Test\\Beta');
 
     // Four characters and no room for the terminator: the classic off-by-one.
     memory.putDword(OUT_NAME_SIZE, 4);
@@ -374,8 +374,8 @@ test('an enumeration name buffer that is one character short is ERROR_MORE_DATA'
 
 test('an enumeration with nowhere to put the name is refused', ()=>{
     const { fns, create } = setup();
-    const key = create('Software');
-    create('Software\\Beta');
+    const key = create('Software\\Test');
+    create('Software\\Test\\Beta');
 
     assert.equal(
         fns.RegEnumKeyExA.handler([key, 0, 0, OUT_NAME_SIZE, 0, 0, 0, 0]),
@@ -387,7 +387,7 @@ test('an enumeration with nowhere to put the name is refused', ()=>{
 
 test('values enumerate with their type and data, and then run out', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'First', 'abcd');
     memory.bytes.set([7, 0, 0, 0], INPUT);
     memory.putString(NAME, 'Second');
@@ -423,7 +423,7 @@ test('values enumerate with their type and data, and then run out', ()=>{
 
 test('an enumerated value reports the data size it needed', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'First', 'abcd');
 
     memory.putDword(OUT_NAME_SIZE, 0x40);
@@ -444,9 +444,9 @@ test('an enumerated value reports the data size it needed', ()=>{
 
 test('RegQueryInfoKeyA is where the enumerators buffer sizes come from', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
-    create('Software\\Beta');
-    create('Software\\LongerName');
+    const key = create('Software\\Test');
+    create('Software\\Test\\Beta');
+    create('Software\\Test\\LongerName');
     setString(key, 'First', 'abcd');
     setString(key, 'SecondValue', 'a longer string');
 
@@ -469,7 +469,7 @@ test('RegQueryInfoKeyA is where the enumerators buffer sizes come from', ()=>{
 
 test('RegQueryInfoKeyA on an empty key answers zero rather than nothing', ()=>{
     const { memory, fns, create } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     memory.putDword(OUT_INFO, 0xdeadbeef);
     memory.putDword(OUT_INFO + 4, 0xdeadbeef);
 
@@ -483,7 +483,7 @@ test('RegQueryInfoKeyA on an empty key answers zero rather than nothing', ()=>{
 
 test('deleting a value reports whether there was one to delete', ()=>{
     const { memory, fns, create, setString } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     setString(key, 'Path', 'x');
 
     memory.putString(NAME, 'PATH');
@@ -511,7 +511,7 @@ test('a key with subkeys is refused, not deleted', ()=>{
 
 test('a key cannot delete itself', ()=>{
     const { fns, create } = setup();
-    const key = create('Software');
+    const key = create('Software\\Test');
     assert.equal(fns.RegDeleteKeyA.handler([key, 0]), ERROR_FILE_NOT_FOUND);
 });
 

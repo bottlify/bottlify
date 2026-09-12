@@ -155,7 +155,83 @@ function keyFromJSON(stored){
 }
 
 /**
- * Builds an empty hive: the four predefined roots and nothing under them.
+ * @typedef {Object} MachineKey
+ * @property {number} root
+ * @property {string} path
+ * @property {Record<string, string>} [values]
+ */
+
+/**
+ * The keys and values every Windows installation carries before any program
+ * has run, as far as a program of the era asks for them: where programs go,
+ * where the shared-library counts live, where an installer registers what it
+ * put there and where the shell keeps its folders. An installer opens these
+ * without creating them and takes a missing one for a broken machine.
+ *
+ * Every string is stored as REG_SZ; a path is what this machine's volume
+ * actually holds, so what a program reads here it can then open.
+ *
+ * @type {readonly MachineKey[]}
+ */
+const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Classes' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion', values: {
+        ProgramFilesDir: 'C:\\Program Files',
+        ProgramFilesPath: 'C:\\Program Files',
+        CommonFilesDir: 'C:\\Program Files\\Common Files',
+        SystemRoot: 'C:\\WINDOWS',
+        MediaPath: 'C:\\WINDOWS\\Media',
+    } },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Setup' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' },
+    { root: HKEY_LOCAL_MACHINE,
+        path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', values: {
+            'Common Desktop': 'C:\\Documents and Settings\\All Users\\Desktop',
+            'Common Programs': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs',
+            'Common Start Menu': 'C:\\Documents and Settings\\All Users\\Start Menu',
+            'Common Startup':
+                'C:\\Documents and Settings\\All Users\\Start Menu\\Programs\\Startup',
+            'Common Documents': 'C:\\Documents and Settings\\All Users\\Documents',
+        } },
+    { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', values: {
+        CurrentVersion: '5.1',
+        CurrentBuildNumber: '2600',
+        ProductName: 'Microsoft Windows XP',
+        SystemRoot: 'C:\\WINDOWS',
+        PathName: 'C:\\WINDOWS',
+    } },
+    { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+    { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
+    { root: HKEY_CURRENT_USER,
+        path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', values: {
+            Desktop: 'C:\\Documents and Settings\\User\\Desktop',
+            Programs: 'C:\\Documents and Settings\\User\\Start Menu\\Programs',
+            'Start Menu': 'C:\\Documents and Settings\\User\\Start Menu',
+            Startup: 'C:\\Documents and Settings\\User\\Start Menu\\Programs\\Startup',
+            Personal: 'C:\\Documents and Settings\\User\\My Documents',
+            AppData: 'C:\\Documents and Settings\\User\\Application Data',
+            Fonts: 'C:\\WINDOWS\\Fonts',
+        } },
+    { root: HKEY_CURRENT_USER, path: 'Control Panel\\Desktop' },
+]));
+
+/** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
+const sz = text=>{
+    const bytes = new Uint8Array(text.length + 1);
+    for (let at = 0; at < text.length; at++)
+    {
+        bytes[at] = text.charCodeAt(at) & 0xff;
+    }
+    return bytes;
+};
+
+/**
+ * Builds a hive: the four predefined roots with the machine's own keys under
+ * them (see MACHINE_KEYS), and nothing a program has put there yet.
  *
  * Enumeration order is insertion order throughout, which is what makes an
  * index-based enumeration answer the same thing twice. Overwriting a value
@@ -190,12 +266,43 @@ export function createHive(){
         });
     };
 
+    /**
+     * Puts the machine's own keys in place, adding what is missing and
+     * leaving what is there: a hive restored from an earlier run keeps every
+     * value a program wrote, and a key the program deleted comes back, as
+     * it would on a machine whose registry was repaired.
+     */
+    const furnish = ()=>{
+        for (const entry of MACHINE_KEYS)
+        {
+            let node = /** @type {RegistryKey} */ (roots.get(entry.root));
+            for (const part of segments(entry.path))
+            {
+                let next = node.keys.get(fold(part));
+                if (!next)
+                {
+                    next = makeKey(part);
+                    node.keys.set(fold(part), next);
+                }
+                node = next;
+            }
+            for (const [name, text] of Object.entries(entry.values ?? {}))
+            {
+                if (!node.values.has(fold(name)))
+                {
+                    node.values.set(fold(name), { name, type: REG_SZ, data: sz(text) });
+                }
+            }
+        }
+    };
+
     const reset = ()=>{
         roots.clear();
         for (const [id, name] of ROOT_NAMES)
         {
             roots.set(id, makeKey(name));
         }
+        furnish();
     };
     reset();
 
@@ -406,6 +513,7 @@ export function createHive(){
                 }
                 roots.set(id, keyFromJSON(entry.key));
             }
+            furnish();
         },
     };
 }

@@ -32,6 +32,7 @@ const ERROR_MORE_DATA = 234;
 const ERROR_NO_MORE_ITEMS = 259;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
 const ERROR_INVALID_SID = 1337;
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
 
 /** The count is a byte and the format allows eight. */
 const MAX_SUB_AUTHORITIES = 8;
@@ -421,6 +422,33 @@ export function createRegistryFunctions(host){
                 writeText(buffer >>> 0, USER_NAME);
                 writeDword(size >>> 0, needed);
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL GetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+         *                      DWORD nLength, LPDWORD lpnLengthNeeded)
+         * BOOL SetFileSecurityA(LPCSTR, SECURITY_INFORMATION, PSECURITY_DESCRIPTOR)
+         *
+         * This machine's volume carries no security descriptors, and the
+         * honest answer is the one the consumer line of Windows gave: the
+         * call is not implemented. A program of the era asks before it
+         * copies a file and carries on when told so; told nothing -- a zero
+         * with a stale error behind it -- it takes the copy for failed.
+         */
+        GetFileSecurityA: {
+            argBytes: 20,
+            handler: ()=>{
+                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            },
+        },
+
+        SetFileSecurityA: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
             },
         },
 
