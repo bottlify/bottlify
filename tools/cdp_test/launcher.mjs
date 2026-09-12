@@ -107,7 +107,7 @@ try
 {
     cdp = new CdpEndpoint(browser.browserWs);
     await cdp.open();
-    const { targetId } = await cdp.send('Target.createTarget', { url: `${options.url}#/library` });
+    const { targetId } = await cdp.send('Target.createTarget', { url: options.url });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Page.enable', {}, sessionId);
@@ -155,7 +155,13 @@ try
         console.log(`settings: ${options.settings}`);
     }
 
-    // The card, then Play: the launcher routes by hash and picks by click.
+    // The library link, the card, then Play: the launcher routes by path and
+    // picks by click. The link is clicked rather than navigated to so the
+    // router sees a history entry, the way it does under a person.
+    const libraryLink = `[...document.querySelectorAll('a')]`
+        + `.find(one=>one.getAttribute('href') === '/library')`;
+    await until(`Boolean(${libraryLink})`, 30000);
+    await evaluate(`${libraryLink}.click()`);
     await until(`document.querySelectorAll('.MuiCard-root').length > 0`, 30000);
     const clicked = await evaluate(`(()=>{
         const cards = [...document.querySelectorAll('.MuiCard-root')];
