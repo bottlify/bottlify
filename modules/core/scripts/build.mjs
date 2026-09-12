@@ -6,7 +6,7 @@
 
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
-import { copyFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -145,8 +145,12 @@ async function copyVendor(){
 }
 
 await mkdir(DIST, { recursive: true });
+// Two entries, one build: the module a page imports and the worker it starts
+// the engine in. Bundled apart because a worker is loaded by URL, not imported,
+// and each carries the engine it needs. Both sit in dist/, so the vendor
+// directory below is the same for either.
 await build({
-    entryPoints: [join(SRC, 'index.js')],
+    entryPoints: [join(SRC, 'index.js'), join(SRC, 'host', 'engine.worker.js')],
     bundle: true,
     format: 'esm',
     platform: 'browser',
@@ -163,9 +167,13 @@ await build({
     // The built module's own directory holds the emulator (see copyVendor),
     // so the engine finds it without being told.
     define: { 'import.meta.env.BOTTLIFY_VENDOR': '"./vendor/"' },
-    outfile: join(DIST, 'core.js'),
+    outdir: DIST,
+    entryNames: '[name]',
     logLevel: 'info',
 });
+// `index.js` is the package's entry and `core.js` is the file the exports map
+// names; esbuild names an output after its entry.
+await rename(join(DIST, 'index.js'), join(DIST, 'core.js'));
 const vendored = await copyVendor();
 // The audio worklet runs on the browser's audio thread, loaded by URL rather
 // than imported, so it ships as a file of its own beside the module.
@@ -177,4 +185,4 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log(`dist: core.js + ${vendored} vendor artifacts + checksums.json`);
+console.log(`dist: core.js + engine.worker.js + ${vendored} vendor artifacts + checksums.json`);

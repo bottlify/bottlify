@@ -961,6 +961,35 @@ runs on.
 changed and written back runs compiled: the stored status and control words are right, and
 generated code was entered fewer than once in ten iterations rather than three times each.
 
+### B12. The audio layer on a thread of its own: the seam, and why it is not crossed yet
+
+The engine now runs in a worker and the output already runs on the audio thread (the worklet
+reading the ring). What is left on the engine's thread is the mixer's pump -- every open track
+resampled and mixed into the ring once a turn -- the DirectSound, waveOut and MSS buffer reads out
+of guest memory that feed it, and the hosted MPEG provider's WebCodecs callbacks. The user's
+question was whether those should go to a second worker.
+
+**What a split would have to look like.** The guest's memory is the emulator's own wasm memory
+(`exports.memory` of the vendored build), and that build is not compiled with shared memory, so a
+second worker cannot read a sound buffer where it lies. The seam is therefore not a shared view of
+guest RAM but the buffer *writes*: an Unlock, a waveOutWrite, a stream feed copies the bytes the
+program wrote into a block the audio worker owns, and the cursors and track state travel the other
+way through a small shared control block (Int32 words for play/write positions and flags, read with
+`Atomics`), so a `GetCurrentPosition` on the engine thread is a load rather than a round trip. The
+ring stays where the mixer is; the MPEG provider and its decoder live with the mixer so its output
+callbacks never queue behind a turn. The audio layer's boundaries do not move: it still requires
+win32, bridge and memory through the module contract, and placing it elsewhere is a host decision
+(`src/host/`), not a new import.
+
+**Why it stays where it is, for now.** Measured on the main menu of a real title through the
+harness, 60 000 scheduler turns, engine in a worker: the pump's self time was 921 ms of a 186 s
+run, 0.5% of wall and 11 us a turn; on the page's thread the same run put it at 1196 ms of 209 s,
+0.6%. A device that draws less than one percent of the thread is not what to move first, and the
+decoder callbacks that were held behind the page's own work are, in the worker, held only behind
+turns the loop yields between when something is pending. The seam above is what to build when a
+measurement says the pump has become material -- many tracks, a resampler on every one -- and not
+before.
+
 ## An unlocked buffer is read through a window, and the crossing is timed one call in eight
 
 **The cause.** Browser profiler on the saved battle, after the trap's own costs were cut: the

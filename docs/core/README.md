@@ -55,37 +55,89 @@ A disabled module that another active module `requires` is not silently omitted:
 a stub (see below) so the interface stays bound and the requiring module never has to special-case
 "my dependency doesn't exist". An unknown module name anywhere in the configuration is an error.
 
-## Public surface (agreed, not yet built)
+## Public surface
 
-What a consumer imports is deliberately not the module machinery above. The agreed shape:
+What a consumer imports is deliberately not the module machinery above:
 
 ```js
-// the runtime itself — no framework, runs in a worker
+// the runtime itself -- no framework; runs the engine in a worker of its own
 import { createApp } from '@bottlify/core';
 
-// optional React binding; React is a dependency of this entry point only
-import { AppProvider, Viewport, useApp } from '@bottlify/core/react';
+const app = await createApp({
+    executable,                                    // Uint8Array: the program
+    v86: { moduleUrl, wasmBytes },                 // the emulator's artifacts
+    canvas,                                        // or `container`, or neither
+    bundle: { url, id, store: 'local' },           // a .btl, by URL, read a range at a time
+    storage: 'opfs',                               // where the session goes
+    audio: { drained: true, sampleRate },          // something reads the ring
+    host: 'worker',                                // or 'thread'
+});
+app.on('frame', ({ width, height }) => { /* the viewport's own pixels */ });
+app.input.attach(canvas);                          // keyboard and mouse, on the page
+const speaker = new AudioWorkletNode(context, 'bottlify-output', {
+    processorOptions: { ...app.audio.ring().memory, channels: app.audio.format().channels },
+});
+const code = await app.run();
 ```
 
-`createApp` returns an `AppController` — `run()`, `pause()`, `attachLog()`/`detachLog()` and the
-rest of the lifecycle. `AppProvider` calls it and puts the controller in context, `Viewport` owns
-the canvas and hands it to the runtime, `useApp` reaches the controller.
+`createApp` runs on the page and builds everything between the program and the browser: it
+spawns the engine worker (`engine.worker.js`, shipped beside `core.js` and found relative to it;
+`workerUrl` overrides that for a bundler that moves files), adopts the `canvas` it is given --
+or makes one in `container` -- and transfers its control to the worker, opens the GPU device in
+the worker and presents every frame straight into that canvas, captures keyboard and mouse on
+the canvas and posts them, forwards the page's visibility to the worker for pacing only, and hands
+back the sound ring's shared memory for the page's audio worklet. What it returns is the same
+controller either way: `run`, `pause`, `resume`, `stop`, `dispose`, `on`, `attachLog`,
+`diagnostics`, `log`, `audio`, `input`, `session`, `registry`, `presented`, `trace`.
 
-The controller is not React-specific and carries no framework types: it is the runtime's own handle,
-which is why the React entry point can be a thin wrapper rather than a parallel implementation.
+### Where the engine runs: `host`
 
-Two rules behind this shape:
+- `worker` (the default wherever `Worker` exists): the emulator, the Win32 layer, the mixer's
+  pump and the GPU device all live on a thread of their own. The page does nothing per frame.
+  The run loop keeps the page's pacing by default -- a yield every turn, a short look while
+  idle -- because that is what measured best; `pacing: 'event'` asks for the loop a thread of
+  its own allows instead: turns back to back until a host answer, a range or a message from
+  the page is pending, and an idle machine asleep until the guest's own next deadline -- a
+  timed wait, a queue timer, a device that wants feeding -- or until the page speaks. The page
+  counts what it posts in one shared word (when the origin has shared memory) so the worker
+  sees a waiting message between two turns without yielding to find out. Measured on a real
+  title's menu, the event-driven loop woke once per host answer for turns that retired nothing
+  and ran at half the page pacing's throughput; it stays available for the change that batches
+  those wakes.
+- `thread`: the same engine behind the same port protocol on the calling thread, with the
+  page's own pacing (a yield every turn, a short look while idle) because that thread cannot
+  block. This is what a test, a headless run and `?engine=src` debugging use, and what a
+  runtime without `Worker` falls back to.
 
-- **The core package stays framework-agnostic.** It has zero runtime dependencies and executes in a
-  worker; exporting React components from its main entry would put React inside the engine. A
-  first-party UI is a separate concern, and embedding is otherwise the consumer's own business.
-- **Nothing in the core's vocabulary is named after games.** This is a Win32 runtime — "web-wine",
-  in the owner's words — and games are the target use case, not the subject. Hence `createApp` and
-  not `createGame`.
+A canvas can transfer its control once, so the host it was handed to is kept for as long as the
+canvas is: disposing a program leaves its worker ready, and the next `createApp` on the same
+canvas starts in it.
 
-Still open: whether the React binding ships as the `@bottlify/core/react` subpath shown here or as a
-separate `@bottlify/react` package. A subpath keeps one version and one release; a separate package
-keeps the dependency graph cleaner for non-React consumers.
+### What became asynchronous
+
+Anything that crosses the thread boundary answers with a promise, in both host modes, so a
+consumer writes against one shape:
+
+| call | answers |
+|---|---|
+| `run()`, `pause()`, `resume()`, `stop()`, `dispose()` | `Promise` |
+| `diagnostics()`, `trace()`, `presented()` | `Promise` |
+| `log.setLevel()`, `log.setDefaultLevel()`, `log.profile()`, `log.frames()` | `Promise` |
+| `log.recent()`, `log.drain()` | synchronous, from a mirror of the journal the page keeps in step a few times a second |
+| `audio.ring()`, `audio.format()` | synchronous; the ring's memory was handed over at start |
+| `session.export()`, `registry()` | synchronous, once `run()` has resolved: what the exit left behind travels with it (files only with `collectOnExit`) |
+| `on()`, `input.*`, `attachLog()` | synchronous |
+
+Options that could not cross a thread are named by what they are built from: a bundle by its
+`url` rather than a fetch function, a seeded volume by `storage: { files }`, a watch by
+`watch: { libraries, strings }`, hooks by `hooks: [{ module, offset, label, argBytes, lengths }]`,
+the device's diagnostic knobs by `device: { fog, mips, skipTexture, ... }` with no device object.
+
+A React binding (`AppProvider`, `Viewport`, `useApp`) is still an open question: a
+`@bottlify/core/react` subpath keeps one version and one release; a separate package keeps the
+dependency graph cleaner for non-React consumers. The core package stays framework-agnostic
+either way, and nothing in its vocabulary is named after games: this is a Win32 runtime, and games
+are the target use case, not the subject.
 
 ## What is built, and what is not
 

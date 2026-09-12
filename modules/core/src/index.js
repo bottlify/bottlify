@@ -8,9 +8,9 @@
  * What the published package exports.
  *
  * This exists only so that the two surfaces can be exported together without
- * either importing the other: `app.js` is built on `core.js`, so `core.js`
- * cannot name it back.
+ * either importing the other: `host/create.js` is built on `app.js`, which is
+ * built on `core.js`, so `core.js` cannot name either back.
  */
 
-export { createApp } from './app.js';
+export { createApp } from './host/create.js';
 export { assembleModules } from './core.js';

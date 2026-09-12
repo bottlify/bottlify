@@ -32,6 +32,7 @@
   },
   "exports": {
     ".": "./dist/core.js",
+    "./engine.worker.js": "./dist/engine.worker.js",
     "./worklet.js": "./dist/worklet.js",
     "./libv86.mjs": "./dist/vendor/libv86.mjs",
     "./v86.wasm": "./dist/vendor/v86.wasm",
