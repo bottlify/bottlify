@@ -244,6 +244,28 @@ const int64 = (lowPart, highPart)=>(highPart | 0) * 0x100000000 + (lowPart >>> 0
 export function createFileFunctions(host){
     const { files } = host;
 
+    // A machine has these directories before any program runs: GetTempPath
+    // promises the one, and an installer's first act is to create its scratch
+    // file there. A promise of a directory that is not there fails that
+    // create with "access denied", which is the wrong answer to a question
+    // the program never asked.
+    for (const path of ['C:\\WINDOWS', TEMP_PATH.slice(0, -1)])
+    {
+        try
+        {
+            if (!files.stat(path)?.exists)
+            {
+                files.mkdir(path);
+            }
+        }
+        catch (e){
+            // A volume that cannot make a directory -- a build assembled
+            // without one -- has no directory to promise, and nothing to do
+            // about it here.
+            void e;
+        }
+    }
+
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         host.writeMemory(address, new Uint8Array([
@@ -1323,6 +1345,11 @@ export function createFileFunctions(host){
                     {
                         return fail(ERROR_ACCESS_DENIED, 0);
                     }
+                    // Created and closed: the name is reserved by the file's
+                    // existence, not by holding it open. Held, the caller's own
+                    // open of the name it was just given would be refused as
+                    // shared with nobody.
+                    files.close(node);
                 }
 
                 if ((out >>> 0) !== 0)
@@ -1602,6 +1629,11 @@ export function createFileFunctions(host){
          * Zero for success, which is the opposite of CloseHandle's convention
          * and the kind of difference that is silent when got wrong: a caller
          * that checks for zero would see every close as a failure.
+         *
+         * The volume is told, as CloseHandle tells it. A handle closed without
+         * its file stays open underneath with its sharing terms, and the next
+         * open of the same name for writing -- which is exactly what follows a
+         * create-and-close -- is refused as shared with nobody.
          */
         _lclose: {
             argBytes: 4,
@@ -1609,7 +1641,11 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    host.handles.close(handle >>> 0);
+                    const closed = host.handles.close(handle >>> 0);
+                    if (closed && closed.node)
+                    {
+                        files.close(closed.node);
+                    }
                     host.setLastError(ERROR_SUCCESS);
                     return 0;
                 }

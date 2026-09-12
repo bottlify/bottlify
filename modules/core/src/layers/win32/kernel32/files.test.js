@@ -185,7 +185,10 @@ function fakeFiles(){
             cut.set(entry.data.subarray(0, Math.min(size, entry.data.length)));
             entry.data = cut;
         },
-        close: ()=>{},
+        /** @param {{ path: string }} node */
+        close: node=>{
+            void node;
+        },
         /** @param {string} path */
         remove(path){
             const node = nodes.get(path);
@@ -451,7 +454,8 @@ test('a write to a standard handle goes to the console, not to the filesystem', 
     assert.equal(result, 1);
     assert.deepEqual(console, [{ handle: HANDLE_STDOUT, text: 'hello' }]);
     assert.equal(memory.dword(OUT_COUNT), 5);
-    assert.equal(files.nodes.size, 2, 'nothing was created for it');
+    // The volume holds what it held plus the machine's own two directories.
+    assert.equal(files.nodes.size, 4, 'nothing was created for it');
 });
 
 test('a write to a file lands at the position and moves it on', ()=>{
@@ -921,6 +925,40 @@ test('_lopen and _lread read a file the old way', ()=>{
     assert.equal(fns._lread.handler([handle, BUFFER, 7]), 7);
     assert.equal(memory.string(BUFFER), 'payload');
     assert.equal(fns._lclose.handler([handle]), 0, 'zero is success here, unlike CloseHandle');
+});
+
+test('_lclose hands the file back to the volume, as CloseHandle does', ()=>{
+    // A create-and-close followed by an open for writing is how a
+    // self-extractor takes a scratch file. With the handle closed and the file
+    // still held underneath, that open was refused as shared with nobody.
+    const { files, fns, at } = setup();
+    /** @type {string[]} */
+    const released = [];
+    files.close = (/** @type {{ path: string }} */ node)=>{
+        released.push(node.path);
+    };
+
+    const handle = fns._lcreat.handler([at(NAME, 'C:\\GAME\\SCRATCH.TMP'), 0]);
+    assert.notEqual(handle, HFILE_ERROR);
+    assert.equal(fns._lclose.handler([handle]), 0);
+    assert.deepEqual(released, ['C:\\GAME\\SCRATCH.TMP']);
+    assert.notEqual(fns._lopen.handler([at(NAME, 'C:\\GAME\\SCRATCH.TMP'), 2]), HFILE_ERROR,
+        'and the name opens again for writing');
+});
+
+test('the temporary directory exists before a program asks for it', ()=>{
+    // GetTempPath names it and an installer creates its first file there
+    // without looking; a machine on which the promised directory is missing
+    // answers that create with "access denied".
+    const { files, fns, memory, at } = setup();
+    assert.ok(files.stat('C:\\WINDOWS\\TEMP')?.isDirectory);
+
+    assert.notEqual(fns.GetTempFileNameA.handler([0, at(NAME, 'GLC'), 0, BUFFER]), 0);
+    const path = memory.string(BUFFER);
+    assert.ok(path.startsWith('C:\\WINDOWS\\TEMP\\GLC'), path);
+    assert.ok(files.stat(path)?.exists, 'the name is reserved by a file');
+    assert.notEqual(fns._lopen.handler([at(NAME, path), 2]), HFILE_ERROR,
+        'which the caller can open for writing: the reservation did not hold it open');
 });
 
 test('_lopen refuses a file that is not there', ()=>{
