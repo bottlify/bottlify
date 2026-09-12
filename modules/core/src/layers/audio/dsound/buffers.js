@@ -132,6 +132,8 @@ export function createSoundBuffer(
      * device block is heard as a click.
      */
     let fedByte = 0;
+    /** How far ahead of the play cursor the read stood when it last advanced. */
+    let fedLead = 0;
     // A non-looping buffer that reached its end since the last drain. Its play
     // cursor reads zero again, so the wrapped span drainPlayed forms collapses
     // to nothing for a sound short enough to finish between two fills of the
@@ -271,12 +273,17 @@ export function createSoundBuffer(
         // it has covered since.
         const target = (play + ahead) % bytes;
         const covered = (target - fedByte + bytes) % bytes;
-        if (covered === 0)
+        // The read can stand ahead of the target by up to the lead it was
+        // last advanced with: a stop drops the lead to nothing and a lower
+        // rate shrinks it. Read as a wrap, that distance is nearly the whole
+        // buffer, handed over again.
+        if (covered === 0 || covered >= bytes - fedLead)
         {
             return [];
         }
         const from = fedByte;
         fedByte = target;
+        fedLead = ahead;
         const first = Math.min(covered, bytes - from);
         return first === covered
             ? [{ from, bytes: covered }]
@@ -310,6 +317,7 @@ export function createSoundBuffer(
             anchorByte = 0;
             anchorMs = now();
             fedByte = 0;
+            fedLead = 0;
         },
         get primary(){
             return primary;
@@ -356,15 +364,16 @@ export function createSoundBuffer(
 
         stop(){
             // The position is kept, because GetCurrentPosition on a stopped
-            // buffer has to report where it actually stopped.
+            // buffer has to report where it actually stopped. The read is
+            // not pulled back to it: what was read ahead of here is in the
+            // mixer and will be heard, and reading it again on resume plays
+            // it twice -- for a pause between two sounds, the end of the
+            // first one repeated. The same holds after a one-shot ran to
+            // its end, where the cursor reads zero again and a read pulled
+            // back there hands over the whole sound a second time.
             anchorByte = playCursor();
             anchorMs = now();
             playing = false;
-            // What was read ahead of here is out of the program's hands and
-            // will still be heard; playing again reads it once more, so that
-            // the sound resumes from where the cursor says it is rather than
-            // from where the read had got to.
-            fedByte = anchorByte;
         },
 
         /** @param {number} position */
@@ -377,6 +386,7 @@ export function createSoundBuffer(
             // between where playback used to be and where it has been put --
             // which is most of the buffer, played at once.
             fedByte = anchorByte;
+            fedLead = 0;
         },
 
         /** @param {number} hz  Zero means the format's own rate. */

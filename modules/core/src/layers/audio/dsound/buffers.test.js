@@ -277,21 +277,91 @@ test('the bytes playback passed are read out, which is what makes it audible', (
     assert.equal(lead + aligned(SECOND / 4), sound.cursors().write, 'up to the write cursor');
 });
 
-test('stopping and playing again resumes the read from the cursor', ()=>{
-    // What was read ahead of the stop is already on its way to the device; a
-    // resume reads it again rather than leaving a hole the length of the lead
-    // between where the program sees the cursor and where the read had got.
+/**
+ * How many times each byte of a buffer has been handed over, across a
+ * sequence of drains: the property under test is that no byte is heard twice.
+ *
+ * @param {ReturnType<typeof createSoundBuffer>} sound
+ */
+function coverage(sound){
+    const counts = new Uint8Array(sound.bytes);
+    return {
+        drain(){
+            const ranges = sound.drainPlayed();
+            for (const range of ranges)
+            {
+                for (let at = range.from; at < range.from + range.bytes; at++)
+                {
+                    counts[at]++;
+                }
+            }
+            return ranges;
+        },
+        twice: ()=>counts.filter(count=>count > 1).length,
+    };
+}
+
+test('a stop and a resume hand every byte over once', ()=>{
+    // The lead ahead of the play cursor was already given to the mixer when
+    // the program stopped, and the mixer cannot give it back: it is heard
+    // then. Handing it over again on resume plays those bytes twice, which
+    // for a pause between two sounds is the end of the first one repeated.
     const { sound, time } = buffer();
+    const handed = coverage(sound);
     sound.play(DSBPLAY_LOOPING);
     time.advance(250);
-    sound.drainPlayed();
+    handed.drain();
+    const fed = sound.cursors().write;
     sound.stop();
-    assert.deepEqual(sound.drainPlayed(), [], 'a stopped buffer reads nothing');
+    assert.deepEqual(handed.drain(), [], 'a stopped buffer reads nothing');
+    assert.equal(sound.cursors().play, aligned(SECOND / 4), 'the cursor reads where it stopped');
 
     sound.play(DSBPLAY_LOOPING);
-    const [range] = sound.drainPlayed();
-    assert.equal(range.from, sound.cursors().play, 'from the cursor');
-    assert.equal(range.from + range.bytes, sound.cursors().write, 'to the lead');
+    assert.equal(sound.cursors().play, aligned(SECOND / 4), 'and resumes from there');
+    assert.deepEqual(handed.drain(), [], 'the lead was handed over before the stop');
+    time.advance(100);
+    const [range] = handed.drain();
+    assert.equal(range.from, fed, 'the read continues where it had got to');
+    assert.equal(range.from + range.bytes, sound.cursors().write, 'up to the write cursor');
+    assert.equal(handed.twice(), 0);
+});
+
+test('lowering the rate does not hand over a lap', ()=>{
+    // The lead shrinks with the rate, so the read stands past the cursor and
+    // its new lead; a distance read as a wrap is nearly the whole buffer.
+    const { sound, time } = buffer();
+    const handed = coverage(sound);
+    sound.play(DSBPLAY_LOOPING);
+    time.advance(250);
+    handed.drain();
+    const fed = sound.cursors().write;
+    sound.setFrequency(FORMAT.sampleRate / 4);
+    assert.deepEqual(handed.drain(), [], 'nothing new was played');
+    time.advance(400);
+    const [range] = handed.drain();
+    assert.equal(range.from, fed, 'the read continues where it had got to');
+    assert.equal(handed.twice(), 0);
+});
+
+test('a one-shot stopped after it ended hands over its tail, not the whole sound', ()=>{
+    // Reaching the end puts the cursor back at zero; a program that then
+    // calls Stop -- before letting go of the buffer, say -- must not make
+    // the next drain start from zero too, or everything already heard is
+    // heard again.
+    const { sound, time } = buffer();
+    const handed = coverage(sound);
+    sound.play(0);
+    time.advance(400);
+    handed.drain();
+    const fed = sound.cursors().write;
+    time.advance(1000);
+    assert.equal(sound.status() & DSBSTATUS_PLAYING, 0, 'it finished');
+    sound.stop();
+    const [tail] = handed.drain();
+    assert.equal(tail.from, fed, 'from where the read had got to');
+    assert.equal(tail.from + tail.bytes, SECOND, 'to the end');
+    assert.deepEqual(handed.drain(), [], 'and nothing more');
+    assert.equal(handed.twice(), 0);
 });
 
 test('a span that runs off the end comes back as the two ranges it is', ()=>{
