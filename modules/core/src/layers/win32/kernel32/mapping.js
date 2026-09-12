@@ -27,6 +27,8 @@
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What a read that failed after the caller was parked answers. */
+const ERROR_IO_DEVICE = 1117;
 
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
@@ -44,13 +46,23 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
+ * @property {(thread: any, code: number) => void} [setLastErrorFor]
+ *           The error of a thread that is not the one running: a map that
+ *           waited for its bytes answers on somebody else's turn.
+ * @property {() => any} [currentThread]
+ * @property {{ views: number, waited: number, failed: number }} [metrics]
+ *           Counted in place: views mapped, views that waited for their
+ *           bytes, views whose bytes never came.
  * @property {(bytes: number) => number} allocate  Guest memory, or 0.
  * @property {(address: number) => void} release
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
  *              close: (handle: number) => any }} handles
- * @property {{ read: (node: any, offset: number, length: number) => Uint8Array | null,
+ * @property {{ read: (node: any, offset: number, length: number) =>
+ *                  Uint8Array | Promise<Uint8Array>,
  *              write: (node: any, offset: number, bytes: Uint8Array) => number }} files
+ *           A promise when the bytes are not resident yet; the map then
+ *           answers when they are, the caller parked meanwhile, as a read is.
  */
 
 /**
@@ -176,30 +188,53 @@ export function createMappingFunctions(host){
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
 
-                // Read through to the file now. An anonymous mapping starts as
-                // zeroes, which is what the allocator already gives.
-                if (mapping.node)
-                {
-                    const bytes = host.files.read(mapping.node, offset, wanted);
-                    if (bytes === null)
-                    {
-                        // The file cannot be read without waiting, and this call
-                        // has nowhere to wait. Refused rather than mapped as
-                        // zeroes, which a caller would read as a file of nulls
-                        // and never question.
-                        host.release(address);
-                        return fail(ERROR_NOT_ENOUGH_MEMORY);
-                    }
+                const writable = mapping.writable
+                    && ((access >>> 0) & (FILE_MAP_WRITE | FILE_MAP_ALL_ACCESS)) !== 0;
+                const metrics = host.metrics;
+                /** @param {Uint8Array} bytes */
+                const deliver = bytes=>{
                     if (bytes.length > 0)
                     {
                         host.writeMemory(address, bytes);
                     }
-                }
+                    views.set(address, { mapping, offset, length: wanted, writable });
+                    if (metrics)
+                    {
+                        metrics.views++;
+                    }
+                    return address;
+                };
 
-                const writable = mapping.writable
-                    && ((access >>> 0) & (FILE_MAP_WRITE | FILE_MAP_ALL_ACCESS)) !== 0;
-                views.set(address, { mapping, offset, length: wanted, writable });
-                return address;
+                // Read through to the file now. An anonymous mapping starts as
+                // zeroes, which is what the allocator already gives.
+                if (!mapping.node)
+                {
+                    return deliver(new Uint8Array(0));
+                }
+                const bytes = host.files.read(mapping.node, offset, wanted);
+                if (typeof (/** @type {any} */ (bytes))?.then !== 'function')
+                {
+                    return deliver(/** @type {Uint8Array} */ (bytes));
+                }
+                // The bytes are not here yet. The caller is parked until they
+                // are, the way a read parks it: a program that maps an archive
+                // it has just opened is not told it has run out of memory
+                // because the archive had not finished arriving.
+                const owner = host.currentThread?.() ?? null;
+                if (metrics)
+                {
+                    metrics.waited++;
+                }
+                const arriving = /** @type {Promise<Uint8Array>} */ (bytes);
+                return /** @type {any} */ (arriving.then(deliver, ()=>{
+                    host.release(address);
+                    host.setLastErrorFor?.(owner, ERROR_IO_DEVICE);
+                    if (metrics)
+                    {
+                        metrics.failed++;
+                    }
+                    return 0;
+                }));
             },
         },
 

@@ -279,6 +279,8 @@ export const win32Module = {
         // task memory, a vtable -- comes out of the same free list, because
         // carving it up in advance is guessing at proportions nobody knows.
         const allocator = createHeapAllocator(arena);
+        // Counted by the mapping calls as they go.
+        const mappings = { views: 0, waited: 0, failed: 0 };
         const heap = {
             /** @param {number} bytes */
             allocate: bytes=>allocator.allocate(bytes),
@@ -483,6 +485,7 @@ export const win32Module = {
                 ...createHeapFunctions({
                     arena, allocator, readMemory, writeMemory,
                     setLastError: setError,
+                    divergence: config?.divergence,
                     /** @param {number} address */
                     regionAt: address=>memory.find(address),
                 }),
@@ -548,6 +551,7 @@ export const win32Module = {
                     readMemory,
                     writeMemory,
                     setLastError: setError,
+                    metrics: mappings,
                     /** @param {number} bytes */
                     allocate: bytes=>allocator.allocate(bytes),
                     /** @param {number} address */
@@ -556,20 +560,18 @@ export const win32Module = {
                     files: {
                         /**
                          * A mapping is read here, at map time, rather than on
-                         * every access -- so a block that is not resident yet
-                         * would be a promise, and this call cannot wait. The
-                         * mapping layer is told, and refuses rather than
-                         * handing the guest a promise it cannot use.
+                         * every access; a block that is not resident yet is a
+                         * promise, and the mapping layer parks the caller on
+                         * it, as a read does.
                          *
                          * @param {any} node @param {number} offset @param {number} length
                          */
-                        read: (node, offset, length)=>{
-                            const bytes = volume.read(node, offset, length);
-                            return bytes instanceof Promise ? null : bytes;
-                        },
+                        read: (node, offset, length)=>volume.read(node, offset, length),
                         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                         write: (node, offset, bytes)=>volume.write(node, offset, bytes),
                     },
+                    currentThread: ()=>kernel.currentThread(),
+                    setLastErrorFor: setErrorOn,
                 }),
                 ...ports.table,
                 ...createFileTimeFunctions({
@@ -998,6 +1000,8 @@ export const win32Module = {
              * allocators hand out the same address.
              */
             heap: ()=>heap,
+            /** Views of files: how many were mapped, waited for their bytes, or failed. */
+            mappings: ()=>mappings,
 
             /**
              * Which threads are parked on a completion port, and for how long.
@@ -1081,6 +1085,7 @@ export const win32Module = {
                 // layer that takes from it and never gives back does not merely
                 // leak -- it tells the program to stop keeping things.
                 heap: current ? current.heap().diagnostics() : null,
+                mappings: current ? current.mappings() : null,
                 windowProcedures: current ? current.windowProcedures() : [],
                 exitCode: current ? current.exitCode() : null,
             },

@@ -388,3 +388,26 @@ test('the global functions declare the stack they pop', ()=>{
     assert.equal(fns.GlobalSize.argBytes, 4);
     assert.equal(fns.LocalFree.argBytes, 4);
 });
+
+test('a refused allocation says what was asked and what was left', ()=>{
+    // A program told it has run out of memory says so in its own words and
+    // exits; the report is the only account of how much it asked for.
+    const host = fakeHost();
+    /** @type {[string, string][]} */
+    const reports = [];
+    const fns = createHeapFunctions({
+        ...host,
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>{
+            reports.push([api, detail]);
+        },
+    });
+    const heap = fns.GetProcessHeap.handler();
+    assert.notEqual(fns.HeapAlloc.handler([heap, 0, 64]), 0);
+    assert.equal(fns.HeapAlloc.handler([heap, 0, ARENA.size * 2]), 0);
+    assert.equal(fns.VirtualAlloc.handler([0, ARENA.size * 2, 0x1000, 4]), 0);
+    assert.equal(reports.length, 2);
+    assert.equal(reports[0][0], 'HeapAlloc');
+    assert.match(reports[0][1], /^\d+ bytes refused: \d+ largest free of \d+ free, \d+ used in 1 blocks$/);
+    assert.equal(reports[1][0], 'VirtualAlloc');
+});

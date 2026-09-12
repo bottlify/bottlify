@@ -297,6 +297,10 @@ export function createHeapAllocator({ base, size }){
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
  *           Without it VirtualQuery reports every address as free.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a refused allocation is reported: a program that is told it
+ *           has run out of memory says so in its own words and exits, and
+ *           without this nothing says how much it asked for and what was left.
  */
 
 /**
@@ -330,6 +334,18 @@ export function createHeapFunctions(host){
 
     const processHeap = newHandle();
     const heaps = new Set([processHeap]);
+
+    /**
+     * An allocation the arena could not serve, said with what was asked and
+     * what was left, since the program will only say it ran out of memory.
+     *
+     * @param {string} api @param {number} size
+     */
+    const refused = (api, size)=>{
+        const state = allocator.diagnostics();
+        host.divergence?.(api, `${size} bytes refused: ${state.largestFree} largest free`
+            + ` of ${state.free} free, ${state.used} used in ${state.blocks} blocks`);
+    };
 
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
@@ -414,6 +430,7 @@ export function createHeapFunctions(host){
                 // prepared to handle the failure.
                 if (address === 0)
                 {
+                    refused('HeapAlloc', size);
                     return 0;
                 }
                 if (flags & HEAP_ZERO_MEMORY)
@@ -552,6 +569,7 @@ export function createHeapFunctions(host){
                         // with no code behind it leaves whatever the previous
                         // call happened to set, which is worse than useless.
                         host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                        refused('VirtualAlloc', rounded);
                         return 0;
                     }
                 }

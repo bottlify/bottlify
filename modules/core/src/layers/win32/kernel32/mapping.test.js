@@ -22,7 +22,10 @@ function setup(){
     let nextAddress = 0x1000;
     /** @type {number[]} */
     const errors = [];
+    /** @type {[any, number][]} */
+    const errorsFor = [];
     /** The one file a mapping can be made of, as a byte array. */
+    /** @type {{ data: Uint8Array, arrives?: Promise<boolean> }} */
     const file = { data: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]) };
 
     const fns = createMappingFunctions({
@@ -54,8 +57,27 @@ function setup(){
             },
             close: handle=>table.delete(handle),
         },
+        currentThread: ()=>'the-caller',
+        /** @param {any} thread @param {number} code */
+        setLastErrorFor: (thread, code)=>{
+            errorsFor.push([thread, code]);
+        },
         files: {
-            read: (node, offset, length)=>node.data.slice(offset, offset + length),
+            /** @param {any} node @param {number} offset @param {number} length */
+            read: (node, offset, length)=>{
+                const block = node.data.slice(offset, offset + length);
+                if (node.arrives)
+                {
+                    return node.arrives.then((/** @type {boolean} */ ok)=>{
+                        if (!ok)
+                        {
+                            throw new Error('the block did not arrive');
+                        }
+                        return block;
+                    });
+                }
+                return block;
+            },
             write: (node, offset, data)=>{
                 node.data.set(data, offset);
                 return data.length;
@@ -66,7 +88,7 @@ function setup(){
     const fileHandle = nextHandle;
     nextHandle += 4;
     table.set(fileHandle, { type: 'file', object: file });
-    return { fns, bytes, errors, file, fileHandle };
+    return { fns, bytes, errors, errorsFor, file, fileHandle };
 }
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -129,4 +151,36 @@ test('a pipe is one queue with two handles, and peeking does not consume', ()=>{
     assert.equal(dword(bytes, 0x314), 0);
     assert.equal(fns.PeekNamedPipe.handler([write, 0x300, 16, 0x310, 0x314, 0x318]), 0,
         'and the writing end is not the end you peek');
+});
+
+test('a view of a file whose bytes are not here yet is answered when they are', async()=>{
+    // A volume backed by a bundle answers a read with a promise while the
+    // block is still arriving. A program that maps an archive it has just
+    // opened used to be told it had run out of memory; it is parked instead,
+    // as a read parks it, and gets its view once the bytes are there.
+    const { fns, bytes, file, fileHandle, errors } = setup();
+    /** @type {(ok: boolean) => void} */
+    let arrive = ()=>{};
+    file.arrives = new Promise(resolve=>{
+        arrive = resolve;
+    });
+    const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 8, 0]);
+    const answer = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 8]);
+    assert.equal(typeof answer.then, 'function', 'the caller is parked on the bytes');
+    arrive(true);
+    const view = await answer;
+    assert.notEqual(view, 0);
+    assert.deepEqual([...bytes.slice(view, view + 8)], [1, 2, 3, 4, 5, 6, 7, 8]);
+    assert.deepEqual(errors, [], 'no error was set: nothing went wrong');
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+});
+
+test('a view whose bytes never arrive fails on the caller, not on whoever runs then', async()=>{
+    const { fns, file, fileHandle, errorsFor } = setup();
+    file.arrives = Promise.resolve(false);
+    const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 8, 0]);
+    const view = await fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 8]);
+    assert.equal(view, 0);
+    assert.deepEqual(errorsFor, [['the-caller', 1117]],
+        'ERROR_IO_DEVICE, on the thread that asked');
 });

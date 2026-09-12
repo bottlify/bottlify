@@ -835,6 +835,29 @@ phases when asked; a test hands a record out of the ring, makes another call, an
 copy is untouched; a memory test reads bytes to the end of a region, past it, out of a region
 added later, and out of one re-protected after being remembered.
 
+## A view of a file waits for its bytes, and a refused allocation says what it refused
+
+**The cause.** A title loading a saved match died one time in eight with its own critical
+error, "not enough memory resources", its crash report naming its archive reader; the heap had
+three quarters of a gigabyte free. Two of this engine's calls answer with that code for reasons
+that are not memory: `MapViewOfFile` refused a file whose bytes had not arrived yet (a volume
+backed by a bundle answers a read with a promise, and the map had nowhere to wait), and a refused
+`VirtualAlloc` or `HeapAlloc` said nothing about what was asked or what was left.
+
+**The change.** A view of a file whose bytes are not resident parks the caller until they are,
+exactly as `ReadFile` does, and answers on that thread; the failed arrival sets the caller's own
+error. A refused allocation is reported as a divergence with the size asked and the arena's
+largest free span, free total and use. The mapping calls count views mapped, waited for and
+failed, in the win32 diagnostics.
+
+**The measurement.** On this title the mapping change is not the cause: a load of the match and
+the save maps no file at all (views 0). The refused-allocation report is what the next crash is
+caught with; the load loop polls the log for it.
+
+**The tests.** A map whose bytes arrive later answers when they do, with the bytes and no error;
+one whose bytes never come fails on the thread that asked, with `ERROR_IO_DEVICE`; a refused heap
+or virtual allocation reports its size against the arena's state.
+
 ## Without paging a block runs to its page's boundary and across it
 
 **The cause.** The profiler build, on a title in a match, after the exits above were dealt with:
