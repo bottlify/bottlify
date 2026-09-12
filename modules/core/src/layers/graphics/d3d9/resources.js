@@ -121,6 +121,7 @@ export function createReferenceCount(options = {}){
 /**
  * @typedef {Object} Surface
  * @property {number} base            Byte address the surface's own storage starts at.
+ * @property {string} kind            A SURFACE_TYPE.
  * @property {number} refCount
  * @property {() => number} addRef
  * @property {() => number} release
@@ -173,6 +174,8 @@ export function createSurface(options){
 
     return {
         base: options.base,
+        /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
+        kind: options.type,
         get refCount(){
             return options.count.value;
         },
@@ -320,6 +323,8 @@ export function createTexture(options){
 
     return {
         levels: options.levels,
+        cube,
+        type: cube ? D3DRTYPE.CUBETEXTURE : D3DRTYPE.TEXTURE,
         get refCount(){
             return options.count.value;
         },

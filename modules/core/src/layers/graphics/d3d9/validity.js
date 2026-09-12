@@ -228,6 +228,7 @@ export const SWAP_EFFECT_MAX_BACK_BUFFERS = Object.freeze({
  * @property {number} [backBufferWidth]
  * @property {number} [backBufferHeight]
  * @property {number} [backBufferFormat]
+ * @property {boolean} [lockableBackBuffer]  D3DPRESENTFLAG_LOCKABLE_BACKBUFFER was asked for.
  */
 
 /**
