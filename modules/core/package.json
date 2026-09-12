@@ -47,6 +47,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "build:v86": "node scripts/build-v86.mjs",
+    "build:video-decoder": "node scripts/build-video-decoder.mjs",
     "fetch:v86": "node scripts/fetch-v86.mjs",
     "fetch:video-decoder": "node scripts/fetch-video-decoder.mjs",
     "verify:reproducibility": "node scripts/verify-reproducibility.mjs",

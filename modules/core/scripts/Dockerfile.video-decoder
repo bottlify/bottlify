@@ -1,0 +1,41 @@
+# Copyright © 2026 Bottlify Project
+# Licensed under the Mozilla Public License, version 2.0
+# See LICENSE for details
+
+# Pinned build image for video-decoder.wasm: a curated FFmpeg compiled to
+# WebAssembly and linked with video-decoder/decoder.c.
+#
+# Two pins make the output reproducible and both live here: the Emscripten
+# version (the same FFmpeg through a different emsdk is a different binary) and
+# the FFmpeg commit. FFmpeg is cloned from upstream at a release tag and the
+# clone is checked against the commit the tag is expected to name, so a tag
+# that moved fails the build instead of quietly compiling something else.
+#
+# Toolchain beyond emsdk itself, required by FFmpeg's own configure and Makefile:
+#   - make, pkg-config, python3 -> the build and configure's probes
+#   - git, ca-certificates      -> the clone below, nothing after it
+#   - nasm/yasm are deliberately absent: --disable-x86asm, there is no x86 here
+#
+# The FFmpeg libraries are built into an image layer, so a change to decoder.c
+# alone costs a link rather than the twenty-minute compile in front of it, and
+# the container that runs from this image only links and copies out.
+FROM emscripten/emsdk:3.1.64
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends make pkg-config python3 git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+ARG FFMPEG_TAG=n6.1
+ARG FFMPEG_COMMIT=d4ff0020b40b524a490cf62eccbd3a318f4c0e58
+RUN git clone --depth 1 --branch "${FFMPEG_TAG}" https://github.com/FFmpeg/FFmpeg /ffmpeg \
+ && cd /ffmpeg \
+ && test "$(git rev-parse HEAD)" = "${FFMPEG_COMMIT}" \
+ && rm -rf /ffmpeg/.git
+
+COPY video-decoder/build-decoder.sh /usr/local/bin/build-decoder.sh
+RUN chmod +x /usr/local/bin/build-decoder.sh \
+ && build-decoder.sh libs /ffmpeg /work
+
+COPY video-decoder/decoder.c /opt/video-decoder/decoder.c
+
+ENTRYPOINT ["build-decoder.sh", "link", "/ffmpeg", "/work", "/opt/video-decoder/decoder.c"]

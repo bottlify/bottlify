@@ -11,6 +11,12 @@
 # every push spent ten minutes of a runner to re-confirm a fact nobody had
 # touched, so it now runs when its own inputs change, on a weekly schedule that
 # would catch a base image drifting under us, and on demand.
+#
+# The video decoder -- FFmpeg compiled to WebAssembly -- is built here for the
+# same reasons and on the same triggers. It is published as a release of this
+# repository only on demand: `gh workflow run vendor.yml` from the commit whose
+# decoder is wanted, then `npm run fetch:video-decoder -- --update <tag>` pins
+# what it published.
 name: vendor
 
 on:
@@ -22,6 +28,9 @@ on:
       - 'modules/core/scripts/Dockerfile.v86'
       - 'modules/core/scripts/v86-make-and-hash.sh'
       - 'modules/core/scripts/verify-reproducibility.mjs'
+      - 'modules/core/scripts/build-video-decoder.mjs'
+      - 'modules/core/scripts/Dockerfile.video-decoder'
+      - 'modules/core/scripts/video-decoder/**'
       - '.github/workflows/vendor.yml'
   pull_request:
     paths:
@@ -30,12 +39,58 @@ on:
       - 'modules/core/scripts/Dockerfile.v86'
       - 'modules/core/scripts/v86-make-and-hash.sh'
       - 'modules/core/scripts/verify-reproducibility.mjs'
+      - 'modules/core/scripts/build-video-decoder.mjs'
+      - 'modules/core/scripts/Dockerfile.video-decoder'
+      - 'modules/core/scripts/video-decoder/**'
       - '.github/workflows/vendor.yml'
   schedule:
     - cron: '0 4 * * 1'
   workflow_dispatch:
 
 jobs:
+  video-decoder:
+    name: video-decoder (FFmpeg to wasm in container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build:video-decoder
+        env:
+          BOTTLIFY_VIDEO_DECODER_DOCKER: '1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-decoder
+          path: |
+            modules/core/dist/vendor/video-decoder.wasm
+            modules/core/dist/vendor/SHA256SUMS
+            modules/core/dist/vendor/video-decoder.manifest.json
+      # The tag names the commit that produced the bytes, which is what the
+      # lock then pins. Only on demand: a scheduled rebuild that matches is
+      # confirmation, not a new artifact.
+      - name: Publish release
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="video-decoder-$(git rev-parse --short=7 HEAD)"
+          NOTES="FFmpeg n6.1 (LGPL-2.1-or-later) compiled to WebAssembly and linked with modules/core/scripts/video-decoder/decoder.c, from $(git rev-parse HEAD)."
+          cd modules/core/dist/vendor
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              video-decoder.wasm SHA256SUMS video-decoder.manifest.json
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --title "video-decoder $TAG" --notes "$NOTES" \
+              video-decoder.wasm SHA256SUMS video-decoder.manifest.json
+          fi
+
   vendor:
     name: vendor (v86 build in container + reproducibility)
     runs-on: ubuntu-latest

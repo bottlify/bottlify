@@ -14,16 +14,16 @@ import { fileURLToPath } from 'node:url';
  * vendor/prebuilt/, verifying every file against video-decoder-lock.json.
  *
  * Building it from source needs Docker and twenty minutes of a compiler; a
- * development machine should need neither. The build itself lives in the FFmpeg
- * fork it compiles -- `bottlify/` on that fork's `bottlify` branch -- so that a
- * long compile spends its own Actions minutes and clutters its own release
- * list. It publishes the .wasm, a SHA256SUMS and a manifest naming the commit
- * it was built from; this script consumes them. The .wasm is a build artifact
- * and is never committed.
+ * development machine should need neither. The build is `build-video-decoder.mjs`
+ * in a container, run by the vendor workflow on demand, which publishes the
+ * .wasm, a SHA256SUMS and a manifest naming the commit it was built from as a
+ * release of this repository; this script consumes them. The .wasm is a build
+ * artifact and is never committed.
  *
  * Usage:
- *   node scripts/fetch-video-decoder.mjs               download + verify
- *   node scripts/fetch-video-decoder.mjs --update TAG  re-pin the lock
+ *   node scripts/fetch-video-decoder.mjs                          download + verify
+ *   node scripts/fetch-video-decoder.mjs --update TAG [--repo R]  re-pin the lock;
+ *       the repository stays the lock's own unless named
  */
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -87,9 +87,8 @@ async function fetchPinned(){
     if (!lock.repo || !lock.tag || names.length === 0)
     {
         throw new Error(
-            'video-decoder-lock.json pins no release yet. Run the fork\'s '
-            + '`bottlify-video-decoder` workflow, then '
-            + '`node scripts/fetch-video-decoder.mjs --update <tag>`.');
+            'video-decoder-lock.json pins no release yet. Dispatch the `vendor` '
+            + 'workflow, then `node scripts/fetch-video-decoder.mjs --update <tag>`.');
     }
     await mkdir(OUT, { recursive: true });
 
@@ -116,7 +115,13 @@ if (updateIndex !== -1)
     {
         throw new Error('usage: fetch-video-decoder.mjs --update <release-tag>');
     }
-    await update(process.env.VIDEO_DECODER_REPO ?? 'mrwayer/FFmpeg', tag);
+    const repoIndex = process.argv.indexOf('--repo');
+    const repo = repoIndex !== -1 ? process.argv[repoIndex + 1] : (await readLock()).repo;
+    if (!repo)
+    {
+        throw new Error('the lock names no repository: pass --repo <owner/name>');
+    }
+    await update(repo, tag);
 }
 else
 {
