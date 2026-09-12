@@ -40,6 +40,7 @@ import { IID_IDirect3D8, IID_IDirect3DDevice8, IID_IDirect3DSurface8,
 import { D3DPRESENT_PARAMETERS8, D3DDISPLAYMODE, D3DVIEWPORT8, D3DCAPS8,
     D3DSURFACE_DESC8, D3DLOCKED_RECT, D3DLIGHT7, RECT, POINT, createFields } from './structs.js';
 import { D3DDEVTYPE, D3DFMT_INDEX, D3DRTYPE } from '../d3d8/constants.js';
+import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
@@ -1612,6 +1613,25 @@ export function createDirect3D8Seam(
     };
 
     /**
+     * The formats an adapter's mode list is offered in: 32-bit and 16-bit
+     * colour, which are what CheckDeviceType approves as an adapter format.
+     * Direct3D 8 lists every mode in every format under one index, so the
+     * list is the sizes crossed with these.
+     */
+    const ADAPTER_FORMATS = Object.freeze([22, 23]);
+
+    /**
+     * Every mode the adapter offers, in the order a program walks them: each
+     * size in each format, sizes smallest first.
+     *
+     * @returns {{ width: number, height: number, format: number }[]}
+     */
+    const adapterModes = ()=>displayModes(screen())
+        .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
+            width: mode.width, height: mode.height, format,
+        })));
+
+    /**
      * What this device says it can do.
      *
      * Every number here is a claim something acts on, and the ones that read as
@@ -1742,18 +1762,24 @@ export function createDirect3D8Seam(
             return D3D_OK;
         },
 
-        // One mode, and it is the one the display is already in. A longer list
-        // would be a list of modes this build cannot set: there is one surface
-        // and it is the size the assembling caller gave it.
-        GetAdapterModeCount: ()=>1,
+        // The whole list, because a program builds its resolution menu from
+        // it and every entry can be set: the surface follows the size a device
+        // is created at. Answering one mode gave such a program a menu of one.
+        GetAdapterModeCount: ()=>adapterModes().length,
 
         /** @param {any} root @param {number[]} args */
         EnumAdapterModes: (root, [, mode, out])=>{
-            if ((out >>> 0) === 0 || (mode >>> 0) !== 0)
+            const listed = adapterModes()[mode >>> 0];
+            if ((out >>> 0) === 0 || !listed)
             {
                 return D3DERR_INVALIDCALL;
             }
-            writeDisplayMode(out >>> 0);
+            fields.writeStruct(out >>> 0, D3DDISPLAYMODE, {
+                Width: listed.width,
+                Height: listed.height,
+                RefreshRate: REFRESH_HZ,
+                Format: listed.format,
+            });
             return D3D_OK;
         },
 

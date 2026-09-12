@@ -366,14 +366,24 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
 
     assert.equal(ask('GetAdapterCount', []), 1);
-    assert.equal(ask('GetAdapterModeCount', [0]), 1);
+    // An 800x600 display of the era offers 640x480 and 800x600, each in 32-bit
+    // and 16-bit colour: four modes, and a program builds its menu from them.
+    const count = ask('GetAdapterModeCount', [0]);
+    assert.equal(count, 4);
 
     const mode = 0x1200;
-    assert.equal(ask('EnumAdapterModes', [0, 0, mode]), D3D_OK);
-    assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.Width), SCREEN.width,
-        'the one mode is the one the display is already in');
-    assert.equal(ask('EnumAdapterModes', [0, 1, mode]), D3DERR_INVALIDCALL,
-        'and there is no other');
+    const seen = [];
+    for (let index = 0; index < count; index++)
+    {
+        assert.equal(ask('EnumAdapterModes', [0, index, mode]), D3D_OK);
+        seen.push(`${h.fields.readU32(mode + D3DDISPLAYMODE.Width)}x${
+            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}/${
+            h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
+    }
+    assert.deepEqual(seen, ['640x480/22', '640x480/23', '800x600/22', '800x600/23'],
+        'every size in every adapter format, smallest first');
+    assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
+        'and the index past the end is refused, so a walk ends');
 
     assert.equal(ask('CheckDeviceType',
         [0, D3DDEVTYPE.HAL, D3DFMT.X8R8G8B8, D3DFMT.X8R8G8B8, 1]), D3D_OK);

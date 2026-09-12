@@ -282,7 +282,11 @@ test('the display enumeration ends', ()=>{
         index++;
         assert.ok(index < 1000, 'the enumeration did not terminate');
     }
-    assert.ok(index >= 1, 'and it offered at least one mode before stopping');
+    // A 1024x768 display of the era offers 640x480, 800x600 and 1024x768; a
+    // program's resolution menu is built from exactly this walk.
+    assert.equal(index, 3, 'every size up to the display, and then the end');
+    const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
+    assert.equal(last, SCREEN.width, 'the largest listed is the display itself');
 });
 
 test('AdjustWindowRectEx grows a client rectangle by the frame the style carries', ()=>{

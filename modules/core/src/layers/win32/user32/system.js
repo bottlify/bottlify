@@ -20,6 +20,7 @@
 
 import { formatToString } from '../msvcrt/format.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
+import { REFRESH_HZ, displayModes } from './display.js';
 import {
     DEVMODEA,
     DM_BITSPERPEL,
@@ -147,7 +148,6 @@ const DISP_CHANGE_SUCCESSFUL = 0;
 const DISP_CHANGE_BADMODE = -2;
 
 /** The refresh rate reported for the one mode this build offers. */
-const REFRESH_HZ = 60;
 
 /** EnumDisplaySettings' named indices: the mode in effect, and the registry's. */
 const ENUM_CURRENT_SETTINGS = -1;
@@ -501,9 +501,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL EnumDisplaySettingsA(LPCSTR lpszDeviceName, DWORD iModeNum,
          *                          DEVMODEA *lpDevMode)
          *
-         * One mode, and index one answers FALSE. A caller walks this until it
-         * does, so an enumeration that never ends is a hang rather than a wrong
-         * list.
+         * A caller walks the indices until one answers FALSE, and builds its
+         * resolution menu from what it was given on the way; the two named
+         * indices answer the mode in effect. An enumeration that never ends
+         * is a hang, so the list is finite and the end is reported.
          *
          * The two named indices answer the same mode: the current settings are
          * the one mode there is, and so are the registry's. A program asks for
@@ -516,18 +517,24 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([, mode, devMode])=>{
                 const index = mode | 0;
-                if ((index !== 0 && index !== ENUM_CURRENT_SETTINGS
-                    && index !== ENUM_REGISTRY_SETTINGS) || (devMode >>> 0) === 0)
+                if ((devMode >>> 0) === 0)
                 {
                     return 0;
                 }
+                const current = index === ENUM_CURRENT_SETTINGS || index === ENUM_REGISTRY_SETTINGS;
+                const listed = current ? null : displayModes(screen)[index];
+                if (!current && (index < 0 || !listed))
+                {
+                    return 0;
+                }
+                const answer = listed ?? { ...screen, refresh: REFRESH_HZ };
                 writeU16(host, devMode + DEVMODEA.dmSize, DEVMODEA.SIZE);
                 writeU16(host, devMode + DEVMODEA.dmDriverExtra, 0);
                 writeU32s(host, devMode + DEVMODEA.dmFields,
                     [DM_BITSPERPEL | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY]);
                 writeU32s(host, devMode + DEVMODEA.dmBitsPerPel,
-                    [screen.bitsPerPixel, screen.width, screen.height]);
-                writeU32s(host, devMode + DEVMODEA.dmDisplayFrequency, [REFRESH_HZ]);
+                    [answer.bitsPerPixel, answer.width, answer.height]);
+                writeU32s(host, devMode + DEVMODEA.dmDisplayFrequency, [answer.refresh]);
                 return 1;
             },
         },

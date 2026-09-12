@@ -1384,8 +1384,16 @@ async function buildApp(options){
      * is telling the engine its screen is that resolution, one window full of
      * it. The reported metrics follow, so a cursor the game normalises by the
      * screen and draws in its own back buffer stays under the pointer.
+     *
+     * What does not follow is how large the display can be. A program reads
+     * the modes on offer to build its resolution menu, and a list bounded by
+     * the mode it is already in offers it nothing else: it created its device
+     * at the size it last saved, and from then on that was the only size it
+     * could see. So the display's own size travels beside the mode in effect,
+     * set once from the launch and never moved.
      */
-    const display = { ...(options.screen ?? { width: 640, height: 480, bitsPerPixel: 32 }) };
+    const launched = options.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
+    const display = { ...launched, displayWidth: launched.width, displayHeight: launched.height };
 
     /**
      * Divergences already reported, so each is said once.
