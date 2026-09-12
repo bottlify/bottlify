@@ -106,6 +106,8 @@ export const win32Module = {
         let libraries = {};
         /** @type {number | null} */
         let exitCode = null;
+        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number, height: number) => boolean }} */
+        let windowService = { list: ()=>[], place: ()=>false };
 
         /** @type {(handle: number, text: string) => void} */
         const sink = config?.onOutput ?? (()=>{});
@@ -785,6 +787,9 @@ export const win32Module = {
                 readCString,
                 handles,
                 queue,
+                windowService: (/** @type {typeof windowService} */ service)=>{
+                    windowService = service;
+                },
                 // What GetSystemMetrics and EnumDisplaySettings answer with.
                 // The same screen GDI and the drawing layer are given: a
                 // program picks its mode from this and would otherwise be
@@ -1047,6 +1052,22 @@ export const win32Module = {
              * written when it answers, so the one holding everything is the one
              * missing.
              */
+            /** Every top-level window's rectangle, as the program declared it. */
+            windows: ()=>windowService.list(),
+
+            /**
+             * Places a window as the system would, telling the program with a
+             * move and a size. What a fullscreen device does to the window it
+             * presents into: the picture is the mode's size, and a window left
+             * at its old size has the program clipping its cursor to a corner
+             * of it.
+             *
+             * @param {number} hwnd @param {number} x @param {number} y
+             * @param {number} width @param {number} height
+             */
+            placeWindow: (hwnd, x, y, width, height)=>
+                windowService.place(hwnd, x, y, width, height),
+
             windowProcedures: ()=>dispatching.map(held=>({
                 hwnd: `0x${held.hwnd.toString(16)}`,
                 message: `0x${held.message.toString(16)}`,
@@ -1086,6 +1107,7 @@ export const win32Module = {
                 // leak -- it tells the program to stop keeping things.
                 heap: current ? current.heap().diagnostics() : null,
                 mappings: current ? current.mappings() : null,
+                windows: current ? current.windows() : [],
                 windowProcedures: current ? current.windowProcedures() : [],
                 exitCode: current ? current.exitCode() : null,
             },

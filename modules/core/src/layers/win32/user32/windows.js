@@ -34,6 +34,10 @@ import {
 
 /** Messages this layer has an opinion about. */
 const WM_DESTROY = 0x0002;
+const WM_MOVE = 0x0003;
+const WM_SIZE = 0x0005;
+/** WM_SIZE's wParam for a plain resize: not minimised, not maximised. */
+const SIZE_RESTORED = 0;
 const WM_NCCREATE = 0x0081;
 const WM_CREATE = 0x0001;
 const WM_CLOSE = 0x0010;
@@ -200,6 +204,13 @@ function characterFor(key){
  */
 
 /**
+ * @typedef {Object} WindowService
+ * @property {() => { hwnd: string, x: number, y: number, width: number, height: number,
+ *            visible: boolean }[]} list
+ * @property {(hwnd: number, x: number, y: number, width: number, height: number) => boolean} place
+ */
+
+/**
  * @typedef {Object} WindowHost
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           The display every system metric is derived from.
@@ -233,6 +244,13 @@ function characterFor(key){
  *           is what this used to do always.
  * @property {(address: number) => void} [release]
  * @property {() => Promise<void>} idle
+ * @property {(service: WindowService) => void} [windowService]
+ *     Handed the two things the rest of the machine needs from the windows:
+ *     a reader of every top-level window's rectangle, for a diagnostic -- the
+ *     window is the space a program declares its cursor in, and a cursor that
+ *     lands short of where it was aimed is that rectangle disagreeing with the
+ *     picture -- and a way to place a window as the system would, which a
+ *     fullscreen device has to do to the window it presents into.
  * @property {() => { x: number, y: number }} [cursor]
  *           Where the pointer is. Absent in a build with no input, and then
  *           the answer is the origin.
@@ -701,6 +719,41 @@ export function createWindowFunctions(host){
     // door, what a program asks the system about itself after that, the things
     // a window owns, and dialogs. They share the window records rather than
     // each keeping a copy, which is why they are built here.
+    host.windowService?.({
+        list: ()=>[...windows.values()]
+            .filter(record=>!record.destroyed && !record.parent)
+            .map(record=>({
+                hwnd: `0x${record.hwnd.toString(16)}`,
+                x: record.x, y: record.y, width: record.width, height: record.height,
+                visible: (record.style & WS_VISIBLE) !== 0,
+            })),
+        /**
+         * Places a window the way SetWindowPos does, and tells the program the
+         * way DefWindowProc would: a move and a size. A program of this era
+         * re-reads its rectangle on WM_SIZE and clips its cursor to it, which
+         * is exactly what has to happen once the picture is another size.
+         *
+         * @param {number} hwnd @param {number} x @param {number} y
+         * @param {number} width @param {number} height
+         */
+        place: (hwnd, x, y, width, height)=>{
+            const record = live(hwnd);
+            if (!record)
+            {
+                return false;
+            }
+            record.x = x | 0;
+            record.y = y | 0;
+            record.width = width | 0;
+            record.height = height | 0;
+            host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
+                lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
+            host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
+                lParam: ((height & 0xffff) << 16 | width & 0xffff) >>> 0 });
+            return true;
+        },
+    });
+
     return {
         ...createPaintFunctions({ host, live, queue: host.queue, WM_PAINT }),
         // The focus lives with the windows, so the system half answers from

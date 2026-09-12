@@ -576,6 +576,11 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
             keysDown: [...held.keys()],
             buttonsDown: [...pressed],
             cursor: { ...cursor },
+            // The two spaces a pointer travels between. A cursor that lands
+            // short of where it was aimed is these two disagreeing, and
+            // nothing else in this report can show which one is wrong.
+            viewport: confinedTo?.() ?? null,
+            clip: clipRect ? { ...clipRect } : null,
         }),
     };
 }

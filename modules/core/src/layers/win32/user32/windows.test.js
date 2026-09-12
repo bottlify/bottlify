@@ -160,12 +160,17 @@ function setup({ heap = false, reply } = {}){
     /** @type {number[]} */
     const released = [];
 
+    /** @type {import('./windows.js').WindowService | null} */
+    let service = null;
     const fns = createWindowFunctions({
         readMemory: (address, length)=>memory.readMemory(address, length),
         writeMemory: (address, data)=>memory.writeMemory(address, data),
         readCString: (address, maxLength)=>memory.readCString(address, maxLength),
         handles,
         queue,
+        windowService: handed=>{
+            service = handed;
+        },
         dispatch: (wndProc, message)=>{
             dispatched.push({ wndProc, ...message });
             return reply ? reply(message) : 0x1234;
@@ -193,7 +198,8 @@ function setup({ heap = false, reply } = {}){
         await Promise.resolve();
     };
 
-    return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released };
+    return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
+        service: /** @type {import('./windows.js').WindowService} */ (service) };
 }
 
 /**
@@ -401,6 +407,42 @@ test('a rectangle of a window that is gone is not written', ()=>{
     memory.fill(RECT_BUFFER, RECT.SIZE / 4);
     assert.equal(fns.GetClientRect.handler([hwnd, RECT_BUFFER]), 0);
     assert.equal(memory.u32(RECT_BUFFER), UNTOUCHED);
+});
+
+test('placing a window as the system would moves it and tells the program', ()=>{
+    // What a fullscreen device does to the window it presents into. The
+    // program re-reads its rectangle on WM_SIZE and clips its cursor to it, so
+    // both messages have to arrive, packed the way DefWindowProc packs them.
+    const { fns, memory, hwnd, queue, service } = withWindow();
+
+    assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
+
+    fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.right), 1024);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 768);
+
+    /** @type {any[]} */
+    const told = [];
+    for (;;)
+    {
+        const message = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+        if (!message)
+        {
+            break;
+        }
+        told.push(message);
+    }
+    const move = told.find(message=>message.message === 0x0003);
+    const size = told.find(message=>message.message === 0x0005);
+    assert.ok(move && size, 'a move and a size are posted');
+    assert.equal(size.lParam >>> 0, (768 << 16 | 1024) >>> 0,
+        'the client size, height above width');
+    assert.equal(size.wParam, 0, 'SIZE_RESTORED: neither minimised nor maximised');
+    assert.equal(told.indexOf(move) < told.indexOf(size), true, 'the move before the size');
+
+    assert.equal(service.place(0x9999, 0, 0, 1, 1), false,
+        'a window that is not there is not placed');
+    assert.deepEqual(service.list().map(entry=>[entry.width, entry.height]), [[1024, 768]]);
 });
 
 test('MoveWindow changes both rectangles', ()=>{

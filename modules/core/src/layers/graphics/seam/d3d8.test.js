@@ -208,7 +208,9 @@ function seamed({ shadow = false } = {}){
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         cursor: (/** @type {any} */ notice)=>cursors.push(notice),
-        resolution: (/** @type {number} */ w, /** @type {number} */ h)=>resolutions.push([w, h]),
+        resolution: (/** @type {number} */ w, /** @type {number} */ h,
+            /** @type {{ window?: number, fullscreen?: boolean } | undefined} */ where)=>
+            resolutions.push([w, h, where?.window, where?.fullscreen]),
     });
     const fields = createFields(box.services);
 
@@ -1207,6 +1209,20 @@ test('creating a device reports its resolution as the screen the program now has
     const device = h.createDevice(h.create());
     assert.notEqual(device, 0);
     // createDevice builds present parameters at 64x64 (see the fixture).
-    assert.deepEqual(h.resolutions.at(-1), [64, 64],
-        'the back buffer size a device was created at is reported');
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
+        'the back buffer size a device was created at is reported, with its window, windowed');
+});
+
+test('a fullscreen device names the window it takes with it', ()=>{
+    // The real device places its window at the mode's size; the window is
+    // named so whoever answers can do the same, and fullscreen is the signal.
+    const h = seamed();
+    assert.notEqual(h.createDevice(h.create(), { Windowed: 0, hDeviceWindow: 0x777 }), 0);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
+});
+
+test('a device with no window of its own presents into the focus window', ()=>{
+    const h = seamed();
+    assert.notEqual(h.createDevice(h.create(), { Windowed: 0, hDeviceWindow: 0 }), 0);
+    assert.equal(h.resolutions.at(-1)?.[2], HWND, 'hFocusWindow, as CreateDevice was given');
 });

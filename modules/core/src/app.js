@@ -1683,11 +1683,24 @@ async function buildApp(options){
             screen: display,
             // A program that creates its device at a resolution names its screen:
             // one window is that resolution. The reported metrics follow it.
-            resolution: (/** @type {number} */ width, /** @type {number} */ height)=>{
+            /**
+             * @param {number} width @param {number} height
+             * @param {{ window?: number, fullscreen?: boolean }} [where]
+             */
+            resolution: (width, height, where = {})=>{
                 if (width > 0 && height > 0)
                 {
                     display.width = width;
                     display.height = height;
+                    // A fullscreen device takes the window it presents into
+                    // with it, as the real one does: placed at the origin, the
+                    // mode's size, and told so. A window left at its old size
+                    // has the program clipping its cursor to a corner of the
+                    // picture -- the picture fills the mode, the window does not.
+                    if (where.fullscreen && where.window)
+                    {
+                        win32.placeWindow(where.window, 0, 0, width, height);
+                    }
                 }
             },
             // Where a locked surface or vertex buffer's bytes live. A lock

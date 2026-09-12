@@ -228,8 +228,10 @@ const S_FALSE = 1;
  * @param {(api: string, detail: string) => void} [deps.divergence]
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
- * @param {(width: number, height: number) => void} [deps.resolution]
- *        Told the resolution a device is created at, to report as the screen.
+ * @param {(width: number, height: number,
+ *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *        Told the resolution a device is created at, to report as the screen --
+ *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => AdapterIdentity | null} [deps.identity]
  *        The hardware behind the device, as the assembling caller knows it.
  */
@@ -1834,7 +1836,12 @@ export function createDirect3D8Seam(
             if (hr === D3D_OK && held.device)
             {
                 // The window is now this resolution; the reported screen is too.
-                resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0);
+                // Fullscreen, the device's window follows the mode, as the real
+                // device moves it; windowed, the window is the program's own.
+                resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
+                    window: (wanted.hDeviceWindow >>> 0) || (focus >>> 0),
+                    fullscreen: !wanted.windowed,
+                });
             }
             if (hr !== D3D_OK || !held.device)
             {
