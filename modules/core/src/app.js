@@ -298,18 +298,90 @@ export function groupBlocks(blocks){
 }
 
 /**
- * How far past what a read wants a request reaches: the blocks that follow in
- * container order, up to this many packed bytes, when nothing holds them yet.
+ * How much a miss brings in beyond what the read wanted: the aligned window of
+ * the container it falls in, and past a forward reader's miss, this many more
+ * packed bytes of what follows.
  *
- * A program reading an archive forward misses one block at a time, and one
- * block is one round trip: measured on a real title, thirty-five requests
- * brought in under ten megabytes, each paid for in latency rather than
- * bandwidth. Reaching this far past the miss turns a run of them into a few.
- * Two mebibytes is small against a request's ceiling and large against a
- * block, and a program that touches one block of a region it never returns to
- * pays for this much extra at most.
+ * A miss is one round trip whatever its size, and on a real title a start is
+ * a hundred of them for a few megabytes: latency, not bandwidth. Two mebibytes
+ * is small against a request's ceiling and large against a block, and a
+ * program that touches one block of a region it never returns to pays for this
+ * much extra at most.
  */
 const READ_AHEAD_BYTES = 2 << 20;
+
+/**
+ * Widens every miss to the aligned window of the container that holds it.
+ *
+ * Whatever the read wanted, the request is the window: the blocks around a
+ * miss are the rest of the file it is in, or the file beside it, and a start
+ * that comes back for them one miss at a time pays a round trip for each.
+ * Blocks already resident are stepped over, and a window is clipped at the
+ * container's end. Two misses in one window are one request.
+ *
+ * @param {any[]} blocks  Wanted and not resident, ascending by offset.
+ * @param {{ block: (index: number) => any, blockCount: number }} bundle
+ * @param {(index: number) => boolean} resident
+ * @param {number} [bytes]  The window, and its alignment.
+ * @returns {any[]} the same blocks and the rest of their windows, ascending
+ */
+export function withWindow(blocks, bundle, resident, bytes = READ_AHEAD_BYTES){
+    /** @type {Map<number, any>} */
+    const chosen = new Map(blocks.map(block=>[block.index, block]));
+    /** @param {number} index */
+    const add = index=>{
+        if (!chosen.has(index) && !resident(index))
+        {
+            const block = bundle.block(index);
+            chosen.set(index, { index, offset: block.offset, packed: block.packed, ahead: true });
+        }
+    };
+    for (const block of blocks)
+    {
+        const start = Math.floor(block.offset / bytes) * bytes;
+        for (let index = block.index - 1;
+            index >= 0 && bundle.block(index).offset >= start; index--)
+        {
+            add(index);
+        }
+        for (let index = block.index + 1;
+            index < bundle.blockCount && bundle.block(index).offset < start + bytes; index++)
+        {
+            add(index);
+        }
+    }
+    return [...chosen.values()].sort((left, right)=>left.offset - right.offset);
+}
+
+/**
+ * The blocks a request would bring in for the second time.
+ *
+ * A block downloaded once must not be downloaded again, and this is where
+ * that is checked rather than assumed: everything inside a request's span
+ * that is already resident, whether asked for by name or bridged over as a
+ * gap, is a byte paid for twice. Counted before the request goes out, so the
+ * number is about what was asked, not about what arrived.
+ *
+ * @param {{ blocks: any[] }} group
+ * @param {{ block: (index: number) => any }} bundle
+ * @param {(index: number) => boolean} resident
+ * @returns {{ blocks: number, bytes: number }}
+ */
+export function refetchedIn(group, bundle, resident){
+    let blocks = 0;
+    let bytes = 0;
+    const first = group.blocks[0]?.index ?? 0;
+    const last = group.blocks[group.blocks.length - 1]?.index ?? -1;
+    for (let index = first; index <= last; index++)
+    {
+        if (resident(index))
+        {
+            blocks++;
+            bytes += bundle.block(index).packed;
+        }
+    }
+    return { blocks, bytes };
+}
 
 /**
  * Extends a miss with the blocks that follow it in the container.
@@ -317,11 +389,8 @@ const READ_AHEAD_BYTES = 2 << 20;
  * Only when the miss continues where the last fetch stopped: that is a program
  * reading forward, and reaching past it turns the run into a few requests.
  * Measured on a real title's cinematic, one block a request for two hundred
- * and forty blocks. A miss anywhere else is left alone -- an archive's index
- * and the files it points to are read all over the container, and reaching
- * past every one of those fetched five times the bytes for a third fewer
- * requests. Blocks already resident count against the reach but are not asked
- * for again.
+ * and forty blocks. A miss anywhere else gets its window and no more. Blocks
+ * already resident count against the reach but are not asked for again.
  *
  * @param {any[]} absent  Wanted and not resident, ascending by offset.
  * @param {{ block: (index: number) => any, blockCount: number }} bundle
@@ -1076,7 +1145,9 @@ function expectIndex(expected){
  *
  * @param {any} deps
  * @returns {Promise<{ fetch: (needed: any[]) => Promise<void>,
- *                     stop: () => void, ahead: () => number } | null>}
+ *                     stop: () => void, ahead: () => number,
+ *                     refetched: () => { blocks: number, bytes: number },
+ *                     ranges: () => { requests: number, bytes: number } } | null>}
  */
 async function mountBundle({ options, cpu, filesystem, events }){
     if (!options.bundle?.fetch)
@@ -1154,7 +1225,18 @@ async function mountBundle({ options, cpu, filesystem, events }){
         blocks: bundle.blockCount,
         cached: cache.diagnostics().resident,
         backed: cache.backed,
+        remembered: cache.order().length,
     });
+    if (!cache.backed)
+    {
+        // Said out loud, in the words of the setting it defeats: a store that
+        // quietly failed to open reads from outside as a cache that never
+        // worked, and every block of this run will be fetched again next time.
+        events.emit('bundle-unbacked', {
+            reason: cache.reason,
+            effect: 'fetched blocks are not kept on this machine',
+        });
+    }
 
     /**
      * Brings in one run of blocks: one request, then split and checked.
@@ -1171,7 +1253,12 @@ async function mountBundle({ options, cpu, filesystem, events }){
      * @param {{ start: number, end: number, blocks: any[] }} group
      */
     const fetchGroup = async group=>{
+        const twice = refetchedIn(group, bundle, has);
+        refetched.blocks += twice.blocks;
+        refetched.bytes += twice.bytes;
         const span = group.end - group.start;
+        ranges.requests++;
+        ranges.bytes += span;
         const whole = await fetchRange(group.start, span, bytes=>{
             for (const block of group.blocks)
             {
@@ -1203,6 +1290,26 @@ async function mountBundle({ options, cpu, filesystem, events }){
         }
     };
 
+    /** @param {number} index */
+    const has = index=>cache.has(index);
+    /** Blocks a request went out for that were already here. */
+    const refetched = { blocks: 0, bytes: 0 };
+    /**
+     * What went over the wire: range requests and the bytes they spanned. The
+     * count of reads that waited is a different number -- one read may be
+     * several requests, and a request may serve a read that never waited.
+     */
+    const ranges = { requests: 0, bytes: 0 };
+    /**
+     * Blocks a request is out for right now, each with the promise of it. A
+     * second read that wants one of them waits for that request rather than
+     * sending its own: two threads reading neighbouring files would otherwise
+     * fetch the same window twice, once each.
+     *
+     * @type {Map<number, Promise<void>>}
+     */
+    const inFlight = new Map();
+
     // What a read is waiting on right now. The background filler stands aside
     // whenever this is above zero: a block a parked thread wants is worth more
     // than any block nobody has asked for.
@@ -1221,12 +1328,16 @@ async function mountBundle({ options, cpu, filesystem, events }){
 
     /** @param {any[]} needed */
     const demand = async needed=>{
+        for (const block of needed)
+        {
+            cache.demanded(block.index);
+        }
         const absent = [...new Map(needed
             .filter(block=>!cache.has(block.index))
             .map(block=>[block.index, block])).values()]
             .sort((left, right)=>left.offset - right.offset);
 
-        const reaching = withReadAhead(absent, bundle, index=>cache.has(index), expected);
+        const reaching = withWindow(withReadAhead(absent, bundle, has, expected), bundle, has);
         ahead += reaching.length - absent.length;
         if (reaching.length > 0)
         {
@@ -1236,14 +1347,28 @@ async function mountBundle({ options, cpu, filesystem, events }){
                 expected.shift();
             }
         }
+        const borrowed = [...new Set(reaching.map(block=>inFlight.get(block.index)))]
+            .filter(promise=>promise !== undefined);
+        const own = reaching.filter(block=>!inFlight.has(block.index));
         waiting++;
+        const request = inParallel(groupBlocks(own), MAX_CONCURRENT_REQUESTS, fetchGroup);
+        for (const block of own)
+        {
+            inFlight.set(block.index, request);
+        }
         try
         {
-            await inParallel(groupBlocks(reaching), MAX_CONCURRENT_REQUESTS, fetchGroup);
+            // A borrowed request that fails is the other read's failure to
+            // report; this one comes back for the block if it is still absent.
+            await Promise.all([request, ...borrowed.map(promise=>promise.catch(()=>{}))]);
         }
         finally
         {
             waiting--;
+            for (const block of own)
+            {
+                inFlight.delete(block.index);
+            }
         }
 
         // Once per batch, not once per block: losing the record of a block that
@@ -1253,17 +1378,72 @@ async function mountBundle({ options, cpu, filesystem, events }){
     };
 
     /**
+     * Brings groups in one at a time, and only while no read is parked. Both
+     * follow from what the filler is for: it exists to use idle time, so the
+     * moment the time stops being idle it has to give the connections back to
+     * the read that a player is actually waiting on.
+     *
+     * @param {{ start: number, end: number, blocks: any[] }[]} groups
+     * @returns {Promise<boolean>} whether to go on
+     */
+    const fillGroups = async groups=>{
+        for (const group of groups)
+        {
+            while (true)
+            {
+                if (stopped)
+                {
+                    return false;
+                }
+                if (waiting === 0)
+                {
+                    break;
+                }
+                await new Promise(resolve=>setTimeout(resolve, IDLE_CHECK_MS));
+            }
+            // Only what is still missing, regrouped: a read may have brought
+            // part of this group in while the filler stood aside.
+            const missing = group.blocks
+                .filter(block=>!has(block.index) && !inFlight.has(block.index));
+            if (missing.length === 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                for (const part of groupBlocks(missing))
+                {
+                    await fetchGroup(part);
+                }
+                await cache.persist();
+            }
+            catch (e){
+                // A run that cannot be filled in the background is still a run.
+                // The blocks it failed on will be asked for again, in front of a
+                // parked thread, where the failure belongs.
+                events.emit('bundle-prefetch-failed',
+                    { start: group.start, reason: /** @type {any} */ (e).message });
+                return false;
+            }
+            events.emit('bundle-prefetch', {
+                resident: cache.diagnostics().resident,
+                blocks: bundle.blockCount,
+            });
+        }
+        return true;
+    };
+
+    /**
      * Fills the rest of the cache while the game is not asking for anything.
      *
-     * Not a guess about what will be read next -- it is the whole bundle, in
-     * container order, taken one request at a time out of the gaps. That makes
-     * it the opposite of a heuristic: nothing about it can be wrong about the
-     * game's access pattern, it can only be early or late.
-     *
-     * One request at a time, and only while no read is parked. Both follow from
-     * what this is for: it exists to use idle time, so the moment the time stops
-     * being idle it has to give the connections back to the read that a player
-     * is actually waiting on.
+     * First what the last run asked for, in the order it asked: a start reads
+     * the same things in the same order every time, so that is the one thing
+     * known about what will be read next, and each of those blocks comes in
+     * with its window the way a miss would. Then the whole bundle, in container
+     * order, taken one request at a time out of the gaps -- not a guess about
+     * what will be read next, so nothing about it can be wrong about the game's
+     * access pattern, it can only be early or late.
      *
      * Off when the blocks have nowhere to go. Filling a bounded heap cache with
      * a whole bundle would evict as fast as it fills, and pay for every byte of
@@ -1275,47 +1455,18 @@ async function mountBundle({ options, cpu, filesystem, events }){
             return;
         }
 
-        const all = Array.from({ length: bundle.blockCount },
-            (unused, index)=>bundle.block(index));
-
-        for (const group of groupBlocks(all))
+        for (const index of cache.order())
         {
-            while (true)
+            if (!has(index)
+                && !await fillGroups(groupBlocks(withWindow([bundle.block(index)], bundle, has))))
             {
-                if (stopped)
-                {
-                    return;
-                }
-                if (waiting === 0)
-                {
-                    break;
-                }
-                await new Promise(resolve=>setTimeout(resolve, IDLE_CHECK_MS));
-            }
-            const missing = group.blocks.filter(block=>!cache.has(block.index));
-            if (missing.length === 0)
-            {
-                continue;
-            }
-
-            try
-            {
-                await fetchGroup(group);
-                await cache.persist();
-            }
-            catch (e){
-                // A run that cannot be filled in the background is still a run.
-                // The blocks it failed on will be asked for again, in front of a
-                // parked thread, where the failure belongs.
-                events.emit('bundle-prefetch-failed',
-                    { start: group.start, reason: /** @type {any} */ (e).message });
                 return;
             }
-            events.emit('bundle-prefetch', {
-                resident: cache.diagnostics().resident,
-                blocks: bundle.blockCount,
-            });
         }
+
+        const all = Array.from({ length: bundle.blockCount },
+            (unused, index)=>bundle.block(index));
+        await fillGroups(groupBlocks(all));
     };
 
     // Deliberately not awaited: it runs for as long as the bundle has blocks
@@ -1325,6 +1476,11 @@ async function mountBundle({ options, cpu, filesystem, events }){
         fetch: demand,
         /** How many blocks were brought in ahead of a read, ever. */
         ahead: ()=>ahead,
+        /** Blocks a request went out for that were already here: the number
+         *  that has to stay at zero. */
+        refetched: ()=>({ ...refetched }),
+        /** Range requests made and bytes asked for, ever. */
+        ranges: ()=>({ ...ranges }),
         stop(){
             stopped = true;
         },
@@ -1429,7 +1585,9 @@ async function buildApp(options){
 
     // Filled in once the emulator is up and a bundle, if any, is mounted. win32
     // is built before that and is handed the lookup rather than the answer.
-    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number } | null} */
+    /** @type {{ fetch: (needed: any[]) => Promise<void>, stop: () => void, ahead: () => number,
+     *          refetched: () => { blocks: number, bytes: number },
+     *          ranges: () => { requests: number, bytes: number } } | null} */
     let blocks = null;
     /**
      * Where a thread's environment block comes from, once the process has
@@ -2155,6 +2313,7 @@ async function buildApp(options){
         'message-box': 'warn',
         'bundle-retry': 'warn',
         'bundle-prefetch-failed': 'warn',
+        'bundle-unbacked': 'warn',
     });
     events.onAny((/** @type {string} */ name, /** @type {any} */ payload)=>{
         journal.write(SEVERITY[name] ?? 'info', name, '{0}', describeEvent(payload));
@@ -3924,6 +4083,10 @@ async function buildApp(options){
                     ...events.diagnostics(),
                     bundle: {
                         ...bundleReads, distinct: blocksSeen.size, ahead: blocks?.ahead() ?? 0,
+                        refetched: blocks?.refetched().blocks ?? 0,
+                        refetchedBytes: blocks?.refetched().bytes ?? 0,
+                        ranges: blocks?.ranges().requests ?? 0,
+                        rangeBytes: blocks?.ranges().bytes ?? 0,
                     },
                     film: { ...film },
                     // Which of the program's own code the machine is spent on.

@@ -103,9 +103,10 @@ const set = (bitmap, index)=>{
  * deadlock arriving by a longer route.
  *
  * @param {number} maxBytes
+ * @param {string} reason  Why there is no durable store, for the journal.
  * @returns {any}
  */
-function createMemoryCache(maxBytes){
+function createMemoryCache(maxBytes, reason){
     /** Insertion order is least-recently-used order. @type {Map<number, Uint8Array>} */
     const held = new Map();
     /** Brought in for the read currently being served. @type {Set<number>} */
@@ -114,9 +115,15 @@ function createMemoryCache(maxBytes){
 
     return {
         backed: false,
+        reason,
 
         /** @param {number} index */
         has: index=>held.has(index),
+
+        /** Nothing durable to keep an order in, so nothing is remembered. */
+        demanded(){},
+        /** @returns {number[]} */
+        order: ()=>[],
 
         /** @param {number} index */
         read(index){
@@ -160,6 +167,13 @@ function createMemoryCache(maxBytes){
 }
 
 /**
+ * How many blocks the record of a run's reads holds. A start reads a few
+ * hundred blocks before its first frame; a few thousand covers that with room
+ * for what a run reads afterwards, and stays a small file beside the blocks.
+ */
+const ORDER_LIMIT = 4096;
+
+/**
  * @param {Object} options
  * @param {BlockStore | null} options.store  Synchronous byte storage, or null.
  * @param {string} options.name       Names this bundle's cache. Two bundles must
@@ -180,39 +194,58 @@ export async function createBlockCache(options){
         ?? Math.max(64 << 20, 32 * blockSize);
     if (!store)
     {
-        return createMemoryCache(maxHeapBytes);
+        return createMemoryCache(maxHeapBytes, 'no store');
     }
 
-    const dataPath = `/${name}.blocks`;
-    const bitmapPath = `/${name}.present`;
+    // A bare file name at the store's root: the origin's file system refuses a
+    // name with a separator in it, and a bundle's id is not ours to vet.
+    const file = name.replace(/[^A-Za-z0-9._-]/g, '_');
+    const dataPath = `${file}.blocks`;
+    const bitmapPath = `${file}.present`;
+    const orderPath = `${file}.order`;
     const bitmap = new Uint8Array(bitmapBytes(blockCount));
 
     try
     {
         await store.open(dataPath);
         await store.open(bitmapPath);
+        await store.open(orderPath);
     }
-    catch {
+    catch (e){
         // A store that will not open is a slower run, not a failed one. The
         // ordinary reason is a build outside a worker, where no synchronous
         // handle on OPFS exists to be had.
-        return createMemoryCache(maxHeapBytes);
+        return createMemoryCache(maxHeapBytes, /** @type {Error} */ (e).message);
     }
 
     // A bitmap of the wrong size belongs to a different bundle, or to a version
     // of this one with different blocks. Either way the slots underneath it mean
     // something else, so it starts again rather than being partly believed.
     const held = store.stat(bitmapPath);
+    /**
+     * The order the last run first asked for its blocks in: what a filler
+     * should bring in before anything else, because a start reads the same
+     * things in the same order every time.
+     *
+     * @type {number[]}
+     */
+    let previous = [];
     if (held && held.size === bitmap.length)
     {
         bitmap.set(store.read(bitmapPath, 0, bitmap.length));
+        const stored = store.read(orderPath, 0, ORDER_LIMIT * 4);
+        previous = [...new Uint32Array(stored.buffer, stored.byteOffset, stored.length >> 2)]
+            .filter(index=>index < blockCount);
     }
     else
     {
         store.truncate(bitmapPath, bitmap.length);
         store.write(bitmapPath, 0, bitmap);
+        store.truncate(orderPath, 0);
     }
 
+    /** This run's first demands, in order. @type {Set<number>} */
+    const demanded = new Set();
     let dirty = false;
 
     return {
@@ -220,6 +253,23 @@ export async function createBlockCache(options){
 
         /** @param {number} index */
         has: index=>isSet(bitmap, index),
+
+        /**
+         * A read wanted this block. Only the first time counts, and only the
+         * order: what is recorded is the sequence a start reads in.
+         *
+         * @param {number} index
+         */
+        demanded(index){
+            if (demanded.size < ORDER_LIMIT && !demanded.has(index))
+            {
+                demanded.add(index);
+                dirty = true;
+            }
+        },
+
+        /** What the last run asked for, in the order it asked. */
+        order: ()=>previous,
 
         /**
          * @param {number} index
@@ -255,6 +305,13 @@ export async function createBlockCache(options){
                 return;
             }
             store.write(bitmapPath, 0, bitmap);
+            // This run's order first, then whatever the last run reached that
+            // this one has not yet: a run cut short must not shed what a
+            // longer one learned.
+            const order = new Uint32Array([...demanded,
+                ...previous.filter(index=>!demanded.has(index))].slice(0, ORDER_LIMIT));
+            store.truncate(orderPath, order.byteLength);
+            store.write(orderPath, 0, new Uint8Array(order.buffer));
             dirty = false;
         },
 

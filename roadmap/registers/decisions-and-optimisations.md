@@ -1310,3 +1310,66 @@ the machine back. The win32 surface: every value a normal process may set round-
 current thread names the caller, a value from the realtime class is refused with
 `ERROR_INVALID_PARAMETER` and leaves the priority as it was, and a handle that is not a thread
 answers `THREAD_PRIORITY_ERROR_RETURN` with `ERROR_INVALID_HANDLE`.
+
+## A block downloaded once is not downloaded again, and a miss brings in its window
+
+**The cause.** A second start of the same bundle in the same browser fetched every block the
+first start had fetched, and read from outside as a cache that never worked. The block cache
+named its two files as paths, `/<id>.blocks` and `/<id>.present`, and handed those names to the
+origin's file system, which refuses a name with a separator in it (`getFileHandle` answers
+"Name is not allowed"; checked in a real browser). The cache caught the refusal and quietly fell
+back to the bounded heap store, so nothing was kept between starts, blocks the heap let go were
+fetched again within a run, and the background filler -- inert without a durable store -- never
+ran. Nothing reported it: the `bundle` event said `backed=false` and nobody was reading that
+field.
+
+**The decision.** Three things, each pinned by its own test.
+
+The cache's files are bare names at the store's root, with anything the store would refuse
+replaced, and a store that will not open now says why: the `bundle-unbacked` warning names the
+reason and what it costs ("fetched blocks are not kept on this machine"), so a private window
+or a blocked storage API reads as what it is. The launcher keeps the store on for every run --
+a block fetched once must not be paid for twice, on this start or the next -- and its setting
+now governs only whether the rest of the game is copied in the background. Two more holes on the
+same path are closed: a read that wants a block another read's request is already out for waits
+for that request instead of sending its own, and the filler regroups only what is still missing
+rather than fetching a group whole because part of it arrived. Two counters make this checkable
+from a run instead of assumed: `refetched` (blocks inside a range request that were already
+resident, whether named or bridged over) and `ranges`/`rangeBytes` (what actually went over the
+wire; the `requests` beside them counts reads that waited, which is a different number and was
+mistaken for this one).
+
+A demand miss fetches its window: every miss is widened to the 2 MiB-aligned window of the
+container it falls in, minus what is resident, clipped at the end; two misses in one window are
+one request, and a resident block wider than a bridged gap splits the request rather than being
+fetched again. The forward read-ahead stays on top of it, with the same constant. This replaces
+the rule that reached past a miss only when it continued the last fetch.
+
+The filler is no longer blind: the order in which a run first demanded its blocks is kept beside
+the blocks (bounded to 4096 entries; this run's order first, then what the last run reached that
+this one did not), and the next start's filler brings those in first, each with its window, before
+filling the rest in container order. A bundle never run before fills as it did.
+
+**The measurement.** Through the launcher, sampled every 250 ms, on the local server. The warm
+start: two starts in one browser, the second issued 0 range requests, waited 0 ms on fetches and
+refetched 0 blocks; the first draw came at 7.49 s cold and 7.32 s warm, so the fetches were not
+what the loading lag was mostly made of. The window, four cold starts each way, before with the
+old fetch logic and the repaired store: before, 102 range requests and 97.9 MB on the wire over
+30 s, reads waited 926, 325, 713 and 418 ms of the five seconds from 3 to 8 s, the first draw at
+8.15, 7.02, 6.79 and 6.74 s; after, 63 requests and 156 MB (38 % fewer requests for 60 % more
+bytes), waits of 374, 363, 296 and 324 ms, the first draw at 7.80, 7.10, 7.83 and 6.55 s. Time
+to the menu did not move outside its own spread; the wait shrank; the bytes grew. The order:
+with the filler on, a start with no record against a start whose blocks were cleared and whose
+record was kept. Without the record, 15 reads waited 491 ms in the first 10 s; with it, none
+waited at all (0 ms, 0 demands). But the filler itself is the larger cost on a local server: it
+brought in 940 MB to 1 GB in those 10 s, the guest retired 17 and 25 million instructions a
+second against 113 and 131 without it, and the first draw came at 14.4 and 13.5 s against 7 to 8.
+A filler that fills at that rate is not using idle time; that is a defect of its own to take up,
+not tuned away here, and it is off by default.
+
+**The tests.** The cache opens under a name a store allows and is backed; a store that will not
+open carries its reason; the order is recorded once per block in demand order, survives a
+reload, merges a short run behind a longer one, belongs to the bundle and is bounded. A lone
+miss becomes its aligned window minus what is resident; a window at the end is clipped; two
+misses in one window are one request; the first window does not reach before block zero. A
+request is charged for every resident block inside its span, named or bridged.

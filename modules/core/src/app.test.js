@@ -13,7 +13,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pageIsHidden, placePatches,
-    withReadAhead,
+    withReadAhead, withWindow, refetchedIn,
     resolveLibraryPath, timedWait, pagePacing,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
@@ -183,6 +183,60 @@ test('a miss reaches ahead through the blocks that follow it', ()=>{
         'four blocks of reach past the last wanted one, minus the resident one');
     assert.ok(reached.slice(2).every(block=>block.ahead === true));
     assert.equal(reached[2].offset, 5 * (256 << 10), 'with the container offsets');
+});
+
+test('a lone miss becomes its aligned window, minus what is already here', ()=>{
+    // A miss costs a round trip whatever its size, so the request is the
+    // two-mebibyte window of the container the miss falls in: blocks 8..15 at
+    // a quarter mebibyte each, wherever in the window the miss was.
+    const layout = run(0, 40, 256 << 10);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 40 };
+    const resident = (/** @type {number} */ index)=>index === 9 || index === 14;
+
+    const widened = withWindow([layout[11]], bundle, resident);
+
+    assert.deepEqual(widened.map(block=>block.index), [8, 10, 11, 12, 13, 15]);
+    assert.ok(widened.filter(block=>block.index !== 11).every(block=>block.ahead === true));
+    assert.equal(groupBlocks(widened).length, 3,
+        'a resident block wider than a bridged gap splits the request, and is not fetched again');
+    assert.equal(groupBlocks(withWindow([layout[11]], bundle, ()=>false)).length, 1,
+        'with nothing resident, the window is one request');
+});
+
+test('a window at the end is clipped, and two misses in one window are one request', ()=>{
+    const layout = run(0, 11, 256 << 10);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 11 };
+
+    const clipped = withWindow([layout[9]], bundle, ()=>false);
+    assert.deepEqual(clipped.map(block=>block.index), [8, 9, 10]);
+
+    const pair = withWindow([layout[1], layout[6]], bundle, ()=>false);
+    assert.deepEqual(pair.map(block=>block.index), [0, 1, 2, 3, 4, 5, 6, 7]);
+    assert.equal(groupBlocks(pair).length, 1);
+});
+
+test('the window does not begin before an unaligned first block', ()=>{
+    // Blocks start after the container's header, so the first window is short
+    // by that much and no block before index zero is asked for.
+    const layout = run(4096, 4, 256 << 10);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index], blockCount: 4 };
+
+    assert.deepEqual(withWindow([layout[2]], bundle, ()=>false).map(block=>block.index),
+        [0, 1, 2, 3]);
+    assert.deepEqual(withWindow([], bundle, ()=>false), []);
+});
+
+test('a request is charged for every resident block inside its span', ()=>{
+    // Whether named or bridged over as a gap, a resident block inside a range
+    // request is downloaded twice, and that is the number that has to be zero.
+    const layout = run(0, 10, 1000);
+    const bundle = { block: (/** @type {number} */ index)=>layout[index] };
+    const group = { start: 2000, end: 7000, blocks: [layout[2], layout[4], layout[6]] };
+    const resident = (/** @type {number} */ index)=>index === 3 || index === 6 || index === 8;
+
+    assert.deepEqual(refetchedIn(group, bundle, resident), { blocks: 2, bytes: 2000 },
+        'the bridged block and the named one, not the one outside the span');
+    assert.deepEqual(refetchedIn({ blocks: [] }, bundle, resident), { blocks: 0, bytes: 0 });
 });
 
 test('read-ahead stops at the end of the bundle and adds nothing to nothing', ()=>{
