@@ -7,7 +7,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BRING_UP_PARK, GUEST_JUMP, buildBootRom, ROM_BASE, ROM_SIZE, SEL_CODE32, SEL_DATA32,
+    BRING_UP_PARK, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP, IDT_OFFSET,
+    IDT_POINTER_OFFSET, VECTORS, buildBootRom, ROM_BASE, ROM_SIZE, SEL_CODE32, SEL_DATA32,
 } from './boot-rom.js';
 
 const ENTRY_VECTOR = 0x7000;
@@ -105,9 +106,12 @@ test('every processor exception has a gate, and each gate has its own stub', ()=
     // machine, so a divide by zero and a bad pointer arrive as the same
     // message at an address that is wherever the CPU happened to be.
     const image = buildBootRom({ entryVector: 0x7000, initialStack: 0x300000, trapPort: 0xb077 });
-    const idt = 0x400;
+    const idt = IDT_OFFSET;
 
-    for (const vector of [0, 6, 13, 14, 31])
+    // The processor's own exceptions, and the software interrupts a program
+    // of another era reaches for: without a gate the emulator stops the
+    // machine instead of raising the fault the processor would.
+    for (const vector of [0, 6, 13, 14, 31, 0x21, 0x2e, 255])
     {
         const gate = idt + vector * 8;
         const offset = image[gate] | image[gate + 1] << 8
@@ -115,14 +119,15 @@ test('every processor exception has a gate, and each gate has its own stub', ()=
         assert.equal(image[gate + 2] | image[gate + 3] << 8, 0x08, 'the flat 32-bit code selector');
         assert.equal(image[gate + 5], 0x8e,
             'present, ring 0, 32-bit interrupt gate — a trap gate would leave interrupts on');
-        assert.equal(offset, ROM_BASE + 0x700 + vector * 16,
+        assert.equal(offset, ROM_BASE + FAULT_STUBS_OFFSET + vector * FAULT_STUB_BYTES,
             'and it points at this vector\'s own stub, not a shared one');
     }
+    assert.equal(VECTORS, 256, 'every vector, so no int reaches past the table');
 });
 
 test('a fault stub reports its own vector and then stops', ()=>{
     const image = buildBootRom({ entryVector: 0x7000, initialStack: 0x300000, trapPort: 0xb077 });
-    const stub = 0x700 + 13 * 16;
+    const stub = FAULT_STUBS_OFFSET + 13 * FAULT_STUB_BYTES;
 
     assert.deepEqual([...image.subarray(stub, stub + 4)], [0x66, 0xba, 0x77, 0xb0],
         'mov dx, trapPort');
@@ -145,5 +150,6 @@ test('the interrupt table is loaded before the guest can fault', ()=>{
         && init[at + 2] === 0x01 && init[at + 3] === 0x16);
 
     assert.ok(lgdt >= 0 && lidt > lgdt, 'lidt follows lgdt, both before protected mode');
-    assert.equal(image[0x600] | image[0x601] << 8, 32 * 8 - 1, 'thirty-two gates, less one');
+    assert.equal(image[IDT_POINTER_OFFSET] | image[IDT_POINTER_OFFSET + 1] << 8,
+        VECTORS * 8 - 1, 'every gate, less one');
 });

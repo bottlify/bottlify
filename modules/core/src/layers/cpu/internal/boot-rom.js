@@ -37,19 +37,23 @@ const OFF_GDT_PTR = 0x120;
 const OFF_PM_ENTRY = 0x200;
 const OFF_PARK = 0x300;
 const OFF_IDT = 0x400;
-const OFF_IDT_PTR = 0x600;
-const OFF_FAULT_STUBS = 0x700;
+const OFF_IDT_PTR = 0xc00;
+const OFF_FAULT_STUBS = 0xd00;
 const OFF_RESET = 0xfff0;
 
 /**
- * How many interrupt vectors get a gate.
+ * How many interrupt vectors get a gate: all of them.
  *
- * The first thirty-two are the processor's own exceptions, and they are the
- * ones that matter: without a gate the emulator has nowhere to dispatch a fault
- * to and stops the machine, so a divide by zero, a bad pointer or an illegal
- * instruction all arrive as "the emulator gave up" rather than as themselves.
+ * The first thirty-two are the processor's own exceptions, and without a gate
+ * the emulator has nowhere to dispatch a fault to and stops the machine, so a
+ * divide by zero, a bad pointer or an illegal instruction all arrive as "the
+ * emulator gave up" rather than as themselves. The rest are what a program
+ * reaches with a software `int`: a real processor answers one past the
+ * table's end with a general protection fault, and the emulator answers it by
+ * stopping the machine -- so every vector has a stub, and an `int 21h` from
+ * code written for another era is reported as the interrupt it was.
  */
-const VECTORS = 32;
+export const VECTORS = 256;
 
 /** Bytes each fault stub occupies. Eleven are used; the slot is a round number. */
 const FAULT_STUB_SIZE = 16;
@@ -65,6 +69,12 @@ export const FAULT_TRAP_BASE = 0xf000;
 
 /** Where a fault's stub sits, so a caller can tell one from ordinary code. */
 export const FAULT_STUBS_BASE = ROM_BASE + OFF_FAULT_STUBS;
+
+/** Where the interrupt table and its pointer sit in the image, for a test. */
+export const IDT_OFFSET = OFF_IDT;
+export const IDT_POINTER_OFFSET = OFF_IDT_PTR;
+export const FAULT_STUBS_OFFSET = OFF_FAULT_STUBS;
+export const FAULT_STUB_BYTES = FAULT_STUB_SIZE;
 
 /**
  * Bytes of the protected-mode entry before its last instruction: one `mov eax,

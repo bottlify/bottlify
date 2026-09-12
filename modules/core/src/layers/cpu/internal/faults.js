@@ -67,7 +67,11 @@ export function readFault(vector, esp, readU32){
     const at = hasError ? esp + 4 : esp;
     return {
         vector,
-        name: NAMES[vector] ?? `exception ${vector}`,
+        // Past the processor's own: a software interrupt nothing here
+        // answers, named by the number the program used.
+        name: NAMES[vector] ?? (vector < 32
+            ? `exception ${vector}`
+            : `int 0x${vector.toString(16)} with no handler`),
         errorCode: hasError ? readU32(esp) >>> 0 : null,
         eip: readU32(at) >>> 0,
         cs: readU32(at + 4) >>> 0,
