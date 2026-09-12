@@ -55,7 +55,10 @@ test('a file written through the adapter reads back through it', async()=>{
     assert.equal(vol.write(node, 0, new Uint8Array([1, 2, 3, 4])), 4);
     vol.close(node);
 
-    assert.deepEqual(vol.stat('C:\\save.dat'), { exists: true, isDirectory: false, size: 4 });
+    const written = vol.stat('C:\\save.dat');
+    assert.ok(written && written.modified > 0, 'a write stamps the file with a time');
+    assert.deepEqual({ ...written, modified: 0 },
+        { exists: true, isDirectory: false, size: 4, modified: 0 });
 
     const reopened = vol.open('C:\\save.dat', { read: true });
     assert.deepEqual([...vol.read(reopened, 1, 2)], [2, 3],

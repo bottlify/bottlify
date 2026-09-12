@@ -71,6 +71,82 @@ export const TIME_ZONE_INFORMATION = Object.freeze({
 /** The volume every file here reports belonging to. */
 const VOLUME_SERIAL = 0xb0771f42;
 
+/** FILETIME units (100 ns) between 1601-01-01 and the Unix epoch. */
+const FILETIME_EPOCH = 116_444_736_000_000_000n;
+/** FILETIME units in one millisecond. */
+const FILETIME_PER_MS = 10_000n;
+
+/**
+ * Milliseconds since the Unix epoch as a FILETIME. A moment before 1970 is
+ * still after 1601, so nothing here goes negative for the dates a file has.
+ *
+ * @param {number} ms
+ * @returns {bigint}
+ */
+export function msToFileTime(ms){
+    return BigInt(Math.floor(ms)) * FILETIME_PER_MS + FILETIME_EPOCH;
+}
+
+/**
+ * The reverse, or null for a FILETIME before the Unix epoch -- which is what
+ * an uninitialised one reads as.
+ *
+ * @param {bigint} units
+ * @returns {number | null}
+ */
+export function fileTimeToMs(units){
+    return units < FILETIME_EPOCH ? null : Number((units - FILETIME_EPOCH) / FILETIME_PER_MS);
+}
+/** The DOS calendar runs from 1980 to 2107, in two-second steps. */
+const DOS_FIRST_MS = Date.UTC(1980, 0, 1);
+const DOS_LAST_MS = Date.UTC(2107, 11, 31, 23, 59, 58);
+
+/**
+ * A DOS date and time -- the packed words an archive of the era stores for
+ * every member -- as milliseconds since the Unix epoch, or null when the
+ * words do not name a date. Local time on the machine that packed it, which
+ * this machine treats as UTC, as it treats every local time.
+ *
+ * @param {number} date @param {number} time
+ * @returns {number | null}
+ */
+export function dosDateTimeToMs(date, time){
+    const year = 1980 + (date >>> 9);
+    const month = (date >>> 5) & 0xf;
+    const day = date & 0x1f;
+    const hours = time >>> 11;
+    const minutes = (time >>> 5) & 0x3f;
+    const seconds = (time & 0x1f) * 2;
+    if (month < 1 || month > 12 || day < 1 || hours > 23 || minutes > 59 || seconds > 59)
+    {
+        return null;
+    }
+    const ms = Date.UTC(year, month - 1, day, hours, minutes, seconds);
+    // A day past the month's end rolls over in Date.UTC; DOS refuses it.
+    return new Date(ms).getUTCDate() === day ? ms : null;
+}
+
+/**
+ * The reverse: the two words for a moment, or null when the moment is
+ * outside the calendar DOS can write. Seconds round down to the even one.
+ *
+ * @param {number} ms
+ * @returns {{ date: number, time: number } | null}
+ */
+export function msToDosDateTime(ms){
+    if (!(ms >= DOS_FIRST_MS && ms <= DOS_LAST_MS))
+    {
+        return null;
+    }
+    const at = new Date(ms);
+    return {
+        date: ((at.getUTCFullYear() - 1980) << 9) | ((at.getUTCMonth() + 1) << 5)
+            | at.getUTCDate(),
+        time: (at.getUTCHours() << 11) | (at.getUTCMinutes() << 5)
+            | (at.getUTCSeconds() >>> 1),
+    };
+}
+
 /** FILE_ATTRIBUTE_DIRECTORY and FILE_ATTRIBUTE_ARCHIVE. */
 const FILE_ATTRIBUTE_DIRECTORY = 0x10;
 const FILE_ATTRIBUTE_ARCHIVE = 0x20;
@@ -82,7 +158,9 @@ const FILE_ATTRIBUTE_ARCHIVE = 0x20;
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
  * @property {(path: string) => { exists: boolean, isDirectory: boolean,
- *                                size: number } | null} stat
+ *                                size: number, modified?: number } | null} stat
+ * @property {(path: string, modified: number) => boolean} [setModified]
+ *           Stamps a file's write time, in milliseconds since the epoch.
  */
 
 /** @param {string} text @returns {Uint8Array} UTF-16, NUL-terminated. */
@@ -133,15 +211,16 @@ export function createFileTimeFunctions(host){
     };
 
     /**
-     * A file's recorded times, in FILETIME units. Nothing in the filesystem
-     * carries them yet, so all three are the same zero -- see the note at the
-     * top about why that is an answer rather than a gap.
+     * A file's recorded times, in FILETIME units. The volume keeps one time
+     * per file -- when it was last written -- and that is what all three
+     * answer with: a program comparing dates compares the write time, and a
+     * creation time later than it would be a contradiction.
      *
      * @param {any} file
      */
     const timesOf = file=>{
-        void file;
-        return { created: 0n, accessed: 0n, written: 0n };
+        const written = msToFileTime(host.stat(file.path)?.modified ?? 0);
+        return { created: written, accessed: written, written };
     };
 
     return {
@@ -161,6 +240,53 @@ export function createFileTimeFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 writeFileTime(to >>> 0, readFileTime(from >>> 0));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL DosDateTimeToFileTime(WORD wFatDate, WORD wFatTime, LPFILETIME)
+         *
+         * What an installer calls for every file it unpacks: the archive
+         * carries DOS words, the file it writes wants a FILETIME, and the
+         * file's recorded time is what its next pass compares against to
+         * decide whether the copy is done.
+         */
+        DosDateTimeToFileTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([date, time, out])=>{
+                const ms = dosDateTimeToMs(date & 0xffff, time & 0xffff);
+                if (ms === null || out === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                writeFileTime(out >>> 0, BigInt(ms) * FILETIME_PER_MS + FILETIME_EPOCH);
+                return 1;
+            },
+        },
+
+        /** BOOL FileTimeToDosDateTime(const FILETIME *, LPWORD lpFatDate, LPWORD lpFatTime) */
+        FileTimeToDosDateTime: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([from, outDate, outTime])=>{
+                if (from === 0 || outDate === 0 || outTime === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const units = readFileTime(from >>> 0);
+                const packed = units < FILETIME_EPOCH
+                    ? null
+                    : msToDosDateTime(Number((units - FILETIME_EPOCH) / FILETIME_PER_MS));
+                if (packed === null)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const word = (/** @type {number} */ value)=>
+                    new Uint8Array([value & 0xff, value >>> 8]);
+                host.writeMemory(outDate >>> 0, word(packed.date));
+                host.writeMemory(outTime >>> 0, word(packed.time));
                 return 1;
             },
         },
@@ -215,15 +341,32 @@ export function createFileTimeFunctions(host){
          * BOOL SetFileTime(HANDLE hFile, const FILETIME *, const FILETIME *,
          *                  const FILETIME *)
          *
-         * Accepted and not stored. The filesystem keeps no times, so recording
-         * them here would produce a file whose times GetFileTime reports and
-         * nothing else agrees with -- worse than not keeping them at all, since
-         * a program could then see them change and not persist.
+         * The write time is kept; the other two are accepted, since the
+         * volume records one time per file and the write time is the one a
+         * program compares. An installer stamps every file it unpacks with
+         * the archive's time and, on its next pass, copies again anything
+         * whose time does not match -- so a time that was not kept is a
+         * file that is installed forever.
          */
         SetFileTime: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+            handler: ([handle, , , written])=>{
+                const file = object(handle, 'file');
+                if (!file)
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((written >>> 0) !== 0)
+                {
+                    const ms = fileTimeToMs(readFileTime(written >>> 0));
+                    if (ms !== null)
+                    {
+                        host.setModified?.(file.path, ms);
+                    }
+                }
+                return 1;
+            },
         },
 
         /**
@@ -258,6 +401,10 @@ export function createFileTimeFunctions(host){
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.dwFileAttributes,
                     entry?.isDirectory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_ARCHIVE,
                     true);
+                const time = msToFileTime(entry?.modified ?? 0);
+                view.setBigUint64(BY_HANDLE_FILE_INFORMATION.ftCreationTime, time, true);
+                view.setBigUint64(BY_HANDLE_FILE_INFORMATION.ftLastAccessTime, time, true);
+                view.setBigUint64(BY_HANDLE_FILE_INFORMATION.ftLastWriteTime, time, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.dwVolumeSerialNumber,
                     VOLUME_SERIAL, true);
                 view.setUint32(BY_HANDLE_FILE_INFORMATION.nFileSizeHigh,

@@ -29,6 +29,7 @@
  */
 
 import { HANDLE_STDIN, HANDLE_STDOUT, HANDLE_STDERR } from './console.js';
+import { msToFileTime } from './filetime.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
@@ -152,6 +153,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {boolean} exists
  * @property {boolean} isDirectory
  * @property {number} size
+ * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
  */
 
 /**
@@ -159,6 +161,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {string} name
  * @property {boolean} isDirectory
  * @property {number} size
+ * @property {number} [modified]  Milliseconds since the epoch; absent means unknown.
  */
 
 /**
@@ -184,6 +187,7 @@ export const WIN32_FIND_DATAA = Object.freeze({
  * @property {(node: any, size: number) => void} truncate
  * @property {(node: any) => void} close
  * @property {(path: string) => boolean} remove
+ * @property {(path: string, modified: number) => boolean} [setModified]
  * @property {(path: string) => boolean} mkdir
  * @property {(from: string, to: string) => boolean} rename
  * @property {(path: string, pattern: string) => DirectoryEntry[]} list
@@ -460,6 +464,13 @@ export function createFileFunctions(host){
         const data = new Uint8Array(WIN32_FIND_DATAA.SIZE);
         const view = new DataView(data.buffer);
         view.setUint32(WIN32_FIND_DATAA.dwFileAttributes, attributesOf(entry), true);
+        // One time for all three: the volume records when a file was last
+        // written and nothing else, and a program comparing dates compares
+        // the write time.
+        const time = msToFileTime(entry.modified ?? 0);
+        view.setBigUint64(WIN32_FIND_DATAA.ftCreationTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAA.ftLastAccessTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAA.ftLastWriteTime, time, true);
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAA.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAA.nFileSizeLow, low(size), true);
@@ -554,6 +565,10 @@ export function createFileFunctions(host){
         const data = new Uint8Array(WIN32_FIND_DATAW.SIZE);
         const view = new DataView(data.buffer);
         view.setUint32(WIN32_FIND_DATAW.dwFileAttributes, attributesOf(entry), true);
+        const time = msToFileTime(entry.modified ?? 0);
+        view.setBigUint64(WIN32_FIND_DATAW.ftCreationTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAW.ftLastAccessTime, time, true);
+        view.setBigUint64(WIN32_FIND_DATAW.ftLastWriteTime, time, true);
         const size = entry.size ?? 0;
         view.setUint32(WIN32_FIND_DATAW.nFileSizeHigh, high(size), true);
         view.setUint32(WIN32_FIND_DATAW.nFileSizeLow, low(size), true);

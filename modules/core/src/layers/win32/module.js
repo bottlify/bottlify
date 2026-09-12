@@ -584,6 +584,8 @@ export const win32Module = {
                     resolveHandle: (handle, type)=>kernel.handles.resolve(handle, type),
                     /** @param {string} path */
                     stat: path=>filesystem.stat(path),
+                    /** @param {string} path @param {number} modified */
+                    setModified: (path, modified)=>filesystem.setModified(path, modified),
                 }),
                 ...createConsoleIoFunctions({
                     readMemory,

@@ -88,13 +88,27 @@ export function createVolume(fs, fetchBlocks = null){
     return {
         /**
          * @param {string} path
-         * @returns {{ exists: boolean, isDirectory: boolean, size: number } | null}
+         * @returns {{ exists: boolean, isDirectory: boolean, size: number,
+         *             modified: number } | null}
          */
         stat(path){
             const entry = attempt(()=>fs.stat(path), null);
             return entry
-                ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size }
+                ? { exists: true, isDirectory: Boolean(entry.directory), size: entry.size,
+                    modified: entry.modified ?? 0 }
                 : null;
+        },
+
+        /**
+         * @param {string} path
+         * @param {number} modified  Milliseconds since the epoch.
+         * @returns {boolean}
+         */
+        setModified(path, modified){
+            return attempt(()=>{
+                fs.setModified(path, modified);
+                return true;
+            }, false);
         },
 
         /**
@@ -207,6 +221,7 @@ export function createVolume(fs, fetchBlocks = null){
                 name: entry.name,
                 isDirectory: Boolean(entry.directory),
                 size: entry.size,
+                modified: entry.modified ?? 0,
             })), []),
 
         currentDirectory: ()=>fs.currentDirectory(),

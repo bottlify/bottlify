@@ -103,6 +103,7 @@ export const filesystemModule = {
             drives.set(key, createOverlay({
                 source: stores?.source ?? null,
                 writable: stores?.writable ?? createMemoryStore(),
+                now: config?.now,
                 onChanged: (/** @type {any} */ change)=>{
                     changes.set(`${key}:${change.path}`, {
                         path: formatPath(key, splitComponents(change.path)),
@@ -320,6 +321,16 @@ export const filesystemModule = {
                 const { tree, drive, components } = locate(path);
                 const entry = tree.stat(components);
                 return entry ? { ...entry, path: formatPath(drive, components) } : null;
+            },
+
+            /**
+             * Stamps a file with a modification time of the caller's choosing.
+             *
+             * @param {string} path @param {number} modified  Milliseconds since the epoch.
+             */
+            setModified(path, modified){
+                const { tree, components } = locate(path);
+                tree.setModified(components, modified);
             },
 
             /**

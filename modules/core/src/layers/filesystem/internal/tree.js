@@ -39,6 +39,7 @@ import { foldName, matchName } from './paths.js';
  * @property {boolean} inWritable
  * @property {boolean} tombstone  Deleted here, still present in the source.
  * @property {Map<string, Node>} children  Keyed by folded name.
+ * @property {number} modified    Milliseconds since the epoch; when it was last written.
  */
 
 /**
@@ -47,7 +48,16 @@ import { foldName, matchName } from './paths.js';
  * @property {string} path
  * @property {boolean} directory
  * @property {number} size
+ * @property {number} modified  Milliseconds since the epoch.
  */
+
+/**
+ * The time a file that nobody here has written carries: what came from the
+ * source was written before this machine existed, and a program comparing
+ * dates has to find it older than anything it writes itself. The start of
+ * the DOS calendar is the oldest date every convention can still express.
+ */
+export const SOURCE_MODIFIED_MS = Date.UTC(1980, 0, 1);
 
 /**
  * @param {Node | null} parent
@@ -65,6 +75,7 @@ function makeNode(parent, name){
         inWritable: false,
         tombstone: false,
         children: new Map(),
+        modified: SOURCE_MODIFIED_MS,
     };
 }
 
@@ -73,8 +84,9 @@ function makeNode(parent, name){
  * @param {import('./memory-store.js').SourceStore | null} [options.source]
  * @param {import('./memory-store.js').WritableStore} options.writable
  * @param {((change: { path: string, kind: string }) => void) | null} [options.onChanged]
+ * @param {() => number} [options.now]  The clock a write is stamped with.
  */
-export function createOverlay({ source = null, writable, onChanged = null }){
+export function createOverlay({ source = null, writable, onChanged = null, now = Date.now }){
     /**
      * Announces that a path in the writable layer now differs from what anyone
      * outside has. Only the fact and the path: a program writes a save in
@@ -293,8 +305,20 @@ export function createOverlay({ source = null, writable, onChanged = null }){
                     path: node.path,
                     directory: node.directory,
                     size: sizeOf(node),
+                    modified: node.modified,
                 }
                 : null;
+        },
+
+        /**
+         * Stamps a file with a time of the caller's choosing, which is what an
+         * installer does to every file it unpacks: the archive carries the
+         * time, and the next pass compares against it.
+         *
+         * @param {string[]} components @param {number} modified
+         */
+        setModified(components, modified){
+            mustFind(components).modified = modified;
         },
 
         /**
@@ -324,6 +348,7 @@ export function createOverlay({ source = null, writable, onChanged = null }){
                     path: child.path,
                     directory: child.directory,
                     size: sizeOf(child),
+                    modified: child.modified,
                 });
             }
             return entries;
@@ -357,6 +382,7 @@ export function createOverlay({ source = null, writable, onChanged = null }){
             }
             copyUp(node);
             writable.write(node.path, offset, bytes);
+            node.modified = now();
             changed(node.path, 'written');
         },
 
@@ -379,6 +405,7 @@ export function createOverlay({ source = null, writable, onChanged = null }){
                 copyUp(node);
             }
             writable.truncate(node.path, size);
+            node.modified = now();
         },
 
         /**
@@ -404,8 +431,10 @@ export function createOverlay({ source = null, writable, onChanged = null }){
             materialiseParents(node);
             writable.truncate(node.path, 0);
             node.inWritable = true;
+            node.modified = now();
             changed(node.path, 'written');
-            return { name: node.name, path: node.path, directory: false, size: 0 };
+            return { name: node.name, path: node.path, directory: false, size: 0,
+                modified: node.modified };
         },
 
         /**

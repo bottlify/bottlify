@@ -797,8 +797,11 @@ test('WIN32_FIND_DATAA is filled in where the guest reads it', ()=>{
     assert.equal(memory.dword(FIND_DATA + WIN32_FIND_DATAA.nFileSizeHigh), 0);
     assert.equal(memory.string(FIND_DATA + WIN32_FIND_DATAA.cFileName), 'A.SAV',
         'the name alone, not the path it was found under');
-    assert.equal(memory.dword(FIND_DATA + WIN32_FIND_DATAA.ftLastWriteTime), 0,
-        'what we do not know is zeroed rather than left as it was');
+    // An entry the fake stamps with no time reads as the FILETIME of the
+    // epoch, not as an uninitialised zero: every time here is a real one.
+    assert.equal(memory.dword(FIND_DATA + WIN32_FIND_DATAA.ftLastWriteTime), 0xd53e8000);
+    assert.equal(memory.dword(FIND_DATA + WIN32_FIND_DATAA.ftLastWriteTime + 4), 0x019db1de,
+        'the epoch as a FILETIME, not an uninitialised zero');
     assert.equal(memory.bytes[FIND_DATA + WIN32_FIND_DATAA.cAlternateFileName], 0);
 });
 

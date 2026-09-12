@@ -15,6 +15,8 @@ function setup(){
     /** @type {number[]} */
     const errors = [];
     const file = { path: 'C:\\GAME\\WAR3.EXE' };
+    /** @type {{ path: string, modified: number }[]} */
+    const stamped = [];
     const fns = createFileTimeFunctions({
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
@@ -29,11 +31,32 @@ function setup(){
             return file;
         },
         stat: path=>path === file.path
-            ? { exists: true, isDirectory: false, size: 0x1234 }
+            ? { exists: true, isDirectory: false, size: 0x1234,
+                modified: stamped.at(-1)?.modified ?? Date.UTC(1980, 0, 1) }
             : null,
+        setModified: (path, modified)=>{
+            stamped.push({ path, modified });
+            return true;
+        },
     });
-    return { fns, bytes, errors, file };
+    return { fns, bytes, errors, file, stamped };
 }
+
+test('a time set on a file is the time read back from it', ()=>{
+    // An installer stamps every file it unpacks and, on its next pass, copies
+    // again anything whose time does not match: a time accepted and not kept
+    // is a file that is installed forever.
+    const { fns, bytes, stamped } = setup();
+    const moment = Date.UTC(2004, 7, 6, 14, 30, 20);
+    new DataView(bytes.buffer)
+        .setBigUint64(0x100, BigInt(moment) * 10000n + 116444736000000000n, true);
+
+    assert.equal(fns.SetFileTime.handler([8, 0, 0, 0x100]), 1);
+    assert.deepEqual(stamped, [{ path: 'C:\\GAME\\WAR3.EXE', modified: moment }]);
+
+    assert.equal(fns.GetFileTime.handler([8, 0, 0, 0x200]), 1);
+    assert.deepEqual([...bytes.slice(0x200, 0x208)], [...bytes.slice(0x100, 0x108)]);
+});
 
 /** @param {Uint8Array} bytes @param {number} at */
 const dword = (bytes, at)=>
@@ -64,6 +87,28 @@ test('local file time is the same file time, because this machine is in UTC', ()
 
     assert.equal(fns.LocalFileTimeToFileTime.handler([0x200, 0x300]), 1);
     assert.deepEqual([...bytes.slice(0x300, 0x308)], [1, 2, 3, 4, 5, 6, 7, 8]);
+});
+
+test('a DOS date and time round-trips through a FILETIME to the second it can name', ()=>{
+    // An archive of the era stamps every member in DOS words; the installer
+    // converts them for the file it writes and compares on its next pass.
+    // 2004-08-06 14:30:20 -> date 0x3106, time 0x73ca (seconds stored halved).
+    const { fns, bytes } = setup();
+
+    assert.equal(fns.DosDateTimeToFileTime.handler([0x3106, 0x73ca, 0x100]), 1);
+    const units = new DataView(bytes.buffer).getBigUint64(0x100, true);
+    assert.equal(units, (BigInt(Date.UTC(2004, 7, 6, 14, 30, 20)) * 10000n)
+        + 116444736000000000n);
+
+    assert.equal(fns.FileTimeToDosDateTime.handler([0x100, 0x200, 0x202]), 1);
+    assert.equal(bytes[0x200] | bytes[0x201] << 8, 0x3106);
+    assert.equal(bytes[0x202] | bytes[0x203] << 8, 0x73ca);
+
+    assert.equal(fns.DosDateTimeToFileTime.handler([0x31ff, 0, 0x100]), 0,
+        'a month of fifteen is not a date');
+    bytes.fill(0, 0x300, 0x308);
+    assert.equal(fns.FileTimeToDosDateTime.handler([0x300, 0x200, 0x202]), 0,
+        'and 1601 is before the DOS calendar');
 });
 
 test('a null pointer either side is a failure, not a silent nothing', ()=>{
