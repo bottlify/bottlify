@@ -812,6 +812,8 @@ export const win32Module = {
                 /** @param {number} instance @param {number} type @param {number | string} name */
                 findResource: (instance, type, name)=>
                     modules.findResource?.(instance, type, name) ?? null,
+                /** @param {number} instance */
+                moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
                 // Where the pointer is and what is held down. The input layer
                 // is above this one and cannot be imported from here, so both
                 // are handed down as thunks; a build without one answers what

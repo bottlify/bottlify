@@ -153,6 +153,9 @@ const DISP_CHANGE_BADMODE = -2;
 const ENUM_CURRENT_SETTINGS = -1;
 const ENUM_REGISTRY_SETTINGS = -2;
 
+/** DdeInitialize's answer when the exchange cannot be set up at all. */
+const DMLERR_SYS_ERROR = 0x400f;
+
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -1007,6 +1010,61 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 host.writeMemory(buffer, bytes);
                 return kept.length;
             },
+        },
+
+        /**
+         * HBITMAP LoadBitmapA(HINSTANCE hInstance, LPCSTR lpBitmapName)
+         *
+         * A bitmap needs the decoder LoadImage lacks too, so the answer is
+         * the same null a program checks for -- declared here rather than
+         * left to the missing-import stub, because that stub pops nothing
+         * and this call pushes eight bytes: a program that paints its banner
+         * from a bitmap was walking away with its stack eight bytes short on
+         * every attempt.
+         */
+        LoadBitmapA: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        /**
+         * The Dynamic Data Exchange entry points an installer of the era uses
+         * to talk to the program manager about its group and its icons. There
+         * is no program manager to talk to: initialisation reports a system
+         * error, which is the documented answer when DDE is not available, and
+         * a program then skips what it would have said. Declared for the same
+         * reason as LoadBitmapA: each pops what it was pushed.
+         *
+         * UINT DdeInitializeA(LPDWORD pidInst, PFNCALLBACK pfnCallback,
+         *                     DWORD afCmd, DWORD ulRes)
+         */
+        DdeInitializeA: {
+            argBytes: 16,
+            handler: ()=>DMLERR_SYS_ERROR,
+        },
+
+        /** BOOL DdeUninitialize(DWORD idInst) */
+        DdeUninitialize: {
+            argBytes: 4,
+            handler: ()=>1,
+        },
+
+        /** HSZ DdeCreateStringHandleA(DWORD idInst, LPCSTR psz, int iCodePage) */
+        DdeCreateStringHandleA: {
+            argBytes: 12,
+            handler: ()=>0,
+        },
+
+        /** BOOL DdeFreeStringHandle(DWORD idInst, HSZ hsz) */
+        DdeFreeStringHandle: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        /** HDDEDATA DdeNameService(DWORD idInst, HSZ hsz1, HSZ hsz2, UINT afCmd) */
+        DdeNameService: {
+            argBytes: 16,
+            handler: ()=>0,
         },
 
         /**

@@ -236,6 +236,9 @@ function characterFor(key){
  *           Whether a module carries a resource of that type and name: what
  *           decides if a cursor or icon a program loads out of its own image
  *           exists. Absent for the same reason, and then none does.
+ * @property {(instance: number) => number} [moduleBase]
+ *           Where a module is mapped, which with a resource's own offset is
+ *           the address of its bytes -- a dialog template is read in place.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {(bytes: number) => number} [allocate]

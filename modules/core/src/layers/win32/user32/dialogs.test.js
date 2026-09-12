@@ -29,6 +29,7 @@ const WM_INITDIALOG = DIALOG_LAYOUT.WM_INITDIALOG;
 const DS_SETFONT = DIALOG_LAYOUT.DS_SETFONT;
 
 const DIALOGPROC = 0x402000;
+const MODULE_BASE = 0x400000;
 const HINSTANCE = 0x400000;
 
 function fakeMemory(size = 0x14000){
@@ -80,7 +81,8 @@ function fakeHandles(){
     };
 }
 
-function setup(){
+/** @param {{ resources?: Record<string, number> }} [options] */
+function setup({ resources = {} } = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -93,6 +95,16 @@ function setup(){
         dispatch: ()=>0,
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
+        // A module whose resources sit at fixed offsets from a fixed base:
+        // the type is folded into the key so a lookup under the wrong type
+        // finds nothing, as the real tree would answer.
+        /** @param {number} instance @param {number} type @param {number | string} name */
+        findResource: (instance, type, name)=>(
+            instance === HINSTANCE && `${type}:${name}` in resources
+                ? { rva: resources[`${type}:${name}`], size: 0, codePage: 0, language: 0 }
+                : null),
+        /** @param {number} instance */
+        moduleBase: instance=>(instance === HINSTANCE ? MODULE_BASE : 0),
     });
     const table = /** @type {Record<string, { argBytes: number,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
@@ -210,6 +222,22 @@ test('a template is walked into a dialog and the controls it names', ()=>{
     assert.notEqual(first, second);
     assert.equal(fns.GetDlgCtrlID.handler([first]), 100);
     assert.equal(fns.GetDlgItem.handler([dialog, 999]), 0);
+});
+
+test('a dialog named in the resources is the template read where it was mapped', ()=>{
+    // CreateDialogParam is CreateDialogIndirectParam over the resource tree:
+    // an installer names its welcome dialog by id and nothing more, and a
+    // module whose dialogs cannot be found by name has no dialogs at all.
+    const RT_DIALOG = 5;
+    const { memory, fns } = setup({ resources: { [`${RT_DIALOG}:200`]: TEMPLATE - MODULE_BASE } });
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+
+    const dialog = fns.CreateDialogParamA.handler([HINSTANCE, 200, 0, DIALOGPROC, 0]);
+    assert.notEqual(dialog, 0);
+    assert.notEqual(fns.GetDlgItem.handler([dialog, 100]), 0);
+    assert.equal(fns.CreateDialogParamA.handler([HINSTANCE, 201, 0, DIALOGPROC, 0]), 0,
+        'a name the module does not carry is no dialog');
+    assert.equal(fns.CreateDialogParamA.argBytes, 20);
 });
 
 test('coordinates are dialog units, not pixels', ()=>{

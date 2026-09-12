@@ -95,6 +95,13 @@ const DLU_PER_CHAR_Y = 8;
 const WM_CLOSE = 0x0010;
 const WM_INITDIALOG = 0x0110;
 
+/** RT_DIALOG: the resource type a dialog template is filed under. */
+const RT_DIALOG = 5;
+/** A resource name below this is an integer id, not a pointer to text. */
+const MAX_INTEGER_RESOURCE = 0x10000;
+/** The longest resource name read out of guest memory. */
+const MAX_RESOURCE_NAME = 256;
+
 /**
  * @param {Object} options
  * @param {any} options.host
@@ -272,6 +279,81 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         return clipped.length;
     };
 
+    /**
+     * A dialog from a template already in memory, shared by the two ways a
+     * program hands one over: pointed at directly, or named in its resources.
+     *
+     * @param {number} instance @param {number} template @param {number} parent
+     * @param {number} dialogFunc @param {number} initParam
+     */
+    const createDialog = (instance, template, parent, dialogFunc, initParam)=>{
+        const described = (template >>> 0) === 0
+            ? null
+            : parseTemplate(template >>> 0);
+        if (!described)
+        {
+            return 0;
+        }
+        const dialog = makeWindow({
+            className: '#32770',
+            title: described.title,
+            style: described.style,
+            exStyle: described.exStyle,
+            parent: parent >>> 0,
+            instance: instance >>> 0,
+            wndProc: dialogFunc >>> 0,
+            x: described.x,
+            y: described.y,
+            width: described.width,
+            height: described.height,
+        });
+        for (const control of described.controls)
+        {
+            makeWindow({
+                className: control.className,
+                title: control.title,
+                style: (control.style | WS_CHILD) >>> 0,
+                exStyle: control.exStyle,
+                parent: dialog.hwnd,
+                instance: instance >>> 0,
+                id: control.id,
+                // No procedure: the class is a system one this build
+                // does not implement, and a control that answered
+                // messages from nowhere would be inventing behaviour.
+                wndProc: 0,
+                x: control.x,
+                y: control.y,
+                width: control.width,
+                height: control.height,
+            });
+        }
+        host.created?.(dialog.hwnd);
+        host.queue.post({
+            hwnd: dialog.hwnd,
+            message: WM_INITDIALOG,
+            // The window that would take the focus, of which there is
+            // none: no control here can hold it.
+            wParam: 0,
+            lParam: initParam >>> 0,
+        });
+        return dialog.hwnd;
+    };
+
+    /**
+     * The address of a dialog template named in a module's resources, or zero.
+     * The bytes are where the loader mapped them, so nothing is copied.
+     *
+     * @param {number} instance @param {number} name
+     */
+    const templateAddress = (instance, name)=>{
+        const raw = name >>> 0;
+        const key = raw < MAX_INTEGER_RESOURCE ? raw : host.readCString(raw, MAX_RESOURCE_NAME);
+        const found = /** @type {{ rva: number } | null} */ (
+            host.findResource?.(instance >>> 0, RT_DIALOG, key) ?? null);
+        const base = host.moduleBase?.(instance >>> 0) ?? 0;
+        return found && base !== 0 ? base + found.rva : 0;
+    };
+
     return {
         /**
          * HWND CreateDialogIndirectParamA(HINSTANCE hInstance,
@@ -281,58 +363,24 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         CreateDialogIndirectParamA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([instance, template, parent, dialogFunc, initParam])=>{
-                const described = (template >>> 0) === 0
-                    ? null
-                    : parseTemplate(template >>> 0);
-                if (!described)
-                {
-                    return 0;
-                }
-                const dialog = makeWindow({
-                    className: '#32770',
-                    title: described.title,
-                    style: described.style,
-                    exStyle: described.exStyle,
-                    parent: parent >>> 0,
-                    instance: instance >>> 0,
-                    wndProc: dialogFunc >>> 0,
-                    x: described.x,
-                    y: described.y,
-                    width: described.width,
-                    height: described.height,
-                });
-                for (const control of described.controls)
-                {
-                    makeWindow({
-                        className: control.className,
-                        title: control.title,
-                        style: (control.style | WS_CHILD) >>> 0,
-                        exStyle: control.exStyle,
-                        parent: dialog.hwnd,
-                        instance: instance >>> 0,
-                        id: control.id,
-                        // No procedure: the class is a system one this build
-                        // does not implement, and a control that answered
-                        // messages from nowhere would be inventing behaviour.
-                        wndProc: 0,
-                        x: control.x,
-                        y: control.y,
-                        width: control.width,
-                        height: control.height,
-                    });
-                }
-                host.created?.(dialog.hwnd);
-                host.queue.post({
-                    hwnd: dialog.hwnd,
-                    message: WM_INITDIALOG,
-                    // The window that would take the focus, of which there is
-                    // none: no control here can hold it.
-                    wParam: 0,
-                    lParam: initParam >>> 0,
-                });
-                return dialog.hwnd;
-            },
+            handler: ([instance, template, parent, dialogFunc, initParam])=>
+                createDialog(instance, template, parent, dialogFunc, initParam),
+        },
+
+        /**
+         * HWND CreateDialogParamA(HINSTANCE hInstance, LPCSTR lpTemplateName,
+         *   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
+         *
+         * The same dialog, named in the module's resources rather than
+         * pointed at: the template is found where the image was mapped and
+         * read in place.
+         */
+        CreateDialogParamA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>
+                createDialog(instance, templateAddress(instance, name), parent, dialogFunc,
+                    initParam),
         },
 
         /**

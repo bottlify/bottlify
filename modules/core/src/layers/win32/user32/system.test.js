@@ -327,6 +327,22 @@ test('AdjustWindowRect is the same call without an extended style', ()=>{
     assert.deepEqual([memory.u32(RECT_BUFFER), memory.u32(RECT_BUFFER + 4)], plain);
 });
 
+test('a banner bitmap and a program-manager conversation are refused with the stack intact', ()=>{
+    // Neither has an implementation to offer, and both were reaching the
+    // missing-import stub, which pops nothing: an installer painting its
+    // banner from a bitmap left eight bytes on its stack per attempt and
+    // returned into them.
+    const { fns } = setup();
+    assert.equal(fns.LoadBitmapA.handler([0x400000, 101]), 0);
+    assert.equal(fns.LoadBitmapA.argBytes, 8);
+    assert.equal(fns.DdeInitializeA.handler([0x1000, 0x2000, 0, 0]), 0x400f,
+        'DMLERR_SYS_ERROR: the exchange is not available, which a program handles');
+    assert.equal(fns.DdeInitializeA.argBytes, 16);
+    assert.equal(fns.DdeCreateStringHandleA.handler([1, 0x100, 0]), 0);
+    assert.equal(fns.DdeNameService.handler([1, 0, 0, 1]), 0);
+    assert.equal(fns.DdeNameService.argBytes, 16);
+});
+
 test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     // A program walks a path with this and stops when the pointer stops
     // moving; a stub that answered zero sent it on to copy from address zero.

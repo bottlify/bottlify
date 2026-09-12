@@ -183,6 +183,29 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
         },
 
         /**
+         * BOOL InvalidateRgn(HWND hWnd, HRGN hRgn, BOOL bErase)
+         *
+         * The region is not read: this build's update area is a rectangle,
+         * and a region within the client area invalidates, at most, the
+         * client area. Repainting more than asked is a cost; repainting less
+         * is a hole.
+         */
+        InvalidateRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, , erase])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                invalidate(record, clientRect(record));
+                record.erase = record.erase || (erase >>> 0) !== 0;
+                return 1;
+            },
+        },
+
+        /**
          * BOOL UpdateWindow(HWND hWnd)
          *
          * Windows *sends* WM_PAINT here, which means running the window
