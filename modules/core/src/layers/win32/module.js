@@ -618,6 +618,7 @@ export const win32Module = {
                     resolveHandle: (/** @type {number} */ handle,
                         /** @type {string | undefined} */ type)=>
                         kernel.handles.resolve(handle, type),
+                    currentThread: ()=>kernel.currentThread(),
                     exit: code=>{
                         exitCode = code >>> 0;
                     },

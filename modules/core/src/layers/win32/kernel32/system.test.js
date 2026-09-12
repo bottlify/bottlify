@@ -69,6 +69,11 @@ function fakeHost(){
         /** @param {number} code */
         exit: code=>exits.push(code),
         park: ()=>PARKED,
+        /** The caller's own thread record, which the pseudo-handle resolves to. */
+        self: { kind: 'thread', priority: 0 },
+        currentThread(){
+            return this.self;
+        },
     };
 }
 
@@ -243,3 +248,51 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
     assert.equal(fns.IsProcessorFeaturePresent.handler([99]), 0, 'and nothing unknown');
 });
 
+
+test('a thread priority set is the one read back, for every value a normal process may set', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const worker = { kind: 'thread', priority: 0 };
+    host.handles.set(0x40, worker);
+
+    for (const priority of [-15, -2, -1, 0, 1, 2, 15])
+    {
+        assert.equal(fns.SetThreadPriority.handler([0x40, priority >>> 0]), 1, `set ${priority}`);
+        assert.equal(worker.priority, priority, 'the kernel record is where it lives');
+        assert.equal(fns.GetThreadPriority.handler([0x40]), priority, `read back ${priority}`);
+    }
+    assert.deepEqual(host.errors, [], 'none of them was an error');
+});
+
+test('the pseudo-handle for the current thread names the caller', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.SetThreadPriority.handler([0xfffffffe, 2]), 1);
+    assert.equal(host.self.priority, 2);
+    assert.equal(fns.GetThreadPriority.handler([0xfffffffe]), 2);
+});
+
+test('a priority outside the normal class is refused as a parameter', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    const worker = { kind: 'thread', priority: 1 };
+    host.handles.set(0x40, worker);
+
+    for (const priority of [3, -3, 6, -7, 14, 0x10000])
+    {
+        assert.equal(fns.SetThreadPriority.handler([0x40, priority >>> 0]), 0,
+            `refused ${priority}`);
+    }
+    assert.equal(worker.priority, 1, 'and the thread keeps the priority it had');
+    assert.deepEqual(host.errors, [87, 87, 87, 87, 87, 87], 'ERROR_INVALID_PARAMETER each time');
+});
+
+test('a priority on a handle that is not a thread is a reported failure', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+
+    assert.equal(fns.GetThreadPriority.handler([0x99]), 0x7fffffff, 'THREAD_PRIORITY_ERROR_RETURN');
+    assert.equal(fns.SetThreadPriority.handler([0x99, 0]), 0);
+    assert.deepEqual(host.errors, [6, 6], 'ERROR_INVALID_HANDLE each time');
+});

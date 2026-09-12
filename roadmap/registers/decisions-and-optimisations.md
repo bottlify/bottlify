@@ -1247,3 +1247,66 @@ one is reported, and a null stream goes to the fallback. The provider is tested 
 that answers in the call: every request is answered whole, a request within the lead without a
 promise at all, and `waits` stays at zero to the end of the stream. The audio module's decoder
 choice by configuration and the media module's null-until-ready answer are pinned as well.
+
+## The turn goes to the highest-priority ready thread
+
+**The cause.** With the sound provider answering in the call, the music buffer still replayed
+stale bytes at one moment of a cold start: exactly at the first draws of the menu, when the main
+thread sits in the draw traps with seventy to eighty code compilations a frame and the guest
+retires 2 to 17 million instructions a second. The sound library's streaming thread has a
+deadline there -- the looping DirectSound buffer plays whether it was refilled or not -- and the
+scheduler was round-robin over equal quanta, so a thread with a deadline got the same turn as
+one without. Measured through the launcher on two cold starts, sampled every 250 ms: a burst of
+158 and 168 KB of stale bytes in the six seconds around the first draws (at 8.1 and 9.9 s after
+the engine was up), 204 and 290 KB over 90 s. The program had asked for something else all
+along (read with `?log=call.cpu`): from the main thread it raises a worker to `ABOVE_NORMAL`
+a second after start and the streaming thread to `THREAD_PRIORITY_TIME_CRITICAL` when the sound
+library comes up, one worker sets itself back to `NORMAL` every few hundred milliseconds, and the
+main loop polls `GetThreadPriority(GetCurrentThread())` --
+`SetThreadPriority` was accepted and ignored, and `GetThreadPriority` answered normal for
+everyone.
+
+**The decision.** Priority as Windows composes it for a normal-class process: a base of 8 moved
+by the relative priority a program sets, with `THREAD_PRIORITY_IDLE` pinned to 1 and
+`TIME_CRITICAL` to 15; the seven values a normal process may set are accepted and any other is
+refused with `ERROR_INVALID_PARAMETER`. There is no `SetPriorityClass`, so the class is always
+normal. The turn goes to the highest-priority ready thread; equals keep the round-robin order
+and the quantum they had. Starvation control the way Windows does it: a ready thread passed over
+for longer than a bound -- four seconds of guest time, the scheduler's own clock -- outranks
+everything for one turn, so a high-priority thread that never yields cannot hold the machine for
+ever. No wake boost: the measurement did not ask for one (see below), and a boost that is not
+needed is a scheduling rule nobody can read back from a run. The kernel's thread record is the
+one place the priority lives; the win32 calls read and write it there, and the report
+(`byThread`) names each thread's absolute priority and how often it was boosted.
+
+**The measurement.** Two cold starts through the launcher, the same sampler, the browser
+restarted between them, against the two starts above. The burst of stale bytes at the first
+draws: 8.5 and 24 KB against 158 and 168. Over 90 s: 64 and 204 KB against 204 and 290 -- the
+second start's total is one burst of 137 KB at 15.6 to 16.1 s, after the menu was up, during
+which the engine worker's own event loop answered a probe 2 s late and the guest retired 10
+million instructions a second; the streaming thread was blocked on its own timer, not passed
+over, and the scheduler was not asked for a decision it could have made differently. The first
+draw of the menu came at 6.8 and 7.9 s against 8.1 and 9.9. The starvation control never fired:
+zero boosts in both runs, and the streaming thread, which is the one at 15, holds 3 to 4 % of
+the retired instructions before and after alike -- it wants the machine rarely and briefly, and
+having it first is all it needed. The picture did not pay for the sound: frames on the canvas in
+the 30 to 60 s window 50 and 55 a second against 50 and 39, in 60 to 90 s 52 and 55 against 56
+and 39; guest instructions per second in the same window 112 and 122 million against 101 and
+82; the main thread's share of the machine 86 and 87 % against 78 and 82. The 10 to 20 s windows
+read 20 and 21 a second at 10 to 15 s against 29 and 13, and 20 and 29 at 15 to 20 s against 33
+and 20 -- inside the spread of the two baseline starts, in a window the shader and code
+compilation of a cold start dominates, so not a cost this measurement can attribute to the
+scheduler; a paired run on a quiet machine would say. The ring starvation of the first two
+seconds (8 to 15 thousand blocks a sample at 0.9 to 1.5 s) is unchanged by this: it precedes the
+streaming thread's existence, while the intro is starting, and is a different defect.
+
+**The tests.** The scheduler: priority composes as Windows composes it; the highest-priority
+ready thread runs first and equals round-robin exactly as before, with every existing turn-order
+test unchanged; a thread starved by a busier, higher one gets its turn when the bound is
+reached and again one bound after that, with the boost counted on it and in the report; a thread
+that raises its own priority mid-run is scheduled by it from the next turn and lowering it hands
+the machine back. The win32 surface: every value a normal process may set round-trips through
+`SetThreadPriority`/`GetThreadPriority` into the kernel record, the pseudo-handle for the
+current thread names the caller, a value from the realtime class is refused with
+`ERROR_INVALID_PARAMETER` and leaves the priority as it was, and a handle that is not a thread
+answers `THREAD_PRIORITY_ERROR_RETURN` with `ERROR_INVALID_HANDLE`.

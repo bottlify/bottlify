@@ -52,9 +52,17 @@ const CURRENT_PROCESS = 0xffffffff;
 /** 100ns units between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
 
-/** Thread priorities. One value, because the scheduler has one. */
-const THREAD_PRIORITY_NORMAL = 0;
+/**
+ * The relative thread priorities a process of the normal class may set: idle,
+ * lowest, below normal, normal, above normal, highest, time-critical. The gaps
+ * belong to the realtime class and are refused as a parameter, as they are on
+ * Windows.
+ */
+const THREAD_PRIORITIES = new Set([-15, -2, -1, 0, 1, 2, 15]);
 const THREAD_PRIORITY_ERROR_RETURN = 0x7fffffff;
+
+/** GetCurrentThread hands out this, and it is -2 on every Windows. */
+const CURRENT_THREAD = 0xfffffffe;
 
 /** FormatMessage's two flags that change what it does. */
 const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100;
@@ -131,6 +139,7 @@ const compare = (left, right)=>(left < right ? -1 : (left > right ? 1 : 0));
  * @property {() => number} systemTimeMs   Guest wall clock, milliseconds since 1970.
  * @property {(code: number) => void} setLastError
  * @property {(handle: number, type?: string) => any} resolveHandle
+ * @property {() => any} currentThread
  * @property {(code: number) => void} exit
  * @property {() => any} park
  * @property {(bytes: number) => number} [allocate]
@@ -239,6 +248,17 @@ export function createSystemFunctions(host){
             return null;
         }
     };
+
+    /**
+     * The thread a handle names, which is most often the caller's own through
+     * the pseudo-handle: a program sets its priority on itself far more
+     * often than on a thread it holds a real handle to.
+     *
+     * @param {number} handle
+     */
+    const thread = handle=>((handle >>> 0) === CURRENT_THREAD
+        ? host.currentThread()
+        : object(handle, 'thread'));
 
     /** @param {bigint} filetime @returns {Uint8Array} SYSTEMTIME */
     const systemTimeFrom = filetime=>{
@@ -569,30 +589,50 @@ export function createSystemFunctions(host){
         /**
          * int GetThreadPriority(HANDLE hThread)
          *
-         * Every thread runs at normal priority. The scheduler here is round
-         * robin over equal quanta, so a priority would be a number a caller
-         * could set and read back while nothing about the run changed --
-         * reporting normal is the one answer that is true.
+         * Read from the kernel's thread record, which is the one place the
+         * priority lives: the scheduler composes the absolute priority from
+         * this relative one at every turn.
          */
         GetThreadPriority: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'thread')
-                ? THREAD_PRIORITY_NORMAL
-                : THREAD_PRIORITY_ERROR_RETURN,
+            handler: ([handle])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return THREAD_PRIORITY_ERROR_RETURN;
+                }
+                return target.priority;
+            },
         },
 
         /**
          * BOOL SetThreadPriority(HANDLE hThread, int nPriority)
          *
-         * Accepted and not acted on, for the reason above. It succeeds rather
-         * than failing because a program that cannot lower a worker's priority
-         * often refuses to start the worker at all.
+         * The value is one of the seven a normal-class process may set; the
+         * argument arrives as an unsigned register and is read back as the
+         * signed int it was.
          */
         SetThreadPriority: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([handle])=>object(handle, 'thread') ? 1 : 0,
+            handler: ([handle, priority])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const relative = priority | 0;
+                if (!THREAD_PRIORITIES.has(relative))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                target.priority = relative;
+                return 1;
+            },
         },
 
         /**

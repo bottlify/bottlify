@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ThreadState, createScheduler } from './threads.js';
+import { ThreadState, absolutePriority, createScheduler } from './threads.js';
 import { createSwitcher } from './switch.js';
 
 /**
@@ -307,4 +307,99 @@ test('a deadline set later but sooner is the first to expire, and none expires e
     sched.runOnce();
     assert.notEqual(again.state, ThreadState.BLOCKED, 'expired at its own deadline');
     assert.equal(sched.diagnostics().expiries, 2);
+});
+
+test('priority is composed as Windows composes it for a normal-class process', ()=>{
+    assert.equal(absolutePriority(0), 8, 'THREAD_PRIORITY_NORMAL');
+    assert.equal(absolutePriority(-2), 6, 'LOWEST');
+    assert.equal(absolutePriority(-1), 7, 'BELOW_NORMAL');
+    assert.equal(absolutePriority(1), 9, 'ABOVE_NORMAL');
+    assert.equal(absolutePriority(2), 10, 'HIGHEST');
+    assert.equal(absolutePriority(-15), 1, 'IDLE is pinned, not composed');
+    assert.equal(absolutePriority(15), 15, 'TIME_CRITICAL likewise');
+});
+
+test('the highest-priority ready thread runs first, and equals keep their turns', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const b = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+    const feeder = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xc000, name: 'feeder' });
+    feeder.priority = 2;
+
+    const order = [];
+    for (let i = 0; i < 4; i++)
+    {
+        order.push(sched.runOnce().ran.name);
+    }
+    assert.deepEqual(order, ['feeder', 'feeder', 'feeder', 'feeder'],
+        'a ready thread above the others is the only one that runs');
+    assert.equal(a.instructions + b.instructions, 0);
+
+    sched.block(feeder, 'the device has enough');
+    order.length = 0;
+    for (let i = 0; i < 3; i++)
+    {
+        order.push(sched.runOnce().ran.name);
+    }
+    assert.deepEqual(order, ['a', 'b', 'a'], 'the equals round-robin once it is out of the way');
+
+    sched.wake(feeder);
+    assert.equal(sched.runOnce().ran, feeder, 'and it is back in front the turn it wakes');
+});
+
+test('a thread starved by a busier, higher one gets a turn within the bound', ()=>{
+    let clock = 0;
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        now: ()=>clock, starvation: 50 });
+    const main = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const busy = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'busy' });
+    busy.priority = 15;
+
+    const order = [];
+    for (let i = 0; i < 12; i++)
+    {
+        clock += 10;
+        order.push(sched.runOnce().ran.name);
+    }
+    // Ready at 0, passed over until the clock reaches 50, run on that turn,
+    // then the bound is measured again from when its turn ended.
+    assert.deepEqual(order, ['busy', 'busy', 'busy', 'busy', 'main',
+        'busy', 'busy', 'busy', 'busy', 'main', 'busy', 'busy']);
+    assert.equal(main.boosts, 2, 'each of its turns was a boost');
+    assert.equal(busy.boosts, 0);
+    assert.equal(sched.diagnostics().boosts, 2);
+    assert.equal(main.boosted, false, 'the boost lasts the one turn');
+});
+
+test('a thread that raises its priority mid-run is scheduled by it from the next turn', ()=>{
+    const { sched } = scheduler();
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    const b = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'b' });
+
+    assert.equal(sched.runOnce().ran, a);
+    // What SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST) does.
+    a.priority = 2;
+    assert.equal(sched.runOnce().ran, a, 'not b, whose turn it would have been');
+    assert.equal(sched.runOnce().ran, a);
+    a.priority = -2;
+    assert.equal(sched.runOnce().ran, b, 'and lowering it hands the machine over');
+    assert.equal(sched.runOnce().ran, b);
+});
+
+test('the report says what priority each thread runs at and how often it was boosted', ()=>{
+    let clock = 0;
+    const cpu = fakeCpu();
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 1000,
+        now: ()=>clock, starvation: 10 });
+    sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'main' });
+    const feeder = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xb000, name: 'feeder' });
+    feeder.priority = 2;
+
+    assert.match(sched.diagnostics().byThread, /main 0 ready p8 b0 \| feeder 0 ready p10 b0/);
+    clock = 10;
+    sched.runOnce();
+    assert.match(sched.diagnostics().byThread, /main 1000 ready p8 b1/,
+        'the starved one ran, boosted, and the count says so');
+    assert.match(sched.diagnostics().byThread, /feeder 0 ready p10 b0/);
 });

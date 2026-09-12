@@ -131,7 +131,8 @@ sub-record each for handles, sync objects, processes and time:
 ### Threads and the scheduler (`internal/threads.js`)
 
 One emulated CPU, many threads: a thread is its saved context, its stack, its TEB and a state.
-The scheduler is round-robin over ready threads; the quantum is retired guest instructions, so
+The scheduler runs the highest-priority ready thread and round-robins among equals (see §4 for
+how the priority is composed); the quantum is retired guest instructions, so
 the point at which one thread yields to the next is a function of what the guest did, not of
 host speed.
 
@@ -258,7 +259,11 @@ stops the machine from outside the trap.
 
 ## 4. Limitations and divergences
 
-- **Round-robin, no priorities.** `SetThreadPriority` and friends have nothing here to act on.
+- **Priority, then round-robin.** A turn goes to the highest-priority ready thread; equals take
+  turns in queue order. The priority is composed as Windows composes it for a normal-class
+  process (base 8, `THREAD_PRIORITY_IDLE` pinned to 1 and `TIME_CRITICAL` to 15); there is no
+  `SetPriorityClass`, so the class is always normal. A ready thread passed over for `starvation`
+  guest milliseconds (4000 by default) outranks everything for one turn; there is no wake boost.
 - **A thread is never removed** from `threads`; a terminated one stays in the list and in
   `byState`.
 - **Pool stacks are fixed-size** (`stacks.size`) and never freed; the pool is bounded by
@@ -284,7 +289,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/kernel/internal/<fil
 
 | file | kind | covers |
 |------|------|--------|
-| `internal/threads.test.js` | unit | Turn order, blocking/waking, `awaitingHost` excluded from candidates, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering. |
+| `internal/threads.test.js` | unit | Turn order, priority order and starvation, blocking/waking, `awaitingHost` excluded from candidates, quantum bound, overrun and slow-slice accounting, per-thread and per-page reports, deadline ordering. |
 | `internal/switch.test.js` | unit | Save/restore, TEB travelling with the restore, first switch, self-switch as no-op, error on no thread. |
 | `internal/sync.test.js` | contract | Event/mutex/semaphore semantics per Win32: auto vs manual reset, recursion, owner-only release, abandonment, wait-all atomicity, wait-any index and base, poll never queueing, thread objects, expiry leaving only its queues. |
 | `internal/time.test.js` | unit | Advance, credit floor and ceiling, skip never past real time, diagnostics. |

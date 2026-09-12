@@ -8,10 +8,16 @@
  * Threads and the queue they take turns in.
  *
  * A thread is its saved CPU state, its stack, its TEB, and where it is in the
- * lifecycle. The scheduler here is round-robin over the ready threads, with the
- * quantum counted in retired guest instructions -- so the point at which one
- * thread yields to another is a function of what the guest did, not of how fast
- * the host happens to be.
+ * lifecycle. The scheduler here gives each turn to the highest-priority ready
+ * thread and round-robins among equals, with the quantum counted in retired
+ * guest instructions -- so the point at which one thread yields to another is
+ * a function of what the guest did, not of how fast the host happens to be.
+ *
+ * Priority is composed the way Windows composes it: the process's class gives
+ * a base of 8 and the thread's relative priority moves it by up to two, with
+ * the two saturating values (idle, time-critical) pinned to 1 and 15. A
+ * program that streams sound raises its feeder above the thread that draws,
+ * and the order in which the two get the machine is what it is asking for.
  */
 
 /** @enum {string} */
@@ -29,12 +35,39 @@ export const ThreadState = {
 /** How finely the guest's whereabouts are recorded: one entry per 64 KiB. */
 const PAGE = 0x10000;
 
+/** The base of the normal priority class, and the two relative values pinned outside it. */
+const NORMAL_BASE = 8;
+const THREAD_PRIORITY_IDLE = -15;
+const THREAD_PRIORITY_TIME_CRITICAL = 15;
+/** Above anything a thread can ask for: what a starved thread is raised to for one turn. */
+const STARVED = 16;
+
+/**
+ * A thread's absolute priority, from the relative one a program set on it.
+ *
+ * @param {number} relative
+ */
+export function absolutePriority(relative){
+    if (relative === THREAD_PRIORITY_IDLE)
+    {
+        return 1;
+    }
+    if (relative === THREAD_PRIORITY_TIME_CRITICAL)
+    {
+        return 15;
+    }
+    return NORMAL_BASE + relative;
+}
+
 /**
  * @param {Object} options
  * @param {any} options.cpu        The cpu layer's API.
  * @param {any} options.switcher   The single switch primitive.
  * @param {number} [options.quantum]  Retired instructions per turn.
- * @param {() => number} [options.now]  The guest's clock, for timed waits.
+ * @param {number} [options.starvation]
+ *        Guest milliseconds a ready thread may be passed over before it is
+ *        raised above everything for one turn. Windows uses about four seconds.
+ * @param {() => number} [options.now]  The guest's clock, for timed waits and starvation.
  * @param {(deadline: number) => number} [options.skipTo]
  *        Moves the guest's clock to a deadline when every thread is waiting on
  *        one, and answers how far it actually moved -- which is nothing once the
@@ -45,6 +78,9 @@ const PAGE = 0x10000;
  */
 export function createScheduler(options){
     const { cpu, switcher, quantum = 100_000, now = ()=>0, skipTo = ()=>0 } = options;
+    const starvation = options.starvation ?? 4000;
+    /** Turns given to a thread because it had been passed over too long. */
+    let boosts = 0;
     const wall = options.wall ?? (()=>performance.now());
     /**
      * Told what a parked thread is about to be resumed with: which wait it
@@ -221,6 +257,7 @@ export function createScheduler(options){
             thread.deadline = null;
             thread.waitResult = thread.timeoutResult ?? 0;
             thread.state = ThreadState.READY;
+            thread.readySince = at;
             thread.waitingOn = null;
             expiries++;
             for (const told of onExpiry)
@@ -259,6 +296,16 @@ export function createScheduler(options){
                 context: cpu.newContext({ entry, stackTop }),
                 instructions: 0,
                 exitCode: null,
+                /**
+                 * The relative priority a program set, in Windows's own
+                 * values; the absolute one is composed at each turn.
+                 */
+                priority: 0,
+                /** When it last became ready without running: what starvation is measured from. */
+                readySince: now(),
+                /** Turns it was given for having been passed over too long. */
+                boosts: 0,
+                boosted: false,
                 /** What it is waiting for, when blocked; for diagnostics. */
                 waitingOn: null,
                 /**
@@ -325,9 +372,36 @@ export function createScheduler(options){
                 }
             }
 
-            // Round-robin: the queue order is creation order, and a thread that
-            // has just run goes behind the others by being moved to the back.
-            const next = candidates[0];
+            // The highest priority runs; among equals the queue order decides,
+            // and a thread that has just run goes behind the others by being
+            // moved to the back. A thread passed over for longer than the
+            // starvation bound outranks everyone for this one turn, so a busy
+            // high-priority thread can never hold the machine for ever.
+            let next = candidates[0];
+            if (candidates.length > 1)
+            {
+                const at = now();
+                /** @param {any} thread */
+                const rank = thread=>(at - thread.readySince >= starvation
+                    ? STARVED
+                    : absolutePriority(thread.priority));
+                let best = rank(next);
+                for (let i = 1; i < candidates.length; i++)
+                {
+                    const contender = rank(candidates[i]);
+                    if (contender > best)
+                    {
+                        best = contender;
+                        next = candidates[i];
+                    }
+                }
+                if (best === STARVED)
+                {
+                    next.boosted = true;
+                    next.boosts++;
+                    boosts++;
+                }
+            }
 
             // A thread that parked was stopped mid-call: put it back where it
             // belongs, carrying whatever its wait produced. Deciding that here
@@ -357,6 +431,7 @@ export function createScheduler(options){
             if (current && current.state === ThreadState.RUNNING)
             {
                 current.state = ThreadState.READY;
+                current.readySince = now();
             }
             current = next;
             next.state = ThreadState.RUNNING;
@@ -403,9 +478,11 @@ export function createScheduler(options){
                 }
             }
 
+            next.boosted = false;
             if (next.state === ThreadState.RUNNING)
             {
                 next.state = ThreadState.READY;
+                next.readySince = now();
                 // To the back of the queue, so the next call picks someone else.
                 threads.splice(threads.indexOf(next), 1);
                 threads.push(next);
@@ -443,6 +520,7 @@ export function createScheduler(options){
                 return false;
             }
             thread.state = ThreadState.READY;
+            thread.readySince = now();
             thread.waitingOn = null;
             thread.deadline = null;
             return true;
@@ -522,6 +600,10 @@ export function createScheduler(options){
                     s.thread ?? '?'} 0x${s.from.toString(16)}->0x${s.at.toString(16)}`).join('; '),
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
+                // Turns handed out against priority, to a thread passed over
+                // too long. A steady count is a high-priority thread that
+                // never yields, which a program does not mean to do.
+                boosts,
                 // Empty in a healthy run: a thread's stack pointer belongs
                 // inside the stack it was given, and anywhere else is memory
                 // somebody else owns. Strings rather than a list, because a
@@ -541,9 +623,12 @@ export function createScheduler(options){
                 // starved by another, and the totals cannot tell those apart.
                 // Instructions retired, because that is what a quantum is
                 // measured in here and so it is the only currency the scheduler
-                // and the thread agree on.
+                // and the thread agree on. Then the absolute priority it runs
+                // at and how often it had to be boosted to run at all.
                 byThread: threads
-                    .map(thread=>`${thread.name} ${thread.instructions} ${thread.state}`)
+                    .map(thread=>`${thread.name} ${thread.instructions} ${thread.state} p${
+                        absolutePriority(thread.priority)} b${thread.boosts}${
+                        thread.boosted ? '+' : ''}`)
                     .join(' | '),
                 current: current ? current.name : null,
                 // A thread that has been waiting on the same thing for a long
