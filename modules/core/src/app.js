@@ -1709,6 +1709,10 @@ async function buildApp(options){
             // reach -- an address invented for the purpose is one the program
             // writes into nothing and we read nothing out of.
             allocate: (/** @type {number} */ bytes)=>win32.heap().allocate(bytes),
+            // What wglGetProcAddress answers for a name OPENGL32 exports
+            // itself: the export's own address, the one an import bound to.
+            /** @param {string} name */
+            exportAddress: name=>findModule('OPENGL32.dll')?.addressOf(name) ?? 0,
             // And back again when the last reference to a resource goes. The
             // arena is the same one the program's own allocator draws from, and
             // GlobalMemoryStatus reports what is left of it -- so a texture

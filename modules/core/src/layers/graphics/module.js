@@ -10,6 +10,7 @@ import { createDirect3D8 } from './d3d8/device.js';
 import { createDirect3D9 } from './d3d9/device.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
+import { createVulkan } from './vulkan/runtime.js';
 import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 
@@ -165,6 +166,31 @@ export const graphicsModule = {
                 screen: ()=>services.screen,
                 ...options,
             }),
+            // Direct3D 10's seam makes the device itself from what a program
+            // passes; this hands it the GPU, reached only when one is made.
+            /** @returns {import('./d3d10/device.js').DeviceOptions} */
+            d3d10: ()=>({
+                backend: device ? api.backend() : undefined,
+                createSampler: device
+                    ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
+                    : undefined,
+                createTexture: device
+                    ? (/** @type {any} */ descriptor)=>device.device.createTexture(descriptor)
+                    : undefined,
+                divergence: config?.divergence,
+            }),
+            /** @returns {any} */
+            vulkan: (/** @type {any} */ options)=>createVulkan({
+                readMemory: services.readMemory,
+                writeMemory: services.writeMemory,
+                backend: ()=>api.backend(),
+                screen: ()=>services.screen,
+                compressedTextures:
+                    device?.device?.features?.has('texture-compression-bc') === true,
+                adapter: ()=>api.adapter(),
+                divergence: config?.divergence,
+                ...options,
+            }),
         };
 
         /**
@@ -296,7 +322,11 @@ export const graphicsModule = {
             // and where to say when what it set there is not what the device
             // would have accepted.
             allocate: config?.allocate,
+            free: config?.free,
             divergence: config?.divergence,
+            // The address of one of OPENGL32's own exports, which only the
+            // assembling caller knows once the module is placed.
+            exportAddress: config?.exportAddress,
             // Where a program's cursor goes, when the host shows one.
             cursor: config?.cursor,
             // Told the resolution a device is created at, so the reported

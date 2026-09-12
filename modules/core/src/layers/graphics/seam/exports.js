@@ -26,10 +26,12 @@
 import { ARGUMENT_WORDS } from '../opengl/exports.js';
 import { createPublisher } from './com.js';
 import { createDirect3D8Seam } from './d3d8.js';
+import { createDirect3D9Seam } from './d3d9.js';
+import { createDirect3D10Seam } from './d3d10.js';
+import { createVulkanSeam } from './vulkan.js';
 import { createDirectDrawSeam, readGuid } from './ddraw.js';
 import { createDirect3D7Seam } from './d3d7.js';
-import { describe, IDIRECT3D9_SLOTS } from './vtables.js';
-import { IID_IDirect3D9, IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
+import { IID_IDirectDraw7, IID_IDirectDrawClipper } from './iids.js';
 import { createFields } from './structs.js';
 
 const DD_OK = 0;
@@ -64,6 +66,11 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *        What a Direct3D 7 device draws with, reached when one is first made.
  * @param {(bytes: number) => number} [deps.allocate]
  *        Guest memory for the state a program sets without crossing into the host.
+ * @param {(address: number) => void} [deps.free]
+ *        And the way to give it back, for a map a program has finished with.
+ * @param {(name: string) => number} [deps.exportAddress]
+ *        The guest address of one of OPENGL32's own exports, which is what
+ *        wglGetProcAddress answers for a core name.
  * @param {(api: string, detail: string) => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  * @param {(width: number, height: number,
@@ -79,6 +86,7 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  */
 export function createGraphicsLibraries(
     { graphics, memory, publishInterface, screen, gdi, present, publisher: shared, callGuest,
+        free, exportAddress,
         currentThread,
         scratch, render, allocate, divergence, cursor, resolution },
 )
@@ -89,6 +97,16 @@ export function createGraphicsLibraries(
         publisher, memory, screen, allocate, divergence, cursor, resolution,
         identity: ()=>graphics.adapter?.() ?? null,
     });
+    const d3d9 = createDirect3D9Seam({
+        publisher, memory, screen, divergence, cursor, resolution,
+        identity: ()=>graphics.adapter?.() ?? null,
+    });
+    const d3d10 = createDirect3D10Seam({
+        publisher, memory, allocate, free,
+        deviceOptions: ()=>graphics.create('d3d10'),
+        factoryOptions: { windowClientSize: ()=>screen() },
+    });
+    const vulkan = createVulkanSeam({ graphics, memory, divergence, resolution });
     const d3d7 = createDirect3D7Seam({
         publisher, memory, render, callGuest, currentThread, scratch,
     });
@@ -100,12 +118,6 @@ export function createGraphicsLibraries(
     /** What a program has actually asked us to make, for a report. */
     /** @type {string[]} */
     const created = [];
-
-    // Direct3D 9's object is the same shape as 8's and differs only in its
-    // vtable, so it is published with 9's slots and no marshalling of its own
-    // yet -- every method answers E_NOTIMPL, which is honest, where a wrong
-    // implementation would not be.
-    const d3d9Interfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS)];
 
     /**
      * A DirectDraw object of one generation, published as that generation.
@@ -144,7 +156,7 @@ export function createGraphicsLibraries(
     const openglRuntime = ()=>{
         if (!opengl)
         {
-            opengl = graphics.create('opengl', { scratch, present });
+            opengl = graphics.create('opengl', { scratch, present, exportAddress, divergence });
             created.push('opengl');
         }
         return opengl;
@@ -200,10 +212,14 @@ export function createGraphicsLibraries(
                         return 0;
                     }
                     created.push('d3d9');
-                    return publisher.publish(root, d3d9Interfaces, IID_IDirect3D9);
+                    return d3d9.publishRoot(root);
                 },
             },
         },
+
+        ...d3d10.libraries,
+
+        'vulkan-1.dll': vulkan.library,
 
         'DDRAW.dll': {
             /**
@@ -314,7 +330,8 @@ export function createGraphicsLibraries(
             // The device's own counters. Nothing else reaches the renderer, so
             // without this a run says which libraries a program opened and
             // nothing at all about what it drew through them.
-            device: d3d8.diagnostics(),
+            device: d3d8.diagnostics() ?? d3d9.diagnostics(),
+            vulkan: vulkan.diagnostics(),
         }),
 
         /**
