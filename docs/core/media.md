@@ -46,6 +46,7 @@ artifact and is not in git.
 | `available()` | Whether a binary was configured. |
 | `prepare()` | Instantiates the decoder without opening anything, so the cost lands where the caller chooses rather than on the frame a cinematic starts. |
 | `open(bytes)` | A clip from the whole file in memory; a promise, because the first call instantiates the module. |
+| `openAudio({ formatTag, sampleRate, channels })` | An elementary audio stream with no container, decoded a packet at a time inside the call: `feed(bytes)` answers with the interleaved 16-bit PCM that frame produced, `flush()` with what was still held, `close()`; `sampleRate` and `channels` say what comes out. Synchronous. Null when there is no binary, when the binary was built without the path (an issue in diagnostics says so), or when it is not instantiated yet -- asking starts it, so the next stream finds it. A tag the build cannot serve throws by name. |
 | `closeAll()` | Drops every clip, for a teardown between games. |
 | `libraries()` | `{ 'ijl15.dll' }` when the guest-memory thunks are configured, else `{}`. |
 | `ordinals()` | `{ 'ijl15.dll': { 1..6 } }`, for a program that imports by number. |
@@ -84,22 +85,24 @@ even with a binary configured.
 ### The video decoder
 
 `src/layers/media/internal/decoder.js` is the JavaScript half of a standalone WebAssembly module
-built out of an FFmpeg fork, with no JavaScript glue of its own. Every import the module declares
+built out of upstream FFmpeg by `scripts/build-video-decoder.mjs`, with no JavaScript glue of its own. Every import the module declares
 is answered here: `wasi_snapshot_preview1` and `env` are each a `Proxy` whose unknown names
 answer a function returning zero, so a rebuild with a different codec set cannot turn into a link
 error, and the two that need real behaviour are explicit -- `proc_exit` throws (a decoder that
 decides to exit says so by failing the call it was inside) and `emscripten_notify_memory_growth`
 does nothing (every view is taken from the live buffer at the moment of use).
 
-The C surface is the module's `memory` and ten functions: `media_alloc`, `media_free`, `media_open(data, size)`,
+The C surface is the module's `memory` and thirteen functions: `media_alloc`, `media_free`, `media_open(data, size)`,
 `media_info(id, out)` (twelve `int32` fields: width, height, pixel format, codec id, fourcc, frame
 count, fps numerator and denominator, sample rate, channels, has-video, has-audio),
 `media_codec_name`, `media_decode` (status 0 frame, 1 end, 2 audio), `media_frame`,
-`media_audio_pending`, `media_audio_read(id, out, max)`, `media_close`. `open` copies the file into
+`media_audio_pending`, `media_audio_read(id, out, max)`, `media_close`, and the packet-fed path
+`media_open_audio(formatTag, sampleRate, channels)`, `media_feed_audio(id, data, size)`,
+`media_flush_audio(id)`, which share the FIFO and the close. `open` copies the file into
 a block the decoder then owns and names the refusal by code: invalid clip, out of memory, too
 many clips open, container not recognised, neither video nor audio, no decoder for this stream.
-Which containers and codecs the binary understands is decided in the fork's build, not in this
-tree; the tree's own test opens a RIFF WAVE file, which is the smallest container the build can
+Which containers and codecs the binary understands is decided in
+`scripts/video-decoder/build-decoder.sh`, not in this tree; the tree's own test opens a RIFF WAVE file, which is the smallest container the build can
 open, and the release is pinned by hash in `video-decoder-lock.json`.
 
 Frames come out as BGRA because that is a 32-bit Windows surface's byte order; an 8- or 16-bit

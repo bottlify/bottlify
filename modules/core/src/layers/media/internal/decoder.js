@@ -6,7 +6,7 @@
 
 /**
  * The JavaScript half of the video decoder: the C surface of the wasm module
- * built out of the FFmpeg fork, wrapped so that nothing above this file handles
+ * built out of FFmpeg by scripts/video-decoder, wrapped so that nothing above this file handles
  * a raw pointer or an integer status.
  *
  * The module is a standalone wasm binary with no JavaScript glue of its own, so
@@ -42,6 +42,8 @@ const Failure = new Map([
     [-4, 'the container was not recognised'],
     [-5, 'the file carries neither video nor audio'],
     [-6, 'no decoder for this stream'],
+    [-7, 'the stream description is unusable'],
+    [-8, 'the decoded audio was not taken away'],
 ]);
 
 /**
@@ -57,6 +59,29 @@ const Failure = new Map([
  * @property {(id: number) => number} media_audio_pending
  * @property {(id: number, out: number, max: number) => number} media_audio_read
  * @property {(id: number) => void} media_close
+ * @property {(formatTag: number, sampleRate: number, channels: number) => number}
+ *     [media_open_audio]   Absent from a binary built before the packet-fed path.
+ * @property {(id: number, data: number, size: number) => number} [media_feed_audio]
+ * @property {(id: number) => number} [media_flush_audio]
+ */
+
+/**
+ * @typedef {Object} AudioStreamShape
+ * @property {number} formatTag    The WAVE format tag: 0x55 is MPEG Layer 3.
+ * @property {number} sampleRate
+ * @property {number} channels
+ */
+
+/**
+ * An elementary audio stream decoded a packet at a time, in the call.
+ *
+ * @typedef {Object} AudioStream
+ * @property {number} sampleRate   Of the PCM that comes out.
+ * @property {number} channels
+ * @property {(bytes: Uint8Array) => Int16Array} feed
+ *     One whole frame in; every sample it produced out, interleaved and copied.
+ * @property {() => Int16Array} flush   What the decoder still held. Nothing can be fed after.
+ * @property {() => void} close
  */
 
 /**
@@ -132,9 +157,42 @@ export async function createDecoder(wasmBytes){
         throw new Error('media: the decoder would not give up its first allocation');
     }
 
-    const counters = { opened: 0, frames: 0, audioBytes: 0 };
-    /** @type {Set<any>} */
+    const counters = { opened: 0, frames: 0, audioBytes: 0, audioStreams: 0 };
+    /** @type {Set<{ close: () => void }>} */
     const open = new Set();
+    const audioCapable = typeof wasm.media_open_audio === 'function'
+        && typeof wasm.media_feed_audio === 'function'
+        && typeof wasm.media_flush_audio === 'function';
+
+    /**
+     * A block of the decoder's memory that grows to fit and is reused, so a
+     * stream fed a frame at a time does not allocate twice a frame.
+     */
+    const scratchBlock = ()=>{
+        let block = 0;
+        let size = 0;
+        return {
+            /** @param {number} bytes @returns {number} */
+            fit(bytes){
+                if (bytes > size)
+                {
+                    wasm.media_free(block);
+                    block = wasm.media_alloc(bytes);
+                    size = block ? bytes : 0;
+                    if (!block)
+                    {
+                        throw new Error(`media: no room for ${bytes} bytes in the decoder`);
+                    }
+                }
+                return block;
+            },
+            release(){
+                wasm.media_free(block);
+                block = 0;
+                size = 0;
+            },
+        };
+    };
 
     /** @param {number} pointer @param {number} length @returns {Uint8Array} */
     const view = (pointer, length)=>new Uint8Array(wasm.memory.buffer, pointer, length);
@@ -306,7 +364,97 @@ export async function createDecoder(wasmBytes){
             return clip;
         },
 
-        /** Closes every clip still open. */
+        /** Whether this binary has the packet-fed audio path at all. */
+        audioCapable: ()=>audioCapable,
+
+        /**
+         * Opens an elementary audio stream with no container around it, for
+         * a caller that cuts the frames itself and needs each one decoded in
+         * the call that fed it.
+         *
+         * Null from a binary built without the path, so that whoever holds
+         * the stream can fall back rather than fail; a description the build
+         * cannot serve -- a tag with no decoder behind it -- throws by name.
+         *
+         * @param {AudioStreamShape} shape
+         * @returns {AudioStream | null}
+         */
+        openAudio({ formatTag, sampleRate, channels }){
+            if (!audioCapable)
+            {
+                return null;
+            }
+            const openAudio = /** @type {NonNullable<DecoderExports['media_open_audio']>} */
+                (wasm.media_open_audio);
+            const feedAudio = /** @type {NonNullable<DecoderExports['media_feed_audio']>} */
+                (wasm.media_feed_audio);
+            const flushAudio = /** @type {NonNullable<DecoderExports['media_flush_audio']>} */
+                (wasm.media_flush_audio);
+            const id = openAudio(formatTag, sampleRate, channels);
+            if (id < 0)
+            {
+                throw new Error(`media: ${Failure.get(id) ?? `unknown failure ${id}`}`);
+            }
+            counters.audioStreams++;
+            const info = infoOf(id);
+            const input = scratchBlock();
+            const output = scratchBlock();
+            let closed = false;
+
+            /** @param {number} status @returns {Int16Array} */
+            const take = status=>{
+                if (status < 0)
+                {
+                    throw new Error(`media: ${Failure.get(status) ?? `decode failed (${status})`}`);
+                }
+                const pending = wasm.media_audio_pending(id);
+                if (pending <= 0)
+                {
+                    return new Int16Array(0);
+                }
+                const block = output.fit(pending);
+                const count = wasm.media_audio_read(id, block, pending);
+                counters.audioBytes += count;
+                return new Int16Array(view(block, count).slice().buffer, 0, count >> 1);
+            };
+
+            /** @type {AudioStream} */
+            const stream = {
+                sampleRate: info.sampleRate,
+                channels: info.channels,
+                feed(bytes){
+                    if (closed)
+                    {
+                        throw new Error('media: feed on a closed stream');
+                    }
+                    const block = input.fit(bytes.byteLength);
+                    view(block, bytes.byteLength).set(bytes);
+                    return take(feedAudio(id, block, bytes.byteLength));
+                },
+                flush(){
+                    if (closed)
+                    {
+                        throw new Error('media: flush on a closed stream');
+                    }
+                    return take(flushAudio(id));
+                },
+                close(){
+                    if (closed)
+                    {
+                        return;
+                    }
+                    closed = true;
+                    open.delete(stream);
+                    input.release();
+                    output.release();
+                    wasm.media_close(id);
+                },
+            };
+            open.add(stream);
+            return stream;
+        },
+
+        /** Closes every clip and stream still open. */
         closeAll(){
             for (const clip of [...open])
             {
@@ -317,6 +465,7 @@ export async function createDecoder(wasmBytes){
         diagnostics(){
             return {
                 ...counters,
+                audioCapable,
                 clips: open.size,
                 heapBytes: wasm.memory.buffer.byteLength,
             };

@@ -142,3 +142,77 @@ test('a decoded clip is counted, and closeAll lets go of it', async t=>{
     decoder.closeAll();
     assert.equal(decoder.diagnostics().clips, 0);
 });
+
+/** MPEG-1 layer III, 128 kbit/s, 44.1 kHz, stereo, zeros past the header: a silent frame. */
+function silentFrame(){
+    const frame = new Uint8Array(417);
+    frame.set([0xff, 0xfb, 0x90, 0x00]);
+    return frame;
+}
+
+const LAYER3 = { formatTag: 0x55, sampleRate: 44100, channels: 2 };
+const PREDATES = 'video-decoder.wasm predates the packet-fed audio path: rebuild it';
+
+test('a binary built without the packet-fed path answers null rather than failing', async t=>{
+    const decoder = await loadDecoder();
+    if (!decoder)
+    {
+        return t.skip(MISSING);
+    }
+    if (decoder.audioCapable())
+    {
+        return t.skip('this binary has the path; the null answer is for one without it');
+    }
+    assert.equal(decoder.openAudio(LAYER3), null);
+    assert.equal(decoder.diagnostics().audioCapable, false);
+});
+
+test('an elementary stream is decoded inside the call that fed it', async t=>{
+    const decoder = await loadDecoder();
+    if (!decoder)
+    {
+        return t.skip(MISSING);
+    }
+    if (!decoder.audioCapable())
+    {
+        return t.skip(PREDATES);
+    }
+    const stream = decoder.openAudio(LAYER3);
+    assert.ok(stream, 'a Layer 3 stream opens');
+    assert.equal(stream.sampleRate, 44100);
+    assert.equal(stream.channels, 2);
+    assert.equal(decoder.diagnostics().clips, 1);
+
+    let total = 0;
+    for (let index = 0; index < 4; index++)
+    {
+        /** @type {Int16Array} */
+        const pcm = stream.feed(silentFrame());
+        assert.equal(pcm.length, 1152 * 2, `frame ${index} came out whole, in the call`);
+        assert.ok(pcm.every(sample=>sample === 0), 'and silent');
+        total += pcm.length;
+    }
+    total += stream.flush().length;
+    assert.equal(total, 4 * 1152 * 2, 'every sample fed came out, none twice');
+    assert.equal(decoder.diagnostics().audioStreams, 1);
+
+    stream.close();
+    stream.close();
+    assert.throws(()=>stream.feed(silentFrame()), /closed stream/);
+    assert.equal(decoder.diagnostics().clips, 0);
+});
+
+test('a stream the build cannot serve fails by name', async t=>{
+    const decoder = await loadDecoder();
+    if (!decoder)
+    {
+        return t.skip(MISSING);
+    }
+    if (!decoder.audioCapable())
+    {
+        return t.skip(PREDATES);
+    }
+    assert.throws(()=>decoder.openAudio({ ...LAYER3, formatTag: 0x7777 }), /no decoder/);
+    assert.throws(()=>decoder.openAudio({ ...LAYER3, sampleRate: 0 }), /unusable/);
+    assert.equal(decoder.diagnostics().clips, 0, 'nothing was left open by a refusal');
+});

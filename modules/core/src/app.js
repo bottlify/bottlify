@@ -1709,6 +1709,13 @@ async function buildApp(options){
             // program runs the decoder it ships, which is the comparison a
             // measurement of the hosted one is made against.
             mp3: options.audio?.mp3 ?? true,
+            // What decodes behind that provider: the media layer's hosted
+            // decoder, which answers in the call. Handed down as a thunk for
+            // the reason the mixer is handed to win32 -- audio may not import
+            // media -- and asked only when a stream opens; null from a build
+            // that cannot, and the provider falls back to the platform's.
+            /** @param {import('./layers/media/internal/decoder.js').AudioStreamShape} shape */
+            openAudio: shape=>core.api('media').openAudio(shape),
         },
         input: {
             publishInterface: (/** @type {any} */ object, /** @type {string} */ iid)=>
@@ -2069,6 +2076,18 @@ async function buildApp(options){
             },
         },
     });
+
+    // The hosted MPEG provider decodes through the media layer's binary and
+    // asks for it synchronously, so the binary has to be up before the first
+    // stream opens -- seconds after a program starts, and inside the
+    // compilation burst that starts it. Compiled now, off the thread, rather
+    // than found missing then; a build with no binary has nothing to prepare.
+    if ((options.audio?.mp3 ?? true) && core.api('media').available())
+    {
+        core.api('media').prepare().catch(()=>{
+            // Reported by the layer's own diagnostics; the provider falls back.
+        });
+    }
 
     const filesystem = core.api('filesystem');
     const storage = resolveStorage(options.storage, options.id ?? 'session');

@@ -460,3 +460,37 @@ test('a platform that cannot open a decoder refuses the stream', async()=>{
     assert.equal(await f.call('ASI_stream_open', [1, FETCH, f.file.length]), 0);
     assert.match(f.provider.diagnostics().lastError, /no decoder/);
 });
+
+test('a decoder that answers in the call never parks a request', async()=>{
+    const file = mp3Stream(40);
+    let fed = 0;
+    // Shaped like the hosted decoder: the samples for a frame are delivered
+    // inside feed, and nothing is left pending anywhere.
+    const f = fixture({ file, open: (_header, onPcm)=>({
+        feed: (_bytes, frame)=>onPcm(new Int16Array(frame.samples * frame.channels).fill(++fed)),
+        flush: ()=>Promise.resolve(),
+        close: ()=>{},
+    }) });
+    const handle = await f.call('ASI_stream_open', [1, FETCH, 4096]);
+    assert.equal(f.provider.diagnostics().waits, 0, 'the open did not wait for its lead');
+    const buffer = 0x80000;
+    const perFrame = 1152 * 2 * 2;
+
+    // Within what the first read fed: answered without a promise at all.
+    const direct = f.call('ASI_stream_process', [handle, buffer, perFrame * 9]);
+    assert.ok(!(direct instanceof Promise), 'answered in the call');
+    assert.equal(direct, perFrame * 9);
+    assert.equal(f.view.getInt16(buffer + perFrame * 8, true), 9);
+
+    // Past it: the read through the library's callback is the only thing the
+    // request waits on, and the count comes back whole.
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame * 12]),
+        perFrame * 12);
+    assert.equal(f.view.getInt16(buffer, true), 10);
+    assert.equal(f.view.getInt16(buffer + perFrame * 11, true), 21);
+    assert.equal(await f.call('ASI_stream_process', [handle, buffer, perFrame * 100]),
+        perFrame * 19);
+    assert.equal(f.call('ASI_stream_process', [handle, buffer, perFrame]), 0, 'the end');
+    assert.equal(f.provider.diagnostics().waits, 0, 'no request was ever parked on the decoder');
+    assert.equal(f.provider.diagnostics().samplesOut, 40 * 1152 * 2);
+});

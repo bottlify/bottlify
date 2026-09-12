@@ -39,7 +39,8 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | `callGuest` | `(entry, args, thread?) => Promise<number>` | `bridge.callGuest` | Runs a guest routine, for device enumeration and the provider's registration. |
 | `currentThread` | `() => thread` | `() => undefined` | Whose call the provider is answering, read before it awaits. |
 | `resolveImport` | `(library, name) => address \| null` | `() => null` | The guest address of an export, of the sound middleware or of the provider itself. |
-| `decoder` | `Decoder` | `createWebCodecsDecoder()` | The MPEG decoder behind the provider; a test substitutes one. |
+| `openAudio` | `(shape) => AudioStream | null` | absent | The media layer's packet-fed decoder, handed down by the assembling caller. Present, the provider decodes each frame inside the call that fed it (`createSynchronousDecoder`) and falls back to WebCodecs per stream when it answers null. |
+| `decoder` | `Decoder` | from `openAudio`, else `createWebCodecsDecoder()` | The MPEG decoder behind the provider; a test substitutes one. |
 | `mp3` | boolean | `true` | Whether `Mp3dec.asi` is published at all. `false` leaves a program to run the decoder it ships. |
 | `warn` | `(text) => void` | absent | Where the provider reports a failure. |
 
@@ -54,6 +55,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | `feeding()` | `{ sink, fills, refusedFills, notified, fedRanges, fedBytes, tracksOpen }`. |
 | `buffers()` | Every DirectSound buffer a program created. |
 | `dsound()`, `mp3()` | The seam and the provider objects, for whoever is measuring. |
+| `decoder()` | Which decoder stands behind the provider and how its streams were served: `{ name: 'synchronous', opens, fallbackOpens, paddedFrames }`, `{ name: 'webcodecs' }` or `{ name: 'custom' }`. Also under `diagnostics().metrics.decoder`. |
 | `behind()` | Turns a track's backlog was dropped for being past its moment. |
 
 ### Published libraries
@@ -167,12 +169,17 @@ callback in `FETCH_CHUNK` (65,536-byte) pieces from a guest scratch block, each 
 from where the last stopped (offset -1) because the callback was measured miscounting a named
 offset outside its window; the size stated at open is advisory. `src/layers/audio/asi/mp3.js`
 scans frame headers (MPEG 1, 2 and 2.5, skipping an ID3v2 tag, probing the first 262,144 bytes
-for a frame) and cuts the stream at frame boundaries; the platform's `AudioDecoder` (WebCodecs,
-codec `'mp3'`) decodes them and `interleave16` turns each `AudioData` into interleaved 16-bit
-samples. Before the stream is handed over, `LEAD_FRAMES` (8) frames are decoded ahead and kept in
-front of the position, because the decoder was measured answering up to a second late while a
-title starts; an `ASI_stream_process` that runs past what is decoded waits (counted in `waits`)
-rather than answering short, which holds the guest thread and whatever lock it took. `seek` finds
+for a frame) and cuts the stream at frame boundaries. Each frame goes to the decoder as it is
+read: with `openAudio` configured that is the media layer's hosted decoder, which answers inside
+`feed` (`createSynchronousDecoder`), so every fed frame's samples are in hand before the request
+that read it returns and a frame the decoder rejects is made up with silence (`paddedFrames`);
+without it, or per stream when the media layer answers null, the platform's `AudioDecoder`
+(WebCodecs, codec `'mp3'`) decodes them and `interleave16` turns each `AudioData` into
+interleaved 16-bit samples. Before the stream is handed over, `LEAD_FRAMES` (8) frames are read
+ahead and kept in front of the position; an `ASI_stream_process` that has fed enough and finds
+it not yet decoded -- only the platform decoder, which was measured answering up to a second
+late while a title starts -- waits (counted in `waits`) rather than answering short, which holds
+the guest thread and whatever lock it took. With the hosted decoder `waits` stays at zero. `seek` finds
 the frame at or after the byte offset, `attribute` answers rates, widths, channels, position and
 percent done, `set_preference` records requested rate, width and channels.
 

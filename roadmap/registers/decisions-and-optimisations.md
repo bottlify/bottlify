@@ -1186,3 +1186,48 @@ to 219 M/s.
 oracle test runs a program mixing loads, arithmetic against memory and registers, an exchange, a
 compare and a helper-kept square root, compiled, with the inline path off and on, and compares
 every stored result word for word, with the exact ones checked outright.
+
+## The hosted Layer 3 provider answers in the call
+
+**The cause.** The music that a title plays through its sound middleware was heard repeating at
+the menu, and the frame rate collapsed with it. The repeats were laps of the streaming buffer
+played again: the DirectSound diagnostics counted 460–656 KB of stale bytes in the 10–15 s bin
+of a cold start, three to five laps. The middleware calls the provider's `ASI_stream_process`
+expecting the count it asked for before the call returns, and it holds its own lock while it
+asks. The hosted provider decoded through the platform's `AudioDecoder`, which answers on a
+browser thread of its own -- measured starved for seconds by the burst of wasm compilation that a
+start is -- so a request that ran ahead of it parked the guest thread (14–28 waits per 5 s),
+the lock stayed held, and the main thread stalled on it. A lead decoded ahead of the position
+hid the ordinary case and not this one. The redistributable decoder computes its samples inside
+the call and never waits; the difference was ours.
+
+**The change.** A hosted call answers in the call. The vendored FFmpeg build that decodes
+cinematics gains a container-less entry (`media_open_audio` by WAVE format tag, `media_feed_audio`
+one frame at a time, `media_flush_audio`) sharing the FIFO the container path drains; the media
+layer publishes it as `openAudio`, synchronous, and the app hands it down to the audio layer as
+configuration, the way the mixer is handed to win32. The provider's decoder contract stays; a
+`createSynchronousDecoder` fulfils it by delivering each frame's samples inside `feed`, making up
+a frame the decoder rejects with silence so that what came out always accounts for what went in,
+and falling back to the platform decoder per stream when the media layer answers null -- a build
+whose binary predates the entry, or one not yet instantiated, which the app now prepares at
+assembly rather than on the first stream. The provider's wait path exists only for that fallback;
+`waits` counts a request parked on the decoder, once, and is pinned at zero for the synchronous
+decoder. The decoder build moves into this repository (`scripts/Dockerfile.video-decoder`,
+`scripts/video-decoder/`, `build-video-decoder.mjs`, a job in the vendor workflow that publishes
+a release on dispatch) against upstream FFmpeg at `n6.1` pinned by commit.
+
+**The measurement.** Awaits the rebuilt binary: the pinned `video-decoder.wasm` lacks the entry,
+so today every stream still falls back to the platform decoder and the numbers above stand. To
+be taken with `dbg/cdp_test/musicrepeat.mjs` on two cold starts once the vendor workflow has
+published a decoder and the lock is re-pinned to it: stale bytes in the first 30 s, `waits`,
+threads parked on the host in that window, and the frame rate.
+
+**The tests.** The decoder wrapper feeds silent Layer 3 frames and gets 1152 stereo samples of
+zeros back per frame, in the call, and a tag the build cannot serve fails by name (skipped, with
+the reason printed, until the binary is rebuilt; the pinned binary is tested to answer null
+rather than fail). The synchronous decoder is tested against a fake stream: samples arrive
+before `feed` returns, `flush` delivers the rest in the call, a short frame is padded, a failing
+one is reported, and a null stream goes to the fallback. The provider is tested with a decoder
+that answers in the call: every request is answered whole, a request within the lead without a
+promise at all, and `waits` stays at zero to the end of the stream. The audio module's decoder
+choice by configuration and the media module's null-until-ready answer are pinned as well.

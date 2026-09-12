@@ -66,7 +66,16 @@ export const mediaModule = {
             }
             loading ??= createDecoder(binary).then(built=>{
                 decoder = built;
+                if (!built.audioCapable())
+                {
+                    issues.push('The decoder binary has no packet-fed audio path: '
+                        + 'sound streams fall back to the platform decoder.');
+                }
                 return built;
+            }, e=>{
+                issues.push(`The decoder binary could not be instantiated: ${
+                    e instanceof Error ? e.message : String(e)}`);
+                throw e;
             });
             return loading;
         };
@@ -89,6 +98,29 @@ export const mediaModule = {
              * @returns {Promise<any>}
              */
             open: async bytes=>(await load()).open(bytes),
+
+            /**
+             * An elementary audio stream decoded a packet at a time, in the
+             * call -- or null, when this build cannot: no binary, one built
+             * without the path, or one not instantiated yet. Synchronous,
+             * because the caller is answering a call that cannot wait; asking
+             * before the decoder is up starts it, so the next stream finds it.
+             *
+             * @param {import('./internal/decoder.js').AudioStreamShape} shape
+             * @returns {import('./internal/decoder.js').AudioStream | null}
+             */
+            openAudio(shape){
+                if (!binary)
+                {
+                    return null;
+                }
+                if (!decoder)
+                {
+                    load().catch(()=>undefined);
+                    return null;
+                }
+                return decoder.openAudio(shape);
+            },
 
             closeAll(){
                 decoder?.closeAll();

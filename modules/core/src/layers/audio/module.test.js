@@ -380,3 +380,28 @@ test('the MPEG provider can be left out, for a run to compare against', async()=
     });
     assert.deepEqual(Object.keys(api.libraries()), ['DSOUND.dll']);
 });
+
+test('the decoder behind the provider follows the configuration', async()=>{
+    const f = fixture();
+    const host = {
+        requireApi: (/** @type {string} */ name)=>
+            name === 'bridge' ? { callGuest: async()=>0 } : f.memory,
+        provide: ()=>{},
+    };
+    // Nothing offered: the platform's decoder, which answers later.
+    let api = await audioModule.create({ ...f.config }, host);
+    assert.deepEqual(api.decoder(), { name: 'webcodecs' });
+    assert.deepEqual(audioModule.diagnostics().metrics?.decoder, { name: 'webcodecs' });
+
+    // The media layer's hosted decoder offered: preferred, with the platform's
+    // as the fallback for a stream it answers null to.
+    api = await audioModule.create({ ...f.config, openAudio: ()=>null }, host);
+    assert.deepEqual(api.decoder(),
+        { name: 'synchronous', opens: 0, fallbackOpens: 0, paddedFrames: 0 });
+
+    // A test's own decoder wins over both.
+    api = await audioModule.create({ ...f.config, openAudio: ()=>null, decoder: {
+        open: ()=>({ feed: ()=>{}, flush: ()=>Promise.resolve(), close: ()=>{} }),
+    } }, host);
+    assert.deepEqual(api.decoder(), { name: 'custom' });
+});

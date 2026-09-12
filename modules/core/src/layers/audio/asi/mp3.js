@@ -9,9 +9,13 @@
  *
  * A stream decoder is asked for its frames one at a time, so the file has to
  * be cut at frame boundaries before anything can decode it; the cut is made
- * here, from the headers alone. The decoding itself is the platform's
- * (WebCodecs), reached through a small contract so a test can stand in for it.
+ * here, from the headers alone. The decoding itself is behind a small
+ * contract so a test can stand in for it: a hosted decoder that answers in
+ * the call, or the platform's (WebCodecs), which answers later.
  */
+
+/** WAVE_FORMAT_MPEGLAYER3, the tag a Layer 3 stream is named by. */
+export const WAVE_FORMAT_MPEGLAYER3 = 0x55;
 
 /** Kilobits per second by header index, for layer III. */
 const BITRATES_MPEG1 = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
@@ -172,9 +176,99 @@ export function splitFrames(bytes){
  * @property {(header: FrameHeader, onPcm: (samples: Int16Array) => void,
  *     onError: (error: Error) => void) => DecoderStream} open
  *   A stream shaped like its first frame. Samples come out interleaved,
- *   16-bit, as the decoder produces them -- later than they went in, and
- *   not necessarily one frame's worth at a time.
+ *   16-bit, as the decoder produces them -- inside `feed` when the decoder
+ *   answers in the call, later when it does not, and not necessarily one
+ *   frame's worth at a time.
+ * @property {() => DecoderDiagnostics} [diagnostics]
  */
+
+/**
+ * @typedef {Object} DecoderDiagnostics
+ * @property {string} name            Which decoder this is.
+ * @property {number} [opens]         Streams decoded in the call.
+ * @property {number} [fallbackOpens] Streams handed to the platform decoder instead.
+ * @property {number} [paddedFrames]  Frames the decoder answered short, made up with silence.
+ */
+
+/**
+ * The hosted decoder's stream contract, as the media layer publishes it.
+ *
+ * @typedef {Object} AudioStream
+ * @property {(bytes: Uint8Array) => Int16Array} feed
+ * @property {() => Int16Array} flush
+ * @property {() => void} close
+ */
+
+/**
+ * A decoder that answers inside the call that fed it.
+ *
+ * What the guest asked for is computed before the call returns, the way a
+ * decoder running as guest code would have computed it; nothing is left
+ * pending on a browser thread that may be starved for seconds while a
+ * program starts. A frame that comes back short -- one the decoder rejected
+ * -- is made up with silence, so that what came out always accounts for
+ * what went in and a request is never left waiting for samples that will
+ * not arrive.
+ *
+ * @param {(shape: { formatTag: number, sampleRate: number, channels: number })
+ *     => AudioStream | null} openAudio
+ *   The media layer's entry; null when its binary cannot do this, in which
+ *   case the stream goes to `fallback`.
+ * @param {Decoder} fallback
+ * @returns {Decoder}
+ */
+export function createSynchronousDecoder(openAudio, fallback){
+    let opens = 0;
+    let fallbackOpens = 0;
+    let paddedFrames = 0;
+    return {
+        open(header, onPcm, onError){
+            const stream = openAudio({
+                formatTag: WAVE_FORMAT_MPEGLAYER3,
+                sampleRate: header.sampleRate,
+                channels: header.channels,
+            });
+            if (stream === null)
+            {
+                fallbackOpens++;
+                return fallback.open(header, onPcm, onError);
+            }
+            opens++;
+            /** @param {() => Int16Array} produce @param {number} owed */
+            const emit = (produce, owed)=>{
+                let pcm;
+                try
+                {
+                    pcm = produce();
+                }
+                catch (e){
+                    onError(e instanceof Error ? e : new Error(String(e)));
+                    return;
+                }
+                if (pcm.length < owed)
+                {
+                    paddedFrames++;
+                    const padded = new Int16Array(owed);
+                    padded.set(pcm);
+                    pcm = padded;
+                }
+                if (pcm.length > 0)
+                {
+                    onPcm(pcm);
+                }
+            };
+            return {
+                feed: (bytes, frame)=>emit(()=>stream.feed(bytes), frame.samples * frame.channels),
+                flush(){
+                    emit(()=>stream.flush(), 0);
+                    return Promise.resolve();
+                },
+                close: ()=>stream.close(),
+            };
+        },
+        diagnostics: ()=>({ name: 'synchronous', opens, fallbackOpens, paddedFrames }),
+    };
+}
 
 /**
  * @param {any} data       an AudioData
@@ -249,5 +343,6 @@ export function createWebCodecsDecoder(AudioDecoderClass, EncodedAudioChunkClass
                 },
             };
         },
+        diagnostics: ()=>({ name: 'webcodecs' }),
     };
 }

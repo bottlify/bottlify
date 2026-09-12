@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     parseFrameHeader, id3Length, splitFrames, scanFrames, interleave16, createWebCodecsDecoder,
+    createSynchronousDecoder,
 } from './mp3.js';
 
 /** MPEG-1 layer III, 128 kbit/s, 44.1 kHz, stereo: 417 bytes a frame. */
@@ -174,4 +175,132 @@ test('a platform without the decoder refuses to open rather than answering silen
     const decoder = createWebCodecsDecoder(undefined, undefined);
     const header = splitFrames(stream(1))[0].header;
     assert.throws(()=>decoder.open(header, ()=>{}, ()=>{}), /no MPEG audio decoder/);
+});
+
+/**
+ * A hosted stream that turns each frame into samples carrying the frame's
+ * first data byte, and records what was asked of it.
+ *
+ * @param {{ short?: boolean, failing?: boolean }} [options]
+ */
+function hostedStream(options = {}){
+    /** @type {any[]} */
+    const calls = [];
+    let closed = false;
+    return {
+        calls,
+        closed: ()=>closed,
+        /** @param {{ formatTag: number, sampleRate: number, channels: number }} shape */
+        openAudio: shape=>{
+            calls.push(shape);
+            return {
+                sampleRate: shape.sampleRate,
+                channels: shape.channels,
+                /** @param {Uint8Array} bytes */
+                feed: bytes=>{
+                    calls.push(['feed', bytes.length]);
+                    if (options.failing)
+                    {
+                        throw new Error('the decoded audio was not taken away');
+                    }
+                    return options.short ? new Int16Array(0)
+                        : new Int16Array(1152 * 2).fill(bytes[4]);
+                },
+                flush: ()=>{
+                    calls.push(['flush']);
+                    return Int16Array.of(7, 7);
+                },
+                close: ()=>{
+                    closed = true;
+                },
+            };
+        },
+    };
+}
+
+/** A fallback that must not be reached. */
+const NEVER = {
+    open: ()=>{
+        throw new Error('the fallback was used');
+    },
+};
+
+test('the hosted decoder answers inside feed, flushes the rest in the call, and closes', async()=>{
+    const hosted = hostedStream();
+    const decoder = createSynchronousDecoder(hosted.openAudio, NEVER);
+    const bytes = stream(2);
+    const frames = splitFrames(bytes);
+    /** @type {Int16Array[]} */
+    const out = [];
+    const open = decoder.open(frames[0].header, samples=>out.push(samples), ()=>{
+        assert.fail('nothing failed');
+    });
+    assert.deepEqual(hosted.calls[0], { formatTag: 0x55, sampleRate: 44100, channels: 2 });
+
+    open.feed(bytes.subarray(0, 417), frames[0].header);
+    assert.equal(out.length, 1, 'the samples were delivered before feed returned');
+    assert.equal(out[0].length, 1152 * 2);
+    assert.equal(out[0][0], 1);
+    open.feed(bytes.subarray(417, 834), frames[1].header);
+    assert.equal(out[1][0], 2);
+
+    const flushed = open.flush();
+    assert.equal(out.length, 3, 'what the decoder still held came out before flush returned');
+    assert.deepEqual([...out[2]], [7, 7]);
+    await flushed;
+    open.close();
+    assert.ok(hosted.closed());
+    assert.deepEqual(decoder.diagnostics?.(),
+        { name: 'synchronous', opens: 1, fallbackOpens: 0, paddedFrames: 0 });
+});
+
+test('a frame the hosted decoder answers short is made up with silence', ()=>{
+    const hosted = hostedStream({ short: true });
+    const decoder = createSynchronousDecoder(hosted.openAudio, NEVER);
+    const bytes = stream(1);
+    const [frame] = splitFrames(bytes);
+    /** @type {Int16Array[]} */
+    const out = [];
+    const open = decoder.open(frame.header, samples=>out.push(samples), ()=>{});
+    open.feed(bytes, frame.header);
+    // What came out accounts for what went in: a request is never left
+    // waiting for samples that will not arrive.
+    assert.equal(out.length, 1);
+    assert.equal(out[0].length, 1152 * 2);
+    assert.ok(out[0].every(sample=>sample === 0));
+    assert.equal(decoder.diagnostics?.()?.paddedFrames, 1);
+});
+
+test('a hosted stream that fails reports it rather than hanging the caller', ()=>{
+    const hosted = hostedStream({ failing: true });
+    const decoder = createSynchronousDecoder(hosted.openAudio, NEVER);
+    const bytes = stream(1);
+    const [frame] = splitFrames(bytes);
+    /** @type {Error | null} */
+    let failure = null;
+    const open = decoder.open(frame.header, ()=>{
+        assert.fail('no samples from a failed feed');
+    }, error=>{
+        failure = error;
+    });
+    open.feed(bytes, frame.header);
+    assert.match(/** @type {any} */ (failure)?.message, /not taken away/);
+});
+
+test('without a hosted stream the platform decoder takes the stream', ()=>{
+    /** @type {any[]} */
+    const opened = [];
+    const fallback = {
+        /** @type {import('./mp3.js').Decoder['open']} */
+        open: header=>{
+            opened.push(header);
+            return { feed: ()=>{}, flush: ()=>Promise.resolve(), close: ()=>{} };
+        },
+    };
+    const decoder = createSynchronousDecoder(()=>null, fallback);
+    const header = splitFrames(stream(1))[0].header;
+    decoder.open(header, ()=>{}, ()=>{});
+    assert.deepEqual(opened, [header]);
+    assert.deepEqual(decoder.diagnostics?.(),
+        { name: 'synchronous', opens: 0, fallbackOpens: 1, paddedFrames: 0 });
 });

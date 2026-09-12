@@ -36,3 +36,21 @@ test('closing everything is safe before anything was opened', async()=>{
     api.closeAll();
     await mediaModule.dispose();
 });
+
+test('a packet-fed stream is null until there is a decoder to answer with', async()=>{
+    const shape = { formatTag: 0x55, sampleRate: 44100, channels: 2 };
+    let api = await mediaModule.create({});
+    assert.equal(api.openAudio(shape), null, 'no binary: nothing to decode with');
+    await mediaModule.dispose();
+
+    // A binary that is not up yet answers null and starts coming up, so the
+    // next stream finds it; one that cannot come up says so in the issues.
+    api = await mediaModule.create({ wasmBytes: new Uint8Array([0, 1, 2]) });
+    assert.equal(api.openAudio(shape), null);
+    for (let guard = 0; guard < 50 && mediaModule.diagnostics().issues?.length === 0; guard++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+    assert.match(mediaModule.diagnostics().issues?.[0] ?? '', /could not be instantiated/);
+    await mediaModule.dispose();
+});

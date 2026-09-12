@@ -15,10 +15,14 @@
  * and the data subtypes are what the library compares against, so they are
  * the ones the redistributable decoder registers, not ones chosen here.
  *
- * The decoding happens on the host. A stream is read whole through the fetch
- * callback when it is opened, cut into frames, and decoded in the background
- * while the library asks for samples; a request that runs ahead of the decoder
- * waits for it rather than answering short.
+ * The decoding happens on the host. A stream is read through the fetch
+ * callback as the library asks for samples, cut into frames, and each frame is
+ * handed to the decoder as it arrives. A decoder that answers in the call --
+ * the ordinary one -- has every fed frame's samples ready before the request
+ * that read it returns, which is how the real provider behaves; a decoder that
+ * answers later leaves a request that ran ahead of it waiting rather than
+ * answering short, and that wait is counted, because it holds the guest
+ * thread and whatever lock the library took before asking.
  */
 
 import { id3Length, scanFrames } from './mp3.js';
@@ -416,6 +420,16 @@ export function createMp3Provider(host){
     const leadSamples = stream=>LEAD_FRAMES * stream.first.samples * stream.first.channels;
 
     /**
+     * Parks the caller until the decoder has produced more, or the stream is
+     * over. Only a decoder that answers later ever brings a caller here: one
+     * that answers in the call has already produced everything it was fed.
+     *
+     * @param {Stream} stream
+     */
+    const waitForDecoder = stream=>
+        new Promise(resolve=>stream.waiting.push(()=>resolve(undefined)));
+
+    /**
      * Waits until `target` samples have been decoded, or the stream is over.
      *
      * @param {Stream} stream @param {number} target
@@ -423,20 +437,22 @@ export function createMp3Provider(host){
     const decodedUpTo = async(stream, target)=>{
         while (!stream.done && stream.decoded < target)
         {
-            await new Promise(resolve=>stream.waiting.push(()=>resolve(undefined)));
+            await waitForDecoder(stream);
         }
     };
 
     /**
      * Makes `wanted` samples past the position available, or as many as the
      * stream has: reading more input while the decoder has not been fed enough
-     * -- a lead past the request, so the wait that follows also restores what
-     * later requests are answered from -- waiting on it while it has, and
-     * flushing it once the input is spent.
+     * -- a lead past the request, so a decoder that answers later is also
+     * given what later requests are answered from -- flushing it once the
+     * input is spent, and waiting on it only when it has been fed enough and
+     * has not yet answered.
      *
      * @param {Stream} stream @param {number} wanted @param {any} thread
      */
     const ensure = async(stream, wanted, thread)=>{
+        let parked = false;
         while (!stream.done && stream.decoded - stream.position < wanted)
         {
             if (stream.fed - stream.position < wanted + leadSamples(stream) && !stream.inputDone)
@@ -447,16 +463,26 @@ export function createMp3Provider(host){
             if (stream.inputDone && !stream.flushing)
             {
                 stream.flushing = true;
-                stream.decoder.flush().then(()=>{
-                    stream.done = true;
-                    wake(stream);
-                }, error=>{
-                    fail(`decoding failed: ${error?.message ?? error}`);
-                    stream.done = true;
-                    wake(stream);
-                });
+                try
+                {
+                    await stream.decoder.flush();
+                }
+                catch (e){
+                    fail(`decoding failed: ${e instanceof Error ? e.message : String(e)}`);
+                }
+                stream.done = true;
+                wake(stream);
+                continue;
             }
-            await new Promise(resolve=>stream.waiting.push(()=>resolve(undefined)));
+            // Fed enough and not yet answered: a request parked here holds the
+            // guest thread, so each one is counted, once, however many times
+            // it is woken before it has what it asked for.
+            if (!parked)
+            {
+                parked = true;
+                waits++;
+            }
+            await waitForDecoder(stream);
         }
     };
 
@@ -674,9 +700,8 @@ export function createMp3Provider(host){
                     {
                         return deliver();
                     }
-                    // Behind the decoder: read and wait rather than answer
-                    // short, because a short answer is the end of the stream.
-                    waits++;
+                    // Past what is decoded: read on rather than answer short,
+                    // because a short answer is the end of the stream.
                     return ensure(stream, wanted, thread).then(deliver);
                 },
             },

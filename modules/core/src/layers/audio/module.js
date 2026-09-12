@@ -7,7 +7,7 @@
 import { createDirectSound } from './dsound/seam.js';
 import { createMixer } from './output/mixer.js';
 import { createMp3Provider } from './asi/provider.js';
-import { createWebCodecsDecoder } from './asi/mp3.js';
+import { createSynchronousDecoder, createWebCodecsDecoder } from './asi/mp3.js';
 
 /**
  * audio — the sound APIs a program was written against.
@@ -120,6 +120,17 @@ export const audioModule = {
                     bridge.callGuest({ entry, args })),
         });
 
+        // What decodes behind the provider. The library asks for its samples
+        // in a call and holds a lock while it asks, so a decoder that answers
+        // later parks the guest thread and everything waiting on that lock
+        // with it; the assembling caller's `openAudio` -- the media layer's
+        // hosted decoder -- answers in the call, and the platform's decoder
+        // is only the fallback for a build whose binary cannot.
+        const decoder = config?.decoder
+            ?? (config?.openAudio
+                ? createSynchronousDecoder(config.openAudio, createWebCodecsDecoder())
+                : createWebCodecsDecoder());
+
         // The MPEG decoder a sound library of this era loads beside a program
         // as a provider of its own. Hosted, because decoding it in the guest
         // costs a fifth of the machine; reached through the same library
@@ -136,7 +147,7 @@ export const audioModule = {
                     /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
             currentThread: config?.currentThread ?? (()=>undefined),
             resolveImport: config?.resolveImport ?? (()=>null),
-            decoder: config?.decoder ?? createWebCodecsDecoder(),
+            decoder,
             /** @param {string} text */
             warn: text=>config?.warn?.(text),
         });
@@ -268,6 +279,9 @@ export const audioModule = {
             /** The MPEG provider, for whoever is measuring. */
             mp3: ()=>mp3,
 
+            /** Which decoder stands behind it, and how its streams were served. */
+            decoder: ()=>decoder.diagnostics?.() ?? { name: 'custom' },
+
             /**
              * Where a sound API sends its samples.
              *
@@ -329,6 +343,7 @@ export const audioModule = {
                 libraries: current ? Object.keys(current.libraries()) : [],
                 ...(current ? current.dsound().diagnostics() : {}),
                 mp3: current ? current.mp3().diagnostics() : null,
+                decoder: current ? current.decoder() : null,
                 ...(current ? current.output().diagnostics() : {}),
                 behindTurns: current ? current.behind() : 0,
                 ...(current ? current.feeding() : {}),
