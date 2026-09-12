@@ -86,6 +86,11 @@ export function launchWithGpu({ browser = findBrowser(), headed = false } = {}){
     return start(browser, [
         '--enable-unsafe-webgpu',
         '--enable-unsafe-swiftshader',
+        // A scenario clicks Play through the protocol, and the browser does not
+        // count that as a gesture: the audio context stays suspended, the
+        // launcher switches sound off, and a run that was meant to measure
+        // sound measures its absence. Nobody sits at this browser to click.
+        '--autoplay-policy=no-user-gesture-required',
     ], headed);
 }
 
