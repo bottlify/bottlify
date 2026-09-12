@@ -38,10 +38,9 @@ The order in the master plan is the plan, not a queue anyone is standing in. Pha
 landed in them while Phase 5 is still open, because a title asks for what it asks for. Where a phase
 has no document, the master plan's Part III entry is all there is.
 
-**Phase 5** — the backend, GDI's drawing half and DirectDraw are done; Direct3D 7 and Direct3D 8
-have guest-facing seams and draw (D3D8 answers eighty-two of its ninety-four device slots); Direct3D
-9 and OpenGL are connected to the machine; Direct3D 10 has an object model and contract tests but no
-seam; Glide is not started. Pixels have reached a real GPU.
+**Phase 5** — the backend, GDI's drawing half and DirectDraw are done; Direct3D 7, 8, 9 and 10,
+OpenGL and Vulkan all have guest-facing seams; Direct3D 8 is the one that has drawn a real title,
+the rest are verified by tests; Glide is not started. Pixels have reached a real GPU.
 
 **Phase 10** — Warcraft III runs in a browser on a real GPU and draws its main menu. This is the
 phase that decides what the others do next.
