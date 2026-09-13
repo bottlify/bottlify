@@ -6,7 +6,10 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { createHive, HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './functions.js';
+import { IID_ITYPELIB } from './objects.js';
 
 const S_OK = 0x00000000;
 const E_INVALIDARG = 0x80070057;
@@ -102,11 +105,11 @@ function fakeHost(){
 
 /** @type {ReturnType<typeof fakeHost>} */
 let host;
-/** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */
+/** @type {Record<string, { argBytes: number, handler: (args: number[]) => number | Promise<number> }>} */
 let fx;
 
 /** @param {string} name @param {number[]} args */
-const call = (name, args)=>fx[name].handler(args) >>> 0;
+const call = (name, args)=>(/** @type {number} */ (fx[name].handler(args))) >>> 0;
 
 const setUp = ()=>{
     host = fakeHost();
@@ -392,18 +395,250 @@ test('the ordinals are the ones a real oleaut32 exports', ()=>{
     assert.equal(OLEAUT32_ORDINALS[163], 'RegisterTypeLib');
 });
 
-test('a type library cannot be loaded, and the pointer says so as well as the code', ()=>{
+test('without a volume or vtables no type library loads, and the pointer says so', ()=>{
     setUp();
-    host.putWide(SLOT, 'xx');
+    host.putWide(TEXT, 'C:\\lib.tlb');
+    host.putU32(SLOT, 0xdeadbeef);
     assert.equal(call('LoadTypeLib', [TEXT, SLOT]) | 0, 0x80029c4a | 0);
     assert.equal(host.u32(SLOT), 0);
-    host.putWide(SLOT, 'xx');
+    host.putU32(SLOT, 0xdeadbeef);
     assert.equal(call('LoadRegTypeLib', [TEXT, 1, 0, 0, SLOT]) | 0, 0x8002801d | 0);
     assert.equal(host.u32(SLOT), 0);
+    assert.equal(call('RegisterTypeLib', [0x1234, TEXT, 0]) | 0, 0x80070057 | 0);
     assert.equal(fx.LoadTypeLib.argBytes, 8);
     assert.equal(fx.LoadTypeLibEx.argBytes, 12);
     assert.equal(fx.LoadRegTypeLib.argBytes, 20);
     assert.equal(fx.RegisterTypeLib.argBytes, 12);
+    assert.equal(fx.UnRegisterTypeLib.argBytes, 20);
+});
+
+/** The fixture library, on a one-file volume, with a hive and a publisher. */
+function libraryHost(){
+    const base = fakeHost();
+    const bytes = new Uint8Array(readFileSync(new URL('./msft-typelib.bin', import.meta.url)));
+    /** @type {{ object: any, id: string }[]} */
+    const published = [];
+    /** @type {string[]} */
+    const opened = [];
+    const hive = createHive();
+    return {
+        ...base,
+        hive,
+        published,
+        opened,
+        files: {
+            /** @param {string} path */
+            stat: path=>(path.toLowerCase() === 'c:\\lib\\engine.tlb'
+                ? { exists: true, isDirectory: false, size: bytes.length }
+                : { exists: false, isDirectory: false, size: 0 }),
+            /** @param {string} path */
+            open: path=>{
+                opened.push(path);
+                return { path };
+            },
+            /** @param {any} node @param {number} offset @param {number} length */
+            read: (node, offset, length)=>(opened.length % 2 === 0
+                ? Promise.resolve(bytes.subarray(offset, offset + length))
+                : bytes.subarray(offset, offset + length)),
+            close: ()=>{},
+        },
+        vtables: {
+            /** @param {any} object @param {string} id */
+            publish: (object, id)=>{
+                published.push({ object, id });
+                return 0x7000 + published.length * 16;
+            },
+        },
+        call: ()=>Promise.resolve(0),
+    };
+}
+
+test('LoadTypeLib reads the file off the volume, and the library registers and loads back',
+    async()=>{
+        const lib = libraryHost();
+        const fns = createAutomationFunctions(lib);
+        lib.putWide(TEXT, 'C:\\lib\\engine.tlb');
+        assert.equal(fns.LoadTypeLib.handler([TEXT, SLOT]), 0);
+        const pointer = lib.u32(SLOT);
+        assert.equal(pointer, 0x7010);
+        assert.equal(lib.published[0].id, IID_ITYPELIB);
+        assert.equal(lib.opened.length, 1, 'read once, whole');
+
+        assert.equal(fns.RegisterTypeLib.handler([pointer, TEXT, 0]), 0);
+        const root = /** @type {any} */ (lib.hive.root(HKEY_CLASSES_ROOT));
+        const version = lib.hive.open(root, 'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}\\1.0');
+        assert.ok(version, 'the version key, in hex');
+        const text = (/** @type {Uint8Array} */ data)=>String.fromCharCode(
+            ...data.subarray(0, data.indexOf(0)));
+        assert.equal(text(/** @type {any} */ (lib.hive.getValue(version, '')).data),
+            'InstallShield Professional Setup Kernel 7.0');
+        const win32 = /** @type {any} */ (lib.hive.open(version, '0\\win32'));
+        assert.equal(text(/** @type {any} */ (lib.hive.getValue(win32, '')).data),
+            'C:\\lib\\engine.tlb');
+        assert.equal(text(/** @type {any} */ (lib.hive.getValue(
+            /** @type {any} */ (lib.hive.open(version, 'HELPDIR')), '')).data), 'C:\\lib');
+        assert.equal(text(/** @type {any} */ (lib.hive.getValue(
+            /** @type {any} */ (lib.hive.open(version, 'FLAGS')), '')).data), '0');
+
+        // Loaded back by GUID and version, through a read that arrives later.
+        lib.writeMemory(0x3000, Uint8Array.from([0x47, 0x62, 0x63, 0x94, 0x39, 0xbc, 0x8b, 0x4b,
+            0xa7, 0x28, 0x2d, 0x1f, 0xbe, 0xbf, 0xa7, 0x6a]));
+        const loading = fns.LoadRegTypeLib.handler([0x3000, 1, 0, 0, SLOT]);
+        assert.ok(loading instanceof Promise, 'parked on the bytes');
+        assert.equal(await loading, 0);
+        assert.equal(lib.u32(SLOT), 0x7020, 'a second library object');
+        assert.equal(lib.live.size, 0, 'the path string made for the load is freed');
+        assert.equal(/** @type {number} */ (fns.LoadRegTypeLib.handler([0x3000, 2, 0, 0, SLOT])) | 0,
+            0x8002801d | 0, 'only the registered version');
+
+        assert.equal(fns.UnRegisterTypeLib.handler([0x3000, 1, 0, 0, 1]), 0);
+        assert.equal(lib.hive.open(root, 'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}'), null);
+        assert.equal(fns.UnRegisterTypeLib.handler([0x3000, 1, 0, 0, 1]) | 0, 0x8002801d | 0);
+        assert.equal(/** @type {number} */ (fns.LoadRegTypeLib.handler([0x3000, 1, 0, 0, SLOT])) | 0,
+            0x8002801d | 0);
+
+        lib.putWide(TEXT, 'C:\\lib\\missing.tlb');
+        assert.equal(/** @type {number} */ (fns.LoadTypeLib.handler([TEXT, SLOT])) | 0,
+            0x80029c4a | 0);
+        assert.equal(lib.u32(SLOT), 0);
+        assert.ok(lib.said.some(line=>line.includes('missing.tlb')));
+    });
+
+test('LoadTypeLibEx registers when asked to, and DispGetIDsOfNames reaches a type', async()=>{
+    const lib = libraryHost();
+    const fns = createAutomationFunctions(lib);
+    lib.putWide(TEXT, 'C:\\lib\\engine.tlb');
+    assert.equal(fns.LoadTypeLibEx.handler([TEXT, 2, SLOT]), 0, 'REGKIND_NONE');
+    const root = /** @type {any} */ (lib.hive.root(HKEY_CLASSES_ROOT));
+    assert.equal(lib.hive.open(root, 'TypeLib'), null);
+    // The fake volume's second read arrives later, so the registration waits.
+    assert.equal(await fns.LoadTypeLibEx.handler([TEXT, 1, SLOT]), 0, 'REGKIND_REGISTER');
+    assert.ok(lib.hive.open(root, 'TypeLib\\{94636247-BC39-4B8B-A728-2D1FBEBFA76A}\\1.0'));
+
+    // A type of the library, then a name looked up through the flat entry.
+    const library = lib.u32(SLOT);
+    const record = lib.published.find(entry=>entry.id === IID_ITYPELIB && entry.object);
+    assert.ok(record);
+    const getTypeInfo = record.object.interfaceFor(IID_ITYPELIB).methods
+        .find((/** @type {any} */ m)=>m.name === 'GetTypeInfo');
+    assert.equal(getTypeInfo.invoke(record.object, [33, SLOT]), 0);
+    const typeInfo = lib.u32(SLOT);
+    assert.notEqual(typeInfo, library);
+    lib.putWide(0x3000, 'Count');
+    lib.putU32(0x3100, 0x3000);
+    assert.equal(fns.DispGetIDsOfNames.handler([typeInfo, 0x3100, 1, 0x3200]), 0);
+    assert.equal(lib.u32(0x3200), 1);
+    assert.equal(fns.DispGetIDsOfNames.handler([0x4444, 0x3100, 1, 0x3200]) | 0, 0x80070057 | 0,
+        'not a type information this library gave out');
+});
+
+test('a SAFEARRAY is read off its descriptor, locked, and copied whole', ()=>{
+    setUp();
+    // Two dimensions: [1..3] outer, [0..1] inner, of 4-byte elements.
+    const psa = 0x3000;
+    host.putU16(psa, 2);
+    host.putU16(psa + 2, 0x80); // FADF_HAVEVARTYPE
+    host.putU32(psa + 4, 4);
+    host.putU32(psa + 8, 0);
+    host.putU32(psa + 12, 0x3100);
+    host.putU32(psa + 16, 2);
+    host.putU32(psa + 20, 0);
+    host.putU32(psa + 24, 3);
+    host.putU32(psa + 28, 1);
+    for (let index = 0; index < 6; index++)
+    {
+        host.putU32(0x3100 + index * 4, 100 + index);
+    }
+    assert.equal(call('SafeArrayGetDim', [psa]), 2);
+    assert.equal(call('SafeArrayGetElemsize', [psa]), 4);
+    assert.equal(call('SafeArrayGetUBound', [psa, 1, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 3, 'dimension 1 is the outer one, bound last');
+    assert.equal(call('SafeArrayGetLBound', [psa, 1, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 1);
+    assert.equal(call('SafeArrayGetUBound', [psa, 2, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 1);
+    assert.equal(call('SafeArrayGetUBound', [psa, 3, SLOT]) | 0, 0x8002000b | 0, 'DISP_E_BADINDEX');
+    assert.equal(call('SafeArrayGetDim', [0]), 0);
+
+    assert.equal(call('SafeArrayLock', [psa]), 0);
+    assert.equal(call('SafeArrayLock', [psa]), 0);
+    assert.equal(host.u32(psa + 8), 2);
+    assert.equal(call('SafeArrayUnlock', [psa]), 0);
+    assert.equal(call('SafeArrayUnlock', [psa]), 0);
+    assert.equal(call('SafeArrayUnlock', [psa]) | 0, 0x8000ffff | 0, 'E_UNEXPECTED below zero');
+    assert.equal(call('SafeArrayLock', [0]) | 0, 0x80070057 | 0);
+
+    host.putU32(psa + 8, 1);
+    assert.equal(call('SafeArrayCopy', [psa, SLOT]), 0);
+    const copy = host.u32(SLOT);
+    assert.notEqual(copy, 0);
+    assert.equal(host.u16(copy), 2);
+    assert.equal(host.u32(copy + 8), 0, 'the copy is unlocked');
+    const data = host.u32(copy + 12);
+    assert.notEqual(data, 0x3100, 'its own data');
+    assert.deepEqual([...Array(6)].map((_, i)=>host.u32(data + i * 4)),
+        [100, 101, 102, 103, 104, 105]);
+    assert.deepEqual([host.u32(copy + 16), host.u32(copy + 24)], [2, 3]);
+    assert.equal(call('SafeArrayCopy', [0, SLOT]) | 0, 0x80070057 | 0);
+    assert.equal(host.u32(SLOT), 0);
+});
+
+test('an array of strings is copied string by string', ()=>{
+    setUp();
+    const psa = 0x3000;
+    host.putU16(psa, 1);
+    host.putU16(psa + 2, 0x100); // FADF_BSTR
+    host.putU32(psa + 4, 4);
+    host.putU32(psa + 12, 0x3100);
+    host.putU32(psa + 16, 2);
+    host.putU32(psa + 20, 0);
+    host.putWide(TEXT, 'one');
+    const one = call('SysAllocString', [TEXT]);
+    host.putU32(0x3100, one);
+    host.putU32(0x3104, 0);
+    assert.equal(call('SafeArrayCopy', [psa, SLOT]), 0);
+    const data = host.u32(host.u32(SLOT) + 12);
+    const copied = host.u32(data);
+    assert.notEqual(copied, one, 'a new string');
+    assert.equal(call('SysStringLen', [copied]), 3);
+    assert.equal(host.u32(data + 4), 0, 'NULL stays NULL');
+});
+
+test('DispGetParam picks the positional argument and converts it', ()=>{
+    setUp();
+    // Two positional arguments after one named one: [named, second, first].
+    const params = 0x3000;
+    host.putU32(params, 0x3100);
+    host.putU32(params + 4, 0x3200);
+    host.putU32(params + 8, 3);
+    host.putU32(params + 12, 1);
+    host.putVariant(0x3100, VT_I4, 9);
+    host.putVariant(0x3110, VT_I4, 200);
+    host.putVariant(0x3120, VT_I4, 100);
+    host.putVariant(VARIANT_A, 0, 0);
+    assert.equal(call('DispGetParam', [params, 0, VT_BSTR, VARIANT_A, SLOT]), 0);
+    assert.equal(host.u16(VARIANT_A), VT_BSTR);
+    assert.equal(call('SysStringLen', [host.u32(VARIANT_A + 8)]), 3, '"100"');
+    assert.equal(call('DispGetParam', [params, 1, VT_I4, VARIANT_A, SLOT]), 0);
+    assert.equal(host.u32(VARIANT_A + 8), 200);
+    host.putU32(SLOT, 0);
+    assert.equal(call('DispGetParam', [params, 2, VT_I4, VARIANT_A, SLOT]) | 0, 0x80020004 | 0,
+        'DISP_E_PARAMNOTFOUND: the named one does not count');
+    host.putVariant(0x3110, VT_UNKNOWN, 0x5555);
+    assert.equal(call('DispGetParam', [params, 1, VT_I4, VARIANT_A, SLOT]) | 0, 0x80020005 | 0);
+    assert.equal(host.u32(SLOT), 1, 'which argument was wrong');
+});
+
+test('CreateErrorInfo hands out an object with one reference', ()=>{
+    const lib = libraryHost();
+    const fns = createAutomationFunctions(lib);
+    assert.equal(fns.CreateErrorInfo.handler([SLOT]), 0);
+    assert.notEqual(lib.u32(SLOT), 0);
+    assert.equal(lib.published[0].id, '{22F03340-547D-101B-8E65-08002B2BD119}');
+    assert.equal(fns.CreateErrorInfo.handler([0]) | 0, 0x80070057 | 0);
+    setUp();
+    assert.equal(call('CreateErrorInfo', [SLOT]) | 0, 0x8007000e | 0, 'nowhere to put one');
+    assert.equal(host.u32(SLOT), 0);
 });
 
 test('the argument list of each entry is the one the guest pushed', ()=>{
@@ -416,6 +651,9 @@ test('the argument list of each entry is the one the guest pushed', ()=>{
         SysStringLen: 4, SysStringByteLen: 4,
         VariantInit: 4, VariantClear: 4, VariantCopy: 8, VariantCopyInd: 8,
         VariantChangeType: 16, VariantChangeTypeEx: 20,
+        SafeArrayGetDim: 4, SafeArrayGetElemsize: 4, SafeArrayGetUBound: 12,
+        SafeArrayGetLBound: 12, SafeArrayLock: 4, SafeArrayUnlock: 4, SafeArrayCopy: 8,
+        DispGetParam: 20, DispGetIDsOfNames: 16, CreateErrorInfo: 4,
     };
     for (const [name, argBytes] of Object.entries(expected))
     {

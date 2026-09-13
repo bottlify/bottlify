@@ -28,6 +28,7 @@
  */
 
 import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from './guid.js';
+import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -42,6 +43,7 @@ const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
 const REGDB_E_CLASSNOTREG = 0x80040154;
 const CO_E_NOTINITIALIZED = 0x800401f0;
 const CO_E_CLASSSTRING = 0x800401f3;
+const STG_E_INVALIDFUNCTION = 0x80030001 | 0;
 
 /**
  * The apartment models. COINIT_MULTITHREADED is zero, so the model is one bit
@@ -73,6 +75,15 @@ const COINIT_APARTMENTTHREADED = 0x2;
  * @property {{ pointer: () => number }} [taskAllocator]
  *           The process's IMalloc, for CoGetMalloc. Absent, that call fails
  *           as an allocation failure would.
+ * @property {{ root: (id: number) => any, open: (key: any, path: string) => any,
+ *              getValue: (key: any, name: string) => { data: Uint8Array } | null }} [hive]
+ *           The registry, for the class keys ProgIDFromCLSID reads. Absent,
+ *           no class has a ProgID.
+ * @property {{ load: (name: number) => number | Promise<number>,
+ *              free: (module: number) => number }} [libraries]
+ *           LoadLibraryW and FreeLibrary, for CoLoadLibrary and CoFreeLibrary:
+ *           a library COM loads is the same mapping kernel32 makes, and a
+ *           name it takes is a wide string. Absent, CoLoadLibrary answers 0.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -157,10 +168,10 @@ export function createTaskAllocator({ heap, registry, vtables, readMemory, write
             id: IID_IMALLOC,
             methods: [
                 { name: 'Alloc', argBytes: 8,
-                    invoke: (object, [, bytes])=>heap.allocate(bytes >>> 0) },
+                    invoke: (object, [bytes])=>heap.allocate(bytes >>> 0) },
                 { name: 'Realloc', argBytes: 12,
-                    invoke: (object, [, pointer, size])=>reallocate(heap, memory, pointer, size) },
-                { name: 'Free', argBytes: 8, invoke: (object, [, pointer])=>{
+                    invoke: (object, [pointer, size])=>reallocate(heap, memory, pointer, size) },
+                { name: 'Free', argBytes: 8, invoke: (object, [pointer])=>{
                     if ((pointer >>> 0) !== 0)
                     {
                         heap.free(pointer >>> 0);
@@ -168,30 +179,43 @@ export function createTaskAllocator({ heap, registry, vtables, readMemory, write
                     return 0;
                 } },
                 { name: 'GetSize', argBytes: 8,
-                    invoke: (object, [, pointer])=>heap.block(pointer >>> 0)?.size ?? 0xffffffff },
+                    invoke: (object, [pointer])=>heap.block(pointer >>> 0)?.size ?? 0xffffffff },
                 // 1 when the block is this allocator's, 0 when not: there is
                 // one heap, so a block it knows is one it made.
                 { name: 'DidAlloc', argBytes: 8,
-                    invoke: (object, [, pointer])=>(heap.block(pointer >>> 0) ? 1 : 0) },
+                    invoke: (object, [pointer])=>(heap.block(pointer >>> 0) ? 1 : 0) },
                 { name: 'HeapMinimize', argBytes: 4, invoke: ()=>0 },
             ],
         }],
     }));
     let pointer = 0;
+    /** @type {import('./objects.js').ComObject | null} */
+    let allocator = null;
     return {
-        /** The interface pointer, made on first use; 0 when nothing can hold it. */
+        /**
+         * The interface pointer, made on first use; 0 when nothing can hold it.
+         *
+         * Every hand-out carries a reference, because every caller gives one
+         * back: a program that asks twice and releases twice would otherwise
+         * take the object to zero, and the next caller would be handed the
+         * same address with nothing behind it.
+         */
         pointer: ()=>{
             if (pointer === 0)
             {
-                const object = registry.create(CLSID_TASK_ALLOCATOR);
-                if (!object)
+                allocator = registry.create(CLSID_TASK_ALLOCATOR);
+                if (!allocator)
                 {
                     return 0;
                 }
                 // The process's own reference, never released: the creation
                 // reference is the one the guest was handed and will give back.
-                object.addRef();
-                pointer = vtables.publish(object, IID_IMALLOC) >>> 0;
+                allocator.addRef();
+                pointer = vtables.publish(allocator, IID_IMALLOC) >>> 0;
+            }
+            else
+            {
+                allocator?.addRef();
             }
             return pointer;
         },
@@ -305,6 +329,43 @@ export function createOleFunctions(host){
         return address === 0 ? null : readGuid(host, address);
     };
 
+    /**
+     * @param {string} api @param {number} out  Where the object would go, or 0.
+     * @returns {number} STG_E_INVALIDFUNCTION
+     */
+    const refuseStorage = (api, out)=>{
+        if (out !== 0)
+        {
+            writeU32(out, 0);
+        }
+        host.divergence?.(api, 'structured storage is not implemented');
+        return STG_E_INVALIDFUNCTION;
+    };
+
+    const stringFromGuid = {
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([rguid, ppsz])=>{
+            const out = ppsz >>> 0;
+            const guid = guidAt(rguid);
+            if (guid === null || out === 0)
+            {
+                return E_INVALIDARG;
+            }
+            const block = host.heap.allocate((GUID_STRING_LENGTH + 1) * 2);
+            host.writeMemory(out, new Uint8Array(4));
+            if (block === 0)
+            {
+                return E_OUTOFMEMORY;
+            }
+            writeOleString(block, guid);
+            const pointer = new Uint8Array(4);
+            new DataView(pointer.buffer).setUint32(0, block, true);
+            host.writeMemory(out, pointer);
+            return S_OK;
+        },
+    };
+
     return {
         /** HRESULT CoInitialize(LPVOID pvReserved) */
         CoInitialize: {
@@ -334,6 +395,29 @@ export function createOleFunctions(host){
         CoFreeUnusedLibraries: {
             argBytes: 0,
             handler: ()=>0,
+        },
+
+        /**
+         * HINSTANCE CoLoadLibrary(LPOLESTR lpszLibName, BOOL bAutoFree)
+         * void CoFreeLibrary(HINSTANCE hInst)
+         *
+         * LoadLibrary and FreeLibrary under COM's names, and the same
+         * mapping: an address this hands out is one GetProcAddress accepts.
+         * The auto-free flag only says whether CoFreeUnusedLibraries may
+         * unload the library later, and nothing here ever does.
+         */
+        CoLoadLibrary: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([name])=>host.libraries?.load(name >>> 0) ?? 0,
+        },
+        CoFreeLibrary: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([module])=>{
+                host.libraries?.free(module >>> 0);
+                return 0;
+            },
         },
 
         CoUninitialize: {
@@ -555,6 +639,98 @@ export function createOleFunctions(host){
                 return GUID_STRING_LENGTH + 1;
             },
         },
+
+        /**
+         * HRESULT StgCreateDocfile(const OLECHAR *pwcsName, DWORD grfMode,
+         *                          DWORD reserved, IStorage **ppstgOpen)
+         * HRESULT StgOpenStorage(const OLECHAR *pwcsName, IStorage *pstgPriority,
+         *     DWORD grfMode, SNB snbExclude, DWORD reserved, IStorage **ppstgOpen)
+         * HRESULT WriteClassStm(IStream *pStm, REFCLSID rclsid)
+         * HRESULT OleLoadFromStream(IStream *pStm, REFIID iidInterface, void **ppvObj)
+         * HRESULT OleSaveToStream(IPersistStream *pPStm, IStream *pStm)
+         *
+         * Structured storage -- the compound file and the objects persisted
+         * through it -- is not built. Each entry point is declared with its
+         * true argument count so the import binds cleanly, and answers the
+         * documented refusal with a null where the object would go.
+         */
+        StgCreateDocfile: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, , , out])=>refuseStorage('StgCreateDocfile', out >>> 0),
+        },
+        StgOpenStorage: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([, , , , , out])=>refuseStorage('StgOpenStorage', out >>> 0),
+        },
+        WriteClassStm: {
+            argBytes: 8,
+            handler: ()=>refuseStorage('WriteClassStm', 0),
+        },
+        OleLoadFromStream: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>refuseStorage('OleLoadFromStream', out >>> 0),
+        },
+        OleSaveToStream: {
+            argBytes: 8,
+            handler: ()=>refuseStorage('OleSaveToStream', 0),
+        },
+
+        /**
+         * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
+         *
+         * The class's ProgID key in the registry, as a string in task
+         * memory; a class with no key is not registered.
+         */
+        ProgIDFromCLSID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([rclsid, out])=>{
+                const slot = out >>> 0;
+                const guid = guidAt(rclsid);
+                if (guid === null || slot === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32(slot, 0);
+                const root = host.hive?.root(HKEY_CLASSES_ROOT);
+                const key = root ? host.hive?.open(root, `CLSID\\${guid}\\ProgID`) : null;
+                const value = key ? host.hive?.getValue(key, '') : null;
+                if (!value)
+                {
+                    return REGDB_E_CLASSNOTREG;
+                }
+                let progId = '';
+                for (const byte of value.data)
+                {
+                    if (byte === 0)
+                    {
+                        break;
+                    }
+                    progId += String.fromCharCode(byte);
+                }
+                const block = host.heap.allocate((progId.length + 1) * 2);
+                if (block === 0)
+                {
+                    return E_OUTOFMEMORY;
+                }
+                writeOleString(block, progId);
+                writeU32(slot, block);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT StringFromCLSID(REFCLSID rclsid, LPOLESTR *ppsz)
+         * HRESULT StringFromIID(REFIID rclsid, LPOLESTR *ppsz)
+         *
+         * The same string as StringFromGUID2, in a block the caller frees
+         * with CoTaskMemFree.
+         */
+        StringFromCLSID: stringFromGuid,
+        StringFromIID: stringFromGuid,
 
         /**
          * HRESULT CLSIDFromString(LPCOLESTR lpsz, LPCLSID pclsid)

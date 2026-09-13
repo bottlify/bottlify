@@ -1,0 +1,61 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRpcFunctions } from './functions.js';
+
+test('a proxy DLL registers as done, says so, and hands out no class object', ()=>{
+    /** @type {[string, string][]} */
+    const said = [];
+    const memory = new Uint8Array(64);
+    const fns = createRpcFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        divergence: (api, detail)=>{
+            said.push([api, detail]);
+        },
+    });
+    assert.equal(fns.NdrDllRegisterProxy.argBytes, 12);
+    assert.equal(fns.NdrDllRegisterProxy.handler(), 0, 'S_OK');
+    assert.equal(said.length, 1, 'and the divergence is reported');
+    assert.equal(fns.NdrDllUnregisterProxy.handler(), 0);
+
+    memory.set([0xef, 0xbe, 0xad, 0xde], 16);
+    const refused = fns.NdrDllGetClassObject.handler([0x1000, 0x2000, 16, 0, 0, 0]);
+    assert.equal(refused >>> 0, 0x80040111, 'CLASS_E_CLASSNOTAVAILABLE');
+    assert.deepEqual([...memory.subarray(16, 20)], [0, 0, 0, 0], 'the out pointer is cleared');
+    assert.equal(fns.NdrDllCanUnloadNow.handler(), 1, 'S_FALSE: never unloadable');
+});
+
+test('a UUID is made random and read back from its braceless spelling', ()=>{
+    const memory = new Uint8Array(128);
+    const text = '6B29FC40-CA47-1067-B31D-00DD010662DA';
+    for (let at = 0; at < text.length; at++)
+    {
+        memory[64 + at] = text.charCodeAt(at);
+    }
+    const fns = createRpcFunctions({
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        readCString: (address, max)=>{
+            let read = '';
+            for (let at = address; memory[at] !== 0 && read.length < max; at++)
+            {
+                read += String.fromCharCode(memory[at]);
+            }
+            return read;
+        },
+    });
+    assert.equal(fns.UuidCreate.handler([0]), 0, 'RPC_S_OK');
+    assert.equal(memory[7] >> 4, 4, 'version 4');
+    assert.equal(memory[8] >> 6, 2, 'variant 1');
+    assert.equal(fns.UuidFromStringA.handler([64, 16]), 0);
+    assert.deepEqual([...memory.subarray(16, 32)], [0x40, 0xfc, 0x29, 0x6b, 0x47, 0xca, 0x67, 0x10,
+        0xb3, 0x1d, 0x00, 0xdd, 0x01, 0x06, 0x62, 0xda]);
+    memory[64 + 8] = 0x58;
+    assert.equal(fns.UuidFromStringA.handler([64, 16]), 1705, 'RPC_S_INVALID_STRING_UUID');
+    assert.equal(fns.UuidFromStringA.handler([0, 32]), 0, 'NULL is the nil UUID');
+    assert.deepEqual([...memory.subarray(32, 48)], new Array(16).fill(0));
+});

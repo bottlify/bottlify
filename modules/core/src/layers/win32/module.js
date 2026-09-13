@@ -46,6 +46,7 @@ import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
+import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
@@ -1003,6 +1004,19 @@ export const win32Module = {
                 taskAllocator,
                 divergence: config?.divergence,
                 vtables: comVtables,
+                hive,
+                // Read at call time: the table they live in is built above,
+                // but the object holding it is assigned after this literal.
+                libraries: {
+                    /** @param {number} name */
+                    load: name=>libraries['KERNEL32.dll'].LoadLibraryW.handler([name]),
+                    /** @param {number} module */
+                    free: module=>libraries['KERNEL32.dll'].FreeLibrary.handler([module]),
+                },
+            }),
+
+            'RPCRT4.dll': createRpcFunctions({
+                writeMemory, readCString, divergence: config?.divergence,
             }),
 
             'OLEAUT32.dll': createAutomationFunctions({
@@ -1010,6 +1024,14 @@ export const win32Module = {
                 writeMemory,
                 heap,
                 divergence: config?.divergence,
+                // A type library is a file a program loads and an object it
+                // registers, so automation reads the volume, publishes through
+                // the same vtables COM uses and writes the same hive.
+                files: volume,
+                vtables: comVtables,
+                hive,
+                /** @param {number} entry @param {number[]} args */
+                call: (entry, args)=>bridge.callGuest({ entry, args }),
             }),
         };
 

@@ -109,6 +109,14 @@ function fakeHost(){
         published,
         /** @type {{ pointer: () => number } | undefined} */
         taskAllocator: undefined,
+        /** @type {{ load: (name: number) => number, free: (module: number) => number } | undefined} */
+        libraries: undefined,
+        /**
+         * @type {{ root: (id: number) => any, open: (key: any, path: string) => any,
+         *          getValue: (key: any, name: string) => { data: Uint8Array } | null }
+         *        | undefined}
+         */
+        hive: undefined,
         /** @param {any} thread */
         run: thread=>{
             current = thread;
@@ -468,11 +476,20 @@ test('the task allocator is one object over the task heap, and a Release never d
 
     const record = [...host.published.entries()].find(([, at])=>at === pointer)?.[0];
     assert.ok(record, 'published through the same vtables COM uses');
+    // Two hand-outs, two references for the guest to give back, and the
+    // process's own on top: releasing both leaves the object alive.
+    assert.equal(record.object.refCount, 3);
+    assert.equal(record.object.release(), 2);
+    assert.equal(record.object.release(), 1);
+    assert.equal(record.object.destroyed, false, 'the process still holds it');
+    assert.equal(allocator.pointer(), pointer, 'and hands it out again');
+    assert.equal(record.object.refCount, 2);
     const methods = record.methods.map((/** @type {any} */ m)=>m.name);
     assert.deepEqual(methods, ['QueryInterface', 'AddRef', 'Release',
         'Alloc', 'Realloc', 'Free', 'GetSize', 'DidAlloc', 'HeapMinimize']);
     const invoke = (/** @type {string} */ name, /** @type {number[]} */ args)=>
-        record.methods.find((/** @type {any} */ m)=>m.name === name).invoke(record.object, [pointer, ...args]);
+        // As the bridge calls it: the interface pointer already stripped.
+        record.methods.find((/** @type {any} */ m)=>m.name === name).invoke(record.object, args);
 
     // Memory taken through the interface is CoTaskMem memory, and the other
     // way round.
@@ -599,6 +616,84 @@ test('IsEqualGUID compares the bytes, not the pointers', ()=>{
     assert.equal(fns.IsEqualGUID.handler([IID_ARG, 0]), 0);
 });
 
+test('CoLoadLibrary and CoFreeLibrary are LoadLibraryW and FreeLibrary under other names', ()=>{
+    const { host } = setup();
+    /** @type {string[]} */
+    const asked = [];
+    host.libraries = {
+        load: (/** @type {number} */ name)=>{
+            asked.push(`load ${name}`);
+            return 0x10000000;
+        },
+        free: (/** @type {number} */ module)=>{
+            asked.push(`free ${module}`);
+            return 1;
+        },
+    };
+    const fns = createOleFunctions(host);
+    assert.equal(fns.CoLoadLibrary.handler([0x1234, 1]), 0x10000000);
+    fns.CoFreeLibrary.handler([0x10000000]);
+    assert.deepEqual(asked, ['load 4660', 'free 268435456']);
+
+    const without = setup().fns;
+    assert.equal(without.CoLoadLibrary.handler([0x1234, 1]), 0, 'nothing to load through');
+});
+
+test('StringFromCLSID hands out the string in task memory', ()=>{
+    const { host, fns } = setup();
+    host.fill(PPV, 1);
+    assert.equal(fns.StringFromCLSID.handler([CLSID_ARG, PPV]), 0, 'S_OK');
+    const block = host.u32(PPV);
+    assert.notEqual(block, 0);
+    assert.ok(host.heap.block(block), 'CoTaskMem memory, freed with CoTaskMemFree');
+    let text = '';
+    for (let at = 0;; at += 2)
+    {
+        const unit = host.bytes[block + at] | (host.bytes[block + at + 1] << 8);
+        if (unit === 0)
+        {
+            break;
+        }
+        text += String.fromCharCode(unit);
+    }
+    assert.equal(text, CLSID_TEST);
+    assert.equal(fns.StringFromIID.handler([CLSID_ARG, 0]) >>> 0, 0x80070057, 'E_INVALIDARG');
+});
+
+test('ProgIDFromCLSID reads the class key, and an unregistered class has none', ()=>{
+    const { host, fns } = setup();
+    host.fill(PPV, 1);
+    assert.equal(fns.ProgIDFromCLSID.handler([CLSID_ARG, PPV]) >>> 0, 0x80040154,
+        'REGDB_E_CLASSNOTREG');
+    assert.equal(host.u32(PPV), 0);
+
+    const progId = Uint8Array.from([...'Test.Class.1'].map(c=>c.charCodeAt(0)));
+    host.hive = {
+        root: ()=>({}),
+        open: (key, path)=>(path === `CLSID\\${CLSID_TEST}\\ProgID` ? { progId } : null),
+        getValue: key=>({ data: key.progId }),
+    };
+    const withHive = createOleFunctions(host);
+    assert.equal(withHive.ProgIDFromCLSID.handler([CLSID_ARG, PPV]), 0);
+    const block = host.u32(PPV);
+    assert.ok(host.heap.block(block), 'task memory');
+    const units = new Uint16Array(host.bytes.slice(block, block + 24).buffer);
+    assert.equal(String.fromCharCode(...units), 'Test.Class.1');
+});
+
+test('structured storage is refused with a null object and a divergence', ()=>{
+    const { host, fns } = setup();
+    host.fill(PPV, 1);
+    assert.equal(fns.StgCreateDocfile.handler([0, 0x1012, 0, PPV]) >>> 0, 0x80030001,
+        'STG_E_INVALIDFUNCTION');
+    assert.equal(host.u32(PPV), 0);
+    assert.equal(fns.StgOpenStorage.handler([0, 0, 0x20, 0, 0, PPV]) >>> 0, 0x80030001);
+    assert.equal(fns.OleLoadFromStream.handler([0, CLSID_ARG, PPV]) >>> 0, 0x80030001);
+    assert.equal(fns.WriteClassStm.handler() >>> 0, 0x80030001);
+    assert.equal(fns.OleSaveToStream.handler() >>> 0, 0x80030001);
+    assert.ok(host.reported.some(text=>text.includes('StgCreateDocfile')));
+});
+
 test('the table declares stdcall argument sizes and nothing else', ()=>{
     const table = /** @type {Record<string, any>} */ (setup().fns);
     const expected = {
@@ -609,6 +704,8 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         OleUninitialize: 0,
         CreateStreamOnHGlobal: 12,
         CoFreeUnusedLibraries: 0,
+        CoLoadLibrary: 8,
+        CoFreeLibrary: 4,
         CoCreateInstance: 20,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,
@@ -616,6 +713,14 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoTaskMemRealloc: 8,
         CoGetMalloc: 8,
         StringFromGUID2: 12,
+        ProgIDFromCLSID: 8,
+        StgCreateDocfile: 16,
+        StgOpenStorage: 24,
+        WriteClassStm: 8,
+        OleLoadFromStream: 12,
+        OleSaveToStream: 8,
+        StringFromCLSID: 8,
+        StringFromIID: 8,
         CLSIDFromString: 8,
         IIDFromString: 8,
         IsEqualGUID: 8,
