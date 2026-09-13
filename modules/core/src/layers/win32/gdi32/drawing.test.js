@@ -670,3 +670,25 @@ test('GetDIBits describes a bitmap before it copies one', ()=>{
     // and rows from somewhere else would be worse than none.
     assert.equal(fns.GetDIBits.handler([hdc, bitmap, 0, 48, OUT, STRUCT, 0]), 0);
 });
+
+test('TextOutW reads code units and draws through the same engine as the narrow twin', ()=>{
+    const drawing = fakeDrawing();
+    const { memory, fns, hdc } = setup(drawing.services);
+
+    // Two bytes per character, the count in characters, and no terminator: a
+    // caller drawing part of a longer buffer passes the buffer and a short count.
+    memory.bytes.set([0x41, 0, 0x42, 0, 0x43, 0, 0x44, 0], STRUCT);
+    assert.equal(fns.TextOutW.handler([hdc, 5, 6, STRUCT, 3]), 1);
+    assert.deepEqual(drawing.calls.filter(call=>call[0] === 'textOutA'),
+        [['textOutA', hdc, 5, 6, 'ABC']]);
+
+    // A character outside Latin-1 survives, since nothing here narrows it.
+    memory.bytes.set([0x14, 0x04], STRUCT);
+    assert.equal(fns.TextOutW.handler([hdc, 0, 0, STRUCT, 1]), 1);
+    assert.equal(drawing.calls.filter(call=>call[0] === 'textOutA')[1][4], '\u0414');
+
+    assert.equal(fns.TextOutW.argBytes, 20, 'the same five arguments as TextOutA');
+    const bare = setup();
+    assert.equal(bare.fns.TextOutW.handler([bare.hdc, 0, 0, STRUCT, 1]), 0,
+        'and it fails the same way without a drawing service');
+});

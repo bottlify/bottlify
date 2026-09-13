@@ -79,6 +79,15 @@ export function createImmFunctions(host){
             },
         },
 
+        /**
+         * BOOL ImmGetOpenStatus(HIMC hIMC)
+         *
+         * Whether the input method is composing, which it never is: FALSE is
+         * the state a program checking this is hoping for, since an open IME is
+         * what makes it stop treating keystrokes as its own.
+         */
+        ImmGetOpenStatus: { argBytes: 4, handler: ()=>0 },
+
         /** BOOL ImmSetConversionStatus(HIMC, DWORD, DWORD) */
         ImmSetConversionStatus: { argBytes: 12, handler: ()=>1 },
 

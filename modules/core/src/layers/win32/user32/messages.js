@@ -60,6 +60,69 @@ export const ANY_WINDOW = null;
 export const WM_TIMER = 0x0113;
 
 /**
+ * The classes GetQueueStatus answers about.
+ *
+ * QS_ALLPOSTMESSAGE is the same news as QS_POSTMESSAGE with the message range
+ * of a waiting PeekMessage ignored, so anything that sets one sets both.
+ */
+export const QS_KEY = 0x0001;
+export const QS_MOUSEMOVE = 0x0002;
+export const QS_MOUSEBUTTON = 0x0004;
+export const QS_POSTMESSAGE = 0x0008;
+export const QS_TIMER = 0x0010;
+export const QS_PAINT = 0x0020;
+export const QS_HOTKEY = 0x0080;
+export const QS_ALLPOSTMESSAGE = 0x0100;
+
+/** The ends of the two input ranges, and the one message of its own class. */
+const WM_KEYFIRST = 0x0100;
+const WM_KEYLAST = 0x0108;
+const WM_MOUSELAST = 0x020d;
+const WM_HOTKEY = 0x0312;
+
+/**
+ * Which class a message belongs to, by its number.
+ *
+ * Windows decides this by where a message came from rather than what it is: a
+ * click the hardware reported sets QS_MOUSEBUTTON, the same click a program
+ * posted to itself sets QS_POSTMESSAGE. One queue here holds both and cannot
+ * always tell them apart, so the number decides -- and that is the direction
+ * to be wrong in. A loop watching QS_INPUT for the keypress that skips a
+ * cinematic is the reason this call exists, and reporting real input as a mere
+ * post would leave it watching for something that never comes; reporting a
+ * program's own posted click as input at worst makes it look once too often.
+ *
+ * @param {number} message
+ */
+const classOf = message=>{
+    if (message === WM_PAINT)
+    {
+        return QS_PAINT;
+    }
+    if (message === WM_TIMER)
+    {
+        return QS_TIMER;
+    }
+    if (message === WM_HOTKEY)
+    {
+        return QS_HOTKEY;
+    }
+    if (message >= WM_KEYFIRST && message <= WM_KEYLAST)
+    {
+        return QS_KEY;
+    }
+    if (message === WM_MOUSEMOVE)
+    {
+        return QS_MOUSEMOVE;
+    }
+    if (message > WM_MOUSEMOVE && message <= WM_MOUSELAST)
+    {
+        return QS_MOUSEBUTTON;
+    }
+    return QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+};
+
+/**
  * @param {Object} [options]
  * @param {() => number} [options.now]
  *        The guest's clock, in milliseconds. A timer is due against the clock
@@ -72,6 +135,21 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     let quitCode = null;
     let posted = 0;
     let retrieved = 0;
+    /**
+     * The classes that arrived since the queue was last looked at, which is the
+     * half of GetQueueStatus that says what is *new*. Cleared by every look --
+     * GetQueueStatus's own, and any retrieval -- because that is the window the
+     * documentation defines it over.
+     */
+    let changed = 0;
+    /**
+     * The paint and the timer as the last status call saw them. Neither is a
+     * queued message, so neither has an arrival to record: a condition that was
+     * absent and is now present is the news, and this is what it is compared
+     * against. Without it a window left dirty for a hundred frames would report
+     * itself as news in every one of them.
+     */
+    let reportedSynthetic = 0;
     /**
      * The message most recently taken off the queue, for GetMessageTime and
      * GetMessagePos: both answer about it, whichever window it was for.
@@ -290,6 +368,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             {
                 return;
             }
+            changed |= classOf(message.message >>> 0);
             if ((message.message >>> 0) === WM_MOUSEMOVE)
             {
                 // Replaced in place rather than dropped and re-appended: a move
@@ -346,6 +425,53 @@ export function createMessageQueue({ now = ()=>0 } = {}){
         /** @param {number} code  The value the program exits with. */
         postQuit(code){
             quitCode = code | 0;
+            changed |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+        },
+
+        /**
+         * What is waiting, by class, as GetQueueStatus reports it: `inQueue` is
+         * everything there is, `changed` only what has arrived since the last
+         * look. Both halves are needed because a program tests them for
+         * different things -- "is there anything to pump" against "has anything
+         * happened since I last asked".
+         *
+         * Looking counts as a look: the news is cleared here, the way it is
+         * cleared by a retrieval.
+         *
+         * @returns {{ inQueue: number, changed: number }}
+         */
+        status(){
+            let inQueue = 0;
+            for (const entry of pending)
+            {
+                inQueue |= classOf(entry.message);
+            }
+            if (quitCode !== null)
+            {
+                inQueue |= QS_POSTMESSAGE | QS_ALLPOSTMESSAGE;
+            }
+            const filter = { hwnd: ANY_WINDOW, first: 0, last: 0, remove: false };
+            if (dirtyWindow && dirtyWindow(filter) !== 0)
+            {
+                inQueue |= QS_PAINT;
+            }
+            const at = now();
+            for (const timer of timers.values())
+            {
+                if (timer.due <= at)
+                {
+                    inQueue |= QS_TIMER;
+                    break;
+                }
+            }
+            const synthetic = inQueue & (QS_PAINT | QS_TIMER);
+            // Only what is still there: the low word is defined as what arrived
+            // *and has not been taken yet*, so a keystroke posted and retrieved
+            // between two looks is no longer news.
+            const news = (changed | (synthetic & ~reportedSynthetic)) & inQueue;
+            changed = 0;
+            reportedSynthetic = synthetic;
+            return { inQueue, changed: news };
         },
 
         /**
@@ -408,6 +534,10 @@ export function createMessageQueue({ now = ()=>0 } = {}){
          * @returns {import('./structs.js').MessageFields | null}
          */
         peek(filter){
+            // A look at the queue is a look however it is spelt: GetMessage and
+            // PeekMessage clear the news GetQueueStatus reports just as
+            // GetQueueStatus itself does.
+            changed = 0;
             const index = pending.findIndex(entry=>accepts(entry, filter));
             if (index >= 0)
             {

@@ -379,6 +379,19 @@ test('every ordinal names a function this library actually has', ()=>{
     }
 });
 
+test('the property frame is refused out loud, with the stack it was pushed', ()=>{
+    setUp();
+    // Imported by number and never by name, so nothing in a program's import
+    // table would say which call this is. Declared all the same: the loader's
+    // stub for an unclaimed ordinal pops nothing, and eleven arguments left on
+    // the stack corrupt the caller from there on.
+    assert.equal(fx.OleCreatePropertyFrame.argBytes, 44);
+    assert.equal(call('OleCreatePropertyFrame', [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),
+        0x80004001, 'E_NOTIMPL, which a caller checks');
+    assert.ok(host.said.some(line=>line.includes('OleCreatePropertyFrame')),
+        `nothing reported the refusal: ${JSON.stringify(host.said)}`);
+});
+
 test('the ordinals are the ones a real oleaut32 exports', ()=>{
     // Read off a real export directory. A wrong number here binds a call to a
     // different function and nothing anywhere would say so.
@@ -393,6 +406,7 @@ test('the ordinals are the ones a real oleaut32 exports', ()=>{
     assert.equal(OLEAUT32_ORDINALS[150], 'SysAllocStringByteLen');
     assert.equal(OLEAUT32_ORDINALS[161], 'LoadTypeLib');
     assert.equal(OLEAUT32_ORDINALS[163], 'RegisterTypeLib');
+    assert.equal(OLEAUT32_ORDINALS[417], 'OleCreatePropertyFrame');
 });
 
 test('without a volume or vtables no type library loads, and the pointer says so', ()=>{

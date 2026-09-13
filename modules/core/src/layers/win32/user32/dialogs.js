@@ -992,6 +992,29 @@ export function createDialogFunctions(options){
         },
 
         /**
+         * BOOL CheckDlgButton(HWND hDlg, int nIDButton, UINT uCheck)
+         *
+         * BM_SETCHECK to the one control, which is all Windows does here. The
+         * state is passed through rather than reduced to a boolean, because
+         * BST_INDETERMINATE is a third value a three-state button keeps and a
+         * program reads back.
+         */
+        CheckDlgButton: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, check])=>{
+                const control = controlOf(hwnd, id);
+                if (!control)
+                {
+                    return 0;
+                }
+                const told = host.send(control.hwnd, BM_SETCHECK, check >>> 0, 0,
+                    host.callerThread?.());
+                return typeof told === 'number' ? 1 : Promise.resolve(told).then(()=>1);
+            },
+        },
+
+        /**
          * BOOL CheckRadioButton(HWND hDlg, int nIDFirstButton, int nIDLastButton,
          *                       int nIDCheckButton)
          *

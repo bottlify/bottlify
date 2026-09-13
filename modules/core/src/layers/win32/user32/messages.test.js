@@ -6,10 +6,14 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ANY_WINDOW, WM_QUIT, WM_TIMER, createMessageQueue } from './messages.js';
+import {
+    ANY_WINDOW, QS_KEY, QS_MOUSEBUTTON, QS_MOUSEMOVE, QS_PAINT, QS_POSTMESSAGE, QS_TIMER,
+    WM_QUIT, WM_TIMER, createMessageQueue,
+} from './messages.js';
 
 const WM_KEYDOWN = 0x0100;
 const WM_MOUSEMOVE = 0x0200;
+const WM_LBUTTONDOWN = 0x0201;
 const WM_USER = 0x0400;
 
 /** The filter that admits everything, spelled out once. */
@@ -407,4 +411,77 @@ test('the queue remembers the last message it handed out, and only those it remo
     assert.equal(queue.last()?.time, 0x1234);
     queue.peek({ ...ALL, remove: true });
     assert.equal(queue.last()?.message, 0x401);
+});
+
+test('the queue says what is waiting by class, as GetQueueStatus reports it', ()=>{
+    const queue = createMessageQueue();
+    assert.deepEqual(queue.status(), { inQueue: 0, changed: 0 },
+        'an empty queue has nothing waiting and no news');
+
+    queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
+    queue.post({ hwnd: 0x40, message: WM_LBUTTONDOWN, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 0x40, message: WM_MOUSEMOVE, wParam: 0, lParam: 0 });
+    queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0 });
+
+    const status = queue.status();
+    // A film-skip loop asks for the input classes alone: the press it is waiting
+    // for has to be in there, and it has to be there as input rather than as a
+    // post, or the loop masks it away and plays the film to the end.
+    assert.equal(status.inQueue & QS_KEY, QS_KEY);
+    assert.equal(status.inQueue & QS_MOUSEBUTTON, QS_MOUSEBUTTON);
+    assert.equal(status.inQueue & QS_MOUSEMOVE, QS_MOUSEMOVE);
+    assert.equal(status.inQueue & QS_POSTMESSAGE, QS_POSTMESSAGE);
+    assert.equal(status.changed & QS_KEY, QS_KEY, 'and all of it is news the first time');
+});
+
+test('news is what arrived since the last look, and only what is still there', ()=>{
+    const queue = createMessageQueue();
+    queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
+
+    assert.equal(queue.status().changed & QS_KEY, QS_KEY);
+    assert.equal(queue.status().changed, 0, 'asking twice does not report it twice');
+    assert.equal(queue.status().inQueue & QS_KEY, QS_KEY, 'though it is still waiting');
+
+    queue.post({ hwnd: 0x40, message: WM_LBUTTONDOWN, wParam: 0, lParam: 0 });
+    queue.peek(ALL);
+    assert.equal(queue.status().changed, 0,
+        'a retrieval counts as a look and clears the news with it');
+
+    queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x42, lParam: 0 });
+    queue.peek({ hwnd: ANY_WINDOW, first: WM_KEYDOWN, last: WM_KEYDOWN, remove: true });
+    assert.equal(queue.status().changed & QS_KEY, 0,
+        'and a keystroke already taken is no longer waiting to be news about');
+});
+
+test('a paint and a due timer are waiting even though neither is a queued message', ()=>{
+    let clock = 0;
+    const queue = createMessageQueue({ now: ()=>clock });
+    let dirty = 0x40;
+    queue.paintsFrom(()=>dirty);
+    queue.setTimer(0x40, 7, 50, 0);
+
+    const first = queue.status();
+    assert.equal(first.inQueue & QS_PAINT, QS_PAINT);
+    assert.equal(first.changed & QS_PAINT, QS_PAINT, 'a window that was clean is news');
+    assert.equal(first.inQueue & QS_TIMER, 0, 'the timer is not due yet');
+
+    assert.equal(queue.status().changed & QS_PAINT, 0,
+        'a window still dirty is not news again -- otherwise every frame reports it');
+
+    clock = 50;
+    const due = queue.status();
+    assert.equal(due.inQueue & QS_TIMER, QS_TIMER);
+    assert.equal(due.changed & QS_TIMER, QS_TIMER);
+
+    dirty = 0;
+    assert.equal(queue.status().inQueue & QS_PAINT, 0, 'a painted window stops waiting');
+});
+
+test('a pending quit is something waiting, so a loop watching the queue wakes for it', ()=>{
+    const queue = createMessageQueue();
+    queue.postQuit(0);
+
+    const status = queue.status();
+    assert.equal(status.inQueue & QS_POSTMESSAGE, QS_POSTMESSAGE);
+    assert.equal(status.changed & QS_POSTMESSAGE, QS_POSTMESSAGE);
 });

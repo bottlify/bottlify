@@ -42,3 +42,11 @@ test('the conversion status is written, not left holding the caller\'s stack', (
     // A null pointer is legal for either, and must not be written through.
     assert.equal(m.imm.ImmGetConversionStatus.handler([0, 0, 0]), 1);
 });
+
+test('the input method is never open, which is the state a game is asking for', ()=>{
+    const m = machine();
+    // An open input method is what makes a program stop treating keystrokes as
+    // its own, so FALSE here is the answer it wants rather than a refusal.
+    assert.equal(m.imm.ImmGetOpenStatus.handler([0]), 0);
+    assert.equal(m.imm.ImmGetOpenStatus.argBytes, 4);
+});

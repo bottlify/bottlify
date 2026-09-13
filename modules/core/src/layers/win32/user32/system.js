@@ -1413,6 +1413,41 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * int LoadStringW(HINSTANCE hInstance, UINT uID, LPWSTR lpBuffer,
+         *                int cchBufferMax)
+         *
+         * The same string, kept as the resource holds it. The count is in
+         * characters in both forms, so the two differ only in how the text is
+         * written out -- and a program calling this after narrowing its own
+         * strings gets two bytes per character, which is what it will index by.
+         */
+        LoadStringW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([instance, id, buffer, size])=>{
+                const text = host.loadString?.(instance >>> 0, id >>> 0) ?? null;
+                if (text === null || (buffer >>> 0) === 0 || (size | 0) <= 0)
+                {
+                    if ((buffer >>> 0) !== 0 && (size | 0) > 0)
+                    {
+                        host.writeMemory(buffer, new Uint8Array(2));
+                    }
+                    return 0;
+                }
+                const kept = text.slice(0, (size | 0) - 1);
+                const bytes = new Uint8Array((kept.length + 1) * 2);
+                for (let at = 0; at < kept.length; at++)
+                {
+                    const code = kept.charCodeAt(at);
+                    bytes[at * 2] = code & 0xff;
+                    bytes[at * 2 + 1] = code >> 8;
+                }
+                host.writeMemory(buffer, bytes);
+                return kept.length;
+            },
+        },
+
+        /**
          * HBITMAP LoadBitmapA(HINSTANCE hInstance, LPCSTR lpBitmapName)
          *
          * A bitmap needs the decoder LoadImage lacks too, so the answer is

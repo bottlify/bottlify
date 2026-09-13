@@ -1046,6 +1046,21 @@ export function createHeapFunctions(host){
         },
 
         /**
+         * BOOL FlushInstructionCache(HANDLE hProcess, LPCVOID lpBaseAddress,
+         *                            SIZE_T dwSize)
+         *
+         * Nothing to do and it must still succeed. A program that has just
+         * written code -- a runtime, a patched import, a copy-protection
+         * trampoline -- calls this before jumping into it, and treats failure as
+         * a reason not to jump. The processor here notices a written code page
+         * on its own, so the request is already satisfied by the time it arrives.
+         */
+        FlushInstructionCache: {
+            argBytes: 12,
+            handler: ()=>1,
+        },
+
+        /**
          * SIZE_T VirtualQuery(LPCVOID lpAddress, PMEMORY_BASIC_INFORMATION lpBuffer,
          *                     SIZE_T dwLength)
          *

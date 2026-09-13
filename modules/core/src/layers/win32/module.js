@@ -887,6 +887,10 @@ export const win32Module = {
                 call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
                 divergence: config?.divergence,
+                /** @param {number} id */
+                threadExists: id=>kernel.threads().some(
+                    (/** @type {{ id: number }} */ thread)=>(thread.id >>> 0) === id),
+                setLastError: setError,
                 park: ()=>bridge.park(),
                 idle,
                 // The handles half of a wait that also watches the queue.

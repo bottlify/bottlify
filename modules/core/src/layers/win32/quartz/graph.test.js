@@ -758,3 +758,37 @@ test('seeking and retiming are accepted and say they did nothing', ()=>{
     assert.ok(host.reported.some(line=>line.includes('does not seek')));
     assert.ok(host.reported.some(line=>line.includes('put_Rate')));
 });
+
+test('releasing a running graph stops the film rather than leaving it decoding', ()=>{
+    // How a skip is often written: the program drops the graph instead of
+    // stopping it. A graph left in the playing set went on being ticked, so its
+    // frames went on being presented over whatever the program drew next -- and
+    // the file stayed open for the rest of the run.
+    const clip = fakeClip({ frameCount: 1000, fps: 10 });
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH, { clip });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(0);
+    assert.ok(tick(200), 'running, so it advances');
+
+    assert.equal(object.release(), 0, 'the last reference');
+    assert.equal(tick(400), null, 'and nothing is left to drive');
+    assert.equal(clip.closed, true, 'nor is the file left open');
+});
+
+test('a graph released after the film has finished closes the clip too', ()=>{
+    const clip = fakeClip({ frameCount: 2, fps: 10 });
+    const { object, host, tick } = createObject(CLSID_FILTER_GRAPH, { clip });
+    host.putWide(PATH, MOVIE);
+    call(object, IID_IGRAPH_BUILDER, 'RenderFile', [PATH, 0]);
+    call(object, IID_IMEDIA_CONTROL, 'Run');
+    tick(0);
+    tick(10000);
+    assert.equal(call(object, IID_IMEDIA_EVENT_EX, 'GetEvent', [OUT, OUT + 4, OUT + 8, 0]), S_OK);
+    assert.equal(host.i32(OUT), EC_COMPLETE);
+
+    assert.equal(clip.closed, false, 'a finished film is not a released graph');
+    object.release();
+    assert.equal(clip.closed, true);
+});

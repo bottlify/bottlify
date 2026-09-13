@@ -680,3 +680,36 @@ test('a message is reported as not a dialog message, so the caller dispatches it
 
     assert.equal(fns.IsDialogMessageA.handler([dialog, OUT]), 0);
 });
+
+test('CheckDlgButton tells the one button, passing the state through', ()=>{
+    /** @type {{ hwnd: number, message: number, wParam: number }[]} */
+    const sent = [];
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            sent.push({ hwnd: message.hwnd, message: message.message, wParam: message.wParam });
+            return 0;
+        },
+    });
+    putTemplate(memory, [{ id: 10, x: 0, y: 0, cx: 4, cy: 4 }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const GWL_WNDPROC = -4;
+    const BUTTONPROC = 0x403000;
+    const BM_SETCHECK = 0x00f1;
+    const BST_INDETERMINATE = 2;
+    const button = fns.GetDlgItem.handler([dialog, 10]);
+    fns.SetWindowLongA.handler([button, GWL_WNDPROC, BUTTONPROC]);
+
+    assert.equal(fns.CheckDlgButton.argBytes, 12);
+    assert.equal(fns.CheckDlgButton.handler([dialog, 10, 1]), 1);
+    // Passed through rather than reduced to a boolean: the third state is one a
+    // three-state button keeps and a program reads back.
+    assert.equal(fns.CheckDlgButton.handler([dialog, 10, BST_INDETERMINATE]), 1);
+    assert.deepEqual(sent.filter(one=>one.message === BM_SETCHECK), [
+        { hwnd: button, message: BM_SETCHECK, wParam: 1 },
+        { hwnd: button, message: BM_SETCHECK, wParam: BST_INDETERMINATE },
+    ]);
+
+    assert.equal(fns.CheckDlgButton.handler([dialog, 99, 1]), 0, 'no such control');
+    assert.equal(fns.CheckDlgButton.handler([0x9999, 10, 1]), 0, 'no such dialog');
+});

@@ -40,6 +40,7 @@ const WM_DESTROY = 0x0002;
 const WM_CLOSE = 0x0010;
 const WM_QUIT = 0x0012;
 const WM_KEYDOWN = 0x0100;
+const WM_LBUTTONDOWN = 0x0201;
 const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
 const WM_USER = 0x0400;
@@ -146,6 +147,11 @@ const WAIT_OBJECT_0 = 0;
 const WAIT_TIMEOUT = 0x102;
 const INFINITE = 0xffffffff;
 const QS_ALLINPUT = 0x04ff;
+const QS_KEY = 0x0001;
+const QS_MOUSEBUTTON = 0x0004;
+const QS_POSTMESSAGE = 0x0008;
+const QS_INPUT = 0x0007;
+const ERROR_INVALID_THREAD_ID = 1444;
 const PARKED = Object.freeze({ parked: true });
 
 /**
@@ -159,8 +165,10 @@ const PARKED = Object.freeze({ parked: true });
  * @param {() => number} [options.now] The guest clock, for a wait with a deadline.
  * @param {(entry: number, args: number[]) => any} [options.hookReply] What a hook
  *        procedure answers.
+ * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
+ *        name a thread of this process, for PostThreadMessage.
  */
-function setup({ heap = false, reply, waitForObjects, now, hookReply } = {}){
+function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -172,6 +180,8 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply } = {}){
     const called = [];
     /** @type {string[]} */
     const divergences = [];
+    /** What a refused call left for GetLastError. @type {number[]} */
+    const errors = [];
     /** Resolvers for a waiting call, released a turn at a time by the test. */
     /** @type {(() => void)[]} */
     const idlers = [];
@@ -203,6 +213,9 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply } = {}){
         },
         callerThread: ()=>THREAD,
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
+        threadExists,
+        /** @param {number} code */
+        setLastError: code=>errors.push(code),
         park: ()=>{
             parked.push(true);
             return PARKED;
@@ -229,7 +242,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply } = {}){
     };
 
     return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
-        called, divergences,
+        called, divergences, errors,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -1460,4 +1473,73 @@ test('the hook functions declare the stack they pop', ()=>{
     assert.equal(fns.SetWindowsHookExA.argBytes, 16);
     assert.equal(fns.UnhookWindowsHookEx.argBytes, 4);
     assert.equal(fns.CallNextHookEx.argBytes, 16);
+});
+
+// --- what is waiting, without pumping for it ---
+
+test('GetQueueStatus reports what is waiting in the high word and what is new in the low', ()=>{
+    const { fns, queue } = setup();
+    assert.equal(fns.GetQueueStatus.handler([QS_ALLINPUT]), 0, 'an empty queue is nothing');
+
+    queue.post({ hwnd: 0x40, message: WM_LBUTTONDOWN, wParam: 0, lParam: 0 });
+    const first = fns.GetQueueStatus.handler([QS_ALLINPUT]) >>> 0;
+    assert.equal(first >>> 16 & QS_MOUSEBUTTON, QS_MOUSEBUTTON, 'a click is waiting');
+    assert.equal(first & QS_MOUSEBUTTON, QS_MOUSEBUTTON, 'and it is news');
+
+    const again = fns.GetQueueStatus.handler([QS_ALLINPUT]) >>> 0;
+    assert.equal(again >>> 16 & QS_MOUSEBUTTON, QS_MOUSEBUTTON, 'still waiting');
+    assert.equal(again & 0xffff, 0, 'and no longer news');
+
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(fns.GetQueueStatus.handler([QS_ALLINPUT]), 0,
+        'once it has been taken there is nothing waiting at all');
+});
+
+test('GetQueueStatus answers only about the classes it was asked about', ()=>{
+    const { fns, queue } = setup();
+    queue.post({ hwnd: 0x40, message: WM_KEYDOWN, wParam: 0x41, lParam: 0 });
+    queue.post({ hwnd: 0, message: WM_USER, wParam: 0, lParam: 0 });
+
+    // The mask is the whole point of the call for a playback loop: it asks about
+    // input and must not be woken by its own posted work.
+    const input = fns.GetQueueStatus.handler([QS_INPUT]) >>> 0;
+    assert.equal(input >>> 16, QS_KEY);
+    const posts = fns.GetQueueStatus.handler([QS_POSTMESSAGE]) >>> 0;
+    assert.equal(posts >>> 16, QS_POSTMESSAGE);
+});
+
+test('GetQueueStatus and the thread post pop the stack they were pushed', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetQueueStatus.argBytes, 4);
+    assert.equal(fns.PostThreadMessageA.argBytes, 16);
+});
+
+test('a message posted to a thread is taken by a retrieval that named no window', ()=>{
+    const { fns, memory, queue } = setup({ threadExists: id=>id === 0x88 });
+    memory.fill(MSG_BUFFER, MSG.SIZE / 4);
+
+    assert.equal(fns.PostThreadMessageA.handler([0x88, WM_USER, 7, 9]), 1);
+    assert.equal(queue.depth(), 1);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.hwnd), 0, 'a thread message has no window');
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 7);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.lParam), 9);
+});
+
+test('a thread message is not handed to a retrieval that named a window', ()=>{
+    const { fns, hwnd, queue } = withWindow();
+    assert.equal(fns.PostThreadMessageA.handler([0x88, WM_USER, 0, 0]), 1);
+
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, hwnd, 0, 0, PM_REMOVE]), 0,
+        'a filter naming a window skips thread messages, as Windows documents');
+    assert.equal(queue.depth(), 1, 'and leaves the message where it was');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+});
+
+test('PostThreadMessageA refuses a thread that does not exist, and says why', ()=>{
+    const { fns, queue, errors } = setup({ threadExists: id=>id === 0x88 });
+    assert.equal(fns.PostThreadMessageA.handler([0x99, WM_USER, 0, 0]), 0);
+    assert.equal(queue.depth(), 0, 'and queues nothing for nobody to find');
+    assert.deepEqual(errors, [ERROR_INVALID_THREAD_ID]);
 });

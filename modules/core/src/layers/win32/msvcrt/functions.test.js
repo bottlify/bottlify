@@ -420,3 +420,40 @@ test('_set_error_mode hands back what was put in, and refuses a mode it has not 
     assert.equal(fns._set_error_mode.handler([7]) | 0, -1, 'an unknown mode is refused');
     assert.equal(fns._set_error_mode.handler([REPORT]), 1, 'and changed nothing');
 });
+
+test('rand draws this runtime own sequence, and srand starts it where told', ()=>{
+    const { fns } = setup();
+    // The numbers are part of the contract: a program that seeds with a constant
+    // -- a level layout, a shuffled deck -- produces the same result every run,
+    // and a better generator would produce a different one.
+    fns.srand.handler([1]);
+    const fromOne = [0, 0, 0, 0, 0].map(()=>fns.rand.handler());
+    assert.deepEqual(fromOne, [41, 18467, 6334, 26500, 19169]);
+
+    fns.srand.handler([1]);
+    assert.deepEqual([0, 0, 0, 0, 0].map(()=>fns.rand.handler()), fromOne,
+        'the same seed gives the same sequence');
+
+    fns.srand.handler([12345]);
+    assert.notDeepEqual([0, 0, 0].map(()=>fns.rand.handler()), fromOne.slice(0, 3));
+});
+
+test('rand stays inside RAND_MAX, because a caller scales its range by it', ()=>{
+    const { fns } = setup();
+    fns.srand.handler([0x7fffffff]);
+    for (let draw = 0; draw < 1000; draw++)
+    {
+        const value = fns.rand.handler();
+        assert.ok(value >= 0 && value <= 0x7fff, `rand gave ${value}`);
+    }
+    assert.equal(fns.rand.argBytes, 0);
+    assert.equal(fns.srand.argBytes, 4);
+    assert.equal(fns.rand.convention, 'cdecl');
+});
+
+test('rand starts where this runtime starts, without any srand at all', ()=>{
+    const { fns } = setup();
+    // An unseeded program is seeded with one, which is what the C standard says
+    // and what msvcrt does.
+    assert.equal(fns.rand.handler(), 41);
+});

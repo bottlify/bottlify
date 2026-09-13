@@ -596,3 +596,11 @@ test('a reservation is a whole granule, and a commit inside it is whole pages', 
     assert.equal(reports.length, 1);
     assert.match(reports[0], /^VirtualAlloc: commit of 4096 bytes at 0x[0-9a-f]+ refused/);
 });
+
+test('FlushInstructionCache succeeds, because a program that has written code checks it', ()=>{
+    const { fns } = setup();
+    // A runtime writes a thunk, flushes, and jumps into it. Failure here is a
+    // reason not to jump, and the processor already notices a written code page.
+    assert.equal(fns.FlushInstructionCache.handler(), 1);
+    assert.equal(fns.FlushInstructionCache.argBytes, 12);
+});

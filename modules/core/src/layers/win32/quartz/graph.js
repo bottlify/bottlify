@@ -1121,21 +1121,38 @@ export function createQuartz(host){
     };
 
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
-    const filterGraph = ()=>({
-        state: newGraphState(),
-        interfaces: [
-            describe(IID_IFILTER_GRAPH, IFILTER_GRAPH_SLOTS, graphBuilder),
-            describe(IID_IGRAPH_BUILDER, IGRAPH_BUILDER_SLOTS, graphBuilder),
-            describe(IID_IMEDIA_CONTROL, IMEDIA_CONTROL_SLOTS, mediaControl),
-            describe(IID_IMEDIA_EVENT, IMEDIA_EVENT_SLOTS, mediaEvent),
-            describe(IID_IMEDIA_EVENT_EX, IMEDIA_EVENT_EX_SLOTS, mediaEvent),
-            describe(IID_IVIDEO_WINDOW, IVIDEO_WINDOW_SLOTS, videoWindow),
-            describe(IID_IBASIC_VIDEO, IBASIC_VIDEO_SLOTS, basicVideo),
-            describe(IID_IBASIC_AUDIO, IBASIC_AUDIO_SLOTS, basicAudio),
-            describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, mediaPosition),
-            describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, mediaSeeking),
-        ],
-    });
+    const filterGraph = ()=>{
+        const state = newGraphState();
+        return {
+            state,
+            /**
+             * Releasing the last reference tears the graph down, and tearing a
+             * graph down stops it: a program that skips a film by dropping the
+             * graph rather than stopping it first must not leave the film
+             * decoding. What was left running kept being ticked and kept being
+             * presented, so its frames went on covering whatever the program
+             * drew next -- and the file it was reading stayed open for the rest
+             * of the run.
+             */
+            destroy: ()=>{
+                playing.delete(state);
+                state.clip?.close();
+                state.clip = null;
+            },
+            interfaces: [
+                describe(IID_IFILTER_GRAPH, IFILTER_GRAPH_SLOTS, graphBuilder),
+                describe(IID_IGRAPH_BUILDER, IGRAPH_BUILDER_SLOTS, graphBuilder),
+                describe(IID_IMEDIA_CONTROL, IMEDIA_CONTROL_SLOTS, mediaControl),
+                describe(IID_IMEDIA_EVENT, IMEDIA_EVENT_SLOTS, mediaEvent),
+                describe(IID_IMEDIA_EVENT_EX, IMEDIA_EVENT_EX_SLOTS, mediaEvent),
+                describe(IID_IVIDEO_WINDOW, IVIDEO_WINDOW_SLOTS, videoWindow),
+                describe(IID_IBASIC_VIDEO, IBASIC_VIDEO_SLOTS, basicVideo),
+                describe(IID_IBASIC_AUDIO, IBASIC_AUDIO_SLOTS, basicAudio),
+                describe(IID_IMEDIA_POSITION, IMEDIA_POSITION_SLOTS, mediaPosition),
+                describe(IID_IMEDIA_SEEKING, IMEDIA_SEEKING_SLOTS, mediaSeeking),
+            ],
+        };
+    };
 
     /** @returns {import('../ole32/objects.js').ComClassDefinition} */
     const filterMapper2 = ()=>({

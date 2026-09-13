@@ -44,6 +44,9 @@ const MAX_STRING = 1 << 20;
 const INT_MAX = 0x7fffffff;
 const INT_MIN = -0x80000000;
 
+/** The largest number `rand` produces, which a caller scales its range by. */
+const RAND_MAX = 0x7fff;
+
 /** Leading whitespace atoi skips, then an optional sign and decimal digits. */
 const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
 
@@ -106,6 +109,9 @@ const foldCase = text=>text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
  * @param {MsvcrtHost} host
  */
 export function createMsvcrtFunctions(host){
+    /** What `rand` draws from next; where this runtime starts before any srand. */
+    let randomSeed = 1;
+
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
 
@@ -404,6 +410,40 @@ export function createMsvcrtFunctions(host){
 
         itoa,
         _itoa: itoa,
+
+        /**
+         * void srand(unsigned int seed) and int rand(void)
+         *
+         * This runtime's own generator, not a better one. The sequence is part
+         * of the contract: a program that seeds with a constant expects the same
+         * numbers every run -- a level layout, a shuffled deck, a name picked
+         * from a table -- and one that seeds from the clock still expects
+         * fifteen bits, because it scales the result by RAND_MAX. Substituting
+         * anything else changes what the program produces, and the arithmetic
+         * below is small enough that there is no reason to.
+         *
+         * One sequence for the process, where this runtime keeps one per thread.
+         * The difference shows only in which thread draws which number, and no
+         * program can depend on that ordering in the first place.
+         */
+        srand: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([seed])=>{
+                randomSeed = seed >>> 0;
+                return 0; // void
+            },
+        },
+
+        rand: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>{
+                randomSeed = (Math.imul(randomSeed, 214013) + 2531011) >>> 0;
+                return (randomSeed >>> 16) & RAND_MAX;
+            },
+        },
 
         /** int puts(const char *str) */
         puts: {

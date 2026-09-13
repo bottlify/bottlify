@@ -147,8 +147,10 @@ function fakeContexts(){
  *        Which resources the program's own image carries.
  * @param {(wndProc: number, message: any) => number} [options.dispatch]
  *        What a window procedure answers; nothing unless given.
+ * @param {(instance: number, id: number) => string | null} [options.loadString]
+ *        The string table of the program's own image.
  */
-function setup({ cursor, keyState, findResource, dispatch = ()=>0 } = {}){
+function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0 } = {}){
     const memory = fakeMemory();
     const clock = { at: 0 };
     const queue = createMessageQueue({ now: ()=>clock.at });
@@ -174,6 +176,7 @@ function setup({ cursor, keyState, findResource, dispatch = ()=>0 } = {}){
         cursor: cursor && (()=>cursor),
         keyState,
         findResource,
+        loadString,
         /** @param {any} notice */
         messageBox: notice=>notices.push(notice),
         /** @param {string} text */
@@ -894,4 +897,38 @@ test('GetMessageTime and GetMessagePos describe the message last taken off the q
     assert.equal(fns.GetMessageTime.handler([]), 5000);
     assert.equal(fns.GetMessagePos.handler([]), 17 | 23 << 16);
     assert.equal(fns.GetMessageTime.argBytes, 0);
+});
+
+test('LoadStringW writes the resource string as code units and counts characters', ()=>{
+    const { memory, fns } = setup({
+        loadString: (instance, id)=>(instance === HINSTANCE && id === 0x10 ? 'Loading' : null),
+    });
+    memory.fill(OUT_BUFFER, 8);
+
+    assert.equal(fns.LoadStringW.handler([HINSTANCE, 0x10, OUT_BUFFER, 16]), 7,
+        'the count is characters, and excludes the terminator');
+    const units = [...Array(8).keys()].map(at=>
+        memory.bytes[OUT_BUFFER + at * 2] | (memory.bytes[OUT_BUFFER + at * 2 + 1] << 8));
+    assert.deepEqual(units, [...'Loading'].map(character=>character.charCodeAt(0)).concat(0));
+    assert.equal(fns.LoadStringW.argBytes, 16);
+});
+
+test('LoadStringW truncates to the buffer and still terminates it', ()=>{
+    const { memory, fns } = setup({ loadString: ()=>'Loading' });
+
+    assert.equal(fns.LoadStringW.handler([HINSTANCE, 0x10, OUT_BUFFER, 4]), 3,
+        'three characters and the terminator fill a buffer of four');
+    assert.equal(memory.bytes[OUT_BUFFER + 6], 0);
+    assert.equal(memory.bytes[OUT_BUFFER + 7], 0);
+});
+
+test('LoadStringW reports nothing for a string the image does not have', ()=>{
+    const { memory, fns } = setup({ loadString: ()=>null });
+    memory.fill(OUT_BUFFER, 4);
+
+    assert.equal(fns.LoadStringW.handler([HINSTANCE, 0x99, OUT_BUFFER, 16]), 0);
+    // Emptied rather than left alone: a caller reads the buffer whatever the
+    // return says, and unwritten it holds whatever was there before.
+    assert.equal(memory.bytes[OUT_BUFFER], 0);
+    assert.equal(memory.bytes[OUT_BUFFER + 1], 0);
 });

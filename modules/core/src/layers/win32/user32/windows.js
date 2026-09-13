@@ -242,6 +242,9 @@ const INFINITE = 0xffffffff;
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
+/** What PostThreadMessage reports for an identifier that names no thread. */
+const ERROR_INVALID_THREAD_ID = 1444;
+
 /** Class atoms come from the range Windows reserves for dynamic atoms. */
 const FIRST_ATOM = 0xc000;
 const LAST_ATOM = 0xffff;
@@ -339,6 +342,12 @@ function characterFor(key){
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
  * @property {(api: string, detail: string) => void} [divergence]
+ * @property {(id: number) => boolean} [threadExists]
+ *           Whether a thread identifier names a thread of this process, which
+ *           is the whole of what PostThreadMessage validates. Absent in a build
+ *           with no scheduler behind it, which then only refuses zero.
+ * @property {(code: number) => void} [setLastError]
+ *           Where a refusal leaves its reason, for the caller that asks why.
  * @property {() => any} park   Stops the caller; returns the parked token.
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's resources. Absent in a build with no
@@ -2537,6 +2546,60 @@ export function createWindowFunctions(host){
                 }
                 host.queue.post({ hwnd: target, message, wParam, lParam });
                 return 1;
+            },
+        },
+
+        /**
+         * BOOL PostThreadMessageA(DWORD idThread, UINT Msg, WPARAM wParam,
+         *                         LPARAM lParam)
+         *
+         * A message with no window, which only the thread's own GetMessage or
+         * PeekMessage can take -- and only when it asked for every window,
+         * because a retrieval naming one skips thread messages. That is how a
+         * program breaks its own modal loop out of a wait from another thread.
+         *
+         * There is one queue here and it belongs to whichever thread is
+         * pumping, so the identifier is checked for naming a live thread and
+         * otherwise ignored: posting to a thread that never pumps would leave
+         * the message where nobody looks, and reporting failure for a thread
+         * that does not exist is the answer a caller can act on.
+         */
+        PostThreadMessageA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([thread, message, wParam, lParam])=>{
+                const id = thread >>> 0;
+                const known = host.threadExists ? host.threadExists(id) : id !== 0;
+                if (!known)
+                {
+                    host.setLastError?.(ERROR_INVALID_THREAD_ID);
+                    return 0;
+                }
+                host.queue.post({ hwnd: 0, message, wParam, lParam });
+                return 1;
+            },
+        },
+
+        /**
+         * DWORD GetQueueStatus(UINT flags)
+         *
+         * Two answers in one word, and a program relies on both: the high half
+         * is every class of message waiting now, the low half only what has
+         * arrived since the last look. A playback loop asks this to find out
+         * whether the player has pressed anything without pumping the queue
+         * first, and a loop that is told "nothing" plays the film to its end
+         * whatever the player does.
+         *
+         * Both halves are masked by what was asked for, so a caller that asked
+         * about input alone is never told about a timer.
+         */
+        GetQueueStatus: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flags])=>{
+                const mask = flags >>> 0;
+                const { inQueue, changed } = host.queue.status();
+                return (((inQueue & mask) << 16) | (changed & mask)) >>> 0;
             },
         },
 

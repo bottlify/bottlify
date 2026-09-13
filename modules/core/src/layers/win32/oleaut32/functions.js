@@ -92,6 +92,7 @@ const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
 const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const TYPE_E_REGISTRYACCESS = 0x8002801c | 0;
 const E_INVALIDARG = 0x80070057;
+const E_NOTIMPL = 0x80004001;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_TYPEMISMATCH = 0x80020005;
 const DISP_E_PARAMNOTFOUND = 0x80020004 | 0;
@@ -1421,6 +1422,33 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * HRESULT OleCreatePropertyFrame(HWND hwndOwner, UINT x, UINT y,
+         *   LPCOLESTR lpszCaption, ULONG cObjects, IUnknown **ppUnk,
+         *   ULONG cPages, LPCLSID pPageClsID, LCID lcid, DWORD dwReserved,
+         *   LPVOID pvReserved)
+         *
+         * The modal property sheet an embedded control puts its own settings
+         * on, which this build cannot put up: the pages are dialogs belonging to
+         * the control, reached through interfaces nothing here implements.
+         *
+         * Declared all the same, for the reason every refusal here is declared
+         * rather than left to the loader's stub for a name nobody claims: that
+         * stub pops nothing and this call pushes forty-four bytes, so a program
+         * that offered its settings once would come back with a corrupted stack
+         * and fail somewhere else entirely. The refusal is a documented answer a
+         * caller checks; a stack four dozen bytes short is not.
+         */
+        OleCreatePropertyFrame: {
+            argBytes: 44,
+            handler: ()=>{
+                report('Automation', 'OleCreatePropertyFrame cannot show a property'
+                    + ' sheet: the pages belong to the object and are not implemented,'
+                    + ' so the settings it offers cannot be changed');
+                return E_NOTIMPL;
+            },
+        },
+
+        /**
          * HRESULT CreateErrorInfo(ICreateErrorInfo **pperrinfo)
          *
          * A fresh, empty error object with one reference, the caller's.
@@ -1488,4 +1516,5 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
     202: 'CreateErrorInfo',
+    417: 'OleCreatePropertyFrame',
 });

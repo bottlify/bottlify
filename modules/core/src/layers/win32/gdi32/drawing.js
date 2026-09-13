@@ -504,6 +504,38 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             },
         },
 
+        /**
+         * BOOL TextOutW(HDC hdc, int x, int y, LPCWSTR lpString, int c)
+         *
+         * The count is characters, not bytes, and it is authoritative here for
+         * the same reason it is in the narrow twin: the string need not be
+         * terminated. Twice the bytes are read and the pair assembled into code
+         * units, which is the whole of the difference -- the glyphs come out of
+         * the same engine, so the two entry points cannot draw differently.
+         */
+        TextOutW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, x, y, string, count])=>{
+                const interfaces = bound(handle);
+                if (!interfaces)
+                {
+                    return 0;
+                }
+                const length = Math.max(count | 0, 0);
+                const bytes = (string >>> 0) === 0 || length === 0
+                    ? new Uint8Array(0)
+                    : host.readMemory(string >>> 0, length * 2);
+                let text = '';
+                for (let at = 0; at * 2 + 1 < bytes.length; at++)
+                {
+                    text += String.fromCharCode(bytes[at * 2] | (bytes[at * 2 + 1] << 8));
+                }
+                interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
+                return 1;
+            },
+        },
+
         /** BOOL Rectangle(HDC hdc, int left, int top, int right, int bottom) */
         Rectangle: {
             argBytes: 20,
