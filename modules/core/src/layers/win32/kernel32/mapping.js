@@ -135,11 +135,16 @@ export function createMappingFunctions(host){
                     return fail(ERROR_NOT_ENOUGH_MEMORY);
                 }
                 const anonymous = (file >>> 0) === INVALID_HANDLE_VALUE || file === 0;
-                const node = anonymous ? null : object(file, 'file');
-                if (!anonymous && !node)
+                const opened = anonymous ? null : object(file, 'file');
+                if (!anonymous && !opened)
                 {
                     return fail(ERROR_INVALID_HANDLE);
                 }
+                // What a file handle resolves to is the open-file record --
+                // path, position, access -- and the volume's node is a field
+                // of it. The mapping keeps the node, because the record's
+                // position is the handle's and a view has its own offset.
+                const node = opened ? opened.node : null;
                 const writable = (protect >>> 0) === PAGE_READWRITE
                     || (protect >>> 0) === PAGE_WRITECOPY;
                 if (anonymous && (sizeLow >>> 0) === 0)

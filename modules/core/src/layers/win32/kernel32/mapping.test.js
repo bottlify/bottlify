@@ -87,7 +87,9 @@ function setup(){
 
     const fileHandle = nextHandle;
     nextHandle += 4;
-    table.set(fileHandle, { type: 'file', object: file });
+    // Shaped as kernel32 keeps an open file: the volume's node is a field of
+    // the record a handle resolves to, not the record itself.
+    table.set(fileHandle, { type: 'file', object: { node: file, position: 0 } });
     return { fns, bytes, errors, errorsFor, file, fileHandle };
 }
 

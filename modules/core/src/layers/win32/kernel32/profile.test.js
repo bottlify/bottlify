@@ -262,6 +262,14 @@ test('a section is read back as its entries, key=value each, and win.ini is a fi
     assert.equal(memory.raw(OUT, 1), '\0');
     assert.equal(fns.GetPrivateProfileSectionA.argBytes, 16);
 
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 64, FILE]),
+        'Startup Other '.length);
+    assert.equal(memory.raw(OUT, 15), 'Startup Other  ');
+    assert.equal(fns.GetPrivateProfileSectionNamesA.handler([OUT, 6, FILE]), 4,
+        'cut two short, like every list');
+    assert.equal(memory.raw(OUT, 6), 'Star  ');
+    assert.equal(fns.GetPrivateProfileSectionNamesA.argBytes, 12);
+
     memory.put(SECTION, 'Desktop');
     memory.put(KEY, 'Wallpaper');
     memory.put(VALUE, 'none');

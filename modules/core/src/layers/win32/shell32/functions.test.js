@@ -155,6 +155,12 @@ test('a shell file operation is refused as not implemented and marked aborted', 
         .map(fn=>fn.argBytes), [4, 16, 20]);
 });
 
+test('a notification icon is refused, with both arguments popped', ()=>{
+    const fns = createShellFunctions({ writeMemory: ()=>{} });
+    assert.equal(fns.Shell_NotifyIconA.argBytes, 8);
+    assert.equal(fns.Shell_NotifyIconA.handler(), 0);
+});
+
 test('DragFinish pops the drop it is handed', ()=>{
     const fns = createShellFunctions({ writeMemory: ()=>{} });
     assert.equal(fns.DragFinish.argBytes, 4);

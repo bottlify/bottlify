@@ -41,6 +41,25 @@ The registry comes out beside the files and travels as one of them,
 form has nothing the unpacked form lacks. **The engine does not read it back on
 mount yet**; writing it is this side of that contract.
 
+## Running without the wizard
+
+`silentOptions(media)` is the other way through: the engine's own unattended
+mode, when the engine is recognised from the bytes of the entry -- the runtime
+a Wise stub extracts, the `_winzip_` section of a WinZip self-extractor, the RAR
+signature behind a WinRAR SFX, the InstallShield player with its `data1.cab`,
+`engine32.cab` and `setup.ini` behind or beside it. It answers with the command
+line, the files the engine reads its answers from (a Wise values file, an
+InstallShield response file keyed by the product GUID) and the destination,
+`C:\App`, which is where a bundle is mounted; the caller seeds the files, runs
+with that command line, and reads the volume for progress. Null means the
+family is not known and the wizard has to be run.
+
+Two limits are the engines' own. A WinRAR SFX of this generation reads no
+destination switch, so the tree lands where the archive's script says and
+`destination` is null. A Wise script overrides its destination only where it
+marked `MAINDIR` as read from the values file; one that fixes the path in the
+script keeps it.
+
 ## Two kinds of bottle
 
 A **local** bottle is that prefix. It never leaves the machine, never gets

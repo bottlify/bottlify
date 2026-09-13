@@ -320,6 +320,22 @@ test('DeleteDC and ReleaseDC are not interchangeable', ()=>{
     assert.equal(fns.DeleteDC.handler([memoryDC]), 0);
 });
 
+test('CreateDCA opens the display and nothing else, and DeleteDC closes it', ()=>{
+    const { fns, memory } = setup();
+    memory.putString(FACE_NAME, 'DISPLAY');
+    const display = fns.CreateDCA.handler([FACE_NAME, 0, 0, 0]);
+    assert.ok(display > 0);
+    assert.equal(fns.GetDeviceCaps.handler([display, BITSPIXEL]), 32, 'it is the screen');
+    assert.equal(fns.ReleaseDC.handler([0, display]), 0, 'not borrowed from a window');
+    assert.equal(fns.DeleteDC.handler([display]), 1);
+    assert.equal(fns.DeleteDC.handler([display]), 0);
+
+    memory.putString(FACE_NAME, 'WINSPOOL');
+    assert.equal(fns.CreateDCA.handler([FACE_NAME, 0, 0, 0]), 0, 'there is no printer');
+    assert.equal(fns.CreateDCA.handler([0, 0, 0, 0]), 0);
+    assert.equal(fns.CreateDCA.argBytes, 16);
+});
+
 test('CreateCompatibleDC starts with the one-pixel bitmap it is documented to have', ()=>{
     const { fns, hdc } = withDC();
     const memoryDC = fns.CreateCompatibleDC.handler([hdc]);
@@ -866,6 +882,26 @@ test('the metrics of a DC nobody selected a font into are the system font\'s', (
 });
 
 // --- the stack every one of them pops ---
+
+test('the extents a DC has are read back, and a metafile is refused', ()=>{
+    const { fns, memory } = setup();
+    const hdc = fns.CreateCompatibleDC.handler([0]);
+    fns.SetMapMode.handler([hdc, MM_ANISOTROPIC]);
+    fns.SetViewportExtEx.handler([hdc, 400, 300, 0]);
+    fns.SetWindowExtEx.handler([hdc, 40, 30, 0]);
+    assert.equal(fns.GetViewportExtEx.handler([hdc, OUT]), 1);
+    assert.deepEqual([memory.i32(OUT + SIZE.cx), memory.i32(OUT + SIZE.cy)], [400, 300]);
+    assert.equal(fns.GetWindowExtEx.handler([hdc, OUT]), 1);
+    assert.deepEqual([memory.i32(OUT + SIZE.cx), memory.i32(OUT + SIZE.cy)], [40, 30]);
+    assert.equal(fns.GetViewportExtEx.handler([hdc, 0]), 0, 'nowhere to write');
+    assert.equal(fns.GetWindowExtEx.handler([0x7777, OUT]), 0, 'not a DC');
+
+    assert.equal(fns.SetMetaFileBitsEx.handler(), 0);
+    assert.equal(fns.PlayMetaFile.handler(), 0);
+    assert.equal(fns.DeleteMetaFile.handler(), 0);
+    assert.deepEqual([fns.GetViewportExtEx, fns.GetWindowExtEx, fns.SetMetaFileBitsEx,
+        fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
+});
 
 test('every function declares the stack its arguments occupy', ()=>{
     const { fns } = setup();

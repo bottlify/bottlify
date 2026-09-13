@@ -393,6 +393,19 @@ export function createShellFunctions(host){
         },
 
         /**
+         * BOOL Shell_NotifyIconA(DWORD dwMessage, NOTIFYICONDATAA *lpData)
+         *
+         * A notification icon lives on the taskbar, and there is no taskbar.
+         * FALSE is what the real call answers when the shell's tray window is
+         * not there to receive the icon, and a program treats that the way it
+         * treats a machine without an Explorer: it carries on without the icon.
+         */
+        Shell_NotifyIconA: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        /**
          * DWORD_PTR SHGetFileInfoA(LPCSTR pszPath, DWORD dwFileAttributes,
          *                          SHFILEINFOA *psfi, UINT cbFileInfo, UINT uFlags)
          *

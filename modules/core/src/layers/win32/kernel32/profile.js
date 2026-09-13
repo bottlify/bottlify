@@ -463,6 +463,25 @@ export function createProfileFunctions(host){
         },
 
         /**
+         * DWORD GetPrivateProfileSectionNamesA(LPSTR lpszReturnBuffer,
+         *   DWORD nSize, LPCSTR lpFileName)
+         *
+         * The list a NULL section name gives GetPrivateProfileString, under
+         * its own name.
+         */
+        GetPrivateProfileSectionNamesA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([buffer, size, file])=>{
+                const path = pathOf(file);
+                /** @param {ProfileLine[]} lines */
+                const answer = lines=>deliver(buffer, size, lookUp(lines, null, null, ''));
+                const loaded = path === null ? [] : load(path);
+                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+            },
+        },
+
+        /**
          * BOOL WritePrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
          *   LPCSTR lpString, LPCSTR lpFileName)
          */

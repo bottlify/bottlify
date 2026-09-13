@@ -14,9 +14,14 @@
  * not an installer's.
  *
  *     const options = prefixOptions(media);        // build the app with these
+ *     const silent = silentOptions(media);         // and these, to skip the wizard
  *     await app.run(...);                          // the person clicks through
  *     const prefix = collectFrom(app, media);      // this is what it produced
  *     await publish({ prefix, ... });              // and this is the bottle
+ *
+ * `silentOptions` is the engine's own unattended mode, when its family is
+ * recognised: a command line and the files it reads its answers from, with
+ * the destination already decided. Null means the wizard has to be run.
  *
  * What is reachable today is the publisher's own single-process installer.
  * A distribution that extracts a payload and starts a second program cannot
@@ -31,6 +36,7 @@ import { finish, partSink } from './upload.js';
 export { MEDIA_DIRECTORY, REGISTRY_PATH, chooseRoot, collect, guessEntry, prefixOptions }
     from './prefix.js';
 export { DEFAULT_BLOCK_SIZE, packBundle, packBlock, sha256 } from './pack.js';
+export { DESTINATION, detectFamily, responseFile, silentOptions } from './silent.js';
 export { PART_BYTES, finish, partSink } from './upload.js';
 
 /**
