@@ -361,6 +361,94 @@ test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
     assert.equal(fns.IsDialogMessageA.argBytes, 8);
 });
 
+test('a modal dialog disables its owner until it ends', async()=>{
+    const OWNERPROC = 0x402100;
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (wndProc === DIALOGPROC && message.message === WM_INITDIALOG)
+            {
+                table.EndDialog.handler([message.hwnd, 7]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, []);
+    const owner = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, OWNERPROC, 0]);
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 1);
+
+    const answer = fns.DialogBoxIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, owner, DIALOGPROC, 0]);
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 0, 'disabled while the dialog is up');
+    assert.equal(await answer, 7);
+    assert.equal(fns.IsWindowEnabled.handler([owner]), 1, 'and enabled again after');
+});
+
+test('CheckRadioButton tells every button in the range, and only the one named is checked', ()=>{
+    /** @type {{ wndProc: number, hwnd: number, message: number, wParam: number }[]} */
+    const sent = [];
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            sent.push({ wndProc, hwnd: message.hwnd, message: message.message,
+                wParam: message.wParam });
+            return 0;
+        },
+    });
+    putTemplate(memory, [
+        { id: 10, x: 0, y: 0, cx: 4, cy: 4 },
+        { id: 11, x: 0, y: 4, cx: 4, cy: 4 },
+        { id: 12, x: 0, y: 8, cx: 4, cy: 4 },
+        { id: 20, x: 0, y: 12, cx: 4, cy: 4 },
+    ]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    // A control has no procedure of its own and a message to it runs
+    // nothing, so two of the three are given one, as a program subclassing
+    // its buttons would; the third shows a procedure-less one is skipped.
+    const GWL_WNDPROC = -4;
+    const BUTTONPROC = 0x403000;
+    const BM_SETCHECK = 0x00f1;
+    fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 10]), GWL_WNDPROC, BUTTONPROC]);
+    fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 11]), GWL_WNDPROC, BUTTONPROC]);
+    fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 20]), GWL_WNDPROC, BUTTONPROC]);
+
+    assert.equal(fns.CheckRadioButton.argBytes, 16);
+    assert.equal(fns.CheckRadioButton.handler([dialog, 10, 12, 11]), 1);
+    assert.deepEqual(sent.map(one=>[one.wndProc, one.hwnd, one.message, one.wParam]), [
+        [BUTTONPROC, fns.GetDlgItem.handler([dialog, 10]), BM_SETCHECK, 0],
+        [BUTTONPROC, fns.GetDlgItem.handler([dialog, 11]), BM_SETCHECK, 1],
+    ], 'the button outside the range is not told, and one with no procedure runs nothing');
+    assert.equal(fns.CheckRadioButton.handler([0x9999, 10, 12, 11]), 0, 'no dialog, no buttons');
+});
+
+test('the base units and MapDialogRect scale the way the template was scaled', ()=>{
+    const { memory, fns } = setup();
+    putTemplate(memory, [{ id: 800, x: 10, y: 20, cx: 40, cy: 8 }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const control = fns.GetDlgItem.handler([dialog, 800]);
+
+    const units = fns.GetDialogBaseUnits.handler([]);
+    assert.equal(units & 0xffff, DIALOG_LAYOUT.CHAR_WIDTH);
+    assert.equal(units >>> 16, DIALOG_LAYOUT.CHAR_HEIGHT);
+
+    const view = new DataView(memory.bytes.buffer);
+    for (const [at, value] of [10, 20, 50, 28].entries())
+    {
+        view.setInt32(OUT + at * 4, value, true);
+    }
+    assert.equal(fns.MapDialogRect.handler([dialog, OUT]), 1);
+    fns.GetWindowRect.handler([control, OUT + 16]);
+    for (const at of [0, 1, 2, 3])
+    {
+        assert.equal(view.getInt32(OUT + at * 4, true), view.getInt32(OUT + 16 + at * 4, true),
+            'the mapped rectangle is where the template put the control');
+    }
+    assert.equal(fns.MapDialogRect.handler([0x9999, OUT]), 0);
+});
+
 test('a quit retrieved inside a modal loop ends the dialog and is put back', async()=>{
     const { memory, queue, fns } = setup();
     putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6 }]);

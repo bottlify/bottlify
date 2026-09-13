@@ -94,6 +94,26 @@ const OPCODE_TABLES = {
 const JIT_CONFIG_CHAINING = 6;
 
 /**
+ * What each x87 site counter is, in the emulator's own order.
+ *
+ * The first group names the instruction whose helper left a register in the
+ * 80-bit format, so no later inline operation on that value can use it; the
+ * `arm.` group names the inline form that then had to call its helper. `kept`
+ * and `wide` are the two outcomes of every helper write, and their sum is
+ * every helper write there was, so a `wide` the named sites do not account for
+ * says a writer is missing from the account rather than leaving it unnoticed.
+ */
+const X87_SITE_NAMES = [
+    'kept', 'wide', 'arith', 'fst.sti', 'fxch', 'fcmovcc',
+    'fild.m16', 'fild.m32', 'fild.m64', 'fld.m32', 'fld.m64', 'fld.m80',
+    'push.other', 'frndint', 'fscale', 'fprem', 'fsqrt', 'fchs.fabs',
+    'transcendental', 'frstor', 'fxrstor', 'mmx', '', '',
+    'arm.binop.m32', 'arm.binop.m64', 'arm.binop.sti', 'arm.fld.sti',
+    'arm.fst.m32', 'arm.fst.m64', 'arm.fxch', 'arm.fchs.fabs', 'arm.fsqrt',
+    'arm.fst.sti', 'arm.fcom.sti', 'arm.fcom.mem', 'arm.fist',
+];
+
+/**
  * Whether this engine accepts a wasm tail call: the smallest module with one,
  * a function that returns by calling itself, offered for validation.
  */
@@ -318,6 +338,33 @@ export async function createV86Host(config){
         }
         return pairs.sort((left, right)=>right[1] - left[1])
             .map(([page, count])=>`0x${(page * 4096).toString(16)}:${count}`).join(' ');
+    };
+
+    /**
+     * Where x87 values stop being tagged doubles, as "name:count" pairs.
+     *
+     * A single tag-lost count says an inline form paid for a helper but not
+     * what canonicalised the register, which may be nowhere near it. These
+     * name both ends: the instruction that wrote a register the double format
+     * could not hold, and the inline form that then called its helper.
+     */
+    const x87Sites = ()=>{
+        const exports = cpu.wm.exports;
+        if (typeof exports.bottlify_x87_site !== 'function')
+        {
+            return '';
+        }
+        const pairs = [];
+        for (let site = 0; site < X87_SITE_NAMES.length; site++)
+        {
+            const count = exports.bottlify_x87_site(site);
+            if (count > 0 && X87_SITE_NAMES[site])
+            {
+                pairs.push([X87_SITE_NAMES[site], count]);
+            }
+        }
+        return pairs.sort((left, right)=>right[1] - left[1])
+            .map(([name, count])=>`${name}:${count}`).join(' ');
     };
 
     return {
@@ -639,6 +686,10 @@ export async function createV86Host(config){
                     // still leaves to a helper is poisoning the tag ahead of
                     // them, and the profile will show the helper.
                     x87TagLost: read(14),
+                    // The same, split by site: which instruction's helper left
+                    // a register in the 80-bit format, and which inline form
+                    // then paid for it.
+                    x87Sites: x87Sites(),
                     dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,

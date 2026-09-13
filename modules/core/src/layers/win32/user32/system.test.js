@@ -145,8 +145,10 @@ function fakeContexts(){
  * @param {(instance: number, type: number, name: number | string) => unknown}
  *        [options.findResource]
  *        Which resources the program's own image carries.
+ * @param {(wndProc: number, message: any) => number} [options.dispatch]
+ *        What a window procedure answers; nothing unless given.
  */
-function setup({ cursor, keyState, findResource } = {}){
+function setup({ cursor, keyState, findResource, dispatch = ()=>0 } = {}){
     const memory = fakeMemory();
     const clock = { at: 0 };
     const queue = createMessageQueue({ now: ()=>clock.at });
@@ -155,6 +157,8 @@ function setup({ cursor, keyState, findResource } = {}){
     const notices = [];
     /** @type {string[]} */
     const said = [];
+    /** @type {string[]} */
+    const diverged = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -164,7 +168,7 @@ function setup({ cursor, keyState, findResource } = {}){
         queue,
         screen: SCREEN,
         dc: ()=>contexts.service,
-        dispatch: ()=>0,
+        dispatch,
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
         cursor: cursor && (()=>cursor),
@@ -174,12 +178,14 @@ function setup({ cursor, keyState, findResource } = {}){
         messageBox: notice=>notices.push(notice),
         /** @param {string} text */
         say: text=>said.push(text),
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock, notices, said };
+    return { memory, queue, fns: table, contexts, clock, notices, said, diverged };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -195,6 +201,81 @@ function makeWindow(memory, fns, style = WS_OVERLAPPED){
 }
 
 // --- painting ---
+
+test('RedrawWindow invalidates, validates and updates as its flags say', ()=>{
+    const { memory, fns, queue } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const RDW_INVALIDATE = 0x0001;
+    const RDW_ERASE = 0x0004;
+    const RDW_VALIDATE = 0x0008;
+    const RDW_UPDATENOW = 0x0100;
+
+    assert.equal(fns.RedrawWindow.argBytes, 16);
+    memory.putU32s(RECT_BUFFER, [10, 20, 110, 120]);
+    assert.equal(fns.RedrawWindow.handler([hwnd, RECT_BUFFER, 0, RDW_INVALIDATE | RDW_ERASE]), 1);
+    memory.fill(OUT_BUFFER, 4);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, OUT_BUFFER, 0]), 1);
+    assert.equal(memory.u32(OUT_BUFFER + RECT.right), 110, 'the rectangle given is what is dirty');
+    assert.equal(queue.depth(), 0, 'and nothing was posted yet');
+
+    assert.equal(fns.RedrawWindow.handler([hwnd, 0, 0, RDW_UPDATENOW]), 1);
+    assert.equal(queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true })?.message,
+        0x000f, 'RDW_UPDATENOW is a WM_PAINT');
+
+    assert.equal(fns.RedrawWindow.handler([hwnd, 0, 0, RDW_VALIDATE]), 1);
+    assert.equal(fns.GetUpdateRect.handler([hwnd, OUT_BUFFER, 0]), 0, 'validated: nothing dirty');
+    assert.equal(fns.RedrawWindow.handler([0x9999, 0, 0, RDW_INVALIDATE]), 0);
+});
+
+test('SetRect writes the four sides, and PtInRect is closed on the left and top only', ()=>{
+    const { memory, fns } = setup();
+
+    assert.equal(fns.SetRect.handler([RECT_BUFFER, 10, 20, 30, 40]), 1);
+    assert.deepEqual([RECT.left, RECT.top, RECT.right, RECT.bottom].map(at=>
+        memory.u32(RECT_BUFFER + at)), [10, 20, 30, 40]);
+    assert.equal(fns.SetRect.handler([0, 1, 2, 3, 4]), 0);
+
+    assert.equal(fns.PtInRect.argBytes, 12, 'the point travels by value');
+    assert.equal(fns.PtInRect.handler([RECT_BUFFER, 10, 20]), 1);
+    assert.equal(fns.PtInRect.handler([RECT_BUFFER, 29, 39]), 1);
+    assert.equal(fns.PtInRect.handler([RECT_BUFFER, 30, 20]), 0, 'the right edge is outside');
+    assert.equal(fns.PtInRect.handler([RECT_BUFFER, 10, 40]), 0, 'and so is the bottom');
+    assert.equal(fns.PtInRect.handler([RECT_BUFFER, -1, 20]), 0);
+});
+
+test('SetCursor answers with the cursor it replaced, and GetCursor with the current one', ()=>{
+    const { fns } = setup();
+
+    assert.equal(fns.GetCursor.handler([]), 0);
+    assert.equal(fns.SetCursor.handler([0x300]), 0);
+    assert.equal(fns.GetCursor.handler([]), 0x300);
+    assert.equal(fns.SetCursor.handler([0x400]), 0x300);
+    assert.equal(fns.SetCursor.handler([0]), 0x400);
+    assert.equal(fns.GetCursor.handler([]), 0);
+});
+
+test('SendMessageTimeoutA is a send whose answer goes out through the pointer', async()=>{
+    const { memory, fns } = setup({ dispatch: (wndProc, message)=>message.wParam * 2 });
+    const hwnd = makeWindow(memory, fns);
+    const SMTO_NORMAL = 0;
+
+    assert.equal(fns.SendMessageTimeoutA.argBytes, 28);
+    memory.putU32s(OUT_BUFFER, [0xffffffff]);
+    assert.equal(await fns.SendMessageTimeoutA.handler(
+        [hwnd, 0x0400, 21, 0, SMTO_NORMAL, 1000, OUT_BUFFER]), 1);
+    assert.equal(memory.u32(OUT_BUFFER), 42, 'the procedure answered in time, as it always does');
+    assert.equal(fns.SendMessageTimeoutA.handler([0x9999, 0x0400, 0, 0, 0, 1000, OUT_BUFFER]), 0);
+});
+
+test('DrawIcon succeeds without painting, and says so once', ()=>{
+    const { fns, diverged } = setup();
+
+    assert.equal(fns.DrawIcon.argBytes, 16);
+    assert.equal(fns.DrawIcon.handler([0x100, 4, 4, 0x200]), 1);
+    assert.equal(fns.DrawIcon.handler([0x100, 4, 4, 0x200]), 1);
+    assert.equal(diverged.length, 1, 'a progress display draws its icon on every tick');
+    assert.match(diverged[0], /^DrawIcon: /);
+});
 
 test('BeginPaint fills the struct the guest allocated', ()=>{
     const { memory, fns } = setup();
@@ -469,11 +550,15 @@ test('EnableWindow answers with the state it found, not the one it set', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);
 
+    assert.equal(fns.IsWindowEnabled.handler([hwnd]), 1);
     assert.equal(fns.EnableWindow.handler([hwnd, 0]), 0, 'it was enabled');
+    assert.equal(fns.IsWindowEnabled.handler([hwnd]), 0, 'and is not any more');
     assert.equal(fns.EnableWindow.handler([hwnd, 0]), 1, 'and now it was disabled');
     assert.equal(fns.EnableWindow.handler([hwnd, 1]), 1);
+    assert.equal(fns.IsWindowEnabled.handler([hwnd]), 1);
     assert.equal(fns.EnableWindow.handler([hwnd, 1]), 0);
     assert.equal(fns.EnableWindow.handler([0x9999, 1]), 0, 'and a window that is not one');
+    assert.equal(fns.IsWindowEnabled.handler([0x9999]), 0);
 });
 
 test('the foreground window is the one the program showed, never nothing while one shows', ()=>{

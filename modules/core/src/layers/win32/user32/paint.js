@@ -33,6 +33,12 @@ import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js'
 const DT_CALCRECT = 0x0400;
 const DT_SINGLELINE = 0x0020;
 
+/** RedrawWindow's flags, the ones with an effect on an update rectangle. */
+const RDW_INVALIDATE = 0x0001;
+const RDW_ERASE = 0x0004;
+const RDW_VALIDATE = 0x0008;
+const RDW_UPDATENOW = 0x0100;
+
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
 const ESTIMATED_LINE_HEIGHT = 16;
@@ -50,6 +56,8 @@ const ESTIMATED_LINE_HEIGHT = 16;
  *           The device-context service, when the build has one: `get(hwnd)`
  *           makes a DC for a window, `release(hwnd, hdc)` gives it back. Absent
  *           in a build that cannot draw.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call that answers other than Windows would says so.
  */
 
 /** The rectangle covering a whole window's client area. @param {any} record */
@@ -82,6 +90,7 @@ const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
  * @param {number} options.WM_PAINT
  */
 export function createPaintFunctions({ host, live, queue, WM_PAINT }){
+    let iconDivergenceSaid = false;
     /** @param {any} record @param {any} rect */
     const invalidate = (record, rect)=>{
         if (isEmpty(rect))
@@ -231,6 +240,44 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                 }
                 invalidate(record, clientRect(record));
                 record.erase = record.erase || (erase >>> 0) !== 0;
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL RedrawWindow(HWND hWnd, const RECT *lprcUpdate, HRGN hrgnUpdate,
+         *                   UINT flags)
+         *
+         * The two halves a program combines: RDW_INVALIDATE is InvalidateRect
+         * (the region, as with InvalidateRgn, stands for the client area),
+         * RDW_VALIDATE takes the area back, and RDW_UPDATENOW is UpdateWindow.
+         * RDW_ERASE marks the background for erasing, as bErase does.
+         */
+        RedrawWindow: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, rect, region, flags])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const area = (rect >>> 0) !== 0 && (region >>> 0) === 0
+                    ? readRect(host, rect)
+                    : clientRect(record);
+                if ((flags & RDW_INVALIDATE) !== 0)
+                {
+                    invalidate(record, area);
+                    record.erase = record.erase || (flags & RDW_ERASE) !== 0;
+                }
+                else if ((flags & RDW_VALIDATE) !== 0)
+                {
+                    record.updateRect = null;
+                }
+                if ((flags & RDW_UPDATENOW) !== 0 && record.updateRect)
+                {
+                    queue.post({ hwnd: record.hwnd, message: WM_PAINT, wParam: 0, lParam: 0 });
+                }
                 return 1;
             },
         },
@@ -391,6 +438,27 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
         DrawEdge: {
             argBytes: 16,
             handler: ()=>0,
+        },
+
+        /**
+         * BOOL DrawIcon(HDC hDC, int X, int Y, HICON hIcon)
+         *
+         * An icon is a resource nothing here decodes into pixels yet, so
+         * nothing is drawn -- and the call succeeds, because a program draws
+         * an icon for decoration and stops for nothing if the decoration is
+         * refused. Said once per run, since a progress display draws its icon
+         * on every tick.
+         */
+        DrawIcon: {
+            argBytes: 16,
+            handler: ()=>{
+                if (!iconDivergenceSaid)
+                {
+                    iconDivergenceSaid = true;
+                    host.divergence?.('DrawIcon', 'icons are not painted; the call succeeds');
+                }
+                return 1;
+            },
         },
 
         /**

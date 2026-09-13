@@ -447,6 +447,13 @@ test('the three brush constructors all make brushes', ()=>{
 
     assert.ok(fns.SelectObject.handler([hdc, solid]) > 0, 'and a brush selects as a brush');
     assert.equal(fns.SelectObject.handler([hdc, hatched]), solid);
+
+    const bitmap = fns.CreateBitmap.handler([8, 8, 1, 1, 0]);
+    const pattern = fns.CreatePatternBrush.handler([bitmap]);
+    assert.ok(pattern > 0, 'a bitmap makes a pattern brush');
+    assert.equal(fns.SelectObject.handler([hdc, pattern]), hatched);
+    assert.equal(fns.CreatePatternBrush.handler([solid]), 0, 'a brush is not a bitmap');
+    assert.equal(fns.CreatePatternBrush.handler([0]), 0);
 });
 
 test('CreateFontIndirectA reads LOGFONTA at the documented offsets', ()=>{
@@ -814,6 +821,18 @@ test('a string is exactly as wide as its characters are', ()=>{
     fns.GetTextMetricsA.handler([hdc, STRUCT]);
     assert.equal(memory.i32(OUT + SIZE.cy), memory.i32(STRUCT + TEXTMETRICA.tmHeight),
         'the height of a line of text is the cell height, once');
+});
+
+test('GetTextExtentPointA is the older name for the same measurement', ()=>{
+    const { fns, memory, hdc } = withDC();
+    putLogFont(memory, { height: -12, width: 8 });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    memory.putString(FACE_NAME, 'Hello');
+
+    assert.equal(fns.GetTextExtentPointA.argBytes, 16);
+    memory.fill(OUT, SIZE.SIZE / 4);
+    assert.equal(fns.GetTextExtentPointA.handler([hdc, FACE_NAME, 5, OUT]), 1);
+    assert.equal(memory.i32(OUT + SIZE.cx), 5 * 8);
 });
 
 test('an empty string has no width, and a negative count is not a string', ()=>{

@@ -35,6 +35,7 @@
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_INVALID_HANDLE = 6;
+const ERROR_INVALID_PARAMETER = 87;
 
 /** dwCreationFlags, the one bit that changes what a create does here. */
 const CREATE_SUSPENDED = 0x00000004;
@@ -83,6 +84,7 @@ const directoryOf = path=>path.slice(0, Math.max(
  *           Told about every request as it is recorded, while the caller's
  *           stack is still standing. A replacement erases the logs of the run
  *           that asked for it, so this is where the evidence has to be taken.
+ * @property {number} [processId]  The running program's own identifier.
  */
 
 /**
@@ -279,6 +281,36 @@ export function createSpawnFunctions(host){
                     ? ''
                     : host.readWideString(commandLine >>> 0, MAX_COMMAND_LINE),
                 flags >>> 0, information),
+        },
+
+        /**
+         * HANDLE OpenProcess(DWORD dwDesiredAccess, BOOL bInheritHandle, DWORD dwProcessId)
+         *
+         * The processes there are: the running program, and the children it
+         * asked for. Any access is granted -- there is one user -- and an
+         * identifier that names nothing is the documented invalid parameter.
+         * The program's own process comes back as the pseudo-handle every
+         * other call here already understands as "this process".
+         */
+        OpenProcess: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , id])=>{
+                const wanted = id >>> 0;
+                // The same default GetCurrentProcessId falls back to.
+                if (wanted === ((host.processId ?? 0x1000) >>> 0))
+                {
+                    return CURRENT_PROCESS;
+                }
+                const child = kernel.processes.all().find(
+                    (/** @type {any} */ made)=>made.id === wanted);
+                if (!child)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return kernel.handles.open('process', child);
+            },
         },
 
         /**

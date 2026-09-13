@@ -239,6 +239,25 @@ test('PROCESS_INFORMATION comes back filled in with usable handles', ()=>{
     assert.equal(host.kernel.handles.resolve(child.threadHandle, 'process-thread'), child);
 });
 
+test('OpenProcess finds the program itself and the children it made, and nothing else', ()=>{
+    const host = fakeHost({ files: ['C:\\App\\child.exe'] });
+    const fns = createSpawnFunctions(host);
+    const ERROR_INVALID_PARAMETER = 87;
+    const PROCESS_ALL_ACCESS = 0x1f0fff;
+    fns.CreateProcessA.handler([putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    const child = pending(host);
+
+    assert.equal(fns.OpenProcess.argBytes, 12);
+    const opened = fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, child.id]);
+    assert.notEqual(opened, 0);
+    assert.notEqual(opened, child.handle, 'a handle of its own');
+    assert.equal(host.kernel.handles.resolve(opened, 'process'), child);
+    assert.equal(fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x1000]), CURRENT_PROCESS,
+        'the program itself');
+    assert.equal(fns.OpenProcess.handler([PROCESS_ALL_ACCESS, 0, 0x7777]), 0);
+    assert.equal(host.errors.at(-1), ERROR_INVALID_PARAMETER);
+});
+
 test('an image that is not there is refused rather than recorded', ()=>{
     const host = fakeHost({ files: [] });
     const fns = createSpawnFunctions(host);

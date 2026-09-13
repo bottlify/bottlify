@@ -56,6 +56,7 @@ const RGN_COPY = 5;
 /** What CombineRgn and its relatives report about the shape they produced. */
 const NULLREGION = 1;
 const SIMPLEREGION = 2;
+const COMPLEXREGION = 3;
 const REGION_ERROR = 0;
 
 /**
@@ -245,6 +246,36 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             }
         }
         return { header, bits: host.readMemory(bits, stride * rows), colors };
+    };
+
+    /** @param {any} a @param {any} b */
+    const intersect = (a, b)=>({
+        left: Math.max(a.left, b.left),
+        top: Math.max(a.top, b.top),
+        right: Math.min(a.right, b.right),
+        bottom: Math.min(a.bottom, b.bottom),
+    });
+
+    /**
+     * The clip a DC is drawing under: what was last selected, or the whole
+     * surface when nothing was. Kept on the DC because the drawing layer
+     * holds the rectangle and answers no question about it.
+     *
+     * @param {any} dc
+     */
+    const clipOf = dc=>{
+        if (dc.clip)
+        {
+            return dc.clip;
+        }
+        const surface = surfaceOf(dc);
+        return { left: 0, top: 0, right: surface.width, bottom: surface.height };
+    };
+
+    /** @param {number} handle @param {any} dc @param {any} rect */
+    const setClip = (handle, dc, rect)=>{
+        dc.clip = { ...rect };
+        bound(handle)?.setClipRect(handle >>> 0, rect);
     };
 
     /** @param {number} handle @returns {any | null} */
@@ -668,16 +699,15 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle, region])=>{
-                const interfaces = bound(handle);
-                if (!interfaces)
+                const dc = dcOf(handle);
+                if (!dc || !bound(handle))
                 {
                     return REGION_ERROR;
                 }
-                const dc = dcOf(handle);
                 if ((region >>> 0) === 0)
                 {
                     const surface = surfaceOf(dc);
-                    interfaces.setClipRect(handle >>> 0, {
+                    setClip(handle, dc, {
                         left: 0, top: 0, right: surface.width, bottom: surface.height,
                     });
                     return SIMPLEREGION;
@@ -687,8 +717,86 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 {
                     return REGION_ERROR;
                 }
-                interfaces.setClipRect(handle >>> 0, rect);
+                setClip(handle, dc, rect);
                 return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+            },
+        },
+
+        /**
+         * int ExcludeClipRect(HDC hdc, int left, int top, int right, int bottom)
+         *
+         * A clip is one rectangle here, so taking a rectangle out of it is
+         * exact only when what is left is still one: nothing, or the clip
+         * less a band across its full width or height. That is the common
+         * case -- a program excludes the strip it has already painted -- and
+         * it is done. Any other cut would leave an L or a frame, which this
+         * model cannot hold; the clip is left as it was and the answer says
+         * the region is more complex than what is drawn under, which is true.
+         */
+        ExcludeClipRect: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([handle, left, top, right, bottom])=>{
+                const dc = dcOf(handle);
+                if (!dc || !bound(handle))
+                {
+                    return REGION_ERROR;
+                }
+                const clip = clipOf(dc);
+                const cut = intersect(clip, {
+                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
+                });
+                if (isEmpty(cut))
+                {
+                    return isEmpty(clip) ? NULLREGION : SIMPLEREGION;
+                }
+                const spansWidth = cut.left <= clip.left && cut.right >= clip.right;
+                const spansHeight = cut.top <= clip.top && cut.bottom >= clip.bottom;
+                /** @param {any} rect */
+                const keep = rect=>{
+                    setClip(handle, dc, rect);
+                    return isEmpty(rect) ? NULLREGION : SIMPLEREGION;
+                };
+                if (spansWidth && spansHeight)
+                {
+                    return keep({ left: 0, top: 0, right: 0, bottom: 0 });
+                }
+                if (spansWidth && cut.top <= clip.top)
+                {
+                    return keep({ ...clip, top: cut.bottom });
+                }
+                if (spansWidth && cut.bottom >= clip.bottom)
+                {
+                    return keep({ ...clip, bottom: cut.top });
+                }
+                if (spansHeight && cut.left <= clip.left)
+                {
+                    return keep({ ...clip, left: cut.right });
+                }
+                if (spansHeight && cut.right >= clip.right)
+                {
+                    return keep({ ...clip, right: cut.left });
+                }
+                return COMPLEXREGION;
+            },
+        },
+
+        /**
+         * BOOL RectVisible(HDC hdc, const RECT *lprc)
+         *
+         * Whether any of the rectangle is inside the clip: what a program
+         * asks before painting a part it may be able to skip.
+         */
+        RectVisible: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, rect])=>{
+                const dc = dcOf(handle);
+                if (!dc || (rect >>> 0) === 0 || !bound(handle))
+                {
+                    return 0;
+                }
+                return isEmpty(intersect(clipOf(dc), readRect(host, rect >>> 0))) ? 0 : 1;
             },
         },
 

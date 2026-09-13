@@ -1534,6 +1534,45 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL EnumChildWindows(HWND hWndParent, WNDENUMPROC lpEnumFunc, LPARAM lParam)
+         *
+         * Every descendant, not only the immediate children -- that is what
+         * the documentation says and what a program setting a font on every
+         * control of a dialog relies on -- each handed to the callback until
+         * one answers FALSE. The list is taken first, so a callback that
+         * destroys or creates windows does not move the walk under itself.
+         * The thread is read before the first await, because after it the
+         * processor belongs to whoever the scheduler chose.
+         */
+        EnumChildWindows: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([parent, callback, lParam])=>{
+                const call = host.call;
+                if (!call || (callback >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const thread = host.callerThread?.();
+                /** @param {number} of @returns {number[]} */
+                const descendants = of=>[...windows.values()]
+                    .filter(record=>!record.destroyed && record.parent === of)
+                    .flatMap(record=>[record.hwnd, ...descendants(record.hwnd)]);
+                const listed = descendants(parent >>> 0);
+                return (async()=>{
+                    for (const hwnd of listed)
+                    {
+                        if ((await call(callback >>> 0, [hwnd, lParam >>> 0], thread) | 0) === 0)
+                        {
+                            break;
+                        }
+                    }
+                    return 1;
+                })();
+            },
+        },
+
         /** LRESULT DispatchMessageA(const MSG *lpMsg) */
         DispatchMessageA: {
             argBytes: 4,

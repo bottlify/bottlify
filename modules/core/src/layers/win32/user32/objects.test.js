@@ -221,6 +221,32 @@ test('an atom and a string are different names for different properties', ()=>{
 
 // --- menus ---
 
+test('a window has a system menu with the standard commands, and its close can be grayed', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    const SC_CLOSE = 0xf060;
+    const MF_BYCOMMAND = 0;
+    const MF_GRAYED = 1;
+
+    const menu = fns.GetSystemMenu.handler([hwnd, 0]);
+    assert.notEqual(menu, 0);
+    assert.equal(fns.GetSystemMenu.handler([hwnd, 0]), menu, 'the same one each time');
+    assert.equal(fns.GetMenuItemCount.handler([menu]), 7);
+    assert.equal(fns.GetMenuItemID.handler([menu, 6]), SC_CLOSE, 'close is last');
+    assert.equal(fns.GetMenuItemID.handler([menu, 7]), -1, 'and nothing follows it');
+
+    assert.equal(fns.EnableMenuItem.handler([menu, SC_CLOSE, MF_BYCOMMAND | MF_GRAYED]), 0,
+        'it was enabled');
+    assert.equal(fns.EnableMenuItem.handler([menu, SC_CLOSE, MF_BYCOMMAND]), MF_GRAYED,
+        'and then it was grayed');
+    assert.equal(fns.EnableMenuItem.handler([menu, 0x1234, MF_BYCOMMAND]), -1);
+
+    assert.equal(fns.GetSystemMenu.handler([hwnd, 1]), 0, 'reverting answers nothing');
+    assert.equal(fns.GetMenuItemCount.handler([menu]), -1, 'and the copy is gone');
+    assert.notEqual(fns.GetSystemMenu.handler([hwnd, 0]), 0, 'a fresh one comes after');
+    assert.equal(fns.GetSystemMenu.handler([0x9999, 0]), 0);
+});
+
 test('a menu item is inserted, counted and read back', ()=>{
     const { memory, fns } = setup();
     const menu = fns.CreateMenu.handler([]);

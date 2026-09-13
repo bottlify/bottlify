@@ -1471,3 +1471,57 @@ reload, merges a short run behind a longer one, belongs to the bundle and is bou
 miss becomes its aligned window minus what is resident; a window at the end is clipped; two
 misses in one window are one request; the first window does not reach before block zero. A
 request is charged for every resident block inside its span, named or bridged.
+
+## A helper leaves an x87 register in the form inline code reads, and says where it cannot
+
+**The cause.** With the forms above inlined, the tag-lost counter in a settled Warcraft III match
+still read 47 145 a second, stable over two captures, about 0.6% of the x87 operations: some form
+was still canonicalising registers, and every inline arm downstream of it paid a helper for the
+rest of that value's life. The counter could not say which. A single number names the arm that
+pays, and the instruction that canonicalised the register may be nowhere near it -- so the count
+was unactionable, and the list of candidates (`fild m16`, the 80-bit conversions, the
+transcendentals, `frndint`, `fscale`, `fprem`, `fcmovcc`, a restored stack, an MMX write, the
+interpreter) was too long to inline one at a time at a build and a browser run each.
+
+**The change: the account.** Both ends are named, and the account is exhaustive by construction.
+Where a helper writes a register -- one function, which every helper's register write goes through
+-- a counter says whether the double format held the value (`kept`) or did not (`wide`), and a
+`wide` is charged again under the instruction that wrote it. On the helper arm of each inline form
+a counter says which form then paid. `kept` plus `wide` is every helper write there was, so a
+`wide` the named instructions do not add up to is a writer missing from the account rather than a
+gap that passes unnoticed. Both increments sit where a call is being made already, so the inline
+arms cost nothing for it. Read through `bottlify_x87_site`, named in `jitState().x87Sites` as
+`name:count` pairs sorted by count.
+
+**The change: the fix.** Writing that same register is also the fix, and it needed no codegen arm
+for any form. A value the double format holds with nothing lost is stored in the tagged form
+instead of the 80-bit one. The test is integer arithmetic on the two words -- the exponent in a
+double's range, the integer bit set, nothing in the eleven low mantissa bits -- so no conversion is
+run, the exception flags the caller is about to read are untouched, and a value it accepts reads
+back through `fpu_canonical` as exactly the bits it came from. So an 80-bit load, a word or
+quadword integer load, an exchange, a register store, a round to an integer, a scale, a remainder,
+a conditional move, a stack restored by `frstor` or `fxrstor`, and the transcendentals all now
+leave a register the arithmetic after them uses inline. What is refused is what a double cannot
+hold with the same value -- an infinity, a NaN, an unnormal, a denormal, a mantissa with anything
+below a double's -- and those still leave the register in the 80-bit format, and still count, under
+the instruction's name. What the tag changes is the precision later arithmetic on that value runs
+at, which is the trade the inline path already makes for every value it produces itself;
+configuration index 12 is the switch for both. Separately, `fild m16` is compiled rather than left
+to the interpreter's helper -- the last x87 form in the group that was not.
+
+**The measurement.** On the oracle program below, with the group on: 370 526 registers kept their
+tag through a helper over 20 000 iterations, `wide` was exactly 20 000, and all 20 000 of those
+were the one 80-bit load the program deliberately gives a value no double holds. Every other site
+read zero, including every inline arm except the multiply that reads that refused value. What this
+is worth in a frame is not measured yet -- it needs a browser run on the settled match:
+`x87TagLost` and the per-site counters against 47 145 a second, and `f80Conversions` against
+75 000 a second.
+
+**The tests.** The oracle from the entry above, extended: an 80-bit load, a word integer load, a
+round to an integer, a scale, a remainder and a stack through `fsave`/`frstor`, each followed by
+arithmetic on what it wrote, run compiled with the group off and on and compared word for word;
+the per-site counters asserted zero for each of those forms and for every inline arm; and one
+80-bit value with a bit set below a double's mantissa, which must be refused -- `wide` equal to the
+iteration count, charged wholly to `fld m80`, and the multiply that reads it the only inline arm in
+the program that calls its helper. A nasm test covers the same forms; it is unrun here, because
+this machine has no nasm.

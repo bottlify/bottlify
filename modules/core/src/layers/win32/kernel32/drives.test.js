@@ -100,6 +100,27 @@ test('a mounted drive is fixed and an unmounted one has no root', ()=>{
     assert.equal(fns.GetDriveTypeA.handler([0x220]), DRIVE_NO_ROOT_DIR);
 });
 
+test('the byte-count form says the whole volume, which the cluster form clamps', ()=>{
+    const { fns, bytes } = setup(['C']);
+    plant(bytes, 0x200, 'C:' + String.fromCharCode(92));
+    assert.equal(fns.GetDiskFreeSpaceA.handler([0x200, 0x100, 0x104, 0x108, 0x10c]), 1);
+    const cluster = dword(bytes, 0x100) * dword(bytes, 0x104);
+
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x200, 0x110, 0x118, 0x120]), 1);
+    /** @param {number} at */
+    const qword = at=>dword(bytes, at) + dword(bytes, at + 4) * 0x1_0000_0000;
+    assert.equal(qword(0x118), 32 * 1024 * 1024 * 1024, 'the whole volume');
+    assert.equal(qword(0x110), 24 * 1024 * 1024 * 1024, 'and what is free of it');
+    assert.equal(qword(0x120), qword(0x110), 'which with one user is what is available');
+    assert.ok(qword(0x118) > dword(bytes, 0x10c) * cluster,
+        'more than the cluster call can say, which is clamped rather than wrapped');
+    assert.equal(dword(bytes, 0x10c) * cluster, 0x1_0000_0000 - cluster, 'to just under 2^32');
+
+    plant(bytes, 0x220, 'Q:' + String.fromCharCode(92));
+    assert.equal(fns.GetDiskFreeSpaceExA.handler([0x220, 0x110, 0x118, 0x120]), 0,
+        'a drive that is not there has no size');
+});
+
 test('both spellings of GetDriveType agree', ()=>{
     // Two implementations of one answer drift, and the drift shows as a drive
     // that exists when asked one way and not the other.
@@ -128,7 +149,7 @@ test('the free-space figures multiply without wrapping', ()=>{
     const free = dword(bytes, 0x108);
     const total = dword(bytes, 0x10c);
 
-    assert.ok(free < total);
+    assert.ok(free <= total);
     assert.ok(total * sectors * bytesPerSector <= 0xffffffff,
         'the product stays inside what a caller can hold');
 });

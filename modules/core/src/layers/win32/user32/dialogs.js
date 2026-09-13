@@ -44,7 +44,7 @@
  */
 
 import { ANY_WINDOW, WM_QUIT } from './messages.js';
-import { readMessage } from './structs.js';
+import { readMessage, readRect, writeRect } from './structs.js';
 
 /** DLGTEMPLATE, the fixed part before the variable-length names. */
 const DLGTEMPLATE = Object.freeze({
@@ -127,6 +127,13 @@ const CHAR_WIDTH = 8;
 const CHAR_HEIGHT = 16;
 const DLU_PER_CHAR_X = 4;
 const DLU_PER_CHAR_Y = 8;
+
+/** How a button is told its check state, and the two states a radio has. */
+const BM_SETCHECK = 0x00f1;
+const BST_UNCHECKED = 0;
+const BST_CHECKED = 1;
+/** The style bit EnableWindow sets, and a modal dialog sets on its owner. */
+const WS_DISABLED = 0x08000000;
 
 /** Messages a dialog answers. */
 const WM_CLOSE = 0x0010;
@@ -491,6 +498,15 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         {
             return 0;
         }
+        // The owner is disabled for as long as the dialog is up, as Windows
+        // disables it: a program asking IsWindowEnabled of its own frame
+        // meanwhile is told no, and a click on the frame reaches nothing.
+        const owner = live(record.parent);
+        const ownerWasEnabled = owner !== null && (owner.style & WS_DISABLED) === 0;
+        if (ownerWasEnabled)
+        {
+            owner.style = (owner.style | WS_DISABLED) >>> 0;
+        }
         while (!record.destroyed)
         {
             const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
@@ -506,6 +522,10 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
                 break;
             }
             await (dialogKey(hwnd, entry, thread) ?? deliver(entry, thread));
+        }
+        if (ownerWasEnabled)
+        {
+            owner.style = (owner.style & ~WS_DISABLED) >>> 0;
         }
         return record.dialogResult ?? 0;
     };
@@ -630,6 +650,75 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, id])=>controlOf(hwnd, id)?.hwnd ?? 0,
+        },
+
+        /**
+         * BOOL CheckRadioButton(HWND hDlg, int nIDFirstButton, int nIDLastButton,
+         *                       int nIDCheckButton)
+         *
+         * What Windows does, literally: BM_SETCHECK to every control whose
+         * identifier is in the range, checked for the one named and cleared
+         * for the rest. A control of a system class has no procedure here,
+         * and is passed over as a message to it would be.
+         */
+        CheckRadioButton: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, first, last, check])=>{
+                const dialog = live(hwnd);
+                if (!dialog)
+                {
+                    return 0;
+                }
+                for (const record of windows.values())
+                {
+                    if (record.destroyed || record.parent !== dialog.hwnd || record.wndProc === 0
+                        || (record.id | 0) < (first | 0) || (record.id | 0) > (last | 0))
+                    {
+                        continue;
+                    }
+                    host.dispatch(record.wndProc, {
+                        hwnd: record.hwnd,
+                        message: BM_SETCHECK,
+                        wParam: (record.id | 0) === (check | 0) ? BST_CHECKED : BST_UNCHECKED,
+                        lParam: 0,
+                    });
+                }
+                return 1;
+            },
+        },
+
+        /**
+         * LONG GetDialogBaseUnits(void)
+         *
+         * The character cell dialogs are laid out against, width in the low
+         * word and height in the high: the same cell the templates here are
+         * scaled by, so a program doing the arithmetic itself lands where
+         * the template did.
+         */
+        GetDialogBaseUnits: {
+            argBytes: 0,
+            handler: ()=>((CHAR_HEIGHT << 16) | CHAR_WIDTH) >>> 0,
+        },
+
+        /** BOOL MapDialogRect(HWND hDlg, LPRECT lpRect) */
+        MapDialogRect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, rect])=>{
+                if (!live(hwnd) || (rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const units = readRect(host, rect >>> 0);
+                writeRect(host, rect >>> 0, {
+                    left: acrossFor(units.left),
+                    top: downFor(units.top),
+                    right: acrossFor(units.right),
+                    bottom: downFor(units.bottom),
+                });
+                return 1;
+            },
         },
 
         /** int GetDlgCtrlID(HWND hWnd) */

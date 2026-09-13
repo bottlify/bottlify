@@ -180,6 +180,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
     // Ids handed to a timer with no window, kept clear of the small numbers a
     // program picks for its own.
     let nextTimerId = 0x1000;
+    /** The cursor SetCursor last set; nothing draws it, but it is read back. */
+    let currentCursor = 0;
+
+    /**
+     * What SendMessage does, shared with the timed form.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam
+     * @param {number} lParam
+     */
+    const sendMessage = (hwnd, message, wParam, lParam)=>{
+        const record = live(hwnd);
+        if (!record || record.wndProc === 0)
+        {
+            return 0;
+        }
+        return host.dispatch(record.wndProc, {
+            hwnd: record.hwnd,
+            message: message >>> 0,
+            wParam: wParam >>> 0,
+            lParam: lParam >>> 0,
+        });
+    };
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
 
@@ -961,7 +983,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
         IsWindowEnabled: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record && (record.style & WS_DISABLED) === 0 ? 1 : 0;
+            },
         },
 
         /** HWND WindowFromPoint(POINT Point) */
@@ -1415,10 +1440,26 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 loadResourceObject(host, 'cursor', RT_GROUP_CURSOR, instance, name),
         },
 
-        /** HCURSOR SetCursor(HCURSOR hCursor) */
+        /**
+         * HCURSOR SetCursor(HCURSOR hCursor)
+         *
+         * The cursor set is the cursor GetCursor reports and the one the call
+         * answers with next time: a program restores what it found.
+         */
         SetCursor: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([cursor])=>{
+                const previous = currentCursor;
+                currentCursor = cursor >>> 0;
+                return previous;
+            },
+        },
+
+        /** HCURSOR GetCursor(void) */
+        GetCursor: {
+            argBytes: 0,
+            handler: ()=>currentCursor,
         },
 
         /**
@@ -1599,26 +1640,45 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * Sending means running the window procedure before this returns, which
          * is the bridge's business. The dispatch service the bookkeeping half
          * already holds is exactly that, so this is the one place a message does
-         * not go through the queue.
+         * not go through the queue. A window of a system class has no procedure
+         * here; what a control that ignored the message would answer is zero,
+         * the same answer SendDlgItemMessage gives for the same control.
          */
         SendMessageA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message, wParam, lParam])=>{
-                const record = live(hwnd);
-                // A window of a system class has no procedure here; what a
-                // control that ignored the message would answer is zero, the
-                // same answer SendDlgItemMessage gives for the same control.
-                if (!record || record.wndProc === 0)
+            handler: ([hwnd, message, wParam, lParam])=>sendMessage(hwnd, message, wParam, lParam),
+        },
+
+        /**
+         * LRESULT SendMessageTimeoutA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam,
+         *   UINT fuFlags, UINT uTimeout, PDWORD_PTR lpdwResult)
+         *
+         * The timeout is for a window on another thread that does not answer.
+         * Every window here is on the caller's thread, where the send runs
+         * the procedure to completion, so the answer is always in time: the
+         * result goes out through the pointer and the call reports success.
+         */
+        SendMessageTimeoutA: {
+            argBytes: 28,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam, , , result])=>{
+                if (!live(hwnd))
                 {
                     return 0;
                 }
-                return host.dispatch(record.wndProc, {
-                    hwnd: record.hwnd,
-                    message: message >>> 0,
-                    wParam: wParam >>> 0,
-                    lParam: lParam >>> 0,
-                });
+                /** @param {number} answer */
+                const report = answer=>{
+                    if ((result >>> 0) !== 0)
+                    {
+                        writeU32s(host, result >>> 0, [answer >>> 0]);
+                    }
+                    return 1;
+                };
+                const answer = sendMessage(hwnd, message, wParam, lParam);
+                return typeof (/** @type {any} */ (answer))?.then === 'function'
+                    ? /** @type {any} */ (answer).then(report)
+                    : report(answer);
             },
         },
 
@@ -1846,6 +1906,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * The rectangle helpers: arithmetic over the caller's own memory, each
          * refusing a null pointer with FALSE rather than faulting inside.
          *
+         * BOOL SetRect(LPRECT, int xLeft, int yTop, int xRight, int yBottom)
          * BOOL SetRectEmpty(LPRECT)
          * BOOL CopyRect(LPRECT lprcDst, const RECT *lprcSrc)
          * BOOL EqualRect(const RECT *, const RECT *)
@@ -1853,6 +1914,21 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * BOOL InflateRect(LPRECT, int dx, int dy)
          * BOOL PtInRect(const RECT *, POINT pt)
          */
+        SetRect: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([out, left, top, right, bottom])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeRect(host, out >>> 0, {
+                    left: left | 0, top: top | 0, right: right | 0, bottom: bottom | 0,
+                });
+                return 1;
+            },
+        },
+
         SetRectEmpty: {
             argBytes: 4,
             /** @param {number[]} args */

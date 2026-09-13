@@ -1509,3 +1509,160 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
     assert.ok(helpers.tagLost > 10000,
         `${helpers.tagLost} with the group off, against ${inline.tagLost} with it on`);
 });
+
+test('an x87 value a double holds keeps its tag through the helpers', async()=>{
+    // The forms that have no inline arm write a register through one helper,
+    // and that helper now leaves the register in the tagged form whenever the
+    // double format holds the value with nothing lost -- so the arithmetic
+    // that follows an 80-bit load, a word integer load, a round to an integer,
+    // a scale, a remainder or a restored stack is inline, without a codegen arm
+    // for any of them. The same program is run compiled both ways and every
+    // result compared word for word; with the group on, no operation in it
+    // takes a helper arm for want of a tag, and the per-site counters name the
+    // one value that is deliberately refused: an 80-bit value with a bit set
+    // below a double's mantissa, whose arithmetic must stay the library's.
+    const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
+    const bits = (/** @type {number} */ v)=>new Uint32Array(Float32Array.of(v).buffer)[0];
+    const DATA = 0x9000;
+    const [ONEPOINTFIVE, TWOANDAQUARTER, SEVENPOINTFIVE] = [0x9000, 0x9004, 0x9008];
+    const [M80, M80INEXACT, I16, I16NEG] = [0x9010, 0x9020, 0x9030, 0x9032];
+    const RESULTS = 0x9100;
+    const SAVED = 0x9200;
+    const N = 20000;
+
+    /** @param {number} at */
+    const abs = at=>u32(at);
+    const program = [
+        0xb9, ...u32(N),                        //       mov ecx, N
+        0xdb, 0xe3,                             // loop: fninit
+        // an 80-bit load a double holds, then arithmetic on what it loaded
+        0xdb, 0x2d, ...abs(M80),                //       fld tword [1.5]
+        0xd8, 0x0d, ...abs(TWOANDAQUARTER),     //       fmul dword [2.25]
+        0xd9, 0x1d, ...abs(RESULTS + 0x00),     //       fstp dword       3.375
+        // a word integer load, then arithmetic on what it loaded
+        0xdf, 0x05, ...abs(I16),                //       fild word [1234]
+        0xd8, 0x0d, ...abs(ONEPOINTFIVE),       //       fmul dword [1.5]
+        0xd9, 0x1d, ...abs(RESULTS + 0x04),     //       fstp dword       1851
+        0xdf, 0x05, ...abs(I16NEG),             //       fild word [-3]
+        0xd8, 0x05, ...abs(TWOANDAQUARTER),     //       fadd dword [2.25]
+        0xd9, 0x1d, ...abs(RESULTS + 0x08),     //       fstp dword       -0.75
+        // a round to an integer, then arithmetic on the rounded value
+        0xd9, 0x05, ...abs(SEVENPOINTFIVE),     //       fld dword [7.5]
+        0xd9, 0xfc,                             //       frndint          8
+        0xd8, 0x0d, ...abs(ONEPOINTFIVE),       //       fmul dword [1.5]
+        0xd9, 0x1d, ...abs(RESULTS + 0x0c),     //       fstp dword       12
+        // a scale, then arithmetic on the scaled value
+        0xd9, 0x05, ...abs(TWOANDAQUARTER),     //       fld dword [2.25]
+        0xd9, 0xe8,                             //       fld1
+        0xd9, 0xc9,                             //       fxch st1
+        0xd9, 0xfd,                             //       fscale           4.5
+        0xd8, 0x0d, ...abs(ONEPOINTFIVE),       //       fmul dword [1.5]
+        0xd9, 0x1d, ...abs(RESULTS + 0x10),     //       fstp dword       6.75
+        0xdd, 0xd8,                             //       fstp st0
+        // a remainder, then arithmetic on the remainder
+        0xd9, 0x05, ...abs(TWOANDAQUARTER),     //       fld dword [2.25]
+        0xd9, 0x05, ...abs(SEVENPOINTFIVE),     //       fld dword [7.5]
+        0xd9, 0xf8,                             //       fprem            0.75
+        0xd8, 0x0d, ...abs(ONEPOINTFIVE),       //       fmul dword [1.5]
+        0xd9, 0x1d, ...abs(RESULTS + 0x14),     //       fstp dword       1.125
+        0xdd, 0xd8,                             //       fstp st0
+        // the whole stack through a save and a restore
+        0xd9, 0x05, ...abs(ONEPOINTFIVE),       //       fld dword [1.5]
+        0xd9, 0x05, ...abs(TWOANDAQUARTER),     //       fld dword [2.25]
+        0xdd, 0x35, ...abs(SAVED),              //       fsave [.]
+        0xdd, 0x25, ...abs(SAVED),              //       frstor [.]
+        0xde, 0xc9,                             //       fmulp st1, st0   3.375
+        0xd9, 0x1d, ...abs(RESULTS + 0x18),     //       fstp dword
+        // a value no double holds: refused, so the arithmetic stays the
+        // library's, and the result narrowed to a single is the same either way
+        0xdb, 0x2d, ...abs(M80INEXACT),         //       fld tword
+        0xd8, 0x0d, ...abs(TWOANDAQUARTER),     //       fmul dword [2.25]
+        0xd9, 0x1d, ...abs(RESULTS + 0x1c),     //       fstp dword       3.375
+    ];
+    program.push(0x49);                                             // dec ecx
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32((GUEST_CODE + 5) - (jnzAt + 6)));  // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    /** @param {number} tagged */
+    const run = async tagged=>{
+        const host = await boot();
+        host.cpu().wm.exports.set_jit_config(12, tagged);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, new Uint8Array([
+            ...f32(1.5), ...f32(2.25), ...f32(7.5), ...u32(0),
+            // 1.5 in the 80-bit format, and the same with the lowest mantissa
+            // bit set -- a bit below anything a double can hold.
+            ...u32(0), ...u32(0xc0000000), 0xff, 0x3f, 0, 0, 0, 0, 0, 0,
+            ...u32(1), ...u32(0xc0000000), 0xff, 0x3f, 0, 0, 0, 0, 0, 0,
+            1234 & 0xff, 1234 >>> 8, 0xfd, 0xff,
+        ]));
+        host.writePhysical(RESULTS, new Uint8Array(0x20));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slice = 0; slice < 8000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const state = host.jitState();
+        assert.ok(state !== -1 && state.compiledSteps > 0, 'and was compiled');
+        const results = host.readPhysical(RESULTS, 0x20);
+        const { x87TagLost, x87Sites } = state;
+        host.stop();
+        return { results, x87TagLost, x87Sites };
+    };
+
+    const helpers = await run(0);
+    const inline = await run(1);
+    assert.deepEqual([...inline.results], [...helpers.results], 'the same results either way');
+
+    const word = (/** @type {Uint8Array} */ r, /** @type {number} */ at)=>
+        (r[at] | r[at + 1] << 8 | r[at + 2] << 16 | r[at + 3] << 24) >>> 0;
+    const r = inline.results;
+    assert.equal(word(r, 0x00), bits(3.375), 'an 80-bit load then a multiply');
+    assert.equal(word(r, 0x04), bits(1851), 'a word integer load then a multiply');
+    assert.equal(word(r, 0x08), bits(-0.75), 'a negative word integer load then an add');
+    assert.equal(word(r, 0x0c), bits(12), 'a round to an integer then a multiply');
+    assert.equal(word(r, 0x10), bits(6.75), 'a scale then a multiply');
+    assert.equal(word(r, 0x14), bits(1.125), 'a remainder then a multiply');
+    assert.equal(word(r, 0x18), bits(3.375), 'a saved and restored stack then a multiply');
+    assert.equal(word(r, 0x1c), bits(3.375), 'a value no double holds, narrowed to a single');
+
+    // The per-site account. Every form here writes a register through a helper
+    // and leaves it in the form the arithmetic after it can use, so each of
+    // their sites reads zero and so does every inline arm -- with one exception,
+    // which is the point of the account: the 80-bit value no double holds is
+    // refused, once per iteration, and the multiply that reads it is the only
+    // inline arm in the program that calls its helper.
+    /** @param {string} sites */
+    const byName = sites=>Object.fromEntries(sites.split(' ').filter(Boolean)
+        .map(pair=>[pair.slice(0, pair.lastIndexOf(':')),
+            Number(pair.slice(pair.lastIndexOf(':') + 1))]));
+    const on = byName(inline.x87Sites);
+    for (const site of ['fild.m16', 'frndint', 'fscale', 'fprem', 'frstor', 'fxch',
+        'arith', 'fst.sti', 'transcendental', 'mmx',
+        'arm.binop.m64', 'arm.binop.sti', 'arm.fld.sti', 'arm.fst.m32',
+        'arm.fst.m64', 'arm.fxch', 'arm.fst.sti', 'arm.fcom.sti', 'arm.fcom.mem', 'arm.fist'])
+    {
+        assert.equal(on[site] ?? 0, 0, `${site} took no helper arm: ${inline.x87Sites}`);
+    }
+    assert.equal(on.wide, N, `the refused load, once per iteration: ${inline.x87Sites}`);
+    assert.equal(on['fld.m80'], on.wide, 'and it is the whole of what was refused');
+    assert.ok((on.kept ?? 0) > 5 * N,
+        `${on.kept} registers kept their tag through a helper over ${N} iterations`);
+    assert.equal(inline.x87TagLost, on['arm.binop.m32'],
+        `every arm taken was the multiply on the refused value: ${inline.x87Sites}`);
+
+    // With the group off nothing is tagged at all, so the inline arms of the
+    // arithmetic that follows each of these forms fall to their helpers.
+    assert.ok(helpers.x87TagLost > 5 * N,
+        `${helpers.x87TagLost} with the group off, against ${inline.x87TagLost} with it on`);
+});

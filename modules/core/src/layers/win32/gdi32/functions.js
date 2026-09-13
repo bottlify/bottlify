@@ -920,6 +920,28 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * HBRUSH CreatePatternBrush(HBITMAP hbm)
+         *
+         * A brush over a bitmap, which is what the BS_PATTERN form of a
+         * LOGBRUSH describes with its hatch field holding the handle. A handle
+         * that is not a bitmap makes no brush.
+         */
+        CreatePatternBrush: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([bitmap])=>{
+                const record = objects.get(bitmap);
+                if (!record || record.type !== 'bitmap')
+                {
+                    return 0;
+                }
+                return objects.create('brush', {
+                    style: BS_PATTERN, color: 0, hatch: bitmap >>> 0,
+                });
+            },
+        },
+
         /** HBRUSH CreateHatchBrush(int iHatch, COLORREF color) */
         CreateHatchBrush: {
             argBytes: 8,
@@ -1357,28 +1379,20 @@ export function createGdiFunctions(host){
 
         /**
          * Clipping and scaling a framework's device-context class wraps,
-         * whether or not the program draws. Nothing is clipped here, so every
-         * point and rectangle is visible and the clip box is the whole
-         * surface; the scaled extents are the plain ones, since the transform
-         * is not applied to anything; an escape is a printer's, and there is
-         * no printer.
+         * whether or not the program draws. A point is always visible and
+         * the clip box is the whole surface (RectVisible, which reads the
+         * clip, is with the drawing half); the scaled extents are the plain
+         * ones, since the transform is not applied to anything; an escape is
+         * a printer's, and there is no printer.
          *
          * BOOL PtVisible(HDC, int x, int y)
-         * BOOL RectVisible(HDC, const RECT *)
          * int GetClipBox(HDC, LPRECT)
          * BOOL ScaleViewportExtEx(HDC, int, int, int, int, LPSIZE)
          * BOOL ScaleWindowExtEx(HDC, int, int, int, int, LPSIZE)
          * int Escape(HDC, int, int, LPCSTR, LPVOID)
-         * HBRUSH CreatePatternBrush(HBITMAP)
          */
         PtVisible: {
             argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
-        },
-
-        RectVisible: {
-            argBytes: 8,
             /** @param {number[]} args */
             handler: ([handle])=>(dcOf(handle) ? 1 : 0),
         },
@@ -1434,15 +1448,6 @@ export function createGdiFunctions(host){
 
         Escape: { argBytes: 20, handler: ()=>0 },
 
-        CreatePatternBrush: {
-            argBytes: 4,
-            handler: ()=>{
-                host.divergence?.('CreatePatternBrush',
-                    'a brush cannot be made from a bitmap here');
-                return 0;
-            },
-        },
-
         /** int GetDeviceCaps(HDC hdc, int index) */
         GetDeviceCaps: {
             argBytes: 8,
@@ -1493,8 +1498,12 @@ export function createGdiFunctions(host){
         },
     };
 
+    // The older name for the same call: the same arguments, the same
+    // SIZE written, and an installer's engine measures with it.
+    const aliased = { ...table, GetTextExtentPointA: table.GetTextExtentPoint32A };
+
     return {
-        table,
+        table: aliased,
 
         /**
          * A device context over memory somebody else owns.

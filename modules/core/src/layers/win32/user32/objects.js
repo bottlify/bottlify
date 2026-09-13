@@ -78,8 +78,23 @@ const MF_BYPOSITION = 0x0400;
 const MF_GRAYED = 0x0001;
 const MF_DISABLED = 0x0002;
 const MF_CHECKED = 0x0008;
+const MFT_SEPARATOR = 0x0800;
 /** The check mark of the default menu font, in pixels each way. */
 const CHECK_MARK_SIZE = 13;
+
+/**
+ * The system menu every window has by default: the commands the frame's own
+ * box offers, by the identifiers a program addresses them with.
+ */
+const SYSTEM_MENU_ITEMS = Object.freeze([
+    { id: 0xf120, text: '&Restore' },
+    { id: 0xf010, text: '&Move' },
+    { id: 0xf000, text: '&Size' },
+    { id: 0xf020, text: 'Mi&nimize' },
+    { id: 0xf030, text: 'Ma&ximize' },
+    { id: 0, type: MFT_SEPARATOR, text: '' },
+    { id: 0xf060, text: '&Close\tAlt+F4' },
+]);
 
 /** MENUITEMINFOA, whose cbSize says which of the two versions was compiled. */
 const MENUITEMINFO = Object.freeze({
@@ -542,6 +557,48 @@ export function createObjectFunctions({ host, live }){
                 }
                 found.menu.items.splice(found.at, 1);
                 return 1;
+            },
+        },
+
+        /**
+         * HMENU GetSystemMenu(HWND hWnd, BOOL bRevert)
+         *
+         * A window's system menu is made the first time it is asked for, with
+         * the standard commands, and kept: a program asks for it to gray the
+         * close command and expects the next ask to find that done. Revert
+         * throws the copy away and answers nothing, as documented.
+         */
+        GetSystemMenu: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, revert])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                if ((revert >>> 0) !== 0)
+                {
+                    const held = menuOf(record.systemMenu ?? 0);
+                    if (held)
+                    {
+                        menus.delete(held.handle);
+                        host.handles.close(held.handle);
+                    }
+                    record.systemMenu = 0;
+                    return 0;
+                }
+                if (!menuOf(record.systemMenu ?? 0))
+                {
+                    const menu = { handle: 0, popup: true, items: SYSTEM_MENU_ITEMS.map(item=>({
+                        id: item.id, type: item.type ?? 0, state: 0, submenu: 0, data: 0,
+                        text: item.text,
+                    })) };
+                    menu.handle = host.handles.open('menu', menu);
+                    menus.set(menu.handle, menu);
+                    record.systemMenu = menu.handle;
+                }
+                return record.systemMenu;
             },
         },
 

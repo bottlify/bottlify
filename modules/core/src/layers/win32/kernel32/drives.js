@@ -40,16 +40,28 @@ const MAX_PATH = 260;
 /**
  * The geometry claimed, and the reason for these particular numbers.
  *
- * 512-byte sectors and 8 to a cluster is an ordinary FAT32 volume of the era.
- * The cluster count is chosen so that clusters × sectors × bytes stays *below*
- * 2^32 -- a two-gigabyte volume, half of it free. That is the documented way to
- * get a byte count out of GetDiskFreeSpace, and a product landing exactly on
- * 2^32 wraps to zero, which reads as a full disk rather than an empty one.
+ * 512-byte sectors and 8 to a cluster is an ordinary volume of the era. The
+ * volume itself is thirty-two gigabytes with twenty-four free: nothing here has
+ * a size of its own, a program of the era installs into a fraction of that, so
+ * a figure this large refuses no installation and is still a disk such a
+ * program could have seen.
+ *
+ * The cluster call cannot say that much. The documented way to get a byte
+ * count out of it is to multiply all four values on 32-bit arithmetic, and a
+ * product at or past 2^32 wraps -- to zero, which reads as a full disk. So it
+ * reports the volume as the consumer line of Windows reported a large one:
+ * clamped so the product stays below 2^32, two gigabytes at most. The byte
+ * call has the room and says the whole of it.
  */
 const BYTES_PER_SECTOR = 512;
 const SECTORS_PER_CLUSTER = 8;
-const TOTAL_CLUSTERS = 0x0008_0000;
-const FREE_CLUSTERS = 0x0004_0000;
+const CLUSTER_BYTES = BYTES_PER_SECTOR * SECTORS_PER_CLUSTER;
+const VOLUME_BYTES = 32 * 1024 * 1024 * 1024;
+const FREE_BYTES = 24 * 1024 * 1024 * 1024;
+/** The most clusters the cluster call may report: a product just under 2^32. */
+const CLUSTER_CAP = 0x1_0000_0000 / CLUSTER_BYTES - 1;
+const TOTAL_CLUSTERS = Math.min(VOLUME_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
+const FREE_CLUSTERS = Math.min(FREE_BYTES / CLUSTER_BYTES, CLUSTER_CAP);
 
 /** What the volume calls itself. */
 const VOLUME_LABEL = 'Bottlify';
@@ -227,6 +239,40 @@ export function createDriveFunctions(host){
                 writeDwordIf(bytesPerSector >>> 0, BYTES_PER_SECTOR);
                 writeDwordIf(freeClusters >>> 0, FREE_CLUSTERS);
                 writeDwordIf(totalClusters >>> 0, TOTAL_CLUSTERS);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetDiskFreeSpaceExA(LPCSTR lpDirectoryName,
+         *   PULARGE_INTEGER lpFreeBytesAvailableToCaller,
+         *   PULARGE_INTEGER lpTotalNumberOfBytes, PULARGE_INTEGER lpTotalNumberOfFreeBytes)
+         *
+         * The volume in bytes, whole -- the cluster call reports the same
+         * volume clamped. There is one user and no quota, so what is free is
+         * what the caller may have.
+         */
+        GetDiskFreeSpaceExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([path, available, total, free])=>{
+                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
+                if (!known(root))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                /** @param {number} address @param {number} value */
+                const writeQwordIf = (address, value)=>{
+                    if (address !== 0)
+                    {
+                        writeDword(address, value >>> 0);
+                        writeDword(address + 4, Math.floor(value / 0x1_0000_0000));
+                    }
+                };
+                writeQwordIf(available >>> 0, FREE_BYTES);
+                writeQwordIf(total >>> 0, VOLUME_BYTES);
+                writeQwordIf(free >>> 0, FREE_BYTES);
                 return 1;
             },
         },

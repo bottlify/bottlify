@@ -841,6 +841,34 @@ test('TranslateMessage leaves alone what it cannot translate', ()=>{
     assert.equal(queue.depth(), 0);
 });
 
+test('EnumChildWindows walks every descendant until the callback says stop', async()=>{
+    const ENUMPROC = 0x405000;
+    const { fns, memory, called } = setup({ hookReply: ()=>1 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hwnd = createWindow(fns, memory);
+    const child = createWindow(fns, memory, { parent: hwnd, style: WS_CHILD });
+    const grandchild = createWindow(fns, memory, { parent: child, style: WS_CHILD });
+    const second = createWindow(fns, memory, { parent: hwnd, style: WS_CHILD });
+    createWindow(fns, memory);
+
+    assert.equal(fns.EnumChildWindows.argBytes, 12);
+    assert.equal(await fns.EnumChildWindows.handler([hwnd, ENUMPROC, 0x77]), 1);
+    assert.deepEqual(called.map(one=>one.args), [
+        [child, 0x77], [grandchild, 0x77], [second, 0x77],
+    ], 'children, their children, and never the other top-level window');
+    assert.ok(called.every(one=>one.entry === ENUMPROC && one.thread === THREAD));
+
+    const stopping = setup({ hookReply: ()=>0 });
+    putClass(stopping.memory);
+    stopping.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const top = createWindow(stopping.fns, stopping.memory);
+    createWindow(stopping.fns, stopping.memory, { parent: top, style: WS_CHILD });
+    createWindow(stopping.fns, stopping.memory, { parent: top, style: WS_CHILD });
+    await stopping.fns.EnumChildWindows.handler([top, ENUMPROC, 0]);
+    assert.equal(stopping.called.length, 1, 'FALSE from the callback ends the walk');
+});
+
 test('DispatchMessageA reports what it would have called, and its answer', ()=>{
     const { fns, memory, dispatched, hwnd } = withWindow();
     memory.putU32s(MSG_BUFFER, [hwnd, WM_USER, 1, 2, 0, 0, 0]);

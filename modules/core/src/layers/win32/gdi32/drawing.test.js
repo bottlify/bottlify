@@ -354,6 +354,38 @@ test('a null clip region means the whole surface, not an empty one', ()=>{
     assert.equal(fns.SelectClipRgn.handler([hdc, empty]), NULLREGION);
 });
 
+test('a band excluded from the clip is taken off; a cut that would leave an L is not', ()=>{
+    const graphics = fakeDrawing();
+    const { fns, memory, hdc } = setup(graphics.services);
+    const COMPLEXREGION = 3;
+    const lastClip = ()=>graphics.calls.filter(call=>call[0] === 'setClipRect').at(-1)?.[2];
+
+    assert.equal(fns.ExcludeClipRect.argBytes, 20);
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 0, 0, 640, 100]), SIMPLEREGION,
+        'a band across the top');
+    assert.deepEqual(lastClip(), { left: 0, top: 100, right: 640, bottom: 480 });
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 600, 0, 700, 480]), SIMPLEREGION,
+        'a band down the right, reaching past the surface');
+    assert.deepEqual(lastClip(), { left: 0, top: 100, right: 600, bottom: 480 });
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 10, 200, 20, 210]), COMPLEXREGION,
+        'a hole in the middle cannot be one rectangle');
+    assert.deepEqual(lastClip(), { left: 0, top: 100, right: 600, bottom: 480 },
+        'so nothing changed');
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 700, 0, 800, 480]), SIMPLEREGION,
+        'a rectangle outside the clip takes nothing');
+
+    memory.putU32s(STRUCT, [0, 0, 5, 5]);
+    assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 0, 'above the excluded band');
+    memory.putU32s(STRUCT, [0, 95, 5, 105]);
+    assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 1, 'straddling its edge');
+    assert.equal(fns.RectVisible.handler([hdc, 0]), 0);
+
+    assert.equal(fns.ExcludeClipRect.handler([hdc, 0, 0, 640, 480]), NULLREGION,
+        'everything: nothing is left');
+    assert.equal(fns.RectVisible.handler([hdc, STRUCT]), 0);
+    assert.equal(fns.ExcludeClipRect.handler([0x9999, 0, 0, 1, 1]), 0);
+});
+
 // --- objects a program reads back ---
 
 test('GetObjectA sizes a buffer before it fills one', ()=>{
