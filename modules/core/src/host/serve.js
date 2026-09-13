@@ -21,6 +21,7 @@
  */
 
 import { createMacrotask, pacedYield, pagePacing } from '../app.js';
+import { createLogReader } from '../layers/log/reader.js';
 
 /** How many presented frames are remembered for a diagnostic to read back. */
 const PRESENT_HISTORY = 600;
@@ -310,6 +311,16 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     let viewport = null;
     /** The GPU device of the running program. @type {any} */
     let device = null;
+    /**
+     * A reader on *this* thread, and only where the page could not have one:
+     * without shared memory the log's block cannot cross, so the answers a
+     * reader would have given here are computed here and posted. With shared
+     * memory this stays null and nothing a reader wants ever reaches this
+     * thread again.
+     *
+     * @type {ReturnType<typeof createLogReader> | null}
+     */
+    let reading = null;
 
     /** @param {import('./messages.js').FromEngine} message */
     const post = message=>port.postMessage(message);
@@ -530,7 +541,17 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             catch {
                 // No mixer in this build: a run without sound is a run.
             }
-            return { audio, adapter };
+
+            // The log's memory crosses here, once, in the answer that starts
+            // the program -- it is shared memory, so crossing is sharing, and
+            // from now on the page reads records, frames, counters and tables
+            // itself. A block that is not shared would cross as a copy that
+            // never moves again, so it is kept here and read here instead.
+            const log = app.log.memory();
+            const shared = typeof SharedArrayBuffer === 'function'
+                && log.journal instanceof SharedArrayBuffer;
+            reading = shared ? null : createLogReader({ memory: log });
+            return { audio, adapter, log: shared ? log : null };
         },
 
         /**
@@ -569,6 +590,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const ending = app;
             app = null;
             started = null;
+            reading = null;
             await ending?.dispose();
             device?.destroy?.();
             device = null;
@@ -587,15 +609,26 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         },
         trace: ()=>app.trace(),
         presented: ()=>({ count: frames, history: presented.slice() }),
+        /*
+         * The reading half of the log, for a page that has no shared memory
+         * to read it in. Every one of these is a request the page does not
+         * make when the block crossed at start: there it reads the same
+         * numbers out of the same memory, on its own thread.
+         */
         'log.recent': (/** @type {number} */ count)=>app.log.recent(count),
         'log.drain': (/** @type {number} */ since, /** @type {number} */ limit)=>
             app.log.drain(since, limit),
+        'log.profile': (/** @type {number} */ worst)=>app.log.profile(worst),
+        'log.frames': (/** @type {number} */ count)=>app.log.frames(count),
+        'log.counters': (/** @type {string} */ layer)=>reading?.counters(layer) ?? {},
+        'log.threads': ()=>reading?.threads() ?? [],
+        'log.guestByModule': ()=>reading?.guestByModule() ?? {},
+        // The writer's gate, which is the engine's to change: a level says
+        // what is kept, and only the thread doing the keeping can be told.
         'log.setLevel': (/** @type {string} */ category, /** @type {string | number} */ level)=>
             app.log.setLevel(category, level),
         'log.setDefaultLevel': (/** @type {string | number} */ level)=>
             app.log.setDefaultLevel(level),
-        'log.profile': (/** @type {number} */ worst)=>app.log.profile(worst),
-        'log.frames': (/** @type {number} */ count)=>app.log.frames(count),
         'input.attach': ()=>viewport && app.input.attach(viewport, { listen: false }),
         'input.detach': ()=>app.input.detach(),
         /**

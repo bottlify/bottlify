@@ -92,7 +92,7 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 
 | place | what it does |
 |---|---|
-| **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, keeps a mirror of the journal, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
+| **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, reads the log out of the shared memory the engine publishes it into, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
 | **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the emulator, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
 | **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | The `bottlify-output` `AudioWorkletProcessor` reads the ring in shared memory; its read index is what a program's play cursor is built on when `audio.drained` is true. |
 
@@ -122,13 +122,17 @@ Three kinds go to the engine, two come back. Only requests carry an id.
 | from engine | `event` | `name`, `payload` | An event the page subscribed to with `on`, or `frame`, which is always sent. |
 
 The method table in `serve.js`: `start`, `run`, `pause`, `resume`, `stop`, `dispose`,
-`diagnostics`, `trace`, `presented`, `log.recent`, `log.drain`, `log.setLevel`,
-`log.setDefaultLevel`, `log.profile`, `log.frames`, `input.attach`, `input.detach`, `on`. Any
+`diagnostics`, `trace`, `presented`, `log.setLevel`, `log.setDefaultLevel`, `input.attach`,
+`input.detach`, `on`, and — only for a page without shared memory — `log.recent`, `log.drain`,
+`log.profile`, `log.frames`, `log.counters`, `log.threads`, `log.guestByModule`. Any
 request other than `start` or `dispose` before a program has started is refused with `nothing has
 been started`; a second `start` with `this worker is already running a program`.
 
 `start` answers with `Started`: `{ audio: { memory: { control, samples }, sampleRate, channels } |
-null, adapter: { vendor, architecture, description } }`. `run` answers with `{ code, registry,
+null, log: LogMemory | null, adapter: { vendor, architecture, description } }`. `log` is the
+journal's block and every layer's table descriptors — shared memory, so the answer shares it rather
+than copying it, and this is the only time it crosses. It is null where the origin has no
+`SharedArrayBuffer`, and the engine then answers the reading calls itself instead. `run` answers with `{ code, registry,
 files }`; `files` is empty unless `collectOnExit` was set.
 
 The `frame` event is sent on the first presented frame and whenever the frame's size changes,
@@ -147,10 +151,10 @@ JSON cost the engine's thread tens of milliseconds per call.
 
 | member | answers | notes |
 |---|---|---|
-| `run(runOptions?)` | `Promise<number>` | Exit code, once the journal mirror has caught up. `runOptions.maxTurns` bounds the turns the guest worked; `runOptions.timeoutMs` bounds the wall clock, which is the only bound a program that just waits ever reaches. |
+| `run(runOptions?)` | `Promise<number>` | Exit code, once the page's own last look at the journal is done, so a tail read right after is the tail. `runOptions.maxTurns` bounds the turns the guest worked; `runOptions.timeoutMs` bounds the wall clock, which is the only bound a program that just waits ever reaches. |
 | `pause()`, `resume()`, `stop()` | `Promise` | |
 | `dispose()` | `Promise` | Ends the program and its device. With a canvas the worker stays alive for the next program in the same canvas; without one it is terminated. |
-| `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's — the cheap read for a poll. |
+| `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's. The **cold** description: a request to the engine's thread, and the only way to see a layer that publishes no table of its own. Not for a poll — what a poll wants is under `log` below. |
 | `trace()` | `Promise<string>` | Where the guest was: registers, a stack scan, the host calls in flight. |
 | `presented()` | `Promise<{ count, history: Presented[] }>` | The last 600 presented frames: `{ index, at, ms, w, h, failed }`. |
 | `frames()` | `number` | Frames shown as of the last `frame` event. Synchronous. |
@@ -158,9 +162,21 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
 | `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |
-| `log.recent(count?)`, `log.drain(since?, limit?)` | synchronous | From the page's mirror of the journal, refreshed every 200 ms, 4000 records a refresh, holding `log.capacity` or 4096 records. A drain's `lost` counts every sequence asked for that the mirror cannot hand over, whether the worker's ring lapped between two refreshes or the mirror lapped a slower reader. |
-| `log.setLevel`, `log.setDefaultLevel`, `log.profile`, `log.frames` | `Promise` | |
+| `log.recent(count?)`, `log.drain(since?, limit?)` | synchronous | Decoded here, out of the journal's ring in shared memory. A drain's `lost` counts every sequence asked for that cannot be handed over. |
+| `log.frames(count?)`, `log.profile(worst?)` | synchronous | The profiler's frame and phase tables, read and sorted here. |
+| `log.counters(layer)`, `log.threads()`, `log.guestByModule()` | synchronous | A layer's counters as a record; the kernel's thread table with its names resolved; retired instructions summed by the region each page is in, heaviest first. |
+| `log.table(layer, name)`, `log.word(id)` | synchronous | Any published table as it lies, and what a name id in one means. Shared memory only — a table is its buffer, and a copy of one has stopped moving. |
+| `log.stats()` | synchronous | `{ written, capacity, lost, rejected }` of the journal. |
+| `log.reading()` | `'shared' \| 'requests'` | Which way the log is being read. |
+| `log.memory()` | `LogMemory \| null` | For a reader of the consumer's own — another worker, a view that polls at its own rate. |
+| `log.setLevel`, `log.setDefaultLevel` | `Promise` | A level is the writer's gate: only the thread that keeps a record can be told what to keep. |
 | `log.areas()` | `string[]` | The `call.*` categories. |
+
+Without shared memory every synchronous `log` call above answers over the port instead — a promise,
+from the engine's own reader, with `recent` and `drain` served from a page-side mirror of the ring
+refreshed every 200 ms (4000 records a refresh, `log.capacity` or 4096 held) so that they stay
+synchronous; `table` and `word` and `memory` answer nothing. `log.reading()` says which it is, and
+the launcher's settings panel prints it.
 | `audio.ring()` | `{ memory }` | The ring's shared buffers, handed over at start. Throws `this run has no sound ring` without a mixer. Synchronous. |
 | `audio.format()` | `{ sampleRate, channels }` | Synchronous. |
 | `input.attach(viewport)` | `DomInput` | Captures keyboard and mouse on `viewport` and posts them. The canvas's own `width`/`height` are stale once transferred, so positions are scaled by the last `frame` event. |
@@ -177,11 +193,17 @@ Events an engine emits and the page may subscribe to include `frame`, `output`, 
 
 ### What became asynchronous, and why
 
-Everything that reads the engine's state crosses a thread, so it answers with a promise — in both
-host modes, so a consumer writes against one shape. Three things stay synchronous by design: the
-journal, because a reader polls it from a render loop and the page keeps a mirror; the sound ring,
-because its memory was handed over once at start; and `session.export()`/`registry()`, because what
-an exit left behind travels back with the exit itself.
+Everything that reads the engine's state by asking for it crosses a thread, so it answers with a
+promise — in both host modes, so a consumer writes against one shape. What stays synchronous is what
+does not have to ask: the whole of `log`, because the journal and every table live in memory the page
+shares and reads itself; the sound ring, because its memory was handed over once at start; and
+`session.export()`/`registry()`, because what an exit left behind travels back with the exit itself.
+
+That is the rule the log half is built on: **nothing a reader does may reach the engine's thread.**
+A poll of `diagnostics()` breaks it, which is why the figures a poll wants — frames, phases,
+counters, threads, the guest attribution — are published into tables instead and summed on the
+reader's side. `diagnostics()` stays for the cold description and for the layers that publish no
+table yet (audio, graphics, bridge, win32, media).
 
 The controller does not carry the engine's `debug`, `post`, `guestProfile`, `mainThread`,
 `recordedSession`, `off`, `exitCode` or `replacements`. Those are reachable only by importing

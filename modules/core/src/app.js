@@ -3942,6 +3942,16 @@ async function buildApp(options){
 
             /** @param {number} [count] The most recent frames, one row each. */
             frames: count=>core.api('log').frames(count),
+
+            /**
+             * The journal's block and every layer's tables, for a reader on
+             * another thread. Handed over once: everything above is then read
+             * there, out of this memory, and this thread is never asked for a
+             * record, a frame or a counter again.
+             *
+             * @returns {import('./layers/log/internal/reader.js').LogMemory}
+             */
+            memory: ()=>core.api('log').memory(),
         },
 
         /** @param {(handle: number, text: string) => void} sink */
@@ -4138,27 +4148,11 @@ async function buildApp(options){
                         rangeBytes: blocks?.ranges().bytes ?? 0,
                     },
                     film: { ...film },
-                    // Which of the program's own code the machine is spent on.
-                    // The scheduler counts it by address because only here are
-                    // the images known by name, and a page number answers
-                    // nothing on its own. Heaviest first, and cut short: the
-                    // tail is every page the guest ever touched once.
-                    guestByModule: (()=>{
-                        const mapped = memory.list();
-                        /** @type {Record<string, number>} */
-                        const byModule = {};
-                        for (const [page, instructions] of Object.entries(kernel.pages())
-                            .sort((left, right)=>right[1] - left[1])
-                            .slice(0, 64))
-                        {
-                            const address = Number(page);
-                            const region = mapped.find((/** @type {any} */ each)=>
-                                address >= each.base && address < each.base + each.size);
-                            const name = region ? region.name : 'unmapped';
-                            byModule[name] = (byModule[name] ?? 0) + instructions;
-                        }
-                        return byModule;
-                    })(),
+                    // Which of the program's own code the machine is spent on
+                    // is not here: the kernel publishes its page counts and the
+                    // memory layer its regions, and whoever reads them sums and
+                    // sorts on their own thread. A table computed on this one
+                    // is a reader's work done by the program.
                     unimplementedCalls: Object.fromEntries(missingCalls),
                     // The guest-to-guest calls a watch was put in front of, by label.
                     watches: [...watches.keys()],

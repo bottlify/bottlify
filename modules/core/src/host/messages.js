@@ -81,11 +81,18 @@
 
 /**
  * What `start` answers with: the sound ring, if the run has one, in the shared
- * memory the page hands to its audio worklet, and who made the adapter.
+ * memory the page hands to its audio worklet, the log's memory for a reader on
+ * the page, and who made the adapter.
+ *
+ * `log` is null where the origin has no shared memory: the block would cross
+ * as a copy that never moves again, so the page asks the engine for what it
+ * wants to read instead. Everything a reader does is on one side or the other,
+ * never half on each.
  *
  * @typedef {Object} Started
  * @property {{ memory: { control: ArrayBufferLike, samples: ArrayBufferLike },
  *     sampleRate: number, channels: number } | null} audio
+ * @property {import('../layers/log/internal/reader.js').LogMemory | null} log
  * @property {{ vendor: string, architecture: string, description: string }} adapter
  */
 

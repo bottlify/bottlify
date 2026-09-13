@@ -252,9 +252,11 @@ under the event's name as its category (`divergence`, `unimplemented`, `bundle-r
   id as -1. Half a megabyte holds tens of thousands of words, so this is an alarm, not a case.
 - **Tables are sampled, not transactional.** A reader may see a row from between two stores of one
   frame; the next frame corrects it.
-- **The engine still answers `recent`/`drain`/`frames`/`profile` on its own thread** until the host
-  hands `memory()` to a reader elsewhere; those calls read the same memory and cost what the reader
-  would have paid, on the wrong thread.
+- **The engine still answers `recent`/`drain`/`frames`/`profile` on its own thread** for whoever
+  calls them there; those calls read the same memory and cost what the reader would have paid, on
+  the wrong thread. The host (`src/host/serve.js`) hands `memory()` across at start and the page
+  reads it itself, so in a normal run nothing calls them — except on an origin without shared
+  memory, where the block cannot cross and they are the fallback.
 
 ## 5. Tests
 

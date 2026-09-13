@@ -25,7 +25,7 @@ repeated below.
 
 ```
 modules/core/src/
-├── index.js               # what the package exports: createApp, assembleModules
+├── index.js               # what the package exports: createApp, assembleModules, createLogReader
 ├── core.js                # assembleModules: registry → plan → scoped hosts → CoreInstance
 ├── app.js                 # the engine: assembles the layers, maps the process, binds imports,
 │                          #   the run loop and its pacing, process replacement

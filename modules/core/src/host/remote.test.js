@@ -9,6 +9,11 @@ import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
 import { serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS } from './serve.js';
 import { PAGE_YIELD_MS } from '../app.js';
+import { createJournal, Level } from '../layers/log/internal/journal.js';
+import { createMetrics } from '../layers/log/internal/metrics.js';
+import {
+    createProfiler, FRAME_COLUMNS, PHASE_COLUMNS, PHASE_ROWS,
+} from '../layers/log/internal/profiler.js';
 
 /**
  * Both ends of the wire, joined by a real MessageChannel: what the page sends
@@ -29,12 +34,33 @@ after(()=>{
     }
 });
 
-/** An application, as far as the wire is concerned. */
-function fakeApp(){
+/**
+ * An application, as far as the wire is concerned.
+ *
+ * The log is the real thing rather than a stand-in: the whole point of the
+ * wire's log half is that one side writes a journal and a table and the other
+ * reads them out of the same memory, and a fake in the middle would prove
+ * nothing about that. `shared: false` builds the same layout in an
+ * `ArrayBuffer`, which is what an origin without cross-origin isolation gets
+ * and what puts the page back on the request path.
+ *
+ * @param {{ capacity?: number, shared?: boolean }} [how]
+ */
+function fakeApp({ capacity = 4096, shared = true } = {}){
     /** @type {Map<string, ((payload: any) => void)[]>} */
     const listeners = new Map();
-    /** @type {any[]} */
-    const records = [];
+    const journal = createJournal({ now: ()=>0, capacity, shared });
+    const registry = createMetrics({ shared });
+    const own = registry.counters('log', ['rejected']);
+    const profiler = createProfiler({
+        now: ()=>0,
+        tables: {
+            frames: registry.table('log', 'frames', { rows: 8, columns: FRAME_COLUMNS }),
+            phases: registry.table('log', 'phases',
+                { rows: PHASE_ROWS, columns: PHASE_COLUMNS }),
+        },
+        intern: journal.intern,
+    });
     const app = {
         options: /** @type {any} */ (null),
         sent: /** @type {any[]} */ ([]),
@@ -51,8 +77,17 @@ function fakeApp(){
         },
         /** @param {string} text */
         write(text){
-            records.push({ sequence: records.length, time: 0, levelName: 'info',
-                category: 'test', text });
+            journal.write(Level.INFO, 'test', text);
+        },
+        /** One closed frame, so that a reader has a frame and a phase to read. */
+        frame(){
+            profiler.beginFrame();
+            profiler.begin('turn', 'guest');
+            profiler.end('turn');
+            const closed = profiler.endFrame();
+            own[0] = journal.rejected();
+            registry.sample();
+            return closed;
         },
         on: (/** @type {string} */ name, /** @type {(payload: any) => void} */ handler)=>{
             listeners.set(name, [...listeners.get(name) ?? [], handler]);
@@ -81,15 +116,21 @@ function fakeApp(){
             ring: ()=>({ memory: { control: new ArrayBuffer(16), samples: new ArrayBuffer(64) } }),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
-        /** How many records the ring behind the wire holds before lapping. */
-        ring: Infinity,
+        /** How many times the log's memory has been asked for. */
+        memories: 0,
         log: {
-            /** @param {number} since @param {number} limit */
-            drain: (since, limit)=>{
-                const from = Math.max(since, records.length - app.ring);
-                const taken = records.slice(from, from + limit);
-                return { records: taken, from, next: from + taken.length, lost: from - since };
+            memory(){
+                app.memories++;
+                return { journal: journal.memory(), tables: registry.describe() };
             },
+            /** @param {number} count */
+            recent: count=>journal.recent(count),
+            /** @param {number} since @param {number} limit */
+            drain: (since, limit)=>journal.drain(since, limit),
+            /** @param {number} count */
+            frames: count=>profiler.frames(count),
+            /** @param {number} worst */
+            profile: worst=>profiler.snapshot(worst),
             setDefaultLevel: (/** @type {any} */ level)=>{
                 app.levels.push(level);
             },
@@ -169,11 +210,12 @@ function fakeViewport({ width, height }){
 
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
- * @param {{ threaded?: boolean, now?: () => number }} [deps]
+ * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
+ *     journal?: { capacity?: number, shared?: boolean } }} [deps]
  */
-async function connect(options = {}, deps = {}){
+async function connect(options = {}, { journal, ...deps } = {}){
     const channel = new MessageChannel();
-    const app = fakeApp();
+    const app = fakeApp(journal);
     const { gpu, canvas, screen } = fakeGpu();
     /** @type {any} */
     let built = null;
@@ -312,29 +354,67 @@ test('a failed run rejects with the reason and trace the page shows', async()=>{
     await remote.dispose();
 });
 
-test('the journal mirror follows the ring and answers a drain as the ring would', async()=>{
+test('the page reads the journal, the frames and the phases without asking the engine', async()=>{
     const { remote, app } = await connect();
     app.write('one');
     app.write('two');
-    await remote.run();
+    app.frame();
+    const crossed = remote.traffic().request;
+
+    assert.equal(remote.log.reading(), 'shared');
     assert.deepEqual(remote.log.recent(1).map((/** @type {any} */ r)=>r.text), ['two']);
     const first = remote.log.drain(0, 10);
     assert.deepEqual(first.records.map((/** @type {any} */ r)=>r.text), ['one', 'two']);
     assert.equal(first.next, 2);
-    const nothing = remote.log.drain(first.next, 10);
-    assert.deepEqual(nothing, { records: [], from: 2, next: 2, lost: 0 });
+    assert.deepEqual(remote.log.drain(first.next, 10), { records: [], from: 2, next: 2, lost: 0 });
+
+    const frames = remote.log.frames(8);
+    assert.equal(frames.length, 1, 'the frame the engine closed, read out of its table');
+    const profile = remote.log.profile(1);
+    assert.equal(profile.frames, 1);
+    assert.ok(profile.phases.some((/** @type {any} */ phase)=>phase.name === 'turn'),
+        'and the phase inside it');
+    assert.deepEqual(remote.log.counters('log'), { rejected: 0 });
+    assert.equal(remote.log.table('log', 'frames')?.written(), 1);
+    assert.deepEqual(remote.log.stats(), { written: 2, capacity: 4096, lost: 0, rejected: 0 });
+    assert.ok(remote.log.memory()?.journal instanceof SharedArrayBuffer);
+
+    assert.equal(remote.traffic().request, crossed,
+        'not one of those reads was a message to the engine');
+
+    // The writer's gate is the one thing that still crosses: a level says what
+    // is kept, and only the thread that keeps it can be told.
     await remote.log.setDefaultLevel('debug');
     assert.deepEqual(app.levels, ['debug']);
+    assert.equal(remote.traffic().request, crossed + 1);
     await remote.dispose();
 });
 
-test('a mirror that falls behind reports exactly the records it missed', async()=>{
-    // A flood laps the worker's ring between two refreshes, and a reader
-    // slower than the mirror is lapped by the mirror's own bound. Both leave
-    // holes in what the mirror holds, and a reader is told the size of every
-    // hole in what it asked for -- never "0 lost" over a sequence with gaps.
-    const { remote, app } = await connect({ log: { capacity: 8 } });
-    app.ring = 6;
+test('the log memory is handed over once, in the answer that starts the program', async()=>{
+    const { remote, app } = await connect();
+    app.write('one');
+    app.frame();
+    remote.log.recent(10);
+    remote.log.frames(8);
+    remote.log.profile(1);
+    remote.log.guestByModule();
+    remote.log.threads();
+    await remote.run();
+    assert.equal(app.memories, 1, 'asked for at start and never again');
+    await remote.dispose();
+    await remote.dispose().catch(()=>{});
+    assert.equal(app.memories, 1);
+});
+
+test('without shared memory the same answers come back over the port', async()=>{
+    // A flood laps the engine's ring between two refreshes, and a reader slower
+    // than the mirror is lapped by the mirror's own bound. Both leave holes in
+    // what the mirror holds, and a reader is told the size of every hole in what
+    // it asked for -- never "0 lost" over a sequence with gaps.
+    const { remote, app } = await connect({ log: { capacity: 8 } },
+        { journal: { shared: false, capacity: 6 } });
+    assert.equal(remote.log.reading(), 'requests');
+    assert.equal(remote.log.memory(), null);
     for (let at = 0; at < 4; at++)
     {
         app.write(`${at}`);
@@ -343,32 +423,46 @@ test('a mirror that falls behind reports exactly the records it missed', async()
     const first = remote.log.drain(0, 100);
     assert.equal(first.lost, 0);
     assert.equal(first.next, 4);
+    app.frame();
+    assert.equal((await remote.log.frames(8)).length, 1, 'a frame still answers, by request');
+    assert.equal((await remote.log.profile(1)).frames, 1);
+    assert.deepEqual(await remote.log.counters('log'), { rejected: 0 });
+    assert.equal(remote.log.table('log', 'frames'), null, 'a table cannot cross as a copy');
 
-    // Ten more while the mirror was not looking: the worker's ring of six
-    // kept 8..13, so 4..7 are gone before the mirror ever saw them.
+    // Ten more while the mirror was not looking: the engine's ring of six kept
+    // only the tail, and the journal wrote its own warning about the lap, so
+    // what the mirror can hand over starts later than it asked for.
     for (let at = 4; at < 14; at++)
     {
         app.write(`${at}`);
     }
     await remote.run();
     const lapped = remote.log.drain(first.next, 100);
-    assert.deepEqual(lapped.records.map((/** @type {any} */ r)=>r.text),
-        ['8', '9', '10', '11', '12', '13']);
-    assert.equal(lapped.from, 8);
-    assert.equal(lapped.lost, 4, 'four sequences asked for, none of them held');
+    assert.ok(lapped.from > first.next, 'the ring lapped between the two looks');
+    assert.equal(lapped.lost, lapped.from - first.next,
+        'and every sequence asked for that it cannot hand over is counted');
+    assert.deepEqual(lapped.records.map((/** @type {any} */ r)=>r.sequence),
+        lapped.records.map((/** @type {any} */ _, /** @type {number} */ i)=>lapped.from + i),
+        'what it does hand over is unbroken');
 
-    // The mirror keeps eight; a reader that has not looked since sequence 4
-    // is now behind the mirror as well as behind the ring.
+    // The mirror keeps eight; a reader that has not looked since sequence 4 is
+    // now behind the mirror as well as behind the ring.
     for (let at = 14; at < 18; at++)
     {
         app.write(`${at}`);
     }
     await remote.run();
     const slow = remote.log.drain(4, 100);
-    assert.deepEqual(slow.records.map((/** @type {any} */ r)=>r.text),
-        ['10', '11', '12', '13', '14', '15', '16', '17']);
-    assert.equal(slow.lost, 6, 'four the ring lost and two the mirror dropped');
+    assert.equal(slow.records.length, 8, 'the mirror holds eight records');
+    assert.deepEqual(slow.records.map((/** @type {any} */ r)=>r.text).slice(-4),
+        ['14', '15', '16', '17']);
+    assert.equal(slow.lost, slow.next - 4 - slow.records.length,
+        'the ring lost some and the mirror dropped the rest, all of them counted');
     assert.equal(remote.log.drain(slow.next, 100).lost, 0, 'and none once caught up');
+    const stats = await remote.log.stats();
+    assert.equal(stats.written, slow.next, 'everything the engine has written');
+    assert.equal(stats.capacity, 8);
+    assert.ok(stats.lost > 0, 'and what the engine said it had lapped before a refresh read it');
     await remote.dispose();
 });
 
