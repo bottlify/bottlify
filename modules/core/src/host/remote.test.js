@@ -313,6 +313,21 @@ test('an input event arrives at the router as it left the page', async()=>{
     await remote.dispose();
 });
 
+test('attaching with pointerLock asks the page canvas for the lock on a click', async()=>{
+    const { remote } = await connect();
+    let asked = 0;
+    const viewport = { ...fakeViewport({ width: 320, height: 240 }),
+        requestPointerLock: ()=>{ asked++; } };
+    remote.input.attach(viewport, { pointerLock: true });
+    viewport.fire('pointerdown', { clientX: 1, clientY: 1, button: 0, pointerId: 1 });
+    assert.equal(asked, 1);
+    remote.input.detach();
+    remote.input.attach(viewport);
+    viewport.fire('pointerdown', { clientX: 1, clientY: 1, button: 0, pointerId: 1 });
+    assert.equal(asked, 1);
+    await remote.dispose();
+});
+
 test('a DOM event captured on the page is scaled by the frame the worker presented', async()=>{
     const { remote, app, built } = await connect();
     // The page's canvas is 320x240 on screen and keeps saying so; the worker

@@ -481,11 +481,15 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
          * router's own events; the worker never sees a DOM event.
          */
         input: {
-            /** @param {any} viewport */
-            attach(viewport){
+            /**
+             * @param {any} viewport
+             * @param {{ pointerLock?: boolean }} [mode]
+             */
+            attach(viewport, mode){
                 dom?.detach();
                 dom = createDomInput({
                     canvas: viewport,
+                    pointerLock: mode?.pointerLock ?? false,
                     send: event=>{
                         /** @type {import('./messages.js').InputMessage} */
                         const message = { type: 'input', event };
