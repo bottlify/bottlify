@@ -1306,6 +1306,32 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([hwnd])=>(live(hwnd) ? hwnd >>> 0 : 0),
         },
 
+        /**
+         * int SetWindowRgn(HWND hWnd, HRGN hRgn, BOOL bRedraw)
+         *
+         * A window shaped by a region. The shape is accepted and the region
+         * becomes the system's, as documented, but nothing here clips the
+         * window to it: it paints as the rectangle it always was, which is
+         * reported once because a skinned setup window looks different for
+         * it. Declared so the twelve bytes it was pushed are popped.
+         */
+        SetWindowRgn: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, hRgn])=>{
+                if (!live(hwnd))
+                {
+                    return 0;
+                }
+                if ((hRgn >>> 0) !== 0)
+                {
+                    host.divergence?.('SetWindowRgn',
+                        'a window region is accepted and the window is not clipped to it');
+                }
+                return 1;
+            },
+        },
+
         /** BOOL ShowOwnedPopups(HWND hWnd, BOOL fShow) */
         ShowOwnedPopups: {
             argBytes: 8,

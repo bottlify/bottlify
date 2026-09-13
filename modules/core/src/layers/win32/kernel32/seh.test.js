@@ -46,7 +46,7 @@ function machine(options = {}){
         setRegisters: values=>{
             registers = { ...registers, ...values };
         },
-        /** @param {{ entry: number, args: number[] }} call */
+        /** @param {{ entry: number, args: number[], stackAtRest?: number }} call */
         callGuest: async call=>{
             called.push({ entry: call.entry, args: [...call.args] });
             return options.answer
@@ -149,22 +149,31 @@ test('the record is built on the program\'s stack, below where it was', async()=
 });
 
 test('handlers run below the record they were handed', async()=>{
-    // They push onto the same stack. Leaving the pointer where it was has the
-    // first handler write over the record it is reading.
-    /** @type {number[]} */
+    // They push onto the same stack. A frame built where the call in flight
+    // left the stack has the first handler's own frames grow down over the
+    // context and then the record it is reading -- and a C++ frame handler
+    // that reads a return address where the exception code was takes the
+    // exception for a foreign one and declines it.
+    /** @type {(number | undefined)[]} */
     const seen = [];
     const m = machine();
     const original = m.host.callGuest;
     m.host.callGuest = async call=>{
-        seen.push(m.registers().esp);
+        seen.push(call.stackAtRest);
         return original(call);
     };
-    m.registerFrames([0x51000]);
+    m.registerFrames([0x51000, 0x52000]);
 
     await m.seh.dispatch({ code: 1, address: 0x401000 });
+    await m.seh.unwind(0x20100, 0x401010);
 
     const [{ args: [record] }] = m.called;
-    assert.ok(seen[0] <= record, 'the stack pointer is at or below the record');
+    assert.equal(seen.length, 3);
+    for (const stackAtRest of seen)
+    {
+        assert.ok(stackAtRest !== undefined && stackAtRest <= record,
+            'the frame is built at or below the record');
+    }
 });
 
 test('a context a handler changed is what execution continues with', async()=>{

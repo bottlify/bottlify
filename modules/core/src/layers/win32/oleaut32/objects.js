@@ -511,6 +511,40 @@ export function createTypeLibraryObjects(host){
         : description.functions);
 
     /**
+     * The functions a type answers to by name or member id: its own, then
+     * those of every type it derives from within the library. A derived
+     * dual interface's dispatch view lists only its own methods, and a
+     * program asking it for a base member's id expects the answer the base
+     * would give, which is what the real ITypeInfo does.
+     *
+     * @param {TypeLibrary} library
+     * @param {TypeInfoDescription} description
+     * @returns {FunctionDescription[]}
+     */
+    const inheritedFunctionsOf = (library, description)=>{
+        const collected = [...functionsOf(description)];
+        const seen = new Set([description]);
+        /** @type {TypeInfoDescription[]} */
+        const pending = [description];
+        while (pending.length > 0)
+        {
+            const type = /** @type {TypeInfoDescription} */ (pending.shift());
+            for (const implemented of type.implementedTypes)
+            {
+                const base = resolveReference(library, implemented.hreftype);
+                if (!base || isImport(base) || seen.has(base))
+                {
+                    continue;
+                }
+                seen.add(base);
+                collected.push(...base.functions);
+                pending.push(base);
+            }
+        }
+        return collected;
+    };
+
+    /**
      * The ITypeInfo for one type of a library, made once per type.
      *
      * @param {LibraryState} owner @param {number} hreftype
@@ -732,16 +766,17 @@ export function createTypeLibraryObjects(host){
      * ITypeInfo::GetIDsOfNames. The first name is a member's; the rest name
      * its parameters, whose ids are their positions.
      *
+     * @param {TypeLibrary} library
      * @param {TypeInfoDescription} type
      * @param {number} names @param {number} count @param {number} out
      */
-    const getIDsOfNames = (type, names, count, out)=>{
+    const getIDsOfNames = (library, type, names, count, out)=>{
         if (names === 0 || out === 0)
         {
             return E_INVALIDARG;
         }
         const wanted = readWide(readU32(names)).toLowerCase();
-        const members = [...functionsOf(type), ...type.variables];
+        const members = [...inheritedFunctionsOf(library, type), ...type.variables];
         const member = members.find(entry=>entry.name?.toLowerCase() === wanted);
         if (!member)
         {
@@ -1031,7 +1066,8 @@ export function createTypeLibraryObjects(host){
         { name: 'GetIDsOfNames', argBytes: 16,
             /** @param {ComAdapter} object @param {number[]} args */
             invoke: (object, [names, count, out])=>
-                getIDsOfNames(object.state.description, names >>> 0, count >>> 0, out >>> 0) },
+                getIDsOfNames(object.state.owner.library, object.state.description,
+                    names >>> 0, count >>> 0, out >>> 0) },
         /**
          * HRESULT Invoke(PVOID pvInstance, MEMBERID memid, WORD wFlags,
          *     DISPPARAMS *pDispParams, VARIANT *pVarResult,
@@ -1047,7 +1083,8 @@ export function createTypeLibraryObjects(host){
                 {
                     return E_INVALIDARG;
                 }
-                const fn = invoker.find(functionsOf(type), memid | 0, flags & 0xffff);
+                const fn = invoker.find(inheritedFunctionsOf(state.owner.library, type),
+                    memid | 0, flags & 0xffff);
                 if (!fn)
                 {
                     return DISP_E_MEMBERNOTFOUND;
@@ -1209,7 +1246,7 @@ export function createTypeLibraryObjects(host){
             const state = typeInfosByPointer.get(pointer >>> 0);
             return state
                 ? { getIDsOfNames: (names, count, out)=>
-                    getIDsOfNames(state.description, names, count, out) }
+                    getIDsOfNames(state.owner.library, state.description, names, count, out) }
                 : null;
         },
     };

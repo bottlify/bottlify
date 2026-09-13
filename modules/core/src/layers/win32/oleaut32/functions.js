@@ -50,6 +50,7 @@ const VT_BSTR = 8;
 const VT_DISPATCH = 9;
 const VT_ERROR = 10;
 const VT_BOOL = 11;
+const VT_VARIANT = 12;
 const VT_UNKNOWN = 13;
 const VT_I1 = 16;
 const VT_UI1 = 17;
@@ -67,6 +68,18 @@ const FADF_BSTR = 0x100;
 const FADF_UNKNOWN = 0x200;
 const FADF_DISPATCH = 0x400;
 const FADF_VARIANT = 0x800;
+const DISP_E_ARRAYISLOCKED = 0x8002000d | 0;
+
+/**
+ * How many bytes one element of each array type takes.
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
+const ELEMENT_BYTES = Object.freeze({
+    [VT_I2]: 2, [VT_I4]: 4, [VT_R4]: 4, [VT_R8]: 8, [VT_BSTR]: 4, [VT_DISPATCH]: 4,
+    [VT_ERROR]: 4, [VT_BOOL]: 2, [VT_VARIANT]: VARIANT_BYTES, [VT_UNKNOWN]: 4, [VT_I1]: 1,
+    [VT_UI1]: 1, [VT_UI2]: 2, [VT_UI4]: 4, [VT_INT]: 4, [VT_UINT]: 4,
+});
 
 /** The two bits of a VARTYPE that are not the type. */
 const VT_BYREF = 0x4000;
@@ -794,6 +807,36 @@ export function createAutomationFunctions(host){
         };
     };
 
+    /**
+     * Where one element lives. The indices name the leftmost dimension
+     * first, and it is the leftmost that varies fastest in the data.
+     *
+     * @param {number} psa @param {number} rgIndices
+     * @returns {{ array: NonNullable<ReturnType<typeof safeArrayAt>>, address: number }
+     *           | { error: number }}
+     */
+    const elementAt = (psa, rgIndices)=>{
+        const array = safeArrayAt(psa);
+        if (!array || rgIndices === 0)
+        {
+            return { error: E_INVALIDARG };
+        }
+        let offset = 0;
+        let stride = 1;
+        for (let dim = 0; dim < array.dims; dim++)
+        {
+            const bound = array.bounds[array.dims - 1 - dim];
+            const index = readU32(rgIndices + dim * 4) | 0;
+            if (index < bound.lower || index >= bound.lower + bound.elements)
+            {
+                return { error: DISP_E_BADINDEX };
+            }
+            offset += (index - bound.lower) * stride;
+            stride *= bound.elements;
+        }
+        return { array, address: array.data + offset * array.elementBytes };
+    };
+
     const registerTypeLib = {
         argBytes: 12,
         /** @param {number[]} args */
@@ -1197,6 +1240,284 @@ export function createAutomationFunctions(host){
         },
 
         /**
+         * SAFEARRAY *SafeArrayCreate(VARTYPE vt, UINT cDims, SAFEARRAYBOUND *rgsabound)
+         *
+         * A descriptor and zeroed data for the type and bounds asked for.
+         * The caller's bounds name the leftmost dimension first; the
+         * descriptor keeps them the other way round, which is the order the
+         * bound readers below count from.
+         */
+        SafeArrayCreate: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([vt, cDims, rgsabound])=>{
+                const type = vt & 0xffff;
+                const dims = cDims >>> 0;
+                const elementBytes = ELEMENT_BYTES[type];
+                if (elementBytes === undefined || dims === 0 || (rgsabound >>> 0) === 0)
+                {
+                    return 0;
+                }
+                let elements = 1;
+                for (let index = 0; index < dims; index++)
+                {
+                    elements *= readU32((rgsabound >>> 0) + index * 8);
+                }
+                const dataBytes = Math.max(1, elements * elementBytes);
+                const descriptor = host.heap.allocate(SAFEARRAY_BOUNDS + dims * 8);
+                const data = host.heap.allocate(dataBytes);
+                if (descriptor === 0 || data === 0)
+                {
+                    host.heap.free(descriptor);
+                    host.heap.free(data);
+                    return 0;
+                }
+                const features = type === VT_BSTR ? FADF_BSTR
+                    : type === VT_UNKNOWN ? FADF_UNKNOWN
+                        : type === VT_DISPATCH ? FADF_DISPATCH
+                            : type === VT_VARIANT ? FADF_VARIANT : 0;
+                writeU16(descriptor, dims);
+                writeU16(descriptor + 2, features);
+                writeU32(descriptor + 4, elementBytes);
+                writeU32(descriptor + 8, 0);
+                writeU32(descriptor + 12, data);
+                for (let index = 0; index < dims; index++)
+                {
+                    host.writeMemory(descriptor + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
+                        host.readMemory((rgsabound >>> 0) + index * 8, 8).slice());
+                }
+                host.writeMemory(data, new Uint8Array(dataBytes));
+                return descriptor;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayDestroy(SAFEARRAY *psa)
+         *
+         * The elements that own something are released first, as
+         * VariantClear releases them; a locked array is the caller's still.
+         */
+        SafeArrayDestroy: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array)
+                {
+                    return S_OK;
+                }
+                if (array.locks !== 0)
+                {
+                    return DISP_E_ARRAYISLOCKED;
+                }
+                const elements = array.bounds.reduce((total, bound)=>total * bound.elements, 1);
+                if (array.data !== 0)
+                {
+                    for (let index = 0; index < elements; index++)
+                    {
+                        if ((array.features & FADF_BSTR) !== 0)
+                        {
+                            freeBstr(readU32(array.data + index * 4));
+                        }
+                        else if ((array.features & FADF_VARIANT) !== 0)
+                        {
+                            clear(array.data + index * VARIANT_BYTES);
+                        }
+                    }
+                    host.heap.free(array.data);
+                }
+                host.heap.free(psa >>> 0);
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayRedim(SAFEARRAY *psa, SAFEARRAYBOUND *psaboundNew)
+         *
+         * Changes the rightmost dimension, which is the slowest-varying and
+         * so the one whose elements sit at the end of the data: growing
+         * appends zeroed elements, shrinking drops the last ones, and what
+         * they owned goes with them.
+         */
+        SafeArrayRedim: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, psaboundNew])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (psaboundNew >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                if (array.locks !== 0)
+                {
+                    return DISP_E_ARRAYISLOCKED;
+                }
+                const inner = array.bounds.slice(1)
+                    .reduce((total, bound)=>total * bound.elements, 1);
+                const before = array.bounds[0].elements * inner;
+                const elements = readU32(psaboundNew >>> 0);
+                const after = elements * inner;
+                const stride = array.elementBytes;
+                for (let index = after; index < before; index++)
+                {
+                    if ((array.features & FADF_BSTR) !== 0)
+                    {
+                        freeBstr(readU32(array.data + index * 4));
+                    }
+                    else if ((array.features & FADF_VARIANT) !== 0)
+                    {
+                        clear(array.data + index * VARIANT_BYTES);
+                    }
+                }
+                if (after > before)
+                {
+                    const data = host.heap.allocate(after * stride);
+                    if (data === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    host.writeMemory(data, new Uint8Array(after * stride));
+                    if (array.data !== 0)
+                    {
+                        host.writeMemory(data,
+                            host.readMemory(array.data, before * stride).slice());
+                        host.heap.free(array.data);
+                    }
+                    writeU32((psa >>> 0) + 12, data);
+                }
+                host.writeMemory((psa >>> 0) + SAFEARRAY_BOUNDS,
+                    host.readMemory(psaboundNew >>> 0, 8).slice());
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayGetElement(SAFEARRAY *psa, LONG *rgIndices, void *pv)
+         * HRESULT SafeArrayPutElement(SAFEARRAY *psa, LONG *rgIndices, void *pv)
+         *
+         * One element, copied the way its type is copied: a string is
+         * duplicated and a variant goes through VariantCopy, so what the
+         * caller gets is its own to free, and what it put stays the array's.
+         * An interface pointer goes in and out as it is, which VariantCopy
+         * already reports.
+         */
+        SafeArrayGetElement: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([psa, rgIndices, pv])=>{
+                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                if ('error' in at)
+                {
+                    return at.error;
+                }
+                if ((pv >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const { features, elementBytes } = at.array;
+                if ((features & FADF_BSTR) !== 0)
+                {
+                    const source = readU32(at.address);
+                    const copy = source === 0 ? 0 : allocateBstr(
+                        host.readMemory(source, byteLengthOf(source)).slice());
+                    if (source !== 0 && copy === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    writeU32(pv >>> 0, copy);
+                    return S_OK;
+                }
+                if ((features & FADF_VARIANT) !== 0)
+                {
+                    host.writeMemory(pv >>> 0, new Uint8Array(VARIANT_BYTES));
+                    return copyVariant(pv >>> 0, at.address);
+                }
+                host.writeMemory(pv >>> 0, host.readMemory(at.address, elementBytes).slice());
+                return S_OK;
+            },
+        },
+        SafeArrayPutElement: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([psa, rgIndices, pv])=>{
+                const at = elementAt(psa >>> 0, rgIndices >>> 0);
+                if ('error' in at)
+                {
+                    return at.error;
+                }
+                if ((pv >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const { features, elementBytes } = at.array;
+                if ((features & FADF_BSTR) !== 0)
+                {
+                    // The argument is the BSTR itself, not a pointer to one.
+                    const source = pv >>> 0;
+                    const copy = allocateBstr(
+                        host.readMemory(source, byteLengthOf(source)).slice());
+                    if (copy === 0)
+                    {
+                        return E_OUTOFMEMORY;
+                    }
+                    freeBstr(readU32(at.address));
+                    writeU32(at.address, copy);
+                    return S_OK;
+                }
+                if ((features & (FADF_UNKNOWN | FADF_DISPATCH)) !== 0)
+                {
+                    writeU32(at.address, pv >>> 0);
+                    return S_OK;
+                }
+                if ((features & FADF_VARIANT) !== 0)
+                {
+                    return copyVariant(at.address, pv >>> 0);
+                }
+                host.writeMemory(at.address, host.readMemory(pv >>> 0, elementBytes).slice());
+                return S_OK;
+            },
+        },
+
+        /**
+         * HRESULT SafeArrayAccessData(SAFEARRAY *psa, void **ppvData)
+         * HRESULT SafeArrayUnaccessData(SAFEARRAY *psa)
+         *
+         * A lock and the data pointer; nothing here moves data, so the
+         * pointer is the one the descriptor already holds.
+         */
+        SafeArrayAccessData: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([psa, out])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array || (out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeU32((psa >>> 0) + 8, array.locks + 1);
+                writeU32(out >>> 0, array.data);
+                return S_OK;
+            },
+        },
+        SafeArrayUnaccessData: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([psa])=>{
+                const array = safeArrayAt(psa >>> 0);
+                if (!array)
+                {
+                    return E_INVALIDARG;
+                }
+                if (array.locks === 0)
+                {
+                    return E_UNEXPECTED;
+                }
+                writeU32((psa >>> 0) + 8, array.locks - 1);
+                return S_OK;
+            },
+        },
+
+        /**
          * UINT SafeArrayGetDim(SAFEARRAY *psa)
          * UINT SafeArrayGetElemsize(SAFEARRAY *psa)
          * HRESULT SafeArrayGetUBound(SAFEARRAY *psa, UINT nDim, LONG *plUbound)
@@ -1499,15 +1820,22 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
-    15: 'SafeArrayGetDim',
-    16: 'SafeArrayGetElemsize',
-    17: 'SafeArrayGetUBound',
-    18: 'SafeArrayGetLBound',
-    19: 'SafeArrayLock',
-    20: 'SafeArrayUnlock',
-    25: 'SafeArrayCopy',
-    26: 'DispGetParam',
-    27: 'DispGetIDsOfNames',
+    15: 'SafeArrayCreate',
+    16: 'SafeArrayDestroy',
+    17: 'SafeArrayGetDim',
+    18: 'SafeArrayGetElemsize',
+    19: 'SafeArrayGetUBound',
+    20: 'SafeArrayGetLBound',
+    21: 'SafeArrayLock',
+    22: 'SafeArrayUnlock',
+    23: 'SafeArrayAccessData',
+    24: 'SafeArrayUnaccessData',
+    25: 'SafeArrayGetElement',
+    26: 'SafeArrayPutElement',
+    27: 'SafeArrayCopy',
+    28: 'DispGetParam',
+    29: 'DispGetIDsOfNames',
+    40: 'SafeArrayRedim',
     161: 'LoadTypeLib',
     162: 'LoadRegTypeLib',
     163: 'RegisterTypeLib',

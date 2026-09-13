@@ -79,6 +79,10 @@ const MF_GRAYED = 0x0001;
 const MF_DISABLED = 0x0002;
 const MF_CHECKED = 0x0008;
 const MFT_SEPARATOR = 0x0800;
+const MF_BITMAP = 0x0004;
+const MF_POPUP = 0x0010;
+const MF_OWNERDRAW = 0x0100;
+const MF_SEPARATOR = 0x0800;
 /** The check mark of the default menu font, in pixels each way. */
 const CHECK_MARK_SIZE = 13;
 
@@ -576,6 +580,28 @@ export function createObjectFunctions({ host, live }){
         },
 
         /**
+         * BOOL RemoveMenu(HMENU hMenu, UINT uPosition, UINT uFlags)
+         *
+         * DeleteMenu without the destruction: an item that opens a submenu
+         * is taken out and the submenu stays the program's, which is what
+         * lets it be put back or hung elsewhere.
+         */
+        RemoveMenu: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, position, flags])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, position, flags) : null;
+                if (!found)
+                {
+                    return 0;
+                }
+                found.menu.items.splice(found.at, 1);
+                return 1;
+            },
+        },
+
+        /**
          * HMENU GetSystemMenu(HWND hWnd, BOOL bRevert)
          *
          * A window's system menu is made the first time it is asked for, with
@@ -653,6 +679,41 @@ export function createObjectFunctions({ host, live }){
                     submenu: described.submenu,
                     data: described.data,
                     text: described.text ?? '',
+                });
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AppendMenuA(HMENU hMenu, UINT uFlags, UINT_PTR uIDNewItem, LPCSTR lpNewItem)
+         *
+         * The older spelling of an insertion at the end: the flags say what
+         * the item is, the id is a submenu handle when MF_POPUP is among
+         * them, and the text is a string unless the item is a separator or
+         * owner-drawn -- when it is data the program will read back.
+         */
+        AppendMenuA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, uFlags, id, newItem])=>{
+                const menu = menuOf(handle);
+                if (!menu)
+                {
+                    return 0;
+                }
+                const flags = uFlags >>> 0;
+                const separator = (flags & MF_SEPARATOR) !== 0;
+                const text = separator || (flags & (MF_BITMAP | MF_OWNERDRAW)) !== 0
+                    || (newItem >>> 0) === 0
+                    ? ''
+                    : host.readCString(newItem >>> 0, MAX_TEXT);
+                menu.items.push({
+                    id: (flags & MF_POPUP) !== 0 ? 0 : id >>> 0,
+                    type: (separator ? MFT_SEPARATOR : 0) | (flags & MF_OWNERDRAW),
+                    state: flags & (MF_GRAYED | MF_DISABLED | MF_CHECKED),
+                    submenu: (flags & MF_POPUP) !== 0 ? id >>> 0 : 0,
+                    data: (flags & MF_OWNERDRAW) !== 0 ? newItem >>> 0 : 0,
+                    text,
                 });
                 return 1;
             },

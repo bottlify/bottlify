@@ -214,7 +214,8 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *           Where a write to a standard handle goes instead of the filesystem.
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any,
- *              close: (handle: number) => any }} handles
+ *              close: (handle: number) => any,
+ *              typeOf?: (handle: number) => string | undefined }} handles
  *           The one handle table, shared with every other kind of object.
  * @property {() => any} [currentThread]
  *           Whose call this is, for an answer that arrives after the thread has
@@ -1236,8 +1237,13 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
+                    // Only a file handle owns its node. A mapping over the
+                    // file carries the same node, and closing the mapping
+                    // must leave the file open, or the program's own close
+                    // of the file fails as an invalid handle afterwards.
+                    const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node)
+                    if (closed && closed.node && (type === undefined || type === 'file'))
                     {
                         files.close(closed.node);
                     }
@@ -1743,8 +1749,13 @@ export function createFileFunctions(host){
             handler: ([handle])=>{
                 try
                 {
+                    // Only a file handle owns its node. A mapping over the
+                    // file carries the same node, and closing the mapping
+                    // must leave the file open, or the program's own close
+                    // of the file fails as an invalid handle afterwards.
+                    const type = host.handles.typeOf?.(handle >>> 0);
                     const closed = host.handles.close(handle >>> 0);
-                    if (closed && closed.node)
+                    if (closed && closed.node && (type === undefined || type === 'file'))
                     {
                         files.close(closed.node);
                     }

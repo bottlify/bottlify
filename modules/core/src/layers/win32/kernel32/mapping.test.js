@@ -82,6 +82,8 @@ function setup(){
                 node.data.set(data, offset);
                 return data.length;
             },
+            /** @param {any} node */
+            size: node=>node.data.length,
         },
     });
 
@@ -120,6 +122,22 @@ test('a read-only view is not written back', ()=>{
     bytes[view] = 0x77;
     fns.UnmapViewOfFile.handler([view]);
     assert.equal(file.data[0], 1, 'the file kept what it had');
+});
+
+test('a mapping of a file with no size given is as large as the file', ()=>{
+    // The usual way a program maps a file whole: neither the mapping nor the
+    // view names a size, and both mean "all of it".
+    const { fns, bytes, file, fileHandle } = setup();
+    const mapping = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READONLY, 0, 0, 0]);
+    assert.notEqual(mapping, 0);
+    const view = fns.MapViewOfFile.handler([mapping, FILE_MAP_READ, 0, 0, 0]);
+    assert.notEqual(view, 0);
+    assert.deepEqual([...bytes.slice(view, view + file.data.length)], [...file.data]);
+    assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
+
+    file.data = new Uint8Array(0);
+    assert.equal(fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READONLY, 0, 0, 0]), 0,
+        'an empty file cannot be mapped');
 });
 
 test('a mapping with no file must be told its size', ()=>{

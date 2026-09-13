@@ -274,6 +274,10 @@ function fakeHandles(){
             return entry.object;
         },
         /** @param {number} handle */
+        typeOf(handle){
+            return entries.get(handle)?.type;
+        },
+        /** @param {number} handle */
         close(handle){
             const entry = entries.get(handle);
             if (!entry)
@@ -589,12 +593,20 @@ test('closing a file handle closes it once and for all', ()=>{
 });
 
 test('CloseHandle closes what other tables opened, without telling the filesystem', ()=>{
-    const { handles, fns } = setup();
+    const { handles, fns, files, open } = setup();
     const event = handles.open('event', { signalled: false });
 
     assert.equal(fns.CloseHandle.handler([event]), 1,
         'one handle space means one CloseHandle');
     assert.equal(handles.has(event), false);
+
+    // A mapping over an open file carries the file's node; closing the
+    // mapping leaves the file open for its own close.
+    files.put('C:\\GAME\\SAVE.DAT', 'abcd');
+    const file = open('C:\\GAME\\SAVE.DAT', OPEN_EXISTING);
+    const mapping = handles.open('mapping', { node: handles.resolve(file).node, size: 4 });
+    assert.equal(fns.CloseHandle.handler([mapping]), 1);
+    assert.equal(fns.CloseHandle.handler([file]), 1, 'the file was still open');
 });
 
 test('deleting reports which half of the path was not there', ()=>{

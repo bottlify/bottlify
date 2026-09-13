@@ -287,6 +287,24 @@ test('names go both ways: GetNames, GetIDsOfNames, FindName and IsName', ()=>{
     assert.equal(host.u32(0x500) | 0, -1, 'MEMBERID_NIL for a type');
 });
 
+test('a name a derived dispinterface inherits is found, as its base would find it', ()=>{
+    // ISetupOpSequence2 adds two methods to ISetupOpSequence; a program that
+    // asks it for "Count" is asking for the base's member.
+    const { host, lib } = setup();
+    host.invoke(lib, 'GetTypeInfo', [26, OUT]);
+    const info = host.u32(OUT);
+    host.putWide(0x400, 'count');
+    host.putU32(NAMES, 0x400);
+    assert.equal(host.invoke(info, 'GetIDsOfNames', [NAMES, 1, OUT]), 0);
+    assert.equal(host.u32(OUT), 1);
+    host.putWide(0x400, 'getlast');
+    assert.equal(host.invoke(info, 'GetIDsOfNames', [NAMES, 1, OUT]), 0);
+    assert.equal(host.u32(OUT), 6, 'its own still come first');
+    host.putWide(0x400, 'mainlog');
+    assert.equal(host.invoke(info, 'GetIDsOfNames', [NAMES, 1, OUT]) >>> 0, 0x80020006,
+        'a member of another type is still unknown');
+});
+
 test('references: the base, the dual twin, the standard imports, and the container', ()=>{
     const { host, lib } = setup();
     host.invoke(lib, 'GetTypeInfo', [33, OUT]);

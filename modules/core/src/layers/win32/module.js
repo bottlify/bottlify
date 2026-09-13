@@ -627,6 +627,8 @@ export const win32Module = {
                         read: (node, offset, length)=>volume.read(node, offset, length),
                         /** @param {any} node @param {number} offset @param {Uint8Array} bytes */
                         write: (node, offset, bytes)=>volume.write(node, offset, bytes),
+                        /** @param {any} node */
+                        size: node=>filesystem.size(node),
                     },
                     currentThread: ()=>kernel.currentThread(),
                     setLastErrorFor: setErrorOn,
@@ -1024,6 +1026,12 @@ export const win32Module = {
                 divergence: config?.divergence,
                 vtables: comVtables,
                 hive,
+                // A docfile is a file on the volume, and an object a program
+                // saves into one answers GetClassID and Save on its own side.
+                files: volume,
+                /** @param {number} entry @param {number[]} args @param {unknown} [thread] */
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                callerThread: ()=>bridge.callerThread(),
                 // Read at call time: the table they live in is built above,
                 // but the object holding it is assigned after this literal.
                 libraries: {

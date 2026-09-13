@@ -261,9 +261,15 @@ export const bridgeModule = {
              *   turning and gave other threads their turns, and by the time it
              *   resumes the thread on the processor is somebody else. A caller
              *   in that position has to remember whose call it is answering.
+             * @param {number} [call.stackAtRest]
+             *   Where to build the frame instead of at the call in flight's
+             *   free stack. A caller that has put something on the stack
+             *   itself -- an exception record and context, handed to the
+             *   routine it is about to run -- names the stack below that, or
+             *   the routine's own frames grow down over what it was given.
              * @returns {Promise<number>}
              */
-            callGuest({ entry, args = [], thread }){
+            callGuest({ entry, args = [], thread, stackAtRest }){
                 const frame = parking.current();
                 // Whose call this answers, and never "whoever is running". A
                 // handler still holding the processor is answering the call in
@@ -295,7 +301,7 @@ export const bridgeModule = {
                     // Only a call still holding the processor describes this
                     // thread's stack; otherwise the thread's own suspended call
                     // is the record of where it came to rest.
-                    stackAtRest: parking.freeStackFor(runOn),
+                    stackAtRest: stackAtRest ?? parking.freeStackFor(runOn),
                 });
             },
 

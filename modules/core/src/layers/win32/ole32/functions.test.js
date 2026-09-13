@@ -282,13 +282,6 @@ test('OleInitialize enters the same apartment as CoInitialize and OleUninitializ
     assert.equal(host.threads.first.ole32, null);
 });
 
-test('a stream on a global is refused as an allocation failure and reported', ()=>{
-    const { host, fns } = setup();
-    assert.equal(fns.CreateStreamOnHGlobal.handler([0x100, 1, PPV]), E_OUTOFMEMORY);
-    assert.equal(host.u32(PPV), 0);
-    assert.equal(host.reported.length, 1);
-});
-
 test('an unbalanced CoUninitialize does nothing', ()=>{
     const { host, fns } = setup();
     fns.CoUninitialize.handler();
@@ -681,17 +674,30 @@ test('ProgIDFromCLSID reads the class key, and an unregistered class has none', 
     assert.equal(String.fromCharCode(...units), 'Test.Class.1');
 });
 
-test('structured storage is refused with a null object and a divergence', ()=>{
+test('CLSIDFromProgID reads the ProgID key, and an unknown ProgID is not a class', ()=>{
     const { host, fns } = setup();
+    host.putWide(STRING_BUFFER, 'Test.Class.1');
+    host.fill(GUID_OUT, 4);
+    assert.equal(fns.CLSIDFromProgID.handler([STRING_BUFFER, GUID_OUT]) >>> 0, CO_E_CLASSSTRING);
+    assert.equal(formatGuid(host.bytes.subarray(GUID_OUT, GUID_OUT + GUID_SIZE)), GUID_NULL);
+
+    const clsid = Uint8Array.from([...CLSID_TEST].map(c=>c.charCodeAt(0)));
+    host.hive = {
+        root: ()=>({}),
+        open: (key, path)=>(path === 'Test.Class.1\\CLSID' ? { clsid } : null),
+        getValue: key=>({ data: key.clsid }),
+    };
+    const withHive = createOleFunctions(host);
+    assert.equal(withHive.CLSIDFromProgID.handler([STRING_BUFFER, GUID_OUT]), S_OK);
+    assert.equal(formatGuid(host.bytes.subarray(GUID_OUT, GUID_OUT + GUID_SIZE)), CLSID_TEST);
+    assert.equal(withHive.CLSIDFromProgID.handler([0, GUID_OUT]), E_INVALIDARG);
+
+    assert.equal(withHive.CoReleaseMarshalData.handler(), S_OK);
     host.fill(PPV, 1);
-    assert.equal(fns.StgCreateDocfile.handler([0, 0x1012, 0, PPV]) >>> 0, 0x80030001,
-        'STG_E_INVALIDFUNCTION');
+    assert.equal(withHive.GetRunningObjectTable.handler([0, PPV]), E_OUTOFMEMORY);
     assert.equal(host.u32(PPV), 0);
-    assert.equal(fns.StgOpenStorage.handler([0, 0, 0x20, 0, 0, PPV]) >>> 0, 0x80030001);
-    assert.equal(fns.OleLoadFromStream.handler([0, CLSID_ARG, PPV]) >>> 0, 0x80030001);
-    assert.equal(fns.WriteClassStm.handler() >>> 0, 0x80030001);
-    assert.equal(fns.OleSaveToStream.handler() >>> 0, 0x80030001);
-    assert.ok(host.reported.some(text=>text.includes('StgCreateDocfile')));
+    assert.equal(withHive.CreateItemMoniker.handler([0, 0, PPV]), E_OUTOFMEMORY);
+    assert.ok(host.reported.some(text=>text.includes('CreateItemMoniker')));
 });
 
 test('the table declares stdcall argument sizes and nothing else', ()=>{
@@ -716,9 +722,22 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         ProgIDFromCLSID: 8,
         StgCreateDocfile: 16,
         StgOpenStorage: 24,
+        StgIsStorageFile: 4,
+        StgCreateDocfileOnILockBytes: 16,
+        StgOpenStorageOnILockBytes: 24,
+        GetHGlobalFromStream: 8,
+        CoMarshalInterThreadInterfaceInStream: 12,
+        CoGetInterfaceAndReleaseStream: 12,
         WriteClassStm: 8,
+        ReadClassStm: 8,
+        WriteClassStg: 8,
+        ReadClassStg: 8,
         OleLoadFromStream: 12,
         OleSaveToStream: 8,
+        CLSIDFromProgID: 8,
+        CoReleaseMarshalData: 4,
+        GetRunningObjectTable: 8,
+        CreateItemMoniker: 12,
         StringFromCLSID: 8,
         StringFromIID: 8,
         CLSIDFromString: 8,

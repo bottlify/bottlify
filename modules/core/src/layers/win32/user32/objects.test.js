@@ -299,6 +299,27 @@ test('a command names an item wherever it is, and a position names a place', ()=
     assert.equal(fns.GetMenuItemCount.handler([inner]), 0);
     assert.equal(fns.GetMenuItemCount.handler([outer]), 1);
     assert.equal(fns.DeleteMenu.handler([outer, 1, MF_BYPOSITION]), 0);
+
+    // RemoveMenu takes the item out and leaves the submenu alive.
+    assert.equal(fns.RemoveMenu.argBytes, 12);
+    assert.equal(fns.RemoveMenu.handler([outer, 0, MF_BYPOSITION]), 1);
+    assert.equal(fns.GetMenuItemCount.handler([outer]), 0);
+    assert.equal(fns.GetMenuItemCount.handler([inner]), 0, 'the submenu is still a menu');
+    assert.equal(fns.RemoveMenu.handler([outer, 0, MF_BYPOSITION]), 0);
+
+    // AppendMenuA: a command with text, a separator, and a popup by handle.
+    const MF_POPUP = 0x10;
+    const MF_SEPARATOR = 0x800;
+    const MF_GRAYED = 0x1;
+    memory.putString(TEXT, 'Close');
+    assert.equal(fns.AppendMenuA.argBytes, 16);
+    assert.equal(fns.AppendMenuA.handler([outer, MF_GRAYED, 7, TEXT]), 1);
+    assert.equal(fns.AppendMenuA.handler([outer, MF_SEPARATOR, 0, 0]), 1);
+    assert.equal(fns.AppendMenuA.handler([outer, MF_POPUP, inner, TEXT]), 1);
+    assert.equal(fns.GetMenuItemCount.handler([outer]), 3);
+    assert.equal(fns.GetMenuState.handler([outer, 7, 0]) & MF_GRAYED, MF_GRAYED);
+    assert.equal(fns.GetSubMenu.handler([outer, 2]), inner);
+    assert.equal(fns.AppendMenuA.handler([0x9999, 0, 1, TEXT]), 0);
 });
 
 test('destroying a menu takes its submenus with it', ()=>{

@@ -29,6 +29,7 @@
 
 import { GUID_NULL, GUID_SIZE, GUID_STRING_LENGTH, readGuid, writeGuid } from './guid.js';
 import { HKEY_CLASSES_ROOT } from '../advapi32/registry.js';
+import { createStorageFunctions } from './storage.js';
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
@@ -43,7 +44,6 @@ const CLASS_E_CLASSNOTAVAILABLE = 0x80040111;
 const REGDB_E_CLASSNOTREG = 0x80040154;
 const CO_E_NOTINITIALIZED = 0x800401f0;
 const CO_E_CLASSSTRING = 0x800401f3;
-const STG_E_INVALIDFUNCTION = 0x80030001 | 0;
 
 /**
  * The apartment models. COINIT_MULTITHREADED is zero, so the model is one bit
@@ -51,6 +51,9 @@ const STG_E_INVALIDFUNCTION = 0x80030001 | 0;
  * says nothing about which apartment the thread joined.
  */
 const COINIT_APARTMENTTHREADED = 0x2;
+
+/** The longest ProgID a registry key can carry. */
+const MAX_PROGID = 255;
 
 /**
  * @typedef {Object} OleHeap
@@ -84,6 +87,13 @@ const COINIT_APARTMENTTHREADED = 0x2;
  *           LoadLibraryW and FreeLibrary, for CoLoadLibrary and CoFreeLibrary:
  *           a library COM loads is the same mapping kernel32 makes, and a
  *           name it takes is a wide string. Absent, CoLoadLibrary answers 0.
+ * @property {import('./storage.js').StorageFiles} [files]
+ *           The volume, for a docfile. Absent, no storage opens.
+ * @property {(entry: number, args: number[], thread?: unknown) => Promise<number>} [call]
+ *           A stdcall into guest code, for an object a program saves to a
+ *           stream: its GetClassID and Save are the program's. The thread
+ *           names whose call a second, awaited-after call answers.
+ * @property {() => unknown} [callerThread]  Whose call is being handled.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -239,16 +249,17 @@ export function createOleFunctions(host){
     };
 
     /**
-     * Reads an LPCOLESTR that is supposed to be a GUID. Only as far as a GUID
-     * string can reach: a longer one is not one, and stopping there means a
-     * missing terminator cannot walk off into whatever follows.
+     * Reads an LPCOLESTR that is supposed to be a GUID, or a ProgID. Only as
+     * far as one can reach: a longer one is not one, and stopping there
+     * means a missing terminator cannot walk off into whatever follows.
      *
      * @param {number} address
+     * @param {number} [maxLength]
      * @returns {string}
      */
-    const readOleString = address=>{
-        const bytes = host.readMemory(address, (GUID_STRING_LENGTH + 1) * 2);
-        const units = Math.min(GUID_STRING_LENGTH + 1, bytes.length >> 1);
+    const readOleString = (address, maxLength = GUID_STRING_LENGTH)=>{
+        const bytes = host.readMemory(address, (maxLength + 1) * 2);
+        const units = Math.min(maxLength + 1, bytes.length >> 1);
         let text = '';
         for (let index = 0; index < units; index++)
         {
@@ -331,15 +342,15 @@ export function createOleFunctions(host){
 
     /**
      * @param {string} api @param {number} out  Where the object would go, or 0.
-     * @returns {number} STG_E_INVALIDFUNCTION
+     * @returns {number} E_OUTOFMEMORY
      */
-    const refuseStorage = (api, out)=>{
+    const refuseObject = (api, out)=>{
         if (out !== 0)
         {
             writeU32(out, 0);
         }
-        host.divergence?.(api, 'structured storage is not implemented');
-        return STG_E_INVALIDFUNCTION;
+        host.divergence?.(api, 'the running object table and monikers are not built');
+        return E_OUTOFMEMORY;
     };
 
     const stringFromGuid = {
@@ -443,28 +454,6 @@ export function createOleFunctions(host){
         OleUninitialize: {
             argBytes: 0,
             handler: leaveApartment,
-        },
-
-        /**
-         * HRESULT CreateStreamOnHGlobal(HGLOBAL hGlobal, BOOL fDeleteOnRelease, LPSTREAM *ppstm)
-         *
-         * No IStream implementation exists yet, so the call is refused as an
-         * allocation failure -- the one HRESULT a caller of this function is
-         * written to handle -- and the refusal is reported, because a program
-         * loads a picture through a stream and one refused here shows none.
-         */
-        CreateStreamOnHGlobal: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, , out])=>{
-                if ((out >>> 0) !== 0)
-                {
-                    writeU32(out >>> 0, 0);
-                }
-                host.divergence?.('COM',
-                    'CreateStreamOnHGlobal has no IStream to hand out and refused');
-                return E_OUTOFMEMORY;
-            },
         },
 
         /**
@@ -640,43 +629,9 @@ export function createOleFunctions(host){
             },
         },
 
-        /**
-         * HRESULT StgCreateDocfile(const OLECHAR *pwcsName, DWORD grfMode,
-         *                          DWORD reserved, IStorage **ppstgOpen)
-         * HRESULT StgOpenStorage(const OLECHAR *pwcsName, IStorage *pstgPriority,
-         *     DWORD grfMode, SNB snbExclude, DWORD reserved, IStorage **ppstgOpen)
-         * HRESULT WriteClassStm(IStream *pStm, REFCLSID rclsid)
-         * HRESULT OleLoadFromStream(IStream *pStm, REFIID iidInterface, void **ppvObj)
-         * HRESULT OleSaveToStream(IPersistStream *pPStm, IStream *pStm)
-         *
-         * Structured storage -- the compound file and the objects persisted
-         * through it -- is not built. Each entry point is declared with its
-         * true argument count so the import binds cleanly, and answers the
-         * documented refusal with a null where the object would go.
-         */
-        StgCreateDocfile: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, , , out])=>refuseStorage('StgCreateDocfile', out >>> 0),
-        },
-        StgOpenStorage: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([, , , , , out])=>refuseStorage('StgOpenStorage', out >>> 0),
-        },
-        WriteClassStm: {
-            argBytes: 8,
-            handler: ()=>refuseStorage('WriteClassStm', 0),
-        },
-        OleLoadFromStream: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, , out])=>refuseStorage('OleLoadFromStream', out >>> 0),
-        },
-        OleSaveToStream: {
-            argBytes: 8,
-            handler: ()=>refuseStorage('OleSaveToStream', 0),
-        },
+        // Structured storage: the docfile, its objects and the entry points
+        // that hand them out, over the same heap, registry and vtables.
+        ...createStorageFunctions(host),
 
         /**
          * HRESULT ProgIDFromCLSID(REFCLSID clsid, LPOLESTR *lplpszProgID)
@@ -720,6 +675,80 @@ export function createOleFunctions(host){
                 writeU32(slot, block);
                 return S_OK;
             },
+        },
+
+        /**
+         * HRESULT CLSIDFromProgID(LPCOLESTR lpszProgID, LPCLSID lpclsid)
+         *
+         * The other direction: the ProgID's own key, whose CLSID subkey
+         * holds the class as a string. A ProgID with no key is not
+         * registered, which is the code a program branches on.
+         */
+        CLSIDFromProgID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([lpszProgID, lpclsid])=>{
+                const out = lpclsid >>> 0;
+                if (out === 0 || (lpszProgID >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                writeGuid(host, out, GUID_NULL);
+                const progId = readOleString(lpszProgID >>> 0, MAX_PROGID);
+                const root = host.hive?.root(HKEY_CLASSES_ROOT);
+                const key = root && progId.length > 0
+                    ? host.hive?.open(root, `${progId}\\CLSID`)
+                    : null;
+                const value = key ? host.hive?.getValue(key, '') : null;
+                if (!value)
+                {
+                    return CO_E_CLASSSTRING;
+                }
+                let text = '';
+                for (const byte of value.data)
+                {
+                    if (byte === 0)
+                    {
+                        break;
+                    }
+                    text += String.fromCharCode(byte);
+                }
+                return writeGuid(host, out, text) ? S_OK : CO_E_CLASSSTRING;
+            },
+        },
+
+        /**
+         * HRESULT CoReleaseMarshalData(IStream *pStm)
+         *
+         * Frees what a marshaled packet holds. The packets this build
+         * writes hold a pointer and nothing owned, so there is nothing to
+         * let go of; the call is accepted so a program that cleans up
+         * after an unmarshal it never made does not lose eight bytes of
+         * stack to a missing import.
+         */
+        CoReleaseMarshalData: {
+            argBytes: 4,
+            handler: ()=>S_OK,
+        },
+
+        /**
+         * HRESULT GetRunningObjectTable(DWORD reserved, LPRUNNINGOBJECTTABLE *pprot)
+         * HRESULT CreateItemMoniker(LPCOLESTR lpszDelim, LPCOLESTR lpszItem, LPMONIKER *ppmk)
+         *
+         * Monikers and the running object table are how one process finds
+         * another's objects, and there is one process here. Both refuse as
+         * an allocation failure, which is the answer a caller of either is
+         * written to handle, and say so.
+         */
+        GetRunningObjectTable: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>refuseObject('GetRunningObjectTable', out >>> 0),
+        },
+        CreateItemMoniker: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>refuseObject('CreateItemMoniker', out >>> 0),
         },
 
         /**

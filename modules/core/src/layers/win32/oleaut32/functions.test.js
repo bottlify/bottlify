@@ -401,6 +401,24 @@ test('the ordinals are the ones a real oleaut32 exports', ()=>{
     assert.equal(OLEAUT32_ORDINALS[8], 'VariantInit');
     assert.equal(OLEAUT32_ORDINALS[9], 'VariantClear');
     assert.equal(OLEAUT32_ORDINALS[12], 'VariantChangeType');
+    // The SafeArray block: a program that imports 15 wants an array made,
+    // and one bound to the dimension count instead corrupts its stack.
+    assert.equal(OLEAUT32_ORDINALS[15], 'SafeArrayCreate');
+    assert.equal(OLEAUT32_ORDINALS[16], 'SafeArrayDestroy');
+    assert.equal(OLEAUT32_ORDINALS[17], 'SafeArrayGetDim');
+    assert.equal(OLEAUT32_ORDINALS[18], 'SafeArrayGetElemsize');
+    assert.equal(OLEAUT32_ORDINALS[19], 'SafeArrayGetUBound');
+    assert.equal(OLEAUT32_ORDINALS[20], 'SafeArrayGetLBound');
+    assert.equal(OLEAUT32_ORDINALS[21], 'SafeArrayLock');
+    assert.equal(OLEAUT32_ORDINALS[22], 'SafeArrayUnlock');
+    assert.equal(OLEAUT32_ORDINALS[23], 'SafeArrayAccessData');
+    assert.equal(OLEAUT32_ORDINALS[24], 'SafeArrayUnaccessData');
+    assert.equal(OLEAUT32_ORDINALS[25], 'SafeArrayGetElement');
+    assert.equal(OLEAUT32_ORDINALS[26], 'SafeArrayPutElement');
+    assert.equal(OLEAUT32_ORDINALS[27], 'SafeArrayCopy');
+    assert.equal(OLEAUT32_ORDINALS[28], 'DispGetParam');
+    assert.equal(OLEAUT32_ORDINALS[29], 'DispGetIDsOfNames');
+    assert.equal(OLEAUT32_ORDINALS[40], 'SafeArrayRedim');
     assert.equal(OLEAUT32_ORDINALS[147], 'VariantChangeTypeEx');
     assert.equal(OLEAUT32_ORDINALS[149], 'SysStringByteLen');
     assert.equal(OLEAUT32_ORDINALS[150], 'SysAllocStringByteLen');
@@ -655,6 +673,102 @@ test('CreateErrorInfo hands out an object with one reference', ()=>{
     assert.equal(host.u32(SLOT), 0);
 });
 
+test('a SAFEARRAY is made, filled, read back and destroyed', ()=>{
+    setUp();
+    const BOUNDS = 0x3000;
+    const INDICES = 0x3040;
+    const VALUE = 0x3080;
+    // Two dimensions, the leftmost first as the caller names them: [2..3] x [0..2].
+    host.putU32(BOUNDS, 2);
+    host.putU32(BOUNDS + 4, 2);
+    host.putU32(BOUNDS + 8, 3);
+    host.putU32(BOUNDS + 12, 0);
+    const psa = call('SafeArrayCreate', [3, 2, BOUNDS]);
+    assert.notEqual(psa, 0);
+    assert.equal(call('SafeArrayGetDim', [psa]), 2);
+    assert.equal(call('SafeArrayGetElemsize', [psa]), 4);
+    assert.equal(call('SafeArrayGetLBound', [psa, 1, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 2, 'dimension 1 is the leftmost');
+    assert.equal(call('SafeArrayGetUBound', [psa, 2, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 2);
+
+    for (let outer = 2; outer <= 3; outer++)
+    {
+        for (let inner = 0; inner <= 2; inner++)
+        {
+            host.putU32(INDICES, outer);
+            host.putU32(INDICES + 4, inner);
+            host.putU32(VALUE, outer * 10 + inner);
+            assert.equal(call('SafeArrayPutElement', [psa, INDICES, VALUE]), 0);
+        }
+    }
+    // The leftmost index varies fastest in memory.
+    assert.equal(call('SafeArrayAccessData', [psa, SLOT]), 0);
+    const data = host.u32(SLOT);
+    assert.deepEqual([0, 1, 2, 3, 4, 5].map(index=>host.u32(data + index * 4)),
+        [20, 30, 21, 31, 22, 32]);
+    assert.equal(call('SafeArrayDestroy', [psa]) | 0, 0x8002000d | 0, 'locked by the access');
+    assert.equal(call('SafeArrayUnaccessData', [psa]), 0);
+    host.putU32(INDICES, 3);
+    host.putU32(INDICES + 4, 1);
+    assert.equal(call('SafeArrayGetElement', [psa, INDICES, VALUE]), 0);
+    assert.equal(host.u32(VALUE), 31);
+    host.putU32(INDICES + 4, 3);
+    assert.equal(call('SafeArrayGetElement', [psa, INDICES, VALUE]) | 0, 0x8002000b | 0,
+        'DISP_E_BADINDEX');
+    assert.equal(call('SafeArrayDestroy', [psa]), 0);
+    assert.equal(host.live.has(psa), false);
+    assert.equal(host.live.has(data), false);
+
+    // Strings: the array owns copies, and a caller gets a copy of its own.
+    host.putU32(BOUNDS, 2);
+    host.putU32(BOUNDS + 4, 0);
+    const strings = call('SafeArrayCreate', [8, 1, BOUNDS]);
+    host.putWide(TEXT, 'hello');
+    const bstr = call('SysAllocString', [TEXT]);
+    host.putU32(INDICES, 1);
+    assert.equal(call('SafeArrayPutElement', [strings, INDICES, bstr]), 0);
+    assert.equal(call('SafeArrayGetElement', [strings, INDICES, VALUE]), 0);
+    const got = host.u32(VALUE);
+    assert.notEqual(got, bstr, 'a copy');
+    assert.equal(host.u32(got - 4), 10, 'five characters, in bytes');
+    assert.equal(host.u16(got), 'h'.charCodeAt(0));
+    host.putU32(INDICES, 0);
+    assert.equal(call('SafeArrayGetElement', [strings, INDICES, VALUE]), 0);
+    assert.equal(host.u32(VALUE), 0, 'an element never put is NULL');
+    assert.equal(call('SafeArrayDestroy', [strings]), 0);
+    assert.ok(host.live.has(got - 4), 'what the caller got is its own');
+    assert.ok(host.live.has(bstr - 4), 'and so is what it put');
+
+    // Redimensioned: the last elements go, then room is made for more.
+    host.putU32(BOUNDS, 3);
+    host.putU32(BOUNDS + 4, 0);
+    const grown = call('SafeArrayCreate', [8, 1, BOUNDS]);
+    host.putWide(TEXT, 'kept');
+    host.putU32(INDICES, 1);
+    assert.equal(call('SafeArrayPutElement', [grown, INDICES, call('SysAllocString', [TEXT])]), 0);
+    host.putU32(INDICES, 2);
+    assert.equal(call('SafeArrayPutElement', [grown, INDICES, call('SysAllocString', [TEXT])]), 0);
+    const blocks = host.live.size;
+    host.putU32(BOUNDS, 2);
+    assert.equal(call('SafeArrayRedim', [grown, BOUNDS]), 0);
+    assert.equal(host.live.size, blocks - 1, 'the dropped string was freed');
+    host.putU32(BOUNDS, 5);
+    assert.equal(call('SafeArrayRedim', [grown, BOUNDS]), 0);
+    assert.equal(call('SafeArrayGetUBound', [grown, 1, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 4);
+    host.putU32(INDICES, 1);
+    assert.equal(call('SafeArrayGetElement', [grown, INDICES, VALUE]), 0);
+    assert.equal(host.u16(host.u32(VALUE)), 'k'.charCodeAt(0), 'the kept one is still there');
+    host.putU32(INDICES, 4);
+    assert.equal(call('SafeArrayGetElement', [grown, INDICES, VALUE]), 0);
+    assert.equal(host.u32(VALUE), 0, 'the new ones are empty');
+    assert.equal(call('SafeArrayDestroy', [grown]), 0);
+
+    assert.equal(call('SafeArrayCreate', [0x1234, 1, BOUNDS]), 0, 'no such element type');
+    assert.equal(call('SafeArrayDestroy', [0]), 0, 'NULL is nothing to destroy');
+});
+
 test('the argument list of each entry is the one the guest pushed', ()=>{
     setUp();
     // stdcall: the callee pops, so a wrong count leaves the stack misaligned
@@ -667,6 +781,9 @@ test('the argument list of each entry is the one the guest pushed', ()=>{
         VariantChangeType: 16, VariantChangeTypeEx: 20,
         SafeArrayGetDim: 4, SafeArrayGetElemsize: 4, SafeArrayGetUBound: 12,
         SafeArrayGetLBound: 12, SafeArrayLock: 4, SafeArrayUnlock: 4, SafeArrayCopy: 8,
+        SafeArrayCreate: 12, SafeArrayDestroy: 4, SafeArrayGetElement: 12,
+        SafeArrayPutElement: 12, SafeArrayAccessData: 8, SafeArrayUnaccessData: 4,
+        SafeArrayRedim: 8,
         DispGetParam: 20, DispGetIDsOfNames: 16, CreateErrorInfo: 4,
     };
     for (const [name, argBytes] of Object.entries(expected))

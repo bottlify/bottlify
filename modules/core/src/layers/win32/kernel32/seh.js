@@ -143,8 +143,12 @@ const hex = value=>`0x${(value >>> 0).toString(16)}`;
  *           the head of the chain.
  * @property {() => Record<string, number>} registers
  * @property {(values: Record<string, number>) => void} setRegisters
- * @property {(options: { entry: number, args: number[], thread?: any })
- *              => Promise<number>} callGuest
+ * @property {(options: { entry: number, args: number[], thread?: any,
+ *                        stackAtRest?: number }) => Promise<number>} callGuest
+ *           Runs guest code with its frame built at `stackAtRest`, which is
+ *           where a handler has to start: the record and context it is handed
+ *           sit on this same stack, and a frame built anywhere above them is
+ *           a handler writing over what it is reading.
  * @property {() => any} [currentThread]
  * @property {(text: string) => void} [trace]
  */
@@ -310,11 +314,11 @@ export function createSeh(host){
                 continue;
             }
             // Handlers run below the record they were handed.
-            host.setRegisters({ esp: at.top });
             const answer = await host.callGuest({
                 entry: handler,
                 args: [at.record, frame, at.context, 0],
                 thread: asked,
+                stackAtRest: at.top,
             }) >>> 0;
 
             if (answer === Disposition.CONTINUE_EXECUTION)
@@ -334,7 +338,6 @@ export function createSeh(host){
             }
         }
 
-        host.setRegisters({ esp: registers.esp });
         return { handled: false };
     };
 
@@ -368,15 +371,14 @@ export function createSeh(host){
             }
             if (host.isMapped(handler))
             {
-                host.setRegisters({ esp: at.top });
                 await host.callGuest({
                     entry: handler,
                     args: [at.record, frame, at.context, 0],
                     thread: asked,
+                    stackAtRest: at.top,
                 });
             }
         }
-        host.setRegisters({ esp: registers.esp });
 
         // Only when the walk actually arrived. A chain that was damaged, or a
         // target that was never on it, leaves the head alone: writing the frame

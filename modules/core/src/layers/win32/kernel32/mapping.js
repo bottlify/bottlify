@@ -27,6 +27,8 @@
 const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_NOT_ENOUGH_MEMORY = 8;
+/** What a mapping of an empty file is refused with, as documented. */
+const ERROR_FILE_INVALID = 1006;
 /** What a read that failed after the caller was parked answers. */
 const ERROR_IO_DEVICE = 1117;
 
@@ -60,9 +62,11 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  *              close: (handle: number) => any }} handles
  * @property {{ read: (node: any, offset: number, length: number) =>
  *                  Uint8Array | Promise<Uint8Array>,
- *              write: (node: any, offset: number, bytes: Uint8Array) => number }} files
+ *              write: (node: any, offset: number, bytes: Uint8Array) => number,
+ *              size?: (node: any) => number }} files
  *           A promise when the bytes are not resident yet; the map then
  *           answers when they are, the caller parked meanwhile, as a read is.
+ *           The size is what a mapping made without one is as large as.
  */
 
 /**
@@ -153,9 +157,14 @@ export function createMappingFunctions(host){
                     // is nothing else to derive a size from.
                     return fail(ERROR_INVALID_PARAMETER);
                 }
-                return host.handles.open('mapping', {
-                    node, writable, size: sizeLow >>> 0,
-                });
+                // A size of zero over a file means the file's own size, which
+                // is how a program maps a file whole without asking first.
+                const size = (sizeLow >>> 0) || (node ? host.files.size?.(node) ?? 0 : 0);
+                if (size === 0)
+                {
+                    return fail(ERROR_FILE_INVALID);
+                }
+                return host.handles.open('mapping', { node, writable, size });
             },
         },
 
