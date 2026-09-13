@@ -172,8 +172,46 @@ test('GDI drawing binds a memory context to the bytes of its bitmap in guest mem
     assert.deepEqual([...ram.subarray(0x100 + 16 + 4, 0x100 + 16 + 8)], [0, 0, 0xff, 0],
         'landed in guest memory, as BGRX');
 
-    assert.equal(gdi.surfaceFor({ kind: 'window' }, { width: 4, height: 2, bitCount: 32 }), null);
+    assert.equal(gdi.surfaceFor({ kind: 'window' }, { width: 4, height: 2, bitCount: 32 }), null,
+        'a build with no heap has no desktop for a window context to draw on');
     assert.equal(gdi.surfaceFor({ kind: 'memory' }, { ...bitmap, bits: 0 }), null,
         'a bitmap with no storage has nothing to draw into');
+    await graphicsModule.dispose();
+});
+
+test('a window context is a view of the desktop, which is presented on request', async()=>{
+    // The desktop is one surface in guest memory the size of the display; a
+    // context over a window draws into the part of it the window covers, and
+    // presenting the desktop shows that memory the way a primary surface is.
+    const ram = new Uint8Array(0x2000);
+    const host = hostWith({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: ()=>{},
+        window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
+    });
+    host.requireApi('win32').heap = ()=>({ allocate: ()=>0x1000 });
+    /** @type {(() => void)[]} */
+    const armed = [];
+    const api = await graphicsModule.create({
+        screen: { width: 8, height: 4, bitsPerPixel: 32 },
+        now: ()=>0,
+        /** @param {() => void} tick */
+        schedule: tick=>armed.push(tick),
+    }, host);
+    const gdi = api.gdiDrawing();
+    const view = gdi.surfaceFor(
+        { kind: 'window', bounds: { left: 2, top: 1, right: 6, bottom: 3 } },
+        { width: 8, height: 4, bitCount: 32 });
+    assert.ok(view);
+    assert.equal(view.width, 4);
+    view.write(0, 0, 0x00ff0000);
+    assert.equal(gdi.desktop().read(2, 1), 0x00ff0000, 'landed at the client origin');
+    assert.deepEqual([...ram.subarray(0x1000 + 32 + 8, 0x1000 + 32 + 12)], [0, 0, 0xff, 0],
+        'in guest memory, as BGRX, where the presenter reads it');
+
+    gdi.presentDesktop();
+    armed.shift()?.();
+    const metrics = /** @type {any} */ (graphicsModule.diagnostics().metrics);
+    assert.equal(metrics.presenter.presents, 1, 'the desktop reached the presenter');
     await graphicsModule.dispose();
 });

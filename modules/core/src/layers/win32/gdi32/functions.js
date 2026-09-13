@@ -99,6 +99,10 @@ const GRAY = 0x00808080;
 const DKGRAY = 0x00404040;
 const BLACK = 0x00000000;
 
+/** ExtTextOut's clip flag, and the plain copy a bitmap is drawn with. */
+const ETO_CLIPPED = 0x0004;
+const SRCCOPY = 0x00cc0020;
+
 /** GetDeviceCaps indices this layer has an answer for. */
 const DRIVERVERSION = 0;
 const TECHNOLOGY = 2;
@@ -380,13 +384,20 @@ export function createGdiFunctions(host){
 
     /**
      * @param {number} window  Zero for the screen, which is a window like any other here.
-     * @param {'window' | 'memory'} kind
+     * @param {'window' | 'memory' | 'display'} kind
      */
     const createContext = (window, kind)=>{
         const dc = {
             hdc: 0,
             window,
             kind,
+            /**
+             * Where on the screen a window context draws, or null for all of
+             * it. The drawing layer binds the context to that view.
+             *
+             * @type {{ left: number, top: number, right: number, bottom: number } | null}
+             */
+            bounds: null,
             /** The bitmap a memory DC brought with it, and takes away again. */
             defaultBitmap: 0,
             pen: stockObject(BLACK_PEN),
@@ -675,8 +686,30 @@ export function createGdiFunctions(host){
     const dibSize = (width, height, bitCount)=>
         (((((width * bitCount) + 31) / 32) | 0) * 4) * Math.abs(height);
 
+    const drawing = createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics });
+
+    /**
+     * Solid brushes by colour, for the window manager's own painting and for
+     * GetSysColorBrush. Stock, because the handle is handed out again and
+     * again and a program may not delete it.
+     *
+     * @type {Map<number, number>}
+     */
+    const solidBrushes = new Map();
+    /** @param {number} color  A COLORREF. */
+    const solidBrush = color=>{
+        const key = color >>> 0;
+        let handle = solidBrushes.get(key);
+        if (handle === undefined)
+        {
+            handle = objects.defineStock('brush', { style: BS_SOLID, color: key, hatch: 0 });
+            solidBrushes.set(key, handle);
+        }
+        return handle;
+    };
+
     const table = {
-        ...createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }),
+        ...drawing.functions,
 
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
@@ -714,6 +747,28 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * HDC CreateDCA(LPCSTR pwszDriver, LPCSTR pwszDevice, LPCSTR pszPort,
+         *               const DEVMODEA *pdm)
+         *
+         * A DC on the display, owned by the caller rather than borrowed from
+         * a window, so it goes back through DeleteDC. The display is the only
+         * device there is: a printer or a named device has nothing behind it.
+         */
+        CreateDCA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([driver, device])=>{
+                const named = (driver >>> 0) !== 0 ? host.readCString(driver >>> 0, 32)
+                    : (device >>> 0) !== 0 ? host.readCString(device >>> 0, 32) : '';
+                if (named.toUpperCase() !== 'DISPLAY')
+                {
+                    return 0;
+                }
+                return createContext(0, 'display').hdc;
+            },
+        },
+
         /** HDC CreateCompatibleDC(HDC hdc) */
         CreateCompatibleDC: {
             argBytes: 4,
@@ -745,7 +800,7 @@ export function createGdiFunctions(host){
                 const dc = dcOf(handle);
                 // A DC that came from GetDC goes back through ReleaseDC: it is
                 // the window's, borrowed, and deleting it loses the loan.
-                if (!dc || dc.kind !== 'memory')
+                if (!dc || dc.kind === 'window')
                 {
                     return 0;
                 }
@@ -1412,6 +1467,63 @@ export function createGdiFunctions(host){
             },
         },
 
+        /**
+         * BOOL GetViewportExtEx(HDC hdc, LPSIZE lpsize)
+         * BOOL GetWindowExtEx(HDC hdc, LPSIZE lpsize)
+         */
+        GetViewportExtEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeSize(host, out >>> 0, dc.viewportExt);
+                return 1;
+            },
+        },
+
+        GetWindowExtEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeSize(host, out >>> 0, dc.windowExt);
+                return 1;
+            },
+        },
+
+        /**
+         * A Windows metafile is a picture kept as recorded GDI calls, which a
+         * program plays back to show a logo. Nothing here records or replays
+         * one, so the handle is refused and the play fails: the caller draws
+         * without the picture rather than with a handle that means nothing.
+         *
+         * HMETAFILE SetMetaFileBitsEx(UINT cbBuffer, const BYTE *lpData)
+         * BOOL PlayMetaFile(HDC hdc, HMETAFILE hmf)
+         * BOOL DeleteMetaFile(HMETAFILE hmf)
+         */
+        SetMetaFileBitsEx: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        PlayMetaFile: {
+            argBytes: 8,
+            handler: ()=>0,
+        },
+
+        DeleteMetaFile: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
         ScaleViewportExtEx: {
             argBytes: 24,
             /** @param {number[]} args */
@@ -1504,6 +1616,156 @@ export function createGdiFunctions(host){
 
     return {
         table: aliased,
+
+        /**
+         * A device context over a window, told where on the screen the window's
+         * client area is. That rectangle is what the context is bound to when
+         * it first draws; a context made without one draws on the whole screen,
+         * which is what GetDC(NULL) means.
+         *
+         * @param {number} hwnd
+         * @param {{ left: number, top: number, right: number, bottom: number } | null} bounds
+         * @returns {number} A device context handle.
+         */
+        windowContext(hwnd, bounds){
+            const dc = createContext(hwnd >>> 0, 'window');
+            dc.bounds = bounds;
+            return dc.hdc;
+        },
+
+        /**
+         * Drawing for the window manager: the frames, captions and controls
+         * it paints itself, through the same engine and the same contexts a
+         * program draws with, and with strings that never lived in guest
+         * memory. Every call answers false when the context has no pixels.
+         */
+        draw: {
+            solidBrush,
+
+            /**
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {number} color  A COLORREF.
+             */
+            fill: (hdc, rect, color)=>
+                drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, solidBrush(color)) === true,
+
+            /**
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {number} brush  A brush handle the program owns.
+             */
+            fillWith: (hdc, rect, brush)=>
+                drawing.bound(hdc)?.fillRect(hdc >>> 0, rect, brush >>> 0) === true,
+
+            /**
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             * @param {number} brush
+             */
+            frame: (hdc, rect, brush)=>
+                drawing.bound(hdc)?.frameRect(hdc >>> 0, rect, brush >>> 0) === true,
+
+            /**
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             */
+            invert: (hdc, rect)=>drawing.bound(hdc)?.invertRect(hdc >>> 0, rect) === true,
+
+            /**
+             * Narrows what a context draws in to a rectangle, in its own
+             * coordinates: the update area a paint is limited to.
+             *
+             * @param {number} hdc
+             * @param {{ left: number, top: number, right: number, bottom: number }} rect
+             */
+            clip(hdc, rect){
+                const dc = dcOf(hdc);
+                if (!dc)
+                {
+                    return false;
+                }
+                dc.clip = { ...rect };
+                return drawing.bound(hdc)?.setClipRect(hdc >>> 0, rect) === true;
+            },
+
+            /** The colour a context draws text in. @param {number} hdc */
+            textColor: hdc=>(dcOf(hdc)?.textColor ?? 0) >>> 0,
+
+            /**
+             * Text at a point, over whatever is there, clipped to a rectangle
+             * when one is given. The context's own colour and mode are put
+             * back afterwards: this is the window manager drawing, not the
+             * program changing its context. A program's own DrawText keeps
+             * the mode the program set.
+             *
+             * @param {number} hdc @param {number} x @param {number} y @param {string} text
+             * @param {{ color?: number, clip?: { left: number, top: number,
+             *     right: number, bottom: number } | null, transparent?: boolean }} [options]
+             */
+            text(hdc, x, y, text, options = {}){
+                const dc = dcOf(hdc);
+                const interfaces = drawing.bound(hdc);
+                if (!dc || !interfaces)
+                {
+                    return false;
+                }
+                const { textColor, bkMode, textAlign } = dc;
+                dc.textColor = (options.color ?? dc.textColor) >>> 0;
+                dc.bkMode = options.transparent === false ? bkMode : TRANSPARENT;
+                dc.textAlign = 0;
+                interfaces.setTextAlign(hdc >>> 0, 0);
+                const drawn = interfaces.extTextOutA(hdc >>> 0, x | 0, y | 0,
+                    options.clip ? ETO_CLIPPED : 0, options.clip ?? null, text);
+                dc.textColor = textColor;
+                dc.bkMode = bkMode;
+                dc.textAlign = textAlign;
+                interfaces.setTextAlign(hdc >>> 0, textAlign);
+                return drawn;
+            },
+
+            /**
+             * How much room a string takes in the context's font.
+             *
+             * @param {number} hdc @param {string} text
+             * @returns {{ width: number, height: number, ascent: number }}
+             */
+            measure(hdc, text){
+                const dc = dcOf(hdc);
+                const metrics = currentMetrics(dc ?? { font: 0 });
+                return {
+                    width: text.length * metrics.aveCharWidth,
+                    height: metrics.height,
+                    ascent: metrics.ascent,
+                };
+            },
+
+            /**
+             * A bitmap the program owns, drawn at a point, or nothing when it
+             * has no pixels this layer can reach.
+             *
+             * @param {number} hdc @param {number} x @param {number} y @param {number} bitmap
+             */
+            bitmap(hdc, x, y, bitmap){
+                const record = objects.get(bitmap);
+                if (!record || record.type !== 'bitmap' || !record.attributes.bits)
+                {
+                    return false;
+                }
+                const source = createContext(0, 'memory');
+                source.defaultBitmap = objects.create('bitmap', {
+                    width: 1, height: 1, planes: 1, bitCount: 1, bits: 0, section: 0,
+                });
+                select(source, source.defaultBitmap);
+                const selected = select(source, bitmap >>> 0) !== 0;
+                const shape = record.attributes;
+                const drawn = selected && table.BitBlt.handler([hdc >>> 0, x | 0, y | 0,
+                    shape.width | 0, shape.height | 0, source.hdc, 0, 0, SRCCOPY]) === 1;
+                select(source, source.defaultBitmap);
+                destroyContext(source);
+                return drawn;
+            },
+        },
 
         /**
          * A device context over memory somebody else owns.

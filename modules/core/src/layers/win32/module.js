@@ -915,10 +915,39 @@ export const win32Module = {
                 // its window to ask the display about itself must get one, or
                 // it reads a null context's answers as facts about the screen.
                 dc: ()=>({
-                    /** @param {number} hwnd */
-                    get: hwnd=>gdi.table.GetDC.handler([hwnd]),
+                    /**
+                     * @param {number} hwnd
+                     * @param {{ left: number, top: number, right: number,
+                     *     bottom: number } | null} [bounds]
+                     *     Where on the screen the window's client area is.
+                     */
+                    get: (hwnd, bounds = null)=>gdi.windowContext(hwnd, bounds),
                     /** @param {number} hwnd @param {number} hdc */
                     release: (hwnd, hdc)=>gdi.table.ReleaseDC.handler([hwnd, hdc]),
+                }),
+                // The window manager's own painting -- frames, captions and
+                // the controls of the system classes -- through GDI's engine.
+                draw: gdi.draw,
+                // Shows the desktop once a paint pass has finished. The
+                // graphics layer is above this one and is reached the way the
+                // drawing engine is: through what the assembling caller hands
+                // down, and only when it did.
+                present: ()=>config?.graphics?.presentDesktop?.(),
+                // The window procedure of a system class lives on this side,
+                // and a program that subclasses one still needs an address it
+                // can call through: a stub the bridge traps back to the handler.
+                /**
+                 * @param {string} name
+                 * @param {(message: { hwnd: number, message: number, wParam: number,
+                 *     lParam: number }) => number | Promise<number>} handler
+                 */
+                registerProcedure: (name, handler)=>bridge.register(name, {
+                    argBytes: 16,
+                    /** @param {number[]} args */
+                    handler: ([hwnd, message, wParam, lParam])=>handler({
+                        hwnd: hwnd >>> 0, message: message >>> 0,
+                        wParam: wParam >>> 0, lParam: lParam >>> 0,
+                    }),
                 }),
                 // A program's own explanation of why it is stopping, handed up
                 // whole rather than as a line of log, so whoever is embedding

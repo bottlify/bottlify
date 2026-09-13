@@ -2253,6 +2253,10 @@ async function buildApp(options){
                 createDrawing: drawing=>core.api('graphics').gdiDrawing().create(drawing),
                 /** @param {any} dc @param {any} bitmap */
                 surfaceFor: (dc, bitmap)=>core.api('graphics').gdiDrawing().surfaceFor(dc, bitmap),
+                // The desktop every window context draws into, shown after
+                // a paint pass. The window manager decides when a pass is
+                // over; the graphics layer owns the surface and the screen.
+                presentDesktop: ()=>core.api('graphics').gdiDrawing().presentDesktop(),
             },
             // What a filter graph plays. Handed down rather than reached for:
             // win32 sits below the media layer and may not import it, and the
@@ -4214,6 +4218,23 @@ async function buildApp(options){
         debug: {
             /** @param {number} address @param {number} length */
             read: (address, length)=>memory.readBytes(address >>> 0, length),
+            /**
+             * The desktop the window manager paints into, or null before any
+             * window has drawn: for a tool that writes the screen to a file.
+             *
+             * @returns {{ width: number, height: number, pitch: number,
+             *     bytes: Uint8Array } | null}
+             */
+            desktop: ()=>{
+                const surface = core.api('graphics').gdiDrawing().desktop();
+                return surface
+                    ? { width: surface.width, height: surface.height, pitch: surface.pitch,
+                        bytes: surface.bytes.subarray(surface.offset,
+                            surface.offset + surface.pitch * surface.height) }
+                    : null;
+            },
+            /** Every live window, children included, as the window manager lists them. */
+            windows: ()=>win32.windows(),
             /** @param {string} name */
             register: name=>cpu.readReg32(name),
             eip: ()=>cpu.eip(),

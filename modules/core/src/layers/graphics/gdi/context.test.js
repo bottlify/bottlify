@@ -240,11 +240,11 @@ test('TA_UPDATECP moves the current position by the string it just drew', ()=>{
     drawing.setTextAlign(HDC, TA_UPDATECP);
 
     // The coordinates the call carries are ignored when TA_UPDATECP is set.
-    drawing.textOutA(HDC, 40, 40, 'AB');
+    drawing.textOutA(HDC, 40, 40, 'HB');
     assert.equal(surface.read(4, 3), RED_PIXEL);
     assert.deepEqual(context.state.position, { x: 16, y: 2 });
 
-    drawing.textOutA(HDC, 0, 0, 'C');
+    drawing.textOutA(HDC, 0, 0, 'L');
     assert.equal(surface.read(16, 3), RED_PIXEL, 'the second call starts where the first ended');
 });
 

@@ -147,6 +147,15 @@ export function createMessageQueue({ now = ()=>0 } = {}){
      */
     let dirtyWindow = null;
 
+    /**
+     * Where a message posted from outside goes, when the window half has
+     * said: the input layer names the pointer's position and no window, and
+     * which window is under the pointer is the window half's to know.
+     *
+     * @type {((message: PostedMessage) => PostedMessage | null) | null}
+     */
+    let router = null;
+
     /** @param {MessageFilter} filter */
     const takePaint = filter=>{
         const hwnd = dirtyWindow ? dirtyWindow(filter) : 0;
@@ -274,8 +283,13 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             return taken.character;
         },
 
-        /** @param {PostedMessage} message */
-        post(message){
+        /** @param {PostedMessage} incoming */
+        post(incoming){
+            const message = router ? router(incoming) : incoming;
+            if (!message)
+            {
+                return;
+            }
             if ((message.message >>> 0) === WM_MOUSEMOVE)
             {
                 // Replaced in place rather than dropped and re-appended: a move
@@ -486,6 +500,16 @@ export function createMessageQueue({ now = ()=>0 } = {}){
          */
         paintsFrom(source){
             dirtyWindow = source;
+        },
+
+        /**
+         * Tells the queue how to find the window a posted message is for.
+         * The router may rewrite the message or drop it with null.
+         *
+         * @param {(message: PostedMessage) => PostedMessage | null} route
+         */
+        routeWith(route){
+            router = route;
         },
 
         /** How many real messages are waiting; a pending quit is not one. */

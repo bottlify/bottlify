@@ -83,9 +83,10 @@ function fakeHandles(){
 
 /**
  * @param {{ resources?: Record<string, number>,
- *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number }} [options]
+ *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number,
+ *           allocate?: (bytes: number) => number }} [options]
  */
-function setup({ resources = {}, dispatch = ()=>0 } = {}){
+function setup({ resources = {}, dispatch = ()=>0, allocate } = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -96,6 +97,8 @@ function setup({ resources = {}, dispatch = ()=>0 } = {}){
         handles: fakeHandles(),
         queue,
         dispatch,
+        allocate,
+        release: ()=>{},
         callerThread: ()=>'the caller',
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
@@ -351,7 +354,9 @@ test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
     const MSG = 0x3000;
     memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, 0x00, 0x01, 0, 0, 0x0d));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'Enter on a control inside');
-    assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]), [[0x0111, 1]]);
+    // The dialog is asked for its default button first, and told the click.
+    assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]),
+        [[0x0400, 0], [0x0111, 1]]);
 
     memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
     assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0, 'a letter is not taken');
@@ -440,7 +445,11 @@ test('the base units and MapDialogRect scale the way the template was scaled', (
         view.setInt32(OUT + at * 4, value, true);
     }
     assert.equal(fns.MapDialogRect.handler([dialog, OUT]), 1);
+    // The control's rectangle is on the screen; the template's is in the
+    // dialog's client area, so it is brought back there before comparing.
     fns.GetWindowRect.handler([control, OUT + 16]);
+    fns.ScreenToClient.handler([dialog, OUT + 16]);
+    fns.ScreenToClient.handler([dialog, OUT + 24]);
     for (const at of [0, 1, 2, 3])
     {
         assert.equal(view.getInt32(OUT + at * 4, true), view.getInt32(OUT + 16 + at * 4, true),
@@ -472,6 +481,8 @@ test('coordinates are dialog units, not pixels', ()=>{
     const control = fns.GetDlgItem.handler([dialog, 100]);
 
     fns.GetWindowRect.handler([control, OUT]);
+    fns.ScreenToClient.handler([dialog, OUT]);
+    fns.ScreenToClient.handler([dialog, OUT + 8]);
     assert.equal(memory.u32(OUT), 8 * CHAR_WIDTH / DLU_PER_CHAR_X, 'x');
     assert.equal(memory.u32(OUT + 4), 16 * CHAR_HEIGHT / DLU_PER_CHAR_Y, 'y');
     assert.equal(memory.u32(OUT + 8) - memory.u32(OUT),
@@ -517,6 +528,51 @@ test('a control is a child window, and carries the text the template gave it', (
     // reads it after a zero length and must not find what was there before.
     assert.equal(fns.GetDlgItemTextA.handler([dialog, 999, OUT, 32]), 0);
     assert.equal(memory.readCString(OUT, 32), '');
+});
+
+test('a control of a class the program registered is the window of that class', async()=>{
+    // A template names the program's own control class beside the system
+    // ones. Such a control has the class's procedure and extra bytes, and is
+    // told it exists before the dialog is told to initialise -- the order a
+    // procedure that sets the control up from WM_INITDIALOG depends on.
+    const METER_PROC = 0x403000;
+    const CLASS_STRUCT = 0x10800;
+    const CLASS_NAME = 0x10900;
+    /** @type {{ wndProc: number, message: number, lParam: number }[]} */
+    const seen = [];
+    const { memory, fns } = setup({
+        allocate: ()=>0x13000,
+        dispatch: (wndProc, message)=>{
+            seen.push({ wndProc, message: message.message, lParam: message.lParam });
+            return 0;
+        },
+    });
+    memory.putString(CLASS_NAME, 'meter');
+    memory.writeMemory(CLASS_STRUCT, new Uint8Array(new Uint32Array([
+        0, METER_PROC, 0, 8, HINSTANCE, 0, 0, 0, 0, CLASS_NAME,
+    ]).buffer));
+    assert.notEqual(fns.RegisterClassA.handler([CLASS_STRUCT]), 0);
+    putTemplate(memory, [
+        { id: 201, x: 4, y: 8, cx: 30, cy: 4, className: 'Meter' },
+        { id: 1, x: 4, y: 14, cx: 20, cy: 6, title: 'OK' },
+    ]);
+
+    const dialog = await fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const meter = fns.GetDlgItem.handler([dialog, 201]);
+    assert.notEqual(meter, 0);
+    const WM_CREATE = 0x0001;
+    assert.deepEqual(seen.map(call=>[call.wndProc, call.message]), [[METER_PROC, WM_CREATE]],
+        'the class procedure was told, by name folded without regard to case');
+    assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
+    assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');
+    assert.equal(fns.SetWindowWord.handler([meter, 0, 7]), 0, 'and it has the extra bytes');
+    assert.equal(fns.GetWindowWord.handler([meter, 0]), 7);
+    assert.notEqual(fns.GetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 1]), -4]),
+        METER_PROC, 'a system-class control keeps the system procedure, not its own');
+
+    assert.equal(fns.GetMessageA.handler([OUT, 0, 0, 0]), 1);
+    assert.equal(memory.u32(OUT + 4), WM_INITDIALOG, 'posted after the controls were told');
 });
 
 test('WM_INITDIALOG carries the parameter the caller passed', ()=>{

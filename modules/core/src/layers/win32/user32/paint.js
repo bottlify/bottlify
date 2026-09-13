@@ -29,15 +29,26 @@
 
 import { PAINTSTRUCT, RECT, readRect, writeRect, writeU32s } from './structs.js';
 
-/** DrawText's flags, of which only the ones that change the geometry matter. */
-const DT_CALCRECT = 0x0400;
+/** DrawText's flags. */
+const DT_CENTER = 0x0001;
+const DT_RIGHT = 0x0002;
+const DT_VCENTER = 0x0004;
+const DT_BOTTOM = 0x0008;
+const DT_WORDBREAK = 0x0010;
 const DT_SINGLELINE = 0x0020;
+const DT_CALCRECT = 0x0400;
+const DT_NOPREFIX = 0x0800;
 
 /** RedrawWindow's flags, the ones with an effect on an update rectangle. */
 const RDW_INVALIDATE = 0x0001;
 const RDW_ERASE = 0x0004;
 const RDW_VALIDATE = 0x0008;
 const RDW_UPDATENOW = 0x0100;
+const RDW_FRAME = 0x0400;
+
+/** What BeginPaint sends before the program draws. */
+const WM_NCPAINT = 0x0085;
+const WM_ERASEBKGND = 0x0014;
 
 /** What a character cell measures when nothing better is known. */
 const ESTIMATED_CHAR_WIDTH = 8;
@@ -53,20 +64,33 @@ const ESTIMATED_LINE_HEIGHT = 16;
  *           table, which this layer cannot reach, so it arrives as a service or
  *           not at all.
  * @property {() => any} [dc]
- *           The device-context service, when the build has one: `get(hwnd)`
- *           makes a DC for a window, `release(hwnd, hdc)` gives it back. Absent
- *           in a build that cannot draw.
+ *           The device-context service, when the build has one: `get(hwnd,
+ *           bounds)` makes a DC for a window over the screen rectangle given,
+ *           `release(hwnd, hdc)` gives it back. Absent in a build that cannot draw.
+ * @property {any} [draw]
+ *           The window manager's own drawing, over a DC: fills, text and the
+ *           measure of the selected font. Absent with `dc`.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that answers other than Windows would says so.
+ * @property {() => unknown} [callerThread]
+ *           Whose call is being handled, read before anything is awaited.
  */
 
-/** The rectangle covering a whole window's client area. @param {any} record */
-const clientRect = record=>({
-    left: 0,
-    top: 0,
-    right: Math.max(record.width, 0),
-    bottom: Math.max(record.height, 0),
-});
+/**
+ * @typedef {Object} Rect
+ * @property {number} left
+ * @property {number} top
+ * @property {number} right
+ * @property {number} bottom
+ */
+
+/**
+ * @typedef {Object} LaidOutLine
+ * @property {string} text
+ * @property {number} x
+ * @property {number} y
+ * @property {number | null} underline   The character to underline, for a mnemonic.
+ */
 
 /** @param {any} a @param {any} b */
 const union = (a, b)=>({
@@ -80,6 +104,99 @@ const union = (a, b)=>({
 const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
 
 /**
+ * Where DrawText puts each line of a string.
+ *
+ * The mnemonic prefix is taken out unless DT_NOPREFIX: `&x` is `x` with an
+ * underline to draw, `&&` is one ampersand. Lines break at a line feed, and
+ * with DT_WORDBREAK at the last space that fits; DT_SINGLELINE takes the
+ * whole string as one line, which is also the only case the vertical flags
+ * apply to, as documented. Every character is one cell wide, which is what
+ * the font metrics this build has say.
+ *
+ * @param {string} text
+ * @param {Rect} rect
+ * @param {number} format
+ * @param {{ cellWidth: number, cellHeight: number }} metrics
+ * @returns {LaidOutLine[]}
+ */
+export function layoutText(text, rect, format, metrics){
+    /** @type {number | null} */
+    let mnemonic = null;
+    let plain = text;
+    if ((format & DT_NOPREFIX) === 0)
+    {
+        plain = '';
+        for (let index = 0; index < text.length; index++)
+        {
+            if (text[index] === '&' && index + 1 < text.length)
+            {
+                index++;
+                if (text[index] !== '&' && mnemonic === null)
+                {
+                    mnemonic = plain.length;
+                }
+            }
+            plain += text[index];
+        }
+    }
+    const width = rect.right - rect.left;
+    const columns = Math.max(1, Math.floor(width / Math.max(1, metrics.cellWidth)));
+    /** @type {{ text: string, start: number }[]} */
+    const lines = [];
+    if ((format & DT_SINGLELINE) !== 0)
+    {
+        lines.push({ text: plain.replace(/\r?\n/g, ' '), start: 0 });
+    }
+    else
+    {
+        let at = 0;
+        for (const paragraph of plain.split(/\r\n|\n|\r/))
+        {
+            const start = at;
+            at += paragraph.length + 1;
+            if ((format & DT_WORDBREAK) === 0 || paragraph.length <= columns)
+            {
+                lines.push({ text: paragraph, start });
+                continue;
+            }
+            let from = 0;
+            while (paragraph.length - from > columns)
+            {
+                let cut = paragraph.lastIndexOf(' ', from + columns);
+                cut = cut <= from ? from + columns : cut + 1;
+                lines.push({ text: paragraph.slice(from, cut), start: start + from });
+                from = cut;
+            }
+            lines.push({ text: paragraph.slice(from), start: start + from });
+        }
+    }
+    const height = lines.length * metrics.cellHeight;
+    let top = rect.top;
+    if ((format & DT_SINGLELINE) !== 0)
+    {
+        if ((format & DT_VCENTER) !== 0)
+        {
+            top = rect.top + Math.floor((rect.bottom - rect.top - height) / 2);
+        }
+        else if ((format & DT_BOTTOM) !== 0)
+        {
+            top = rect.bottom - height;
+        }
+    }
+    return lines.map((line, index)=>{
+        const lineWidth = line.text.length * metrics.cellWidth;
+        const x = (format & DT_CENTER) !== 0
+            ? rect.left + Math.floor((width - lineWidth) / 2)
+            : (format & DT_RIGHT) !== 0 ? rect.right - lineWidth : rect.left;
+        const underline = mnemonic !== null && mnemonic >= line.start
+            && mnemonic < line.start + line.text.length
+            ? mnemonic - line.start
+            : null;
+        return { text: line.text, x, y: top + index * metrics.cellHeight, underline };
+    });
+}
+
+/**
  * Builds the painting half of user32, over the window records the bookkeeping
  * half already keeps.
  *
@@ -88,70 +205,234 @@ const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
  * @param {(hwnd: number) => any | null} options.live  A window, if it still is one.
  * @param {any} options.queue
  * @param {number} options.WM_PAINT
+ * @param {{ clientSize: (record: any) => { width: number, height: number },
+ *     clientRect: (record: any) => Rect, windowRect: (record: any) => Rect,
+ *     visibleClientRect: (record: any) => Rect,
+ *     visibleWindowRect: (record: any) => Rect }} options.geometry
+ * @param {(hwnd: number, message: number, wParam: number, lParam: number,
+ *     thread?: unknown) => number | Promise<number>} options.send
+ * @param {(record: any) => void} options.invalidated
+ *        A window's update area grew. Whoever keeps the others in order
+ *        marks the ones that now have to repaint after it.
+ * @param {() => void} options.painted   Something reached the screen.
  */
-export function createPaintFunctions({ host, live, queue, WM_PAINT }){
+export function createPaintFunctions(options){
+    const { host, live, queue, WM_PAINT, geometry, send, invalidated, painted } = options;
     let iconDivergenceSaid = false;
-    /** @param {any} record @param {any} rect */
-    const invalidate = (record, rect)=>{
+
+    /** @param {any} record @returns {Rect} */
+    const clientArea = record=>{
+        const size = geometry.clientSize(record);
+        return { left: 0, top: 0, right: size.width, bottom: size.height };
+    };
+
+    /** @param {any} record @param {any} rect @param {boolean} [erase] */
+    const invalidate = (record, rect, erase = false)=>{
         if (isEmpty(rect))
         {
             return;
         }
         record.updateRect = record.updateRect ? union(record.updateRect, rect) : rect;
+        record.erase = record.erase || erase;
+        invalidated(record);
     };
 
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
 
     /**
-     * DrawTextA, and DrawTextExA without its parameter block. The metrics are
-     * estimates and the code says so; a program that lays out against them is
-     * consistent with itself, which is what matters until real font metrics
-     * exist.
+     * A device context on a window's client area, or on the whole window:
+     * its origin at the area's corner, and clipped to the part of it that
+     * is on the screen and inside every ancestor.
+     *
+     * @param {any} record @param {boolean} [whole]
+     * @returns {number} the handle, or zero
+     */
+    const contextOn = (record, whole = false)=>{
+        const area = whole ? geometry.windowRect(record) : geometry.clientRect(record);
+        const hdc = contexts()?.get(record.hwnd, area) ?? 0;
+        if (hdc !== 0)
+        {
+            const visible = whole
+                ? geometry.visibleWindowRect(record) : geometry.visibleClientRect(record);
+            host.draw?.clip?.(hdc, {
+                left: visible.left - area.left, top: visible.top - area.top,
+                right: visible.right - area.left, bottom: visible.bottom - area.top,
+            });
+        }
+        return hdc;
+    };
+
+    /** @param {any} value @param {(answer: any) => any} then */
+    const after = (value, then)=>(typeof value?.then === 'function'
+        ? value.then(then)
+        : then(value));
+
+    /**
+     * A device context on a window's client area, the update area cleared
+     * and, in that order, the frame and the background painted through the
+     * window's own procedure -- which is what makes BeginPaint the moment a
+     * window's frame appears. Only measuring leaves the update area alone.
+     *
+     * @param {any} record @param {boolean} [measuring]
+     * @returns {{ hdc: number, rect: Rect } | Promise<{ hdc: number, rect: Rect }>}
+     */
+    const beginPaint = (record, measuring = false)=>{
+        const hdc = contextOn(record);
+        if (measuring)
+        {
+            return { hdc, rect: clientArea(record) };
+        }
+        const dirty = record.updateRect ?? clientArea(record);
+        // Cleared before the guest paints, not after: a program that
+        // invalidates from inside its own WM_PAINT expects that request to
+        // survive, and clearing afterwards would swallow it.
+        record.updateRect = null;
+        record.painting = hdc;
+        const erase = record.erase === true;
+        record.erase = false;
+        const frame = record.ncDirty === true;
+        record.ncDirty = false;
+        if (hdc !== 0)
+        {
+            const visible = geometry.visibleClientRect(record);
+            const origin = geometry.clientRect(record);
+            host.draw?.clip?.(hdc, {
+                left: Math.max(dirty.left, visible.left - origin.left),
+                top: Math.max(dirty.top, visible.top - origin.top),
+                right: Math.min(dirty.right, visible.right - origin.left),
+                bottom: Math.min(dirty.bottom, visible.bottom - origin.top),
+            });
+        }
+        const result = { hdc, rect: dirty };
+        if (hdc === 0)
+        {
+            return result;
+        }
+        // Named before the first send: the second one may follow an await,
+        // after which the thread on the processor may be another.
+        const thread = host.callerThread?.();
+        return after(frame ? send(record.hwnd, WM_NCPAINT, 1, 0, thread) : 0,
+            ()=>after(erase ? send(record.hwnd, WM_ERASEBKGND, hdc, 0, thread) : 0, ()=>result));
+    };
+
+    /** @param {any} record @param {number} hdc */
+    const endPaint = (record, hdc)=>{
+        if (hdc !== 0)
+        {
+            contexts()?.release(record.hwnd, hdc);
+            painted();
+        }
+        if (record.painting === hdc)
+        {
+            record.painting = 0;
+        }
+    };
+
+    /**
+     * The character cell of a context's font, for laying text out; the
+     * estimate when the build cannot measure.
+     *
+     * @param {number} hdc
+     */
+    const cellOf = hdc=>{
+        const measured = (hdc >>> 0) !== 0 ? host.draw?.measure?.(hdc >>> 0, 'M') : null;
+        return measured
+            ? { cellWidth: measured.width, cellHeight: measured.height, ascent: measured.ascent }
+            : { cellWidth: ESTIMATED_CHAR_WIDTH, cellHeight: ESTIMATED_LINE_HEIGHT,
+                ascent: ESTIMATED_LINE_HEIGHT - 4 };
+    };
+
+    /**
+     * DrawTextA, and DrawTextExA without its parameter block. DT_CALCRECT
+     * measures and writes the rectangle back; anything else draws each line
+     * where the layout put it, in the context's own colour and mode.
      *
      * @param {number[]} args
      */
     const drawText = ([hdc, text, count, rect, format])=>{
         const limit = (count | 0) < 0 ? 0x10000 : count | 0;
-        const string = (text >>> 0) === 0
+        const string = (text >>> 0) === 0 || limit === 0
             ? ''
-            : host.readCString(text, limit).slice(0, limit === 0 ? 0 : undefined);
-        const lines = (format & DT_SINGLELINE) !== 0 ? [string] : string.split('\n');
-        const widest = lines.reduce((most, line)=>Math.max(most, line.length), 0);
-        const height = Math.max(lines.length, 1) * ESTIMATED_LINE_HEIGHT;
+            : host.readCString(text, limit).slice(0, limit);
+        const bounds = (rect >>> 0) === 0
+            ? { left: 0, top: 0, right: 0x7fff, bottom: 0x7fff }
+            : readRect(host, rect);
+        const cell = cellOf(hdc);
+        // Measured against an unbounded width when the rectangle is empty,
+        // which is how a program asks how wide a string would be.
+        const lines = layoutText(string, (format & DT_CALCRECT) !== 0 && isEmpty(bounds)
+            ? { ...bounds, right: bounds.left + 0x7fff }
+            : bounds, format, cell);
+        const widest = lines.reduce((most, line)=>Math.max(most, line.text.length), 0);
+        const height = Math.max(lines.length, 1) * cell.cellHeight;
 
-        if ((format & DT_CALCRECT) !== 0 && (rect >>> 0) !== 0)
+        if ((format & DT_CALCRECT) !== 0)
         {
-            const bounds = readRect(host, rect);
-            writeRect(host, rect, {
-                left: bounds.left,
-                top: bounds.top,
-                right: bounds.left + widest * ESTIMATED_CHAR_WIDTH,
-                bottom: bounds.top + height,
-            });
+            if ((rect >>> 0) !== 0)
+            {
+                writeRect(host, rect, {
+                    left: bounds.left,
+                    top: bounds.top,
+                    right: (format & DT_WORDBREAK) !== 0 && !isEmpty(bounds)
+                        ? bounds.right
+                        : bounds.left + widest * cell.cellWidth,
+                    bottom: bounds.top + height,
+                });
+            }
+            return height;
         }
-        return (hdc >>> 0) === 0 && (format & DT_CALCRECT) === 0 ? 0 : height;
+        if ((hdc >>> 0) === 0 || !host.draw)
+        {
+            return 0;
+        }
+        for (const line of lines)
+        {
+            host.draw.text(hdc >>> 0, line.x, line.y, line.text, {
+                clip: (rect >>> 0) === 0 ? null : bounds, transparent: false,
+            });
+            if (line.underline !== null)
+            {
+                const at = line.x + line.underline * cell.cellWidth;
+                host.draw.fill(hdc >>> 0, { left: at, top: line.y + cell.ascent,
+                    right: at + cell.cellWidth, bottom: line.y + cell.ascent + 1 },
+                host.draw.textColor?.(hdc >>> 0) ?? 0);
+            }
+        }
+        return height;
     };
 
-    return {
+    const table = {
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>contexts()?.get(hwnd >>> 0) ?? 0,
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record ? contextOn(record) : contexts()?.get(hwnd >>> 0, null) ?? 0;
+            },
         },
 
         /** int ReleaseDC(HWND hWnd, HDC hDC) */
         ReleaseDC: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hwnd, hdc])=>contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0,
+            handler: ([hwnd, hdc])=>{
+                const released = contexts()?.release(hwnd >>> 0, hdc >>> 0) ?? 0;
+                if (released)
+                {
+                    painted();
+                }
+                return released;
+            },
         },
 
         /**
          * HDC BeginPaint(HWND hWnd, LPPAINTSTRUCT lpPaint)
          *
          * Clearing the update region is the load-bearing part, not the DC.
+         * The frame and the background go through the window procedure
+         * first, which means guest code may run before this returns.
          */
         BeginPaint: {
             argBytes: 8,
@@ -162,20 +443,13 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                 {
                     return 0;
                 }
-                const dirty = record.updateRect ?? clientRect(record);
-                const hdc = contexts()?.get(hwnd >>> 0) ?? 0;
-
-                // Cleared before the guest paints, not after: a program that
-                // invalidates from inside its own WM_PAINT expects that request
-                // to survive, and clearing afterwards would swallow it.
-                record.updateRect = null;
-                record.painting = hdc;
-
-                writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, record.erase ? 1 : 0]);
-                writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, dirty);
-                writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
-                record.erase = false;
-                return hdc;
+                const erase = record.erase === true;
+                return after(beginPaint(record), ({ hdc, rect })=>{
+                    writeU32s(host, paintStruct + PAINTSTRUCT.hdc, [hdc, erase ? 1 : 0]);
+                    writeRect(host, paintStruct + PAINTSTRUCT.rcPaint, rect);
+                    writeU32s(host, paintStruct + PAINTSTRUCT.fRestore, [0, 0]);
+                    return hdc;
+                });
             },
         },
 
@@ -187,13 +461,13 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                 const record = live(hwnd);
                 const hdc = host.readMemory(paintStruct + PAINTSTRUCT.hdc, 4);
                 const handle = (hdc[0] | hdc[1] << 8 | hdc[2] << 16 | hdc[3] << 24) >>> 0;
-                if (handle !== 0)
-                {
-                    contexts()?.release(hwnd >>> 0, handle);
-                }
                 if (record)
                 {
-                    record.painting = 0;
+                    endPaint(record, handle);
+                }
+                else if (handle !== 0)
+                {
+                    contexts()?.release(hwnd >>> 0, handle);
                 }
                 return 1;
             },
@@ -215,8 +489,8 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                     return 0;
                 }
                 invalidate(record,
-                    (rect >>> 0) === 0 ? clientRect(record) : readRect(host, rect));
-                record.erase = record.erase || (erase >>> 0) !== 0;
+                    (rect >>> 0) === 0 ? clientArea(record) : readRect(host, rect),
+                    (erase >>> 0) !== 0);
                 return 1;
             },
         },
@@ -238,8 +512,7 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                 {
                     return 0;
                 }
-                invalidate(record, clientRect(record));
-                record.erase = record.erase || (erase >>> 0) !== 0;
+                invalidate(record, clientArea(record), (erase >>> 0) !== 0);
                 return 1;
             },
         },
@@ -251,7 +524,8 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
          * The two halves a program combines: RDW_INVALIDATE is InvalidateRect
          * (the region, as with InvalidateRgn, stands for the client area),
          * RDW_VALIDATE takes the area back, and RDW_UPDATENOW is UpdateWindow.
-         * RDW_ERASE marks the background for erasing, as bErase does.
+         * RDW_ERASE marks the background for erasing, as bErase does, and
+         * RDW_FRAME the frame.
          */
         RedrawWindow: {
             argBytes: 16,
@@ -264,11 +538,11 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
                 }
                 const area = (rect >>> 0) !== 0 && (region >>> 0) === 0
                     ? readRect(host, rect)
-                    : clientRect(record);
+                    : clientArea(record);
                 if ((flags & RDW_INVALIDATE) !== 0)
                 {
-                    invalidate(record, area);
-                    record.erase = record.erase || (flags & RDW_ERASE) !== 0;
+                    invalidate(record, area, (flags & RDW_ERASE) !== 0);
+                    record.ncDirty = record.ncDirty || (flags & RDW_FRAME) !== 0;
                 }
                 else if ((flags & RDW_VALIDATE) !== 0)
                 {
@@ -344,7 +618,7 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
          * int DrawTextExA(HDC, LPSTR, int, LPRECT, UINT, LPDRAWTEXTPARAMS)
          *
          * DrawTextA with a parameter block on the end -- margins and a tab
-         * width -- which the estimate above does not use.
+         * width -- which the layout above does not use.
          */
         DrawTextExA: {
             argBytes: 24,
@@ -355,46 +629,80 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
         /**
          * int FillRect(HDC hDC, const RECT *lprc, HBRUSH hbr)
          *
-         * The three rectangle fills answer honestly rather than pretending: with
-         * nowhere to draw they report failure, so a program is not told a fill
-         * happened that did not.
+         * The brush is a handle the program owns, or a system colour plus
+         * one, which is the convention a class background uses too. With
+         * nowhere to draw the three rectangle fills report failure, so a
+         * program is not told a fill happened that did not.
          */
         FillRect: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hdc, rect, brush])=>
-                contexts()?.fillRect?.(hdc >>> 0, readRect(host, rect), brush >>> 0) ?? 0,
+            handler: ([hdc, rect, brush])=>{
+                const draw = host.draw;
+                if (!draw)
+                {
+                    return 0;
+                }
+                const handle = brush >>> 0;
+                const area = readRect(host, rect);
+                if (handle >= 1 && handle <= SYS_COLOR_BRUSH_LIMIT)
+                {
+                    return draw.fill(hdc >>> 0, area, draw.sysColor(handle - 1)) ? 1 : 0;
+                }
+                return draw.fillWith(hdc >>> 0, area, handle) ? 1 : 0;
+            },
         },
 
         /** BOOL InvertRect(HDC hDC, const RECT *lprc) */
         InvertRect: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hdc, rect])=>
-                contexts()?.invertRect?.(hdc >>> 0, readRect(host, rect)) ?? 0,
+            handler: ([hdc, rect])=>(host.draw?.invert(hdc >>> 0, readRect(host, rect)) ? 1 : 0),
         },
 
         /** BOOL FrameRect(HDC hDC, const RECT *lprc, HBRUSH hbr) */
         FrameRect: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hdc, rect, brush])=>
-                contexts()?.frameRect?.(hdc >>> 0, readRect(host, rect), brush >>> 0) ?? 0,
+            handler: ([hdc, rect, brush])=>(host.draw?.frame(hdc >>> 0, readRect(host, rect),
+                brush >>> 0) ? 1 : 0),
         },
 
         /**
          * HDC GetDCEx(HWND hWnd, HRGN hrgnClip, DWORD flags)
          *
          * The flags select a clip region and whether the non-client area is
-         * included. There is no non-client area and no region clipping on a
-         * window DC here, so every flag describes what a plain GetDC already
-         * gives -- and the region handle is the caller's to destroy either way,
-         * which is why nothing is done with it.
+         * included; DCX_WINDOW is honoured, so a program that paints its own
+         * frame draws on it. The region handle is the caller's to destroy
+         * either way, which is why nothing is done with it.
          */
         GetDCEx: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([hwnd])=>contexts()?.get(hwnd >>> 0) ?? 0,
+            handler: ([hwnd, , flags])=>{
+                const DCX_WINDOW = 0x1;
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return contexts()?.get(hwnd >>> 0, null) ?? 0;
+                }
+                return contextOn(record, (flags & DCX_WINDOW) !== 0);
+            },
+        },
+
+        /**
+         * HDC GetWindowDC(HWND hWnd)
+         *
+         * The whole window, frame included: what a program that paints its
+         * own caption draws on. The origin is the window's corner.
+         */
+        GetWindowDC: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record ? contextOn(record, true) : contexts()?.get(hwnd >>> 0, null) ?? 0;
+            },
         },
 
         /**
@@ -428,16 +736,88 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
         /**
          * BOOL DrawEdge(HDC hdc, LPRECT qrc, UINT edge, UINT grfFlags)
          *
-         * An edge is two rectangles of shaded lines, and which shades depend on
-         * the system colours. With no service to draw them this reports failure
-         * rather than adjusting the rectangle as though something had been
-         * drawn -- BF_ADJUST asks for exactly that, and a caller that got a
-         * shrunken rectangle back would lay its content out inside a border
-         * that is not there.
+         * The four edge styles are two rings of shaded lines each; the
+         * border flags choose which sides, and BF_ADJUST shrinks the
+         * rectangle by what was drawn, for a caller laying content inside.
          */
         DrawEdge: {
             argBytes: 16,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([hdc, rect, edge, flags])=>{
+                const draw = host.draw;
+                if (!draw || (rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const BDR_RAISEDOUTER = 0x1;
+                const BDR_SUNKENOUTER = 0x2;
+                const BDR_RAISEDINNER = 0x4;
+                const BDR_SUNKENINNER = 0x8;
+                const BF_LEFT = 0x1;
+                const BF_TOP = 0x2;
+                const BF_RIGHT = 0x4;
+                const BF_BOTTOM = 0x8;
+                const BF_MIDDLE = 0x800;
+                const BF_ADJUST = 0x2000;
+                const COLOR_3DFACE = 15;
+                const COLOR_3DSHADOW = 16;
+                const COLOR_3DHILIGHT = 20;
+                const COLOR_3DDKSHADOW = 21;
+                let area = readRect(host, rect);
+                /** @param {number} topLeft @param {number} bottomRight */
+                const ring = (topLeft, bottomRight)=>{
+                    const h = hdc >>> 0;
+                    if ((flags & BF_TOP) !== 0)
+                    {
+                        draw.fill(h, { ...area, bottom: area.top + 1, right: area.right - 1 },
+                            draw.sysColor(topLeft));
+                    }
+                    if ((flags & BF_LEFT) !== 0)
+                    {
+                        draw.fill(h, { ...area, right: area.left + 1, bottom: area.bottom - 1 },
+                            draw.sysColor(topLeft));
+                    }
+                    if ((flags & BF_BOTTOM) !== 0)
+                    {
+                        draw.fill(h, { ...area, top: area.bottom - 1 }, draw.sysColor(bottomRight));
+                    }
+                    if ((flags & BF_RIGHT) !== 0)
+                    {
+                        draw.fill(h, { ...area, left: area.right - 1 }, draw.sysColor(bottomRight));
+                    }
+                    area = {
+                        left: area.left + ((flags & BF_LEFT) !== 0 ? 1 : 0),
+                        top: area.top + ((flags & BF_TOP) !== 0 ? 1 : 0),
+                        right: area.right - ((flags & BF_RIGHT) !== 0 ? 1 : 0),
+                        bottom: area.bottom - ((flags & BF_BOTTOM) !== 0 ? 1 : 0),
+                    };
+                };
+                if ((edge & BDR_RAISEDOUTER) !== 0)
+                {
+                    ring(COLOR_3DHILIGHT, COLOR_3DDKSHADOW);
+                }
+                else if ((edge & BDR_SUNKENOUTER) !== 0)
+                {
+                    ring(COLOR_3DSHADOW, COLOR_3DHILIGHT);
+                }
+                if ((edge & BDR_RAISEDINNER) !== 0)
+                {
+                    ring(COLOR_3DFACE, COLOR_3DSHADOW);
+                }
+                else if ((edge & BDR_SUNKENINNER) !== 0)
+                {
+                    ring(COLOR_3DDKSHADOW, COLOR_3DFACE);
+                }
+                if ((flags & BF_MIDDLE) !== 0)
+                {
+                    draw.fill(hdc >>> 0, area, draw.sysColor(COLOR_3DFACE));
+                }
+                if ((flags & BF_ADJUST) !== 0)
+                {
+                    writeRect(host, rect, area);
+                }
+                return 1;
+            },
         },
 
         /**
@@ -472,8 +852,21 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
         DrawFocusRect: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([hdc, rect])=>
-                contexts()?.invertRect?.(hdc >>> 0, readRect(host, rect)) ?? 0,
+            handler: ([hdc, rect])=>{
+                const draw = host.draw;
+                if (!draw)
+                {
+                    return 0;
+                }
+                const area = readRect(host, rect);
+                const h = hdc >>> 0;
+                return draw.invert(h, { ...area, bottom: area.top + 1 })
+                    && draw.invert(h, { ...area, top: area.bottom - 1 })
+                    && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
+                        right: area.left + 1 })
+                    && draw.invert(h, { ...area, top: area.top + 1, bottom: area.bottom - 1,
+                        left: area.right - 1 }) ? 1 : 0;
+            },
         },
 
         /** BOOL ValidateRect(HWND hWnd, const RECT *lpRect) */
@@ -497,7 +890,12 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
             },
         },
     };
+
+    return { table, beginPaint, endPaint, invalidate, clientArea, cellOf, contextOn };
 }
+
+/** A brush argument up to this is a system colour index plus one. */
+const SYS_COLOR_BRUSH_LIMIT = 31;
 
 /** The offsets a test asserts against, so a change to the layout is visible. */
 export const PAINT_LAYOUT = Object.freeze({ PAINTSTRUCT, RECT });

@@ -18,9 +18,21 @@
 
 import { ANY_WINDOW, WM_PAINT, WM_QUIT, WM_TIMER } from './messages.js';
 import { createPaintFunctions } from './paint.js';
-import { createSystemFunctions } from './system.js';
+import { SYS_COLORS, createSystemFunctions } from './system.js';
 import { createObjectFunctions } from './objects.js';
 import { createDialogFunctions } from './dialogs.js';
+import {
+    WS_CHILD, WS_DISABLED, contains, createGeometry, intersect, isEmpty,
+} from './frame.js';
+import {
+    COLOR_3DDKSHADOW, COLOR_3DFACE, COLOR_3DHILIGHT, COLOR_3DSHADOW, COLOR_BTNTEXT,
+    DLGWINDOWEXTRA, HTCLIENT, HTNOWHERE, HTTRANSPARENT, SB_LINEDOWN, SB_ENDSCROLL, SB_LINEUP,
+    SB_PAGEDOWN, SB_PAGEUP, WM_CTLCOLORBTN, WM_CTLCOLORDLG, WM_CTLCOLOREDIT, WM_CTLCOLORLISTBOX,
+    WM_CTLCOLORSCROLLBAR, WM_CTLCOLORSTATIC, WM_ERASEBKGND, WM_GETTEXT,
+    WM_GETTEXTLENGTH, WM_HSCROLL, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_NCHITTEST, WM_SETFOCUS, WM_SETTEXT, WM_SHOWWINDOW, WM_SYSCOMMAND, WM_VSCROLL,
+    createControlProcedures, pointOf,
+} from './controls.js';
 import {
     WNDCLASSA,
     WNDCLASSEXA,
@@ -48,6 +60,65 @@ const WM_CHAR = 0x0102;
 const WM_SYSKEYDOWN = 0x0104;
 const WM_SYSKEYUP = 0x0105;
 const WM_SYSCHAR = 0x0106;
+
+/** The rest of what DefWindowProc and the frame answer. */
+const WM_ACTIVATE = 0x0006;
+const WM_MOUSEACTIVATE = 0x0021;
+const WM_NCCALCSIZE = 0x0083;
+const WM_NCPAINT = 0x0085;
+const WM_NCMOUSEMOVE = 0x00a0;
+const WM_NCLBUTTONDOWN = 0x00a1;
+const WM_RBUTTONDOWN = 0x0204;
+const WM_MBUTTONDOWN = 0x0207;
+const WM_MOUSELAST = 0x020d;
+const WM_KEYFIRST = 0x0100;
+const WM_KEYLAST = 0x0108;
+const WM_CAPTURECHANGED = 0x0215;
+/** Hit-test answers for the frame. */
+const HTCAPTION = 2;
+const HTBORDER = 18;
+const HTCLOSE = 20;
+const HTVSCROLL = 7;
+const HTHSCROLL = 6;
+/** WM_MOUSEACTIVATE: activate the window and deliver the click. */
+const MA_ACTIVATE = 1;
+/** SC_CLOSE: what the close box asks for. */
+const SC_CLOSE = 0xf060;
+/** System colours the frame is painted from. */
+const COLOR_BACKGROUND = 1;
+const COLOR_ACTIVECAPTION = 2;
+const COLOR_INACTIVECAPTION = 3;
+const COLOR_CAPTIONTEXT = 9;
+const COLOR_INACTIVECAPTIONTEXT = 19;
+/** A system colour plus one, as a class background names it. */
+const SYS_COLOR_BRUSH_LIMIT = 31;
+/** The close box in a caption: its size and the gap around it. */
+const CLOSE_BOX = 14;
+const CLOSE_GAP = 2;
+
+/**
+ * The system classes, with their atoms as Windows numbers them, so that
+ * `#128` in a dialog template and the atom in a CreateWindowEx both name the
+ * same class. The dialog class carries the extra bytes a dialog keeps its
+ * procedure and result in.
+ */
+const SYSTEM_CLASSES = Object.freeze([
+    { name: 'Button', atom: 0x0080, windowExtra: 0, background: 0 },
+    { name: 'Edit', atom: 0x0081, windowExtra: 0, background: 0 },
+    { name: 'Static', atom: 0x0082, windowExtra: 0, background: 0 },
+    { name: 'ListBox', atom: 0x0083, windowExtra: 0, background: 0 },
+    { name: 'ScrollBar', atom: 0x0084, windowExtra: 0, background: 0 },
+    { name: 'ComboBox', atom: 0x0085, windowExtra: 0, background: 0 },
+    { name: '#32770', atom: 0x8002, windowExtra: DLGWINDOWEXTRA, background: COLOR_3DFACE + 1 },
+]);
+
+/**
+ * Where a host procedure's address is when there is no bridge to hand one
+ * out: a range no module is mapped at, spaced by the class atom, so a
+ * program that calls it by hand faults where a test can see rather than
+ * running somebody's code.
+ */
+const HOST_PROCEDURE_BASE = 0x7ff00000;
 
 /** The one hook type this build calls, and the one event it calls it for. */
 const WH_CBT = 5;
@@ -220,6 +291,8 @@ function characterFor(key){
 /**
  * @typedef {Object} WindowService
  * @property {() => { hwnd: string, x: number, y: number, width: number, height: number,
+ *            rect: { left: number, top: number, right: number, bottom: number },
+ *            client: { left: number, top: number, right: number, bottom: number },
  *            visible: boolean, className: string, title: string, parent: string | null,
  *            id: number }[]} list
  *           Every live window, children included: a dialog is its controls, and
@@ -234,6 +307,16 @@ function characterFor(key){
  *           The display every system metric is derived from.
  * @property {() => any} [dc]
  *           The device-context service painting takes its DCs from.
+ * @property {any} [draw]
+ *           The window manager's own drawing over a device context: fills,
+ *           text, the selected font's measure. Absent with `dc`.
+ * @property {() => void} [present]
+ *           Shows the desktop. Called once a paint pass has finished.
+ * @property {(name: string, handler: (message: DispatchedMessage) => number | Promise<number>)
+ *     => number} [registerProcedure]
+ *           An address a program can call a host-side window procedure
+ *           through. Absent in a build with no bridge, and then the address
+ *           is one nothing in the guest can reach.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -349,8 +432,104 @@ export function createWindowFunctions(host){
         const name = value <= LAST_ATOM
             ? atoms.get(value)
             : host.readCString(value, MAX_CLASS_NAME);
-        return name === undefined ? null : classes.get(name) ?? null;
+        return name === undefined ? null : classNamed(name);
     };
+
+    /**
+     * A class by name: the program's own first, then a system one. Names
+     * compare without regard to case, and a system class also answers to
+     * its atom spelled out -- `#128` is Button in a dialog template.
+     *
+     * @param {string} name
+     * @returns {any | null}
+     */
+    const classNamed = name=>{
+        const own = classes.get(name);
+        if (own)
+        {
+            return own;
+        }
+        const folded = name.toLowerCase();
+        for (const cls of classes.values())
+        {
+            if (cls.name.toLowerCase() === folded)
+            {
+                return cls;
+            }
+        }
+        const system = systemClasses.get(folded);
+        if (system && system.wndProc === 0)
+        {
+            // The address is made when the class is first wanted rather than
+            // when the tables are built: a stub the bridge hands out needs
+            // the machine to be up, and a build that never makes a control
+            // never needs one.
+            system.wndProc = host.registerProcedure
+                ? host.registerProcedure(`<${system.name}>`,
+                    message=>callProcedure(system.wndProc, message, host.callerThread?.()))
+                : HOST_PROCEDURE_BASE + system.atom * 16;
+            procedures.set(system.wndProc, controls.procedures[system.name]);
+        }
+        return system ?? null;
+    };
+
+    /**
+     * The window procedures that live on this side, by address, and the
+     * classes they belong to.
+     *
+     * @type {Map<number, (record: any, message: DispatchedMessage, thread?: unknown)
+     *     => number | Promise<number>>}
+     */
+    const procedures = new Map();
+    /** @type {Map<string, any>} lower-case name or atom spelling -> class */
+    const systemClasses = new Map();
+
+    /**
+     * Runs a window procedure by address: a host one directly, a guest one
+     * through the bridge. Every message a window receives goes through here,
+     * so that a system class, a subclassed one and a program's own are one
+     * case to the callers.
+     *
+     * @param {number} address @param {DispatchedMessage} message @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const callProcedure = (address, message, thread)=>{
+        const procedure = procedures.get(address >>> 0);
+        if (procedure)
+        {
+            // Named now, while the call that brought us here still holds the
+            // processor: a procedure on this side that sends to guest code
+            // and goes on afterwards is past an await by then.
+            const on = thread ?? host.callerThread?.();
+            const record = windows.get(message.hwnd >>> 0);
+            return record ? watchDispatch(host, message, procedure(record, message, on)) : 0;
+        }
+        return watchDispatch(host, message, host.dispatch(address >>> 0, message, thread));
+    };
+
+    /**
+     * SendMessage, to a live window: its procedure runs before this returns,
+     * or the answer is a promise of when it will have.
+     *
+     * @param {number} hwnd @param {number} message @param {number} wParam @param {number} lParam
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const send = (hwnd, message, wParam, lParam, thread)=>{
+        const record = live(hwnd);
+        if (!record || record.wndProc === 0)
+        {
+            return 0;
+        }
+        return callProcedure(record.wndProc, {
+            hwnd: record.hwnd, message: message >>> 0, wParam: wParam >>> 0, lParam: lParam >>> 0,
+        }, thread);
+    };
+
+    /** @param {any} value @param {(answer: any) => any} then */
+    const andThen = (value, then)=>(typeof value?.then === 'function'
+        ? value.then(then)
+        : then(value));
 
     /**
      * The window a FindWindow of either spelling answers with, or zero.
@@ -403,6 +582,90 @@ export function createWindowFunctions(host){
         return record && !record.destroyed ? record : null;
     };
 
+    /** @param {any} record  Whether it is placed inside another window. */
+    const isChild = record=>(record.style & WS_CHILD) !== 0;
+
+    /** @param {any} record @returns {any} the top-level window it is inside */
+    const topLevelOf = record=>{
+        let at = record;
+        while (isChild(at) && windows.get(at.parent))
+        {
+            at = windows.get(at.parent);
+        }
+        return at;
+    };
+
+    /** @param {any} record @returns {any[]} its live children, in creation order */
+    const childrenOf = record=>[...windows.values()]
+        .filter(child=>!child.destroyed && child.parent === record.hwnd && isChild(child));
+
+    /**
+     * Every live window in the order it is painted and hit: top-level
+     * windows from the bottom up, each followed by its descendants.
+     *
+     * @returns {any[]}
+     */
+    const paintOrder = ()=>{
+        /** @type {any[]} */
+        const listed = [];
+        /** @param {any} record */
+        const visit = record=>{
+            listed.push(record);
+            childrenOf(record).forEach(visit);
+        };
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && !isChild(record))
+            {
+                visit(record);
+            }
+        }
+        return listed;
+    };
+
+    /**
+     * Puts a top-level window on top of the others: last in the order the
+     * records are kept in, which is the order they are painted and hit in.
+     *
+     * @param {any} record
+     */
+    const raise = record=>{
+        const top = topLevelOf(record);
+        if (windows.get(top.hwnd) !== top || [...windows.keys()].at(-1) === top.hwnd)
+        {
+            return;
+        }
+        // Its descendants follow it, so that a walk in record order still
+        // meets a parent before its children.
+        const moved = [top, ...descendantsOf(top)];
+        for (const each of moved)
+        {
+            windows.delete(each.hwnd);
+        }
+        for (const each of moved)
+        {
+            windows.set(each.hwnd, each);
+        }
+        if (shown(top))
+        {
+            appear(top);
+        }
+    };
+
+    /** @param {any} record  Whether it and every ancestor is shown. */
+    const shown = record=>{
+        for (let at = record; at; at = isChild(at) ? windows.get(at.parent) : null)
+        {
+            if ((at.style & WS_VISIBLE) === 0)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    const geometry = createGeometry(hwnd=>windows.get(hwnd >>> 0) ?? null);
+
     /**
      * The window the program is active through.
      *
@@ -415,16 +678,16 @@ export function createWindowFunctions(host){
      * again, and restarts whatever it plays when it comes back -- the menu
      * sliding in, the camera settling -- so the picture never stops arriving.
      */
-    let focused = 0;
+    let active = 0;
     const activeWindow = ()=>{
-        if (focused !== 0 && live(focused))
+        if (active !== 0 && live(active))
         {
-            return focused;
+            return active;
         }
         let candidate = 0;
         for (const record of windows.values())
         {
-            if (!record.destroyed && (record.style & WS_VISIBLE) !== 0 && !record.parent)
+            if (!record.destroyed && (record.style & WS_VISIBLE) !== 0 && !isChild(record))
             {
                 candidate = record.hwnd;
             }
@@ -433,7 +696,69 @@ export function createWindowFunctions(host){
     };
     /** @param {number} hwnd */
     const activate = hwnd=>{
-        focused = hwnd >>> 0;
+        const record = live(hwnd);
+        active = record ? topLevelOf(record).hwnd : 0;
+        // The keyboard follows activation: a focus outside the window that
+        // became active is moved to it, as Windows moves it.
+        const current = focusWindow();
+        if (active !== 0 && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active))
+        {
+            focus = active;
+        }
+    };
+
+    /**
+     * The window the keyboard goes to. Separate from the active window: the
+     * active one is a top-level window, the focus is usually a control in
+     * it, and both are asked for by name.
+     */
+    let focus = 0;
+    const focusWindow = ()=>(focus !== 0 && live(focus) ? focus : 0);
+    /**
+     * Moves the focus, telling the window that loses it and the one that
+     * gains it -- in that order, as Windows sends them -- and activating the
+     * new one's top-level window.
+     *
+     * @param {number} hwnd  Zero takes the focus from everything.
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number>} the window that had it
+     */
+    const setFocus = (hwnd, thread)=>{
+        const previous = focusWindow();
+        const target = hwnd >>> 0;
+        if (target !== 0 && !live(target))
+        {
+            return 0;
+        }
+        if (previous === target)
+        {
+            return previous;
+        }
+        focus = target;
+        if (target !== 0)
+        {
+            activate(target);
+        }
+        return andThen(previous !== 0 ? send(previous, WM_KILLFOCUS, target, 0, thread) : 0,
+            ()=>andThen(target !== 0 ? send(target, WM_SETFOCUS, previous, 0, thread) : 0,
+                ()=>previous));
+    };
+
+    /** The window that has the mouse, or zero. */
+    let captured = 0;
+    /** @param {number} hwnd */
+    const setCapture = hwnd=>{
+        const previous = captured;
+        captured = live(hwnd) ? hwnd >>> 0 : 0;
+        return previous;
+    };
+    const releaseCapture = ()=>{
+        const previous = captured;
+        captured = 0;
+        if (previous !== 0 && live(previous))
+        {
+            host.queue.post({ hwnd: previous, message: WM_CAPTURECHANGED, wParam: 0, lParam: 0 });
+        }
     };
 
     /**
@@ -497,11 +822,20 @@ export function createWindowFunctions(host){
         // Queuing it preserves the order the program observes and keeps the
         // procedure reachable, which is why the record outlives the handle.
         host.queue.post({ hwnd: record.hwnd, message: WM_DESTROY, wParam: 0, lParam: 0 });
+        const covered = shown(record) ? geometry.windowRect(record) : null;
         record.destroyed = true;
         host.handles.close(record.hwnd);
-        if (focused === record.hwnd)
+        if (active === record.hwnd)
         {
-            focused = 0;
+            active = 0;
+        }
+        if (focus === record.hwnd)
+        {
+            focus = 0;
+        }
+        if (captured === record.hwnd)
+        {
+            captured = 0;
         }
 
         for (const child of windows.values())
@@ -510,6 +844,10 @@ export function createWindowFunctions(host){
             {
                 destroyWindow(child.hwnd);
             }
+        }
+        if (covered)
+        {
+            uncover(covered);
         }
         return 1;
     };
@@ -593,7 +931,7 @@ export function createWindowFunctions(host){
      *
      * @param {DispatchedMessage & { time?: number }} message
      * @param {unknown} [thread]  Whose call this answers, when the caller has awaited.
-     * @returns {number}
+     * @returns {number | Promise<number>}
      */
     const deliver = (message, thread)=>{
         // A timer that named a TIMERPROC is called instead of the window
@@ -609,17 +947,25 @@ export function createWindowFunctions(host){
             }, thread);
         }
         // Not `live`: a WM_DESTROY still has to reach the procedure of the
-        // window it is telling about its own end. A window of a system class
-        // has no procedure here, and a message for it goes nowhere.
+        // window it is telling about its own end.
         const record = windows.get(message.hwnd);
-        if (!record || record.wndProc === 0)
+        if (!record)
         {
             return 0;
         }
-        // Whatever the host gives back is the answer, including a promise:
-        // running a window procedure means running guest code, and the bridge
-        // suspends this call until it returns.
-        return watchDispatch(host, message, host.dispatch(record.wndProc, message, thread));
+        if (record.wndProc === 0)
+        {
+            // A window of a class nobody supplied a procedure for: the
+            // message goes where a procedure would have sent it anyway, to
+            // the default one, which is what keeps a WM_PAINT for such a
+            // window from being retrieved for ever.
+            return table.DefWindowProcA.handler(
+                [message.hwnd, message.message, message.wParam, message.lParam]);
+        }
+        // Whatever comes back is the answer, including a promise: running a
+        // window procedure means running guest code, and the bridge suspends
+        // this call until it returns.
+        return callProcedure(record.wndProc, message, thread);
     };
 
     /**
@@ -690,13 +1036,34 @@ export function createWindowFunctions(host){
             userData: 0,
             extra: new DataView(new ArrayBuffer(0)),
             destroyed: false,
+            /** @type {{ left: number, top: number, right: number, bottom: number } | null} */
+            updateRect: null,
+            erase: false,
+            ncDirty: false,
             ...fields,
         };
+        // A system class supplies the procedure and the name a program reads
+        // back: `#128` in a template is the Button class.
+        const system = systemClasses.has(String(record.className).toLowerCase())
+            ? classNamed(String(record.className)) : null;
+        if (system && record.wndProc === 0)
+        {
+            record.className = system.name;
+            record.wndProc = system.wndProc;
+            if (record.extra.byteLength < system.windowExtra)
+            {
+                record.extra = new DataView(new ArrayBuffer(system.windowExtra));
+            }
+        }
         record.hwnd = host.handles.open('window', record);
         windows.set(record.hwnd, record);
-        if ((record.style & WS_VISIBLE) !== 0 && !record.parent)
+        if ((record.style & WS_VISIBLE) !== 0 && !isChild(record))
         {
             activate(record.hwnd);
+        }
+        if ((record.style & WS_VISIBLE) !== 0)
+        {
+            appear(record);
         }
         return record;
     };
@@ -761,7 +1128,25 @@ export function createWindowFunctions(host){
     const announce = (record, args)=>{
         const [exStyle, className, windowName, style, x, y, width, height,
             parent, menu, instance, params] = args;
-        if (!host.allocate || record.wndProc === 0)
+        if (record.wndProc === 0)
+        {
+            return record.hwnd;
+        }
+        // A procedure on this side reads nothing out of a CREATESTRUCT.
+        if (procedures.has(record.wndProc))
+        {
+            return andThen(callProcedure(record.wndProc, {
+                hwnd: record.hwnd, message: WM_CREATE, wParam: 0, lParam: 0,
+            }, host.callerThread?.()), created=>{
+                if ((created | 0) === -1)
+                {
+                    destroyWindow(record.hwnd);
+                    return 0;
+                }
+                return record.hwnd;
+            });
+        }
+        if (!host.allocate)
         {
             return record.hwnd;
         }
@@ -800,13 +1185,9 @@ export function createWindowFunctions(host){
         // has answered is answering a call the bridge has already let go of.
         const thread = host.callerThread?.();
         /** @param {number} message */
-        const send = message=>host.dispatch(record.wndProc, {
+        const tell = message=>callProcedure(record.wndProc, {
             hwnd: record.hwnd, message, wParam: 0, lParam: create,
         }, thread);
-        /** @param {any} value @param {(answer: number) => any} then */
-        const after = (value, then)=>(typeof value?.then === 'function'
-            ? value.then(then)
-            : then(value));
         /** @param {number} handle */
         const done = handle=>{
             host.release?.(create);
@@ -825,13 +1206,13 @@ export function createWindowFunctions(host){
         // to want it.
         const cbt = callHook(WH_CBT, null,
             [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
-        return after(cbt, refused=>{
+        return andThen(cbt, refused=>{
             if ((refused | 0) !== 0)
             {
                 destroyWindow(record.hwnd);
                 return done(0);
             }
-            return after(send(WM_CREATE), created=>{
+            return andThen(tell(WM_CREATE), created=>{
                 if ((created | 0) === -1)
                 {
                     destroyWindow(record.hwnd);
@@ -842,24 +1223,713 @@ export function createWindowFunctions(host){
         });
     };
 
+    // --- Painting: the desktop, the frame, and who repaints after whom ---
+
+    /** Whether something has been drawn since the desktop was last shown. */
+    let presentPending = false;
+    const painted = ()=>{
+        presentPending = true;
+    };
+
+    /**
+     * Shows the desktop once nothing is left to paint. Called when the queue
+     * finds no window with an update area -- which is the end of a paint
+     * pass, and also the next pump after a program drew outside one.
+     */
+    const presentIfPainted = ()=>{
+        if (presentPending)
+        {
+            presentPending = false;
+            host.present?.();
+        }
+    };
+
+    /** @param {number} index  A system colour, as a COLORREF. */
+    const sysColor = index=>SYS_COLORS[index | 0] ?? 0;
+
+    /**
+     * The window manager's drawing, over gdi32's, with the system colours
+     * added: the one description of the classic look a program can also
+     * read, through GetSysColor.
+     */
+    const draw = host.draw
+        ? Object.assign(Object.create(host.draw), { sysColor })
+        : null;
+
+    /**
+     * Marks a window's whole client area, frame included, for repainting.
+     *
+     * @param {any} record
+     */
+    const repaint = record=>{
+        const size = geometry.clientSize(record);
+        record.ncDirty = true;
+        paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
+            true);
+    };
+
+    /**
+     * A window's update area grew: every window painted after it that
+     * overlaps it on the screen has to repaint too, or the one below would
+     * come out on top. The whole overlapping window is marked rather than
+     * the overlap, which is the one-rectangle ceiling of the update area.
+     *
+     * @param {any} record
+     */
+    const invalidated = record=>{
+        if (!shown(record) || !record.updateRect)
+        {
+            return;
+        }
+        const origin = geometry.clientRect(record);
+        const dirty = {
+            left: origin.left + record.updateRect.left,
+            top: origin.top + record.updateRect.top,
+            right: origin.left + record.updateRect.right,
+            bottom: origin.top + record.updateRect.bottom,
+        };
+        const order = paintOrder();
+        for (const other of order.slice(order.indexOf(record) + 1))
+        {
+            if (shown(other) && !isEmpty(intersect(dirty, geometry.windowRect(other))))
+            {
+                const size = geometry.clientSize(other);
+                const whole = { left: 0, top: 0, right: size.width, bottom: size.height };
+                if (!record.updateRect || !other.updateRect
+                    || !sameRect(other.updateRect, whole))
+                {
+                    other.ncDirty = true;
+                    other.updateRect = whole;
+                    other.erase = true;
+                }
+            }
+        }
+    };
+
+    /** @param {any} a @param {any} b */
+    const sameRect = (a, b)=>a.left === b.left && a.top === b.top && a.right === b.right
+        && a.bottom === b.bottom;
+
+    /**
+     * The desktop itself, painted once in the desktop colour before the
+     * first window goes on it. Nothing else ever paints the whole screen.
+     */
+    let desktopPainted = false;
+    const paintDesktop = ()=>{
+        if (desktopPainted || !host.screen)
+        {
+            return;
+        }
+        const hdc = host.dc?.()?.get(0, null) ?? 0;
+        if (hdc === 0)
+        {
+            return;
+        }
+        desktopPainted = true;
+        draw?.fill(hdc, { left: 0, top: 0, right: host.screen.width, bottom: host.screen.height },
+            sysColor(COLOR_BACKGROUND));
+        host.dc?.()?.release(0, hdc);
+        painted();
+    };
+
+    /**
+     * A window appeared: it and everything inside it paint from scratch.
+     *
+     * @param {any} record
+     */
+    const appear = record=>{
+        paintDesktop();
+        for (const each of [record, ...descendantsOf(record)])
+        {
+            if (shown(each))
+            {
+                repaint(each);
+            }
+        }
+    };
+
+    /** @param {any} record @returns {any[]} every live descendant, in paint order */
+    const descendantsOf = record=>childrenOf(record)
+        .flatMap(child=>[child, ...descendantsOf(child)]);
+
+    /**
+     * A part of the screen has nothing on it any more: the desktop shows
+     * through, and every window still under it repaints.
+     *
+     * @param {{ left: number, top: number, right: number, bottom: number }} rect
+     */
+    const uncover = rect=>{
+        paintDesktop();
+        const hdc = host.dc?.()?.get(0, null) ?? 0;
+        if (hdc !== 0)
+        {
+            draw?.fill(hdc, rect, sysColor(COLOR_BACKGROUND));
+            host.dc?.()?.release(0, hdc);
+            painted();
+        }
+        for (const other of paintOrder())
+        {
+            if (shown(other) && !isEmpty(intersect(rect, geometry.windowRect(other))))
+            {
+                repaint(other);
+            }
+        }
+    };
+
+    /**
+     * Paints a window's frame: the border, the caption with the title and
+     * the close box, and the scroll bars its styles give it. What
+     * DefWindowProc does with WM_NCPAINT.
+     *
+     * @param {any} record
+     */
+    const paintFrame = record=>{
+        const frame = geometry.frame(record);
+        if (!draw || (frame.left === 0 && frame.top === 0 && frame.right === 0
+            && frame.bottom === 0))
+        {
+            return;
+        }
+        const hdc = paint.contextOn(record, true);
+        if (hdc === 0)
+        {
+            return;
+        }
+        const width = record.width;
+        const height = record.height;
+        const face = sysColor(COLOR_3DFACE);
+        // The border, one ring per pixel of edge: raised for the outer
+        // ring, face colour inside, as the classic frame is.
+        for (let ring = 0; ring < frame.edge; ring++)
+        {
+            const outer = ring === 0;
+            const topLeft = outer ? sysColor(COLOR_3DHILIGHT) : face;
+            const bottomRight = outer ? sysColor(COLOR_3DDKSHADOW)
+                : ring === 1 ? sysColor(COLOR_3DSHADOW) : face;
+            draw.fill(hdc, { left: ring, top: ring, right: width - ring - 1, bottom: ring + 1 },
+                topLeft);
+            draw.fill(hdc, { left: ring, top: ring, right: ring + 1, bottom: height - ring - 1 },
+                topLeft);
+            draw.fill(hdc, { left: ring, top: height - ring - 1, right: width - ring,
+                bottom: height - ring }, bottomRight);
+            draw.fill(hdc, { left: width - ring - 1, top: ring, right: width - ring,
+                bottom: height - ring }, bottomRight);
+        }
+        if (frame.caption > 0)
+        {
+            const isActive = topLevelOf(record).hwnd === activeWindow();
+            const bar = { left: frame.edge, top: frame.edge, right: width - frame.edge,
+                bottom: frame.edge + frame.caption };
+            draw.fill(hdc, bar, sysColor(isActive ? COLOR_ACTIVECAPTION : COLOR_INACTIVECAPTION));
+            const box = closeBox(record);
+            const metrics = draw.measure(hdc, 'M');
+            draw.text(hdc, bar.left + 4, bar.top + Math.floor((frame.caption - metrics.height) / 2),
+                record.title, {
+                    color: sysColor(isActive ? COLOR_CAPTIONTEXT : COLOR_INACTIVECAPTIONTEXT),
+                    clip: { ...bar, right: box.left - 2 },
+                });
+            draw.fill(hdc, box, face);
+            draw.fill(hdc, { ...box, right: box.right - 1, bottom: box.top + 1 },
+                sysColor(COLOR_3DHILIGHT));
+            draw.fill(hdc, { ...box, right: box.left + 1, bottom: box.bottom - 1 },
+                sysColor(COLOR_3DHILIGHT));
+            draw.fill(hdc, { ...box, top: box.bottom - 1 }, sysColor(COLOR_3DDKSHADOW));
+            draw.fill(hdc, { ...box, left: box.right - 1 }, sysColor(COLOR_3DDKSHADOW));
+            draw.fill(hdc, { left: box.left + 1, top: box.bottom - 2, right: box.right - 1,
+                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+            draw.fill(hdc, { left: box.right - 2, top: box.top + 1, right: box.right - 1,
+                bottom: box.bottom - 1 }, sysColor(COLOR_3DSHADOW));
+            // The cross: two diagonals, two pixels wide, drawn a pixel at a time.
+            const ink = sysColor(COLOR_BTNTEXT);
+            for (let step = 0; step < 7; step++)
+            {
+                const x = box.left + 3 + step;
+                const y = box.top + 3 + step;
+                draw.fill(hdc, { left: x, top: y, right: x + 2, bottom: y + 1 }, ink);
+                draw.fill(hdc, { left: box.right - 5 - step, top: y, right: box.right - 3 - step,
+                    bottom: y + 1 }, ink);
+            }
+        }
+        if (frame.right > frame.edge)
+        {
+            const bar = scrollBarRect(record, true);
+            controls.helpers.paintScrollBar(hdc, bar, true, scrollOf(record, SB_VERT));
+        }
+        if (frame.bottom > frame.edge)
+        {
+            const bar = scrollBarRect(record, false);
+            controls.helpers.paintScrollBar(hdc, bar, false, scrollOf(record, SB_HORZ));
+        }
+        host.dc?.()?.release(record.hwnd, hdc);
+        painted();
+    };
+
+    /** SetScrollInfo's bars for a window's own. */
+    const SB_HORZ = 0;
+    const SB_VERT = 1;
+    /** @param {any} record @param {number} bar */
+    const scrollOf = (record, bar)=>{
+        record.scroll ??= new Map();
+        if (!record.scroll.has(bar))
+        {
+            record.scroll.set(bar, { min: 0, max: 100, page: 0, pos: 0, trackPos: 0 });
+        }
+        return record.scroll.get(bar);
+    };
+
+    /**
+     * Where a window's own scroll bar is, in window coordinates.
+     *
+     * @param {any} record @param {boolean} vertical
+     */
+    const scrollBarRect = (record, vertical)=>{
+        const frame = geometry.frame(record);
+        return vertical
+            ? { left: record.width - frame.right, top: frame.top,
+                right: record.width - frame.edge, bottom: record.height - frame.bottom }
+            : { left: frame.left, top: record.height - frame.bottom,
+                right: record.width - frame.right, bottom: record.height - frame.edge };
+    };
+
+    /** The close box, in window coordinates. @param {any} record */
+    const closeBox = record=>{
+        const frame = geometry.frame(record);
+        const size = Math.min(CLOSE_BOX, frame.caption - 2 * CLOSE_GAP);
+        const top = frame.edge + Math.floor((frame.caption - size) / 2);
+        return { left: record.width - frame.edge - CLOSE_GAP - size, top,
+            right: record.width - frame.edge - CLOSE_GAP, bottom: top + size };
+    };
+
+    /**
+     * What part of a window a screen point is on: the client area, the
+     * caption, its close box, the border, or nowhere.
+     *
+     * @param {any} record @param {number} x @param {number} y
+     */
+    const hitTest = (record, x, y)=>{
+        const rect = geometry.windowRect(record);
+        if (!contains(rect, x, y))
+        {
+            return HTNOWHERE;
+        }
+        if (contains(geometry.clientRect(record), x, y))
+        {
+            return HTCLIENT;
+        }
+        const frame = geometry.frame(record);
+        const local = { x: x - rect.left, y: y - rect.top };
+        if (frame.caption > 0 && local.y >= frame.edge && local.y < frame.edge + frame.caption
+            && local.x >= frame.edge && local.x < record.width - frame.edge)
+        {
+            const box = closeBox(record);
+            return contains(box, local.x, local.y) ? HTCLOSE : HTCAPTION;
+        }
+        if (frame.right > frame.edge && contains(scrollBarRect(record, true), local.x, local.y))
+        {
+            return HTVSCROLL;
+        }
+        if (frame.bottom > frame.edge && contains(scrollBarRect(record, false), local.x, local.y))
+        {
+            return HTHSCROLL;
+        }
+        return HTBORDER;
+    };
+
+    /**
+     * The window under a screen point: the topmost shown one whose rectangle
+     * holds it, then down through its children, skipping a window that says
+     * the point passes through it or is disabled.
+     *
+     * @param {number} x @param {number} y
+     * @param {{ disabled?: boolean, transparent?: boolean }} [skip]
+     *        Whether a disabled or a transparent window is passed over,
+     *        which ChildWindowFromPointEx lets a caller choose.
+     * @returns {{ record: any, hit: number } | null}
+     */
+    const windowFromPoint = (x, y, skip = { disabled: true, transparent: true })=>{
+        /**
+         * @param {any[]} candidates
+         * @returns {{ record: any, hit: number } | null}
+         */
+        const deepest = candidates=>{
+            for (let index = candidates.length - 1; index >= 0; index--)
+            {
+                const record = candidates[index];
+                if ((record.style & WS_VISIBLE) === 0
+                    || !contains(geometry.windowRect(record), x, y))
+                {
+                    continue;
+                }
+                if (skip.disabled && (record.style & WS_DISABLED) !== 0)
+                {
+                    continue;
+                }
+                const hit = hitTest(record, x, y);
+                if (hit === HTCLIENT)
+                {
+                    const inner = deepest(childrenOf(record));
+                    if (inner)
+                    {
+                        return inner;
+                    }
+                }
+                if (skip.transparent && transparentAt(record))
+                {
+                    continue;
+                }
+                return { record, hit };
+            }
+            return null;
+        };
+        return deepest([...windows.values()].filter(record=>!record.destroyed
+            && !isChild(record)));
+    };
+
+    /**
+     * Whether a window lets the pointer through: what it answers WM_NCHITTEST
+     * with, asked of the ones whose procedure is on this side. A program's
+     * own procedure is not run for every hit test; a static of the
+     * program's own class stops the pointer as a window does.
+     *
+     * @param {any} record
+     */
+    const transparentAt = record=>{
+        const procedure = procedures.get(record.wndProc);
+        if (!procedure)
+        {
+            return false;
+        }
+        const answer = procedure(record, {
+            hwnd: record.hwnd, message: WM_NCHITTEST, wParam: 0, lParam: 0,
+        });
+        return typeof answer === 'number' && (answer | 0) === HTTRANSPARENT;
+    };
+
+    /**
+     * Where a message from the input layer goes. A mouse message carries the
+     * pointer's position on the screen; it goes to the window that has the
+     * mouse, or the one under the point, with the position made relative to
+     * that window's client area -- or, on the frame, as a non-client message
+     * with the hit code. A key goes to the window with the focus.
+     *
+     * @param {import('./messages.js').PostedMessage} message
+     * @returns {import('./messages.js').PostedMessage | null} null to drop it
+     */
+    const route = message=>{
+        // Only what the input layer posts names a position; a message a
+        // program posts to a window of its choosing is left to it.
+        if (message.x === undefined || message.y === undefined)
+        {
+            return message;
+        }
+        const kind = message.message >>> 0;
+        if (kind >= WM_KEYFIRST && kind <= WM_KEYLAST)
+        {
+            const target = focusWindow() || activeWindow();
+            return target === 0 ? message : { ...message, hwnd: target };
+        }
+        if (kind < WM_MOUSEMOVE || kind > WM_MOUSELAST)
+        {
+            return message;
+        }
+        const x = message.x | 0;
+        const y = message.y | 0;
+        if (kind === WM_MOUSEWHEEL)
+        {
+            const target = focusWindow() || activeWindow();
+            return target === 0 ? message : { ...message, hwnd: target };
+        }
+        if (captured !== 0 && live(captured))
+        {
+            const origin = geometry.clientOrigin(windows.get(captured));
+            return { ...message, hwnd: captured,
+                lParam: (((y - origin.y) & 0xffff) << 16 | (x - origin.x) & 0xffff) >>> 0 };
+        }
+        const found = windowFromPoint(x, y);
+        if (!found)
+        {
+            return null;
+        }
+        // A press brings the window it lands in to the front and makes it
+        // the active one, before the message reaches it.
+        if (kind === WM_LBUTTONDOWN || kind === WM_RBUTTONDOWN || kind === WM_MBUTTONDOWN)
+        {
+            const top = topLevelOf(found.record);
+            if (top.hwnd !== activeWindow())
+            {
+                activate(top.hwnd);
+                raise(top);
+            }
+        }
+        if (found.hit !== HTCLIENT)
+        {
+            return { ...message, hwnd: found.record.hwnd,
+                message: kind + WM_NCMOUSEMOVE - WM_MOUSEMOVE,
+                wParam: found.hit >>> 0, lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 };
+        }
+        const origin = geometry.clientOrigin(found.record);
+        return { ...message, hwnd: found.record.hwnd,
+            lParam: (((y - origin.y) & 0xffff) << 16 | (x - origin.x) & 0xffff) >>> 0 };
+    };
+    host.queue.routeWith?.(route);
+
+    /**
+     * The default window procedure, as every window procedure falls back on
+     * it. The frame, the background, the hit test, the text, activation and
+     * the close box live here; what a program's procedure does not handle,
+     * this does.
+     *
+     * @param {any} record @param {DispatchedMessage} message @param {unknown} [thread]
+     * @returns {number | Promise<number>}
+     */
+    const defWindowProc = (record, message, thread)=>{
+        switch (message.message >>> 0){
+            // TRUE, and it has to be: a procedure that does not handle
+            // WM_NCCREATE passes it here, and answering FALSE would refuse
+            // every window such a program tries to make.
+            case WM_NCCREATE:
+                return 1;
+            case WM_NCCALCSIZE:
+                return 0;
+            case WM_NCPAINT:
+                paintFrame(record);
+                return 0;
+            case WM_ERASEBKGND: {
+                // The class background: a brush the program made, or a
+                // system colour plus one. No brush means no erasing, which
+                // the program is told by the zero.
+                const cls = classNamed(record.className);
+                const brush = (cls?.background ?? 0) >>> 0;
+                if (brush === 0 || !draw)
+                {
+                    return 0;
+                }
+                const size = geometry.clientSize(record);
+                const area = { left: 0, top: 0, right: size.width, bottom: size.height };
+                if (brush <= SYS_COLOR_BRUSH_LIMIT)
+                {
+                    draw.fill(message.wParam, area, sysColor(brush - 1));
+                }
+                else
+                {
+                    draw.fillWith(message.wParam, area, brush);
+                }
+                return 1;
+            }
+            case WM_CLOSE:
+                destroyWindow(record.hwnd);
+                return 0;
+            // Validates the window: a procedure that hands WM_PAINT here has
+            // nothing to draw, and the area has to be cleared or the same
+            // paint is retrieved for ever. The frame and background still
+            // go out, which is what BeginPaint does.
+            case WM_PAINT:
+                return andThen(paint.beginPaint(record), ({ hdc })=>{
+                    paint.endPaint(record, hdc);
+                    return 0;
+                });
+            case WM_NCHITTEST: {
+                const point = pointOf(message.lParam);
+                return hitTest(record, point.x, point.y) >>> 0;
+            }
+            case WM_NCLBUTTONDOWN: {
+                if (!isChild(record))
+                {
+                    activate(record.hwnd);
+                }
+                const hit = message.wParam | 0;
+                if (hit === HTCLOSE)
+                {
+                    return send(record.hwnd, WM_SYSCOMMAND, SC_CLOSE, message.lParam, thread);
+                }
+                if (hit === HTVSCROLL || hit === HTHSCROLL)
+                {
+                    const point = pointOf(message.lParam);
+                    return clickScrollBar(record, hit, point.x, point.y, thread);
+                }
+                return 0;
+            }
+            case WM_SYSCOMMAND:
+                if ((message.wParam & 0xfff0) === SC_CLOSE)
+                {
+                    return send(record.hwnd, WM_CLOSE, 0, 0, thread);
+                }
+                return 0;
+            case WM_MOUSEACTIVATE:
+                return MA_ACTIVATE;
+            case WM_LBUTTONDOWN:
+                activate(record.hwnd);
+                return 0;
+            case WM_SETTEXT: {
+                const address = message.lParam >>> 0;
+                record.title = address === 0 ? '' : host.readCString(address, MAX_WINDOW_TEXT);
+                if (geometry.frame(record).caption > 0 && shown(record))
+                {
+                    record.ncDirty = true;
+                    paint.invalidate(record, { left: 0, top: 0, right: 0, bottom: 0 }, false);
+                    paintFrame(record);
+                }
+                return 1;
+            }
+            case WM_GETTEXT: {
+                const room = message.wParam >>> 0;
+                const out = message.lParam >>> 0;
+                if (room === 0 || out === 0)
+                {
+                    return 0;
+                }
+                const text = record.title.slice(0, room - 1);
+                writeString(out, text);
+                return text.length;
+            }
+            case WM_GETTEXTLENGTH:
+                return record.title.length;
+            case WM_CTLCOLORSTATIC:
+            case WM_CTLCOLORBTN:
+            case WM_CTLCOLORDLG:
+            case WM_CTLCOLORSCROLLBAR:
+                return draw ? draw.solidBrush(sysColor(COLOR_3DFACE)) : 0;
+            case WM_CTLCOLOREDIT:
+            case WM_CTLCOLORLISTBOX:
+                return 0;
+            case WM_VSCROLL:
+            case WM_HSCROLL:
+                return scrollWindowBar(record, message);
+            case WM_ACTIVATE:
+            case WM_SHOWWINDOW:
+            default:
+                return 0;
+        }
+    };
+
+    /**
+     * A window's own scroll bar was clicked and the program's procedure left
+     * it to the default, which moves the position and repaints the bar. The
+     * program that wanted to scroll its contents would have handled it.
+     *
+     * @param {any} record @param {DispatchedMessage} message
+     */
+    const scrollWindowBar = (record, message)=>{
+        const vertical = message.message === WM_VSCROLL;
+        const held = scrollOf(record, vertical ? SB_VERT : SB_HORZ);
+        const code = message.wParam & 0xffff;
+        const page = Math.max(1, held.page);
+        const by = code === SB_LINEUP ? -1 : code === SB_LINEDOWN ? 1
+            : code === SB_PAGEUP ? -page : code === SB_PAGEDOWN ? page : 0;
+        const ceiling = Math.max(held.min, held.max - Math.max(held.page - 1, 0));
+        held.pos = Math.min(Math.max(held.pos + by, held.min), ceiling);
+        return 0;
+    };
+
+    /**
+     * What the frame's own hit test does with a click on a scroll bar: the
+     * WM_VSCROLL or WM_HSCROLL the bar would send, sent to the window.
+     *
+     * @param {any} record @param {number} hit @param {number} x @param {number} y
+     * @param {unknown} [thread]
+     */
+    const clickScrollBar = (record, hit, x, y, thread)=>{
+        const vertical = hit === HTVSCROLL;
+        const rect = geometry.windowRect(record);
+        const bar = scrollBarRect(record, vertical);
+        const code = controls.helpers.scrollHit(bar, vertical,
+            scrollOf(record, vertical ? SB_VERT : SB_HORZ), x - rect.left, y - rect.top);
+        if (code === SB_ENDSCROLL)
+        {
+            return 0;
+        }
+        return andThen(send(record.hwnd, vertical ? WM_VSCROLL : WM_HSCROLL, code, 0, thread), ()=>{
+            record.ncDirty = true;
+            paintFrame(record);
+            return 0;
+        });
+    };
+
+    const paint = createPaintFunctions({
+        // The drawing with the system colours on it, which FillRect needs
+        // for a brush named as a colour index.
+        host: Object.assign(Object.create(host), { draw }),
+        live, queue: host.queue, WM_PAINT, geometry, send, invalidated, painted,
+    });
+
+    const controls = createControlProcedures({
+        readCString: host.readCString,
+        writeMemory: host.writeMemory,
+        readMemory: host.readMemory,
+        draw,
+        live,
+        windowOf: hwnd=>windows.get(hwnd >>> 0) ?? null,
+        clientSize: record=>geometry.clientSize(record),
+        children: childrenOf,
+        send,
+        callProcedure,
+        post: message=>host.queue.post(message),
+        defWindowProc,
+        beginPaint: record=>paint.beginPaint(record),
+        contextOn: record=>({ hdc: paint.contextOn(record), rect: paint.clientArea(record) }),
+        endPaint: (record, hdc)=>paint.endPaint(record, hdc),
+        invalidate: record=>{
+            const size = geometry.clientSize(record);
+            paint.invalidate(record, { left: 0, top: 0, right: size.width, bottom: size.height },
+                true);
+        },
+        setFocus,
+        focus: focusWindow,
+        setCapture: hwnd=>{
+            setCapture(hwnd);
+        },
+        capture: ()=>captured,
+        releaseCapture,
+        sysColor,
+        keyDown: key=>((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
+        divergence: host.divergence,
+    });
+
+    // The system classes: known under their names and their atoms, each
+    // with a procedure on this side and, once wanted, an address a program
+    // can hold.
+    SYSTEM_CLASSES.forEach(definition=>{
+        const cls = {
+            name: definition.name,
+            atom: definition.atom,
+            style: 0,
+            wndProc: 0,
+            classExtra: 0,
+            windowExtra: definition.windowExtra,
+            instance: 0,
+            icon: 0,
+            cursor: 0,
+            background: definition.background,
+            menuName: 0,
+            className: 0,
+            iconSm: 0,
+        };
+        systemClasses.set(definition.name.toLowerCase(), cls);
+        systemClasses.set(`#${definition.atom}`, cls);
+        atoms.set(definition.atom, definition.name);
+    });
+
     // user32 is one table to the guest and five files only because the subjects
     // are: windows and classes here, painting and its device contexts next
     // door, what a program asks the system about itself after that, the things
     // a window owns, and dialogs. They share the window records rather than
     // each keeping a copy, which is why they are built here.
     // Where WM_PAINT comes from: a visible window with an area still to
-    // paint, the one the filter names or the first found. Made up by the
-    // queue at retrieval rather than posted, because that is what keeps a
-    // hundred invalidations one paint.
+    // paint, the one the filter names or the first found in paint order, so
+    // a window is painted before what lies over it. Made up by the queue at
+    // retrieval rather than posted, because that is what keeps a hundred
+    // invalidations one paint. Nothing left to paint is the end of a pass,
+    // and the moment the desktop is shown.
     host.queue.paintsFrom?.(filter=>{
-        for (const record of windows.values())
+        for (const record of paintOrder())
         {
-            if (!record.destroyed && record.updateRect && (record.style & WS_VISIBLE) !== 0
+            if (record.updateRect && shown(record)
                 && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd))
             {
                 return record.hwnd;
             }
         }
+        presentIfPainted();
         return 0;
     });
 
@@ -869,6 +1939,9 @@ export function createWindowFunctions(host){
             .map(record=>({
                 hwnd: `0x${record.hwnd.toString(16)}`,
                 x: record.x, y: record.y, width: record.width, height: record.height,
+                // On the screen, frame and client apart: where a click lands.
+                rect: geometry.windowRect(record),
+                client: geometry.clientRect(record),
                 visible: (record.style & WS_VISIBLE) !== 0,
                 className: record.className,
                 title: record.title,
@@ -894,6 +1967,10 @@ export function createWindowFunctions(host){
             record.y = y | 0;
             record.width = width | 0;
             record.height = height | 0;
+            // A window a device presents into covers the display: the frame
+            // its style describes takes no room, so the client area is the
+            // whole mode and a program's cursor arithmetic sees the picture.
+            record.frameless = true;
             host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
                 lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
             host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
@@ -902,16 +1979,36 @@ export function createWindowFunctions(host){
         },
     });
 
-    return {
-        ...createPaintFunctions({ host, live, queue: host.queue, WM_PAINT }),
-        // The focus lives with the windows, so the system half answers from
-        // it through a view of the host that carries it.
+    // Named, because a message for a window with no procedure of its own is
+    // handed to the default procedure in this table by `deliver` above.
+    const table = {
+        ...paint.table,
+        // The focus, the capture and the geometry live with the windows, so
+        // the system half answers from them through a view of the host that
+        // carries them.
         ...createSystemFunctions({
-            host: Object.assign(Object.create(host), { focus: activeWindow, setFocus: activate }),
+            host: Object.assign(Object.create(host), {
+                focus: focusWindow, setFocus, active: activeWindow, activate,
+                capture: ()=>captured, setCapture, releaseCapture,
+                send, callProcedure, geometry, windowFromPoint, isChild, repaint, appear, uncover,
+                shown, raise, sysColorBrush: (/** @type {number} */ index)=>(draw
+                    ? draw.solidBrush(sysColor(index)) : 0),
+            }),
             live, windows, classes,
         }),
         ...createObjectFunctions({ host, live }),
-        ...createDialogFunctions({ host, live, windows, makeWindow, destroyWindow, deliver }),
+        ...createDialogFunctions({
+            host: Object.assign(Object.create(host), {
+                focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
+                defDlgProc: controls.helpers.defDlgProc, keyDown: (/** @type {number} */ key)=>
+                    ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
+            }),
+            live, windows, makeWindow, destroyWindow, deliver, announce,
+            // A class the program registered, by the name a template spells it.
+            classNamed: name=>(classes.has(name) || [...classes.values()].some(
+                cls=>cls.name.toLowerCase() === name.toLowerCase())
+                ? classNamed(name) : null),
+        }),
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
@@ -1076,12 +2173,24 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 const wasVisible = (record.style & WS_VISIBLE) !== 0;
-                record.style = (cmdShow | 0) === SW_HIDE
+                const hide = (cmdShow | 0) === SW_HIDE;
+                const covered = wasVisible && hide && shown(record)
+                    ? geometry.windowRect(record) : null;
+                record.style = hide
                     ? (record.style & ~WS_VISIBLE) >>> 0
                     : (record.style | WS_VISIBLE) >>> 0;
-                if (!SHOW_WITHOUT_ACTIVATING.has(cmdShow | 0) && !record.parent)
+                if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow | 0) && !isChild(record))
                 {
                     activate(record.hwnd);
+                    raise(record);
+                }
+                if (!wasVisible && !hide)
+                {
+                    appear(record);
+                }
+                if (covered)
+                {
+                    uncover(covered);
                 }
                 // The documented answer is the state it found, not the one it
                 // set: code that toggles a window reads this back.
@@ -1106,12 +2215,8 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                // No non-client frame is modelled, so the client area is the
-                // whole window. Borders and captions arrive with the metrics
-                // that decide how wide they are.
-                writeRect(host, out, {
-                    left: 0, top: 0, right: record.width, bottom: record.height,
-                });
+                const size = geometry.clientSize(record);
+                writeRect(host, out, { left: 0, top: 0, right: size.width, bottom: size.height });
                 return 1;
             },
         },
@@ -1126,12 +2231,7 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
-                writeRect(host, out, {
-                    left: record.x,
-                    top: record.y,
-                    right: record.x + record.width,
-                    bottom: record.y + record.height,
-                });
+                writeRect(host, out, geometry.windowRect(record));
                 return 1;
             },
         },
@@ -1146,10 +2246,16 @@ export function createWindowFunctions(host){
                 {
                     return 0;
                 }
+                const covered = shown(record) ? geometry.windowRect(record) : null;
                 record.x = x | 0;
                 record.y = y | 0;
                 record.width = width | 0;
                 record.height = height | 0;
+                if (covered)
+                {
+                    uncover(covered);
+                    appear(record);
+                }
                 return 1;
             },
         },
@@ -1159,15 +2265,16 @@ export function createWindowFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, string])=>{
+                // Sent, as Windows sends it: a control keeps its text through
+                // its own procedure, and a program that subclassed one sees
+                // the message.
                 const record = live(hwnd);
                 if (!record)
                 {
                     return 0;
                 }
-                record.title = (string >>> 0) === 0
-                    ? ''
-                    : host.readCString(string, MAX_WINDOW_TEXT);
-                return 1;
+                return andThen(send(record.hwnd, WM_SETTEXT, 0, string >>> 0,
+                    host.callerThread?.()), ()=>1);
             },
         },
 
@@ -1213,6 +2320,42 @@ export function createWindowFunctions(host){
                 }
                 const previous = readLong(record, index);
                 writeLong(record, index, value);
+                return previous;
+            },
+        },
+
+        /**
+         * WORD GetWindowWord(HWND hWnd, int nIndex)
+         * WORD SetWindowWord(HWND hWnd, int nIndex, WORD wNewWord)
+         *
+         * The 16-bit view of the same extra bytes. A control written for
+         * Windows 3.x keeps its state this way, and there is no word-sized
+         * built-in field: the documented ones are all longs.
+         */
+        GetWindowWord: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, index])=>{
+                const record = live(hwnd);
+                const at = index | 0;
+                return record && at >= 0 && at + 2 <= record.extra.byteLength
+                    ? record.extra.getUint16(at, true)
+                    : 0;
+            },
+        },
+
+        SetWindowWord: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, index, value])=>{
+                const record = live(hwnd);
+                const at = index | 0;
+                if (!record || at < 0 || at + 2 > record.extra.byteLength)
+                {
+                    return 0;
+                }
+                const previous = record.extra.getUint16(at, true);
+                record.extra.setUint16(at, value & 0xffff, true);
                 return previous;
             },
         },
@@ -1580,49 +2723,38 @@ export function createWindowFunctions(host){
             handler: ([msg])=>deliver(readMessage(host, msg)),
         },
 
-        /** LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */
+        /**
+         * LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * WM_DESTROY is deliberately not handled, and that is the whole of
+         * it: Windows' default procedure does nothing with it. Ending the
+         * message loop is the program's own decision, made by calling
+         * PostQuitMessage from the window procedure of the one window it
+         * considers its main one.
+         *
+         * Posting a quit here instead looks harmless and is not. A program of
+         * any size destroys windows all the time -- a dialog, a tooltip, a
+         * splash screen -- and passes their WM_DESTROY to the default
+         * procedure because it has nothing to add. Every one of those then
+         * ends the process: a real title was measured closing an auxiliary
+         * window after loading its textures, and shutting itself down cleanly
+         * and inexplicably a moment later.
+         */
         DefWindowProcA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([hwnd, message])=>{
-                switch (message >>> 0){
-                    // TRUE, and it has to be: a procedure that does not handle
-                    // WM_NCCREATE passes it here, and answering FALSE would
-                    // refuse every window such a program tries to make.
-                    case WM_NCCREATE:
-                        return 1;
-                    case WM_CLOSE:
-                        destroyWindow(hwnd);
-                        return 0;
-                    // Validates the window: a procedure that hands WM_PAINT
-                    // here has nothing to draw, and the area has to be
-                    // cleared or the same paint is retrieved for ever.
-                    case WM_PAINT: {
-                        const record = live(hwnd);
-                        if (record)
-                        {
-                            record.updateRect = null;
-                        }
-                        return 0;
-                    }
-                    // WM_DESTROY is deliberately not handled, and that is the
-                    // whole of it: Windows' default procedure does nothing with
-                    // it. Ending the message loop is the program's own
-                    // decision, made by calling PostQuitMessage from the window
-                    // procedure of the one window it considers its main one.
-                    //
-                    // Posting a quit here instead looks harmless and is not. A
-                    // program of any size destroys windows all the time -- a
-                    // dialog, a tooltip, a splash screen -- and passes their
-                    // WM_DESTROY to the default procedure because it has
-                    // nothing to add. Every one of those then ends the process:
-                    // a real title was measured closing an auxiliary window
-                    // after loading its textures, and shutting itself down
-                    // cleanly and inexplicably a moment later.
-                    default:
-                        return 0;
+            handler: ([hwnd, message, wParam, lParam])=>{
+                const record = windows.get(hwnd >>> 0);
+                if (!record)
+                {
+                    return (message >>> 0) === WM_NCCREATE ? 1 : 0;
                 }
+                return defWindowProc(record, {
+                    hwnd: hwnd >>> 0, message: message >>> 0,
+                    wParam: wParam >>> 0, lParam: lParam >>> 0,
+                }, host.callerThread?.());
             },
         },
     };
+    return table;
 }

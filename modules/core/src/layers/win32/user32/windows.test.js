@@ -272,12 +272,18 @@ function createWindow(fns, memory, options = {}){
         [0, className, TITLE, style, x, y, width, height, parent, menu, HINSTANCE, 0]);
 }
 
-/** A class plus a window of it, which almost every test below needs. */
+/**
+ * A class plus a window of it, which almost every test below needs.
+ *
+ * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
+ *     & { reply?: (message: any) => any }} [options]
+ */
 function withWindow(options = {}){
-    const context = setup();
-    putClass(context.memory, options);
+    const { reply, ...rest } = options;
+    const context = setup({ reply });
+    putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
-    const hwnd = createWindow(context.fns, context.memory, options);
+    const hwnd = createWindow(context.fns, context.memory, rest);
     return { ...context, hwnd };
 }
 
@@ -466,12 +472,20 @@ test('placing a window as the system would moves it and tells the program', ()=>
     // What a fullscreen device does to the window it presents into. The
     // program re-reads its rectangle on WM_SIZE and clips its cursor to it, so
     // both messages have to arrive, packed the way DefWindowProc packs them.
-    const { fns, memory, hwnd, queue, service } = withWindow();
+    // A captioned window, so that the frame it would have is visible in
+    // the numbers: placed to a mode, it has none.
+    const WS_CAPTION = 0x00c00000;
+    const { fns, memory, hwnd, queue, service } = withWindow({ style: WS_CAPTION });
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 200 - 19 - 2, 'framed before placing');
 
     assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
 
     fns.GetWindowRect.handler([hwnd, RECT_BUFFER]);
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 1024);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 768);
+    fns.GetClientRect.handler([hwnd, RECT_BUFFER]);
+    assert.equal(memory.u32(RECT_BUFFER + RECT.right), 1024, 'the whole mode is client area');
     assert.equal(memory.u32(RECT_BUFFER + RECT.bottom), 768);
 
     /** @type {any[]} */
@@ -553,10 +567,17 @@ test('destroying a parent destroys the children it owned', ()=>{
 });
 
 test('window text is set, read back, and truncated to the buffer offered', ()=>{
-    const { fns, memory, hwnd } = withWindow();
+    // SetWindowText is WM_SETTEXT sent to the window, so the text lands
+    // through the procedure -- which here, as in most programs, leaves it to
+    // the default one.
+    const { fns, memory, hwnd, dispatched } = withWindow({
+        reply: (/** @type {any} */ message)=>fns.DefWindowProcA.handler(
+            [message.hwnd, message.message, message.wParam, message.lParam]),
+    });
     memory.putString(TITLE, 'A Window Title');
 
     assert.equal(fns.SetWindowTextA.handler([hwnd, TITLE]), 1);
+    assert.equal(dispatched.at(-1).message, 0x000c, 'WM_SETTEXT reached the procedure');
 
     assert.equal(fns.GetWindowTextA.handler([hwnd, TEXT_BUFFER, 64]), 14,
         'the count excludes the terminator');
@@ -596,6 +617,22 @@ test('the extra bytes a class asked for are the window\'s own storage', ()=>{
     assert.equal(fns.SetWindowLongA.handler([first, 8, 0x2222]), 0);
     assert.equal(fns.GetWindowLongA.handler([first, 4]), 0x1111,
         'and the refused write did not spill into the neighbour');
+});
+
+test('a window word is a 16-bit view of the same extra bytes', ()=>{
+    const { fns, memory } = withWindow({ windowExtra: 8 });
+    const hwnd = createWindow(fns, memory);
+
+    assert.equal(fns.SetWindowWord.handler([hwnd, 0, 0x1234]), 0);
+    assert.equal(fns.SetWindowWord.handler([hwnd, 2, 0x5678]), 0);
+    assert.equal(fns.GetWindowWord.handler([hwnd, 0]), 0x1234);
+    assert.equal(fns.GetWindowLongA.handler([hwnd, 0]), 0x56781234,
+        'the two words are the halves of the long at the same offset');
+    assert.equal(fns.SetWindowWord.handler([hwnd, 0, 0x10001]), 0x1234, 'answers the old word');
+    assert.equal(fns.GetWindowWord.handler([hwnd, 0]), 1, 'and keeps only a word');
+    assert.equal(fns.GetWindowWord.handler([hwnd, 7]), 0, 'a word at 7 does not fit in 8');
+    assert.equal(fns.SetWindowWord.handler([hwnd, 7, 1]), 0);
+    assert.deepEqual([fns.GetWindowWord.argBytes, fns.SetWindowWord.argBytes], [8, 12]);
 });
 
 test('a class that asked for no extra bytes has none', ()=>{
@@ -760,6 +797,10 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // it -- a look that does not remove finds the same paint again.
     const { fns, memory, queue, hwnd } = withWindow();
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    // Showing a window is the first thing that paints it.
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'a shown window paints');
+    fns.ValidateRect.handler([hwnd, 0]);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
         'nothing to paint');
 
@@ -783,6 +824,21 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     fns.DefWindowProcA.handler([hwnd, WM_PAINT, 0, 0]);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
         'the default procedure validates what nobody painted');
+});
+
+test('a paint dispatched to a window with no procedure is validated as the default one would', ()=>{
+    // A control of a system class has no procedure here. Its WM_PAINT still
+    // has to go somewhere that clears the area, or a program pumping with
+    // PeekMessage retrieves the same paint for ever and never gets back to
+    // its work -- which looks like a hang from outside.
+    const { fns, memory, hwnd } = withWindow({ wndProc: 0 });
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
+    assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'dispatched once, the area is clean');
 });
 
 test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{

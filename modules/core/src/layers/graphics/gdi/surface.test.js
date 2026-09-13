@@ -21,6 +21,7 @@ import {
     pixelToColor,
     surfaceBounds,
     surfaceForDibSection,
+    viewOf,
 } from './surface.js';
 
 test('a DIB row is padded to four bytes and a bitmap row to two', ()=>{
@@ -192,4 +193,23 @@ test('clearing a surface reaches every pixel including the last', ()=>{
     assert.deepEqual(surfaceBounds(surface), { left: 0, top: 0, right: 5, bottom: 3 });
     assert.equal(surface.read(0, 0), 0x00202020);
     assert.equal(surface.read(4, 2), 0x00202020);
+});
+
+test('a view draws onto its parent at its own origin and drops what falls outside', ()=>{
+    // A window's context is a view over the display: a pixel at the view's
+    // origin lands at the client origin on the screen, and a window hanging
+    // off the edge draws nothing where there is no screen.
+    const screen = createSurface({ width: 6, height: 4 });
+    clearSurface(screen, 0);
+    const view = viewOf(screen, { left: 4, top: 2, right: 9, bottom: 5 });
+    assert.equal(view.width, 5);
+    assert.equal(view.height, 3);
+    view.write(0, 0, 0x00ff0000);
+    view.write(1, 1, 0x0000ff00);
+    view.write(4, 2, 0x000000ff);
+    assert.equal(screen.read(4, 2), 0x00ff0000);
+    assert.equal(screen.read(5, 3), 0x0000ff00);
+    assert.equal(view.read(0, 0), 0x00ff0000);
+    assert.equal(view.read(4, 2), 0, 'off the screen reads as black');
+    assert.equal(view.bytes, screen.bytes, 'the bytes are the parent\'s own');
 });

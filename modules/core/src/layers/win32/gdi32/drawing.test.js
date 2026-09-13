@@ -620,6 +620,14 @@ test('the drawing entry points reach the service, and fail without one', ()=>{
     memory.bytes.set([0x41, 0x42, 0x43, 0x44], STRUCT);
     assert.equal(fns.ExtTextOutA.handler([hdc, 5, 6, 0, 0, STRUCT, 2, 0]), 1);
     assert.equal(seen[1][6], 'AB');
+    // TextOut is the same: the count, and no terminator anywhere near.
+    service.textOutA = (/** @type {any[]} */ ...args)=>{
+        seen.push(['textOutA', ...args]);
+        return true;
+    };
+    memory.bytes.fill(0x58, STRUCT, STRUCT + 64);
+    assert.equal(fns.TextOutA.handler([hdc, 7, 8, STRUCT, 3]), 1);
+    assert.deepEqual(seen[2], ['textOutA', hdc, 7, 8, 'XXX']);
 
     const bare = setup();
     assert.equal(bare.fns.Rectangle.handler([bare.hdc, 0, 0, 1, 1]), 0);

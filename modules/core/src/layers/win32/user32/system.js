@@ -23,6 +23,9 @@ import { ANSI_PAGE, OEM_PAGE, mapCaseAnsi, transcodeSingleByte } from '../kernel
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
+    BORDER, CAPTION_HEIGHT, SCROLLBAR, SIZE_FRAME, WS_CHILD, WS_VISIBLE, frameOf,
+} from './frame.js';
+import {
     DEVMODEA,
     DM_BITSPERPEL,
     DM_DISPLAYFREQUENCY,
@@ -59,57 +62,42 @@ const SM_CMONITORS = 80;
 const SM_CXVIRTUALSCREEN = 78;
 const SM_CYVIRTUALSCREEN = 79;
 
-/** The frame a window with a caption and a sizing border carries. */
-const BORDER = 1;
-const CAPTION_HEIGHT = 19;
-const SIZE_FRAME = 4;
+/** A menu bar's height; the rest of the frame is the window geometry's. */
 const MENU_HEIGHT = 19;
-const SCROLLBAR = 16;
-
-/** Window styles that decide how much frame AdjustWindowRect has to add. */
-const WS_BORDER = 0x00800000;
-const WS_DLGFRAME = 0x00400000;
-const WS_THICKFRAME = 0x00040000;
-const WS_CAPTION = WS_BORDER | WS_DLGFRAME;
 
 /**
- * Extended styles that add frame of their own. They are the reason
- * AdjustWindowRectEx exists as a separate call from AdjustWindowRect: a client
- * rectangle grown without them comes out short by the edge on every side, and a
- * program that sized a window this way gets a client area smaller than it asked
- * for, which is invisible until something is clipped.
- */
-const WS_EX_DLGMODALFRAME = 0x00000001;
-const WS_EX_TOOLWINDOW = 0x00000080;
-const WS_EX_WINDOWEDGE = 0x00000100;
-const WS_EX_CLIENTEDGE = 0x00000200;
-const WS_EX_STATICEDGE = 0x00020000;
-
-/** A tool window's caption is shorter than an ordinary one's. */
-const TOOL_CAPTION_HEIGHT = 12;
-
-/**
- * The system colours, as a program reads them: COLORREF, 0x00BBGGRR.
+ * The system colours, as a program reads them: COLORREF, 0x00BBGGRR. The
+ * classic scheme, and also what the window manager paints from, so a
+ * program that reads them draws in the same colours as its frame.
  *
  * @type {Record<number, number>}
  */
-const SYS_COLORS = Object.freeze({
+export const SYS_COLORS = Object.freeze({
     0: 0x00c0c0c0,
     1: 0x00808080,
-    2: 0x00000080,
+    2: 0x00800000,
+    3: 0x00808080,
     4: 0x00c0c0c0,
     5: 0x00ffffff,
     6: 0x00000000,
     7: 0x00000000,
     8: 0x00000000,
+    9: 0x00ffffff,
+    10: 0x00c0c0c0,
+    11: 0x00c0c0c0,
+    12: 0x00808080,
     13: 0x00800000,
     14: 0x00ffffff,
     15: 0x00c0c0c0,
     16: 0x00808080,
     17: 0x00808080,
     18: 0x00000000,
+    19: 0x00c0c0c0,
     20: 0x00ffffff,
-    21: 0x00808080,
+    21: 0x00000000,
+    22: 0x00c0c0c0,
+    23: 0x00000000,
+    24: 0x00e1ffff,
 });
 
 /** MonitorFromRect and friends answer with this, there being one display. */
@@ -189,24 +177,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
      * @param {number} hwnd @param {number} message @param {number} wParam
      * @param {number} lParam
      */
-    const sendMessage = (hwnd, message, wParam, lParam)=>{
-        const record = live(hwnd);
-        if (!record || record.wndProc === 0)
-        {
-            return 0;
-        }
-        return host.dispatch(record.wndProc, {
-            hwnd: record.hwnd,
-            message: message >>> 0,
-            wParam: wParam >>> 0,
-            lParam: lParam >>> 0,
-        });
-    };
+    const sendMessage = (hwnd, message, wParam, lParam)=>
+        host.send(hwnd >>> 0, message >>> 0, wParam >>> 0, lParam >>> 0, host.callerThread?.());
 
     const screen = host.screen ?? { width: 640, height: 480, bitsPerPixel: 32 };
-
-    /** The window that has the mouse, shared by SetCapture and ReleaseCapture. */
-    let captured = 0;
 
     /**
      * Messages registered by name, in the range Windows keeps for them. The
@@ -227,14 +201,23 @@ export function createSystemFunctions({ host, live, windows, classes }){
      *
      * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
      */
-    const setWindowPos = ([hwnd, , x, y, cx, cy, flags])=>{
+    const setWindowPos = ([hwnd, after, x, y, cx, cy, flags])=>{
         const SWP_NOSIZE = 0x0001;
         const SWP_NOMOVE = 0x0002;
+        const SWP_NOZORDER = 0x0004;
+        const SWP_SHOWWINDOW = 0x0040;
+        const SWP_HIDEWINDOW = 0x0080;
+        const HWND_BOTTOM = 1;
         const record = live(hwnd);
         if (!record)
         {
             return 0;
         }
+        const wasShown = host.shown(record);
+        const covered = wasShown ? host.geometry.windowRect(record) : null;
+        const moved = (flags & SWP_NOMOVE) === 0 && (record.x !== (x | 0) || record.y !== (y | 0));
+        const sized = (flags & SWP_NOSIZE) === 0
+            && (record.width !== (cx | 0) || record.height !== (cy | 0));
         if ((flags & SWP_NOMOVE) === 0)
         {
             record.x = x | 0;
@@ -244,6 +227,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
         {
             record.width = cx | 0;
             record.height = cy | 0;
+        }
+        if ((flags & SWP_SHOWWINDOW) !== 0)
+        {
+            record.style = (record.style | WS_VISIBLE) >>> 0;
+        }
+        else if ((flags & SWP_HIDEWINDOW) !== 0)
+        {
+            record.style = (record.style & ~WS_VISIBLE) >>> 0;
+        }
+        if ((flags & SWP_NOZORDER) === 0 && (after | 0) !== HWND_BOTTOM
+            && (record.style & WS_CHILD) === 0)
+        {
+            host.raise(record);
+        }
+        const isShown = host.shown(record);
+        if (covered && (!isShown || moved || sized))
+        {
+            host.uncover(covered);
+        }
+        if (isShown && (!wasShown || moved || sized))
+        {
+            host.appear(record);
         }
         return 1;
     };
@@ -409,32 +414,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return clipped.length;
     };
 
-    /** @param {number} style @param {number} exStyle */
-    const frameOf = (style, exStyle = 0)=>{
-        const thick = (style & WS_THICKFRAME) !== 0;
-        const border = (style & (WS_BORDER | WS_DLGFRAME)) !== 0;
-        const modal = (exStyle & WS_EX_DLGMODALFRAME) !== 0;
-        const windowEdge = (exStyle & (WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE)) !== 0;
-        const staticEdge = (exStyle & WS_EX_STATICEDGE) !== 0;
-
-        // The edges add up rather than replace one another: a sizing border and
-        // a client edge are two separate frames drawn one inside the other.
-        let edge = thick ? SIZE_FRAME : border || modal ? BORDER : 0;
-        edge += windowEdge ? 2 * BORDER : 0;
-        edge += staticEdge ? BORDER : 0;
-
-        const captioned = (style & WS_CAPTION) === WS_CAPTION;
-        const caption = (exStyle & WS_EX_TOOLWINDOW) !== 0
-            ? TOOL_CAPTION_HEIGHT
-            : CAPTION_HEIGHT;
-        return {
-            left: edge,
-            top: edge + (captioned ? caption : 0),
-            right: edge,
-            bottom: edge,
-        };
-    };
-
     /**
      * The one implementation both ChangeDisplaySettings entry points call.
      *
@@ -496,12 +475,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
             return 0;
         }
         const bounds = readRect(host, rect);
+        // Scroll bars are not counted, as documented: the client rectangle
+        // a program grows here is the one inside the frame alone.
         const frame = frameOf(style >>> 0, exStyle >>> 0);
         writeRect(host, rect, {
-            left: bounds.left - frame.left,
-            top: bounds.top - frame.top - ((menu >>> 0) !== 0 ? MENU_HEIGHT : 0),
-            right: bounds.right + frame.right,
-            bottom: bounds.bottom + frame.bottom,
+            left: bounds.left - frame.edge,
+            top: bounds.top - frame.edge - frame.caption - ((menu >>> 0) !== 0 ? MENU_HEIGHT : 0),
+            right: bounds.right + frame.edge,
+            bottom: bounds.bottom + frame.edge,
         });
         return 1;
     };
@@ -543,6 +524,59 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
     };
 
+    /** @param {any} value @param {(answer: any) => any} then */
+    const andThen = (value, then)=>(typeof value?.then === 'function'
+        ? value.then(then)
+        : then(value));
+
+    /**
+     * ChildWindowFromPoint, both spellings: the last-created child whose
+     * rectangle holds the point, the flags deciding which are passed over.
+     *
+     * @param {number} parent @param {number} x @param {number} y @param {number} flags
+     */
+    const childFromPoint = (parent, x, y, flags)=>{
+        const CWP_SKIPINVISIBLE = 0x0001;
+        const CWP_SKIPDISABLED = 0x0002;
+        const CWP_SKIPTRANSPARENT = 0x0004;
+        const record = live(parent);
+        if (!record)
+        {
+            return 0;
+        }
+        const origin = host.geometry.clientOrigin(record);
+        const screenX = origin.x + (x | 0);
+        const screenY = origin.y + (y | 0);
+        const children = ordered().filter(child=>child.parent === record.hwnd
+            && (child.style & WS_CHILD) !== 0);
+        for (let index = children.length - 1; index >= 0; index--)
+        {
+            const child = children[index];
+            const rect = host.geometry.windowRect(child);
+            if (screenX < rect.left || screenX >= rect.right || screenY < rect.top
+                || screenY >= rect.bottom)
+            {
+                continue;
+            }
+            if ((flags & CWP_SKIPINVISIBLE) !== 0 && (child.style & WS_VISIBLE) === 0)
+            {
+                continue;
+            }
+            if ((flags & CWP_SKIPDISABLED) !== 0 && (child.style & WS_DISABLED) !== 0)
+            {
+                continue;
+            }
+            if ((flags & CWP_SKIPTRANSPARENT) !== 0
+                && host.windowFromPoint(screenX, screenY, { disabled: false, transparent: true })
+                    ?.record !== child)
+            {
+                continue;
+            }
+            return child.hwnd;
+        }
+        return record.hwnd;
+    };
+
     return {
         /** int GetSystemMetrics(int nIndex) */
         GetSystemMetrics: {
@@ -561,12 +595,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * HBRUSH GetSysColorBrush(int nIndex)
          *
-         * A brush is a GDI object and this layer has no object table. Answering
-         * null is what a program checks for, and it is true here.
+         * A brush GDI owns, the same one every time for a colour, which a
+         * program may select and must not delete.
          */
         GetSysColorBrush: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([index])=>((index | 0) in SYS_COLORS
+                ? host.sysColorBrush?.(index | 0) ?? 0
+                : 0),
         },
 
         /**
@@ -749,8 +786,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * BOOL ClientToScreen(HWND hWnd, LPPOINT lpPoint)
          *
-         * A window's client origin is its own position: there is one desktop and
-         * no nesting of frames beyond what the record already knows.
+         * The client origin is inside the frame, and a child's is inside its
+         * parent's: the geometry adds both up.
          */
         ClientToScreen: {
             argBytes: 8,
@@ -764,7 +801,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const at = host.readMemory(point, 8);
                 const x = (at[0] | at[1] << 8 | at[2] << 16 | at[3] << 24) | 0;
                 const y = (at[4] | at[5] << 8 | at[6] << 16 | at[7] << 24) | 0;
-                writeU32s(host, point, [x + record.x, y + record.y]);
+                const origin = host.geometry.clientOrigin(record);
+                writeU32s(host, point, [x + origin.x, y + origin.y]);
                 return 1;
             },
         },
@@ -782,7 +820,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const at = host.readMemory(point, 8);
                 const x = (at[0] | at[1] << 8 | at[2] << 16 | at[3] << 24) | 0;
                 const y = (at[4] | at[5] << 8 | at[6] << 16 | at[7] << 24) | 0;
-                writeU32s(host, point, [x - record.x, y - record.y]);
+                const origin = host.geometry.clientOrigin(record);
+                writeU32s(host, point, [x - origin.x, y - origin.y]);
                 return 1;
             },
         },
@@ -802,8 +841,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([from, to, points, count])=>{
                 const source = live(from);
                 const target = live(to);
-                const dx = (source?.x ?? 0) - (target?.x ?? 0);
-                const dy = (source?.y ?? 0) - (target?.y ?? 0);
+                const fromOrigin = source ? host.geometry.clientOrigin(source) : { x: 0, y: 0 };
+                const toOrigin = target ? host.geometry.clientOrigin(target) : { x: 0, y: 0 };
+                const dx = fromOrigin.x - toOrigin.x;
+                const dy = fromOrigin.y - toOrigin.y;
                 for (let index = 0; index < (count >>> 0); index++)
                 {
                     const at = points + index * 8;
@@ -880,19 +921,9 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                const frame = frameOf(record.style);
-                writeRect(host, info + WINDOWINFO.rcWindow, {
-                    left: record.x - frame.left,
-                    top: record.y - frame.top,
-                    right: record.x + record.width + frame.right,
-                    bottom: record.y + record.height + frame.bottom,
-                });
-                writeRect(host, info + WINDOWINFO.rcClient, {
-                    left: record.x,
-                    top: record.y,
-                    right: record.x + record.width,
-                    bottom: record.y + record.height,
-                });
+                const frame = host.geometry.frame(record);
+                writeRect(host, info + WINDOWINFO.rcWindow, host.geometry.windowRect(record));
+                writeRect(host, info + WINDOWINFO.rcClient, host.geometry.clientRect(record));
                 writeU32s(host, info + WINDOWINFO.dwStyle,
                     [record.style, record.exStyle, 0, frame.left, frame.top]);
                 // Two WORDs share the last DWORD, so neither may be written as one.
@@ -989,10 +1020,37 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** HWND WindowFromPoint(POINT Point) */
+        /**
+         * HWND WindowFromPoint(POINT Point)
+         *
+         * The point arrives by value, as two arguments. The window found is
+         * the one the pointer would reach: shown, not disabled, and not one
+         * that lets the pointer through.
+         */
         WindowFromPoint: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([x, y])=>host.windowFromPoint(x | 0, y | 0)?.record.hwnd ?? 0,
+        },
+
+        /**
+         * HWND ChildWindowFromPointEx(HWND hWndParent, POINT pt, UINT uFlags)
+         *
+         * The immediate child at a point in the parent's client area, or the
+         * parent itself when no child is there. The flags choose which
+         * children are passed over; CWP_ALL passes over none.
+         */
+        ChildWindowFromPointEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([parent, x, y, flags])=>childFromPoint(parent, x, y, flags),
+        },
+
+        /** HWND ChildWindowFromPoint(HWND hWndParent, POINT pt) */
+        ChildWindowFromPoint: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([parent, x, y])=>childFromPoint(parent, x, y, 0),
         },
 
         /**
@@ -1578,24 +1636,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SetCapture: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([hwnd])=>{
-                const previous = captured;
-                captured = hwnd >>> 0;
-                return previous;
-            },
+            handler: ([hwnd])=>host.setCapture(hwnd >>> 0),
         },
 
         /** HWND GetCapture(void) */
         GetCapture: {
             argBytes: 0,
-            handler: ()=>captured,
+            handler: ()=>host.capture(),
         },
 
         /** BOOL ReleaseCapture(void) */
         ReleaseCapture: {
             argBytes: 0,
             handler: ()=>{
-                captured = 0;
+                host.releaseCapture();
                 return 1;
             },
         },
@@ -1687,7 +1741,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const WS_VISIBLE = 0x10000000;
                 const record = live(hwnd);
                 return record && (record.style & WS_VISIBLE) !== 0 ? 1 : 0;
             },
@@ -1696,16 +1749,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /** HWND GetActiveWindow(void) */
         GetActiveWindow: {
             argBytes: 0,
-            handler: ()=>host.focus?.() ?? 0,
+            handler: ()=>host.active?.() ?? 0,
         },
 
         /** HWND GetForegroundWindow(void) */
         GetForegroundWindow: {
             argBytes: 0,
-            handler: ()=>host.focus?.() ?? 0,
+            handler: ()=>host.active?.() ?? 0,
         },
 
-        /** HWND GetFocus(void) */
+        /**
+         * HWND GetFocus(void)
+         *
+         * The window the keyboard goes to, which is a control more often
+         * than a top-level window -- and nothing at all until something
+         * took it, which is a state a program checks for.
+         */
         GetFocus: {
             argBytes: 0,
             handler: ()=>host.focus?.() ?? 0,
@@ -1775,10 +1834,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     return 0;
                 }
                 const wasDisabled = (record.style & WS_DISABLED) !== 0;
-                record.style = (enable >>> 0) !== 0
-                    ? (record.style & ~WS_DISABLED) >>> 0
-                    : (record.style | WS_DISABLED) >>> 0;
-                return wasDisabled ? 1 : 0;
+                const disable = (enable >>> 0) === 0;
+                record.style = disable
+                    ? (record.style | WS_DISABLED) >>> 0
+                    : (record.style & ~WS_DISABLED) >>> 0;
+                if (wasDisabled === disable)
+                {
+                    return wasDisabled ? 1 : 0;
+                }
+                // A change is announced, as Windows announces it: a control
+                // greys itself on WM_ENABLE, and a program watches for it.
+                const WM_ENABLE = 0x000a;
+                return andThen(sendMessage(hwnd, WM_ENABLE, disable ? 0 : 1, 0),
+                    ()=>(wasDisabled ? 1 : 0));
             },
         },
 
@@ -1787,12 +1855,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const previous = host.focus?.() ?? 0;
+                const previous = host.active?.() ?? 0;
                 if (!live(hwnd))
                 {
                     return 0;
                 }
-                host.setFocus?.(hwnd >>> 0);
+                host.activate?.(hwnd >>> 0);
                 return previous;
             },
         },
@@ -1802,11 +1870,13 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                if (!live(hwnd))
+                const record = live(hwnd);
+                if (!record)
                 {
                     return 0;
                 }
-                host.setFocus?.(hwnd >>> 0);
+                host.activate?.(hwnd >>> 0);
+                host.raise?.(record);
                 return 1;
             },
         },
@@ -2088,27 +2158,33 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 {
                     return 0;
                 }
-                return host.dispatch(previous >>> 0, {
+                // A system class's procedure lives on this side, and a program
+                // that subclassed one calls it through here with its address.
+                return host.callProcedure(previous >>> 0, {
                     hwnd: hwnd >>> 0,
                     message: message >>> 0,
                     wParam: wParam >>> 0,
                     lParam: lParam >>> 0,
-                });
+                }, host.callerThread?.());
             },
         },
 
-        /** HWND SetFocus(HWND hWnd) */
+        /**
+         * HWND SetFocus(HWND hWnd)
+         *
+         * The window that loses the focus and the one that gains it are
+         * both told, which means running their procedures before this
+         * returns; the answer is the window that had it.
+         */
         SetFocus: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([hwnd])=>{
-                const previous = host.focus?.() ?? 0;
                 if ((hwnd >>> 0) !== 0 && !live(hwnd))
                 {
                     return 0;
                 }
-                host.setFocus?.(hwnd >>> 0);
-                return previous;
+                return host.setFocus(hwnd >>> 0, host.callerThread?.());
             },
         },
     };

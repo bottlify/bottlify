@@ -87,6 +87,9 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  *           The pixels a device context draws into, given the context and
  *           what it reports as its surface -- the selected bitmap's own
  *           attributes for a memory context -- or null when it has none.
+ * @property {() => void} [presentDesktop]
+ *           Shows the desktop the window contexts draw into. Absent in a
+ *           build with nothing to show it on.
  * @property {any} [pixelFormat]
  *           The pixel-format service: `choose(descriptor)`, `describe(index)`
  *           and `count()`. Absent in a build with no rendering surface.
@@ -153,6 +156,9 @@ export function combine(first, second, mode){
  * @param {(handle: number) => any | null} options.dcOf
  * @param {(dc: any) => any} options.surfaceOf   What the DC reports about its size.
  * @param {(dc: any) => any} options.currentMetrics
+ * @returns The entry points, and `bound`: the drawing interface a context is
+ *     bound to, for the window manager, which paints its own controls through
+ *     the same engine without a guest string to read.
  */
 export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, currentMetrics }){
     /** @type {DrawingServices} */
@@ -292,7 +298,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         bottom: rect.bottom | 0,
     });
 
-    return {
+    const functions = {
         /**
          * BOOL BitBlt(HDC hdc, int x, int y, int cx, int cy, HDC hdcSrc,
          *             int x1, int y1, DWORD rop)
@@ -453,7 +459,14 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             },
         },
 
-        /** BOOL TextOutA(HDC hdc, int x, int y, LPCSTR lpString, int c) */
+        /**
+         * BOOL TextOutA(HDC hdc, int x, int y, LPCSTR lpString, int c)
+         *
+         * The count is authoritative and the string need not be terminated:
+         * a program draws a piece of a longer buffer by passing the buffer
+         * and the length of the piece, and reading to a terminator would
+         * read past the piece -- or off the end of what is mapped.
+         */
         TextOutA: {
             argBytes: 20,
             /** @param {number[]} args */
@@ -463,10 +476,10 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                 {
                     return 0;
                 }
-                const text = (string >>> 0) === 0
+                const length = Math.max(count | 0, 0);
+                const text = (string >>> 0) === 0 || length === 0
                     ? ''
-                    : host.readCString(string, Math.max(count | 0, 0) || 0x10000)
-                        .slice(0, Math.max(count | 0, 0) || undefined);
+                    : String.fromCharCode(...host.readMemory(string >>> 0, length));
                 interfaces.textOutA(handle >>> 0, x | 0, y | 0, text);
                 return 1;
             },
@@ -1170,6 +1183,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             },
         },
     };
+    return { functions, bound };
 }
 
 /**

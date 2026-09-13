@@ -379,3 +379,47 @@ export function clearSurface(surface, pixel){
         }
     }
 }
+
+/**
+ * A rectangle of another surface, as a surface of its own.
+ *
+ * A window's device context draws in the window's client coordinates and
+ * lands on the display, so a view is what it is bound to: its origin is the
+ * client's origin on the parent surface, and a pixel outside the parent -- a
+ * window hanging off the edge of the screen -- reads as black and is not
+ * written. The bytes are the parent's own, so a blit between a view and its
+ * parent is recognised as the overlapping copy it is.
+ *
+ * @param {import("./contract.js").Surface} parent
+ * @param {import("./contract.js").Rect} rect  Where the view lies on the parent.
+ * @returns {import("./contract.js").Surface}
+ */
+export function viewOf(parent, rect){
+    const left = rect.left | 0;
+    const top = rect.top | 0;
+    const width = Math.max(0, (rect.right | 0) - left);
+    const height = Math.max(0, (rect.bottom | 0) - top);
+    /** @param {number} x @param {number} y */
+    const inside = (x, y)=>{
+        const px = x + left;
+        const py = y + top;
+        return px >= 0 && py >= 0 && px < parent.width && py < parent.height;
+    };
+    return {
+        width,
+        height,
+        pitch: parent.pitch,
+        topDown: parent.topDown,
+        bytes: parent.bytes,
+        offset: parent.offset + (top * parent.pitch) + (left * 4),
+        /** @param {number} x @param {number} y */
+        read: (x, y)=>(inside(x, y) ? parent.read(x + left, y + top) : 0),
+        /** @param {number} x @param {number} y @param {number} pixel */
+        write(x, y, pixel){
+            if (inside(x, y))
+            {
+                parent.write(x + left, y + top, pixel);
+            }
+        },
+    };
+}

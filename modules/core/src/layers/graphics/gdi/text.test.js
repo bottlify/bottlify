@@ -46,7 +46,9 @@ function draw(surface, options){
     return extTextOut(createPainter(surface), {
         x: 0,
         y: 0,
-        text: 'AB',
+        // Two letters whose left column is solid from the top row down, so a
+        // probe at a cell's corner lands on ink.
+        text: 'HB',
         metrics: METRICS,
         textColor: INK_COLOR,
         bkColor: PAPER_COLOR,
@@ -74,12 +76,26 @@ test('a left-aligned string starts at the coordinate it was given', ()=>{
 });
 
 test('the ascent, not the cell height, is what a glyph body fills', ()=>{
+    // An L has a full left column: seven rows of it end on the baseline.
     const surface = canvas(32, 16);
-    draw(surface, { x: 0, y: 0, align: TA_LEFT | TA_TOP });
+    draw(surface, { x: 0, y: 0, align: TA_LEFT | TA_TOP, text: 'L' });
     assert.equal(surface.read(0, 0), BACKGROUND, 'the top row of the cell is above the body');
     assert.equal(surface.read(0, 1), INK);
     assert.equal(surface.read(0, 7), INK, 'down to the baseline');
     assert.equal(surface.read(0, 8), BACKGROUND, 'and no further');
+    assert.equal(surface.read(4, 7), INK, 'the foot of the L');
+    assert.equal(surface.read(4, 6), BACKGROUND, 'is one row');
+});
+
+test('a character with no picture is a block, so it is still seen', ()=>{
+    const surface = canvas(32, 16);
+    draw(surface, { x: 0, y: 0, align: TA_LEFT | TA_TOP, text: 'é' });
+    for (let y = 1; y <= 7; y++)
+    {
+        assert.equal(surface.read(0, y), INK);
+        assert.equal(surface.read(4, y), INK);
+    }
+    assert.equal(surface.read(5, 3), BACKGROUND, 'one column bare');
 });
 
 test('the three horizontal alignments put the same string in three places', ()=>{

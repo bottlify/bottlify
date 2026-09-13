@@ -346,11 +346,15 @@ among the 84 unimplemented commands, so a Vulkan program can clear and present b
 four bytes and device bitmaps to two; raster operations are decoded from the ROP3 truth table
 rather than enumerated; filling is Windows' half-open convention; clipping is one rectangle;
 `BitBlt` shifts the source with the clip and uses memmove order on overlap, `StretchBlt` copies
-first; text draws a solid block per cell at the correct alignment and advance because there is no
-font engine. `createGdiDrawing` (`gdi/context.js`) is the entry; no assembly in the tree passes it
-to `win32`'s `graphics.createDrawing` slot (`src/app.js` hands `win32` only the pixel-format
-service and `swapBuffers`), so through `createApp()` gdi32's pixel-moving entry points fail
-truthfully rather than draw.
+first; text draws each character from one five-by-seven face (`gdi/glyphs.js`), scaled by whole
+numbers into the cell the metrics describe, at the correct alignment and advance — a stand-in
+until there is a font engine, with a block for any character the face has no picture of.
+`createGdiDrawing` (`gdi/context.js`) is the entry; `src/app.js` hands it to `win32` as
+`graphics.createDrawing`, with `surfaceFor` and `presentDesktop`. A memory context draws into its
+DIB section's own bytes; a window context draws into a view (`viewOf`) of the **desktop** — one
+32-bit surface the size of the display, allocated from the guest heap so the presenter can show it
+the way it shows a DirectDraw primary — at the rectangle `win32` names for the window. `win32`
+calls `presentDesktop` when a paint pass has ended.
 
 ### Adapter and display
 

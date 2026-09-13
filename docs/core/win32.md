@@ -161,11 +161,26 @@ gets its own heap, hive, queue and COM registry.
   with another and Windows lets it. Bookkeeping stays on the host side, so an overrun corrupts a
   neighbour, as on Windows, and never the allocator. Blocks are 8-byte aligned; `VirtualAlloc`
   reservations begin on 64 KiB boundaries. `GlobalMemoryStatus` reports what is left of the arena.
-- **Windows** (`user32/windows.js` with `paint.js`, `system.js`, `objects.js`, `dialogs.js`). One
-  window table shared by five files. `windowService` is the outward view: `list()` of live
-  top-level windows and `place()`, which is what a fullscreen device uses through `placeWindow`
-  so a program re-reading its rectangle on `WM_SIZE` clips its cursor to the picture. Dialogs are
-  windows: the template is walked for real and coordinates are dialog units.
+- **Windows** (`user32/windows.js` with `paint.js`, `system.js`, `objects.js`, `dialogs.js`,
+  `controls.js`, `frame.js`). One window table shared by the files. `windowService` is the
+  outward view: `list()` of live windows with their screen rectangles and `place()`, which is what
+  a fullscreen device uses through `placeWindow` so a program re-reading its rectangle on
+  `WM_SIZE` clips its cursor to the picture. A window has the frame its styles give it
+  (`frame.js`: border, caption with title and close box, scroll bars), which `DefWindowProc`
+  paints on `WM_NCPAINT` and which `GetClientRect`, `ClientToScreen` and `AdjustWindowRect` all
+  derive from the same metrics. Painting goes through the desktop surface the graphics layer
+  owns (`docs/core/graphics.md`): `BeginPaint` sends `WM_NCPAINT` and `WM_ERASEBKGND` first, a
+  window's update area is one rectangle, a window that is invalidated marks every window painted
+  after it that overlaps it, and the desktop is presented when the queue finds nothing left to
+  paint. The **system classes** — `Button`, `Static`, `Edit`, `ListBox`, `ComboBox`,
+  `ScrollBar` and the dialog class `#32770`, also by their atoms — have their procedures on this
+  side (`controls.js`); each has a real address (a bridge stub) that `GetWindowLong(GWL_WNDPROC)`
+  reports and `CallWindowProc` reaches, so a program may subclass one. Dialogs are windows of the
+  dialog class: the template is walked for real, coordinates are dialog units, the dialog
+  procedure sees every message first and `DefDlgProc` the rest, and `IsDialogMessage` handles
+  Enter, Escape and Tab. Pointer messages from the input layer are routed to the window under
+  the point (or the capture), in that window's client coordinates, with the frame's hit test
+  turning them into non-client messages; keys go to the focus window.
 - **Message queue** (`user32/messages.js`). Posted messages are a list; `WM_MOUSEMOVE` is one
   slot, not a backlog; `WM_QUIT` is a flag that becomes a message when the queue is empty;
   `WM_TIMER` is never queued but synthesised when a program asks and a timer is due, with the due
@@ -273,6 +288,11 @@ Stated as the code states them.
   `sin` is reported missing rather than bound to a function that never sets the result register.
 - **No input method** (`imm32` succeeds by having nothing to do), **no image drawing** in image
   lists, **no message tables or module strings** in `FormatMessage`.
+- **The system classes are the classic look and the common messages**: a combo box's list does
+  not drop down (the arrow keys change the selection; said once as a divergence), a scroll bar's
+  thumb is not dragged, an edit does not undo, an owner-drawn button or static paints its
+  background only, and a static's image is drawn only when the bitmap has pixels this build can
+  reach (said once otherwise).
 - **Unimplemented imports** are bound to a zero-returning stub and reported once per name; zero
   reads as failure under most conventions but as `S_OK` to a caller expecting an `HRESULT`.
 
@@ -290,7 +310,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 |------|----------------------------------|
 | kernel32 | `consoleio`, `critical`, `drives`, `environment`, `exceptions`, `files`, `filetime`, `heap`, `iocp`, `locale`, `mapping`, `process`, `resources`, `seh`, `spawn`, `sync`, `system`, `teb`, `threading`, `vfs` `.test.js` |
 | msvcrt | `convert`, `cxx`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
-| user32 | `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` |
+| user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
 | module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together. |

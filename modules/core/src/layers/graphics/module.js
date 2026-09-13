@@ -14,7 +14,7 @@ import { createVulkan } from './vulkan/runtime.js';
 import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
-import { dibPitch, surfaceForDibSection } from './gdi/surface.js';
+import { createSurface, dibPitch, surfaceForDibSection, viewOf } from './gdi/surface.js';
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -317,6 +317,46 @@ export const graphicsModule = {
             schedule: pacer ? (/** @type {() => void} */ flush)=>pacer.request(flush) : undefined,
         });
 
+        /**
+         * The desktop: one software surface the size of the display, in guest
+         * memory so the presenter can read it the way it reads a DirectDraw
+         * primary. Every window's device context is a view of it. Made on the
+         * first window context rather than at start-up, so a program that
+         * draws only through a device never pays for it, and remade if the
+         * program's display changes size under it.
+         *
+         * @type {(import('./webgpu/internal/presenter.js').PresentableSurface
+         *     & { surface: import('./gdi/contract.js').Surface }) | null}
+         */
+        let desktopSurface = null;
+        const desktop = ()=>{
+            const screen = services.screen;
+            if (desktopSurface && (desktopSurface.width !== screen.width
+                || desktopSurface.height !== screen.height))
+            {
+                config?.free?.(desktopSurface.buffer);
+                desktopSurface = null;
+            }
+            if (!desktopSurface)
+            {
+                const pitch = dibPitch(screen.width, 32);
+                const buffer = win32.heap().allocate(pitch * screen.height) >>> 0;
+                if (buffer === 0)
+                {
+                    return null;
+                }
+                const bytes = services.windowMemory(buffer, pitch * screen.height);
+                desktopSurface = {
+                    buffer, pitch, bitCount: 32, palette: null,
+                    width: screen.width, height: screen.height,
+                    surface: createSurface({
+                        width: screen.width, height: screen.height, bytes, pitch,
+                    }),
+                };
+            }
+            return desktopSurface;
+        };
+
         seam = createGraphicsLibraries({
             graphics: api,
             memory: services,
@@ -406,22 +446,35 @@ export const graphicsModule = {
 
             /**
              * GDI's own drawing, for the device contexts win32 keeps: the
-             * engine a context is bound to, and the pixels a context over a
-             * bitmap in guest memory draws into. A context over a window has
-             * no pixels here yet, and says so with null rather than drawing
-             * into a copy nobody presents.
+             * engine a context is bound to, and the pixels a context draws
+             * into -- a bitmap's own bytes in guest memory for a memory
+             * context, a view of the desktop for a context over a window.
              */
             gdiDrawing: ()=>({
                 /** @param {{ objects: any, metrics: (font: number) => any }} options */
                 create: options=>createGdiDrawing(options),
                 /**
-                 * @param {{ kind: string }} dc
+                 * @param {{ kind: string, bounds?: { left: number, top: number,
+                 *     right: number, bottom: number } }} dc
+                 *     A window context names the screen rectangle it may
+                 *     draw in, in screen coordinates; absent, the whole screen.
                  * @param {{ width: number, height: number, bitCount: number, bits?: number,
                  *     topDown?: boolean, palette?: number[], format?: string }} bitmap
                  */
                 surfaceFor: (dc, bitmap)=>{
+                    if (dc.kind !== 'memory')
+                    {
+                        const screen = desktop();
+                        if (!screen)
+                        {
+                            return null;
+                        }
+                        return viewOf(screen.surface, dc.bounds ?? {
+                            left: 0, top: 0, right: screen.width, bottom: screen.height,
+                        });
+                    }
                     const bits = bitmap.bits ?? 0;
-                    if (dc.kind !== 'memory' || bits === 0)
+                    if (bits === 0)
                     {
                         return null;
                     }
@@ -431,6 +484,20 @@ export const graphicsModule = {
                     const bytes = services.windowMemory(bits,
                         dibPitch(bitmap.width, bitmap.bitCount) * bitmap.height);
                     return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
+                },
+                /** The desktop's pixels, or null in a build with no heap for them. */
+                desktop: ()=>desktop()?.surface ?? null,
+                /**
+                 * Shows the desktop. Called after a paint pass rather than
+                 * after every draw; the presenter coalesces what arrives
+                 * within one flush anyway.
+                 */
+                presentDesktop: ()=>{
+                    const screen = desktop();
+                    if (screen)
+                    {
+                        presenter.present(screen);
+                    }
                 },
             }),
         };

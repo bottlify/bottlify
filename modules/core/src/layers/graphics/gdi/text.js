@@ -7,13 +7,14 @@
 /**
  * Text output, without a font engine behind it.
  *
- * **The glyph shapes here are placeholders and the positions are not.** Every
- * character is drawn as a solid block the width of one cell and the height of
- * the ascent; that is admittedly not an "A". What is real is where the block
- * goes: the alignment the program set, the origin it named, the advance widths
- * it supplied, the background it asked for and the colours it chose. A user
- * interface laid out against those numbers is usable, and replacing the block
- * with a rasterised glyph later moves nothing -- which is the whole reason to
+ * **The glyph shapes are a stand-in and the positions are not.** Every
+ * character is drawn from one five-by-seven pixel face, scaled by whole
+ * numbers to the cell the metrics describe; a character the face has no
+ * picture for is a solid block. What is real is where each one goes: the
+ * alignment the program set, the origin it named, the advance widths it
+ * supplied, the background it asked for and the colours it chose. A user
+ * interface laid out against those numbers is usable, and replacing the face
+ * with a rasterised font later moves nothing -- which is the whole reason to
  * separate the two now rather than wait for a rasteriser.
  *
  * The measurements arrive injected. The bookkeeping half is what a program asks
@@ -24,6 +25,7 @@
 import { OPAQUE } from './brush.js';
 import { colorToPixel } from './surface.js';
 import { fillRect } from './shapes.js';
+import { GLYPH_COLUMNS, GLYPH_ROWS, glyphOf } from './glyphs.js';
 
 /** SetTextAlign flags. The horizontal and vertical choices are separate fields. */
 export const TA_NOUPDATECP = 0;
@@ -121,15 +123,40 @@ export function extTextOut(painter, options){
     }
 
     const ink = colorToPixel(options.textColor);
-    // One pixel of the cell is left bare so that adjacent characters stay
-    // countable; the block is a stand-in for a glyph, not for a filled run.
+    // The face is scaled by the largest whole number that keeps it inside
+    // the cell, with a column and a row of the cell left bare so adjacent
+    // characters stay apart, and its last row sits on the baseline.
+    const scale = Math.max(1, Math.min(
+        Math.floor((metrics.cellWidth - 1) / GLYPH_COLUMNS),
+        Math.floor((metrics.ascent - 1) / GLYPH_ROWS)));
+    const glyphTop = top + Math.max(1, metrics.ascent - GLYPH_ROWS * scale);
     const bodyWidth = Math.max(1, metrics.cellWidth - 1);
     const bodyHeight = Math.max(1, metrics.ascent - 1);
     let pen = left;
     for (let index = 0; index < options.text.length; index++)
     {
         const advance = options.dx?.[index] ?? metrics.cellWidth;
-        if (options.text.charCodeAt(index) !== 0x20)
+        const code = options.text.charCodeAt(index);
+        const rows = glyphOf(code);
+        if (rows)
+        {
+            for (let row = 0; row < GLYPH_ROWS; row++)
+            {
+                for (let column = 0; column < GLYPH_COLUMNS; column++)
+                {
+                    if ((rows[row] & (1 << (GLYPH_COLUMNS - 1 - column))) !== 0)
+                    {
+                        fillRect(clipped, {
+                            left: pen + column * scale,
+                            top: glyphTop + row * scale,
+                            right: pen + (column + 1) * scale,
+                            bottom: glyphTop + (row + 1) * scale,
+                        }, ()=>ink);
+                    }
+                }
+            }
+        }
+        else if (code !== 0x20)
         {
             fillRect(clipped, {
                 left: pen,
