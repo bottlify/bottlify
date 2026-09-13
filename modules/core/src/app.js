@@ -309,7 +309,7 @@ export function groupBlocks(blocks){
  * program that touches one block of a region it never returns to pays for this
  * much extra at most.
  */
-const READ_AHEAD_BYTES = 2 << 20;
+export const READ_AHEAD_BYTES = 2 << 20;
 
 /**
  * Widens every miss to the aligned window of the container that holds it.

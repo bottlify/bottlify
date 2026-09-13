@@ -22,8 +22,11 @@ import { open } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { createApp } from './app.js';
+import { createApp, READ_AHEAD_BYTES } from './app.js';
 import { writeBundle } from '../../../tools/btl.mjs';
+
+/** The fixture's blocks, small so a read of a few bytes still misses one. */
+const BLOCK_SIZE = 64 * 1024;
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 const FIXTURE = new URL('../test/fixtures/session.exe', import.meta.url);
@@ -34,18 +37,21 @@ const PLANTED = 'FROM-BTL';
 /**
  * Builds a bundle holding one file the fixture will read, and hands back a
  * range fetcher over it plus a count of how much was actually asked for.
+ *
+ * @param {string} contents what the fixture reads out of the bundle
+ * @param {number} [filler] bytes of padding nothing ever reads
  */
-async function bundleWith(/** @type {string} */ contents){
+async function bundleWith(contents, filler = 300 * 1024){
     const root = await mkdtemp(join(tmpdir(), 'btl-src-'));
     const out = await mkdtemp(join(tmpdir(), 'btl-out-'));
     await mkdir(join(root, 'Data'), { recursive: true });
     await writeFile(join(root, 'save.dat'), contents);
-    // Large, and incompressible on purpose: a filler that compressed away would
-    // make the bundle tiny and the assertion below meaningless.
-    await writeFile(join(root, 'Data', 'big.bin'), randomBytes(300 * 1024));
+    // Incompressible on purpose: padding that compressed away would make the
+    // bundle tiny and the assertions about what was fetched meaningless.
+    await writeFile(join(root, 'Data', 'big.bin'), randomBytes(filler));
 
     const path = join(out, 'bundle.btl');
-    const summary = await writeBundle({ root, output: path, blockSize: 64 * 1024 });
+    const summary = await writeBundle({ root, output: path, blockSize: BLOCK_SIZE });
     const handle = await open(path, 'r');
 
     const fetched = { calls: 0, bytes: 0 };
@@ -100,10 +106,16 @@ test('a program reads a file out of a bundle, fetching only what it touches', as
     assert.equal(printed, PLANTED,
         'the bytes came out of the bundle, through a read that had to wait for them');
 
-    // The bundle is 300 KiB of payload in 64 KiB blocks. A read of an eight-byte
-    // file must not have pulled the whole thing across.
-    assert.ok(source.fetched.bytes < source.summary.bytes / 2,
-        `only part of the bundle was fetched (${source.fetched.bytes} of ${source.summary.bytes})`);
+    // A miss brings the window around it rather than the block alone, so what
+    // bounds a read of an eight-byte file is the window and not the bundle: a
+    // fixture smaller than one window is fetched whole and that is correct.
+    // What must not happen is a second window for one small read, or a request
+    // for a range nothing asked about.
+    assert.ok(source.fetched.bytes <= READ_AHEAD_BYTES + BLOCK_SIZE,
+        `one window at most was fetched (${source.fetched.bytes} for a window of`
+        + ` ${READ_AHEAD_BYTES})`);
+    assert.ok(source.fetched.calls <= 4,
+        `a handful of requests brought it in (${source.fetched.calls})`);
 
     await source.cleanup();
 });
@@ -213,11 +225,15 @@ test('a session arriving from outside lands on the volume the bundle is mounted 
 });
 
 test('what the program never read is fetched anyway, in the gaps', async()=>{
-    // The fixture reads save.dat and nothing else. Data\big.bin is 300 KiB of
+    // The fixture reads save.dat and nothing else. Data\big.bin is
     // incompressible filler it never opens, so if those blocks arrive, they
     // arrived because nothing was being read rather than because something
     // asked for them.
-    const source = await bundleWith(PLANTED);
+    //
+    // Deliberately larger than one read-ahead window: a bundle that fits inside
+    // the window one miss already brings in is whole before the filler ever
+    // looks at it, which would leave the filler nothing to show for itself.
+    const source = await bundleWith(PLANTED, 2 * READ_AHEAD_BYTES);
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(FIXTURE),
