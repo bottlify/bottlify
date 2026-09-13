@@ -226,8 +226,9 @@ inside one instruction and cannot await.
 `libv86.mjs` (the `V86` class: `add_listener`, `run`, `stop`, `write_memory`,
 `get_instruction_counter`, `io.register_write`, and the `cpu` object's typed views over its
 state) and `v86.wasm` (or `v86-profiler.wasm`), via `wasm_fn`. Views over the emulator's
-memory are taken once per `wasm_memory.buffer` identity rather than through its proxies, which
-create a fresh typed array per property access. Two emulator methods are wrapped for counting:
+memory are taken once and again only when the memory has grown -- which detaches the buffer
+they were on, so a view reading as empty is the signal -- rather than through its proxies, which
+create a fresh typed array per property access, or through the buffer accessor on every read. Two emulator methods are wrapped for counting:
 `codegen_finalize` (published modules, and the first refusal) and `jit_clear_func` (discarded
 ones).
 

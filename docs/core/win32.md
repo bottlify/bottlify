@@ -169,12 +169,17 @@ instruction is the address that works at the last.
 Everything a process owns lives inside one `create()` call — a second process in the same realm
 gets its own heap, hive, queue and COM registry.
 
-- **Heap** (`kernel32/heap.js`). One free-list allocator over the arena serves `HeapAlloc`,
+- **Heap** (`kernel32/heap.js`). One allocator over the arena serves `HeapAlloc`,
   `GlobalAlloc`, `LocalAlloc`, `VirtualAlloc`, `malloc`, `CoTaskMemAlloc`, DIB bits, vtables, and
   the graphics and audio layers' locked buffers, because a program frees with one what it allocated
   with another and Windows lets it. Bookkeeping stays on the host side, so an overrun corrupts a
   neighbour, as on Windows, and never the allocator. Blocks are 8-byte aligned; `VirtualAlloc`
   reservations begin on 64 KiB boundaries. `GlobalMemoryStatus` reports what is left of the arena.
+  Free spans are kept by size class and coalesced through maps by address, so an allocation and a
+  free are lookups whatever the heap holds; the maps are never deleted from, only written over,
+  because deleting a key from a large map and setting it again -- what handing an address out
+  and back does -- is slow in the engine underneath. Addresses are deterministic for a given
+  sequence of requests.
   **Zeroes are not written where they are already there.** Guest memory begins zero and only the
   guest writes into it, so arena above the allocator's high-water mark reads as zero already and a
   caller promising zeroes — `HeapAlloc(HEAP_ZERO_MEMORY)`, `GMEM_ZEROINIT`, a reservation — clears
