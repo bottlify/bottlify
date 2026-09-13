@@ -177,6 +177,16 @@ const VK_MENU = 0x12;
 const MAX_TEXT = 1 << 16;
 
 /**
+ * The clipboard formats that are text, and the ceiling on how much of one is
+ * read out. A program copies a whole error console in one go, which is well
+ * past MAX_TEXT and still worth having.
+ */
+const CF_TEXT = 1;
+const CF_OEMTEXT = 7;
+const CF_UNICODETEXT = 13;
+const MAX_CLIPBOARD_TEXT = 1 << 20;
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
@@ -192,7 +202,49 @@ export function createObjectFunctions({ host, live }){
      * open the clipboard without naming a window -- so whether it is open is a
      * flag of its own rather than a non-zero owner.
      */
-    const clipboard = { open: false, owner: 0, formats: new Map() };
+    const clipboard = { open: false, owner: 0, formats: new Map(), changed: false };
+
+    /**
+     * A terminated string read a piece at a time, so a short one does not
+     * cost the whole ceiling and a long one is not refused at a fixed limit.
+     *
+     * @param {number} address @param {1 | 2} width Bytes per character.
+     */
+    const readTerminated = (address, width)=>{
+        const STEP = 256;
+        let text = '';
+        for (let at = 0; at < MAX_CLIPBOARD_TEXT; at += STEP)
+        {
+            const piece = host.readMemory(address + at, STEP);
+            for (let index = 0; index + width <= piece.length; index += width)
+            {
+                const code = width === 2 ? piece[index] | piece[index + 1] << 8 : piece[index];
+                if (code === 0)
+                {
+                    return text;
+                }
+                text += String.fromCharCode(code);
+            }
+        }
+        return text;
+    };
+
+    /**
+     * The text the clipboard holds, if it holds any. Unicode is preferred
+     * over the byte formats because it is the one that lost nothing; a null
+     * handle is delayed rendering, which nothing here asks the owner for.
+     *
+     * @returns {string | null}
+     */
+    const clipboardText = ()=>{
+        const wide = clipboard.formats.get(CF_UNICODETEXT);
+        if (wide)
+        {
+            return readTerminated(wide, 2);
+        }
+        const narrow = clipboard.formats.get(CF_TEXT) || clipboard.formats.get(CF_OEMTEXT);
+        return narrow ? readTerminated(narrow, 1) : null;
+    };
 
     /** @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
@@ -984,12 +1036,28 @@ export function createObjectFunctions({ host, live }){
             },
         },
 
-        /** BOOL CloseClipboard(void) */
+        /**
+         * BOOL CloseClipboard(void)
+         *
+         * Closing is when a copy is complete, so this is where the text goes
+         * to the host -- and only when the contents changed under this open,
+         * because a program that opened the clipboard to paste would
+         * otherwise push its stale copy over whatever the person took since.
+         */
         CloseClipboard: {
             argBytes: 0,
             handler: ()=>{
                 const wasOpen = clipboard.open;
                 clipboard.open = false;
+                if (wasOpen && clipboard.changed)
+                {
+                    clipboard.changed = false;
+                    const text = clipboardText();
+                    if (text !== null)
+                    {
+                        host.clipboard?.(text);
+                    }
+                }
                 return wasOpen ? 1 : 0;
             },
         },
@@ -1009,6 +1077,7 @@ export function createObjectFunctions({ host, live }){
                     return 0;
                 }
                 clipboard.formats.clear();
+                clipboard.changed = true;
                 return 1;
             },
         },
@@ -1023,6 +1092,7 @@ export function createObjectFunctions({ host, live }){
                     return 0;
                 }
                 clipboard.formats.set(format >>> 0, memory >>> 0);
+                clipboard.changed = true;
                 return memory >>> 0;
             },
         },

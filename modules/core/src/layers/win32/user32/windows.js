@@ -398,6 +398,10 @@ function characterFor(key){
  *           explaining in its own words why it is about to stop, which is the
  *           most useful sentence it will ever say, and a line in a log is where
  *           such a sentence goes to be missed.
+ * @property {(text: string) => void} [clipboard]
+ *           The text a program copied, handed up when it closes the clipboard.
+ *           A copy that stays inside the guest is one the person cannot paste
+ *           anywhere they would want to.
  * @property {(text: string) => void} [say]  Where a program's own words go.
  */
 

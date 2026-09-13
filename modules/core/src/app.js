@@ -2357,6 +2357,11 @@ async function buildApp(options){
                     ? formatTrace(captureTrace({ cpu, memory, kernel, bridge }))
                     : null,
             }),
+            // Text a program copied, for the page to put on the browser's
+            // clipboard: the copy button of an error console is useless if
+            // what it copied cannot leave the engine.
+            /** @param {string} text */
+            onClipboard: text=>events.emit('clipboard', { text }),
             /** @param {number} handle @param {string} text */
             onOutput: (handle, text)=>events.emit('output', { handle, text }),
             /** @param {string} text */

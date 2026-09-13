@@ -998,6 +998,8 @@ export const win32Module = {
                 // this engine can show it the way a person would have seen it.
                 /** @param {any} notice */
                 messageBox: notice=>config?.onMessageBox?.(notice),
+                /** @param {string} text */
+                clipboard: text=>config?.onClipboard?.(text),
                 say: (/** @type {string} */ text)=>trace(text),
                 // A CREATESTRUCT has to live where the guest can read it, and
                 // only for the length of the two messages that carry it.

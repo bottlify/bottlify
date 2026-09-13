@@ -57,6 +57,7 @@ the module graph is built. All are optional.
 | `cursor`, `keyState`, `clipCursor` | thunks | nothing pressed, origin | The input layer, handed down. |
 | `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS` | What the program is told it was started with. |
 | `onOutput(handle, text)`, `onTrace(text)`, `onMessageBox(notice)`, `created(hwnd)`, `spawned(request)` | callbacks | no-ops | Console output, `OutputDebugString`, `MessageBox`, window creation, `CreateProcess`. |
+| `onClipboard(text)` | callback | no-op | The text a program copied. Called from `CloseClipboard` when the clipboard was written under that open and holds `CF_UNICODETEXT` (preferred), `CF_TEXT` or `CF_OEMTEXT`; a close after a read alone, or with only non-text formats, calls nothing. A null handle (delayed rendering) is not rendered. |
 | `divergence(api, detail)` | callback | none | See §3, "The divergence rule". |
 
 ### Provided API (`module.js`)
@@ -329,7 +330,8 @@ Stated as the code states them.
   the process on its first call (§3, "From a table to a module").
 
 Reported at runtime: `divergence` (each once), `unimplemented` (each import once, plus a count per
-name in the application's diagnostics as `unimplementedCalls`), `message-box`, `output`, `debug`,
+name in the application's diagnostics as `unimplementedCalls`), `message-box`, `clipboard` (the
+text a program copied, once its clipboard closes), `output`, `debug`,
 and the metrics in §2.
 
 ## 5. Tests

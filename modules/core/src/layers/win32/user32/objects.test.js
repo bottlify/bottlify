@@ -53,6 +53,8 @@ const FVIRTKEY = 0x01;
 const FCONTROL = 0x08;
 
 const CF_TEXT = 1;
+const CF_OEMTEXT = 7;
+const CF_UNICODETEXT = 13;
 
 const { MENUITEMINFO, SCROLLINFO, ACCEL_SIZE, SB_HORZ } = OBJECT_LAYOUT;
 
@@ -115,10 +117,12 @@ function fakeHandles(){
     };
 }
 
-function setup(){
+/** @param {Record<string, unknown>} [extra] More of the host, for a test that listens to it. */
+function setup(extra = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
+        ...extra,
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
             memory.writeMemory(a, d),
@@ -387,6 +391,84 @@ test('the clipboard is bracketed, and a write outside the brackets fails', ()=>{
     assert.equal(fns.GetClipboardData.handler([CF_TEXT]), 0);
     assert.equal(fns.CloseClipboard.handler([]), 1);
     assert.equal(fns.CloseClipboard.handler([]), 0);
+});
+
+/** @returns {{ copied: string[], host: { clipboard: (text: string) => void } }} */
+function clipboardListener(){
+    /** @type {string[]} */
+    const copied = [];
+    return { copied, host: { clipboard: text=>copied.push(text) } };
+}
+
+/** @param {any} memory @param {number} address @param {string} text */
+function putWideString(memory, address, text){
+    for (let index = 0; index < text.length; index++)
+    {
+        const code = text.charCodeAt(index);
+        memory.bytes[address + index * 2] = code & 0xff;
+        memory.bytes[address + index * 2 + 1] = code >>> 8;
+    }
+    memory.bytes[address + text.length * 2] = 0;
+    memory.bytes[address + text.length * 2 + 1] = 0;
+}
+
+test('CF_TEXT set under an open clipboard reaches the host, exactly, on close', ()=>{
+    // The handle is the guest allocation itself: what a program locks is the
+    // pointer it got back, so the text is read straight through the handle.
+    const { copied, host } = clipboardListener();
+    const { memory, fns } = setup(host);
+    memory.putString(TEXT, 'Fatal error at 0x00401000\r\nstack: 3 frames');
+
+    assert.equal(fns.OpenClipboard.handler([0]), 1);
+    assert.equal(fns.EmptyClipboard.handler([]), 1);
+    assert.equal(fns.SetClipboardData.handler([CF_TEXT, TEXT]), TEXT);
+    assert.deepEqual(copied, [], 'nothing leaves before the clipboard is closed');
+    assert.equal(fns.CloseClipboard.handler([]), 1);
+    assert.deepEqual(copied, ['Fatal error at 0x00401000\r\nstack: 3 frames']);
+
+    // Opened again to read, and closed without a write: a paste does not
+    // push the stale copy over what the person took since.
+    fns.OpenClipboard.handler([0]);
+    assert.equal(fns.GetClipboardData.handler([CF_TEXT]), TEXT);
+    fns.CloseClipboard.handler([]);
+    assert.equal(copied.length, 1);
+});
+
+test('CF_UNICODETEXT is read as UTF-16 and preferred over the byte formats', ()=>{
+    const { copied, host } = clipboardListener();
+    const { memory, fns } = setup(host);
+    memory.putString(TEXT, 'narrow');
+    putWideString(memory, OUT, 'wide \u0416');
+
+    fns.OpenClipboard.handler([0]);
+    fns.SetClipboardData.handler([CF_TEXT, TEXT]);
+    fns.SetClipboardData.handler([CF_UNICODETEXT, OUT]);
+    fns.CloseClipboard.handler([]);
+    assert.deepEqual(copied, ['wide \u0416']);
+});
+
+test('CF_OEMTEXT is text too, and a close with no text format hands nothing up', ()=>{
+    const { copied, host } = clipboardListener();
+    const { memory, fns } = setup(host);
+
+    fns.OpenClipboard.handler([0]);
+    fns.SetClipboardData.handler([2, 0x5000]);
+    fns.CloseClipboard.handler([]);
+    assert.deepEqual(copied, [], 'a bitmap is not text');
+
+    memory.putString(TEXT, 'oem');
+    fns.OpenClipboard.handler([0]);
+    fns.SetClipboardData.handler([CF_OEMTEXT, TEXT]);
+    fns.CloseClipboard.handler([]);
+    assert.deepEqual(copied, ['oem']);
+
+    // Nothing to read through a null handle: that is delayed rendering, and
+    // the owner is not asked to render here.
+    fns.OpenClipboard.handler([0]);
+    fns.EmptyClipboard.handler([]);
+    fns.SetClipboardData.handler([CF_TEXT, 0]);
+    fns.CloseClipboard.handler([]);
+    assert.equal(copied.length, 1);
 });
 
 // --- scroll bars ---
