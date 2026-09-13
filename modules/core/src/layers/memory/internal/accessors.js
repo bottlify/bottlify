@@ -31,8 +31,11 @@
  * @param {Object} options
  * @param {RawMemory} options.raw            Physical memory, normally the cpu layer.
  * @param {ReturnType<import('./regions.js').createRegionMap>} options.regions
+ * @param {((length: number) => void) | null} [options.charge]
+ *     Charges a write to whoever is in flight. Absent where nothing publishes
+ *     the account, so the write path keeps a branch rather than a call.
  */
-export function createAccessors({ raw, regions }){
+export function createAccessors({ raw, regions, charge = null }){
     /**
      * The region the last dword read fell in, by its span and the table's
      * version. A host call reads several dwords -- its arguments, the fields
@@ -90,6 +93,10 @@ export function createAccessors({ raw, regions }){
      */
     const write = (address, bytes)=>{
         regions.assert(address, bytes.length, 'write');
+        if (charge)
+        {
+            charge(bytes.length);
+        }
         // Only a write the guest could execute has anything to tell the
         // emulator's compiler. Everything else -- a structure field, an
         // out-parameter, a surface -- goes straight into memory.

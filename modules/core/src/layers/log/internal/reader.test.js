@@ -10,7 +10,7 @@ import { Worker } from 'node:worker_threads';
 import { Level, createJournal } from './journal.js';
 import { createLogReader } from './reader.js';
 import { createMetrics } from './metrics.js';
-import { FRAME_DELTAS, FRAME_VALUES } from './profiler.js';
+import { FRAME_MIRROR } from './profiler.js';
 import { logModule } from '../module.js';
 
 const setup = (/** @type {any} */ options = {})=>{
@@ -210,16 +210,17 @@ test('a frame says what the program did and what it cost us, without a second ru
     const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
     // The layers whose counters a frame's row carries, registered as the
     // layout names them rather than as any one layer happens to order them.
-    const owned = (/** @type {string} */ layer, /** @type {readonly any[]} */ entries)=>{
-        const wanted = entries.filter(entry=>entry.layer === layer);
+    const owned = (/** @type {string} */ layer)=>{
+        const wanted = FRAME_MIRROR.filter(entry=>entry.layer === layer);
         const row = api.metrics.counters(layer, wanted.map(entry=>entry.counter));
         /** @param {string} column @param {number} value */
         return (column, value)=>{
             row[wanted.findIndex(entry=>entry.column === column)] = value;
         };
     };
-    const cpu = owned('cpu', FRAME_DELTAS);
-    const kernel = owned('kernel', FRAME_VALUES);
+    const cpu = owned('cpu');
+    const kernel = owned('kernel');
+    const memory = owned('memory');
     const regions = api.metrics.table('memory', 'regions',
         { rows: 4, columns: ['name', 'base', 'size', 'access'] });
     regions.set(0, 0, api.intern('Storm.dll'));
@@ -228,24 +229,41 @@ test('a frame says what the program did and what it cost us, without a second ru
     regions.used(1);
     const reader = createLogReader({ memory: api.memory() });
 
-    /** @param {number} ms @param {number} retired @param {number} interpreted */
-    const frame = (ms, retired, interpreted)=>{
+    /**
+     * @param {number} ms @param {number} retired @param {number} interpreted
+     * @param {Object} [extra]
+     * @param {number} [extra.stretches]  Interpreter entries, cumulative.
+     * @param {number} [extra.worst]      Steps of the frame's heaviest stretch.
+     * @param {number} [extra.at]         Where that stretch began.
+     * @param {number} [extra.written]    Bytes the host wrote, cumulative.
+     * @param {string} [extra.writer]     Which call wrote most of them.
+     * @param {number} [extra.writerBytes]
+     */
+    const frame = (ms, retired, interpreted, extra = {})=>{
         api.beginFrame();
         api.begin('slice', 'guest');
         time += ms;
         api.end('slice', { instructions: retired });
         cpu('retired', retired);
         cpu('interpretedSteps', interpreted);
+        cpu('interpretedDispatches', extra.stretches ?? 0);
+        cpu('hostWrittenBytes', extra.written ?? 0);
+        cpu('interpretedWorst', extra.worst ?? 0);
+        cpu('interpretedAt', extra.at ?? 0);
         kernel('thread', api.intern('main'));
         kernel('threadInstructions', retired);
         kernel('threadAt', 0x6f01000);
+        memory('writer', extra.writer === undefined ? -1 : api.intern(extra.writer));
+        memory('writerBytes', extra.writerBytes ?? 0);
         api.endFrame();
     };
 
     // Three frames of a counter that only ever grows, read as three frames.
-    frame(10, 1_000_000, 500);
-    frame(10, 3_000_000, 1500);
-    frame(100, 3_500_000, 60_000);
+    frame(10, 1_000_000, 500, { stretches: 10, written: 1000 });
+    frame(10, 3_000_000, 1500, { stretches: 40, written: 5000,
+        writer: 'LockRect', writerBytes: 2000 });
+    frame(100, 3_500_000, 60_000, { stretches: 140, written: 900_000,
+        worst: 48_000, at: 0x6f02000, writer: 'CreateTexture', writerBytes: 700_000 });
     const frames = reader.frames();
     assert.equal(frames.length, 3);
     assert.deepEqual(frames.map(one=>one.instructions), [0, 2_000_000, 500_000],
@@ -258,6 +276,16 @@ test('a frame says what the program did and what it cost us, without a second ru
     assert.equal(frames[2].counters.x87TagLost, 0, 'a counter nothing wrote reads as nothing');
     assert.deepEqual(frames[2].thread,
         { name: 'main', instructions: 3_500_000, at: 0x6f01000, module: 'Storm.dll' });
+    // The two things a count alone could not say: where the interpreter ran,
+    // and which of our own calls put the bytes into the guest.
+    assert.deepEqual(frames[2].interpreted, {
+        steps: 58_500, stretches: 100, perStretch: 585,
+        worst: 48_000, at: 0x6f02000, module: 'Storm.dll',
+    });
+    assert.deepEqual(frames[2].wrote,
+        { bytes: 895_000, busiest: 'CreateTexture', busiestBytes: 700_000 });
+    assert.equal(frames[0].wrote.busiest, null,
+        'a frame nobody wrote in names no writer');
     assert.equal(frames[2].longestGuest.rate, 35_000_000,
         'the worst slice of the frame, in instructions a second');
 
@@ -265,5 +293,38 @@ test('a frame says what the program did and what it cost us, without a second ru
     // is reported as no work rather than as negative work.
     frame(10, 10, 0);
     assert.equal(reader.frames().at(-1)?.instructions, 0);
+    await logModule.dispose();
+});
+
+test('the writers table reads back as names, heaviest first', async()=>{
+    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0, shared: false });
+    const table = api.metrics.table('memory', 'writers',
+        { rows: 4, columns: ['name', 'bytes', 'writes'] });
+    /**
+     * @param {number} row @param {string} name
+     * @param {number} bytes @param {number} writes
+     */
+    const put = (row, name, bytes, writes)=>
+    {
+        table.set(row, 0, api.intern(name));
+        table.set(row, 1, bytes);
+        table.set(row, 2, writes);
+    };
+    put(0, '<no host call>', 0, 0);
+    put(1, 'LockRect', 900, 3);
+    put(2, 'WriteFile', 9000, 1);
+    table.used(3);
+
+    const reader = createLogReader({ memory: api.memory() });
+    assert.deepEqual(reader.writers(), [
+        { name: 'WriteFile', bytes: 9000, writes: 1 },
+        { name: 'LockRect', bytes: 900, writes: 3 },
+    ], 'a row nobody wrote through is not a writer');
+    await logModule.dispose();
+});
+
+test('a build whose memory layer publishes nothing has no writers rather than a throw', async()=>{
+    const api = await logModule.create({ now: ()=>0, wallClock: ()=>0, shared: false });
+    assert.deepEqual(createLogReader({ memory: api.memory() }).writers(), []);
     await logModule.dispose();
 });

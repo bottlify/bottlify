@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { REGION_COLUMNS, memoryModule } from './module.js';
+import { MEMORY_COUNTERS, REGION_COLUMNS, memoryModule } from './module.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
 
@@ -27,10 +27,10 @@ function fakeLog(){
 }
 
 /** @param {any} log */
-async function open(log){
+async function open(log, cpu = {}){
     return memoryModule.create({}, /** @type {any} */ ({
         /** @param {string} name */
-        requireApi: name=>(name === 'log' ? log : {}),
+        requireApi: name=>(name === 'log' ? log : cpu),
         provide: ()=>{},
     }));
 }
@@ -62,5 +62,57 @@ test('the diagnostics table is the cold path and a fake log without a registry i
     const metrics = /** @type {any} */ (memoryModule.diagnostics().metrics);
     assert.equal(metrics.regions, 1);
     assert.deepEqual(metrics.layout, ['stack 0x300000+0x10000 rw']);
+    await memoryModule.dispose();
+});
+
+test('a write is charged to whoever is in flight, and the frame names the busiest', async()=>{
+    const log = fakeLog();
+    const bytes = new Uint8Array(0x2000);
+    const memory = await open(log, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    });
+    memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+
+    const lock = memory.writer('LockRect');
+    const outside = memory.charging(lock);
+    memory.writeBytes(0x1000, new Uint8Array(300));
+    memory.writeU32(0x1100, 7);
+    memory.charging(outside);
+    memory.writeU8(0x1200, 1);
+
+    const table = readTable(log.metrics.describe().memory.writers);
+    const charged = Object.fromEntries(table.all()
+        .filter(row=>row.writes > 0)
+        .map(row=>[log.words[row.name], [row.bytes, row.writes]]));
+    assert.deepEqual(charged, { LockRect: [304, 2], '<no host call>': [1, 1] });
+
+    const counters = readTable(log.metrics.describe().memory.counters).row(0);
+    assert.deepEqual(Object.keys(counters), MEMORY_COUNTERS,
+        'the frame fields are published before anything reads them');
+    log.metrics.sample();
+    const closed = readTable(log.metrics.describe().memory.counters).row(0);
+    assert.equal(log.words[closed.frameWriter], 'LockRect');
+    assert.equal(closed.frameWriterBytes, 304);
+    await memoryModule.dispose();
+});
+
+test('an unknown name and a build with no tables charge nothing and still write', async()=>{
+    const bytes = new Uint8Array(0x2000);
+    const memory = await open({}, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    });
+    memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+    assert.equal(memory.writer('LockRect'), -1, 'no account, no slot');
+    assert.equal(memory.charging(3), -1);
+    memory.writeU32(0x1000, 0x11223344);
+    assert.equal(bytes[0x1000], 0x44, 'the write still happens');
     await memoryModule.dispose();
 });

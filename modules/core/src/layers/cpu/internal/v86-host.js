@@ -529,8 +529,24 @@ export async function createV86Host(config){
          */
         profile: {
             available: ()=>typeof cpu.wm.exports.profile_set === 'function',
-            /** @returns {boolean} whether the account is being kept */
-            start(){
+            /**
+             * @param {Object} [options]
+             * @param {boolean} [options.keepCode]
+             *     Leave the compiled code alone, so only the interpreter and
+             *     whatever compiles from now on is counted.
+             *
+             *     This is the one way a release build can say *where* the
+             *     interpreter ran. A block counts itself only if it was
+             *     compiled with the account on, so leaving the warm cache in
+             *     place means the code already compiled stays silent and what
+             *     lands in the table is the interpreter's own instructions,
+             *     one at a time. A reader tells the two apart exactly:
+             *     the interpreter counts a weight of one per hit, so an entry
+             *     whose weight equals its hits is interpreted code.
+             *
+             * @returns {boolean} whether the account is being kept
+             */
+            start(options){
                 const exports = cpu.wm.exports;
                 if (typeof exports.profile_set !== 'function')
                 {
@@ -538,8 +554,11 @@ export async function createV86Host(config){
                 }
                 exports.profile_reset();
                 exports.profile_set(1);
-                // A block compiled before now carries no count.
-                exports.jit_clear_cache_js();
+                if (options?.keepCode !== true)
+                {
+                    // A block compiled before now carries no count.
+                    exports.jit_clear_cache_js();
+                }
                 return true;
             },
             stop(){

@@ -48,6 +48,9 @@ import { isParkedCall } from './parking.js';
  * @property {boolean} forwards
  * @property {boolean} readsError
  * @property {number[]} args        The argument array, reused while answers are prompt.
+ * @property {number} writer
+ *     Where the memory layer charges what this call writes into the guest,
+ *     resolved here once so the crossing stores a number and looks nothing up.
  */
 
 /**
@@ -105,6 +108,19 @@ const DETAIL_RING = 4096;
  */
 export function createDispatcher(deps){
     const { cpu, memory, parking, suspend } = deps;
+    /**
+     * Whose writes into guest memory these are.
+     *
+     * Bytes written by the host are one number for the whole run unless
+     * somebody says which call was in flight, and this is the only place that
+     * knows. A slot in, the previous slot out, restored on the way back: a
+     * handler that calls the guest back into another host call nests without a
+     * stack of its own, and a write made with nothing in flight keeps the
+     * name the account gives it rather than the last call's.
+     */
+    const charging = typeof memory?.charging === 'function'
+        ? /** @type {(slot: number) => number} */ (memory.charging)
+        : null;
     const lastError = deps.lastError ?? (()=>0);
     const traceStrings = deps.traceStrings ?? false;
     // A ring holds the end of a run, and the end of a run is rarely where the
@@ -338,6 +354,7 @@ export function createDispatcher(deps){
                 forwards: fn.forwards === true,
                 readsError: deps.lastError !== undefined && fn.lastError !== false,
                 args: new Array(stackWords + (thisFirst ? 1 : 0)),
+                writer: typeof memory?.writer === 'function' ? memory.writer(fn.name) : -1,
             };
             implemented++;
         },
@@ -472,6 +489,8 @@ export function createDispatcher(deps){
 
             parking.beginCall(frame);
             depth++;
+            const charged = charging !== null && entry.writer >= 0
+                ? charging(entry.writer) : -1;
             let result;
             let late = false;
             if (phased)
@@ -511,6 +530,10 @@ export function createDispatcher(deps){
                 if (phased)
                 {
                     profiler.end(entry.name);
+                }
+                if (charging !== null && charged >= 0)
+                {
+                    charging(charged);
                 }
                 depth--;
                 parking.endCall();

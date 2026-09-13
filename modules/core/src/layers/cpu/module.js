@@ -49,6 +49,21 @@ let thunks = null;
 let running = false;
 /** Whether the stub table has been put into guest memory yet. */
 let tableWritten = false;
+/**
+ * The heaviest interpreted stretch since the counters were last published:
+ * how much the slice interpreted, and the address it began at.
+ *
+ * A slice is the finest boundary the host sees -- the interpreter is entered
+ * and left inside one, in the emulator's own code -- so this is the slice the
+ * interpreter ran most of, credited to where the slice started. That is the
+ * same trick the scheduler uses for its heaviest slice, and honest for the
+ * same reason: a slice of a hundred thousand that interpreted most of them was
+ * in one place.
+ */
+let worstInterpreted = 0;
+let worstInterpretedAt = 0;
+/** The emulator's interpreted-step count as it stood after the last slice. */
+let interpretedBefore = 0;
 
 /**
  * What this layer publishes as numbers, once a frame: the counters the
@@ -64,11 +79,22 @@ const JIT_FIELDS = [
     'chainRefused', 'flagsDead', 'slowWrites', 'codePageWritesKept', 'x87TagLost',
     'finalised', 'discarded', 'hostWrites', 'hostWrittenBytes',
 ];
+/** Where this layer's own counters sit, before the emulator's. */
+const JIT_AT = 7;
 export const CPU_COUNTERS = [
     'running', 'instructions', 'protectedMode', 'traps', 'trapCapacity', 'eip',
     'trapCrossings',
     ...JIT_FIELDS.map(field=>`jit.${field}`),
+    // Where the interpreter ran, rather than only how much of it there was.
+    // `interpretedSteps` is a count with no address attached, and a frame that
+    // lost twenty milliseconds to the interpreter cannot be acted on until the
+    // code is named. These two are the frame's, not the run's: the slice that
+    // interpreted most since they were last published, and the address that
+    // slice began at -- which a reader turns into a module through the regions
+    // table, the way it already does for the scheduler's heaviest slice.
+    'frameInterpreted', 'frameInterpretedAt',
 ];
+const FRAME_INTERPRETED = JIT_AT + JIT_FIELDS.length;
 
 export const cpuModule = {
     name: 'cpu',
@@ -106,9 +132,14 @@ export const cpuModule = {
                     for (let field = 0; field < JIT_FIELDS.length; field++)
                     {
                         const value = jit[JIT_FIELDS[field]];
-                        counters[7 + field] = typeof value === 'number' ? value : Number(value);
+                        counters[JIT_AT + field] = typeof value === 'number'
+                            ? value : Number(value);
                     }
                 }
+                counters[FRAME_INTERPRETED] = worstInterpreted;
+                counters[FRAME_INTERPRETED + 1] = worstInterpretedAt;
+                worstInterpreted = 0;
+                worstInterpretedAt = 0;
             });
         }
         const settings = {
@@ -341,9 +372,22 @@ export const cpuModule = {
              */
             runSlice(maxInstructions){
                 running = true;
-                const instructions = started().cpu().run_slice(maxInstructions) >>> 0;
+                const machine = started();
+                const from = machine.eip();
+                const instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
                 // Folds the emulator's word into the count before it can wrap.
-                started().instructionCount();
+                machine.instructionCount();
+                // One counter read and one comparison per slice, so that a
+                // frame can name the code the interpreter was in. The slice is
+                // already thousands of times more expensive than this.
+                const interpreted = machine.interpretedSteps();
+                const ran = interpreted - interpretedBefore;
+                interpretedBefore = interpreted;
+                if (ran > worstInterpreted)
+                {
+                    worstInterpreted = ran;
+                    worstInterpretedAt = from;
+                }
                 return instructions;
             },
 
@@ -440,7 +484,13 @@ export const cpuModule = {
                 /** The profiler build's counts, null without one. */
                 instructionStats: ()=>started().instructionStats(),
                 available: ()=>started().profile.available(),
-                start: ()=>started().profile.start(),
+                /**
+                 * @param {{ keepCode?: boolean }} [options]
+                 *     `keepCode` leaves the warm code alone, which is how a
+                 *     release build says where the interpreter ran: see the
+                 *     cpu layer's own note on it.
+                 */
+                start: options=>started().profile.start(options),
                 stop: ()=>started().profile.stop(),
                 read: ()=>started().profile.read(),
             },
@@ -502,5 +552,8 @@ export const cpuModule = {
         thunks = null;
         running = false;
         tableWritten = false;
+        worstInterpreted = 0;
+        worstInterpretedAt = 0;
+        interpretedBefore = 0;
     },
 };

@@ -84,6 +84,10 @@ export const FRAME_DELTAS = Object.freeze([
     { column: 'retired', layer: 'cpu', counter: 'instructions' },
     { column: 'entries', layer: 'cpu', counter: 'jit.entries' },
     { column: 'interpretedSteps', layer: 'cpu', counter: 'jit.interpretedSteps' },
+    // Steps and entries together: their ratio is how long a stretch of
+    // interpreted code ran before the compiler took over again, and a frame
+    // full of short stretches is a different defect from one long one.
+    { column: 'interpretedDispatches', layer: 'cpu', counter: 'jit.interpretedDispatches' },
     { column: 'f80Conversions', layer: 'cpu', counter: 'jit.f80Conversions' },
     { column: 'x87TagLost', layer: 'cpu', counter: 'jit.x87TagLost' },
     { column: 'slowWrites', layer: 'cpu', counter: 'jit.slowWrites' },
@@ -105,6 +109,14 @@ export const FRAME_VALUES = Object.freeze([
     { column: 'thread', layer: 'kernel', counter: 'frameThread' },
     { column: 'threadInstructions', layer: 'kernel', counter: 'frameThreadInstructions' },
     { column: 'threadAt', layer: 'kernel', counter: 'frameAt' },
+    // The heaviest interpreted stretch of the frame and where it began, and
+    // the host call that wrote most into guest memory during it. Both name
+    // what a count on its own cannot: which code fell out of compiled code,
+    // and which of our own calls is behind the bytes.
+    { column: 'interpretedWorst', layer: 'cpu', counter: 'frameInterpreted' },
+    { column: 'interpretedAt', layer: 'cpu', counter: 'frameInterpretedAt' },
+    { column: 'writer', layer: 'memory', counter: 'frameWriter' },
+    { column: 'writerBytes', layer: 'memory', counter: 'frameWriterBytes' },
 ]);
 
 /** Every mirrored column, in the order a frame's row stores them. */

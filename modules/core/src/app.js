@@ -4089,7 +4089,9 @@ async function buildApp(options){
              */
             instructionStats: ()=>core.api('cpu').profile?.instructionStats() ?? null,
             available: ()=>Boolean(core.api('cpu').profile?.available()),
-            start: ()=>Boolean(core.api('cpu').profile?.start()),
+            /** @param {{ keepCode?: boolean }} [how] Kept code makes
+             * the account the interpreter's own instructions. */
+            start: how=>Boolean(core.api('cpu').profile?.start(how)),
             stop: ()=>core.api('cpu').profile?.stop(),
             /**
              * @returns {{ entries: { address: number, instructions: number, hits: number }[],

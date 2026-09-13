@@ -6,6 +6,7 @@
 
 import { Access, RegionKind, createRegionMap } from './internal/regions.js';
 import { createAccessors } from './internal/accessors.js';
+import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/writers.js';
 
 /**
  * memory — the guest address space: what is mapped, who may touch it, and typed
@@ -20,6 +21,8 @@ import { createAccessors } from './internal/accessors.js';
 let regions = null;
 /** @type {any} */
 let accessors = null;
+/** @type {import('./internal/writers.js').WriterAccount | null} */
+let writers = null;
 
 /**
  * The layout as published: name as a dictionary id, base, size, and access
@@ -29,6 +32,14 @@ let accessors = null;
  */
 export const REGION_COLUMNS = ['name', 'base', 'size', 'access'];
 export const REGION_ROWS = 1024;
+
+/**
+ * What this layer publishes as numbers. Both are the frame's rather than the
+ * run's: which host call wrote most into the guest during the frame that just
+ * closed, and how much. The run's totals are in the writers table, which is
+ * cumulative.
+ */
+export const MEMORY_COUNTERS = ['frameWriter', 'frameWriterBytes'];
 
 export const memoryModule = {
     name: 'memory',
@@ -47,7 +58,28 @@ export const memoryModule = {
             /** @type {unknown} */ (host.requireApi('cpu')));
         const log = host.requireApi('log');
         regions = createRegionMap();
-        accessors = createAccessors({ raw: cpu, regions });
+
+        // Who wrote what into the guest, by name. Nothing published means no
+        // charge at all: the write path takes a branch rather than a call, and
+        // a build without the log's tables pays nothing for the account.
+        const writerTable = typeof log.metrics?.table === 'function'
+            ? log.metrics.table('memory', 'writers',
+                { rows: WRITER_ROWS, columns: WRITER_COLUMNS })
+            : null;
+        const account = writerTable
+            ? createWriterAccount({ table: writerTable, intern: log.intern })
+            : null;
+        writers = account;
+        if (account && typeof log.metrics?.counters === 'function')
+        {
+            const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
+            log.metrics.onFrame(()=>{
+                const busiest = account.publish();
+                counters[0] = busiest.writer;
+                counters[1] = busiest.bytes;
+            });
+        }
+        accessors = createAccessors({ raw: cpu, regions, charge: account?.charge ?? null });
 
         // The layout as a table a reader elsewhere can name a page from:
         // one row per region, its name as a dictionary id. Written when a
@@ -99,6 +131,21 @@ export const memoryModule = {
              */
             assert: (address, length, mode)=>regions.assert(address, length, mode),
 
+            /**
+             * The slot a name's writes are charged to, resolved once by
+             * whoever registers the name rather than per write.
+             *
+             * @param {string} name
+             */
+            writer: name=>writers?.writer(name) ?? -1,
+            /**
+             * Charges what follows to a slot and answers who was being
+             * charged, for the caller to put back on the way out.
+             *
+             * @param {number} slot
+             */
+            charging: slot=>writers?.charging(slot) ?? -1,
+
             readBytes: accessors.readBytes,
             writeBytes: accessors.writeBytes,
             window: accessors.window,
@@ -136,5 +183,6 @@ export const memoryModule = {
     async dispose(){
         regions = null;
         accessors = null;
+        writers = null;
     },
 };

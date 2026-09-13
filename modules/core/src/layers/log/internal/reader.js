@@ -319,6 +319,28 @@ export function createLogReader({ memory }){
                         at: row.threadAt,
                         module: named(row.threadAt),
                     },
+                    // What fell out of compiled code: how much the interpreter
+                    // ran, how many stretches that was, and the address the
+                    // heaviest single stretch began at, named.
+                    interpreted: {
+                        steps: counters.interpretedSteps,
+                        stretches: counters.interpretedDispatches,
+                        perStretch: counters.interpretedDispatches > 0
+                            ? counters.interpretedSteps / counters.interpretedDispatches : 0,
+                        worst: row.interpretedWorst,
+                        at: row.interpretedAt,
+                        module: named(row.interpretedAt),
+                    },
+                    // What the host put into guest memory, and which of our own
+                    // calls put most of it there. `bytes` is every write the
+                    // emulator saw; `busiestBytes` only those that came through
+                    // the memory layer, so a large gap between the two says a
+                    // writer is going round it.
+                    wrote: {
+                        bytes: counters.hostWrittenBytes,
+                        busiest: row.writer >= 0 ? cursor.word(row.writer) : null,
+                        busiestBytes: row.writerBytes,
+                    },
                     notes,
                 };
             });
@@ -396,6 +418,26 @@ export function createLogReader({ memory }){
                 byName.set(name, (byName.get(name) ?? 0) + instructions);
             }
             return Object.fromEntries([...byName].sort((one, two)=>two[1] - one[1]));
+        },
+
+        /**
+         * Who writes into guest memory, over the whole run: the name a write
+         * was charged to, the bytes and the count, heaviest first. The sort
+         * and the name lookup happen here, on this thread.
+         *
+         * @returns {{ name: string, bytes: number, writes: number }[]}
+         */
+        writers(){
+            const table = tables.memory?.writers;
+            if (!table)
+            {
+                return [];
+            }
+            return readTable(table).all()
+                .filter(row=>row.writes > 0)
+                .map(row=>({ name: cursor.word(row.name), bytes: row.bytes,
+                    writes: row.writes }))
+                .sort((one, two)=>two.bytes - one.bytes);
         },
 
         /**

@@ -9,6 +9,8 @@ import assert from 'node:assert/strict';
 import { Convention } from './conventions.js';
 import { createParking, isParkedCall } from './parking.js';
 import { createDispatcher } from './dispatch.js';
+import { WRITER_COLUMNS, createWriterAccount } from '../../memory/internal/writers.js';
+import { createTable, readTable } from '../../log/internal/table.js';
 
 /**
  * A CPU and an address space stood in for, so these tests are about marshalling
@@ -22,6 +24,9 @@ import { createDispatcher } from './dispatch.js';
  * @param {boolean} [options.callPhases]
  * @param {() => number} [options.lastError]
  * @param {number} [options.ecx]
+ * @param {Record<string, Function>} [options.memoryExtras]
+ *     What the memory layer answers beyond reads and writes -- the writer
+ *     account, where a test is about attribution.
  */
 function machine(options = {}){
     const { esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0 } = options;
@@ -40,6 +45,7 @@ function machine(options = {}){
         },
     };
     const memory = {
+        ...options.memoryExtras,
         /** @param {number} address */
         readU32: address=>{
             const value = cells.get(address);
@@ -549,4 +555,57 @@ test('a waiting call that fails is reported to the sink, not left unhandled', as
     await Promise.resolve();
     assert.deepEqual(seen.map(call=>[call.kind, call.result]),
         [['waiting', 'waiting'], ['threw', 'threw (was waiting)']]);
+});
+
+test('a write into guest memory is charged to the call in flight, however it nests', ()=>{
+    // The real account over a real table, so this tests the crossing's hook
+    // against the layer that will answer it rather than against a spy.
+    /** @type {string[]} */
+    const words = [];
+    const table = createTable({ rows: 8, columns: WRITER_COLUMNS, shared: false });
+    const account = createWriterAccount({
+        table,
+        intern: text=>{
+            const at = words.indexOf(text);
+            return at >= 0 ? at : words.push(text) - 1;
+        },
+    });
+    const { dispatcher, memory } = machine({
+        args: [1],
+        memoryExtras: { writer: account.writer, charging: account.charging },
+    });
+
+    dispatcher.register(1, {
+        name: 'A', convention: Convention.STDCALL, argBytes: 4,
+        handler: ()=>{
+            account.charge(10);
+            // What a handler that calls the guest back does: the guest traps
+            // into another host call, which must not keep the charge.
+            dispatcher.dispatch(2);
+            account.charge(1);
+            return 0;
+        },
+    });
+    dispatcher.register(2, {
+        name: 'B', convention: Convention.STDCALL, argBytes: 4,
+        handler: ()=>{
+            account.charge(100);
+            return 0;
+        },
+    });
+
+    // A write before anything is in flight, and one after everything returned.
+    account.charge(5);
+    dispatcher.dispatch(1);
+    account.charge(7);
+    void memory;
+
+    const rows = Object.fromEntries(readTable(table.describe()).all()
+        .filter(row=>row.writes > 0)
+        .map(row=>[words[row.name], [row.bytes, row.writes]]));
+    assert.deepEqual(rows, {
+        '<no host call>': [12, 2],
+        A: [11, 2],
+        B: [100, 1],
+    });
 });
