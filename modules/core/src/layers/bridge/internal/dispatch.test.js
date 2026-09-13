@@ -497,9 +497,9 @@ test('a call sink is handed the record as recorded, with nothing peeked for it',
     const memory = {
         ...m.memory,
         /** @param {number} address */
-        readU8: address=>{
+        find: address=>{
             reads.push(address);
-            return 0;
+            return undefined;
         },
     };
     /** @type {any[]} */
@@ -517,6 +517,54 @@ test('a call sink is handed the record as recorded, with nothing peeked for it',
     assert.equal(seen[0].result, '0x1');
     assert.equal(seen[0].strings, null, 'no strings without tracing');
     assert.deepEqual(reads, [], 'and no byte of guest memory was peeked');
+});
+
+test('tracing peeks through the region map and never through a read that throws', ()=>{
+    // Most arguments above the peek floor are constants and handles that
+    // point at nothing. Asking the map costs a lookup; reading and catching
+    // cost a formatted error and a stack per argument, which with tracing on
+    // was several times the whole crossing.
+    const text = 'C:/App/game.cfg';
+    const bytes = new Uint8Array(64);
+    bytes.set([...text].map(c=>c.charCodeAt(0)));
+    const m = machine({ args: [0x2300, 0x7000, 0x7ff8] });
+    let windows = 0;
+    /** @type {any} */
+    const memory = {
+        ...m.memory,
+        /** @param {number} address */
+        find: address=>(address >= 0x7000 && address < 0x8000
+            ? { name: 'data', base: 0x7000, size: 0x1000, access: 'rw' }
+            : undefined),
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>{
+            windows++;
+            assert.ok(address + length <= 0x8000, 'a peek never runs past its region');
+            return bytes.subarray(address - 0x7000, address - 0x7000 + length);
+        },
+        /** @param {number} address */
+        readU8: address=>{
+            throw new Error(`Unmapped read at ${address.toString(16)}`);
+        },
+    };
+    /** @type {any[]} */
+    const seen = [];
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory, parking: m.parking, traceStrings: true,
+        onCall: (/** @type {any} */ call)=>seen.push({ strings: call.strings.slice() }),
+    });
+    dispatcher.register(3, {
+        name: 'X.dll!F', convention: 'stdcall', argBytes: 12, handler: ()=>1,
+    });
+
+    dispatcher.dispatch(3);
+    dispatcher.dispatch(3);
+
+    assert.deepEqual(seen[0].strings, [null, text, null],
+        'the constant is not a pointer, the string is read, the tail of the region is clamped');
+    assert.equal(windows, 4, 'one window per mapped argument per call, none for the constant');
+    assert.deepEqual(seen[1].strings, seen[0].strings);
+    assert.deepEqual(dispatcher.detailed(1)[0].strings, [null, text, null]);
 });
 
 test('a waiting call is reported to the sink twice: once as asked, once as answered', async()=>{

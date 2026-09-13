@@ -82,6 +82,9 @@ const CALL_RING = 4096;
  */
 const DETAIL_RING = 4096;
 
+/** How far a pointer argument is read for the text it may point at. */
+const PEEK_LIMIT = 96;
+
 /**
  * @param {Object} deps
  * @param {any} deps.cpu       For the registers a call frame is read from.
@@ -262,31 +265,37 @@ export function createDispatcher(deps){
         {
             return null;
         }
-        try
+        // Asked of the region map rather than read and caught: most values
+        // above the floor are enumerated constants and handles, which point
+        // at nothing, and a read that throws carries a formatted message and
+        // a stack -- measured at ten microseconds an argument, which with
+        // tracing on was the whole cost of a call several times over.
+        const region = memory.find(address);
+        if (region === undefined || region.access === 'none')
         {
-            let text = '';
-            for (let at = address; at < address + 96; at++)
-            {
-                const byte = memory.readU8(at);
-                if (byte === 0)
-                {
-                    return text.length >= 2 ? text : null;
-                }
-                // Tab, newline and carriage return are text: a message a
-                // program is about to show a person is full of them, and
-                // rejecting them turns the most interesting string in a trace
-                // back into a bare pointer.
-                const printable = (byte >= 0x20 && byte <= 0x7e)
-                    || byte === 0x09 || byte === 0x0a || byte === 0x0d;
-                if (!printable)
-                {
-                    return null;
-                }
-                text += String.fromCharCode(byte);
-            }
+            return null;
         }
-        catch (e){
-            void e;
+        const span = Math.min(PEEK_LIMIT, region.base + region.size - address);
+        const bytes = memory.window(address, span);
+        let text = '';
+        for (let at = 0; at < span; at++)
+        {
+            const byte = bytes[at];
+            if (byte === 0)
+            {
+                return text.length >= 2 ? text : null;
+            }
+            // Tab, newline and carriage return are text: a message a
+            // program is about to show a person is full of them, and
+            // rejecting them turns the most interesting string in a trace
+            // back into a bare pointer.
+            const printable = (byte >= 0x20 && byte <= 0x7e)
+                || byte === 0x09 || byte === 0x0a || byte === 0x0d;
+            if (!printable)
+            {
+                return null;
+            }
+            text += String.fromCharCode(byte);
         }
         return null;
     };
@@ -483,7 +492,19 @@ export function createDispatcher(deps){
             // assembled on its own stack has been overwritten several
             // frames deep by the time anybody reads the trace, and what
             // comes back then belongs to whatever ran next.
-            record.strings = traceStrings ? record.args.map(peekString) : null;
+            if (traceStrings)
+            {
+                const strings = record.strings ??= [];
+                strings.length = kept;
+                for (let i = 0; i < kept; i++)
+                {
+                    strings[i] = peekString(args[i]);
+                }
+            }
+            else
+            {
+                record.strings = null;
+            }
             record.kind = 'threw';
             record.error = 0;
 
