@@ -1258,20 +1258,24 @@ export function createControlProcedures(host){
             const y = top + row * grid.cellHeight;
             const x = rect.left + EDIT_MARGIN;
             const text = shown(record, line.text).slice(scrolled);
+            // Where a character starts is where the drawn text before it
+            // ends: the same measure the engine draws with, not a cell
+            // grid, or a proportional face puts the caret and the
+            // selection somewhere else than the characters.
+            /** @param {number} at */
+            const xOf = at=>x + draw.measure(hdc, text.slice(0, at)).width;
             const from = Math.max(selection.from, line.start) - line.start - scrolled;
             const to = Math.min(selection.to, line.start + line.text.length) - line.start
                 - scrolled;
             if (focused && to > from && to > 0)
             {
                 const start = Math.max(from, 0);
-                draw.fill(hdc, { left: x + start * grid.cellWidth, top: y,
-                    right: x + to * grid.cellWidth, bottom: y + grid.cellHeight },
-                color(COLOR_HIGHLIGHT));
+                draw.fill(hdc, { left: xOf(start), top: y, right: xOf(to),
+                    bottom: y + grid.cellHeight }, color(COLOR_HIGHLIGHT));
                 draw.text(hdc, x, y, text.slice(0, start), { color: ink, clip: rect });
-                draw.text(hdc, x + start * grid.cellWidth, y, text.slice(start, to),
+                draw.text(hdc, xOf(start), y, text.slice(start, to),
                     { color: color(COLOR_HIGHLIGHTTEXT), clip: rect });
-                draw.text(hdc, x + to * grid.cellWidth, y, text.slice(to),
-                    { color: ink, clip: rect });
+                draw.text(hdc, xOf(to), y, text.slice(to), { color: ink, clip: rect });
             }
             else
             {
@@ -1283,8 +1287,8 @@ export function createControlProcedures(host){
                 && (state.selEnd < line.start + line.text.length || first + row === lines.length - 1
                     || state.selEnd === line.start + line.text.length))
             {
-                draw.fill(hdc, { left: x + caret * grid.cellWidth, top: y,
-                    right: x + caret * grid.cellWidth + 1, bottom: y + grid.cellHeight }, ink);
+                draw.fill(hdc, { left: xOf(caret), top: y, right: xOf(caret) + 1,
+                    bottom: y + grid.cellHeight }, ink);
             }
         }
     };
@@ -1340,9 +1344,25 @@ export function createControlProcedures(host){
                 Math.floor((y - EDIT_MARGIN) / grid.cellHeight)))
             : 0;
         const line = lines[Math.max(0, row)];
-        const column = Math.max(0, Math.round((x - EDIT_MARGIN) / grid.cellWidth))
-            + (multiline(record) ? 0 : state.firstColumn ?? 0);
-        return line.start + Math.min(column, line.text.length);
+        const scrolled = multiline(record) ? 0 : state.firstColumn ?? 0;
+        const text = shown(record, line.text).slice(scrolled);
+        // The nearest character boundary, measured the way the text is
+        // drawn: a click lands between the two glyphs it fell between.
+        const draw = /** @type {Drawing} */ (host.draw);
+        let column = 0;
+        let nearest = Infinity;
+        for (let at = 0; at <= text.length; at++)
+        {
+            const distance = Math.abs(draw.measure(hdc, text.slice(0, at)).width
+                - (x - EDIT_MARGIN));
+            if (distance > nearest)
+            {
+                break;
+            }
+            nearest = distance;
+            column = at;
+        }
+        return line.start + scrolled + column;
     };
 
     /**
@@ -2505,6 +2525,11 @@ export function createControlProcedures(host){
             case DM_SETDEFID:
                 state.defaultId = message.wParam & 0xffff;
                 return 1;
+            case WM_SETFONT:
+                record.font = message.wParam >>> 0;
+                return 0;
+            case WM_GETFONT:
+                return record.font ?? 0;
             case WM_CLOSE:
                 // Closing a dialog is Cancel: what the person could have
                 // pressed, sent the way a button would have sent it.

@@ -205,6 +205,7 @@ const WS_VISIBLE = 0x10000000;
 
 /** Every ShowWindow command shows the window; this one alone hides it. */
 const SW_HIDE = 0;
+const SW_SHOW = 5;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -294,7 +295,7 @@ function characterFor(key){
  *            rect: { left: number, top: number, right: number, bottom: number },
  *            client: { left: number, top: number, right: number, bottom: number },
  *            visible: boolean, className: string, title: string, parent: string | null,
- *            id: number }[]} list
+ *            child: boolean, id: number }[]} list
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
@@ -824,6 +825,12 @@ export function createWindowFunctions(host){
         host.queue.post({ hwnd: record.hwnd, message: WM_DESTROY, wParam: 0, lParam: 0 });
         const covered = shown(record) ? geometry.windowRect(record) : null;
         record.destroyed = true;
+        // A dialog's font is the dialog manager's, made from its template,
+        // and goes with the dialog.
+        if (record.dialogFont)
+        {
+            draw?.deleteFont?.(record.dialogFont);
+        }
         host.handles.close(record.hwnd);
         if (active === record.hwnd)
         {
@@ -1852,6 +1859,46 @@ export function createWindowFunctions(host){
         live, queue: host.queue, WM_PAINT, geometry, send, invalidated, painted,
     });
 
+    /**
+     * What TranslateMessage does: a key press becomes the character the
+     * host's own keyboard layout made of it, posted after the press. That is
+     * where a layout, a dead key and an input method live, and none of them
+     * can be worked out from a virtual key here; the table is the fallback
+     * for a host that composes nothing -- a recorded session, a test.
+     *
+     * @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message
+     * @returns {number} nonzero for any of the four key messages, whether or
+     *     not a character came of it, as documented.
+     */
+    const translate = message=>{
+        if (!KEY_MESSAGES.has(message.message))
+        {
+            return 0;
+        }
+        const isDown = message.message === WM_KEYDOWN || message.message === WM_SYSKEYDOWN;
+        const character = isDown
+            ? host.queue.takeComposed?.(message.lParam) ?? characterFor(message.wParam)
+            : null;
+        if (character !== null)
+        {
+            host.queue.post({
+                hwnd: message.hwnd,
+                message: message.message === WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR,
+                wParam: character,
+                lParam: message.lParam,
+            });
+        }
+        return 1;
+    };
+
+    /** @param {any} record @param {number} hdc */
+    const inFont = (record, hdc)=>{
+        if (hdc !== 0 && record.font)
+        {
+            draw?.selectFont?.(hdc, record.font);
+        }
+    };
+
     const controls = createControlProcedures({
         readCString: host.readCString,
         writeMemory: host.writeMemory,
@@ -1865,8 +1912,18 @@ export function createWindowFunctions(host){
         callProcedure,
         post: message=>host.queue.post(message),
         defWindowProc,
-        beginPaint: record=>paint.beginPaint(record),
-        contextOn: record=>({ hdc: paint.contextOn(record), rect: paint.clientArea(record) }),
+        // A control paints and measures in the font it was given, as the
+        // real ones select it before drawing; a fresh context carries the
+        // system font, which is only right for a control given none.
+        beginPaint: record=>andThen(paint.beginPaint(record), painting=>{
+            inFont(record, painting.hdc);
+            return painting;
+        }),
+        contextOn: record=>{
+            const hdc = paint.contextOn(record);
+            inFont(record, hdc);
+            return { hdc, rect: paint.clientArea(record) };
+        },
         endPaint: (record, hdc)=>paint.endPaint(record, hdc),
         invalidate: record=>{
             const size = geometry.clientSize(record);
@@ -1946,6 +2003,9 @@ export function createWindowFunctions(host){
                 className: record.className,
                 title: record.title,
                 parent: record.parent ? `0x${record.parent.toString(16)}` : null,
+                // Inside its parent, as against owned by it: a top-level
+                // window with an owner is still over everything below it.
+                child: isChild(record),
                 id: record.id,
             })),
         /**
@@ -1979,6 +2039,37 @@ export function createWindowFunctions(host){
         },
     });
 
+    /**
+     * Shows or hides a window as ShowWindow does, and answers what
+     * ShowWindow answers: the state it found, not the one it set, because
+     * code that toggles a window reads this back.
+     *
+     * @param {any} record @param {number} cmdShow
+     */
+    const showWindow = (record, cmdShow)=>{
+        const wasVisible = (record.style & WS_VISIBLE) !== 0;
+        const hide = cmdShow === SW_HIDE;
+        const covered = wasVisible && hide && shown(record)
+            ? geometry.windowRect(record) : null;
+        record.style = hide
+            ? (record.style & ~WS_VISIBLE) >>> 0
+            : (record.style | WS_VISIBLE) >>> 0;
+        if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
+        {
+            activate(record.hwnd);
+            raise(record);
+        }
+        if (!wasVisible && !hide)
+        {
+            appear(record);
+        }
+        if (covered)
+        {
+            uncover(covered);
+        }
+        return wasVisible ? 1 : 0;
+    };
+
     // Named, because a message for a window with no procedure of its own is
     // handed to the default procedure in this table by `deliver` above.
     const table = {
@@ -2002,6 +2093,14 @@ export function createWindowFunctions(host){
                 focus: focusWindow, setFocus, send, callProcedure, geometry, children: childrenOf,
                 defDlgProc: controls.helpers.defDlgProc, keyDown: (/** @type {number} */ key)=>
                     ((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
+                show: (/** @type {number} */ hwnd)=>{
+                    const record = live(hwnd);
+                    if (record)
+                    {
+                        showWindow(record, SW_SHOW);
+                    }
+                },
+                translate,
             }),
             live, windows, makeWindow, destroyWindow, deliver, announce,
             // A class the program registered, by the name a template spells it.
@@ -2168,33 +2267,7 @@ export function createWindowFunctions(host){
             /** @param {number[]} args */
             handler: ([hwnd, cmdShow])=>{
                 const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                const wasVisible = (record.style & WS_VISIBLE) !== 0;
-                const hide = (cmdShow | 0) === SW_HIDE;
-                const covered = wasVisible && hide && shown(record)
-                    ? geometry.windowRect(record) : null;
-                record.style = hide
-                    ? (record.style & ~WS_VISIBLE) >>> 0
-                    : (record.style | WS_VISIBLE) >>> 0;
-                if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow | 0) && !isChild(record))
-                {
-                    activate(record.hwnd);
-                    raise(record);
-                }
-                if (!wasVisible && !hide)
-                {
-                    appear(record);
-                }
-                if (covered)
-                {
-                    uncover(covered);
-                }
-                // The documented answer is the state it found, not the one it
-                // set: code that toggles a window reads this back.
-                return wasVisible ? 1 : 0;
+                return record ? showWindow(record, cmdShow | 0) : 0;
             },
         },
 
@@ -2646,35 +2719,7 @@ export function createWindowFunctions(host){
         TranslateMessage: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>{
-                const message = readMessage(host, msg);
-                if (!KEY_MESSAGES.has(message.message))
-                {
-                    return 0;
-                }
-                const isDown = message.message === WM_KEYDOWN
-                    || message.message === WM_SYSKEYDOWN;
-                // What the host's own keyboard layout made of this press, if it
-                // made anything: that is where a layout, a dead key and an
-                // input method live, and none of them can be worked out from a
-                // virtual key here. The table below is the fallback for a host
-                // that composes nothing -- a recorded session, a test.
-                const character = isDown
-                    ? host.queue.takeComposed?.(message.lParam) ?? characterFor(message.wParam)
-                    : null;
-                if (character !== null)
-                {
-                    host.queue.post({
-                        hwnd: message.hwnd,
-                        message: message.message === WM_SYSKEYDOWN ? WM_SYSCHAR : WM_CHAR,
-                        wParam: character,
-                        lParam: message.lParam,
-                    });
-                }
-                // Documented as nonzero for any of the four key messages,
-                // whether or not a character came of it.
-                return 1;
-            },
+            handler: ([msg])=>translate(readMessage(host, msg)),
         },
 
         /**

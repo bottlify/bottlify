@@ -331,11 +331,12 @@ function sameRect(a, b){
  *           what a DC *is* belongs to gdi, which is told where the pixels are.
  * @property {(handle: number) => void} [releaseDc]
  *           The other end of `createDc`.
- * @property {(surface: Surface) => void} [onPresent]
+ * @property {(surface: Surface, window: number, exclusive: boolean) => void} [onPresent]
  *           Called whenever what the primary surface shows may have changed: a
- *           flip, an unlock or a released DC on it, a blit into it. What
- *           showing means -- uploading, composing, presenting -- is not decided
- *           here.
+ *           flip, an unlock or a released DC on it, a blit into it -- with the
+ *           window the cooperative level named and whether it is exclusive,
+ *           which is whose picture this is. What showing means -- uploading,
+ *           composing, presenting -- is not decided here.
  */
 
 /**
@@ -819,7 +820,7 @@ export function createDirectDraw(options = {}){
             present(){
                 if ((caps & DDSCAPS_PRIMARYSURFACE) !== 0 && (caps & DDSCAPS_VISIBLE) !== 0)
                 {
-                    onPresent(surface);
+                    onPresent(surface, cooperativeWindow, exclusive());
                 }
             },
 

@@ -950,8 +950,30 @@ test('without a font engine GetCharWidth32A is the estimate\'s fixed pitch', ()=
 });
 
 test('the dialog base units are the system font\'s cell, from the engine or not at all', ()=>{
+    // The width is the alphabet's average in both cases, as the dialog
+    // manager measures it -- 52 letters at 4 or 5 pixels each here come to
+    // 234, nine per letter-pair, five rounded -- not the font's own average.
     assert.equal(withDC().gdi.draw.baseUnits(), null);
-    assert.deepEqual(withEngine().gdi.draw.baseUnits(), { width: 6, height: 13 });
+    assert.deepEqual(withEngine().gdi.draw.baseUnits(), { width: 5, height: 13 });
+});
+
+test('a dialog\'s font is made from its point size and measured like the base units', ()=>{
+    const { gdi, asked } = withEngine();
+    const font = gdi.draw.createFont(
+        { pointSize: 8, faceName: 'MS Sans Serif', weight: 0, italic: 0, charSet: 0 });
+    assert.notEqual(font, 0);
+    assert.deepEqual(gdi.draw.fontUnits(font), { width: 5, height: 13 });
+    // Eight points at 96 dots per inch is 10.67 pixels: a character height
+    // of 11, asked for as a negative lfHeight.
+    assert.equal(asked.at(-1)?.height, -11);
+    assert.equal(asked.at(-1)?.faceName, 'MS Sans Serif');
+    assert.equal(gdi.draw.fontUnits(0x7777), null, 'not a font');
+    assert.equal(gdi.draw.deleteFont(font), true);
+    assert.equal(gdi.draw.fontUnits(font), null, 'and gone');
+    const blind = withDC().gdi.draw;
+    assert.equal(blind.fontUnits(blind.createFont(
+        { pointSize: 8, faceName: 'MS Sans Serif', weight: 0, italic: 0, charSet: 0 })), null,
+    'without an engine the estimate stands');
 });
 
 // --- the stack every one of them pops ---

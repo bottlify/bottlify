@@ -49,7 +49,8 @@ import { readMessage, readRect, writeRect } from './structs.js';
 import { WS_VISIBLE, frameOf } from './frame.js';
 import {
     DLGC_BUTTON, DLGC_DEFPUSHBUTTON, DLGC_HASSETSEL, DLGC_UNDEFPUSHBUTTON, DLGC_WANTALLKEYS,
-    DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETTEXT, after,
+    DLGC_WANTTAB, DLGWINDOWEXTRA, DWLP_DLGPROC, IDCANCEL, IDOK, WM_GETDLGCODE, WM_SETFONT,
+    WM_SETTEXT, after,
 } from './controls.js';
 
 /** DLGTEMPLATE, the fixed part before the variable-length names. */
@@ -78,6 +79,24 @@ const DLGITEMTEMPLATE = Object.freeze({
 
 /** The template says a font follows; without this bit there is none to skip. */
 const DS_SETFONT = 0x0040;
+/**
+ * The point size that means "the shell's dialog font" rather than a size,
+ * and the font it means: what a DS_SHELLFONT template is compiled to.
+ */
+const SHELL_FONT_SIZE = 0x7fff;
+const SHELL_FONT_POINTS = 8;
+const SHELL_FONT_FACE = 'MS Shell Dlg';
+
+/**
+ * The font a template names, as the block after the title carries it.
+ *
+ * @typedef {Object} DialogFont
+ * @property {number} pointSize
+ * @property {string} faceName
+ * @property {number} weight   Zero in the old layout, which carries none.
+ * @property {number} italic
+ * @property {number} charSet
+ */
 
 /** The style bits a dialog's own window carries. */
 const WS_CHILD = 0x40000000;
@@ -192,12 +211,18 @@ const MAX_RESOURCE_NAME = 256;
  *     lParam: number }, thread?: unknown) => number | Promise<number>} defDlgProc
  * @property {() => number} focus
  * @property {(hwnd: number, thread?: unknown) => number | Promise<number>} setFocus
+ * @property {(hwnd: number) => void} [show]  Shows a window as ShowWindow(SW_SHOW) would.
+ * @property {(message: { hwnd: number, message: number, wParam: number, lParam: number })
+ *     => number} [translate]  What TranslateMessage does with a key message.
  * @property {(record: any) => any[]} children
  * @property {(key: number) => boolean} keyDown
  * @property {{ clientOrigin: (record: any) => { x: number, y: number } }} geometry
- * @property {{ baseUnits?: () => { width: number, height: number } | null }} [draw]
- *           The window manager's drawing, for the cell the system font
- *           measures as. Absent, or answering null, without a font engine.
+ * @property {{ baseUnits?: () => { width: number, height: number } | null,
+ *     fontUnits?: (font: number) => { width: number, height: number } | null,
+ *     createFont?: (fields: DialogFont) => number }} [draw]
+ *           The window manager's drawing, for the cell the system font --
+ *           or a dialog's own -- measures as, and the font a template
+ *           names. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
@@ -289,13 +314,23 @@ export function createDialogFunctions(options){
 
     /** @returns {{ width: number, height: number }} */
     const baseUnits = ()=>host.draw?.baseUnits?.() ?? { width: CHAR_WIDTH, height: CHAR_HEIGHT };
-    /** @param {number} units */
-    const acrossFor = units=>Math.round(units * baseUnits().width / DLU_PER_CHAR_X);
-    /** @param {number} units */
-    const downFor = units=>Math.round(units * baseUnits().height / DLU_PER_CHAR_Y);
+    /**
+     * The cell a dialog is laid out against: its own font's when the
+     * template set one and the engine can measure it, else the system's.
+     *
+     * @param {number} font  A font handle, or zero.
+     * @returns {{ width: number, height: number }}
+     */
+    const unitsFor = font=>(font !== 0 ? host.draw?.fontUnits?.(font) : null) ?? baseUnits();
+    /** @param {number} units @param {{ width: number, height: number }} cell */
+    const acrossFor = (units, cell)=>Math.round(units * cell.width / DLU_PER_CHAR_X);
+    /** @param {number} units @param {{ width: number, height: number }} cell */
+    const downFor = (units, cell)=>Math.round(units * cell.height / DLU_PER_CHAR_Y);
 
     /**
-     * Walks a template into the dialog and the controls it describes.
+     * Walks a template into the dialog and the controls it describes, with
+     * positions and sizes still in dialog units: the cell they scale by is
+     * the font's, which is made once the template has been read.
      *
      * @param {number} address
      * @returns {any | null} null when the template is one this cannot read
@@ -326,11 +361,13 @@ export function createDialogFunctions(options){
         const dialog = {
             style,
             exStyle: template.u32(head.exStyle),
-            x: acrossFor(template.i16(head.x)),
-            y: downFor(template.i16(head.y)),
-            width: acrossFor(template.i16(head.cx)),
-            height: downFor(template.i16(head.cy)),
+            x: template.i16(head.x),
+            y: template.i16(head.y),
+            width: template.i16(head.cx),
+            height: template.i16(head.cy),
             title: '',
+            /** @type {DialogFont | null} */
+            font: null,
             /** @type {any[]} */
             controls: [],
         };
@@ -344,8 +381,19 @@ export function createDialogFunctions(options){
         {
             // The point size; the extended form adds a weight, an italic
             // flag and a charset before the face name.
+            const pointSize = template.u16(template.at);
+            const font = extended
+                ? { pointSize, weight: template.u16(template.at + 2),
+                    italic: template.u16(template.at + 4) & 0xff,
+                    charSet: template.u16(template.at + 4) >>> 8 }
+                : { pointSize, weight: 0, italic: 0, charSet: 0 };
             template.at += extended ? FONT_EX_FIXED : 2;
-            template.nameOrOrdinal(); // typeface
+            const face = template.nameOrOrdinal().name ?? '';
+            // The size that asks for the shell's own dialog font, which is
+            // what a template compiled with DS_SHELLFONT carries.
+            dialog.font = pointSize === SHELL_FONT_SIZE
+                ? { ...font, pointSize: SHELL_FONT_POINTS, faceName: SHELL_FONT_FACE }
+                : { ...font, faceName: face };
         }
 
         for (let index = 0; index < count; index++)
@@ -355,10 +403,10 @@ export function createDialogFunctions(options){
             const control = {
                 style: template.u32(at + item.style),
                 exStyle: template.u32(at + item.exStyle),
-                x: acrossFor(template.i16(at + item.x)),
-                y: downFor(template.i16(at + item.y)),
-                width: acrossFor(template.i16(at + item.cx)),
-                height: downFor(template.i16(at + item.cy)),
+                x: template.i16(at + item.x),
+                y: template.i16(at + item.y),
+                width: template.i16(at + item.cx),
+                height: template.i16(at + item.cy),
                 // A WORD in the old layout and a DWORD in the new, and either
                 // way the id a program passes to GetDlgItem is 16 bits wide.
                 id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
@@ -440,14 +488,19 @@ export function createDialogFunctions(options){
         {
             return 0;
         }
+        // The font the template names is the dialog's for as long as it
+        // lives: the cell its units scale by, and what every control is
+        // handed to paint in.
+        const font = described.font ? host.draw?.createFont?.(described.font) ?? 0 : 0;
+        const cell = unitsFor(font);
         // The template's size is the client area; the window is that plus
         // the frame its styles give it. DS_MODALFRAME is the extended style
         // of the same name, as the resource compiler means it.
         const exStyle = (described.exStyle
             | ((described.style & DS_MODALFRAME) !== 0 ? WS_EX_DLGMODALFRAME : 0)) >>> 0;
         const frame = frameOf(described.style, exStyle);
-        const width = described.width + frame.edge * 2;
-        const height = described.height + frame.edge * 2 + frame.caption;
+        const width = acrossFor(described.width, cell) + frame.edge * 2;
+        const height = downFor(described.height, cell) + frame.edge * 2 + frame.caption;
         // Placed relative to the owner's client area, or centred on the
         // screen when the template asks; a child dialog is placed by its
         // parent like any other child.
@@ -456,8 +509,10 @@ export function createDialogFunctions(options){
         const origin = owner && (described.style & WS_CHILD) === 0
             ? host.geometry.clientOrigin(owner) : { x: 0, y: 0 };
         const centred = (described.style & DS_CENTER) !== 0;
-        const x = centred ? Math.floor((screen.width - width) / 2) : origin.x + described.x;
-        const y = centred ? Math.floor((screen.height - height) / 2) : origin.y + described.y;
+        const x = centred
+            ? Math.floor((screen.width - width) / 2) : origin.x + acrossFor(described.x, cell);
+        const y = centred
+            ? Math.floor((screen.height - height) / 2) : origin.y + downFor(described.y, cell);
         // The dialog class is a system class: its procedure hands every
         // message to the dialog procedure kept in the extra bytes, which is
         // where GetWindowLong(DWLP_DLGPROC) reads it from.
@@ -480,8 +535,14 @@ export function createDialogFunctions(options){
             width,
             height,
         });
+        // Answered to WM_GETFONT on the dialog, and deleted with it: the
+        // handle is the dialog's own, not the program's.
+        dialog.font = font;
+        dialog.dialogFont = font;
         /** @type {Promise<number>[]} */
         const creating = [];
+        /** @type {any[]} */
+        const controls = [];
         for (const control of described.controls)
         {
             // A class the program registered is the program's, procedure and
@@ -492,6 +553,12 @@ export function createDialogFunctions(options){
             // nowhere would be inventing behaviour.
             const cls = classNamed(control.className);
             const style = (control.style | WS_CHILD) >>> 0;
+            const placed = {
+                x: acrossFor(control.x, cell),
+                y: downFor(control.y, cell),
+                width: acrossFor(control.width, cell),
+                height: downFor(control.height, cell),
+            };
             const record = makeWindow({
                 className: control.className,
                 title: control.title,
@@ -501,10 +568,7 @@ export function createDialogFunctions(options){
                 instance: instance >>> 0,
                 id: control.id,
                 wndProc: cls ? cls.wndProc : 0,
-                x: control.x,
-                y: control.y,
-                width: control.width,
-                height: control.height,
+                ...placed,
                 ...(cls
                     ? { extra: new DataView(new ArrayBuffer(Math.max(cls.windowExtra, 0))) }
                     : {}),
@@ -515,14 +579,24 @@ export function createDialogFunctions(options){
                 // memory, so the CREATESTRUCT names neither: a procedure
                 // that reads them there finds NULL. The ceiling on this.
                 const announced = announce(record, [control.exStyle, 0, 0, style,
-                    control.x, control.y, control.width, control.height,
+                    placed.x, placed.y, placed.width, placed.height,
                     dialog.hwnd, control.id, instance >>> 0, 0]);
                 if (typeof (/** @type {any} */ (announced))?.then === 'function')
                 {
                     creating.push(/** @type {Promise<number>} */ (announced));
                 }
             }
+            controls.push(record);
         }
+        // Every control is told the dialog's font once it exists and has
+        // set itself up, as the dialog manager tells it: before
+        // WM_INITDIALOG, and after the program's own WM_CREATE.
+        const thread = host.callerThread?.();
+        const setFonts = ()=>{
+            const told = font === 0
+                ? [] : controls.map(record=>host.send(record.hwnd, WM_SETFONT, font, 0, thread));
+            return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
+        };
         const ready = ()=>{
             host.created?.(dialog.hwnd);
             host.queue.post({
@@ -538,7 +612,8 @@ export function createDialogFunctions(options){
         // WM_INITDIALOG comes after every control exists and has been told
         // so; a procedure that talks to a control from there expects the
         // control to have set itself up.
-        return creating.length === 0 ? ready() : Promise.all(creating).then(ready);
+        const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
+        return fonts ? fonts.then(ready) : ready();
     };
 
     /**
@@ -755,6 +830,9 @@ export function createDialogFunctions(options){
         {
             owner.style = (owner.style | WS_DISABLED) >>> 0;
         }
+        // A modal dialog is shown by the call whether or not its template
+        // says WS_VISIBLE: most templates leave the bit off and rely on this.
+        host.show?.(hwnd);
         while (!record.destroyed)
         {
             const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
@@ -769,7 +847,18 @@ export function createDialogFunctions(options){
                 destroyWindow(hwnd);
                 break;
             }
-            await (dialogKey(hwnd, entry, thread) ?? deliver(entry, thread));
+            const taken = dialogKey(hwnd, entry, thread);
+            if (taken !== null)
+            {
+                await taken;
+                continue;
+            }
+            // The loop is the program's message loop for as long as the
+            // dialog is up, so it translates as one does: a key press the
+            // dialog manager left alone becomes the character an edit
+            // types.
+            host.translate?.(entry);
+            await deliver(entry, thread);
         }
         if (ownerWasEnabled)
         {
@@ -951,16 +1040,21 @@ export function createDialogFunctions(options){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([hwnd, rect])=>{
-                if (!live(hwnd) || (rect >>> 0) === 0)
+                const dialog = live(hwnd);
+                if (!dialog || (rect >>> 0) === 0)
                 {
                     return 0;
                 }
+                // The dialog's own font's cell, as its template was scaled
+                // by: a program placing a control by hand lands where the
+                // template would have put it.
+                const cell = unitsFor(dialog.dialogFont ?? 0);
                 const units = readRect(host, rect >>> 0);
                 writeRect(host, rect >>> 0, {
-                    left: acrossFor(units.left),
-                    top: downFor(units.top),
-                    right: acrossFor(units.right),
-                    bottom: downFor(units.bottom),
+                    left: acrossFor(units.left, cell),
+                    top: downFor(units.top, cell),
+                    right: acrossFor(units.right, cell),
+                    bottom: downFor(units.bottom, cell),
                 });
                 return 1;
             },

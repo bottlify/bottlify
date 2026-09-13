@@ -129,6 +129,8 @@ export function createPresenter(options){
     /** @type {Uint8Array | null} */
     let converted = null;
     const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0 };
+    /** The address of the surface last handed over: which picture is on show. */
+    let lastBuffer = 0;
     /** @type {string[]} */
     const failures = [];
     /** @type {Map<number, () => void>} buffer address -> who shows it */
@@ -218,6 +220,7 @@ export function createPresenter(options){
          */
         present(surface){
             counters.presents++;
+            lastBuffer = surface.buffer;
             const first = pending === null;
             pending = surface;
             if (first)
@@ -244,9 +247,13 @@ export function createPresenter(options){
             claims.delete(buffer >>> 0);
         },
 
+        /** Whether a GPU owns the picture at this address. @param {number} buffer */
+        isClaimed: buffer=>claims.has(buffer >>> 0),
+
         diagnostics(){
             return {
                 ...counters,
+                lastBuffer,
                 pending: pending !== null,
                 claimed: claims.size,
                 failures: [...failures],

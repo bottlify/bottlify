@@ -137,6 +137,15 @@ const LOGICAL_DPI = 96;
 
 /** Millimetres per inch, for the two metrics that are asked in millimetres. */
 const MM_PER_INCH = 25.4;
+/** Typographic points per inch, for a font asked for by point size. */
+const POINTS_PER_INCH = 72;
+
+/**
+ * What the dialog manager averages a font's character width over: both
+ * cases of the alphabet, so a face whose capitals are wide is laid out
+ * wider than one whose lower case is.
+ */
+const ALPHABET = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
 
 /** Bit depths a bitmap can have. Anything else is not a format GDI knows. */
 const BIT_COUNTS = new Set([1, 4, 8, 16, 24, 32]);
@@ -1677,6 +1686,35 @@ export function createGdiFunctions(host){
         GetCharWidthA: table.GetCharWidth32A,
     };
 
+    /**
+     * The character cell dialogs are laid out against in a font: the
+     * average width of the alphabet in both cases, as the dialog manager
+     * measures it, and the font's height. Null without an engine, when the
+     * layout keeps the cell its estimate was made for, and for a handle
+     * that is not a font.
+     *
+     * @param {number} handle
+     * @returns {{ width: number, height: number } | null}
+     */
+    const fontUnitsOf = handle=>{
+        const record = objects.get(handle);
+        if (record?.type !== 'font')
+        {
+            return null;
+        }
+        const measured = host.graphics?.fontMetrics?.(record.attributes);
+        if (!measured)
+        {
+            return null;
+        }
+        const alphabet = host.graphics?.textWidth?.(record.attributes, ALPHABET)
+            ?? ALPHABET.length * measured.aveCharWidth;
+        return {
+            width: Math.floor((Math.floor(alphabet / 26) + 1) / 2),
+            height: measured.height,
+        };
+    };
+
     return {
         table: aliased,
 
@@ -1807,10 +1845,46 @@ export function createGdiFunctions(host){
              *
              * @returns {{ width: number, height: number } | null}
              */
-            baseUnits(){
-                const font = objects.get(stockObject(SYSTEM_FONT))?.attributes ?? logFont({});
-                const measured = host.graphics?.fontMetrics?.(font);
-                return measured ? { width: measured.aveCharWidth, height: measured.height } : null;
+            baseUnits: ()=>fontUnitsOf(stockObject(SYSTEM_FONT)),
+
+            /**
+             * The character cell a dialog set in a font is laid out
+             * against. Null without an engine or for a handle that is not a
+             * font.
+             *
+             * @param {number} handle
+             */
+            fontUnits: handle=>fontUnitsOf(handle),
+
+            /**
+             * A font of the window manager's own -- a dialog's -- from the
+             * point size and face a template names: the point size becomes
+             * a character height at the display's logical resolution.
+             *
+             * @param {{ pointSize: number, faceName: string, weight: number,
+             *     italic: number, charSet: number }} fields
+             * @returns {number} the handle
+             */
+            createFont: fields=>objects.create('font', logFont({
+                height: -Math.round(fields.pointSize * LOGICAL_DPI / POINTS_PER_INCH),
+                weight: fields.weight | 0,
+                italic: fields.italic & 0xff,
+                charSet: fields.charSet & 0xff,
+                faceName: fields.faceName,
+            })),
+
+            /** @param {number} handle */
+            deleteFont: handle=>table.DeleteObject.handler([handle]) === 1,
+
+            /**
+             * Selects a font into a context, as a control does before it
+             * paints in the font it was given.
+             *
+             * @param {number} hdc @param {number} font
+             */
+            selectFont(hdc, font){
+                const dc = dcOf(hdc);
+                return dc ? select(dc, font >>> 0) !== 0 : false;
             },
 
             /**

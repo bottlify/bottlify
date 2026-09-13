@@ -194,7 +194,8 @@ export function versionOf(id){
  * @param {any} deps.memory       readMemory/writeMemory.
  * @param {() => any} deps.screen The display this build is configured for.
  * @param {SurfaceDcServices} [deps.gdi]
- * @param {(surface: PresentedSurface) => void} [deps.present]
+ * @param {(surface: PresentedSurface, window: number, exclusive: boolean) => void}
+ *     [deps.present]  Shows the primary, told whose window it is.
  * @param {(call: { entry: number, args: number[], thread?: any })
  *          => Promise<number>} [deps.callGuest]
  * @param {() => any} [deps.currentThread]
@@ -1260,7 +1261,7 @@ export function createDirectDrawSeam(
             /** @type {import('../ddraw/objects.js').DirectDrawOptions} */
             const options = {
                 version,
-                onPresent: surface=>{
+                onPresent: (surface, window, exclusive)=>{
                     if (present)
                     {
                         present({
@@ -1270,7 +1271,7 @@ export function createDirectDrawSeam(
                             pitch: surface.pitch,
                             bitCount: surface.bytesPerPixel * 8,
                             palette: surface.palette ? surface.palette.entries : null,
-                        });
+                        }, window, exclusive);
                     }
                 },
             };

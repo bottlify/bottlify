@@ -51,7 +51,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  * @param {() => any} deps.screen
  * @param {import('./ddraw.js').SurfaceDcServices} [deps.gdi]
  *        How a DirectDraw surface gets a device context GDI can draw through.
- * @param {(surface: import('./ddraw.js').PresentedSurface) => void} [deps.present]
+ * @param {(surface: import('./ddraw.js').PresentedSurface, window?: number,
+ *     exclusive?: boolean) => void} [deps.present]
  *        Told whenever the DirectDraw primary surface may have changed.
  * @param {any} [deps.publisher]
  *        The publisher to share, for a caller that needs the way back from a

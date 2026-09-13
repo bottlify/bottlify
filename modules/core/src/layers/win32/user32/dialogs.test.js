@@ -278,6 +278,35 @@ test('DialogBox pumps until EndDialog and answers what it was given', async()=>{
     assert.equal(fns.DialogBoxParamA.argBytes, 20);
 });
 
+test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=>{
+    // Most templates leave the bit off: the modal call is what shows the
+    // window, and a dialog left invisible is a program that appears to do
+    // nothing when its own menu is clicked.
+    /** @type {any} */
+    let table = null;
+    /** @type {number} */
+    let visibleAtInit = -1;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (message.message === WM_INITDIALOG)
+            {
+                visibleAtInit = table.IsWindowVisible.handler([message.hwnd]);
+                table.EndDialog.handler([message.hwnd, 1]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const modeless = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.equal(fns.IsWindowVisible.handler([modeless]), 0,
+        'a modeless dialog stays as the template made it');
+
+    await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.equal(visibleAtInit, 1, 'the modal one is visible by the time its procedure runs');
+});
+
 test('a message sent to a control with no procedure is answered with nothing', ()=>{
     // The same control SendDlgItemMessage already answers zero for: sent to
     // by handle instead, it used to ask the bridge to run code at address

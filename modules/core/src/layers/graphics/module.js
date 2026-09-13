@@ -12,11 +12,114 @@ import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
 import { createVulkan } from './vulkan/runtime.js';
 import { createPacer } from './webgpu/internal/pacer.js';
-import { createPresenter } from './webgpu/internal/presenter.js';
+import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
 import { createFontEngine } from './gdi/fonts.js';
-import { createSurface, dibPitch, surfaceForDibSection, viewOf } from './gdi/surface.js';
+import {
+    createSurface, dibPitch, intersectRect, isEmptyRect, surfaceForDibSection, viewOf,
+} from './gdi/surface.js';
 import { textExtent } from './gdi/text.js';
+
+/**
+ * A window as the window manager lists it: enough to know where it is on
+ * the screen, whether it is seen, and whether it is a top-level window or
+ * inside one.
+ *
+ * @typedef {Object} ListedWindow
+ * @property {string} hwnd
+ * @property {import('./gdi/contract.js').Rect} rect     The whole window, on the screen.
+ * @property {import('./gdi/contract.js').Rect} client   Its client area, on the screen.
+ * @property {boolean} visible
+ * @property {boolean} [child]   Placed inside its parent rather than owned by it.
+ * @property {string | null} parent
+ */
+
+/** @param {import('./gdi/contract.js').Rect} a @param {import('./gdi/contract.js').Rect} b */
+const sameRect = (a, b)=>a.left === b.left && a.top === b.top && a.right === b.right
+    && a.bottom === b.bottom;
+
+/**
+ * What is left of a rectangle once another is taken out of it: up to four
+ * pieces, the strips above and below the hole and the ones beside it.
+ *
+ * @param {import('./gdi/contract.js').Rect} rect
+ * @param {import('./gdi/contract.js').Rect} hole
+ * @returns {import('./gdi/contract.js').Rect[]}
+ */
+const subtractRect = (rect, hole)=>{
+    const cut = intersectRect(rect, hole);
+    if (isEmptyRect(cut))
+    {
+        return [rect];
+    }
+    return [
+        { left: rect.left, top: rect.top, right: rect.right, bottom: cut.top },
+        { left: rect.left, top: cut.bottom, right: rect.right, bottom: rect.bottom },
+        { left: rect.left, top: cut.top, right: cut.left, bottom: cut.bottom },
+        { left: cut.right, top: cut.top, right: rect.right, bottom: cut.bottom },
+    ].filter(piece=>!isEmptyRect(piece));
+};
+
+/**
+ * Where a primary surface's pixels show on the screen: its window's client
+ * area -- or the whole screen in exclusive mode -- less every shown
+ * top-level window above that window in z-order. Null when the program has
+ * no window to own the picture, which leaves the primary shown as it is.
+ *
+ * The list is in the order the window manager paints: top-level windows
+ * from the bottom up. A window inside another is inside its area and is
+ * not counted as over it, which is what a primary without a clipper sees.
+ *
+ * @param {ListedWindow[]} windows
+ * @param {number} owner      The cooperative window, or zero for the topmost.
+ * @param {boolean} exclusive
+ * @param {import('./gdi/contract.js').Rect} screen
+ * @returns {import('./gdi/contract.js').Rect[] | null}
+ */
+export function uncoveredRegion(windows, owner, exclusive, screen){
+    const byHandle = new Map(windows.map(window=>[window.hwnd, window]));
+    /** @param {ListedWindow} window @returns {ListedWindow | null} the one it is inside */
+    const parentOf = window=>(window.child && window.parent
+        ? byHandle.get(window.parent) ?? null : null);
+    /** @param {ListedWindow} window */
+    const shown = window=>{
+        for (let at = /** @type {ListedWindow | null} */ (window); at; at = parentOf(at))
+        {
+            if (!at.visible)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    /** @param {ListedWindow} window */
+    const topLevelOf = window=>{
+        let at = window;
+        for (let up = parentOf(at); up; up = parentOf(at))
+        {
+            at = up;
+        }
+        return at;
+    };
+    const topLevels = windows.filter(window=>!window.child && shown(window));
+    const named = byHandle.get(`0x${(owner >>> 0).toString(16)}`);
+    const owning = named ? topLevelOf(named) : topLevels.at(-1);
+    if (!owning)
+    {
+        return null;
+    }
+    const base = intersectRect(exclusive ? screen : owning.client, screen);
+    if (isEmptyRect(base))
+    {
+        return [];
+    }
+    let region = [base];
+    for (const above of topLevels.slice(topLevels.indexOf(owning) + 1))
+    {
+        region = region.flatMap(piece=>subtractRect(piece, above.rect));
+    }
+    return region;
+}
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -259,9 +362,16 @@ export const graphicsModule = {
              * layer composed -- had nowhere to send them, and asking silently
              * found nothing to call.
              *
-             * @param {any} surface
+             * Shown the way a DirectDraw primary is: as the picture of a
+             * window, under whatever is over that window.
+             *
+             * @param {import('./webgpu/internal/presenter.js').PresentableSurface} surface
+             * @param {number} [window]  The window the picture belongs to; zero
+             *     for the program's topmost.
+             * @param {boolean} [exclusive]  Whether it covers the screen.
              */
-            present: surface=>presenter?.present(surface),
+            present: (surface, window = 0, exclusive = false)=>
+                presentPrimary(surface, window, exclusive),
 
             /**
              * The display the program asked for. Anything drawn outside the
@@ -337,6 +447,14 @@ export const graphicsModule = {
          *     & { surface: import('./gdi/contract.js').Surface }) | null}
          */
         let desktopSurface = null;
+        /**
+         * @param {number} buffer @param {number} pitch
+         * @param {{ width: number, height: number }} screen
+         */
+        const viewOfDesktop = (buffer, pitch, screen)=>createSurface({
+            width: screen.width, height: screen.height, pitch,
+            bytes: services.windowMemory(buffer, pitch * screen.height),
+        });
         const desktop = ()=>{
             const screen = services.screen;
             if (desktopSurface && (desktopSurface.width !== screen.width
@@ -353,16 +471,89 @@ export const graphicsModule = {
                 {
                     return null;
                 }
-                const bytes = services.windowMemory(buffer, pitch * screen.height);
                 desktopSurface = {
                     buffer, pitch, bitCount: 32, palette: null,
                     width: screen.width, height: screen.height,
-                    surface: createSurface({
-                        width: screen.width, height: screen.height, bytes, pitch,
-                    }),
+                    surface: viewOfDesktop(buffer, pitch, screen),
                 };
             }
+            else if (desktopSurface.surface.bytes.length === 0)
+            {
+                // The emulator grew its memory, and every view of the old
+                // buffer went with it: the pixels are still at the same
+                // guest address, so the view is taken again over the new one.
+                desktopSurface.surface = viewOfDesktop(desktopSurface.buffer,
+                    desktopSurface.pitch, screen);
+            }
             return desktopSurface;
+        };
+
+        /**
+         * Shows a DirectDraw primary surface.
+         *
+         * There is one screen. A primary belongs to a window -- the one the
+         * program named when it set its cooperative level, else its topmost
+         * -- and its pixels are that window's client area on the desktop;
+         * exclusive mode is the same window covering the screen. So
+         * presenting the primary means copying it into the desktop where
+         * the window is, minus every window above it, and showing the
+         * desktop: a dialog over the picture stays over it. A primary with
+         * nothing over it and the whole screen to itself is shown as it is,
+         * which is the common case and costs no copy; that is decided from
+         * the window list rather than from any flag.
+         *
+         * @param {import('./webgpu/internal/presenter.js').PresentableSurface} surface
+         * @param {number} [window]    The cooperative window, or zero.
+         * @param {boolean} [exclusive]
+         */
+        const presentPrimary = (surface, window = 0, exclusive = false)=>{
+            const screen = services.screen;
+            // A picture the GPU owns has nothing worth reading in guest
+            // memory, and a primary of another size than the screen has no
+            // place on it. The ceiling on this: such a primary is shown as
+            // it is, and anything over it is not seen.
+            const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
+            const region = presenter.isClaimed(surface.buffer)
+                || surface.width !== screen.width || surface.height !== screen.height
+                ? null
+                : uncoveredRegion(win32.windows?.() ?? [], window, exclusive, wholeScreen);
+            if (!region || (region.length === 1 && sameRect(region[0], wholeScreen)))
+            {
+                presenter.present(surface);
+                return;
+            }
+            const target = desktop();
+            if (!target)
+            {
+                presenter.present(surface);
+                return;
+            }
+            const bytesPerPixel = surface.bitCount >>> 3;
+            for (const rect of region)
+            {
+                const width = rect.right - rect.left;
+                for (let y = rect.top; y < rect.bottom; y++)
+                {
+                    const row = services.windowMemory(
+                        surface.buffer + y * surface.pitch + rect.left * bytesPerPixel,
+                        width * bytesPerPixel);
+                    const at = target.surface.offset + y * target.pitch + rect.left * 4;
+                    const out = target.surface.bytes.subarray(at, at + width * 4);
+                    if (surface.bitCount === 32)
+                    {
+                        out.set(row);
+                        continue;
+                    }
+                    expandRow(row, width, surface.bitCount, surface.palette, out);
+                    // The desktop's fourth byte is padding, as GDI keeps it,
+                    // not the alpha a presented row carries.
+                    for (let x = 3; x < out.length; x += 4)
+                    {
+                        out[x] = 0;
+                    }
+                }
+            }
+            presenter.present(target);
         };
 
         /**
@@ -425,8 +616,7 @@ export const graphicsModule = {
                 deleteSurfaceDc: handle=>win32.gdi().deleteSurfaceDc(handle),
             },
 
-            /** @param {any} surface */
-            present: surface=>presenter.present(surface),
+            present: presentPrimary,
 
             // What a Direct3D 7 device draws with. Reached when a program
             // first asks its DirectDraw object for Direct3D, not now, so a

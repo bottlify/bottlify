@@ -127,8 +127,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented.length, 1);
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
-        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, pending: false, claimed: 0,
-        failures: [],
+        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, lastBuffer: 0x1000, pending: false,
+        claimed: 0, failures: [],
     });
 
     h.presenter.present(surface);

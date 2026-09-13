@@ -43,6 +43,7 @@ const WM_CLOSE = 0x0010;
 const WM_KEYDOWN = 0x0100;
 const WM_KEYUP = 0x0101;
 const WM_CHAR = 0x0102;
+const WM_GETFONT = 0x0031;
 const WM_INITDIALOG = 0x0110;
 const WM_COMMAND = 0x0111;
 const WM_VSCROLL = 0x0115;
@@ -60,6 +61,7 @@ const EM_REPLACESEL = 0x00c2;
 const EM_LIMITTEXT = 0x00c5;
 const EM_GETLINECOUNT = 0x00ba;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
+const EN_SETFOCUS = 0x0100;
 const EN_CHANGE = 0x0300;
 const LB_ADDSTRING = 0x0180;
 const LB_GETCOUNT = 0x018b;
@@ -100,6 +102,7 @@ const WS_CAPTION = 0x00c00000;
 const WS_VSCROLL = 0x00200000;
 const WS_TABSTOP = 0x00010000;
 const WS_EX_CLIENTEDGE = 0x00000200;
+const DS_SETFONT = 0x0040;
 const DS_MODALFRAME = 0x0080;
 const BS_DEFPUSHBUTTON = 0x0001;
 const BS_AUTOCHECKBOX = 0x0003;
@@ -175,6 +178,7 @@ function fakeHandles(){
  *
  * @param {ReturnType<typeof fakeMemory>} memory
  * @param {{ style: number, title: string, x?: number, y?: number, cx: number, cy: number,
+ *     font?: { pointSize: number, face: string },
  *     controls: { id: number, className: string, title: string, style: number,
  *         x: number, y: number, cx: number, cy: number }[] }} dialog
  */
@@ -209,6 +213,11 @@ function putTemplate(memory, dialog){
     sz('');
     sz('');
     sz(dialog.title);
+    if (dialog.font)
+    {
+        u16(dialog.font.pointSize);
+        sz(dialog.font.face);
+    }
     for (const control of dialog.controls)
     {
         at = (at + 3) & ~3;
@@ -227,11 +236,26 @@ function putTemplate(memory, dialog){
 }
 
 /**
+ * What the test engine draws a string as: each character its average width,
+ * a pixel less or more by its code.
+ *
+ * @param {string} text @param {number} average
+ */
+const textWidth = (text, average)=>[...text]
+    .reduce((sum, character)=>sum + average + character.charCodeAt(0) % 3 - 1, 0);
+
+/**
  * @param {Object} [options]
  * @param {(message: { hwnd: number, message: number, wParam: number, lParam: number })
  *     => number} [options.reply]  What a guest window procedure answers.
+ * @param {boolean} [options.engine]
+ *     A font engine of sorts: every face measures as a cell of half its
+ *     character height across and two more than it down, so a dialog set in
+ *     a smaller font lays out smaller, and the face asked for is recorded.
+ *     Its glyphs are proportional -- a pixel either side of the average by
+ *     the character code -- and average out exactly over the alphabet.
  */
-function setup({ reply = ()=>0 } = {}){
+function setup({ reply = ()=>0, engine = false } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -243,6 +267,15 @@ function setup({ reply = ()=>0 } = {}){
     const keysDown = new Set();
     let presents = 0;
     let heapNext = HEAP;
+    /** @type {string[]} */
+    const faces = [];
+    /** @param {{ height: number, faceName: string }} font */
+    const metricsOf = font=>{
+        faces.push(font.faceName);
+        const em = Math.abs(font.height) || 16;
+        return { height: em + 2, ascent: em, descent: 2, internalLeading: 2, externalLeading: 0,
+            aveCharWidth: Math.ceil(em / 2), maxCharWidth: em };
+    };
 
     const gdi = createGdiFunctions({
         readMemory: memory.readMemory,
@@ -268,6 +301,11 @@ function setup({ reply = ()=>0 } = {}){
                 }
                 return bitmap.bits ? surfaceForDibSection(bitmap, memory.bytes, 0) : null;
             },
+            ...(engine ? {
+                fontMetrics: metricsOf,
+                /** @param {{ height: number, faceName: string }} font @param {string} text */
+                textWidth: (font, text)=>textWidth(text, metricsOf(font).aveCharWidth),
+            } : {}),
         },
     });
 
@@ -358,7 +396,7 @@ function setup({ reply = ()=>0 } = {}){
 
     return {
         memory, queue, desktop, gdi, fns: table, dispatched, keysDown, pump, mouse, key, click,
-        commands, centre, presents: ()=>presents,
+        commands, centre, faces, presents: ()=>presents,
     };
 }
 
@@ -379,7 +417,7 @@ const WIZARD_PAGE = Object.freeze({
 
 /**
  * @param {ReturnType<typeof setup>} context
- * @param {typeof WIZARD_PAGE} [page]
+ * @param {Parameters<typeof putTemplate>[1]} [page]
  */
 async function openDialog(context, page = WIZARD_PAGE){
     putTemplate(context.memory, page);
@@ -609,6 +647,99 @@ test('an edit takes typing at its caret, selects, and tells its parent EN_CHANGE
     assert.equal(context.memory.readCString(OUT, 16), 'replaced!', 'read-only takes nothing');
 });
 
+test('typing inside a modal loop reaches the edit with the focus, translated', async()=>{
+    // DialogBox pumps for the program, so it translates for the program too:
+    // a key press left alone by the dialog manager becomes the character an
+    // edit types. The dialog procedure gives the focus to the first tab
+    // stop, the edit, and ends the dialog once two characters have landed.
+    let typed = '';
+    const context = setup({ reply: message=>{
+        if (message.message === WM_INITDIALOG)
+        {
+            return 1;
+        }
+        if (message.message === WM_COMMAND && (message.wParam >>> 16) === EN_SETFOCUS)
+        {
+            for (const code of [0x49, 0x4c])
+            {
+                context.key(WM_KEYDOWN, code);
+                context.key(WM_KEYUP, code);
+            }
+        }
+        if (message.message === WM_COMMAND && (message.wParam >>> 16) === EN_CHANGE
+            && context.fns.GetWindowTextA.handler([message.lParam, OUT, 16]) === 2)
+        {
+            typed = context.memory.readCString(OUT, 16);
+            context.fns.EndDialog.handler([message.hwnd, 5]);
+        }
+        return 0;
+    } });
+    putTemplate(context.memory, {
+        ...WIZARD_PAGE,
+        controls: [
+            { id: 300, className: 'Edit', title: '', x: 4, y: 4, cx: 60, cy: 10,
+                style: WS_CHILD | WS_VISIBLE | WS_TABSTOP },
+            ...WIZARD_PAGE.controls,
+        ],
+    });
+    assert.equal(await context.fns.DialogBoxIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]), 5);
+    assert.equal(typed, 'il');
+});
+
+test('an edit places its caret and selection where the drawn text ends', async()=>{
+    // Measured, not gridded: with a proportional face the grid puts the
+    // caret past narrow characters and short of wide ones.
+    const context = setup({ engine: true });
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'Edit');
+    const edit = context.fns.CreateWindowExA.handler([WS_EX_CLIENTEDGE, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, 60, 120, 20, dialog, 300, HINSTANCE, 0]);
+    assert.notEqual(edit, 0);
+    await context.fns.SetFocus.handler([edit]);
+    for (const character of 'il')
+    {
+        context.key(WM_CHAR, character.charCodeAt(0));
+    }
+    await context.pump(dialog);
+
+    // The client area's corner on the screen: inside the client edge.
+    context.memory.writeMemory(OUT, new Uint8Array(8));
+    context.fns.ClientToScreen.handler([edit, OUT]);
+    const left = context.memory.u32(OUT);
+    const top = context.memory.u32(OUT + 4);
+    context.fns.GetClientRect.handler([edit, OUT]);
+    const y = top + Math.floor(context.memory.u32(OUT + 12) / 2);
+    // The system font here averages 8 across; 'i' and 'l' are a pixel
+    // narrower each, so the text ends 14 in from the margin, where a grid
+    // of the widest character would have said 18.
+    const ink = 0x00000000;
+    const paper = 0x00ffffff;
+    const width = textWidth('il', 8);
+    assert.equal(width, 14);
+    assert.equal(context.desktop.read(left + 1 + width, y), ink, 'the caret, where the text ends');
+    assert.equal(context.desktop.read(left + 1 + 18, y), paper, 'and not on the grid');
+
+    // A click just past the second character lands the caret after it, and
+    // one between the two lands before the second.
+    context.click(left + 1 + width + 1, y);
+    await context.pump(dialog);
+    assert.equal(context.fns.SendMessageA.handler([edit, EM_GETSEL, 0, 0]) & 0xffff, 2);
+    context.click(left + 1 + textWidth('i', 8) + 1, y);
+    await context.pump(dialog);
+    assert.equal(context.fns.SendMessageA.handler([edit, EM_GETSEL, 0, 0]) & 0xffff, 1);
+
+    // Shift+End selects to the end, and the highlight ends with the text.
+    context.keysDown.add(VK_SHIFT);
+    context.key(WM_KEYDOWN, 0x23);
+    await context.pump(dialog);
+    context.keysDown.delete(VK_SHIFT);
+    const highlight = 0x00000080;
+    assert.equal(context.desktop.read(left + 1 + width - 1, y), highlight);
+    assert.equal(context.desktop.read(left + 1 + width, y), ink, 'the caret at its end');
+    assert.equal(context.desktop.read(left + 1 + width + 1, y), paper);
+});
+
 test('a read-only multi-line edit breaks its text into lines and scrolls by pages', async()=>{
     const context = setup();
     const dialog = await openDialog(context);
@@ -750,6 +881,46 @@ test('a click on the caption\'s close box asks the dialog to close, which is Can
     assert.deepEqual(closing.map(one=>one.message), [WM_NCLBUTTONDOWN, WM_CLOSE]);
     assert.deepEqual(context.commands().at(-1), [IDCANCEL, BN_CLICKED, 0]);
 });
+
+test('a template that sets a font lays the dialog out in it and hands it to every control',
+    async()=>{
+        // The system font here is 16 high, so its cell is 8 by 18; eight
+        // points is 11 pixels, a cell of 6 by 13. A dialog set in it is laid
+        // out three quarters as wide and its controls paint in it.
+        const context = setup({ engine: true });
+        const dialog = await openDialog(context, {
+            ...WIZARD_PAGE,
+            style: WIZARD_PAGE.style | DS_SETFONT,
+            font: { pointSize: 8, face: 'MS Sans Serif' },
+        });
+        const button = context.fns.GetDlgItem.handler([dialog, 3]);
+        const font = context.fns.SendMessageA.handler([button, WM_GETFONT, 0, 0]);
+        assert.notEqual(font, 0, 'the button was given a font');
+        assert.equal(context.fns.SendMessageA.handler([dialog, WM_GETFONT, 0, 0]), font,
+            'the dialog answers with the same one');
+        assert.equal(context.fns.SendMessageA.handler(
+            [context.fns.GetDlgItem.handler([dialog, 100]), WM_GETFONT, 0, 0]), font);
+        assert.deepEqual(context.gdi.draw.fontUnits(font), { width: 6, height: 13 });
+        assert.equal(context.faces.at(-1), 'MS Sans Serif', 'the face the template named');
+
+        // Forty units across and fourteen down, in that cell rather than
+        // the system font's 80 by 32.
+        context.fns.GetWindowRect.handler([button, OUT]);
+        assert.equal(context.memory.u32(OUT + 8) - context.memory.u32(OUT), 60);
+        assert.equal(context.memory.u32(OUT + 12) - context.memory.u32(OUT + 4), 23);
+        context.memory.writeMemory(OUT, new Uint8Array(16));
+        context.memory.bytes[OUT + 8] = 4;
+        context.memory.bytes[OUT + 12] = 8;
+        assert.equal(context.fns.MapDialogRect.handler([dialog, OUT]), 1);
+        assert.deepEqual([context.memory.u32(OUT + 8), context.memory.u32(OUT + 12)], [6, 13],
+            'MapDialogRect scales by the dialog\'s own font');
+        assert.equal(context.fns.GetDialogBaseUnits.handler([]), (18 << 16) | 8,
+            'while the base units stay the system font\'s');
+
+        // The font is the dialog's, and goes with it.
+        context.fns.DestroyWindow.handler([dialog]);
+        assert.equal(context.gdi.draw.fontUnits(font), null);
+    });
 
 test('a window context draws on the desktop at the client origin and no further', async()=>{
     const context = setup();
