@@ -613,17 +613,20 @@ export function createControlProcedures(host){
     const drawText = (hdc, text, rect, format, rgb)=>{
         const draw = /** @type {Drawing} */ (host.draw);
         const metrics = draw.measure(hdc, 'M');
+        /** @param {string} piece */
+        const widthOf = piece=>draw.measure(hdc, piece).width;
         const lines = layoutText(text, rect, format, {
-            cellWidth: metrics.width, cellHeight: metrics.height,
+            cellWidth: metrics.width, cellHeight: metrics.height, width: widthOf,
         });
         for (const line of lines)
         {
             draw.text(hdc, line.x, line.y, line.text, { color: rgb, clip: rect });
             if (line.underline !== null)
             {
-                const at = line.x + line.underline * metrics.width;
+                const at = line.x + widthOf(line.text.slice(0, line.underline));
                 draw.fill(hdc, { left: at, top: line.y + metrics.ascent,
-                    right: at + metrics.width, bottom: line.y + metrics.ascent + 1 }, rgb);
+                    right: at + widthOf(line.text[line.underline]),
+                    bottom: line.y + metrics.ascent + 1 }, rgb);
             }
         }
     };

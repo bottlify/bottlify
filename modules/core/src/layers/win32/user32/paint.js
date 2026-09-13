@@ -77,6 +77,16 @@ const ESTIMATED_LINE_HEIGHT = 16;
  */
 
 /**
+ * The cell text is laid out on, and the measure of a string in the same
+ * font when the build has one: without it every character is one cell.
+ *
+ * @typedef {Object} TextCell
+ * @property {number} cellWidth
+ * @property {number} cellHeight
+ * @property {(text: string) => number} [width]
+ */
+
+/**
  * @typedef {Object} Rect
  * @property {number} left
  * @property {number} top
@@ -110,16 +120,17 @@ const isEmpty = rect=>rect.right <= rect.left || rect.bottom <= rect.top;
  * underline to draw, `&&` is one ampersand. Lines break at a line feed, and
  * with DT_WORDBREAK at the last space that fits; DT_SINGLELINE takes the
  * whole string as one line, which is also the only case the vertical flags
- * apply to, as documented. Every character is one cell wide, which is what
- * the font metrics this build has say.
+ * apply to, as documented. A string is as wide as the metrics measure it,
+ * or one cell per character when they cannot.
  *
  * @param {string} text
  * @param {Rect} rect
  * @param {number} format
- * @param {{ cellWidth: number, cellHeight: number }} metrics
+ * @param {TextCell} metrics
  * @returns {LaidOutLine[]}
  */
 export function layoutText(text, rect, format, metrics){
+    const widthOf = metrics.width ?? ((/** @type {string} */ piece)=>piece.length * metrics.cellWidth);
     /** @type {number | null} */
     let mnemonic = null;
     let plain = text;
@@ -140,7 +151,31 @@ export function layoutText(text, rect, format, metrics){
         }
     }
     const width = rect.right - rect.left;
-    const columns = Math.max(1, Math.floor(width / Math.max(1, metrics.cellWidth)));
+    /**
+     * The end of the longest piece from `from` that fits the width, and at
+     * least one character, so a rectangle narrower than a glyph still moves
+     * on. Bisected, because a measure is a sum of cached advances and the
+     * pieces are short.
+     *
+     * @param {string} paragraph @param {number} from
+     */
+    const fitting = (paragraph, from)=>{
+        let low = from + 1;
+        let high = paragraph.length;
+        while (low < high)
+        {
+            const middle = (low + high + 1) >> 1;
+            if (widthOf(paragraph.slice(from, middle)) <= width)
+            {
+                low = middle;
+            }
+            else
+            {
+                high = middle - 1;
+            }
+        }
+        return low;
+    };
     /** @type {{ text: string, start: number }[]} */
     const lines = [];
     if ((format & DT_SINGLELINE) !== 0)
@@ -154,20 +189,26 @@ export function layoutText(text, rect, format, metrics){
         {
             const start = at;
             at += paragraph.length + 1;
-            if ((format & DT_WORDBREAK) === 0 || paragraph.length <= columns)
+            if ((format & DT_WORDBREAK) === 0 || widthOf(paragraph) <= width)
             {
                 lines.push({ text: paragraph, start });
                 continue;
             }
             let from = 0;
-            while (paragraph.length - from > columns)
+            while (widthOf(paragraph.slice(from)) > width)
             {
-                let cut = paragraph.lastIndexOf(' ', from + columns);
-                cut = cut <= from ? from + columns : cut + 1;
+                const end = fitting(paragraph, from);
+                let cut = paragraph.lastIndexOf(' ', end);
+                cut = cut <= from ? end : cut + 1;
                 lines.push({ text: paragraph.slice(from, cut), start: start + from });
                 from = cut;
             }
-            lines.push({ text: paragraph.slice(from), start: start + from });
+            // A cut that took the whole paragraph leaves no line to add; an
+            // empty paragraph is still one line.
+            if (from < paragraph.length || from === 0)
+            {
+                lines.push({ text: paragraph.slice(from), start: start + from });
+            }
         }
     }
     const height = lines.length * metrics.cellHeight;
@@ -184,7 +225,7 @@ export function layoutText(text, rect, format, metrics){
         }
     }
     return lines.map((line, index)=>{
-        const lineWidth = line.text.length * metrics.cellWidth;
+        const lineWidth = widthOf(line.text);
         const x = (format & DT_CENTER) !== 0
             ? rect.left + Math.floor((width - lineWidth) / 2)
             : (format & DT_RIGHT) !== 0 ? rect.right - lineWidth : rect.left;
@@ -330,15 +371,18 @@ export function createPaintFunctions(options){
     };
 
     /**
-     * The character cell of a context's font, for laying text out; the
-     * estimate when the build cannot measure.
+     * The character cell of a context's font, for laying text out, and the
+     * measure of a string in it; the estimate when the build cannot measure.
      *
      * @param {number} hdc
+     * @returns {TextCell & { ascent: number }}
      */
     const cellOf = hdc=>{
-        const measured = (hdc >>> 0) !== 0 ? host.draw?.measure?.(hdc >>> 0, 'M') : null;
-        return measured
-            ? { cellWidth: measured.width, cellHeight: measured.height, ascent: measured.ascent }
+        const draw = host.draw;
+        const measured = (hdc >>> 0) !== 0 ? draw?.measure?.(hdc >>> 0, 'M') : null;
+        return measured && draw
+            ? { cellWidth: measured.width, cellHeight: measured.height, ascent: measured.ascent,
+                width: text=>draw.measure(hdc >>> 0, text).width }
             : { cellWidth: ESTIMATED_CHAR_WIDTH, cellHeight: ESTIMATED_LINE_HEIGHT,
                 ascent: ESTIMATED_LINE_HEIGHT - 4 };
     };
@@ -364,7 +408,8 @@ export function createPaintFunctions(options){
         const lines = layoutText(string, (format & DT_CALCRECT) !== 0 && isEmpty(bounds)
             ? { ...bounds, right: bounds.left + 0x7fff }
             : bounds, format, cell);
-        const widest = lines.reduce((most, line)=>Math.max(most, line.text.length), 0);
+        const widthOf = cell.width ?? ((/** @type {string} */ piece)=>piece.length * cell.cellWidth);
+        const widest = lines.reduce((most, line)=>Math.max(most, widthOf(line.text)), 0);
         const height = Math.max(lines.length, 1) * cell.cellHeight;
 
         if ((format & DT_CALCRECT) !== 0)
@@ -376,7 +421,7 @@ export function createPaintFunctions(options){
                     top: bounds.top,
                     right: (format & DT_WORDBREAK) !== 0 && !isEmpty(bounds)
                         ? bounds.right
-                        : bounds.left + widest * cell.cellWidth,
+                        : bounds.left + widest,
                     bottom: bounds.top + height,
                 });
             }
@@ -393,9 +438,10 @@ export function createPaintFunctions(options){
             });
             if (line.underline !== null)
             {
-                const at = line.x + line.underline * cell.cellWidth;
+                const at = line.x + widthOf(line.text.slice(0, line.underline));
                 host.draw.fill(hdc >>> 0, { left: at, top: line.y + cell.ascent,
-                    right: at + cell.cellWidth, bottom: line.y + cell.ascent + 1 },
+                    right: at + widthOf(line.text[line.underline]),
+                    bottom: line.y + cell.ascent + 1 },
                 host.draw.textColor?.(hdc >>> 0) ?? 0);
             }
         }

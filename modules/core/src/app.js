@@ -2253,6 +2253,15 @@ async function buildApp(options){
                 createDrawing: drawing=>core.api('graphics').gdiDrawing().create(drawing),
                 /** @param {any} dc @param {any} bitmap */
                 surfaceFor: (dc, bitmap)=>core.api('graphics').gdiDrawing().surfaceFor(dc, bitmap),
+                // The font engine's measurements, so what a program lays out
+                // against is what the same engine draws.
+                /** @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font */
+                fontMetrics: font=>core.api('graphics').gdiDrawing().fontMetrics(font),
+                /**
+                 * @param {import('./layers/win32/gdi32/structs.js').LogFontFields} font
+                 * @param {string} text
+                 */
+                textWidth: (font, text)=>core.api('graphics').gdiDrawing().textWidth(font, text),
                 // The desktop every window context draws into, shown after
                 // a paint pass. The window manager decides when a pass is
                 // over; the graphics layer owns the surface and the screen.

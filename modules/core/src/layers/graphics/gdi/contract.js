@@ -85,6 +85,10 @@
  * @property {number} cellWidth    Advance from one character origin to the next.
  * @property {number} cellHeight   Full line height, ascent plus descent.
  * @property {number} ascent       Baseline offset from the top of the cell.
+ * @property {(code: number) => import("./fonts.js").Glyph | null} [glyphs]
+ *           The font engine's glyphs for the selected font, when there is an
+ *           engine: each carries its own advance, and `cellWidth` is then
+ *           only an average.
  */
 
 /**

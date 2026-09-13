@@ -81,6 +81,9 @@ function defaultState(){
  *           the pen the program created rather than to a second copy of it.
  * @property {(font: number) => import("./contract.js").TextMetrics} [metrics]
  *           What the bookkeeping half reports for the selected font.
+ * @property {import("./fonts.js").FontEngine} [fonts]
+ *           Where glyphs come from. Without one, or with one that has no
+ *           canvas, text is drawn from the built-in pixel face.
  */
 
 /**
@@ -89,6 +92,7 @@ function defaultState(){
 export function createGdiDrawing(options = {}){
     const objects = options.objects ?? { get: ()=>null };
     const measure = options.metrics ?? (()=>FALLBACK_METRICS);
+    const fonts = options.fonts?.available ? options.fonts : null;
     /** @type {Map<number, any>} */
     const contexts = new Map();
 
@@ -120,7 +124,18 @@ export function createGdiDrawing(options = {}){
     };
 
     /** @param {any} context @returns {import("./contract.js").TextMetrics} */
-    const metricsOf = context=>measure(context.state.font);
+    const metricsOf = context=>{
+        const cell = measure(context.state.font);
+        if (!fonts)
+        {
+            return cell;
+        }
+        // The engine is asked for the font the program selected; a context
+        // with no font record -- one bound outside win32 -- gets its default.
+        const record = objects.get(context.state.font);
+        const font = record && record.type === 'font' ? record.attributes : null;
+        return { ...cell, glyphs: code=>fonts.glyph(code, font) };
+    };
 
     return {
         /**

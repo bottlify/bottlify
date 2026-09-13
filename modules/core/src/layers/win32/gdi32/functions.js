@@ -161,12 +161,13 @@ const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
 /**
  * Font metrics with no font engine behind them.
  *
- * These are estimates, and they stay estimates until there is a rasteriser to
- * measure a real face with. They are chosen so that the numbers a program
- * divides by are self-consistent -- ascent plus descent is the cell height, a
- * string is its length times the average width -- because a layout that adds up
- * is what code depends on, far more than the exact numbers. Every face is
- * treated as fixed-pitch for the same reason.
+ * These are estimates, used when the build has no rasteriser to measure a
+ * real face with. They are chosen so that the numbers a program divides by
+ * are self-consistent -- ascent plus descent is the cell height, a string is
+ * its length times the average width -- because a layout that adds up is what
+ * code depends on, far more than the exact numbers. Every face is treated as
+ * fixed-pitch for the same reason. With an engine, its measurements overlay
+ * these field for field, and a string is as wide as the engine draws it.
  */
 const DEFAULT_EM_HEIGHT = 13;
 const INTERNAL_LEADING_RATIO = 0.2;
@@ -583,6 +584,7 @@ export function createGdiFunctions(host){
      * @returns {import('./structs.js').TextMetricFields}
      */
     const metricsOf = font=>{
+        const measured = host.graphics?.fontMetrics?.(font);
         // lfHeight is three different requests in one field: a cell height when
         // positive, a character height when negative, and "you choose" at zero.
         const requested = font.height | 0;
@@ -622,13 +624,26 @@ export function createGdiFunctions(host){
             // constant is named after.
             pitchAndFamily: (font.pitchAndFamily & 0xf0) & ~TMPF_FIXED_PITCH,
             charSet: font.charSet,
+            ...measured,
         };
     };
 
+    /** @param {any} dc @returns {import('./structs.js').LogFontFields} */
+    const currentFont = dc=>objects.get(dc.font)?.attributes ?? logFont({});
+
     /** @param {any} dc @returns {import('./structs.js').TextMetricFields} */
-    const currentMetrics = dc=>{
-        const font = objects.get(dc.font);
-        return metricsOf(font ? font.attributes : logFont({}));
+    const currentMetrics = dc=>metricsOf(currentFont(dc));
+
+    /**
+     * How wide a string is in a context's font: what the engine draws, or
+     * the estimate's fixed pitch without one.
+     *
+     * @param {any} dc @param {string} text
+     * @returns {number}
+     */
+    const widthOf = (dc, text)=>{
+        const font = currentFont(dc);
+        return host.graphics?.textWidth?.(font, text) ?? text.length * metricsOf(font).aveCharWidth;
     };
 
     /**
@@ -1608,23 +1623,47 @@ export function createGdiFunctions(host){
         /**
          * BOOL GetTextExtentPoint32A(HDC hdc, LPCSTR lpString, int c, LPSIZE psizl)
          *
-         * The string is not read: every face is fixed-pitch here, so the extent
-         * depends on how many characters there are and not on which ones.
+         * The count is authoritative and the string need not be terminated,
+         * as with TextOut.
          */
         GetTextExtentPoint32A: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([handle, , count, out])=>{
+            handler: ([handle, string, count, out])=>{
                 const dc = dcOf(handle);
                 if (!dc || (count | 0) < 0)
                 {
                     return 0;
                 }
-                const metrics = currentMetrics(dc);
-                writeSize(host, out, {
-                    cx: (count | 0) * metrics.aveCharWidth,
-                    cy: metrics.height,
-                });
+                const text = (string >>> 0) === 0 || (count | 0) === 0
+                    ? ''
+                    : String.fromCharCode(...host.readMemory(string >>> 0, count | 0));
+                writeSize(host, out, { cx: widthOf(dc, text), cy: currentMetrics(dc).height });
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetCharWidth32A(HDC hdc, UINT iFirst, UINT iLast, LPINT lpBuffer)
+         *
+         * One advance per character of the range, in the context's font.
+         * GetCharWidthA is the same call under its older name.
+         */
+        GetCharWidth32A: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, first, last, out])=>{
+                const dc = dcOf(handle);
+                if (!dc || (out >>> 0) === 0 || (last >>> 0) < (first >>> 0))
+                {
+                    return 0;
+                }
+                const widths = [];
+                for (let code = first >>> 0; code <= (last >>> 0); code++)
+                {
+                    widths.push(widthOf(dc, String.fromCharCode(code & 0xff)));
+                }
+                writeU32s(host, out >>> 0, widths);
                 return 1;
             },
         },
@@ -1632,7 +1671,11 @@ export function createGdiFunctions(host){
 
     // The older name for the same call: the same arguments, the same
     // SIZE written, and an installer's engine measures with it.
-    const aliased = { ...table, GetTextExtentPointA: table.GetTextExtentPoint32A };
+    const aliased = {
+        ...table,
+        GetTextExtentPointA: table.GetTextExtentPoint32A,
+        GetCharWidthA: table.GetCharWidth32A,
+    };
 
     return {
         table: aliased,
@@ -1751,13 +1794,23 @@ export function createGdiFunctions(host){
              * @returns {{ width: number, height: number, ascent: number }}
              */
             measure(hdc, text){
-                const dc = dcOf(hdc);
-                const metrics = currentMetrics(dc ?? { font: 0 });
-                return {
-                    width: text.length * metrics.aveCharWidth,
-                    height: metrics.height,
-                    ascent: metrics.ascent,
-                };
+                const dc = dcOf(hdc) ?? { font: 0 };
+                const metrics = currentMetrics(dc);
+                return { width: widthOf(dc, text), height: metrics.height, ascent: metrics.ascent };
+            },
+
+            /**
+             * The character cell dialogs are laid out against: the system
+             * font's average width and height, as the font engine measures
+             * them. Null without an engine, when the layout keeps the cell
+             * its estimate was made for.
+             *
+             * @returns {{ width: number, height: number } | null}
+             */
+            baseUnits(){
+                const font = objects.get(stockObject(SYSTEM_FONT))?.attributes ?? logFont({});
+                const measured = host.graphics?.fontMetrics?.(font);
+                return measured ? { width: measured.aveCharWidth, height: measured.height } : null;
             },
 
             /**

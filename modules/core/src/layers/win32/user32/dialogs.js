@@ -131,9 +131,10 @@ const ORDINAL_MARKER = 0xffff;
 
 /**
  * Dialog units are relative to the dialog font: four across to a character
- * width, eight down to a character height. The character cell is the same
+ * width, eight down to a character height. The character cell is the system
+ * font's as the font engine measures it, and without an engine the same
  * estimate the rest of this layer measures text with, so a dialog laid out
- * against it is consistent with the text drawn into it.
+ * against it is consistent with the text drawn into it either way.
  */
 const CHAR_WIDTH = 8;
 const CHAR_HEIGHT = 16;
@@ -194,6 +195,9 @@ const MAX_RESOURCE_NAME = 256;
  * @property {(record: any) => any[]} children
  * @property {(key: number) => boolean} keyDown
  * @property {{ clientOrigin: (record: any) => { x: number, y: number } }} geometry
+ * @property {{ baseUnits?: () => { width: number, height: number } | null }} [draw]
+ *           The window manager's drawing, for the cell the system font
+ *           measures as. Absent, or answering null, without a font engine.
  * @property {() => unknown} [callerThread]
  * @property {(hwnd: number) => void} [created]
  * @property {() => Promise<void>} idle
@@ -283,10 +287,12 @@ export function createDialogFunctions(options){
         };
     };
 
+    /** @returns {{ width: number, height: number }} */
+    const baseUnits = ()=>host.draw?.baseUnits?.() ?? { width: CHAR_WIDTH, height: CHAR_HEIGHT };
     /** @param {number} units */
-    const acrossFor = units=>Math.round(units * CHAR_WIDTH / DLU_PER_CHAR_X);
+    const acrossFor = units=>Math.round(units * baseUnits().width / DLU_PER_CHAR_X);
     /** @param {number} units */
-    const downFor = units=>Math.round(units * CHAR_HEIGHT / DLU_PER_CHAR_Y);
+    const downFor = units=>Math.round(units * baseUnits().height / DLU_PER_CHAR_Y);
 
     /**
      * Walks a template into the dialog and the controls it describes.
@@ -934,7 +940,10 @@ export function createDialogFunctions(options){
          */
         GetDialogBaseUnits: {
             argBytes: 0,
-            handler: ()=>((CHAR_HEIGHT << 16) | CHAR_WIDTH) >>> 0,
+            handler: ()=>{
+                const units = baseUnits();
+                return ((units.height << 16) | units.width) >>> 0;
+            },
         },
 
         /** BOOL MapDialogRect(HWND hDlg, LPRECT lpRect) */

@@ -346,12 +346,21 @@ among the 84 unimplemented commands, so a Vulkan program can clear and present b
 four bytes and device bitmaps to two; raster operations are decoded from the ROP3 truth table
 rather than enumerated; filling is Windows' half-open convention; clipping is one rectangle;
 `BitBlt` shifts the source with the clip and uses memmove order on overlap, `StretchBlt` copies
-first; text draws each character from one five-by-seven face (`gdi/glyphs.js`), scaled by whole
-numbers into the cell the metrics describe, at the correct alignment and advance — a stand-in
-until there is a font engine, with a block for any character the face has no picture of.
-`createGdiDrawing` (`gdi/context.js`) is the entry; `src/app.js` hands it to `win32` as
-`graphics.createDrawing`, with `surfaceFor` and `presentDesktop`. A memory context draws into its
-DIB section's own bytes; a window context draws into a view (`viewOf`) of the **desktop** — one
+first; text is composited from the **font engine**'s glyph coverage (`gdi/fonts.js`) in the text
+colour, at the alignment and advances the program set. The engine rasterises with the browser's
+own fonts through an `OffscreenCanvas` 2D context — no font file ships — mapping the classic
+Windows face names to a CSS stack with the named family first and a generic family (`sans-serif`,
+`serif`, `monospace`) behind it, one glyph per (font, byte) cached, the program's bytes read as
+Windows-1252; a negative LOGFONT height is the em, a positive one the cell the em is fitted to.
+Where there is no canvas (Node, the unit tests) the engine reports `available: false` and text
+falls back to one five-by-seven face (`gdi/glyphs.js`), scaled by whole numbers into the cell,
+with a block for any character the face has no picture of; every byte-exact test runs on that
+face. `createGdiDrawing` (`gdi/context.js`) is the entry; `src/app.js` hands it to `win32` as
+`graphics.createDrawing`, with `surfaceFor`, `presentDesktop`, and the engine's `fontMetrics` and
+`textWidth`, so the metrics a program lays out against (`GetTextMetricsA`,
+`GetTextExtentPoint32A`, `GetCharWidth32A`, `DrawText`, the dialog base units) are the engine's
+measurements when there is one and the bookkeeping half's estimate otherwise. A memory context
+draws into its DIB section's own bytes; a window context draws into a view (`viewOf`) of the **desktop** — one
 32-bit surface the size of the display, allocated from the guest heap so the presenter can show it
 the way it shows a DirectDraw primary — at the rectangle `win32` names for the window. `win32`
 calls `presentDesktop` when a paint pass has ended.

@@ -5,17 +5,17 @@
  */
 
 /**
- * Text output, without a font engine behind it.
+ * Text output.
  *
- * **The glyph shapes are a stand-in and the positions are not.** Every
- * character is drawn from one five-by-seven pixel face, scaled by whole
- * numbers to the cell the metrics describe; a character the face has no
- * picture for is a solid block. What is real is where each one goes: the
- * alignment the program set, the origin it named, the advance widths it
- * supplied, the background it asked for and the colours it chose. A user
- * interface laid out against those numbers is usable, and replacing the face
- * with a rasterised font later moves nothing -- which is the whole reason to
- * separate the two now rather than wait for a rasteriser.
+ * The glyphs come from the font engine when the metrics carry one: each
+ * character's coverage is composited in the text colour at its advance.
+ * Without an engine every character is drawn from one five-by-seven pixel
+ * face, scaled by whole numbers to the cell the metrics describe, and a
+ * character the face has no picture for is a solid block. The positions are
+ * the same either way: the alignment the program set, the origin it named,
+ * the advance widths it supplied, the background it asked for and the
+ * colours it chose -- which is why the two faces share everything but the
+ * innermost loop.
  *
  * The measurements arrive injected. The bookkeeping half is what a program asks
  * for its font metrics, and a second estimator here would be a second answer to
@@ -51,16 +51,77 @@ export const ETO_CLIPPED = 0x0004;
  * @returns {number} how wide the string is, in pixels
  */
 export function textExtent(text, metrics, dx){
-    if (!dx || dx.length === 0)
+    if ((!dx || dx.length === 0) && !metrics.glyphs)
     {
         return text.length * metrics.cellWidth;
     }
     let total = 0;
     for (let index = 0; index < text.length; index++)
     {
-        total += dx[index] ?? metrics.cellWidth;
+        total += dx?.[index] ?? advanceOf(text.charCodeAt(index), metrics);
     }
     return total;
+}
+
+/**
+ * @param {number} code
+ * @param {import("./contract.js").TextMetrics} metrics
+ * @returns {number}
+ */
+function advanceOf(code, metrics){
+    return metrics.glyphs?.(code)?.advance ?? metrics.cellWidth;
+}
+
+/**
+ * A pixel of the text colour over what is there, by the glyph's coverage.
+ * The unused byte of both is zero, so a channel-wise mix keeps it zero.
+ *
+ * @param {number} ink @param {number} under @param {number} alpha
+ * @returns {number}
+ */
+function mix(ink, under, alpha){
+    const inverse = 255 - alpha;
+    let pixel = 0;
+    for (let shift = 0; shift < 24; shift += 8)
+    {
+        const channel = ((ink >>> shift) & 0xff) * alpha + ((under >>> shift) & 0xff) * inverse;
+        pixel |= (((channel + 127) / 255) | 0) << shift;
+    }
+    return pixel >>> 0;
+}
+
+/**
+ * Composites one glyph's coverage at the pen. Fully covered pixels go
+ * through the painter as any other ink does; partly covered ones are mixed
+ * with what is under them first, which is what anti-aliasing is.
+ *
+ * @param {import("./shapes.js").Painter} painter
+ * @param {import("./fonts.js").Glyph} glyph
+ * @param {number} x   The pen.
+ * @param {number} y   The top of the cell.
+ * @param {number} ink
+ */
+function compositeGlyph(painter, glyph, x, y, ink){
+    const { clip, surface } = painter;
+    for (let row = 0; row < glyph.height; row++)
+    {
+        const at = y + glyph.top + row;
+        if (at < clip.top || at >= clip.bottom)
+        {
+            continue;
+        }
+        for (let column = 0; column < glyph.width; column++)
+        {
+            const alpha = glyph.coverage[row * glyph.width + column];
+            const across = x + glyph.left + column;
+            if (alpha === 0 || across < clip.left || across >= clip.right)
+            {
+                continue;
+            }
+            painter.plot(across, at,
+                alpha === 255 ? ink : mix(ink, surface.read(across, at), alpha));
+        }
+    }
 }
 
 /**
@@ -135,10 +196,15 @@ export function extTextOut(painter, options){
     let pen = left;
     for (let index = 0; index < options.text.length; index++)
     {
-        const advance = options.dx?.[index] ?? metrics.cellWidth;
         const code = options.text.charCodeAt(index);
-        const rows = glyphOf(code);
-        if (rows)
+        const advance = options.dx?.[index] ?? advanceOf(code, metrics);
+        const glyph = metrics.glyphs?.(code);
+        const rows = glyph ? null : glyphOf(code);
+        if (glyph)
+        {
+            compositeGlyph(clipped, glyph, pen, top, ink);
+        }
+        else if (rows)
         {
             for (let row = 0; row < GLYPH_ROWS; row++)
             {

@@ -881,6 +881,79 @@ test('the metrics of a DC nobody selected a font into are the system font\'s', (
     assert.equal(memory.u32(OUT), UNTOUCHED);
 });
 
+/**
+ * A font engine standing in for the graphics layer's: every face measures
+ * as a 13-pixel cell, and a character is as wide as its code is odd -- so a
+ * string's width depends on which characters it has, not how many.
+ */
+function withEngine(){
+    const context = setup();
+    /** @type {import('./structs.js').LogFontFields[]} */
+    const asked = [];
+    const gdi = createGdiFunctions({
+        readMemory: (address, length)=>context.memory.readMemory(address, length),
+        writeMemory: (address, data)=>context.memory.writeMemory(address, data),
+        readCString: (address, maxLength)=>context.memory.readCString(address, maxLength),
+        handles: context.handles,
+        surfaces: context.surfaces,
+        graphics: {
+            fontMetrics: font=>{
+                asked.push(font);
+                return { height: 13, ascent: 11, descent: 2, internalLeading: 2,
+                    externalLeading: 0, aveCharWidth: 6, maxCharWidth: 9 };
+            },
+            textWidth: (font, text)=>[...text].reduce((sum, ch)=>sum + 4 + ch.charCodeAt(0) % 2, 0),
+        },
+    });
+    return { ...context, asked, fns: gdi.table, gdi, hdc: gdi.table.GetDC.handler([HWND]) };
+}
+
+test('with a font engine the metrics are its measurements of the selected font', ()=>{
+    const { fns, memory, hdc, asked } = withEngine();
+    putLogFont(memory, { height: -12, faceName: 'Tahoma', weight: 700 });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+
+    assert.equal(fns.GetTextMetricsA.handler([hdc, OUT]), 1);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmHeight), 13);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmAscent), 11);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmInternalLeading), 2);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmAveCharWidth), 6);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmMaxCharWidth), 9);
+    assert.equal(memory.i32(OUT + TEXTMETRICA.tmWeight), 700, 'the rest is still the LOGFONT\'s');
+    const font = asked.at(-1);
+    assert.equal(font?.faceName, 'Tahoma');
+    assert.equal(font?.height, -12);
+});
+
+test('with a font engine a string is as wide as the engine draws it', ()=>{
+    const { fns, memory, hdc } = withEngine();
+    memory.putString(FACE_NAME, 'AB');
+
+    memory.fill(OUT, SIZE.SIZE / 4);
+    assert.equal(fns.GetTextExtentPoint32A.handler([hdc, FACE_NAME, 2, OUT]), 1);
+    assert.equal(memory.i32(OUT + SIZE.cx), 5 + 4, 'A is odd, B is even');
+    assert.equal(memory.i32(OUT + SIZE.cy), 13);
+
+    memory.fill(OUT, 4);
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x43, OUT]), 1);
+    assert.deepEqual([memory.i32(OUT), memory.i32(OUT + 4), memory.i32(OUT + 8)], [5, 4, 5]);
+    assert.equal(fns.GetCharWidthA, fns.GetCharWidth32A);
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 0x43, 0x41, OUT]), 0, 'a backwards range');
+});
+
+test('without a font engine GetCharWidth32A is the estimate\'s fixed pitch', ()=>{
+    const { fns, memory, hdc } = withDC();
+    putLogFont(memory, { height: -12, width: 8 });
+    fns.SelectObject.handler([hdc, fns.CreateFontIndirectA.handler([STRUCT])]);
+    assert.equal(fns.GetCharWidth32A.handler([hdc, 0x41, 0x42, OUT]), 1);
+    assert.deepEqual([memory.i32(OUT), memory.i32(OUT + 4)], [8, 8]);
+});
+
+test('the dialog base units are the system font\'s cell, from the engine or not at all', ()=>{
+    assert.equal(withDC().gdi.draw.baseUnits(), null);
+    assert.deepEqual(withEngine().gdi.draw.baseUnits(), { width: 6, height: 13 });
+});
+
 // --- the stack every one of them pops ---
 
 test('the extents a DC has are read back, and a metafile is refused', ()=>{
@@ -955,6 +1028,7 @@ test('every function declares the stack its arguments occupy', ()=>{
         GetDeviceCaps: 8,
         GetTextMetricsA: 8,
         GetTextExtentPoint32A: 16,
+        GetCharWidth32A: 16,
     };
 
     const table = /** @type {Record<string, { argBytes: number }>} */ (

@@ -90,6 +90,13 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  * @property {() => void} [presentDesktop]
  *           Shows the desktop the window contexts draw into. Absent in a
  *           build with nothing to show it on.
+ * @property {(font: import('./structs.js').LogFontFields) => FontMeasure | null} [fontMetrics]
+ *           What the font engine measures for a font; null, or absent, when
+ *           there is no engine and the estimate stands.
+ * @property {(font: import('./structs.js').LogFontFields, text: string) => number | null}
+ *           [textWidth]
+ *           How wide the engine draws a string in a font; null, or absent,
+ *           without an engine.
  * @property {any} [pixelFormat]
  *           The pixel-format service: `choose(descriptor)`, `describe(index)`
  *           and `count()`. Absent in a build with no rendering surface.
@@ -97,6 +104,14 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  *           Presents the frame an OpenGL context drew into a device context.
  *           Absent in a build that cannot draw, where SwapBuffers fails rather
  *           than presenting nothing.
+ */
+
+/**
+ * The measurements a font engine answers with, named as TEXTMETRIC names
+ * them so they overlay an estimate field for field.
+ *
+ * @typedef {Pick<import('./structs.js').TextMetricFields, 'height' | 'ascent' | 'descent'
+ *     | 'internalLeading' | 'externalLeading' | 'aveCharWidth' | 'maxCharWidth'>} FontMeasure
  */
 
 /** An empty rectangle, which is what a region with no extent is. */

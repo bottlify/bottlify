@@ -14,7 +14,9 @@ import { createVulkan } from './vulkan/runtime.js';
 import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
+import { createFontEngine } from './gdi/fonts.js';
 import { createSurface, dibPitch, surfaceForDibSection, viewOf } from './gdi/surface.js';
+import { textExtent } from './gdi/text.js';
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -357,6 +359,29 @@ export const graphicsModule = {
             return desktopSurface;
         };
 
+        /**
+         * The font engine: the browser's own faces through a canvas, when the
+         * platform has one. Made once for every context and every font, so a
+         * glyph rasterised for one dialog is the same bitmap in the next.
+         */
+        const fonts = createFontEngine();
+        /**
+         * The cell a font measures as, with its glyphs, so an extent asked
+         * without a device context is summed the way a drawn string is.
+         *
+         * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+         * @returns {import('./gdi/contract.js').TextMetrics | null}
+         */
+        const cellOf = font=>{
+            const measured = fonts.metrics(font);
+            return measured ? {
+                cellWidth: measured.aveCharWidth,
+                cellHeight: measured.height,
+                ascent: measured.ascent,
+                glyphs: code=>fonts.glyph(code, font),
+            } : null;
+        };
+
         seam = createGraphicsLibraries({
             graphics: api,
             memory: services,
@@ -452,7 +477,24 @@ export const graphicsModule = {
              */
             gdiDrawing: ()=>({
                 /** @param {{ objects: any, metrics: (font: number) => any }} options */
-                create: options=>createGdiDrawing(options),
+                create: options=>createGdiDrawing({ ...options, fonts }),
+                /**
+                 * What the font engine measures for a font, or null when
+                 * there is no engine and the bookkeeping half's estimate stands.
+                 *
+                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+                 */
+                fontMetrics: font=>fonts.metrics(font),
+                /**
+                 * How wide a string is in a font, or null without an engine.
+                 *
+                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+                 * @param {string} text
+                 */
+                textWidth: (font, text)=>{
+                    const cell = cellOf(font);
+                    return cell ? textExtent(text, cell) : null;
+                },
                 /**
                  * @param {{ kind: string, bounds?: { left: number, top: number,
                  *     right: number, bottom: number } }} dc
