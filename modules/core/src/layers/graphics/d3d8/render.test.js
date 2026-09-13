@@ -2127,3 +2127,320 @@ test('a target whose format has no alpha channel is never written with one', asy
     assert.equal(await writeMaskOf(D3DFMT.A8R8G8B8), 0xf,
         'a format that does have the channel keeps it');
 });
+
+// --- recorded: the preparation a state change builds and every later draw reuses ---
+
+/**
+ * How many pipelines the backend was asked for, hit or miss: the key of a
+ * pipeline is a string per field and a join per stage, so one lookup a draw is
+ * the most expensive thing a draw that changed no state can do.
+ *
+ * @param {ReturnType<typeof harness>} h
+ */
+function pipelineLookups(h){
+    const stats = h.backend.diagnostics().pipelines;
+    return stats.built + stats.reused;
+}
+
+/**
+ * Two identical draws of one quad with `between` run in the middle, and what
+ * the renderer made of them.
+ *
+ * @param {ReturnType<typeof harness>} h
+ * @param {() => void} [between]
+ */
+async function twoDraws(h, between = ()=>{}){
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    between();
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    const diagnostics = device.diagnostics();
+    return {
+        draws: diagnostics.lastFrame.filter((/** @type {any} */ command)=>
+            command.kind === 'draw'),
+        prepared: diagnostics.prepared,
+        lookups: pipelineLookups(h),
+    };
+}
+
+test('recorded: a draw that changes no state reuses the preparation before it', async()=>{
+    // Recorded commands. A frame of a match is hundreds of small draws with the
+    // state cache of the program in front of it, so the fixed cost of a draw is
+    // the whole cost: the cascade, the bindings, the sampler decisions and the
+    // pipeline key depend on state alone and must be worked out once per change.
+    const h = harness();
+    const { draws, prepared, lookups } = await twoDraws(h);
+    assert.equal(draws.length, 2);
+    assert.deepEqual(prepared, { built: 1, reused: 1 });
+    assert.equal(lookups, 1, 'the pipeline was looked up once, not once a draw');
+    assert.equal(draws[0].state, draws[1].state, 'one state object, not two alike');
+    assert.equal(draws[0].stageBindings, draws[1].stageBindings);
+    assert.equal(draws[0].pipeline, draws[1].pipeline, 'and one entry in the frame pipeline list');
+    assert.notEqual(draws[0].uniforms, draws[1].uniforms,
+        'each draw still owns its own block in the arena');
+});
+
+test('recorded: the world transform reaches each draw of one prepared state', async()=>{
+    // Recorded commands. The world matrix moves between most draws of a frame,
+    // which is why the device counter that gates the reuse deliberately ignores
+    // it -- so this is the test that says the draw still gets its own.
+    const h = harness();
+    const world = Float32Array.from(IDENTITY);
+    world[12] = 7;
+    const { draws, prepared } = await twoDraws(h, ()=>{
+        assert.equal(h.device.SetTransform(D3DTS.WORLD, world), D3D_OK);
+    });
+    assert.deepEqual(prepared, { built: 1, reused: 1 },
+        'the world transform alone does not build a preparation again');
+    const at = UNIFORM_AT;
+    assert.equal(draws[0].uniforms[at.world + 12], 0);
+    assert.equal(draws[1].uniforms[at.world + 12], 7, 'the second draw carries the new world');
+    assert.equal(draws[0].uniforms[at.worldViewProjection + 12], 0);
+    assert.equal(draws[1].uniforms[at.worldViewProjection + 12], 7,
+        'and its product with the view and the projection');
+    // Everything past the two world fields is what the preparation carries, and
+    // a draw that rewrote any of it would be a draw served from a stale block.
+    assert.deepEqual(
+        [...draws[0].uniforms.subarray(at.viewportOffset)],
+        [...draws[1].uniforms.subarray(at.viewportOffset)],
+        'and nothing else');
+});
+
+test('recorded: every state group the device publishes ends the reuse', async()=>{
+    // Recorded commands. One case per group of the device state a preparation
+    // is derived from. A group missing from this table is a group whose change
+    // a later draw would not see: the picture then carries the state of the
+    // draw before it, with nothing anywhere reporting it.
+    /** @type {[string, (h: ReturnType<typeof harness>) => void][]} */
+    const groups = [
+        ['a render state', h=>{
+            assert.equal(h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+        }],
+        ['a texture stage state', h=>{
+            assert.equal(h.device.SetTextureStageState(0, D3DTSS.ADDRESSU, D3DTADDRESS.CLAMP),
+                D3D_OK);
+        }],
+        // The same call the guest-side shadow makes when it settles a texture
+        // the program bound without crossing: the device setter is the funnel.
+        ['a texture bound to a stage', h=>{
+            const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, new Uint8Array(4));
+            assert.equal(h.device.SetTexture(0, texture), D3D_OK);
+        }],
+        ['a material', h=>{
+            assert.equal(h.device.SetMaterial({
+                Diffuse: { r: 1, g: 0, b: 0, a: 1 },
+                Ambient: { r: 0, g: 0, b: 0, a: 1 },
+                Specular: { r: 0, g: 0, b: 0, a: 1 },
+                Emissive: { r: 0, g: 0, b: 0, a: 1 },
+                Power: 1,
+            }), D3D_OK);
+        }],
+        ['a light', h=>{
+            assert.equal(h.device.LightEnable(0, true), D3D_OK);
+        }],
+        ['the viewport', h=>{
+            assert.equal(h.device.SetViewport(
+                { X: 0, Y: 0, Width: 2, Height: 2, MinZ: 0, MaxZ: 1 }), D3D_OK);
+        }],
+        ['a transform other than the world', h=>{
+            const view = Float32Array.from(IDENTITY);
+            view[13] = 3;
+            assert.equal(h.device.SetTransform(D3DTS.VIEW, view), D3D_OK);
+        }],
+    ];
+    for (const [what, change] of groups)
+    {
+        const h = harness();
+        const { prepared } = await twoDraws(h, ()=>change(h));
+        assert.deepEqual(prepared, { built: 2, reused: 0 }, `${what} was prepared for again`);
+    }
+});
+
+test('recorded: a state change between two draws is the state the second draw runs under',
+    async()=>{
+        // Recorded commands. The counter says a preparation was built again;
+        // this says the draw that followed it carries the new value, which is
+        // the only thing a picture can be judged by.
+        const h = harness();
+        const { draws } = await twoDraws(h, ()=>{
+            assert.equal(h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+            assert.equal(h.device.SetRenderState(D3DRS.SRCBLEND, D3DBLEND.SRCALPHA), D3D_OK);
+            assert.equal(h.device.SetRenderState(D3DRS.DESTBLEND, D3DBLEND.INVSRCALPHA), D3D_OK);
+        });
+        assert.equal(draws[0].state.blend, false);
+        assert.equal(draws[1].state.blend, true);
+        assert.equal(draws[1].state.srcBlend, D3DBLEND.SRCALPHA);
+        assert.notEqual(draws[0].pipeline, draws[1].pipeline, 'and a pipeline of its own');
+    });
+
+test('recorded: a state set to the value it already holds is not a change', async()=>{
+    // Recorded commands. A program that sets a whole block of state before
+    // every draw is ordinary, and a counter raised by the call rather than by
+    // the change would make the reuse unreachable for such a program.
+    const h = harness();
+    assert.equal(h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+    const { prepared } = await twoDraws(h, ()=>{
+        assert.equal(h.device.SetRenderState(D3DRS.ALPHABLENDENABLE, 1), D3D_OK);
+        assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(h.device.SetTextureStageState(0, D3DTSS.ADDRESSU, D3DTADDRESS.WRAP), D3D_OK);
+    });
+    assert.deepEqual(prepared, { built: 1, reused: 1 });
+});
+
+test('recorded: a vertex shader bound between two draws ends the reuse', async()=>{
+    // Recorded commands. What the vertex stage runs decides the whole
+    // preparation, so a draw after an excursion through a shader must not be
+    // served the fixed-function preparation the draw before it built.
+    const h = harness();
+    /** @type {{ handle?: number }} */
+    const made = {};
+    assert.equal(h.device.CreateVertexShader([0xffffffff], null, made), D3D_OK);
+    const { draws, prepared } = await twoDraws(h, ()=>{
+        assert.equal(h.device.SetVertexShader(made.handle ?? 0), D3D_OK);
+        // Declined, because this build has no translation for a shader bound
+        // through a handle -- which is what makes it an excursion.
+        assert.equal(h.device.DrawPrimitiveUP(
+            D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], 0), 20), D3D_OK);
+        assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);
+    });
+    assert.equal(draws.length, 2, 'the draw through the shader was not recorded');
+    assert.deepEqual(prepared, { built: 2, reused: 0 });
+});
+
+test('recorded: a device reset ends the reuse', async()=>{
+    // Recorded commands. A reset takes the state back to its defaults and
+    // builds the implicit surfaces again, so every view a preparation holds is
+    // a view of something that no longer exists.
+    const h = harness();
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.equal(device.Reset(), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.deepEqual(device.diagnostics().prepared, { built: 2, reused: 0 });
+});
+
+test('recorded: a texture rewritten between two draws is uploaded before the second', async()=>{
+    // Recorded commands. The upload owed to a texture happens inside the draw
+    // that samples it, so a preparation that already holds the view of that
+    // texture has to be built again when the program rewrites its bytes --
+    // otherwise the frame samples what the texture held last time.
+    const h = harness();
+    const { device, gpu } = h;
+    const texture = textureFrom(h, 1, 1, D3DFMT.X8R8G8B8, Uint8Array.from([1, 2, 3, 255]));
+    assert.equal(device.SetTexture(0, texture), D3D_OK);
+    selectTexture(device);
+    const geometry = new Uint8Array(28 * 6);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 28), D3D_OK);
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(texture.LockRect(0, locked, null, 0), D3D_OK);
+    h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([9, 8, 7, 255]));
+    assert.equal(texture.UnlockRect(0), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.deepEqual(device.diagnostics().prepared, { built: 2, reused: 0 });
+    const uploads = gpu.of('writeTexture');
+    assert.equal(uploads.length, 2, 'the new bytes went up as well as the old');
+    assert.deepEqual([...uploads[1].bytes.subarray(0, 4)], [9, 8, 7, 255]);
+});
+
+test('recorded: a frame of a match prepares once per state change, not once per draw', async()=>{
+    // Recorded commands. The shape of a settled battle frame at 640x480: 372
+    // draws, a state change before about two in five of them, the world
+    // transform moved before every one. What is asserted is the shape and not a
+    // time -- but the shape is the whole of why the frame is faster, because
+    // every count below is work the draw used to do again from scratch.
+    const DRAWS = 372;
+    const h = harness();
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    const world = Float32Array.from(IDENTITY);
+    const lookupsBefore = pipelineLookups(h);
+    let changes = 0;
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    for (let index = 0; index < DRAWS; index++)
+    {
+        if (index % 12 < 5)
+        {
+            changes++;
+            // A value no earlier draw set, so it is a change every time.
+            assert.equal(device.SetRenderState(D3DRS.ALPHAREF, index), D3D_OK);
+        }
+        world[12] = index;
+        assert.equal(device.SetTransform(D3DTS.WORLD, world), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    // One preparation per change, and no more: the first draw of the frame is
+    // one of the changing ones, so it needs no preparation of its own.
+    const states = changes;
+    assert.equal(states, 155, 'the frame this is modelled on');
+    assert.deepEqual(device.diagnostics().prepared, { built: states, reused: DRAWS - states });
+    assert.equal(pipelineLookups(h) - lookupsBefore, states,
+        'the pipeline was looked up once per state, not once per draw');
+    assert.equal(h.backend.diagnostics().pipelines.built, 1,
+        'and every one of those states wants the same pipeline: the alpha reference'
+        + ' is a uniform, so a key built per draw was 372 strings for one pipeline');
+    const draws = device.diagnostics().lastFrame.filter((/** @type {any} */ command)=>
+        command.kind === 'draw');
+    assert.equal(draws.length, DRAWS);
+
+    // The repeat path allocates nothing it can share: the draws of one state
+    // hold the same state, bindings and pipeline entry, and differ only in the
+    // block each took from the frame arena.
+    const runs = new Set(draws.map((/** @type {any} */ command)=>command.state));
+    assert.equal(runs.size, states);
+    assert.equal(new Set(draws.map((/** @type {any} */ command)=>command.pipeline)).size, states);
+    assert.equal(new Set(draws.map((/** @type {any} */ command)=>command.uniforms)).size, DRAWS);
+});
+
+test('recorded: a frame whose state never changes prepares once and binds one pipeline', async()=>{
+    // Recorded commands. The floor of the draw path: the world transform is the
+    // only thing that moves, which is the case a run of consecutive draws of one
+    // mesh actually is.
+    const DRAWS = 372;
+    const h = harness();
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    const world = Float32Array.from(IDENTITY);
+    const lookupsBefore = pipelineLookups(h);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    for (let index = 0; index < DRAWS; index++)
+    {
+        world[12] = index;
+        assert.equal(device.SetTransform(D3DTS.WORLD, world), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+    assert.deepEqual(device.diagnostics().prepared, { built: 1, reused: DRAWS - 1 });
+    assert.equal(pipelineLookups(h) - lookupsBefore, 1);
+    const draws = device.diagnostics().lastFrame.filter((/** @type {any} */ command)=>
+        command.kind === 'draw');
+    assert.equal(new Set(draws.map((/** @type {any} */ command)=>command.state)).size, 1);
+    assert.equal(new Set(draws.map((/** @type {any} */ command)=>command.stageBindings)).size, 1);
+    // And each still drew where its own transform put it.
+    assert.deepEqual(draws.map((/** @type {any} */ command)=>
+        command.uniforms[UNIFORM_AT.world + 12]), [...Array(DRAWS).keys()]);
+});

@@ -505,6 +505,16 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     // Raised whenever the lights change, so a reader that keeps a sorted list
     // of the enabled ones knows when it is stale, without building it per draw.
     let lightsVersion = 0;
+    /**
+     * Raised by every state change a draw's preparation depends on, so that a
+     * renderer prepares once per change instead of once per draw.
+     *
+     * The world transform is the one state deliberately left out, because it
+     * moves between most draws and a counter it raised would never hold still.
+     * Whoever reads this therefore owes the world matrix a fresh read on every
+     * draw -- and nothing else derived from it may be kept across draws.
+     */
+    let drawStateVersion = 1;
 
     /** @type {Map<number, Map<number, number>>} stage -> its states, made on first touch */
     let stageStates = new Map();
@@ -849,6 +859,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         {
             material = copyMaterial(block.material);
         }
+        drawStateVersion++;
     };
 
     /**
@@ -1091,6 +1102,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         },
         get lightsVersion(){
             return lightsVersion;
+        },
+        get drawStateVersion(){
+            return drawStateVersion;
         },
         get material(){
             return material;
@@ -1390,6 +1404,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             material = defaultMaterial();
             lights = new Map();
             lightsVersion++;
+            drawStateVersion++;
             clipPlanes = new Map();
             clipStatus = { ClipUnion: 0, ClipIntersection: 0 };
             buildImplicitResources();
@@ -1411,7 +1426,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            states.set(type, value >>> 0);
+            if (states.get(type) !== value >>> 0)
+            {
+                states.set(type, value >>> 0);
+                drawStateVersion++;
+            }
             recordState(block=>block.stageStates, (stage << 8) | type, value >>> 0);
             return D3D_OK;
         },
@@ -1462,6 +1481,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             }
             const taken = Float32Array.from(matrix);
             transforms.set(type, taken);
+            if (type !== D3DTS.WORLD)
+            {
+                drawStateVersion++;
+            }
             recordState(block=>block.transforms, type, taken);
             return D3D_OK;
         },
@@ -1510,6 +1533,10 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 }
             }
             transforms.set(type, product);
+            if (type !== D3DTS.WORLD)
+            {
+                drawStateVersion++;
+            }
             recordState(block=>block.transforms, type, Float32Array.from(product));
             return D3D_OK;
         },
@@ -1521,6 +1548,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 return D3DERR_INVALIDCALL;
             }
             material = copyMaterial(value);
+            drawStateVersion++;
             if (recording)
             {
                 recording.material = copyMaterial(value);
@@ -1675,7 +1703,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            renderStates.set(state, value >>> 0);
+            if (renderStates.get(state) !== value >>> 0)
+            {
+                renderStates.set(state, value >>> 0);
+                drawStateVersion++;
+            }
             recordState(block=>block.renderStates, state, value >>> 0);
             return D3D_OK;
         },
@@ -1701,6 +1733,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             const existing = lights.get(index);
             lights.set(index, { light: { ...light }, enabled: existing?.enabled ?? false });
             lightsVersion++;
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1733,6 +1766,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             record.enabled = enable === true;
             lights.set(index, record);
             lightsVersion++;
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1917,6 +1951,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 minDepth: value.MinZ,
                 maxDepth: value.MaxZ,
             });
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -1952,13 +1987,17 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            if (texture)
+            if ((textures.get(stage) ?? null) !== (texture ?? null))
             {
-                textures.set(stage, texture);
-            }
-            else
-            {
-                textures.delete(stage);
+                if (texture)
+                {
+                    textures.set(stage, texture);
+                }
+                else
+                {
+                    textures.delete(stage);
+                }
+                drawStateVersion++;
             }
             recordState(block=>block.textures, stage, texture ?? null);
             return D3D_OK;
@@ -2068,6 +2107,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             depthStencil = depth ?? null;
             const bound = describe(renderTarget);
             viewport = fullTarget({ width: bound.Width, height: bound.Height });
+            drawStateVersion++;
             return D3D_OK;
         },
 
@@ -2438,7 +2478,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            boundVertexShader = handle >>> 0;
+            if (boundVertexShader !== handle >>> 0)
+            {
+                boundVertexShader = handle >>> 0;
+                drawStateVersion++;
+            }
             return D3D_OK;
         },
 
@@ -2463,6 +2507,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (boundVertexShader === handle)
             {
                 boundVertexShader = 0;
+                drawStateVersion++;
             }
             return D3D_OK;
         },
@@ -2488,7 +2533,11 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             {
                 return D3DERR_INVALIDCALL;
             }
-            boundPixelShader = handle >>> 0;
+            if (boundPixelShader !== handle >>> 0)
+            {
+                boundPixelShader = handle >>> 0;
+                drawStateVersion++;
+            }
             return D3D_OK;
         },
 
@@ -2507,6 +2556,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (boundPixelShader === handle)
             {
                 boundPixelShader = 0;
+                drawStateVersion++;
             }
             return D3D_OK;
         },

@@ -826,6 +826,13 @@ export function eyePosition(view){
  * @property {Map<number, Float32Array>} transforms
  * @property {Map<number, { light: Light, enabled: boolean }>} lights
  * @property {number} [lightsVersion]   Raised whenever `lights` changes.
+ * @property {number} [drawStateVersion]
+ *     Raised by every state change a draw's preparation depends on, so that the
+ *     preparation happens once per change rather than once per draw. The world
+ *     transform is the one state it deliberately ignores -- it moves between
+ *     most draws, and a counter it raised would never hold still -- so whoever
+ *     reads this owes the world matrix a fresh read on every draw. A device
+ *     that does not offer it is prepared for on every draw, as before.
  * @property {Material} material
  * @property {any} backBuffer                                What Present shows.
  * @property {{ vertexShader: number, fvf: number, pixelShader: number,
@@ -1000,6 +1007,9 @@ const stageFlags = (model, mips)=>{
 /** Scratch for the two products every draw forms; copied into the block at once. */
 const WORLD_VIEW = new Float32Array(16);
 const WORLD_VIEW_PROJECTION = new Float32Array(16);
+
+/** What a preparation's block field holds before its first draw writes one. */
+const EMPTY_BLOCK = new Float32Array(0);
 
 /**
  * Why a cascade stopped before the program's stages ran out.
@@ -1417,6 +1427,16 @@ export function createRenderer(options){
         /** Draws that ran through a program rather than the fixed-function pipeline. */
         programmable: 0,
         /**
+         * How often a draw's preparation was built and how often the previous
+         * draw's was reused.
+         *
+         * The reused share is what says whether the state a program sets between
+         * its draws is being tracked as coarsely as it changes: a run where it
+         * is near zero while the program sets no state between draws is a
+         * counter somewhere raised by something that did not change.
+         */
+        prepared: { built: 0, reused: 0 },
+        /**
          * Draws that ran fewer stages than the program had set up.
          *
          * A cascade cut short draws untextured geometry and reports success,
@@ -1623,10 +1643,17 @@ export function createRenderer(options){
 
     /**
      * @param {RenderModel} model
-     * @param {any} layout
-     * @param {import('../webgpu/internal/pipeline.js').LightingState | null} lighting
+     * @param {PreparedDraw} prepared
      */
-    const countLighting = (model, layout, lighting)=>{
+    const countLighting = (model, prepared)=>{
+        const layout = prepared.layout;
+        if (!layout)
+        {
+            // A draw through shaders: what its vertex stage lights and how is
+            // in the shader, not in the state this counts.
+            return;
+        }
+        const lighting = prepared.lighting;
         const tally = counters.lighting;
         const fogMode = (model.renderStates.get(D3DRS.FOGENABLE) ?? 0) !== 0
             ? ((model.renderStates.get(D3DRS.FOGTABLEMODE) ?? 0)
@@ -1642,7 +1669,7 @@ export function createRenderer(options){
             // so they describe how a program started and cannot show a setting
             // it changed to later. A scene that washes towards the fog colour
             // and stays there is precisely that, and this is what can see it.
-            frameStats.fog = fogSettingOf(model);
+            frameStats.fog = prepared.fogSetting ??= fogSettingOf(model);
             // And how many draws ran under each setting: a program fogs its
             // sky, its ground and its interface differently, and a frame that
             // goes wrong is one where a draw ran under another draw's fog --
@@ -2904,12 +2931,21 @@ export function createRenderer(options){
             pixelShader: program.pixelId,
         };
         return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
             state,
             uniforms: vertexBlocks[0],
+            template: null,
             stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
             layout: null,
             textures: [],
-            truncated: false,
+            truncated: null,
+            pipelineFrame: null,
+            pipelineIndex: 0,
             program: {
                 source: {
                     key: `${state.vertexShader}/${state.pixelShader}/${program.declarationId}`
@@ -2960,21 +2996,23 @@ export function createRenderer(options){
     /**
      * Records one draw against the pass the model's targets name.
      *
+     * The pipeline is asked for once per prepared state and then named by the
+     * index it took in this frame's list: building the cache key is a string
+     * per field and a join per stage, which at one a draw is the most expensive
+     * thing a draw that changed no state does.
+     *
      * @param {RenderModel} model
-     * @param {import('../webgpu/internal/pipeline.js').PipelineState} state
-     * @param {Float32Array} uniforms
-     * @param {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
+     * @param {PreparedDraw} prepared
      * @param {any} geometry
-     * @param {any} [program]  The programmable half, for a draw through shaders.
      */
-    const record = (model, state, uniforms, stageBindings, geometry, program = null)=>{
+    const record = (model, prepared, geometry)=>{
         if (maxDraws >= 0 && kept >= maxDraws)
         {
             return;
         }
         kept++;
         frameStats.draws++;
-        for (const binding of stageBindings)
+        for (const binding of prepared.stageBindings)
         {
             if (binding.placeholder)
             {
@@ -2986,12 +3024,88 @@ export function createRenderer(options){
             }
         }
         const frame = ensureViewport(model);
-        const pipeline = frame.pipelines.length;
-        frame.pipelines.push(program
-            ? programs.get(state, program.source)
-            : backend.pipelineFor(state));
-        frame.commands.push(
-            { kind: 'draw', pipeline, state, uniforms, stageBindings, program, ...geometry });
+        if (prepared.pipelineFrame !== frame)
+        {
+            prepared.pipelineIndex = frame.pipelines.length;
+            prepared.pipelineFrame = frame;
+            frame.pipelines.push(prepared.program
+                ? programs.get(prepared.state, prepared.program.source)
+                : backend.pipelineFor(prepared.state));
+        }
+        frame.commands.push({
+            kind: 'draw',
+            pipeline: prepared.pipelineIndex,
+            state: prepared.state,
+            uniforms: prepared.uniforms,
+            stageBindings: prepared.stageBindings,
+            program: prepared.program,
+            ...geometry,
+        });
+    };
+
+    /**
+     * What one state of the device prepares to, kept until the state changes.
+     *
+     * @typedef {Object} PreparedDraw
+     * @property {number | undefined} version   The device state this was prepared from.
+     * @property {number} contentVersion        The texture contents it was prepared from.
+     * @property {number} stride
+     * @property {string} topology
+     * @property {import('../webgpu/internal/pipeline.js').PipelineState} state
+     * @property {Float32Array} uniforms        This draw's block: the one field that is per draw.
+     * @property {Float32Array | null} template
+     *     The block every draw of this state copies, with the two world rows still to write.
+     * @property {{ view: any, sampler: any, placeholder?: boolean }[]} stageBindings
+     * @property {import('../webgpu/internal/pipeline.js').LightingState | null} lighting
+     * @property {string} fogSetting            Built on first use; a frame's diagnostics read it.
+     * @property {import('../webgpu/internal/vertexformat.js').VertexLayout | null} layout
+     * @property {(any | null)[]} textures
+     * @property {CascadeTruncation | null} truncated
+     * @property {any} pipelineFrame            The recording the index below belongs to.
+     * @property {number} pipelineIndex
+     * @property {any} program                  The programmable half, or null.
+     */
+
+    /**
+     * The preparation of the state the last fixed-function draw ran under, or
+     * null when there is none to reuse.
+     *
+     * Everything in it is derived from device state and from the draw's stride
+     * and topology, and nothing from the draw's own vertices -- so while the
+     * device's counter and those two agree with what it was built from, it is
+     * what this draw would have built again. The world transform is the one
+     * state that counter deliberately ignores, and `blockFor` writes it per
+     * draw; nothing else derived from the world transform may be kept here.
+     *
+     * @type {PreparedDraw | null}
+     */
+    let preparedState = null;
+    /**
+     * Raised whenever a texture's own bytes are marked for upload, so that a
+     * preparation holding that texture's view is built again and the upload
+     * owed to it happens before the next draw that samples it.
+     */
+    let contentVersion = 0;
+
+    /**
+     * This draw's uniform block: the prepared state's block with the two
+     * fields the world transform reaches written over it.
+     *
+     * @param {RenderModel} model
+     * @param {PreparedDraw} prepared
+     * @returns {Float32Array}
+     */
+    const blockFor = (model, prepared)=>{
+        const template = /** @type {Float32Array} */ (prepared.template);
+        const block = ensureFrame().arena.take(template.length);
+        block.set(template);
+        const world = transformOf(model, D3DTS.WORLD);
+        block.set(multiplyMatrices(
+            multiplyMatrices(world, transformOf(model, D3DTS.VIEW), WORLD_VIEW),
+            transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
+        UNIFORM_AT.worldViewProjection);
+        block.set(world, UNIFORM_AT.world);
+        return block;
     };
 
     /**
@@ -3002,6 +3116,7 @@ export function createRenderer(options){
      * @param {RenderModel} model
      * @param {number} stride
      * @param {string} topology
+     * @returns {PreparedDraw | null}
      */
     const prepare = (model, stride, topology)=>{
         const processing = model.stageProcessing;
@@ -3018,6 +3133,20 @@ export function createRenderer(options){
         {
             skip('pixelShader');
             return null;
+        }
+        const version = model.drawStateVersion;
+        if (preparedState !== null && version !== undefined && preparedState.version === version
+            && preparedState.contentVersion === contentVersion
+            && preparedState.stride === stride && preparedState.topology === topology)
+        {
+            // The tallies below are per draw even where the state is not: a
+            // report that counted states rather than draws would say a frame
+            // drew a fraction of what it drew.
+            counters.prepared.reused++;
+            reportCascade(preparedState);
+            countLighting(model, preparedState);
+            preparedState.uniforms = blockFor(model, preparedState);
+            return preparedState;
         }
         const layout = decodeFvf(processing.fvf);
         if (stride !== layout.stride)
@@ -3048,7 +3177,7 @@ export function createRenderer(options){
         const lighting = lightingOf(model, layout);
         reportTextureTransform(model, cascade.stages.length);
         reportCoordGeneration(cascade.stages);
-        countLighting(model, layout, lighting);
+        counters.prepared.built++;
         const state = pipelineStateOf(model, {
             fvf: processing.fvf,
             topology,
@@ -3060,12 +3189,31 @@ export function createRenderer(options){
         // `layout` and `textures` are the frame dump's, and are handed back
         // rather than worked out again there: both are already in hand and
         // neither can be recovered from the recorded command.
-        return {
-            state, uniforms: uniformsOf(model, lighting, ensureFrame().arena.take, mipsApplied),
+        //
+        // The template carries whatever world transform this draw had; the
+        // block below writes those two fields again, here as in every later
+        // draw of this state, so one draw and a hundred produce the same bytes.
+        preparedState = {
+            version,
+            contentVersion,
+            stride,
+            topology,
+            state,
+            uniforms: EMPTY_BLOCK,
+            template: uniformsOf(model, lighting, undefined, mipsApplied),
             stageBindings,
-            layout, textures: cascade.textures, truncated: cascade.truncated,
+            lighting,
+            fogSetting: '',
+            layout,
+            textures: cascade.textures,
+            truncated: cascade.truncated,
+            pipelineFrame: null,
+            pipelineIndex: 0,
             program: null,
         };
+        countLighting(model, preparedState);
+        preparedState.uniforms = blockFor(model, preparedState);
+        return preparedState;
     };
 
     /** @param {number} format D3DFMT_INDEX @returns {{ gpu: string, bytes: number } | null} */
@@ -3185,6 +3333,7 @@ export function createRenderer(options){
             const soiled = level=>{
                 entry.dirtyLevels.add(level);
                 entry.dirty = true;
+                contentVersion++;
             };
             const unlockLevel = texture.UnlockRect;
             texture.UnlockRect = (/** @type {number} */ level)=>{
@@ -3248,6 +3397,7 @@ export function createRenderer(options){
             {
                 tracked.dirtyLevels.add(surfaceLevels.get(resource) ?? 0);
                 tracked.dirty = true;
+                contentVersion++;
             }
         },
 
@@ -3327,12 +3477,29 @@ export function createRenderer(options){
                 specularEnable: false,
                 lighting: null,
             };
-            const uniforms = uniformBlock({
-                worldViewProjection: IDENTITY,
-                viewport: model.viewport,
-                textureFactor: 0,
-                fogColor: 0,
-                alphaRef: 0,
+            const prepared = /** @type {PreparedDraw} */ ({
+                version: undefined,
+                contentVersion: 0,
+                stride: CLEAR_STRIDE,
+                topology: 'triangle-list',
+                state,
+                uniforms: uniformBlock({
+                    worldViewProjection: IDENTITY,
+                    viewport: model.viewport,
+                    textureFactor: 0,
+                    fogColor: 0,
+                    alphaRef: 0,
+                }),
+                template: null,
+                stageBindings: [],
+                lighting: null,
+                fogSetting: '',
+                layout: null,
+                textures: [],
+                truncated: null,
+                pipelineFrame: null,
+                pipelineIndex: 0,
+                program: null,
             });
             for (const area of areas)
             {
@@ -3352,7 +3519,7 @@ export function createRenderer(options){
                 frame.commands.push({ kind: 'scissor', rect: {
                     x: area.x1, y: area.y1, width: area.x2 - area.x1, height: area.y2 - area.y1,
                 } });
-                record(model, state, uniforms, [], {
+                record(model, prepared, {
                     vertices: scratchVertices.write(new Uint8Array(vertices.buffer)),
                     indices: null,
                     count: 6,
@@ -3379,12 +3546,12 @@ export function createRenderer(options){
             {
                 return;
             }
-            record(model, prepared.state, prepared.uniforms, prepared.stageBindings, {
+            record(model, prepared, {
                 vertices: { gpu: bufferFor(stream.buffer).gpu.gpu, offset: 0 },
                 ...(fan
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
-            }, prepared.program);
+            });
             if (dumpDraws && !prepared.program)
             {
                 const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
@@ -3420,7 +3587,7 @@ export function createRenderer(options){
             const vertices = { gpu: bufferFor(stream.buffer).gpu.gpu, offset: 0 };
             if (list === undefined)
             {
-                record(model, prepared.state, prepared.uniforms, prepared.stageBindings, {
+                record(model, prepared, {
                     vertices,
                     indices: {
                         gpu: bufferFor(model.indices).gpu.gpu,
@@ -3430,7 +3597,7 @@ export function createRenderer(options){
                     count,
                     first: 0,
                     baseVertex: model.baseVertexIndex,
-                }, prepared.program);
+                });
                 if (dumpDraws && !prepared.program)
                 {
                     const bytes = readMemory(model.indices.base + byteOffset, count * format.bytes);
@@ -3442,10 +3609,10 @@ export function createRenderer(options){
             // The strip's order is in guest memory, where the program left it.
             const order = indicesFrom(
                 readMemory(model.indices.base + byteOffset, count * format.bytes), format.bytes);
-            record(model, prepared.state, prepared.uniforms, prepared.stageBindings, {
+            record(model, prepared, {
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex),
-            }, prepared.program);
+            });
             if (dumpDraws && !prepared.program)
             {
                 dumpIndexed(model, prepared, order);
@@ -3472,8 +3639,7 @@ export function createRenderer(options){
             const geometry = type === D3DPT.TRIANGLEFAN
                 ? expandedGeometry(type, ascending(count), 0)
                 : { indices: null, count, first: 0 };
-            record(model, prepared.state, prepared.uniforms, prepared.stageBindings,
-                { vertices, ...geometry }, prepared.program);
+            record(model, prepared, { vertices, ...geometry });
             if (dumpDraws && !prepared.program)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, count * stride), stride, null);
@@ -3510,7 +3676,7 @@ export function createRenderer(options){
             }
             const vertices = scratchVertices.write(vertexData.subarray(0, numVertices * stride));
             const indices = indicesFrom(indexData.subarray(0, count * format.bytes), format.bytes);
-            record(model, prepared.state, prepared.uniforms, prepared.stageBindings, {
+            record(model, prepared, {
                 vertices,
                 ...(list === undefined
                     ? {
@@ -3520,7 +3686,7 @@ export function createRenderer(options){
                         baseVertex: 0,
                     }
                     : expandedGeometry(type, indices, 0)),
-            }, prepared.program);
+            });
             if (dumpDraws && !prepared.program)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, numVertices * stride),
@@ -3589,6 +3755,7 @@ export function createRenderer(options){
                 draws: counters.draws,
                 clears: counters.clears,
                 programmable: counters.programmable,
+                prepared: { ...counters.prepared },
                 programs: programs.stats(),
                 skipped: { ...counters.skipped },
                 cascade: {

@@ -103,7 +103,7 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `libraries` | The library names published. |
 | `created` | Which APIs a program actually asked for, in order. |
 | `seam.created`, `seam.interfaces` | Objects made through the entry points; interfaces published. |
-| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. |
+| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. |
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
@@ -276,6 +276,21 @@ else. Every texture format is expanded to `bgra8unorm` on upload in integer arit
 `DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the adapter has
 `texture-compression-bc`. The renderer serves Direct3D 7 and 9 too: one fixed-function pipeline
 with one set of numbers.
+
+A draw is prepared once per state change rather than once per draw. The device raises one counter,
+`drawStateVersion`, for every state change a preparation depends on -- a render state, a stage
+state, a texture binding, a material, a light, the viewport, a transform other than the world one,
+the vertex or pixel shader, a state block applied, a reset -- and raises it for a change of value,
+not for a call that sets the value already there. While that counter and the draw's stride and
+topology are what the last preparation was built from, the next draw reuses its vertex layout, its
+stage cascade, its texture and sampler bindings, its pipeline state and the pipeline itself, and
+the block of uniforms all but the two fields the world transform reaches. The world transform is
+the one state the counter deliberately ignores, because it moves between most draws of a frame;
+whoever reads the counter therefore owes the world matrix a fresh read on every draw, and nothing
+else derived from it may be kept. A texture whose bytes the program rewrites raises a counter of
+its own, so the upload owed to it still happens inside the next draw that samples it. The Direct3D
+7 and 9 devices do not publish the counter yet and are prepared for on every draw, as before.
+`diagnostics().prepared` counts what was built and what was reused.
 
 **Direct3D 9** (`src/layers/graphics/d3d9/`). The device advertises vertex and pixel shader model
 2.0 -- the version the translator builds a pipeline from whole -- and refuses a create for a higher
