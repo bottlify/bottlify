@@ -7,7 +7,7 @@
 import { fitFrame } from './letterbox.js';
 import { assembleModules } from './core.js';
 import { createEvents } from './events.js';
-import { captureTrace, formatTrace } from './trace.js';
+import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
@@ -2888,10 +2888,23 @@ async function buildApp(options){
      * naming an address that has nothing to do with the import. What is wanted
      * instead is the name.
      *
-     * The stub pops nothing, so the caller's stack is left wrong. That is
-     * accepted deliberately: it never returns. Deriving the right count needs
-     * a decorated name and most of these have none, and a stack that survives
-     * a call to a function nobody wrote is not worth the pretence.
+     * Whether the stub may return is decided here and nowhere else, by the one
+     * thing that must be right for the program to go on: what the caller
+     * expects of the callee's stack. The evidence is the name and the library.
+     *
+     * - `_name@N` is stdcall with N argument bytes: pop N, answer zero.
+     * - A name from a library win32 declares cdecl (the C runtime family): the
+     *   caller cleans up, so pop nothing and answer zero.
+     * - An undecorated name from any other library is stdcall with a count
+     *   nobody knows. Every export Windows ships is one of these. No stub can
+     *   return from it without leaving the stack short, and a program that
+     *   goes on from there fails somewhere unrelated several calls later --
+     *   so the first call stops the process with a fault naming the import
+     *   and its caller. The full list of what nothing claims is already said
+     *   at bind time, as `import-unresolved`; the call is the one that matters.
+     * - A name a library the program brought does not export is a mismatch
+     *   between two of its own files, not a gap in this build: it answers as
+     *   the decoration says and is reported as the program's own.
      *
      * One stub per name, because a program is quite capable of calling the
      * same missing import a thousand times before it gives up.
@@ -2906,28 +2919,8 @@ async function buildApp(options){
     // trace anywhere a run can be read.
     /** @type {Map<string, number>} */
     const missingCalls = new Map();
-
-    /**
-     * How many argument bytes a stub for an unknown name must pop.
-     *
-     * Returning at all makes this matter: a stdcall callee cleans up and a
-     * caller that gets its stack back four bytes short is corrupted from there
-     * on, which surfaces nowhere near the call.
-     *
-     * The decoration is the only evidence there is, and it is enough for both
-     * cases. `_name@N` is stdcall with N bytes of arguments; an undecorated
-     * name is a C function, where the caller cleans up and popping nothing is
-     * exactly right. A name that is neither -- a C++ mangling, an ordinal -- is
-     * refused rather than guessed at, because a wrong count is worse than a
-     * loud stop.
-     *
-     * @param {string | null} name
-     * @returns {number}
-     */
-    const cleanupFor = name=>{
-        const decorated = name === null ? null : /@(\d+)$/.exec(name);
-        return decorated ? Number(decorated[1]) : 0;
-    };
+    /** The libraries this build synthesises, as opposed to ones a program brings. */
+    const systemLibraries = new Set(Object.keys(allLibraries).map(moduleKeyOf));
 
     /** @param {string} dll @param {string | null} name @param {number | null} ordinal */
     const missingImport = (dll, name, ordinal)=>{
@@ -2937,23 +2930,44 @@ async function buildApp(options){
         {
             return known;
         }
+        const decorated = name === null ? null : /@(\d+)$/.exec(name);
+        const own = !systemLibraries.has(moduleKeyOf(dll)) && findModule(dll) !== null;
+        const returns = decorated !== null || own
+            || win32.libraryConvention(dll) === 'cdecl';
         const address = bridge.register(label, {
-            argBytes: cleanupFor(name),
-            handler: ()=>{
+            argBytes: decorated ? Number(decorated[1]) : 0,
+            /** @param {number[]} _args @param {{ callerStack: number, hostReturn: number }} frame */
+            handler: (_args, frame)=>{
                 missingCalls.set(label, (missingCalls.get(label) ?? 0) + 1);
-                events.emit('unimplemented', { import: label });
-                // Zero, and back to the caller. It is the only value that reads
-                // as failure under every convention at once -- a null pointer,
-                // a null handle, FALSE, a count of none -- so a caller that
-                // checks its result takes its own failure path and says
-                // something about what it wanted.
-                //
-                // Not every convention: zero is S_OK to a caller expecting an
-                // HRESULT and ERROR_SUCCESS to one expecting a status, and both
-                // then read an out-parameter nobody wrote. That is the trade,
-                // and it is the better half of it -- stopping the process here
-                // reports one missing import per run, where continuing reports
-                // every one a program actually calls.
+                events.emit('unimplemented', { import: label, origin: own ? 'program' : 'system' });
+                if (returns)
+                {
+                    // Zero, and back to the caller. It is the only value that
+                    // reads as failure under every convention at once -- a
+                    // null pointer, a null handle, FALSE, a count of none --
+                    // so a caller that checks its result takes its own
+                    // failure path and says something about what it wanted.
+                    return 0;
+                }
+                // The argument bytes are what nobody knows; the words above
+                // the return address are the next best thing, since a reader
+                // who knows the function can count them.
+                const esp = frame.callerStack >>> 0;
+                const words = [0, 1, 2, 3].map(word=>{
+                    const held = memory.readU32(esp + 4 + word * 4) >>> 0;
+                    return `0x${held.toString(16).padStart(8, '0')}`;
+                });
+                const from = describeAddress({ cpu, memory, kernel, bridge }, frame.hostReturn);
+                cpu.raiseFault({
+                    name: 'unimplemented import',
+                    eip: frame.hostReturn,
+                    calledFrom: frame.hostReturn,
+                    detail: `unimplemented import ${label}, called from ${from};`
+                        + ` argument bytes unknown, the stack holds ${words.join(' ')}`,
+                });
+                // The stub's `ret` goes into the park loop, whose halt ends
+                // the slice before the caller runs another instruction.
+                kernel.holdThread();
                 return 0;
             },
         });
@@ -2961,7 +2975,7 @@ async function buildApp(options){
         // Said at bind time as well as when called: a program that is about
         // to run is the moment to read what it imports and nobody answers,
         // before the first of them corrupts a stack.
-        events.emit('import-unresolved', { import: label });
+        events.emit('import-unresolved', { import: label, origin: own ? 'program' : 'system' });
         return address;
     };
 

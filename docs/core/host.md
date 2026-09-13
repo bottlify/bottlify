@@ -194,7 +194,8 @@ the launcher's settings panel prints it.
 
 Events an engine emits and the page may subscribe to include `frame`, `output`, `exit`, `error`,
 `cursor`, `import-unresolved` (an import nothing implements, at bind time), `unimplemented` (one
-such import called), `divergence`, `message-box`, `library-loaded`, `library-missing`,
+such import called; both carry `origin`, `'system'` or `'program'` — and a call to an
+undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box`, `library-loaded`, `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
 `process-create`, `process-replace`, `process-patched`, `debug` (the full list is what
 `events.emit` is called with in `src/app.js`).

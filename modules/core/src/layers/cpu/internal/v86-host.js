@@ -4,7 +4,9 @@
  * See LICENSE for details
  */
 
-import { buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE } from './boot-rom.js';
+import {
+    buildBootRom, BRING_UP_PARK, GUEST_JUMP, ROM_BASE, DEAD_BOOT_CODE,
+} from './boot-rom.js';
 
 /**
  * The only place in the codebase that knows the emulator underneath is v86.
@@ -313,6 +315,12 @@ export async function createV86Host(config){
             + ` cr0 0x${(v().cr[0] >>> 0).toString(16)})`);
     }
     v().eip[0] = GUEST_JUMP;
+    // The boot code has done its one job; from here on an instruction fetched
+    // from it is a guest that lost its way, and is made to say so.
+    for (const { offset, length } of DEAD_BOOT_CODE)
+    {
+        emulator.write_memory(new Uint8Array(length).fill(0xcc), ROM_BASE + offset);
+    }
 
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
@@ -424,6 +432,18 @@ export async function createV86Host(config){
          */
         run: ()=>emulator.run(),
         stop: ()=>emulator.stop(),
+
+        /**
+         * Puts the processor where a `hlt` would have: the next slice retires
+         * nothing. What a fault stub does from inside the guest, done from
+         * outside for a machine that must not execute another instruction.
+         */
+        halt(){
+            v().inHlt[0] = 1;
+        },
+
+        /** A control register. @param {number} index */
+        controlRegister: index=>v().cr[index] >>> 0,
 
         /** @param {(value: number) => void} handler */
         onTrap(handler){

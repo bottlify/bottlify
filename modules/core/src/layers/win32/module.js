@@ -75,6 +75,21 @@ import { registerQuartzClasses } from './quartz/graph.js';
  */
 
 /**
+ * The libraries whose undecorated exports are cdecl: the C runtime and its
+ * versioned and debug siblings, `crtdll`, and the universal runtime.
+ *
+ * Every other library Windows ships exports stdcall, and its undecorated names
+ * say nothing about how many bytes the callee pops. That is what a stub
+ * standing in for an export nobody wrote has to know: a cdecl caller cleans
+ * up after itself and the stub may return; a stdcall caller expects the
+ * callee to, and a stub that guesses leaves the stack short by the argument
+ * bytes, which surfaces as a fault several calls later. Declared here, beside
+ * the tables, because it is a fact about the library and not about any one
+ * name in it.
+ */
+const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
+
+/**
  * The most recently created instance, for `diagnostics()` alone.
  *
  * The module contract puts `diagnostics()` on the module rather than on the
@@ -1063,6 +1078,19 @@ export const win32Module = {
         const api = {
             /** @returns {Record<string, Record<string, any>>} library name -> its exports */
             libraries: ()=>libraries,
+
+            /**
+             * What an undecorated export of a library is, when nothing else
+             * says: `'cdecl'` for the C runtime family, `'stdcall'` for the rest.
+             *
+             * By name rather than by table, because the question is asked
+             * about libraries this build does not have as well as the ones
+             * it does.
+             *
+             * @param {string} library  As an import descriptor names it.
+             * @returns {'cdecl' | 'stdcall'}
+             */
+            libraryConvention: library=>CDECL_LIBRARIES.test(library) ? 'cdecl' : 'stdcall',
 
             /**
              * Device contexts over pixels this layer did not allocate.

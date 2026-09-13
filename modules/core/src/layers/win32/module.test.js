@@ -149,3 +149,24 @@ test('no configured screen leaves both libraries on the same fallback', async()=
 
     await win32Module.dispose();
 });
+
+test('the C runtime family is cdecl and every other library is stdcall', async()=>{
+    // What a stub for an export nobody wrote has to know before it may
+    // return: the C runtime's caller cleans up, a Win32 library's callee
+    // does. The list is by name, because the question is asked about
+    // libraries this build does not have as much as the ones it does.
+    const api = await win32Module.create({}, stubHost());
+
+    for (const library of ['msvcrt.dll', 'MSVCRT.dll', 'msvcr71.dll', 'msvcr80d.dll',
+        'msvcp60.dll', 'crtdll.dll', 'ucrtbase.dll'])
+    {
+        assert.equal(api.libraryConvention(library), 'cdecl', library);
+    }
+    for (const library of ['KERNEL32.dll', 'USER32.dll', 'ntdll.dll', 'OLEACC.dll',
+        'msvcrtd.dll.bak', 'game.dll'])
+    {
+        assert.equal(api.libraryConvention(library), 'stdcall', library);
+    }
+
+    await win32Module.dispose();
+});

@@ -7,8 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BRING_UP_PARK, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP, IDT_OFFSET,
-    IDT_POINTER_OFFSET, VECTORS, buildBootRom, ROM_BASE, ROM_SIZE, SEL_CODE32, SEL_DATA32,
+    BRING_UP_PARK, DEAD_BOOT_CODE, FAULT_STUB_BYTES, FAULT_STUBS_OFFSET, GUEST_JUMP, IDT_OFFSET,
+    IDT_POINTER_OFFSET, VECTORS, buildBootRom, inDeadBootCode, ROM_BASE, ROM_SIZE, SEL_CODE32,
+    SEL_DATA32,
 } from './boot-rom.js';
 
 const ENTRY_VECTOR = 0x7000;
@@ -92,6 +93,23 @@ test('GUEST_JUMP names the jump into guest code, and BRING_UP_PARK a spin', ()=>
     // landing there costs nothing and changes nothing.
     assert.deepEqual([...image.subarray(BRING_UP_PARK - ROM_BASE, BRING_UP_PARK - ROM_BASE + 2)],
         [0xeb, 0xfe], 'jmp $');
+});
+
+test('the boot code to be retired is the whole init and the prologue up to the guest jump', ()=>{
+    // Short by a byte and `mov cr0, eax` survives for a stray return to run;
+    // long by a byte and the live jump into guest code is overwritten.
+    const image = rom();
+    const [init, prologue] = DEAD_BOOT_CODE;
+    assert.equal(image[init.offset], 0xfa, 'cli, the first instruction after reset');
+    const farJump = init.offset + init.length - 8;
+    assert.deepEqual([...image.subarray(farJump, farJump + 2)], [0x66, 0xea],
+        'and the far jump is the last thing in it');
+    assert.equal(image[init.offset + init.length], 0, 'nothing follows it');
+    assert.equal(ROM_BASE + prologue.offset + prologue.length, GUEST_JUMP,
+        'the prologue ends exactly where the jump into guest code begins');
+    assert.equal(inDeadBootCode(ROM_BASE + init.offset + 0x19), true, 'mov cr0, eax');
+    assert.equal(inDeadBootCode(GUEST_JUMP), false, 'the jump stays live');
+    assert.equal(inDeadBootCode(BRING_UP_PARK), false);
 });
 
 test('the entry vector is data, so two ROMs differ only where the vector does', ()=>{

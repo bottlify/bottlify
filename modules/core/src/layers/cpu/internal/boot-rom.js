@@ -95,6 +95,29 @@ const PM_PROLOGUE_SIZE = 5 + 5 * 2 + 5;
 export const GUEST_JUMP = ROM_BASE + OFF_PM_ENTRY + PM_PROLOGUE_SIZE;
 
 /**
+ * The ROM's code that runs once and must never run again: the real-mode init
+ * and the protected-mode prologue, up to the jump into guest code.
+ *
+ * Both are reachable afterwards -- a return through a wrecked stack lands
+ * anywhere, and 0xF0000 is as good a place as any. Entered in protected mode
+ * the init decodes as something else entirely and ends in `mov cr0, eax`,
+ * which turns paging on with whatever EAX held; the prologue reloads the
+ * stack and starts the program over inside its own process. Neither can be
+ * reported as what it was. Once bring-up is past, the two are overwritten
+ * with `int3` -- one byte, so any entry offset hits one -- and an excursion
+ * into the ROM arrives as a fault at an address inside these spans.
+ */
+export const DEAD_BOOT_CODE = Object.freeze([
+    // cli, mov ax, mov ds, lgdt, lidt, mov eax cr0, or, mov cr0, jmp far.
+    { offset: OFF_INIT16, length: 1 + 3 + 2 + 6 + 6 + 3 + 4 + 3 + 8 },
+    { offset: OFF_PM_ENTRY, length: PM_PROLOGUE_SIZE },
+]);
+
+/** Whether an address falls inside the ROM's retired boot code. @param {number} address */
+export const inDeadBootCode = address=>DEAD_BOOT_CODE.some(({ offset, length })=>
+    address >= ROM_BASE + offset && address < ROM_BASE + offset + length);
+
+/**
  * A two-byte `jmp $` for bring-up to land in.
  *
  * The emulator runs whole basic blocks, so there is no stopping *before* the

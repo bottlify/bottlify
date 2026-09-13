@@ -333,11 +333,22 @@ export function formatTrace(trace){
     // not at where the guest's stack was; and everything else is still the
     // guest's. Saying so is the difference between a report and a wild goose
     // chase through our own ROM.
+    //
+    // A fault the host raised has no such frame: one from inside a call
+    // leaves the processor in the park loop behind the stub, so EAX is the
+    // stub's answer, EDX the trap port and ESP the call's own frame; one that
+    // stands in for an exception the processor could not deliver leaves every
+    // register exactly as the faulting instruction found it.
     if (trace.fault)
     {
         lines.push(`stopped in ${trace.stoppedAt}`);
-        lines.push('  eax and edx are the fault stub\'s; esp points at the exception frame;'
-            + ' the rest are the guest\'s');
+        lines.push(trace.fault.detail === undefined
+            ? '  eax and edx are the fault stub\'s; esp points at the exception frame;'
+                + ' the rest are the guest\'s'
+            : trace.fault.vector < 0
+                ? '  eax is the stub\'s answer and edx the trap port; esp points at the'
+                    + ' call\'s frame; the rest are the guest\'s'
+                : '  no exception frame was pushed; every register is the guest\'s');
     }
     if (trace.registers)
     {

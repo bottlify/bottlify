@@ -20,6 +20,8 @@
  * one is fixed by the architecture and is listed below rather than guessed at.
  */
 
+import { inDeadBootCode } from './boot-rom.js';
+
 /** Vectors whose exception pushes an error code before the return frame. */
 const WITH_ERROR_CODE = new Set([8, 10, 11, 12, 13, 14, 17, 21]);
 
@@ -46,7 +48,41 @@ const NAMES = Object.freeze([
  *           to somewhere there is no code, that word is the return address the
  *           call pushed -- which names the instruction that made the call, and
  *           the faulting address itself names nothing at all.
+ * @property {string} [detail]
+ *           The whole report, for a fault the host raised rather than read off
+ *           the processor: what the machine knows about it is the sentence,
+ *           not a vector and a frame.
  */
+
+/**
+ * The vector of a fault the host raised: a stop the processor never saw, named
+ * by whoever decided the guest could not go on. Outside the table on purpose,
+ * so nothing mistakes it for an exception with a frame to read.
+ */
+export const HOST_VECTOR = -1;
+
+/**
+ * A fault raised from our side of the boundary, shaped like the processor's so
+ * that everything downstream -- the poll, the trace, the report -- treats the
+ * two alike.
+ *
+ * @param {Object} fault
+ * @param {string} fault.name
+ * @param {string} fault.detail    The report, in full.
+ * @param {number} fault.eip       Where the guest was, as far as a reader is concerned.
+ * @param {number} [fault.calledFrom]
+ * @param {number} [fault.vector]  For a stop that stands in for a processor exception.
+ * @param {number} [fault.errorCode]
+ * @returns {GuestFault}
+ */
+export function hostFault({ name, detail, eip, calledFrom = 0, vector = HOST_VECTOR, errorCode }){
+    return {
+        vector, name, detail,
+        eip: eip >>> 0, cs: 0, eflags: 0,
+        errorCode: errorCode ?? null,
+        calledFrom: calledFrom >>> 0,
+    };
+}
 
 /**
  * Reads the frame the processor pushed, given the stack pointer as the stub
@@ -92,15 +128,23 @@ export function readFault(vector, esp, readU32){
  * @returns {string}
  */
 export function describeFault(fault){
+    if (fault.detail !== undefined)
+    {
+        return fault.detail;
+    }
     const where = `at 0x${fault.eip.toString(16).padStart(8, '0')}`;
-    // A fault at an address with no code is a call that should not have been
-    // made, and the useful address is the one that made it.
-    const from = fault.eip < 0x1000
-        ? `, called from 0x${fault.calledFrom.toString(16).padStart(8, '0')}`
-        : '';
+    const from = `, called from 0x${fault.calledFrom.toString(16).padStart(8, '0')}`;
+    // The breakpoint is a trap, so the frame names the byte after it.
+    const executed = fault.vector === 3 ? fault.eip - 1 : fault.eip;
+    if (inDeadBootCode(executed))
+    {
+        return `guest jumped into the boot ROM ${where}${from}`;
+    }
     if (fault.errorCode === null)
     {
-        return `${fault.name} ${where}${from}`;
+        // A fault at an address with no code is a call that should not have
+        // been made, and the useful address is the one that made it.
+        return `${fault.name} ${where}${fault.eip < 0x1000 ? from : ''}`;
     }
     if (fault.vector === 14)
     {

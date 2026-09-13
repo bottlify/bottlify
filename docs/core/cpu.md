@@ -58,7 +58,8 @@ otherwise.
 | `layout` | `{ entryVector, initialStack, thunkBase, thunkCapacity, memorySize, romBase, romSize }` | The addresses the layer owns, for whoever lays out the address space. |
 | `boot` | `({ moduleUrl, wasmBytes }) => Promise<void>` | Instantiates the emulator, drives the ROM to protected mode, registers the trap port. Throws if already booted. |
 | `booted` | `() => boolean` | Whether `boot()` has completed. |
-| `fault` | `() => GuestFault \| null` | The processor exception that stopped the machine, with a `text` description, or null. |
+| `fault` | `() => GuestFault \| null` | The fault that stopped the machine, with a `text` description, or null: a processor exception read off its frame, or one the host raised. |
+| `raiseFault` | `({ name, detail, eip, calledFrom? }) => void` | Records a fault of the host's own naming (`vector` -1, `detail` is the whole report), to be found by the same poll as an exception. Only the record: called from inside a trap, the caller sends the stub's return into the park loop, whose `hlt` is what ends the slice. |
 | `run` / `stop` | `() => void` | Free-running mode (the emulator's own loop). The scheduler does not use these; it uses `runSlice`. |
 | `readPhysical` | `(address, length) => Uint8Array` | A **window** on guest RAM — a subarray of the emulator's memory, not a copy. |
 | `writePhysical` | `(address, bytes) => void` | Writes through the emulator, which invalidates any compiled code on the pages touched. |
@@ -143,6 +144,12 @@ slices until EIP lands on the spin, checks `CR0.PE`, then sets EIP back to `GUES
 thread's context is a copy of the machine as it stood when the thread was created; a context
 captured before the mode switch would carry real mode into every thread that ever runs.
 
+The boot code is then retired: the real-mode init and the prologue up to `GUEST_JUMP`
+(`DEAD_BOOT_CODE`) are overwritten with `int3`. A guest that strays into the ROM — a return
+through a wrecked stack lands anywhere — would otherwise run `mov cr0, eax` with whatever EAX
+holds and turn paging on, or reload the stack and start the program over; instead it faults at
+its first byte there, and `describeFault` names it `guest jumped into the boot ROM at …`.
+
 ### Slices and the quantum
 
 `runSlice(n)` calls the emulator's `run_slice(n)` and returns retired instructions. Granularity
@@ -151,6 +158,14 @@ bound falls in. The bound is in guest instructions rather than wall time, so the
 point does not move with host speed. After every slice the 32-bit instruction counter is folded
 into a JavaScript number (`instructionCount()`), which is exact as long as reads are less than
 2^32 instructions apart.
+
+The emulator has no double fault: an exception it cannot deliver — a page fault while pushing
+the frame for a page fault, which paging over a bad directory produces — recurses until the
+host's stack is exhausted and surfaces as a `RangeError`. `runSlice` catches that one error,
+records a `double fault at <eip>: a page fault at <cr2> while delivering a fault` (vector 8,
+`detail` set; EIP is still on the instruction that faulted first, and CR2 holds the last address
+that would not translate) and halts the machine, so the run ends through `fault()` like any
+other.
 
 ### Traps and the stub table
 
@@ -246,7 +261,8 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 
 | file | covers |
 |------|--------|
-| `internal/boot-rom.test.js` | ROM size and placement, reset vector, GDT/IDT contents, the indirect jump, every fault stub reporting its own vector and stopping. |
+| `internal/boot-rom.test.js` | ROM size and placement, reset vector, GDT/IDT contents, the indirect jump, every fault stub reporting its own vector and stopping, the retired boot code ending exactly at the guest jump. |
+| `internal/faults.test.js` | A host-raised fault reads as its sentence, a stand-in for an undeliverable exception keeps its vector, a breakpoint in the retired boot code is an excursion, the live guest jump is not, processor exceptions read as before. |
 | `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |
@@ -258,6 +274,7 @@ emulator in `modules/core/vendor/prebuilt/` — `npm run fetch:v86`):
 |------|--------|
 | `internal/v86-host.itest.js` | Booting to protected mode, the instruction count past 2^32, registers by name, slice bounds on loops, x87 arithmetic, flags, string instructions, compiled-code chaining, profiler builds. |
 | `internal/quantum.itest.js` | A slice is bounded by retired instructions to a page, compiled or interpreted. |
+| `module.itest.js` | The frame's account of the interpreter; an exception the processor cannot deliver ends as a named double fault rather than a host stack overflow; a guest straying into the retired boot code is reported as an excursion. |
 | `internal/context.itest.js` | An x87 thread survives interruption by MMX; pending arithmetic flags survive a switch. |
 | `internal/zstd.itest.js` | A frame decodes byte for byte, scratch is returned, a short frame is an error. |
 

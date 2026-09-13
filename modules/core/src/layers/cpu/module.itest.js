@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { cpuModule } from './module.js';
+import { ROM_BASE } from './internal/boot-rom.js';
 import { createMetrics } from '../log/internal/metrics.js';
 import { readTable } from '../log/internal/table.js';
 
@@ -133,6 +134,50 @@ test('the account can be asked where the interpreter ran, exactly', async()=>{
             `0x${one.address.toString(16)} is not in the guest's loop`);
     }
     api.profile.stop();
+
+    api.stop();
+    await cpuModule.dispose();
+});
+
+test('an exception the processor cannot deliver is a double fault, not a host overflow', async()=>{
+    // Paging turned on over a page directory of zeroes: the next fetch page
+    // faults, delivering that reads the interrupt table through the same
+    // directory and faults again, and the emulator recurses until the host's
+    // stack is gone. What a reader saw was a range error naming nothing.
+    const { api } = await booted(new Uint8Array([
+        0x0f, 0x20, 0xc0, //             mov eax, cr0
+        0x0d, 0x00, 0x00, 0x00, 0x80, // or eax, 0x80000000
+        0x0f, 0x22, 0xc0, //             mov cr0, eax
+        0x90, 0x90, //                   nop nop
+    ]), GUEST_CODE);
+
+    assert.doesNotThrow(()=>api.runSlice(1000));
+    const fault = api.fault();
+    assert.ok(fault, 'the machine stopped on a fault');
+    assert.equal(fault.vector, 8);
+    assert.match(fault.text, /^double fault at 0x0000800[b-d]: a page fault at 0x[0-9a-f]{8}/,
+        'named, at the instruction whose fault could not be delivered');
+    assert.match(fault.text, /paging is on with cr3 0x0/);
+    assert.equal(api.runSlice(1000), 0, 'and it stays stopped');
+
+    api.stop();
+    await cpuModule.dispose();
+});
+
+test('a guest that strays into the retired boot code is reported as an excursion', async()=>{
+    // A return through a wrecked stack can land on the ROM's init, whose
+    // `mov cr0, eax` then turns paging on with whatever EAX holds. The bytes
+    // are retired after bring-up so the excursion is named at its first byte.
+    const target = ROM_BASE + 0x19;
+    const { api } = await booted(new Uint8Array([
+        0xe9, ...u32(target - (GUEST_CODE + 5)), // jmp target
+    ]), GUEST_CODE);
+
+    api.runSlice(1000);
+    const fault = api.fault();
+    assert.ok(fault, 'the machine stopped on a fault');
+    assert.equal(fault.vector, 3, 'the retired bytes are breakpoints');
+    assert.match(fault.text, /^guest jumped into the boot ROM at 0x000f001a/);
 
     api.stop();
     await cpuModule.dispose();

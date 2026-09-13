@@ -176,6 +176,31 @@ test('with no fault the report is simply where the processor is', ()=>{
     assert.doesNotMatch(text, /fault stub/);
 });
 
+test('a fault the host raised does not claim an exception frame it never had', ()=>{
+    // From inside a call the processor is left in the park loop and the
+    // registers are the call's own; for a fault that stands in for one the
+    // processor could not deliver, nothing was pushed at all. Either way the
+    // stub's note would send a reader looking for a frame that is not there.
+    const sources = machine();
+    sources.cpu.eip = ()=>0x00100001;
+    const raised = formatTrace(captureTrace({
+        ...sources,
+        fault: { vector: -1, name: 'unimplemented import', eip: IMAGE + 0x1200,
+            errorCode: null, detail: 'unimplemented import X.dll!Y' },
+    }));
+    assert.match(raised, /^at 0x00401200 image/);
+    assert.match(raised, /stopped in 0x00100001/);
+    assert.match(raised, /eax is the stub's answer and edx the trap port/);
+    assert.doesNotMatch(raised, /exception frame;/);
+
+    const undelivered = formatTrace(captureTrace({
+        ...sources,
+        fault: { vector: 8, name: 'double fault', eip: IMAGE + 0x1200,
+            errorCode: 0, detail: 'double fault at 0x00401200' },
+    }));
+    assert.match(undelivered, /no exception frame was pushed; every register is the guest's/);
+});
+
 test('a stalled machine names every blocked thread and what it waits on', ()=>{
     // The one report that could not be read: a parked thread's registers
     // describe the park loop and nothing else, so the list of what nobody is

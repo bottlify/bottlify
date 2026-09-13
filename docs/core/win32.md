@@ -65,6 +65,7 @@ the module graph is built. All are optional.
 |--------|----------|
 | `libraries()` | `{ 'KERNEL32.dll': table, … }` — every DLL, each a map from export name to `{ argBytes, handler }`. |
 | `ordinals()` | Export ordinals for the libraries imported by number: `WSOCK32.dll`, `WS2_32.dll`, `OLEAUT32.dll`. |
+| `libraryConvention(name)` | `'cdecl'` for the C runtime family (`msvcrt`, `msvcr*`, `msvcp*`, `crtdll`, `ucrtbase`), `'stdcall'` for every other library — what an undecorated export of it is, when nothing else says. Asked about libraries this build lacks as well as the ones it has. |
 | `resolve(name)` | One export by name, whichever library publishes it. |
 | `gdi()` | `createSurfaceDc(attributes)` / `deleteSurfaceDc(handle)` — a DC over pixels GDI did not allocate, for the graphics layer. |
 | `queue()` | The message queue; the input layer and the driver post here. |
@@ -143,8 +144,20 @@ tables from `graphics`, `audio`, `input` and `media`, registers every handler wi
 ([`loader.md`](./loader.md)). An export's address is its trampoline inside that module, and it is
 what both the import table and `GetProcAddress` hand out, so a program comparing the two finds them
 equal. A table that exports `DllMain` is a module with an entry point, run on the first
-`LoadLibrary`. An import no table provides is bound to a stub that counts the call, emits an
-`unimplemented` event and returns zero (`app.js`, `missingImport`).
+`LoadLibrary`. An import no table provides is bound to a stub (`app.js`, `missingImport`) that
+counts the call and emits an `unimplemented` event; whether it may return is decided by what the
+caller expects of the stack, since the argument bytes are the one thing that must be right:
+
+| import | stub |
+|--------|------|
+| `_name@N` (decorated stdcall) | Returns zero and pops N bytes. |
+| Any name from a library `win32.libraryConvention()` declares cdecl — `msvcrt`, `msvcr*`, `msvcp*`, `crtdll`, `ucrtbase` | Returns zero and pops nothing; the caller cleans up. |
+| An undecorated name (or an ordinal) from any other library — every Win32 system export is one | **Stops the process** on the first call with a guest fault: `unimplemented import KERNEL32.dll!Name, called from 0x… image+0x… (rva 0x…); argument bytes unknown, the stack holds w0 w1 w2 w3`. No stub can return from it with the stack right, and a program that goes on fails somewhere unrelated several calls later. The full list of what is unbound is already reported at load as `import-unresolved`. |
+| A name a library the program brought does not export | As the decoration says (a mismatch between two of its own files, not a gap in this build); both events carry `origin: 'program'` rather than `'system'`. |
+
+The fault is raised through `cpu.raiseFault` and the stub's return is sent into the park loop,
+so the caller never runs another instruction; the run ends as `guest-fault`, the same way a
+processor exception does.
 
 `kernel32/modules.js` therefore creates nothing: `LoadLibrary` reports what is already synthesised
 (or reads a library the program ships through `modules.load`), and an address taken at the first
@@ -303,8 +316,10 @@ Stated as the code states them.
   thumb is not dragged, an edit does not undo, an owner-drawn button or static paints its
   background only, and a static's image is drawn only when the bitmap has pixels this build can
   reach (said once otherwise).
-- **Unimplemented imports** are bound to a zero-returning stub and reported once per name; zero
-  reads as failure under most conventions but as `S_OK` to a caller expecting an `HRESULT`.
+- **Unimplemented imports** are reported once per name at load. A decorated stdcall name or a
+  C-runtime name is answered with zero, which reads as failure under most conventions but as
+  `S_OK` to a caller expecting an `HRESULT`; an undecorated name from any other library stops
+  the process on its first call (§3, "From a table to a module").
 
 Reported at runtime: `divergence` (each once), `unimplemented` (each import once, plus a count per
 name in the application's diagnostics as `unimplementedCalls`), `message-box`, `output`, `debug`,
@@ -323,7 +338,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
 | the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
-| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together. |
+| module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
 emulator (`npm run test:integration`), pinning that the bytes the unit test checks are x86 that

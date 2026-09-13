@@ -17,7 +17,7 @@ import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
-import { readFault, describeFault } from './internal/faults.js';
+import { readFault, describeFault, hostFault } from './internal/faults.js';
 
 /**
  * The exception that stopped the machine, if one did.
@@ -288,6 +288,22 @@ export const cpuModule = {
              */
             fault: ()=>lastFault && { ...lastFault, text: describeFault(lastFault) },
 
+            /**
+             * Stops the machine with a fault of the host's own naming, found
+             * by the same poll that finds a processor exception.
+             *
+             * Only the record: this is called from inside a trap, where the
+             * emulator is still standing on the stub and will run its `ret`
+             * regardless. The caller sends that return into the park loop,
+             * whose `hlt` is what actually ends the slice -- the same halt
+             * the ROM's fault stubs end on.
+             *
+             * @param {Omit<Parameters<typeof hostFault>[0], 'vector' | 'errorCode'>} fault
+             */
+            raiseFault(fault){
+                lastFault ??= hostFault(fault);
+            },
+
             run(){
                 running = true;
                 started().run();
@@ -382,7 +398,45 @@ export const cpuModule = {
                 running = true;
                 const machine = started();
                 const from = machine.eip();
-                const instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
+                let instructions = 0;
+                try
+                {
+                    instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
+                }
+                catch (e){
+                    // An exception the processor could not deliver. The
+                    // emulator has no double fault: a page fault while
+                    // pushing the frame for a page fault raises another, and
+                    // it recurses until the host's stack is gone -- which
+                    // surfaces as a range error naming nothing. What is known
+                    // afterwards is still in the machine: EIP was put back on
+                    // the instruction that faulted first and never moved, and
+                    // CR2 holds the last address that would not translate.
+                    if (!(e instanceof RangeError))
+                    {
+                        throw e;
+                    }
+                    const eip = machine.eip();
+                    const cr2 = machine.controlRegister(2);
+                    const cr3 = machine.controlRegister(3);
+                    const paging = (machine.controlRegister(0) & 0x80000000) !== 0;
+                    lastFault ??= hostFault({
+                        vector: 8,
+                        name: 'double fault',
+                        errorCode: 0,
+                        eip,
+                        detail: `double fault at 0x${eip.toString(16).padStart(8, '0')}:`
+                            + ` a page fault at 0x${cr2.toString(16).padStart(8, '0')}`
+                            + ' while delivering a fault'
+                            + (paging
+                                ? `; paging is on with cr3 0x${cr3.toString(16)}`
+                                : ''),
+                    });
+                    // Nothing more may run: the next slice would only walk
+                    // into the same fault. A halt is what the stub behind a
+                    // vector would have ended on, had one been reached.
+                    machine.halt();
+                }
                 // Folds the emulator's word into the count before it can wrap.
                 machine.instructionCount();
                 // One counter read and one comparison per slice, so that a

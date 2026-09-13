@@ -183,8 +183,10 @@ is a counted UTF-16 string with no terminator. Strings live in bundles of sixtee
 - **Forwarders are detected, not followed** by this layer; the resolver is told the string
   through `readExports` and decides.
 - **No bound-import, IAT-directory, exception, security, debug or CLR directories** are read.
-- **Unresolved imports are not errors.** They appear in `unresolved` and in diagnostics; a
+- **Unresolved imports are not errors at load.** They appear in `unresolved` and in diagnostics; a
   call to one lands wherever `missing` pointed, or on the name block's RVA if no hook was given.
+  What the assembler's hook does with the call — answer it or stop the process — is decided by
+  the name and the library ([`win32.md`](./win32.md), "From a table to a module").
 - **Images are never unmapped**; `list()` and the memory regions only grow.
 - **Synthesised modules are console-subsystem DLLs** with one section and no resources,
   version information, or imports of their own; a program inspecting them beyond the export
@@ -212,3 +214,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 
 Integration (`npm run test:integration`): every `src/*.itest.js` maps a real fixture
 executable through `load`/`map`/`bind` and runs it; `src/hello.itest.js` is the smallest.
+`src/imports.itest.js` builds one that imports three names nothing exports and checks what each
+stub does to the stack: the decorated and the C-runtime one answer zero and leave ESP right, the
+undecorated Win32 one ends the run with a fault naming the import and its caller, and all three
+are in `unresolved` at load.
