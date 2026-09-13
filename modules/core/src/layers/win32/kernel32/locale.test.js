@@ -352,6 +352,8 @@ test('no byte leads a double-byte character on the pages this build carries', ()
 test('the thread locale is the one locale, and the default placeholders resolve to it', ()=>{
     const fns = createLocaleFunctions(fakeHost());
     assert.equal(fns.GetThreadLocale.handler(), 0x0409);
+    assert.equal(fns.GetSystemDefaultLCID.handler(), 0x0409, 'the system has the same one');
+    assert.equal(fns.GetSystemDefaultLCID.argBytes, 0);
     assert.equal(fns.ConvertDefaultLocale.handler([0x0400]), 0x0409, 'LOCALE_USER_DEFAULT');
     assert.equal(fns.ConvertDefaultLocale.handler([0x0800]), 0x0409, 'LOCALE_SYSTEM_DEFAULT');
     assert.equal(fns.ConvertDefaultLocale.handler([0x0407]), 0x0407, 'a real locale is itself');

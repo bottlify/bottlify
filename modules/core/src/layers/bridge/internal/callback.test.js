@@ -120,7 +120,7 @@ test('a callback made from inside a callback goes below the stack in use', async
     // The outer procedure is entered with the stack the host call left free.
     made.call({ thread: worker, entry: 0x400000, args: [1, 2, 3, 4], stackAtRest: 0x2ff000 });
     const outerBase = resumed[0][1].esp;
-    assert.equal(outerBase, 0x2ff000 - 4 * 5);
+    assert.equal(outerBase, 0x2ff000 - 4 * 6);
     assert.equal(written.get(outerBase), SENTINEL);
 
     // It runs, pushing locals of its own, and then makes a host call that calls
@@ -129,7 +129,7 @@ test('a callback made from inside a callback goes below the stack in use', async
     made.call({ thread: worker, entry: 0x401000, args: [1, 2, 3, 4], stackAtRest: 0x2fe800 });
     const innerBase = resumed[1][1].esp;
 
-    assert.equal(innerBase, 0x2fe800 - 4 * 5,
+    assert.equal(innerBase, 0x2fe800 - 4 * 6,
         'the inner frame is built below the stack actually in use');
     assert.ok(innerBase < outerBase,
         'and not on top of the outer procedure, which is still standing');
@@ -153,12 +153,12 @@ test('a callback made after a nested host call answered goes below that call, no
     made.suspended(worker,
         { name: 'DialogBoxParamA', restingStack: 0x2fe800, hostReturn: 0x401234 });
     made.call({ thread: worker, entry: 0x401000, args: [1, 2, 3, 4] });
-    assert.equal(resumed[1][1].esp, 0x2fe800 - 4 * 5, 'below the suspended call');
+    assert.equal(resumed[1][1].esp, 0x2fe800 - 4 * 6, 'below the suspended call');
     made.returned(worker);
 
     // The nested call is still suspended while its loop drains what is left.
     made.call({ thread: worker, entry: 0x401000, args: [1, 2, 3, 4] });
-    assert.equal(resumed[2][1].esp, 0x2fe800 - 4 * 5, 'still below it, not at the outer frame');
+    assert.equal(resumed[2][1].esp, 0x2fe800 - 4 * 6, 'still below it, not at the outer frame');
     assert.equal(written.get(outerBase), SENTINEL, 'the outer return address is untouched');
     made.returned(worker);
     made.finish(worker, 1);
@@ -169,7 +169,7 @@ test('a callback made after a nested host call answered goes below that call, no
     // outer frame is the only record, and is right: a stopped thread with
     // nothing below its frame is standing at it.
     made.call({ thread: worker, entry: 0x401000, args: [], stackAtRest: 0x2fe700 });
-    assert.equal(resumed[4][1].esp, 0x2fe700 - 4);
+    assert.equal(resumed[4][1].esp, 0x2fe700 - 8);
 });
 
 test('a callback with no call in flight still finds a stack', ()=>{
@@ -180,7 +180,32 @@ test('a callback with no call in flight still finds a stack', ()=>{
     made.reserve();
     made.call({ thread: worker, entry: 0x400000, args: [], stackAtRest: 0x2ff000 });
     made.call({ thread: worker, entry: 0x401000, args: [] });
-    assert.equal(resumed[1][1].esp, resumed[0][1].esp - 4);
+    assert.equal(resumed[1][1].esp, resumed[0][1].esp - 8);
+});
+
+test('a stdcall callback leaves the sentinel a dword that belongs to nobody', ()=>{
+    // The defect this pins: a dialog procedure delivered a message by the
+    // modal loop is built at the resting stack of the suspended DialogBoxParamA,
+    // and pops its four arguments on the way out, so ESP is back at that
+    // resting position when the sentinel traps. The sentinel parks the thread
+    // by writing the park address at ESP and returning through it -- onto the
+    // return address of the procedure that called DialogBoxParamA, which then
+    // returned into the park loop once the dialog ended. A real program was
+    // stopped dead by its own "Yes" button.
+    const worker = thread('main');
+    const { made, resumed, written } = callbacks([worker]);
+    made.reserve();
+    const resting = 0x2fbc10;
+    made.suspended(worker,
+        { name: 'DialogBoxParamA', restingStack: resting, hostReturn: 0x414e5f });
+    made.call({ thread: worker, entry: 0x414e70, args: [0xf8, 0x111, 6, 0xfc] });
+    const frameBase = resumed[0][1].esp;
+    assert.equal(written.get(frameBase), SENTINEL);
+    const afterRet16 = frameBase + 4 + 4 * 4;
+    assert.ok(afterRet16 < resting,
+        'after `ret 16` the sentinel stands below the first live dword of the caller');
+    assert.equal(afterRet16 + 4, resting,
+        'and its own `ret` pops exactly the spare, landing at the resting position');
 });
 
 test('every thread is looked at, not only the one on the processor', ()=>{

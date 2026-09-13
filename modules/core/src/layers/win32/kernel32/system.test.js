@@ -217,6 +217,24 @@ test('an unmapped pointer is bad and a mapped one is not', ()=>{
     assert.equal(fns.IsBadCodePtr.handler([0]), 1);
 });
 
+test('a string pointer is bad when its terminator is not in mapped memory', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    host.bytes.set([0x61, 0x62, 0], 0x200);
+    host.bytes.set([0x61, 0, 0x62, 0, 0, 0], 0x300);
+    // Terminated within mapped memory, whatever the count says.
+    assert.equal(fns.IsBadStringPtrA.handler([0x200, 0xffffffff]), 0);
+    assert.equal(fns.IsBadStringPtrW.handler([0x300, 0xffffffff]), 0);
+    // A count that stops before the terminator is enough on its own.
+    host.bytes.fill(0x61, 0xf00, 0x1000);
+    assert.equal(fns.IsBadStringPtrA.handler([0xf00, 16]), 0);
+    // Unterminated to the end of mapped memory, and null, and unmapped.
+    assert.equal(fns.IsBadStringPtrA.handler([0xf00, 0xffffffff]), 1);
+    assert.equal(fns.IsBadStringPtrA.handler([0, 0xffffffff]), 1);
+    assert.equal(fns.IsBadStringPtrW.handler([0x10, 4]), 1);
+    assert.deepEqual([fns.IsBadStringPtrA.argBytes, fns.IsBadStringPtrW.argBytes], [8, 8]);
+});
+
 test('a running process reports that it is still running', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);

@@ -183,15 +183,18 @@ callback — cannot call it directly: the handler runs inside the emulator's own
 cannot be re-entered. So `callGuest` builds a frame below where the calling thread's stack
 comes to rest (`restingStack`: inside the innermost callback frame if there is one, otherwise
 where the suspended host call left it, or `freeStackFor(thread)` while the call still holds the
-processor), writes the sentinel stub's address as the return address and the arguments above it,
-pushes `{ frameBase, settle }` on the thread's callback stack, and
+processor), writes the sentinel stub's address as the return address, the arguments above it
+and one spare dword above those, pushes `{ frameBase, settle }` on the thread's callback stack, and
 `kernel.scheduleResume(thread, { eip: entry, esp: frameBase })`. The handler awaits the promise
 and returns it, so the dispatcher suspends the call.
 
 When the callback `ret`s into the sentinel — a stub registered with `preserveResult`, so EAX
 is moved to ECX before the trap — the trap handler calls `kernel.holdThread()` (the stub is
 about to `ret` into whatever the callback left on the stack), pops the frame, and settles it
-with ECX. Both stacks are per thread and both are stacks: a callback may trap into another host
+with ECX. The spare dword is what that `ret` pops: a stdcall callback has already popped its
+arguments, so ESP is back at the top of the frame, and without the spare the park address is
+written over the first live dword of the procedure whose call suspended — its saved register or
+its return address. Both stacks are per thread and both are stacks: a callback may trap into another host
 function, which may call the guest back in turn.
 
 Three refusals, each a former silent corruption: an entry of zero is refused naming the host

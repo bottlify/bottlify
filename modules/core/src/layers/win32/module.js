@@ -42,6 +42,7 @@ import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
 import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions } from './winmm/functions.js';
+import { createMmioFunctions } from './winmm/mmio.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
@@ -766,6 +767,7 @@ export const win32Module = {
                     callGuest: call=>bridge.callGuest(call),
                     currentThread: ()=>kernel.currentThread(),
                     unwind: seh.unwind,
+                    divergence: config?.divergence,
                 }).table,
                 ...createMsvcrtFunctions({
                     readMemory,
@@ -810,6 +812,15 @@ export const win32Module = {
                     // register the caller never reads and leave it storing
                     // whatever was on the floating-point stack already.
                     fpu: config?.fpu,
+                    // The runtime's threads are kernel32's threads: made and
+                    // ended by the same calls, read from the table at the
+                    // moment of the call, once it exists.
+                    threads: {
+                        start: ({ entry, stackSize, parameter, threadIdOut })=>
+                            libraries['KERNEL32.dll'].CreateThread.handler(
+                                [0, stackSize, entry, parameter, 0, threadIdOut]) >>> 0,
+                        exit: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
+                    },
                 }),
             },
 
@@ -820,7 +831,11 @@ export const win32Module = {
             'WS2_32.dll': winsock.sockets,
             'MSWSOCK.dll': winsock.extensions,
 
-            'WINMM.dll': winmm.table,
+            'WINMM.dll': {
+                ...winmm.table,
+                // The files a program reads its sounds from are the volume's.
+                ...createMmioFunctions({ readMemory, writeMemory, readCString, files: volume }),
+            },
 
             'COMCTL32.dll': createComctlFunctions({
                 readMemory, writeMemory, divergence: config?.divergence,
@@ -835,6 +850,10 @@ export const win32Module = {
                 /** @param {number} bytes */
                 allocate: bytes=>heap.allocate(bytes),
                 folders: SHELL_FOLDERS,
+                // The namespace a folder browser walks is the volume every
+                // file call uses, published through the same vtables COM uses.
+                volume: { ...volume, drives: ()=>filesystem.drives() },
+                publish: comVtables.publish,
             }),
 
             'VERSION.dll': createVersionFunctions({

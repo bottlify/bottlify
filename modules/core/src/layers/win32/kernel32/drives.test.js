@@ -167,3 +167,22 @@ test('GetComputerName reports the length it wrote, and the length it needed', ()
     assert.equal(dword(bytes, 0x104), 8, 'and now the length written, without it');
     assert.equal(String.fromCharCode(...bytes.slice(0x140, 0x148)), 'BOTTLIFY');
 });
+
+test('a label set on a volume is the one its information reads back', ()=>{
+    const { fns, bytes, errors } = setup(['C']);
+    plant(bytes, 0x100, 'C:\\');
+    plant(bytes, 0x120, 'WAR3');
+    assert.equal(fns.SetVolumeLabelA.argBytes, 8);
+    assert.equal(fns.SetVolumeLabelA.handler([0x100, 0x120]), 1);
+    assert.equal(fns.GetVolumeInformationA.handler([0x100, 0x200, 32, 0, 0, 0, 0, 0]), 1);
+    assert.equal(String.fromCharCode(...bytes.slice(0x200, 0x204)), 'WAR3');
+    assert.equal(bytes[0x204], 0);
+
+    // A null name clears it, and a root that is no drive is refused.
+    assert.equal(fns.SetVolumeLabelA.handler([0x100, 0]), 1);
+    assert.equal(fns.GetVolumeInformationA.handler([0x100, 0x200, 32, 0, 0, 0, 0, 0]), 1);
+    assert.equal(bytes[0x200], 0);
+    plant(bytes, 0x140, 'Q:\\');
+    assert.equal(fns.SetVolumeLabelA.handler([0x140, 0x120]), 0);
+    assert.equal(errors.at(-1), 87);
+});

@@ -225,9 +225,19 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
             }
 
             // The frame the callback will find: its return address at the top,
-            // its arguments above that. Built below everything already in use,
-            // so an outer frame is still intact when this one unwinds.
-            const frameBase = resting - 4 * (args.length + 1);
+            // its arguments above that, and one spare dword above those. Built
+            // below everything already in use, so an outer frame is still
+            // intact when this one unwinds.
+            //
+            // The spare is the sentinel's. A stdcall callback pops its own
+            // arguments on the way out, which leaves ESP exactly where the frame
+            // began; the sentinel stub then parks the thread by writing the park
+            // address at ESP and returning through it. Without the spare that
+            // write lands on the first live dword above the frame -- a saved
+            // register, or the return address of the procedure that made the
+            // suspended call -- and the procedure returns into the park loop
+            // once its call is answered, with nothing to say for itself.
+            const frameBase = resting - 4 * (args.length + 2);
             // And it has to land on this thread's own stack. Three separate
             // defects have written a callback frame onto a stack belonging to
             // another thread -- each time because the resting position was read

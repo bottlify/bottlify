@@ -151,6 +151,16 @@ export function createDriveFunctions(host){
     };
 
     /**
+     * The label of each volume, by letter, as a program set it; a volume
+     * nobody has labelled carries the machine's own.
+     *
+     * @type {Map<string, string>}
+     */
+    const labels = new Map();
+    /** @param {string} path */
+    const labelOf = path=>labels.get(letterOf(path) ?? '') ?? VOLUME_LABEL;
+
+    /**
      * Both forms of GetVolumeInformation, and both forms of GetDriveType, differ
      * only in how the path arrives. Sharing the body is not tidiness: two
      * implementations of one answer drift, and the drift shows as a drive that
@@ -302,12 +312,13 @@ export function createDriveFunctions(host){
                 }
                 if (volumeName !== 0)
                 {
-                    if (VOLUME_LABEL.length + 1 > (volumeSize >>> 0))
+                    const label = labelOf(root);
+                    if (label.length + 1 > (volumeSize >>> 0))
                     {
                         host.setLastError(ERROR_INVALID_PARAMETER);
                         return 0;
                     }
-                    host.writeMemory(volumeName >>> 0, latin1(VOLUME_LABEL + '\0'));
+                    host.writeMemory(volumeName >>> 0, latin1(label + '\0'));
                 }
                 if (systemName !== 0)
                 {
@@ -321,6 +332,28 @@ export function createDriveFunctions(host){
                 writeDwordIf(serial >>> 0, VOLUME_SERIAL);
                 writeDwordIf(componentLength >>> 0, MAX_COMPONENT_LENGTH);
                 writeDwordIf(flags >>> 0, FILE_SYSTEM_FLAGS);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetVolumeLabelA(LPCSTR lpRootPathName, LPCSTR lpVolumeName)
+         *
+         * The label GetVolumeInformationA reads back from then on; a null
+         * name removes it. A root that is no drive fails as the query does.
+         */
+        SetVolumeLabelA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([path, name])=>{
+                const root = path === 0 ? '' : host.readCString(path >>> 0, MAX_PATH);
+                const letter = letterOf(root);
+                if (letter === null || !known(root))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                labels.set(letter, name === 0 ? '' : host.readCString(name >>> 0, MAX_PATH));
                 return 1;
             },
         },

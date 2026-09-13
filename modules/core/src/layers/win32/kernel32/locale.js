@@ -736,6 +736,7 @@ export function createLocaleFunctions(host){
          * one way and format it another.
          */
         GetUserDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
+        GetSystemDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
         GetThreadLocale: { argBytes: 0, handler: ()=>LCID_EN_US },
 
         /**

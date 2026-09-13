@@ -43,6 +43,10 @@ const REG_OPENED_EXISTING_KEY = 2;
 
 /** The only type the older RegSetValue/RegQueryValue pair can carry. */
 const REG_SZ = 1;
+const REG_EXPAND_SZ = 2;
+const REG_MULTI_SZ = 7;
+/** The types whose data is text, and so arrives in UTF-16 through a W call. */
+const STRING_TYPES = new Set([REG_SZ, REG_EXPAND_SZ, REG_MULTI_SZ]);
 
 /** Registry key names stop at 255 characters, value names at 16383. */
 const MAX_NAME = 16384;
@@ -169,6 +173,42 @@ export function createRegistryFunctions(host){
      */
     const readText = pointer=>(pointer === 0 ? null : host.readCString(pointer, MAX_NAME));
 
+    /**
+     * The narrow form of UTF-16 bytes: the hive holds every string as the
+     * A calls read it, so what a W call brings is stored narrowed and read
+     * back by either.
+     *
+     * @param {Uint8Array} bytes
+     */
+    const narrowed = bytes=>{
+        const out = new Uint8Array(bytes.length >>> 1);
+        for (let i = 0; i < out.length; i++)
+        {
+            out[i] = bytes[i * 2];
+        }
+        return out;
+    };
+
+    /** @param {number} pointer @returns {string | null} */
+    const readWideText = pointer=>{
+        if (pointer === 0)
+        {
+            return null;
+        }
+        let text = '';
+        for (let at = 0; at < MAX_NAME; at++)
+        {
+            const pair = host.readMemory(pointer + at * 2, 2);
+            const code = pair[0] | pair[1] << 8;
+            if (code === 0)
+            {
+                break;
+            }
+            text += String.fromCharCode(code);
+        }
+        return text;
+    };
+
     /** @param {number} pointer @param {string} text */
     const writeText = (pointer, text)=>{
         const bytes = new Uint8Array(text.length + 1);
@@ -236,19 +276,25 @@ export function createRegistryFunctions(host){
      * RegCreateKeyA is the same call with everything but three arguments
      * defaulted, and two copies of a create would drift.
      */
+    /**
+     * @param {any} key @param {string | null} subKey
+     * @param {number} result @param {number} disposition
+     */
+    const createKey = (key, subKey, result, disposition)=>{
+        if (result === 0)
+        {
+            return ERROR_INVALID_PARAMETER;
+        }
+        const made = hive.create(key, subKey);
+        writeDword(result, allocate(made.key));
+        writeDwordIf(disposition,
+            made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
+        return ERROR_SUCCESS;
+    };
     const createKeyEx = {
         argBytes: 36,
-        handler: onKey((key, [, subKey, , , , , , result, disposition])=>{
-            if (result === 0)
-            {
-                return ERROR_INVALID_PARAMETER;
-            }
-            const made = hive.create(key, readText(subKey));
-            writeDword(result, allocate(made.key));
-            writeDwordIf(disposition,
-                made.created ? REG_CREATED_NEW_KEY : REG_OPENED_EXISTING_KEY);
-            return ERROR_SUCCESS;
-        }),
+        handler: onKey((key, [, subKey, , , , , , result, disposition])=>
+            createKey(key, readText(subKey), result, disposition)),
     };
 
     /** LONG RegOpenKeyExA(HKEY, LPCSTR, DWORD ulOptions, REGSAM, PHKEY) */
@@ -293,6 +339,16 @@ export function createRegistryFunctions(host){
          *                      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD lpdwDisposition)
          */
         RegCreateKeyExA: createKeyEx,
+
+        /**
+         * LONG RegCreateKeyExW(HKEY, LPCWSTR, DWORD, LPWSTR, DWORD, REGSAM,
+         *                      LPSECURITY_ATTRIBUTES, PHKEY, LPDWORD)
+         */
+        RegCreateKeyExW: {
+            argBytes: 36,
+            handler: onKey((key, [, subKey, , , , , , result, disposition])=>
+                createKey(key, readWideText(subKey), result, disposition)),
+        },
 
         /**
          * LONG RegCreateKeyA(HKEY, LPCSTR, PHKEY)
@@ -619,6 +675,25 @@ export function createRegistryFunctions(host){
                     ? new Uint8Array(0)
                     : host.readMemory(data, length).slice();
                 hive.setValue(key, readText(name) ?? '', type >>> 0, bytes);
+                return ERROR_SUCCESS;
+            }),
+        },
+
+        /**
+         * LONG RegSetValueExW(HKEY, LPCWSTR, DWORD, DWORD dwType, const BYTE*, DWORD cbData)
+         *
+         * Text arrives as UTF-16 and is stored as the hive keeps every
+         * string, so a value set through here reads back through the A call.
+         */
+        RegSetValueExW: {
+            argBytes: 24,
+            handler: onKey((key, [, name, , type, data, size])=>{
+                const length = size >>> 0;
+                const bytes = data === 0 || length === 0
+                    ? new Uint8Array(0)
+                    : host.readMemory(data, length).slice();
+                hive.setValue(key, readWideText(name) ?? '', type >>> 0,
+                    STRING_TYPES.has(type >>> 0) ? narrowed(bytes) : bytes);
                 return ERROR_SUCCESS;
             }),
         },

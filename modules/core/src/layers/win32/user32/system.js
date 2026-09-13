@@ -404,6 +404,45 @@ export function createSystemFunctions({ host, live, windows, classes }){
         }
     };
 
+    /**
+     * A terminated UTF-16 string, read a piece at a time like the byte one.
+     *
+     * @param {number} address
+     */
+    const readWideString = address=>{
+        const STEP = 128;
+        const LIMIT = 0x20000;
+        let text = '';
+        for (let at = 0; at < LIMIT; at += STEP)
+        {
+            const piece = host.readMemory(address + at, STEP);
+            for (let i = 0; i + 1 < piece.length; i += 2)
+            {
+                const code = piece[i] | piece[i + 1] << 8;
+                if (code === 0)
+                {
+                    return text;
+                }
+                text += String.fromCharCode(code);
+            }
+        }
+        return text;
+    };
+
+    /** @param {number} address @param {string} text @param {number} limit */
+    const writeWideString = (address, text, limit)=>{
+        const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
+        const bytes = new Uint8Array((clipped.length + 1) * 2);
+        for (let index = 0; index < clipped.length; index++)
+        {
+            const code = clipped.charCodeAt(index);
+            bytes[index * 2] = code & 0xff;
+            bytes[index * 2 + 1] = code >>> 8;
+        }
+        host.writeMemory(address, bytes);
+        return clipped.length;
+    };
+
     /** @param {number} address @param {string} text @param {number} limit */
     const writeString = (address, text, limit)=>{
         const clipped = limit > 0 ? text.slice(0, limit - 1) : '';
@@ -1197,6 +1236,27 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * int wsprintfW(LPWSTR lpOut, LPCWSTR lpFmt, ...)
+         *
+         * The wide form: the format and the output are UTF-16, `%s` takes a
+         * wide string and `%S` a byte one, the reverse of the byte form.
+         */
+        wsprintfW: {
+            convention: 'cdecl',
+            argBytes: 8 + 4 * 32,
+            /** @param {number[]} args */
+            handler: args=>{
+                const readString = (/** @type {number} */ address)=>
+                    (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
+                const readWide = (/** @type {number} */ address)=>
+                    (address >>> 0) === 0 ? '(null)' : readWideString(address >>> 0);
+                const text = formatToString(readWide(args[1]), args.slice(2), readString,
+                    { readWideString: readWide, wide: true });
+                return writeWideString(args[0], text, text.length + 1);
+            },
+        },
+
+        /**
          * int wvsprintfA(LPSTR lpOut, LPCSTR lpFmt, va_list arglist)
          *
          * wsprintfA with its arguments already on the caller's stack and a
@@ -1725,6 +1785,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+        },
+
+        /**
+         * int GetKeyboardType(int nTypeFlag)
+         *
+         * The enhanced 101/102-key keyboard every machine of this era reports:
+         * type 4, subtype 0, twelve function keys. Anything else asked is no
+         * keyboard property and answers zero, as the real call does.
+         */
+        GetKeyboardType: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([flag])=>[4, 0, 12][flag >>> 0] ?? 0,
         },
 
         /**

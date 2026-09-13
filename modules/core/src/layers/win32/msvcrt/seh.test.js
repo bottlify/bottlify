@@ -204,3 +204,18 @@ test('longjmp with zero still returns something setjmp cannot mistake', async()=
 
     assert.equal(m.registers().eax, 1);
 });
+
+test('the C++ frame handler is declared with its four arguments, claims nothing, and says so', ()=>{
+    // Registered by every C++ function with a try or a destructor to run,
+    // reached only by a throw. Until the dispatcher exists, the honest answer
+    // is to leave the exception to the next frame and report the divergence,
+    // never to guess at the function's tables.
+    const m = machine();
+    /** @type {string[]} */
+    const diverged = [];
+    const crt = createCrtSeh({ ...m.host, divergence: api=>diverged.push(api) });
+    assert.equal(crt.table.__CxxFrameHandler.argBytes, 16);
+    assert.equal(crt.table.__CxxFrameHandler.handler(),
+        Disposition.CONTINUE_SEARCH);
+    assert.deepEqual(diverged, ['__CxxFrameHandler']);
+});

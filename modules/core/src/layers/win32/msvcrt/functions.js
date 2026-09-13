@@ -30,6 +30,8 @@ import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
+import { createStdioFunctions } from './stdio.js';
+import { createThreadFunctions } from './threads.js';
 
 /** How many argument slots a `va_list` is read for, since it carries no count. */
 const VA_LIST_SLOTS = 64;
@@ -79,6 +81,10 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *           Ends the process; answers with what the calling thread must return,
  *           since `exit` does not come back.
  * @property {(message: string) => void} [abort]
+ * @property {import('./threads.js').ThreadSeam} [threads]
+ *           Where a thread the runtime starts is made and ended: the same
+ *           kernel path CreateThread and ExitThread take. Absent, the thread
+ *           functions stay unexported.
  */
 
 /**
@@ -737,6 +743,17 @@ export function createMsvcrtFunctions(host){
                 files: host.files,
             })
             : {}),
+        ...(host.files && host.allocate && host.free
+            ? createStdioFunctions({
+                readMemory: host.readMemory,
+                writeMemory: host.writeMemory,
+                readCString: host.readCString,
+                allocate: host.allocate,
+                free: host.free,
+                files: host.files,
+            })
+            : {}),
+        ...(host.threads ? createThreadFunctions(host.threads) : {}),
         ...(host.fpu
             ? createMathFunctions({ writeMemory: host.writeMemory, fpu: host.fpu })
             : {}),

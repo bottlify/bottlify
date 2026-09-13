@@ -106,11 +106,11 @@ instantiation of the module reports (method in "Inventory" below):
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
 | `KERNEL32.dll` | `kernel32/` | 256 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O. |
-| `msvcrt.dll` | `msvcrt/` | 209 (158 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, time, C++ support (`cxx.js`), CRT startup, CRT exception helpers. |
+| `msvcrt.dll` | `msvcrt/` | 209 (158 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, CRT exception helpers. |
 | `USER32.dll` | `user32/` | 145 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
 | `GDI32.dll` | `gdi32/` | 75 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
-| `WINMM.dll` | `winmm/` | 47 | `timeGetTime`, wave-out with a real play cursor and a callback thread; honest refusal for midi, mixer, aux, joystick, MCI and recording. |
+| `WINMM.dll` | `winmm/` | 47 | `timeGetTime`, wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 33 each | One socket registry under both names, over an injected adapter (loopback by default). |
 | `ADVAPI32.dll` | `advapi32/` | 18 | The registry API over the hive, `GetUserNameA`, SIDs. |
 | `COMCTL32.dll` | `comctl32/` | 14 | Image lists (indices only), mouse tracking. |
@@ -118,7 +118,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `ole32.dll` | `ole32/` | 13 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 9 | "There is no input method" — which is the state a game asks for. |
-| `SHELL32.dll` | `shell32/` | 7 | Documented refusals (`ShellExecute`, folder browse) and the drag-and-drop truths. |
+| `SHELL32.dll` | `shell32/` | 7 | Documented refusals (`ShellExecute`, folder browse), the drag-and-drop truths, and the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume). |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
 | `VERSION.dll` | `version/` | 3 | The version block read out of a file's own image. |
 | `COMDLG32.dll` | `comdlg32/` | 3 | File dialogs, answered as cancelled. |
@@ -294,8 +294,15 @@ Stated as the code states them.
   other, while `EnumDisplaySettingsA` lists several. `EnumDisplayDevicesA` reports no devices.
 - **One process, no children.** `CreateProcess`/`WinExec` record the request and succeed; the child
   replaces the parent once the parent has nothing left to do. `ShellExecute` answers
-  `SE_ERR_NOASSOC`/`SE_ERR_ACCESSDENIED`; `SHBrowseForFolder` and the common dialogs are cancelled;
-  `SHGetMalloc` writes null.
+  `SE_ERR_NOASSOC`/`SE_ERR_ACCESSDENIED`; `SHBrowseForFolder` and the common dialogs are cancelled.
+- **The shell namespace is the volume.** `SHGetDesktopFolder` answers an `IShellFolder` whose one
+  child is the computer (`CSIDL_DRIVES`), under which the drives and their directories are
+  enumerated (`IEnumIDList`), bound to, compared, named and parsed; every item id carries the full
+  text of what it names, so a combined list turns back into a path. No view objects, no
+  renaming, no storage binding (`E_NOTIMPL`).
+- **`__CxxFrameHandler` catches nothing.** It is declared with its four arguments and answers
+  `ExceptionContinueSearch` with a divergence notice; a C++ exception thrown through such a
+  frame is not caught by its `try` and the frame's destructors do not run.
 - **No network, no HTTP, by default.** Winsock runs over a loopback adapter; WinInet without a
   transport fails with "cannot connect". Both libraries load so a program that imports and never
   uses them still starts.

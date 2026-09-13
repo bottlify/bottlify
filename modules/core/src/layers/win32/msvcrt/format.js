@@ -41,6 +41,8 @@ const MAX_STRING = 1 << 20;
  * @property {number} precision   -1 when the format gave none.
  * @property {boolean} wide       This conversion's string or char is UTF-16.
  * @property {boolean} narrow     ...or explicitly not, overriding the default.
+ * @property {boolean} familyWide The format belongs to the wprintf family,
+ *                                where an unmodified %s is wide and %S is not.
  * @property {boolean} sixtyFour  The argument occupies two stack slots.
  * @property {string} conversion  Empty when the format ended mid-specifier.
  * @property {number} end         Index just past the specifier.
@@ -208,11 +210,32 @@ function parseSpec(format, start, take){
         precision,
         wide,
         narrow,
+        familyWide: false,
         sixtyFour,
         conversion: i < format.length ? format[i] : '',
         end: i + 1,
     };
 }
+
+/**
+ * Whether a string or character conversion reads UTF-16: an explicit
+ * modifier decides, and otherwise the capital form is the opposite of the
+ * family's own width, which is what makes it useful at all.
+ *
+ * @param {Spec} spec
+ */
+const wideText = spec=>{
+    if (spec.narrow)
+    {
+        return false;
+    }
+    if (spec.wide)
+    {
+        return true;
+    }
+    const capital = spec.conversion === 'S' || spec.conversion === 'C';
+    return capital !== spec.familyWide;
+};
 
 /**
  * @typedef {Object} Rendered
@@ -312,17 +335,13 @@ function convert(spec, source, produced, writeCount){
             return { prefix: '', body: '%', numeric: false };
         case 'c':
         case 'C': {
-            // %C is the opposite width of the family's default, which is what
-            // makes it useful at all.
-            const asWide = spec.narrow ? false : spec.wide || spec.conversion === 'C';
-            const code = take() & (asWide ? 0xffff : 0xff);
+            const code = take() & (wideText(spec) ? 0xffff : 0xff);
             return { prefix: '', body: String.fromCharCode(code), numeric: false };
         }
         case 's':
         case 'S': {
-            const asWide = spec.narrow ? false : spec.wide || spec.conversion === 'S';
             const pointer = take() >>> 0;
-            const text = pointer === 0 ? NULL_STRING : readText(pointer, asWide);
+            const text = pointer === 0 ? NULL_STRING : readText(pointer, wideText(spec));
             const body = spec.precision >= 0 ? text.slice(0, spec.precision) : text;
             return { prefix: '', body, numeric: false };
         }
@@ -468,10 +487,7 @@ export function formatToString(format, varargs, readString, options = {}){
         }
 
         const spec = parseSpec(format, i + 1, take);
-        if (options.wide && !spec.narrow)
-        {
-            spec.wide = true;
-        }
+        spec.familyWide = options.wide === true;
         if (spec.conversion === '')
         {
             out += '%';

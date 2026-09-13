@@ -63,6 +63,8 @@ export const NO_TRY_LEVEL = 0xffffffff;
  *              => Promise<number>} callGuest
  * @property {() => any} [currentThread]
  * @property {(targetFrame: number, address: number) => Promise<any>} unwind
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a handler that answers differently from the runtime says so.
  */
 
 /**
@@ -178,6 +180,29 @@ export function createCrtSeh(host){
         table: {
             /** EXCEPTION_DISPOSITION _except_handler3(record, frame, context, dispatcher) */
             _except_handler3: { argBytes: 16, handler: exceptHandler3 },
+
+            /**
+             * EXCEPTION_DISPOSITION __CxxFrameHandler(record, frame, context,
+             *   dispatcher)
+             *
+             * The C++ dispatcher, registered by every function with a `try`
+             * or an object to destroy and reached only when something is
+             * thrown through it. Its tables -- the function's unwind map and
+             * catch blocks, found through EAX -- are not read here: the frame
+             * claims nothing and the search goes on outward, so a thrown
+             * exception is not caught by the block that would catch it, and
+             * the destructors of the frame do not run. Said out loud when it
+             * happens, because a program that reaches here is one this build
+             * cannot yet run correctly.
+             */
+            __CxxFrameHandler: {
+                argBytes: 16,
+                handler: ()=>{
+                    host.divergence?.('__CxxFrameHandler',
+                        'C++ exception dispatch is not implemented: the frame catches nothing');
+                    return Disposition.CONTINUE_SEARCH;
+                },
+            },
 
             /**
              * int _setjmp(jmp_buf env)

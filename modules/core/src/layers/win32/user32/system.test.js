@@ -560,6 +560,51 @@ test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
         'and enough slots are read for a format with several conversions');
 });
 
+test('wsprintfW formats wide, takes a wide %s and a narrow %S, and writes UTF-16', ()=>{
+    const { memory, fns } = setup();
+    /** @param {number} at @param {string} text */
+    const putWide = (at, text)=>{
+        for (let i = 0; i <= text.length; i++)
+        {
+            const code = i < text.length ? text.charCodeAt(i) : 0;
+            memory.bytes[at + i * 2] = code & 0xff;
+            memory.bytes[at + i * 2 + 1] = code >>> 8;
+        }
+    };
+    /** @param {number} at */
+    const readWide = at=>{
+        let text = '';
+        for (let i = 0; ; i++)
+        {
+            const code = memory.bytes[at + i * 2] | memory.bytes[at + i * 2 + 1] << 8;
+            if (code === 0)
+            {
+                return text;
+            }
+            text += String.fromCharCode(code);
+        }
+    };
+    putWide(FORMAT_BUFFER, '%s: %S #%d');
+    putWide(TEXT_BUFFER, 'Wide');
+    memory.putString(TEXT_BUFFER + 0x40, 'narrow');
+
+    const written = fns.wsprintfW.handler(
+        [OUT_BUFFER, FORMAT_BUFFER, TEXT_BUFFER, TEXT_BUFFER + 0x40, 7]);
+    assert.equal(readWide(OUT_BUFFER), 'Wide: narrow #7');
+    assert.equal(written, 'Wide: narrow #7'.length);
+    assert.equal(fns.wsprintfW.convention, 'cdecl');
+    assert.equal(fns.wsprintfW.argBytes, fns.wsprintfA.argBytes);
+});
+
+test('the keyboard is the enhanced one, and anything else asked of it is nothing', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetKeyboardType.handler([0]), 4, 'type: enhanced 101/102-key');
+    assert.equal(fns.GetKeyboardType.handler([1]), 0, 'subtype');
+    assert.equal(fns.GetKeyboardType.handler([2]), 12, 'function keys');
+    assert.equal(fns.GetKeyboardType.handler([3]), 0);
+    assert.equal(fns.GetKeyboardType.argBytes, 4);
+});
+
 test('capture is a pair: releasing clears what setting recorded', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);

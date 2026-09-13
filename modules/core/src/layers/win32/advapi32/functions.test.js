@@ -127,6 +127,46 @@ function setup(){
     return { memory, hive, fns, create, setString };
 }
 
+test('a key made and a value set through the wide calls read back through the narrow ones', ()=>{
+    const { memory, fns } = setup();
+    /** @param {number} at @param {string} text */
+    const putWide = (at, text)=>{
+        for (let i = 0; i <= text.length; i++)
+        {
+            const code = i < text.length ? text.charCodeAt(i) : 0;
+            memory.bytes[at + i * 2] = code & 0xff;
+            memory.bytes[at + i * 2 + 1] = code >>> 8;
+        }
+    };
+    putWide(SUBKEY, 'Software\\Vendor\\Wide');
+    assert.equal(fns.RegCreateKeyExW.handler(
+        [HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, 0, 0, 0, OUT_HANDLE, OUT_DISPOSITION]), ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_DISPOSITION), 1, 'REG_CREATED_NEW_KEY');
+    const key = memory.dword(OUT_HANDLE);
+
+    // Text arrives as UTF-16 with its byte count; a binary value is untouched.
+    putWide(NAME, 'InstallPath');
+    putWide(INPUT, 'C:\\Games');
+    assert.equal(fns.RegSetValueExW.handler([key, NAME, 0, REG_SZ, INPUT, 9 * 2]), ERROR_SUCCESS);
+    memory.putString(NAME, 'installpath');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueExA.handler([key, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_TYPE), REG_SZ);
+    assert.equal(memory.string(OUT_DATA), 'C:\\Games');
+    assert.equal(memory.dword(OUT_SIZE), 9);
+
+    putWide(NAME, 'Flags');
+    memory.putDword(INPUT, 0x01020304);
+    assert.equal(fns.RegSetValueExW.handler([key, NAME, 0, REG_BINARY, INPUT, 4]), ERROR_SUCCESS);
+    memory.putString(NAME, 'Flags');
+    memory.putDword(OUT_SIZE, 0x40);
+    assert.equal(fns.RegQueryValueExA.handler([key, NAME, 0, OUT_TYPE, OUT_DATA, OUT_SIZE]),
+        ERROR_SUCCESS);
+    assert.equal(memory.dword(OUT_DATA), 0x01020304);
+    assert.deepEqual([fns.RegCreateKeyExW.argBytes, fns.RegSetValueExW.argBytes], [36, 24]);
+});
+
 test('a key is created, reopened whatever its case, and read back', ()=>{
     const { memory, fns, create, setString } = setup();
     const created = create('Software\\Vendor\\Product');

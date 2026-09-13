@@ -266,6 +266,47 @@ export function createSystemFunctions(host){
         }
     };
 
+    /**
+     * Whether a string can be read to its terminator, or to a count of
+     * characters, without leaving mapped memory. Probed a page at a time
+     * rather than a character at a time: the count is usually unlimited and
+     * the terminator is what stops the walk.
+     *
+     * @param {number} address @param {number} count @param {1 | 2} width
+     */
+    const stringReadable = (address, count, width)=>{
+        if (address === 0)
+        {
+            return false;
+        }
+        let at = address;
+        let left = count;
+        while (left > 0)
+        {
+            const span = Math.min(left * width, PAGE_SIZE - (at & (PAGE_SIZE - 1)));
+            /** @type {Uint8Array} */
+            let bytes;
+            try
+            {
+                bytes = host.readMemory(at, span);
+            }
+            catch (e){
+                void e;
+                return false;
+            }
+            for (let i = 0; i + width <= bytes.length; i += width)
+            {
+                if (bytes[i] === 0 && (width === 1 || bytes[i + 1] === 0))
+                {
+                    return true;
+                }
+            }
+            at += span;
+            left -= span / width;
+        }
+        return true;
+    };
+
     /** @param {number} handle @param {string} [type] */
     const object = (handle, type)=>{
         try
@@ -533,6 +574,25 @@ export function createSystemFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>(pointer >>> 0) === 0 || !readable(pointer >>> 0, 1) ? 1 : 0,
+        },
+
+        /**
+         * BOOL IsBadStringPtrA(LPCSTR lpsz, UINT_PTR ucchMax)
+         *
+         * Readable up to its terminator or to the count, whichever comes
+         * first; the count is usually -1, meaning the terminator decides.
+         */
+        IsBadStringPtrA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, count])=>stringReadable(pointer >>> 0, count >>> 0, 1) ? 0 : 1,
+        },
+
+        /** BOOL IsBadStringPtrW(LPCWSTR lpsz, UINT_PTR ucchMax) */
+        IsBadStringPtrW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([pointer, count])=>stringReadable(pointer >>> 0, count >>> 0, 2) ? 0 : 1,
         },
 
         /**

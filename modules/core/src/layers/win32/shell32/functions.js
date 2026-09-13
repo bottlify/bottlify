@@ -24,6 +24,8 @@
  * system answers when nobody has dragged anything.
  */
 
+import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
+
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
 const SE_ERR_ACCESSDENIED = 5;
 const SE_ERR_NOASSOC = 31;
@@ -42,8 +44,11 @@ const SHELLEXECUTEINFO_HINSTAPP = 32;
 /** SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. */
 const SHFILEOPSTRUCT_ABORTED = 20;
 const E_OUTOFMEMORY = 0x8007000e | 0;
-/** E_FAIL, for the shell namespace this build does not have. */
+/** E_FAIL, for a namespace call in a build with no volume behind it. */
 const E_FAIL = 0x80004005 | 0;
+
+/** The computer: a folder with no path, whose children are the drives. */
+const CSIDL_DRIVES = 0x11;
 
 /** CSIDL_FLAG_CREATE and its kin ride in the high bits of the folder id. */
 const CSIDL_FLAG_MASK = 0xff00;
@@ -98,6 +103,12 @@ const CSIDL_FOLDERS = Object.freeze({
  *           fail as an out-of-memory would.
  * @property {Readonly<Record<string, string>>} [folders]
  *           The shell folders by the registry's names; absent, no CSIDL is known.
+ * @property {import('./namespace.js').NamespaceVolume} [volume]
+ *           The volume the namespace walks. Absent, there is no namespace and
+ *           SHGetDesktopFolder is refused.
+ * @property {(object: import('../oleaut32/objects.js').ComAdapter, interfaceId: string) => number} [publish]
+ *           Puts a namespace object's interface into guest memory. Absent, as
+ *           without the volume.
  */
 
 /** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
@@ -138,46 +149,35 @@ export function createShellFunctions(host){
         }
     };
 
+    const memory = host.readMemory
+        ? { readMemory: host.readMemory, writeMemory: host.writeMemory } : null;
+    const namespace = memory && host.volume && host.publish && host.allocate
+        ? createShellNamespace({
+            publish: host.publish, allocate: host.allocate, memory, volume: host.volume,
+        }) : null;
+
     /**
-     * An item id list of one item whose data is the path, then the empty item
-     * that ends every list: `cb` is a WORD counting itself. A list made this
-     * way carries its path, so turning it back needs no table.
+     * An item id list of one item whose data is the text (a path, or the
+     * computer's `::` name), then the empty item that ends every list. A
+     * list made this way carries what it names, so turning it back needs no
+     * table.
      *
-     * @param {string} path
+     * @param {string} text
      * @returns {number} where it was put, or zero
      */
-    const listFor = path=>{
-        const text = sz(path);
-        const item = 2 + text.length;
+    const listFor = text=>{
         if (!host.allocate)
         {
             return 0;
         }
-        const at = host.allocate(item + 2);
-        const bytes = new Uint8Array(item + 2);
-        bytes[0] = item & 0xff;
-        bytes[1] = item >>> 8;
-        bytes.set(text, 2);
+        const bytes = listBytes(text);
+        const at = host.allocate(bytes.length);
         host.writeMemory(at, bytes);
         return at;
     };
 
     /** @param {number} list @returns {string | null} */
-    const pathOf = list=>{
-        if (list === 0 || !host.readMemory)
-        {
-            return null;
-        }
-        const header = host.readMemory(list, 2);
-        const item = header[0] | header[1] << 8;
-        if (item < 3)
-        {
-            return null;
-        }
-        const text = host.readMemory(list + 2, item - 2);
-        const end = text.indexOf(0);
-        return String.fromCharCode(...text.subarray(0, end < 0 ? text.length : end));
-    };
+    const pathOf = list=>(list === 0 || !memory ? null : pathOfList(memory, list));
 
     const table = {
         /**
@@ -270,10 +270,11 @@ export function createShellFunctions(host){
         /**
          * BOOL SHGetPathFromIDListA(PCIDLIST_ABSOLUTE pidl, LPSTR pszPath)
          *
-         * A list made by the special-folder call below carries its path; any
-         * other -- the browse above never makes one -- has none, and the
-         * buffer is cleared so a caller that reads it regardless reads an
-         * empty path.
+         * A list made here carries its path, and one the program combined
+         * from several of ours ends in the item that does; the computer's
+         * list, and any other -- the browse above never makes one -- has none,
+         * and the buffer is cleared so a caller that reads it regardless reads
+         * an empty path.
          */
         SHGetPathFromIDListA: {
             argBytes: 8,
@@ -433,7 +434,8 @@ export function createShellFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([, csidl, out])=>{
-                const folder = folderOf(csidl | 0);
+                const folder = ((csidl | 0) & ~CSIDL_FLAG_MASK) === CSIDL_DRIVES
+                    ? MY_COMPUTER : folderOf(csidl | 0);
                 if (folder === null)
                 {
                     host.writeMemory(out >>> 0, dword(0));
@@ -448,18 +450,25 @@ export function createShellFunctions(host){
         /**
          * HRESULT SHGetDesktopFolder(IShellFolder **ppshf)
          *
-         * The root of the shell namespace, which a folder browser walks. There
-         * is none here: E_FAIL, and a null where the interface would go, so a
-         * caller that ignores the HRESULT fails on a null it can see.
+         * The root of the shell namespace, which a folder browser walks: the
+         * computer under it, the drives under that, the volume's directories
+         * under those. Without a volume there is none: E_FAIL, and a null
+         * where the interface would go, so a caller that ignores the HRESULT
+         * fails on a null it can see.
          */
         SHGetDesktopFolder: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) !== 0)
+                if ((out >>> 0) === 0)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    return E_INVALIDARG;
                 }
+                if (namespace)
+                {
+                    return namespace.desktop(out >>> 0);
+                }
+                host.writeMemory(out >>> 0, dword(0));
                 host.divergence?.('SHGetDesktopFolder',
                     'no shell namespace: reports E_FAIL with a null interface');
                 return E_FAIL;
