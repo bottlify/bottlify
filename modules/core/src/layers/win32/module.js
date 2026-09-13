@@ -46,6 +46,7 @@ import { createNoticeThread } from './winmm/thread.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { createVersionFunctions } from './version/functions.js';
+import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
@@ -696,6 +697,7 @@ export const win32Module = {
                     readCString,
                     readWideString,
                     files: volume,
+                    imagePath: ()=>modules.imagePath(),
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
                     handles,
@@ -797,6 +799,8 @@ export const win32Module = {
                 // expanded file: the same volume every other file call uses.
                 files: volume,
             }),
+
+            'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
 
             'COMDLG32.dll': createCommonDialogFunctions({ readMemory }),
 

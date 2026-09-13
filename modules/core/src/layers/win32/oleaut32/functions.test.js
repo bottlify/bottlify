@@ -113,6 +113,19 @@ const setUp = ()=>{
     fx = createAutomationFunctions(host);
 };
 
+test('error information is held once, handed over once, and absent by default', ()=>{
+    setUp();
+    host.putU32(SLOT, 0xdeadbeef);
+    assert.equal(call('GetErrorInfo', [0, SLOT]), 1, 'S_FALSE: nothing set');
+    assert.equal(host.u32(SLOT), 0, 'and the out pointer is cleared');
+    assert.equal(call('SetErrorInfo', [0, 0x12340]), 0);
+    assert.equal(call('GetErrorInfo', [0, SLOT]), 0);
+    assert.equal(host.u32(SLOT), 0x12340);
+    assert.equal(call('GetErrorInfo', [0, SLOT]), 1, 'collected once, gone');
+    assert.equal(fx.GetErrorInfo.argBytes, 8);
+    assert.equal(fx.SetErrorInfo.argBytes, 8);
+});
+
 test('a BSTR carries its byte count in front of the pointer it hands out', ()=>{
     setUp();
     host.putWide(TEXT, 'hi');

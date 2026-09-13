@@ -70,6 +70,8 @@ const VARIANT_ALPHABOOL = 0x0002;
 
 /** HRESULTs this file produces. */
 const S_OK = 0x00000000;
+/** What GetErrorInfo answers when nothing has been set. */
+const S_FALSE = 0x00000001;
 const E_INVALIDARG = 0x80070057;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_TYPEMISMATCH = 0x80020005;
@@ -134,6 +136,9 @@ export function createAutomationFunctions(host){
         new DataView(bytes.buffer).setUint16(0, value & 0xffff, true);
         host.writeMemory(address, bytes);
     };
+
+    /** The IErrorInfo a program last set and nothing has yet collected. */
+    let heldErrorInfo = 0;
 
     /** @param {number} address @param {number} value */
     const writeU32 = (address, value)=>{
@@ -763,6 +768,40 @@ export function createAutomationFunctions(host){
                 return changeType(pvargDest >>> 0, pvarSrc >>> 0, wFlags & 0xffff, vt & 0xffff);
             },
         },
+
+        /**
+         * HRESULT SetErrorInfo(ULONG dwReserved, IErrorInfo *perrinfo)
+         * HRESULT GetErrorInfo(ULONG dwReserved, IErrorInfo **pperrinfo)
+         *
+         * The one error-information slot, per thread on Windows and one for
+         * the process here, where a single thread makes these calls. Getting
+         * it hands the interface over and clears the slot, which is why a
+         * caller that gets it twice finds nothing the second time; a call
+         * with no reference held answers S_FALSE with a null, the documented
+         * shape a caller checks before it dereferences.
+         */
+        SetErrorInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, errorInfo])=>{
+                heldErrorInfo = errorInfo >>> 0;
+                return S_OK;
+            },
+        },
+
+        GetErrorInfo: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                const held = heldErrorInfo;
+                heldErrorInfo = 0;
+                if ((out >>> 0) !== 0)
+                {
+                    writeU32(out >>> 0, held);
+                }
+                return held === 0 ? S_FALSE : S_OK;
+            },
+        },
     };
 }
 
@@ -796,4 +835,6 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
+    200: 'GetErrorInfo',
+    201: 'SetErrorInfo',
 });

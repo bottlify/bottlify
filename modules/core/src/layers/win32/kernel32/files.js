@@ -86,6 +86,8 @@ const FILE_ATTRIBUTE_ARCHIVE = 0x20;
 
 /** The ANSI path limit, and the size of cFileName with it. */
 const MAX_PATH = 260;
+/** A search path list is many of them; longer is a pointer that is not a string. */
+const MAX_PATH_LIST = 32767;
 
 /**
  * The path separator, as a named constant rather than a literal, because it is
@@ -124,6 +126,9 @@ const COPY_CHUNK = 1 << 20;
  * contract -- callers concatenate a file name onto it directly.
  */
 const TEMP_PATH = 'C:\\WINDOWS\\TEMP\\';
+/** The two system directories a search with no path of its own ends in. */
+const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
+const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
 
 /**
  * WIN32_FIND_DATAA, laid out the way the guest compiled it.
@@ -218,6 +223,10 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *              closed: (handle: number, object: any) => void }} [ports]
  *           Completion ports. Absent, overlapped I/O still reads and writes;
  *           what it does not do is tell anyone it finished.
+ * @property {() => string} [imagePath]
+ *           The running program, whose directory is the first place a search
+ *           with no path of its own looks. Absent, the search starts at the
+ *           current directory.
  */
 
 /** @param {number} value */
@@ -1277,6 +1286,64 @@ export function createFileFunctions(host){
         /** BOOL SetFileAttributes(LPCSTR, DWORD dwFileAttributes) -- one body, both spellings. */
         SetFileAttributesA: setFileAttributes.ansi,
         SetFileAttributesW: setFileAttributes.wide,
+
+        /**
+         * DWORD SearchPathA(LPCSTR lpPath, LPCSTR lpFileName, LPCSTR lpExtension,
+         *                   DWORD nBufferLength, LPSTR lpBuffer, LPSTR *lpFilePart)
+         *
+         * A path list given is searched, separated by semicolons; none given
+         * is the documented order -- the program's directory, the current
+         * one, the system and Windows directories. The extension is added
+         * only to a name that has none of its own, and a name already
+         * qualified with a directory is looked for where it says. The answer
+         * is shaped as GetFullPathName's: the length written, the size
+         * needed when the buffer is short, zero and ERROR_FILE_NOT_FOUND when
+         * nothing is there.
+         */
+        SearchPathA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([pathList, fileName, extension, size, buffer, filePart])=>{
+                let name = host.readCString(fileName >>> 0, MAX_PATH);
+                if (name === '')
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const bare = name.slice(
+                    Math.max(name.lastIndexOf(SEPARATOR), name.lastIndexOf('/')) + 1);
+                if ((extension >>> 0) !== 0 && !bare.includes('.'))
+                {
+                    name += host.readCString(extension >>> 0, MAX_PATH);
+                }
+                const qualified = /^[A-Za-z]:|^[\\/]/.test(name)
+                    || name.includes(SEPARATOR) || name.includes('/');
+                const directories = qualified
+                    ? ['']
+                    : (pathList >>> 0) !== 0
+                        ? host.readCString(pathList >>> 0, MAX_PATH_LIST).split(';')
+                        : [parentOf(host.imagePath?.() ?? ''), files.currentDirectory(),
+                            SYSTEM_DIRECTORY, WINDOWS_DIRECTORY];
+                for (const directory of directories)
+                {
+                    const candidate = fullPath(directory === ''
+                        ? name
+                        : `${directory.replace(/[\\/]$/, '')}${SEPARATOR}${name}`);
+                    const entry = files.stat(candidate);
+                    if (!entry?.exists || entry.isDirectory)
+                    {
+                        continue;
+                    }
+                    const written = writeStringTo(buffer >>> 0, size, candidate);
+                    if (written === candidate.length)
+                    {
+                        writeDwordIf(filePart >>> 0,
+                            (buffer >>> 0) + candidate.lastIndexOf(SEPARATOR) + 1);
+                    }
+                    return written;
+                }
+                return fail(ERROR_FILE_NOT_FOUND);
+            },
+        },
 
         /** DWORD GetFullPathName(LPCSTR, DWORD, LPSTR, LPSTR *lpFilePart) -- one body, both spellings. */
         GetFullPathNameA: getFullPathName.ansi,

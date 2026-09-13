@@ -443,16 +443,45 @@ test('WM_INITDIALOG carries the parameter the caller passed', ()=>{
     assert.equal(memory.u32(OUT + 12), 0xcafe, 'the initialisation parameter');
 });
 
-test('an extended template is refused rather than read as an ordinary one', ()=>{
-    // Every field past the signature sits somewhere else. Read with the
-    // ordinary layout it would produce a dialog of plausible nonsense.
+test('an extended template is read with its own layout, font block and item ids', ()=>{
+    // Every field past the signature sits somewhere else: the style comes
+    // after the extended style, the font carries a weight and a charset, an
+    // item id is a DWORD and the creation-data count does not count itself.
+    // Read with the ordinary layout it would be a dialog of plausible nonsense.
     const { memory, fns } = setup();
     const template = writer(memory, TEMPLATE);
     template.u16(1).u16(0xffff);
-    template.u32(0).u32(0).u32(0).u16(2).u16(0).u16(0).u16(100).u16(80);
+    template.u32(0).u32(0x00000001).u32(DS_SETFONT | 0x80000000).u16(2);
+    template.u16(10).u16(20).u16(40).u16(20);
+    template.sz('').sz('').sz('Progress');
+    template.u16(8).u16(400).u16(0x0100).sz('MS Sans Serif');
+    for (const control of [
+        { id: 0x10064, x: 4, y: 8, cx: 20, cy: 6, ordinal: 0x82, title: 'Preparing', extra: 4 },
+        { id: 101, x: 4, y: 20, cx: 20, cy: 6, ordinal: 0x80, title: 'Cancel', extra: 0 },
+    ])
+    {
+        template.align();
+        template.u32(0).u32(0).u32(0);
+        template.u16(control.x).u16(control.y).u16(control.cx).u16(control.cy);
+        template.u32(control.id);
+        template.ordinal(control.ordinal).sz(control.title);
+        template.u16(control.extra);
+        for (let at = 0; at < control.extra; at++)
+        {
+            template.u16(0xeeee);
+            at++;
+        }
+    }
 
-    assert.equal(fns.CreateDialogIndirectParamA.handler(
-        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]), 0);
+    const dialog = fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.notEqual(dialog, 0);
+    const label = fns.GetDlgItem.handler([dialog, 100]);
+    const button = fns.GetDlgItem.handler([dialog, 101]);
+    assert.notEqual(label, 0, 'the id is the low word of the DWORD');
+    assert.notEqual(button, 0, 'and the creation data of the first item was stepped over');
+    assert.equal(memory.readCString(
+        (fns.GetDlgItemTextA.handler([dialog, 101, OUT, 32]), OUT), 32), 'Cancel');
 });
 
 test('ending a dialog destroys it and the controls it owns', ()=>{

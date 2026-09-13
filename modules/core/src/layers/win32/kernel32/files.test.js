@@ -683,6 +683,30 @@ test('GetFullPathNameA resolves textually and points at the last component', ()=
     assert.equal(memory.string(memory.dword(OUT_PART)), 'SAVE.DAT');
 });
 
+test('SearchPathA walks the documented order, adds an extension, and reports the file part', ()=>{
+    const { memory, fns, files, at } = setup();
+    files.put('C:\\WINDOWS\\system32\\cabinet.dll', 'x');
+    files.put('C:\\GAME\\local.dat', 'y');
+    memory.putDword(OUT_PART, 0);
+
+    const written = fns.SearchPathA.handler(
+        [0, at(NAME, 'cabinet'), at(NAME + 0x40, '.dll'), 0x80, OUT_TEXT, OUT_PART]);
+    assert.equal(memory.string(OUT_TEXT), 'C:\\WINDOWS\\system32\\cabinet.dll');
+    assert.equal(written, 'C:\\WINDOWS\\system32\\cabinet.dll'.length);
+    assert.equal(memory.string(memory.dword(OUT_PART)), 'cabinet.dll');
+
+    assert.equal(fns.SearchPathA.handler([0, at(NAME, 'local.dat'), 0, 0x80, OUT_TEXT, 0]),
+        'C:\\GAME\\local.dat'.length, 'the current directory is on the path');
+    assert.equal(fns.SearchPathA.handler(
+        [at(NAME + 0x80, 'C:\\NOWHERE;C:\\WINDOWS\\system32'), at(NAME, 'cabinet.dll'), 0,
+            0x80, OUT_TEXT, 0]), 'C:\\WINDOWS\\system32\\cabinet.dll'.length,
+    'a list given is searched in order');
+    assert.equal(fns.SearchPathA.handler([0, at(NAME, 'absent.dll'), 0, 0x80, OUT_TEXT, 0]), 0);
+    assert.equal(fns.SearchPathA.handler([0, at(NAME, 'local.dat'), 0, 4, OUT_TEXT, 0]),
+        'C:\\GAME\\local.dat'.length + 1, 'too small: the size needed, terminator included');
+    assert.equal(fns.SearchPathA.argBytes, 24);
+});
+
 test('a path ending in a separator has no file part', ()=>{
     const { memory, fns, at } = setup();
 

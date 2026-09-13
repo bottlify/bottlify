@@ -80,10 +80,39 @@ const WS_VISIBLE = 0x10000000;
 /**
  * A DLGTEMPLATEEX begins with a version of 1 and a signature of 0xffff, where
  * an ordinary template has a style DWORD. Every field after that differs, so
- * the two cannot share a reader and one read as the other is nonsense.
+ * the two have their own layouts and one read as the other is nonsense.
  */
 const DLGVER_EX = 1;
 const SIGNATURE_EX = 0xffff;
+
+/** DLGTEMPLATEEX, the fixed part. */
+const DLGTEMPLATEEX = Object.freeze({
+    helpID: 4,
+    exStyle: 8,
+    style: 12,
+    cDlgItems: 16,
+    x: 18,
+    y: 20,
+    cx: 22,
+    cy: 24,
+    SIZE: 26,
+});
+
+/** DLGITEMTEMPLATEEX, likewise; the id is a DWORD here where it was a WORD. */
+const DLGITEMTEMPLATEEX = Object.freeze({
+    helpID: 0,
+    exStyle: 4,
+    style: 8,
+    x: 12,
+    y: 14,
+    cx: 16,
+    cy: 18,
+    id: 20,
+    SIZE: 24,
+});
+
+/** The extended font block: point size, weight, italic and charset before the face. */
+const FONT_EX_FIXED = 6;
 
 /** What an ordinal, rather than a name, looks like in a counted string. */
 const ORDINAL_MARKER = 0xffff;
@@ -215,63 +244,79 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
      */
     const parseTemplate = address=>{
         const template = reader(address);
-        if (template.u16(DLGTEMPLATE.style) === DLGVER_EX
-            && template.u16(DLGTEMPLATE.style + 2) === SIGNATURE_EX)
-        {
-            // An extended template. Every field past the signature sits
-            // somewhere else, so reading it with this layout would produce a
-            // dialog of plausible nonsense rather than a refusal.
-            return null;
-        }
+        // The two layouts, told apart by the signature. A resource compiler
+        // writes the extended one for any dialog with a help id or a font
+        // weight, which is most dialogs of the era.
+        const extended = template.u16(DLGTEMPLATE.style) === DLGVER_EX
+            && template.u16(DLGTEMPLATE.style + 2) === SIGNATURE_EX;
+        const head = extended
+            ? { style: DLGTEMPLATEEX.style, exStyle: DLGTEMPLATEEX.exStyle,
+                count: DLGTEMPLATEEX.cDlgItems, x: DLGTEMPLATEEX.x, y: DLGTEMPLATEEX.y,
+                cx: DLGTEMPLATEEX.cx, cy: DLGTEMPLATEEX.cy, size: DLGTEMPLATEEX.SIZE }
+            : { style: DLGTEMPLATE.style, exStyle: DLGTEMPLATE.dwExtendedStyle,
+                count: DLGTEMPLATE.cdit, x: DLGTEMPLATE.x, y: DLGTEMPLATE.y,
+                cx: DLGTEMPLATE.cx, cy: DLGTEMPLATE.cy, size: DLGTEMPLATE.SIZE };
+        const item = extended
+            ? { style: DLGITEMTEMPLATEEX.style, exStyle: DLGITEMTEMPLATEEX.exStyle,
+                x: DLGITEMTEMPLATEEX.x, y: DLGITEMTEMPLATEEX.y, cx: DLGITEMTEMPLATEEX.cx,
+                cy: DLGITEMTEMPLATEEX.cy, id: DLGITEMTEMPLATEEX.id, size: DLGITEMTEMPLATEEX.SIZE }
+            : { style: DLGITEMTEMPLATE.style, exStyle: DLGITEMTEMPLATE.dwExtendedStyle,
+                x: DLGITEMTEMPLATE.x, y: DLGITEMTEMPLATE.y, cx: DLGITEMTEMPLATE.cx,
+                cy: DLGITEMTEMPLATE.cy, id: DLGITEMTEMPLATE.id, size: DLGITEMTEMPLATE.SIZE };
 
-        const style = template.u32(DLGTEMPLATE.style);
+        const style = template.u32(head.style);
         const dialog = {
             style,
-            exStyle: template.u32(DLGTEMPLATE.dwExtendedStyle),
-            x: acrossFor(template.i16(DLGTEMPLATE.x)),
-            y: downFor(template.i16(DLGTEMPLATE.y)),
-            width: acrossFor(template.i16(DLGTEMPLATE.cx)),
-            height: downFor(template.i16(DLGTEMPLATE.cy)),
+            exStyle: template.u32(head.exStyle),
+            x: acrossFor(template.i16(head.x)),
+            y: downFor(template.i16(head.y)),
+            width: acrossFor(template.i16(head.cx)),
+            height: downFor(template.i16(head.cy)),
             title: '',
             /** @type {any[]} */
             controls: [],
         };
-        const count = template.u16(DLGTEMPLATE.cdit);
+        const count = template.u16(head.count);
 
-        template.at = DLGTEMPLATE.SIZE;
+        template.at = head.size;
         template.nameOrOrdinal(); // menu
         template.nameOrOrdinal(); // window class
         dialog.title = template.nameOrOrdinal().name ?? '';
         if ((style & DS_SETFONT) !== 0)
         {
-            template.at += 2; // point size
+            // The point size; the extended form adds a weight, an italic
+            // flag and a charset before the face name.
+            template.at += extended ? FONT_EX_FIXED : 2;
             template.nameOrOrdinal(); // typeface
         }
 
         for (let index = 0; index < count; index++)
         {
             template.align();
-            const item = template.at;
+            const at = template.at;
             const control = {
-                style: template.u32(item + DLGITEMTEMPLATE.style),
-                exStyle: template.u32(item + DLGITEMTEMPLATE.dwExtendedStyle),
-                x: acrossFor(template.i16(item + DLGITEMTEMPLATE.x)),
-                y: downFor(template.i16(item + DLGITEMTEMPLATE.y)),
-                width: acrossFor(template.i16(item + DLGITEMTEMPLATE.cx)),
-                height: downFor(template.i16(item + DLGITEMTEMPLATE.cy)),
-                id: template.u16(item + DLGITEMTEMPLATE.id),
+                style: template.u32(at + item.style),
+                exStyle: template.u32(at + item.exStyle),
+                x: acrossFor(template.i16(at + item.x)),
+                y: downFor(template.i16(at + item.y)),
+                width: acrossFor(template.i16(at + item.cx)),
+                height: downFor(template.i16(at + item.cy)),
+                // A WORD in the old layout and a DWORD in the new, and either
+                // way the id a program passes to GetDlgItem is 16 bits wide.
+                id: extended ? template.u32(at + item.id) & 0xffff : template.u16(at + item.id),
                 className: '',
                 title: '',
             };
-            template.at = item + DLGITEMTEMPLATE.SIZE;
+            template.at = at + item.size;
             const cls = template.nameOrOrdinal();
             control.className = cls.name ?? `#${cls.ordinal}`;
             control.title = template.nameOrOrdinal().name ?? '';
 
-            // The creation data begins with its own size in bytes, and that word
-            // counts itself. A zero means there is only the word.
+            // The creation data begins with its size in bytes. In the old
+            // layout that word counts itself, so a zero means there is only
+            // the word; in the extended one it counts what follows it.
             const extra = template.u16(template.at);
-            template.at += extra === 0 ? 2 : extra;
+            template.at += extended ? 2 + extra : (extra === 0 ? 2 : extra);
             dialog.controls.push(control);
         }
         return dialog;
