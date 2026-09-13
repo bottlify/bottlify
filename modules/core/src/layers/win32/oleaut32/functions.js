@@ -148,6 +148,10 @@ const DISP_E_OVERFLOW = 0x8002000a;
  * @typedef {Object} AutomationHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *     Sets a range to one byte value in place, with no host buffer holding
+ *     the pattern: the lengths are the program's, and a clear of a megabyte
+ *     through writeMemory costs an allocation and two extra passes.
  * @property {AutomationHeap} heap  Where a BSTR's block comes from.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
@@ -1286,7 +1290,7 @@ export function createAutomationFunctions(host){
                     host.writeMemory(descriptor + SAFEARRAY_BOUNDS + (dims - 1 - index) * 8,
                         host.readMemory((rgsabound >>> 0) + index * 8, 8).slice());
                 }
-                host.writeMemory(data, new Uint8Array(dataBytes));
+                host.fillMemory(data, 0, dataBytes);
                 return descriptor;
             },
         },
@@ -1376,7 +1380,7 @@ export function createAutomationFunctions(host){
                     {
                         return E_OUTOFMEMORY;
                     }
-                    host.writeMemory(data, new Uint8Array(after * stride));
+                    host.fillMemory(data, 0, after * stride);
                     if (array.data !== 0)
                     {
                         host.writeMemory(data,
@@ -1655,7 +1659,7 @@ export function createAutomationFunctions(host){
                 {
                     if ((array.features & FADF_VARIANT) !== 0)
                     {
-                        host.writeMemory(data, new Uint8Array(dataBytes));
+                        host.fillMemory(data, 0, dataBytes);
                         for (let index = 0; index < elements; index++)
                         {
                             copyVariant(data + index * VARIANT_BYTES,

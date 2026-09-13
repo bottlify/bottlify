@@ -68,6 +68,10 @@ const MAX_PROGID = 255;
  * @typedef {Object} OleHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *     Sets a range to one byte value in place, with no host buffer holding
+ *     the pattern: the lengths are the program's, and a clear of a megabyte
+ *     through writeMemory costs an allocation and two extra passes.
  * @property {() => any} currentThread  The record apartment state hangs on.
  * @property {OleHeap} heap             Where task memory comes from.
  * @property {((api: string, detail: string) => void) | undefined} [divergence]

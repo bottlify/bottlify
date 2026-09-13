@@ -36,15 +36,20 @@ const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
  *
  * `written` counts the bytes the host put into guest memory, because a memset
  * that never crosses is the whole point of not zeroing what is already zero.
+ * It is split by how they got there: `copied` came through a buffer built on
+ * the host, `filled` went into the guest's own memory in place.
  */
 function fakeHost(arena = ARENA){
     const bytes = new Uint8Array(arena.base + arena.size);
-    let written = 0;
+    let copied = 0;
+    let filled = 0;
 
     return {
         bytes,
         arena,
-        written: ()=>written,
+        written: ()=>copied + filled,
+        copied: ()=>copied,
+        filled: ()=>filled,
         /**
          * The program writing into memory it was given: straight into the
          * buffer, because the host is not the one doing it.
@@ -59,11 +64,16 @@ function fakeHost(arena = ARENA){
         setLastError: ()=>{},
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
-            written += data.length;
+            copied += data.length;
             for (let i = 0; i < data.length; i++)
             {
                 bytes[address + i] = data[i];
             }
+        },
+        /** @param {number} address @param {number} value @param {number} length */
+        fillMemory(address, value, length){
+            filled += length;
+            bytes.fill(value, address, address + length);
         },
     };
 }
@@ -178,6 +188,23 @@ test('memory handed out again does not carry the last owner\'s data into this on
     assert.ok(all(host.bytes.subarray(again, again + 64), 0),
         'this is the case a lazy zeroing must not get wrong: it is a data leak');
     assert.equal(host.written(), 64, 'and it is paid for exactly once');
+});
+
+test('a recycled block is cleared in place, with no buffer of zeroes to copy', ()=>{
+    // The clearing that has to happen is a whole block, inside the program's
+    // own call: building the zeroes on the host first would allocate the block
+    // again, have the runtime zero that, and copy it across.
+    const { host, fns } = setup();
+    const heap = fns.GetProcessHeap.handler();
+
+    const first = fns.HeapAlloc.handler([heap, 0, 1024]);
+    host.dirty(first, 1024);
+    assert.equal(fns.HeapFree.handler([heap, 0, first]), 1);
+
+    const again = fns.HeapAlloc.handler([heap, HEAP_ZERO_MEMORY, 1024]);
+    assert.ok(all(host.bytes.subarray(again, again + 1024), 0));
+    assert.equal(host.filled(), 1024, 'cleared as a fill of the memory the guest already has');
+    assert.equal(host.copied(), 0, 'and nothing was carried across from the host');
 });
 
 test('HeapAlloc returns NULL when the arena cannot fit the request', ()=>{

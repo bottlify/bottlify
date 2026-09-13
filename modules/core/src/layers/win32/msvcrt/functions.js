@@ -56,6 +56,10 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @typedef {Object} MsvcrtHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *     Sets a range to one byte value in place, with no host buffer holding
+ *     the pattern: the lengths are the program's, and a clear of a megabyte
+ *     through writeMemory costs an allocation and two extra passes.
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
@@ -384,7 +388,7 @@ export function createMsvcrtFunctions(host){
             argBytes: 12,
             /** @param {number[]} args */
             handler: ([destination, value, count])=>{
-                host.writeMemory(destination, new Uint8Array(count >>> 0).fill(value & 0xff));
+                host.fillMemory(destination, value & 0xff, count >>> 0);
                 return destination;
             },
         },
@@ -721,6 +725,7 @@ export function createMsvcrtFunctions(host){
                 resize: host.resize,
                 readMemory: host.readMemory,
                 writeMemory: host.writeMemory,
+                fillMemory: host.fillMemory,
             })
             : {}),
         ...(host.systemTimeMs && host.now

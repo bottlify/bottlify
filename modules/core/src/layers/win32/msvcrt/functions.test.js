@@ -41,6 +41,10 @@ function fakeHost(size = 0x1000){
                 bytes[address + i] = data[i];
             }
         },
+        /** @param {number} address @param {number} value @param {number} length */
+        fillMemory(address, value, length){
+            bytes.fill(value, address, address + length);
+        },
         /** @param {number} address @param {number} maxLength */
         readCString(address, maxLength){
             let text = '';

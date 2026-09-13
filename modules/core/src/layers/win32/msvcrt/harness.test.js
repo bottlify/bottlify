@@ -30,6 +30,9 @@ export function fakeMemory(base = 0x10000){
         /** @param {number} address @param {Uint8Array} source */
         writeMemory: (address, source)=>bytes.set(source, address),
 
+        /** @param {number} address @param {number} value @param {number} length */
+        fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
+
         /** @param {number} address @param {number} max */
         readCString: (address, max)=>{
             let text = '';

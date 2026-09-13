@@ -121,6 +121,10 @@ const MAX_PATH = 260;
  * @typedef {Object} StorageHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *     Sets a range to one byte value in place, with no host buffer holding
+ *     the pattern: the lengths are the program's, and a clear of a megabyte
+ *     through writeMemory costs an allocation and two extra passes.
  * @property {{ allocate: (bytes: number) => number, free: (address: number) => boolean,
  *              block: (address: number) => { size: number } | null,
  *              resize: (address: number, bytes: number) => boolean }} heap
@@ -1290,7 +1294,7 @@ export function createStorageFunctions(host){
                 }
                 if (offset > size)
                 {
-                    host.writeMemory(handle + size, new Uint8Array(offset - size));
+                    host.fillMemory(handle + size, 0, offset - size);
                 }
                 host.writeMemory(handle + offset, bytes);
                 size = Math.max(size, offset + bytes.length);
@@ -1303,7 +1307,7 @@ export function createStorageFunctions(host){
                 }
                 if (wanted > size)
                 {
-                    host.writeMemory(handle + size, new Uint8Array(wanted - size));
+                    host.fillMemory(handle + size, 0, wanted - size);
                 }
                 size = wanted;
                 return true;

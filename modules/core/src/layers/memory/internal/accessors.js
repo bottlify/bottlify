@@ -20,6 +20,9 @@
  * @property {(address: number, bytes: Uint8Array) => void} [writeData]
  *     Writes bytes the guest cannot execute, without telling the emulator's
  *     compiler anything. Absent in a build whose memory is a plain buffer.
+ * @property {(address: number, value: number, length: number) => void} [fillData]
+ *     The same, for a run of one repeated byte, with no buffer to hold the
+ *     pattern. Absent in a build whose memory has no such path.
  * @property {(address: number, length: number) => Uint8Array} readPhysical
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, with nothing allocated. Absent in a build whose
@@ -108,6 +111,44 @@ export function createAccessors({ raw, regions, charge = null }){
         raw.writePhysical(address, bytes);
     };
 
+    /**
+     * Sets a range to one byte value.
+     *
+     * The point is the buffer that is not made. Clearing recycled guest memory
+     * through `writeBytes` means allocating the range on the host, having the
+     * runtime zero it and copying it across -- three passes over bytes the
+     * guest's memory can be filled with in one, and a large short-lived
+     * allocation besides. The lengths are whole heap blocks, so this runs
+     * inside the guest's own call and holds its thread for the duration.
+     *
+     * @param {number} address
+     * @param {number} value    The byte; only its low eight bits are used.
+     * @param {number} length
+     */
+    const fill = (address, value, length)=>{
+        if (length <= 0)
+        {
+            return;
+        }
+        // An executable target has the emulator's compiler to tell, and the
+        // write path is what tells it. That is a guest code page rather than a
+        // heap block, so it is rare, and a buffer there costs nothing worth
+        // saving. An unmapped address lands here too, and is refused by the
+        // same assertion a write would have made.
+        if (!raw.fillData || regions.executable(address))
+        {
+            write(address, new Uint8Array(length).fill(value & 0xff));
+            return;
+        }
+        regions.assert(address, length, 'write');
+        if (charge)
+        {
+            // Once for the range, as the equivalent write would be charged.
+            charge(length);
+        }
+        raw.fillData(address, value & 0xff, length);
+    };
+
     /** Scratch for the integer writers, so a dword does not cost an allocation. */
     const scratch = new Uint8Array(8);
 
@@ -157,6 +198,7 @@ export function createAccessors({ raw, regions, charge = null }){
     return {
         readBytes: read,
         writeBytes: write,
+        fillBytes: fill,
 
         /**
          * The window the copy above refuses: the emulator's own bytes, valid

@@ -25,6 +25,56 @@ function fakeMemory(size = 0x10000){
     };
 }
 
+/**
+ * The emulator's memory as the accessors see it, with the paths it offers kept
+ * apart: `writePhysical` is the one that tells the emulator's compiler about a
+ * page it may have translated, `writeData` and `fillData` the ones that go
+ * straight into memory. The log of which path a call took is the only way to
+ * see the difference from outside, since all three leave the same bytes.
+ *
+ * @param {number} [size]
+ */
+function machineMemory(size = 0x10000){
+    const bytes = new Uint8Array(size);
+    /** @type {string[]} */
+    const took = [];
+    return {
+        bytes,
+        took,
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.subarray(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>{
+            took.push('writePhysical');
+            bytes.set(data, address);
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writeData: (address, data)=>{
+            took.push('writeData');
+            bytes.set(data, address);
+        },
+        /** @param {number} address @param {number} value @param {number} length */
+        fillData: (address, value, length)=>{
+            took.push('fillData');
+            bytes.fill(value, address, address + length);
+        },
+    };
+}
+
+/** A region of several pages, for a fill that has to cross one. */
+function mapWithPages(){
+    const regions = createRegionMap();
+    regions.register({
+        name: 'heap', base: 0x4000, size: 0x4000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'generated', base: 0x8000, size: 0x1000,
+        kind: RegionKind.THUNK_CODE, access: Access.READ_WRITE_EXECUTE,
+    });
+    return regions;
+}
+
 function mapWithCode(){
     const regions = createRegionMap();
     regions.register({
@@ -204,4 +254,78 @@ test('a read of bytes remembers its region the way a dword read does', ()=>{
     regions.protect('data', Access.NONE);
     assert.throws(()=>accessors.readBytes(0x2000, 4), /does not permit/,
         'a region re-protected after being remembered is asked again');
+});
+
+test('a fill covers exactly its range, unaligned and across a page boundary', ()=>{
+    const raw = machineMemory();
+    const accessors = createAccessors({ raw, regions: mapWithPages() });
+
+    // From partway through one page to partway through the third, so neither
+    // end is where a page-at-a-time implementation would have put it.
+    const from = 0x4ffd;
+    const length = 0x1006;
+    accessors.fillBytes(from, 0xa5, length);
+
+    assert.equal(raw.bytes[from - 1], 0, 'the byte before the range is not part of it');
+    assert.equal(raw.bytes[from + length], 0, 'nor the byte after');
+    assert.ok(raw.bytes.subarray(from, from + length).every(byte=>byte === 0xa5),
+        'and everything between is filled');
+
+    accessors.fillBytes(from, 0, 0);
+    accessors.fillBytes(from, 0, -1);
+    assert.equal(raw.bytes[from], 0xa5, 'an empty range writes nothing');
+});
+
+test('a fill is charged once, for the bytes the equivalent write would be', ()=>{
+    const raw = machineMemory();
+    /** @type {number[]} */
+    const charges = [];
+    const accessors = createAccessors({
+        raw, regions: mapWithPages(), charge: length=>charges.push(length),
+    });
+
+    accessors.fillBytes(0x4001, 0xff, 0x1234);
+    accessors.writeBytes(0x4001, new Uint8Array(0x1234).fill(0xff));
+
+    assert.deepEqual(charges, [0x1234, 0x1234],
+        'one charge for the range, the same size the write costs -- not one per byte or page');
+});
+
+test('a fill over executable memory goes the way a write there does', ()=>{
+    const raw = machineMemory();
+    const regions = mapWithPages();
+    const accessors = createAccessors({ raw, regions });
+
+    // Whatever the emulator has translated for a page it may execute has to be
+    // discarded, and the write path is what discards it. A fill that went
+    // straight into memory there would leave the old translation running.
+    accessors.writeBytes(0x8000, new Uint8Array(16).fill(0x90));
+    accessors.fillBytes(0x8010, 0x90, 16);
+    assert.deepEqual(raw.took, ['writePhysical', 'writePhysical']);
+
+    raw.took.length = 0;
+    accessors.writeBytes(0x4000, new Uint8Array(16));
+    accessors.fillBytes(0x4010, 0, 16);
+    assert.deepEqual(raw.took, ['writeData', 'fillData'],
+        'data has nothing to tell the compiler, so it is filled in place');
+});
+
+test('a fill still fills where the memory offers no fill of its own', ()=>{
+    // A build whose memory is a plain buffer: the primitive is on the memory
+    // layer's interface either way, and falls back to the write path.
+    const raw = fakeMemory();
+    const accessors = createAccessors({ raw, regions: mapWithPages() });
+
+    accessors.fillBytes(0x4008, 0x7e, 8);
+    assert.deepEqual([...raw.bytes.subarray(0x4006, 0x4012)],
+        [0, 0, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0, 0]);
+});
+
+test('a fill is refused where the region map refuses a write', ()=>{
+    const raw = machineMemory();
+    const accessors = createAccessors({ raw, regions: mapWithPages() });
+
+    assert.throws(()=>accessors.fillBytes(0x3000, 1, 4), /Unmapped write/);
+    assert.throws(()=>accessors.fillBytes(0x7ff8, 1, 16), /runs past the end/);
+    assert.deepEqual(raw.took, [], 'and nothing was written by either');
 });

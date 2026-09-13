@@ -325,6 +325,8 @@ export const cpuModule = {
             readU32: address=>started().readU32(address),
             /** @param {number} address @param {Uint8Array} bytes */
             writeData: (address, bytes)=>started().writeData(address, bytes),
+            /** @param {number} address @param {number} value @param {number} length */
+            fillData: (address, value, length)=>started().fillData(address, value, length),
             /** @param {string} name */
             readReg32: name=>started().readReg32(name),
             /** @param {string} name @param {number} value */

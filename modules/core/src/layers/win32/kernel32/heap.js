@@ -331,6 +331,11 @@ export function createHeapAllocator({ base, size }){
  * @property {any} [allocator]  An allocator over that arena, when one is shared.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *           Sets a range to one byte value in the guest's own memory. Separate
+ *           from writeMemory because the ranges here are whole heap blocks:
+ *           a buffer holding the pattern would be allocated, zeroed and copied
+ *           inside the program's own call, for bytes that can be filled once.
  * @property {(code: number) => void} setLastError
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
@@ -396,7 +401,7 @@ export function createHeapFunctions(host){
     const zero = (address, length)=>{
         if (length > 0)
         {
-            host.writeMemory(address, new Uint8Array(length));
+            host.fillMemory(address, 0, length);
         }
     };
 

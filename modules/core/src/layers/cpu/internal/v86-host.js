@@ -492,6 +492,23 @@ export async function createV86Host(config){
             v().ram.set(bytes, address);
         },
 
+        /**
+         * Sets a run of bytes the guest can never execute to one value.
+         *
+         * The same promise as `writeData` and for the same reason, minus the
+         * buffer: a caller clearing a recycled heap block would otherwise
+         * allocate a megabyte on the host, have the runtime zero it, and copy
+         * it across -- three passes over bytes the machine's own memory can be
+         * filled with in one.
+         *
+         * @param {number} address @param {number} value @param {number} length
+         */
+        fillData: (address, value, length)=>{
+            hostWrites++;
+            hostWrittenBytes += length;
+            v().ram.fill(value, address, address + length);
+        },
+
         /** @param {string} name @returns {number} */
         readReg32(name){
             // Not in the general-purpose file, and both are asked for by name:

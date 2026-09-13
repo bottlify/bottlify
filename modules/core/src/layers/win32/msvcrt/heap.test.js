@@ -73,6 +73,7 @@ const build = ()=>{
             resize: (address, bytes)=>allocator.resize(address, bytes),
             readMemory: memory.readMemory,
             writeMemory: memory.writeMemory,
+            fillMemory: memory.fillMemory,
         })),
     };
 };

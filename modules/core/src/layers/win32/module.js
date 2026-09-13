@@ -154,6 +154,11 @@ export const win32Module = {
             memory.readBytes(address, length);
         const writeMemory = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
             memory.writeBytes(address, bytes);
+        // Clearing a recycled block is the one write whose length is the
+        // program's rather than a structure's, so it goes in without a host
+        // buffer to hold the pattern.
+        const fillMemory = (/** @type {number} */ address, /** @type {number} */ value,
+            /** @type {number} */ length)=>memory.fillBytes(address, value, length);
         const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readCString(address, maxLength);
 
@@ -526,7 +531,7 @@ export const win32Module = {
                     say: text=>trace(text),
                 }),
                 ...createHeapFunctions({
-                    arena, allocator, readMemory, writeMemory,
+                    arena, allocator, readMemory, writeMemory, fillMemory,
                     setLastError: setError,
                     divergence: config?.divergence,
                     /** @param {number} address */
@@ -772,6 +777,7 @@ export const win32Module = {
                 ...createMsvcrtFunctions({
                     readMemory,
                     writeMemory,
+                    fillMemory,
                     readCString,
                     write: (handle, text)=>sink(handle, text),
                     /**
@@ -1040,6 +1046,7 @@ export const win32Module = {
             'ole32.dll': createOleFunctions({
                 readMemory,
                 writeMemory,
+                fillMemory,
                 currentThread: ()=>kernel.currentThread(),
                 heap,
                 registry: com,
@@ -1070,6 +1077,7 @@ export const win32Module = {
             'OLEAUT32.dll': createAutomationFunctions({
                 readMemory,
                 writeMemory,
+                fillMemory,
                 heap,
                 divergence: config?.divergence,
                 // A type library is a file a program loads and an object it

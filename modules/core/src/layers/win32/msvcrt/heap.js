@@ -28,6 +28,10 @@
  * @property {(address: number, bytes: number) => boolean} resize
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, value: number, length: number) => void} fillMemory
+ *     Sets a range to one byte value in place, with no host buffer holding
+ *     the pattern: the lengths are the program's, and a clear of a megabyte
+ *     through writeMemory costs an allocation and two extra passes.
  */
 
 /**
@@ -84,7 +88,7 @@ export function createHeapFunctions(host){
                 const address = malloc(bytes);
                 if (address !== 0)
                 {
-                    host.writeMemory(address, new Uint8Array(bytes));
+                    host.fillMemory(address, 0, bytes);
                 }
                 return address;
             },

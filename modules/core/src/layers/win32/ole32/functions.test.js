@@ -153,6 +153,8 @@ function fakeHost(){
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
+        /** @param {number} address @param {number} value @param {number} length */
+        fillMemory: (address, value, length)=>bytes.fill(value, address, address + length),
         /** @param {number} address */
         u32(address){
             return (bytes[address] | (bytes[address + 1] << 8)
