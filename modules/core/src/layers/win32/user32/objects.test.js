@@ -113,7 +113,21 @@ function fakeHandles(){
             return handle;
         },
         /** @param {number} handle */
-        close: handle=>entries.delete(handle),
+        typeOf: handle=>entries.get(handle)?.type ?? null,
+        // The kernel's table throws on a handle it does not know, by design, so
+        // a destroy entry point that lets the throw escape is caught here rather
+        // than passing a test the real table would fail.
+        /** @param {number} handle */
+        close(handle){
+            const entry = entries.get(handle);
+            if (!entry)
+            {
+                throw new Error(
+                    `Cannot close invalid handle 0x${(handle >>> 0).toString(16)}`);
+            }
+            entries.delete(handle);
+            return entry.object;
+        },
     };
 }
 
@@ -543,4 +557,24 @@ test('the scroll-range family declares the stack it pops', ()=>{
     assert.equal(fns.GetScrollPos.argBytes, 8);
     assert.equal(fns.ShowScrollBar.argBytes, 12);
     assert.equal(fns.EnableScrollBar.argBytes, 12);
+});
+
+test('destroying a cursor or icon fails on a handle it was never given, rather than throwing', ()=>{
+    const { fns } = setup();
+
+    // A shared standard object is named by a small integer on a null instance
+    // and is handed back as it is, never opened in the table; an invalid handle
+    // is not open either. Windows fails the destroy of both, and the table's
+    // close throws on a handle it does not know -- so the throw has to become
+    // the FALSE answer here, not something that escapes and stops the guest.
+    const shared = 0x7f02;
+    assert.equal(fns.DestroyCursor.handler([shared]), 0, 'a shared cursor is not destroyed');
+    assert.equal(fns.DestroyIcon.handler([shared]), 0, 'nor a shared icon');
+    assert.equal(fns.DestroyCursor.handler([0]), 0, 'an invalid handle fails, not throws');
+
+    // A cursor the program created is a real handle: destroying it succeeds
+    // exactly once, and the second destroy is the failure a double free is.
+    const cursor = fns.CreateCursor.handler([0, 0, 0, 32, 32]);
+    assert.equal(fns.DestroyCursor.handler([cursor]), 1, 'a created cursor is destroyed');
+    assert.equal(fns.DestroyCursor.handler([cursor]), 0, 'and only once');
 });

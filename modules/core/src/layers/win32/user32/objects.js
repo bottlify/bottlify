@@ -187,6 +187,33 @@ const CF_UNICODETEXT = 13;
 const MAX_CLIPBOARD_TEXT = 1 << 20;
 
 /**
+ * Closes a handle a program handed to a destroy entry point.
+ *
+ * A shared standard object -- a cursor or icon named by a small integer on a
+ * null instance -- is never opened in the table, and an invalid handle is not
+ * either; Windows fails the destroy of both rather than performing it. The
+ * table's close throws on a handle it does not know, so that a guest whose
+ * bookkeeping has gone wrong is diagnosed rather than silently ignored, which
+ * makes the throw the failure answer here rather than something to let escape
+ * into the guest and stop it.
+ *
+ * @param {{ handles: { close: (handle: number) => unknown } }} host
+ * @param {number} handle
+ * @returns {boolean} whether there was an object to destroy
+ */
+function destroyObjectHandle(host, handle){
+    try
+    {
+        host.handles.close(handle);
+        return true;
+    }
+    catch (e){
+        void e;
+        return false;
+    }
+}
+
+/**
  * @param {Object} options
  * @param {any} options.host
  * @param {(hwnd: number) => any | null} options.live
@@ -1140,14 +1167,14 @@ export function createObjectFunctions({ host, live }){
         DestroyCursor: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(host.handles.close(handle >>> 0) ? 1 : 0),
+            handler: ([handle])=>(destroyObjectHandle(host, handle >>> 0) ? 1 : 0),
         },
 
         /** BOOL DestroyIcon(HICON hIcon) */
         DestroyIcon: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>(host.handles.close(handle >>> 0) ? 1 : 0),
+            handler: ([handle])=>(destroyObjectHandle(host, handle >>> 0) ? 1 : 0),
         },
 
         /** HICON LoadIconA(HINSTANCE hInstance, LPCSTR lpIconName) */
