@@ -1350,3 +1350,87 @@ test('a texture, a stage state and a material the guest wrote reach the device',
     h.release(texture);
     assert.deepEqual(h.divergences, []);
 });
+
+test('a surface description fills every field, leaving no stack of the caller to be read',
+    ()=>{
+        // A descriptor is written into memory the program supplied, which for
+        // this call is a local. A field nobody fills keeps whatever was on that
+        // stack, and the program reads a number we never gave it -- so this
+        // fills the struct with a sentinel first and asserts not one dword of it
+        // survives. `Size` is the field that made this fatal: it is the
+        // surface's length in bytes, and a program sizing a copy from it was
+        // sizing it from its own garbage.
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+
+        const back = 0xa100;
+        assert.equal(h.device(device, 'GetBackBuffer', [0, 0, back]), D3D_OK);
+        const surface = h.box.memory.readU32(back);
+
+        const desc = 0xa300;
+        const SENTINEL = 0xdeadbeef;
+        for (let at = 0; at < D3DSURFACE_DESC8.SIZE; at += 4)
+        {
+            h.fields.writeU32(desc + at, SENTINEL);
+        }
+        assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
+
+        /** @type {string[]} */
+        const untouched = [];
+        for (const [name, offset] of Object.entries(D3DSURFACE_DESC8))
+        {
+            if (name === 'SIZE')
+            {
+                continue;
+            }
+            if (h.fields.readU32(desc + offset) === SENTINEL)
+            {
+                untouched.push(name);
+            }
+        }
+        assert.deepEqual(untouched, [], 'every field of the descriptor was written');
+
+        // And the one that decides a length says the surface's own length.
+        assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size),
+            h.fields.readU32(desc + D3DSURFACE_DESC8.Width) * 4
+                * h.fields.readU32(desc + D3DSURFACE_DESC8.Height),
+            'Size is the whole surface in bytes at four bytes a pixel');
+        assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.MultiSampleType), 0);
+
+        assert.equal(h.release(surface), 0);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('a back buffer asked for as zero by zero is the display, described and stored as one', ()=>{
+    // Windowed, zero means the size of the device window. Carried through as a
+    // zero it describes a surface with no rows and no storage, which the program
+    // then reads with its own idea of the mode -- and that read used to land in
+    // the slack of a fixed-megabyte allocation rather than in the next object.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root, {
+        BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8,
+    });
+
+    const back = 0xa100;
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, back]), D3D_OK);
+    const surface = h.box.memory.readU32(back);
+
+    const desc = 0xa300;
+    assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), SCREEN.width);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Height), SCREEN.height);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size),
+        SCREEN.width * 4 * SCREEN.height, 'and its length is that surface, not nothing');
+
+    // And the program is told the size was not its own.
+    assert.ok(h.divergences.some(line=>/zero by zero/.test(line)),
+        'the assumption is reported rather than made quietly');
+
+    assert.equal(h.release(surface), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});

@@ -421,3 +421,20 @@ test('a write to a render target says the bytes are discarded, and a read says t
         assert.equal(plain.UnlockRect(), D3D_OK);
         assert.deepEqual(said, []);
     });
+
+test('a surface says its own length in bytes, for a caller that sizes a copy from it', ()=>{
+    const surface = createSurface({
+        type: SURFACE_TYPE.PLAIN, width: SIZE, height: SIZE, format: D3DFMT.A8R8G8B8,
+        pool: D3DPOOL.SCRATCH, usage: 0, base: 0x1000, count: createReferenceCount(),
+    });
+    /** @type {{ desc?: any }} */
+    const described = {};
+    assert.equal(surface.GetDesc(described), D3D_OK);
+    // D3D8's structure has a slot for this and D3D9 dropped it, so it is filled
+    // whichever version asks: a field left unwritten is read back out of the
+    // caller's own stack, and this is the one that decides a length.
+    assert.equal(described.desc.Size, surfaceBytes(D3DFMT.A8R8G8B8, SIZE, SIZE));
+    assert.equal(described.desc.Size, surfacePitch(D3DFMT.A8R8G8B8, SIZE) * SIZE);
+    assert.equal(described.desc.MultiSampleType, 0);
+    assert.equal(described.desc.MultiSampleQuality, 0);
+});

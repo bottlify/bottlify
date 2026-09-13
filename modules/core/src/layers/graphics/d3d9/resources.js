@@ -116,11 +116,24 @@ export function createReferenceCount(options = {}){
  */
 
 /**
+ * A surface's description, complete.
+ *
+ * Every field either version of the structure has a slot for, whether or not
+ * anything here varies it, because a descriptor is written into memory the
+ * program supplied -- usually a local -- and a field nobody fills keeps
+ * whatever was on that stack. The program then reads a number we never gave
+ * it. `Size` is the dangerous one: it is the surface's length in bytes, D3D8's
+ * structure has a slot for it, and a program sizing a copy from it was sizing
+ * it from its own stack garbage.
+ *
  * @typedef {Object} SurfaceDesc
  * @property {number} Type
  * @property {number} Format
  * @property {number} Usage
  * @property {number} Pool
+ * @property {number} Size    In bytes. D3D8's structure only; D3D9 dropped it.
+ * @property {number} MultiSampleType
+ * @property {number} MultiSampleQuality  D3D9's structure only; D3D8 has no slot.
  * @property {number} Width
  * @property {number} Height
  */
@@ -181,6 +194,14 @@ export function createSurface(options){
         Format: options.format,
         Usage: options.usage,
         Pool: options.pool,
+        // The same arithmetic the storage was allocated with, so a program that
+        // reads the surface by this length reads inside it.
+        Size: surfaceBytes(options.format, options.width, options.height),
+        // Nothing here creates a multisampled surface. Said rather than left
+        // unwritten: D3DMULTISAMPLE_NONE is zero, and a program reading a
+        // stack-garbage sample type off its own frame concludes anything.
+        MultiSampleType: 0,
+        MultiSampleQuality: 0,
         Width: options.width,
         Height: options.height,
     };

@@ -1595,3 +1595,69 @@ test('a lockable back buffer is given storage for the whole mode, not a fixed me
     assert.equal(held.surface.UnlockRect(), D3D_OK);
     device.release();
 });
+
+test('what a back buffer says about itself agrees with the storage it was given', ()=>{
+    // The three numbers a program reads the back buffer by -- the descriptor's
+    // Width/Height/Format, the Size it reports in bytes, and the Pitch the lock
+    // hands back -- have to describe the same span, and that span has to be
+    // inside the allocation. A program copies the surface out every frame and
+    // works the length out from these; any one of them larger than the storage
+    // is a read past the end, and any one larger than the buffer the program
+    // sized from it is a write past the end of that.
+    for (const [format, bytesPerPixel] of [
+        [D3DFMT.X8R8G8B8, 4], [D3DFMT.A8R8G8B8, 4], [D3DFMT.R5G6B5, 2],
+    ])
+    {
+        for (const [width, height] of [[640, 480], [800, 600], [1024, 768], [1366, 768]])
+        {
+            /** @type {{ address: number, bytes: number }[]} */
+            const given = [];
+            let next = 0x10000;
+            const device = createDevice({
+                parameters: {
+                    backBufferWidth: width,
+                    backBufferHeight: height,
+                    backBufferFormat: format,
+                    flags: D3DPRESENTFLAG.LOCKABLE_BACKBUFFER,
+                },
+                caps: {
+                    allocate: (/** @type {number} */ bytes)=>{
+                        const address = next;
+                        next += bytes;
+                        given.push({ address, bytes });
+                        return address;
+                    },
+                },
+            });
+            const where = `${width}x${height} format ${format}`;
+
+            /** @type {{ surface?: any }} */
+            const held = {};
+            assert.equal(device.GetBackBuffer(0, 0, held), D3D_OK, where);
+            /** @type {{ desc?: any }} */
+            const described = {};
+            assert.equal(held.surface.GetDesc(described), D3D_OK, where);
+            const desc = described.desc;
+            assert.equal(desc.Width, width, where);
+            assert.equal(desc.Height, height, where);
+            assert.equal(desc.Format, format, where);
+
+            /** @type {any} */
+            const locked = {};
+            assert.equal(held.surface.LockRect(locked, null, D3DLOCK.READONLY), D3D_OK, where);
+            assert.equal(locked.Pitch, width * bytesPerPixel, `pitch at ${where}`);
+            assert.equal(desc.Size, locked.Pitch * height, `size against pitch at ${where}`);
+
+            const storage = given.find(entry=>entry.address === held.surface.base);
+            assert.ok(storage, `the back buffer has storage of its own at ${where}`);
+            assert.ok(storage.bytes >= desc.Size, `storage covers Size at ${where}`);
+            const inside = given.filter(entry=>entry !== storage
+                && entry.address < held.surface.base + desc.Size
+                && entry.address + entry.bytes > held.surface.base);
+            assert.deepEqual(inside, [], `nothing else lies inside the surface at ${where}`);
+
+            assert.equal(held.surface.UnlockRect(), D3D_OK, where);
+            device.release();
+        }
+    }
+});

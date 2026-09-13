@@ -1582,12 +1582,37 @@ export function createDirect3D8Seam(
         describe(IID_IDirect3DDevice8, IDIRECT3DDEVICE8_SLOTS, syncedMethods, deviceGuests),
     ];
 
-    /** @param {number} address */
+    /**
+     * The presentation parameters, with a back buffer size that is a size.
+     *
+     * A windowed device may ask for zero by zero, which means "the size of the
+     * device window" -- and the layer below has no window to measure, so the
+     * display this build is configured for is the nearest true answer. Resolved
+     * here because this is the only side that knows the display, and because
+     * both CreateDevice and Reset come through it.
+     *
+     * A zero left alone describes a surface with no rows, no pitch and no
+     * storage, which the program then reads with its own idea of the mode. What
+     * kept that from being visible was an implicit back buffer allocated a fixed
+     * megabyte whatever its size: a read past a zero-sized surface landed in
+     * slack. Sized properly, it lands in the next allocation instead, so the
+     * zero has to be answered rather than carried.
+     *
+     * @param {number} address
+     */
     const readPresentParameters = address=>{
         const raw = fields.readStruct(address, D3DPRESENT_PARAMETERS8);
+        const display = screen();
+        const asked = { width: raw.BackBufferWidth >>> 0, height: raw.BackBufferHeight >>> 0 };
+        if (asked.width === 0 || asked.height === 0)
+        {
+            divergence?.('Direct3D 8',
+                'a back buffer asked for as zero by zero is the size of the device window,'
+                + ' which this layer cannot measure: the configured display is used instead');
+        }
         return {
-            backBufferWidth: raw.BackBufferWidth,
-            backBufferHeight: raw.BackBufferHeight,
+            backBufferWidth: asked.width === 0 ? display.width : asked.width,
+            backBufferHeight: asked.height === 0 ? display.height : asked.height,
             backBufferFormat: raw.BackBufferFormat,
             backBufferCount: raw.BackBufferCount,
             multiSampleType: raw.MultiSampleType,
