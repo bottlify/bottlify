@@ -162,6 +162,41 @@ function keyFromJSON(stored){
  */
 
 /**
+ * Where the shell keeps its folders, by the names the registry lists them
+ * under. One table, because a program reads the same folder two ways -- the
+ * registry value and the shell's own call -- and compares what it got.
+ *
+ * @type {Readonly<Record<string, string>>}
+ */
+export const SHELL_FOLDERS = Object.freeze({
+    Desktop: 'C:\\Documents and Settings\\User\\Desktop',
+    Programs: 'C:\\Documents and Settings\\User\\Start Menu\\Programs',
+    'Start Menu': 'C:\\Documents and Settings\\User\\Start Menu',
+    Startup: 'C:\\Documents and Settings\\User\\Start Menu\\Programs\\Startup',
+    Personal: 'C:\\Documents and Settings\\User\\My Documents',
+    AppData: 'C:\\Documents and Settings\\User\\Application Data',
+    'Local AppData': 'C:\\Documents and Settings\\User\\Local Settings\\Application Data',
+    Fonts: 'C:\\WINDOWS\\Fonts',
+    Profile: 'C:\\Documents and Settings\\User',
+    'Common Desktop': 'C:\\Documents and Settings\\All Users\\Desktop',
+    'Common Programs': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs',
+    'Common Start Menu': 'C:\\Documents and Settings\\All Users\\Start Menu',
+    'Common Startup': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs\\Startup',
+    'Common Documents': 'C:\\Documents and Settings\\All Users\\Documents',
+    'Common AppData': 'C:\\Documents and Settings\\All Users\\Application Data',
+    Windows: 'C:\\WINDOWS',
+    System: 'C:\\WINDOWS\\system32',
+    ProgramFiles: 'C:\\Program Files',
+    CommonFiles: 'C:\\Program Files\\Common Files',
+});
+
+/**
+ * @param {Readonly<Record<string, string>>} table @param {string[]} names
+ * @returns {Record<string, string>}
+ */
+const pick = (table, names)=>Object.fromEntries(names.map(name=>[name, table[name]]));
+
+/**
  * The keys and values every Windows installation carries before any program
  * has run, as far as a program of the era asks for them: where programs go,
  * where the shared-library counts live, where an installer registers what it
@@ -176,10 +211,10 @@ function keyFromJSON(stored){
 const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Classes' },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion', values: {
-        ProgramFilesDir: 'C:\\Program Files',
-        ProgramFilesPath: 'C:\\Program Files',
-        CommonFilesDir: 'C:\\Program Files\\Common Files',
-        SystemRoot: 'C:\\WINDOWS',
+        ProgramFilesDir: SHELL_FOLDERS.ProgramFiles,
+        ProgramFilesPath: SHELL_FOLDERS.ProgramFiles,
+        CommonFilesDir: SHELL_FOLDERS.CommonFiles,
+        SystemRoot: SHELL_FOLDERS.Windows,
         MediaPath: 'C:\\WINDOWS\\Media',
     } },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs' },
@@ -189,14 +224,9 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\RunOnce' },
     { root: HKEY_LOCAL_MACHINE,
-        path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', values: {
-            'Common Desktop': 'C:\\Documents and Settings\\All Users\\Desktop',
-            'Common Programs': 'C:\\Documents and Settings\\All Users\\Start Menu\\Programs',
-            'Common Start Menu': 'C:\\Documents and Settings\\All Users\\Start Menu',
-            'Common Startup':
-                'C:\\Documents and Settings\\All Users\\Start Menu\\Programs\\Startup',
-            'Common Documents': 'C:\\Documents and Settings\\All Users\\Documents',
-        } },
+        path: 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
+        values: pick(SHELL_FOLDERS, ['Common Desktop', 'Common Programs', 'Common Start Menu',
+            'Common Startup', 'Common Documents']) },
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion', values: {
         CurrentVersion: '5.1',
         CurrentBuildNumber: '2600',
@@ -214,15 +244,9 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
     } },
     { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
     { root: HKEY_CURRENT_USER,
-        path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders', values: {
-            Desktop: 'C:\\Documents and Settings\\User\\Desktop',
-            Programs: 'C:\\Documents and Settings\\User\\Start Menu\\Programs',
-            'Start Menu': 'C:\\Documents and Settings\\User\\Start Menu',
-            Startup: 'C:\\Documents and Settings\\User\\Start Menu\\Programs\\Startup',
-            Personal: 'C:\\Documents and Settings\\User\\My Documents',
-            AppData: 'C:\\Documents and Settings\\User\\Application Data',
-            Fonts: 'C:\\WINDOWS\\Fonts',
-        } },
+        path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Shell Folders',
+        values: pick(SHELL_FOLDERS, ['Desktop', 'Programs', 'Start Menu', 'Startup', 'Personal',
+            'AppData', 'Local AppData', 'Fonts']) },
     { root: HKEY_CURRENT_USER, path: 'Control Panel\\Desktop' },
 ]));
 

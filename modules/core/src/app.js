@@ -11,7 +11,7 @@ import { captureTrace, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
-import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
+import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
@@ -974,6 +974,29 @@ export function resolveLibraryPath(name, imagePath){
     return `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`;
 }
 
+/** Where Windows looks for a bare library name after the program's own directory. */
+const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
+
+/**
+ * Every place a LoadLibrary at run time looks, in order: beside the
+ * executable first, then the system directories -- which is where an
+ * installer puts a library it brought and then loads by bare name. A name
+ * with a directory in it names its one place and is looked for nowhere else.
+ *
+ * @param {string} name
+ * @param {string} imagePath
+ * @returns {string[]}
+ */
+export function libraryCandidates(name, imagePath){
+    const first = resolveLibraryPath(name, imagePath);
+    if (first !== `${imagePath.slice(0, imagePath.lastIndexOf('\\') + 1)}${name}`
+        || /[\\/]/.test(name))
+    {
+        return [first];
+    }
+    return [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+}
+
 /**
  * Runs `work` over `items`, at most `limit` at a time.
  *
@@ -1105,6 +1128,47 @@ const LIBRARY_ALIGN = 0x10000;
  * works and stays hidden until something depends on it being right.
  */
 const BUNDLE_DIRECTORY = 'App';
+
+/**
+ * The version resource of a file on the volume, or null: for a file that is
+ * not there, is not an image, carries none, or whose bytes have not arrived --
+ * the last because this is asked from inside a guest call and cannot wait,
+ * and a file the program has just written is on the volume already.
+ *
+ * @param {any} filesystem
+ * @param {string} path
+ * @returns {Uint8Array | null}
+ */
+export function versionResourceOf(filesystem, path){
+    const RT_VERSION = 16;
+    let handle;
+    try
+    {
+        handle = filesystem.open(path, { create: false });
+    }
+    catch {
+        return null;
+    }
+    try
+    {
+        const bytes = filesystem.read(handle, filesystem.size(handle));
+        const image = parsePe(bytes);
+        const found = findResource(bytes, image, RT_VERSION, 1);
+        if (!found)
+        {
+            return null;
+        }
+        const at = rvaToFileOffset(image, found.rva);
+        return bytes.slice(at, at + found.size);
+    }
+    catch {
+        return null;
+    }
+    finally
+    {
+        filesystem.close(handle);
+    }
+}
 
 /**
  * Reads a whole file off the volume, waiting for whatever is not here yet.
@@ -2282,6 +2346,13 @@ async function buildApp(options){
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
                 ...resourceLookup(()=>mainModule, byBase),
+                /**
+                 * The version resource of a file on the volume, by path: what
+                 * an installer compares before it replaces a shared component.
+                 *
+                 * @param {string} path
+                 */
+                versionInfo: path=>versionResourceOf(filesystem, path),
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is
@@ -2780,10 +2851,10 @@ async function buildApp(options){
     };
 
     /**
-     * Libraries asked for while the program runs, and the ones that are not
-     * there. Both are remembered, and the second matters as much as the first:
-     * a title probes for hardware support once a frame by asking for a library
-     * that does not exist, and a probe that has to wait is a stall per frame.
+     * Libraries that could not be given room. Remembered, because asking
+     * again cannot change the answer; a library that was merely not there
+     * is not, since a program puts one in place and asks again -- an
+     * installer does exactly that with a library it brought.
      *
      * @type {Set<string>}
      */
@@ -2927,21 +2998,54 @@ async function buildApp(options){
                 thread: asked,
             }).then(()=>loaded.base);
         }
+        const candidates = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe');
+        // Looked for before anything is awaited: a title probes for hardware
+        // support once a frame by asking for a library that does not exist,
+        // and a probe that has to wait is a stall per frame. The volume's
+        // index answers at once, and answers afresh each time, so a library
+        // put in place since the last ask is found.
+        const wanted = candidates.find(candidate=>{
+            try
+            {
+                const entry = filesystem.stat(candidate);
+                return entry && !entry.directory;
+            }
+            catch {
+                return false;
+            }
+        });
+        if (wanted === undefined)
+        {
+            // Said out loud, because this is the failure a program reports
+            // as "could not open" and then exits on. Without it the only
+            // trace is a zero, and a zero says nothing about which path was
+            // tried -- which is the whole question.
+            events.emit('library-missing', { name, path: candidates.join(';') });
+            return 0;
+        }
         return (async()=>{
-            const wanted = resolveLibraryPath(name, options.imagePath ?? 'C:\\app.exe');
             const file = await readWholeFile(filesystem, blocks, wanted);
             if (!file)
             {
-                absentLibraries.add(key);
-                // Said out loud, because this is the failure a program reports
-                // as "could not open" and then exits on. Without it the only
-                // trace is a zero, and a zero says nothing about which path was
-                // tried -- which is the whole question.
                 events.emit('library-missing', { name, path: wanted });
                 return 0;
             }
 
-            const image = parsePe(file);
+            let image;
+            try
+            {
+                image = parsePe(file);
+            }
+            catch (e){
+                // A file that is not an image -- a program does load one, by
+                // mistake or to find out -- is a library it cannot have, not a
+                // fault in the machine: the load fails and the program is
+                // told, as Windows tells it.
+                events.emit('library-missing', {
+                    name, path: wanted, reason: /** @type {Error} */ (e).message,
+                });
+                return 0;
+            }
             if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
             {
                 absentLibraries.add(key);

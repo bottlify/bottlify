@@ -982,7 +982,11 @@ export function createLocaleFunctions(host){
             handler: ([page, flags, source, sourceBytes, destination, destinationChars])=>{
                 void flags;
                 const resolved = resolvePage(page);
-                const span = sourceSpan(source >>> 0, sourceBytes, 1);
+                // A NULL source is refused before it is measured: measuring
+                // reads it, and a read of address zero is a fault where
+                // Windows answers with an error code.
+                const span = (source >>> 0) === 0
+                    ? { length: 0 } : sourceSpan(source >>> 0, sourceBytes, 1);
                 if (span.length === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);
@@ -1028,7 +1032,8 @@ export function createLocaleFunctions(host){
                 const usedDefaultOut = args[7] >>> 0;
                 void flags;
                 const resolved = resolvePage(page);
-                const span = sourceSpan(source >>> 0, sourceChars, 2);
+                const span = (source >>> 0) === 0
+                    ? { length: 0 } : sourceSpan(source >>> 0, sourceChars, 2);
                 if (span.length === 0)
                 {
                     host.setLastError(ERROR_INVALID_PARAMETER);

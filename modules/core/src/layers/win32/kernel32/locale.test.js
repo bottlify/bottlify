@@ -136,6 +136,15 @@ test('a zero destination measures and writes nothing at all', ()=>{
     assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
 });
 
+test('a NULL source is an invalid parameter, not a read of address zero', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+
+    assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0, -1, 0, 0]), 0);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0, -1, 0, 0, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER, ERROR_INVALID_PARAMETER]);
+});
+
 test('a destination too small is filled as far as it goes, and the call still fails', ()=>{
     // Windows converts what fits before reporting the buffer too small. A
     // program that sized a BSTR from the measuring call less the terminator

@@ -705,6 +705,12 @@ test('SearchPathA walks the documented order, adds an extension, and reports the
     assert.equal(fns.SearchPathA.handler([0, at(NAME, 'local.dat'), 0, 4, OUT_TEXT, 0]),
         'C:\\GAME\\local.dat'.length + 1, 'too small: the size needed, terminator included');
     assert.equal(fns.SearchPathA.argBytes, 24);
+
+    const wide = fns.SearchPathW.handler(
+        [0, putWide(memory, NAME, 'cabinet.dll'), 0, 0x80, OUT_TEXT, OUT_PART]);
+    assert.equal(wide, 'C:\\WINDOWS\\system32\\cabinet.dll'.length, 'the wide twin');
+    assert.equal(memory.dword(OUT_PART), OUT_TEXT + 'C:\\WINDOWS\\system32\\'.length * 2,
+        'and its file part is in characters of two bytes');
 });
 
 test('a path ending in a separator has no file part', ()=>{

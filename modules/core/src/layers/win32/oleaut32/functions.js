@@ -72,6 +72,8 @@ const VARIANT_ALPHABOOL = 0x0002;
 const S_OK = 0x00000000;
 /** What GetErrorInfo answers when nothing has been set. */
 const S_FALSE = 0x00000001;
+const TYPE_E_CANTLOADLIBRARY = 0x80029c4a | 0;
+const TYPE_E_LIBNOTREGISTERED = 0x8002801d | 0;
 const E_INVALIDARG = 0x80070057;
 const E_OUTOFMEMORY = 0x8007000e;
 const DISP_E_TYPEMISMATCH = 0x80020005;
@@ -802,6 +804,48 @@ export function createAutomationFunctions(host){
                 return held === 0 ? S_FALSE : S_OK;
             },
         },
+
+        /**
+         * HRESULT LoadTypeLib(LPCOLESTR szFile, ITypeLib **pptlib)
+         * HRESULT LoadTypeLibEx(LPCOLESTR szFile, REGKIND regkind, ITypeLib **pptlib)
+         * HRESULT LoadRegTypeLib(REFGUID, WORD wVerMajor, WORD wVerMinor, LCID, ITypeLib **)
+         * HRESULT RegisterTypeLib(ITypeLib *ptlib, LPCOLESTR szFullPath, LPCOLESTR szHelpDir)
+         *
+         * No type library can be loaded: there is no reader for one here,
+         * and nothing has registered one. Each fails the documented way with
+         * a null where the library would go, which is what a program that
+         * loads its own type library to describe itself is written to
+         * survive -- it carries on without the description. Registering
+         * needs a library that was loaded, and there is none.
+         */
+        LoadTypeLib: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, out])=>{
+                writeU32(out >>> 0, 0);
+                return TYPE_E_CANTLOADLIBRARY;
+            },
+        },
+        LoadTypeLibEx: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                writeU32(out >>> 0, 0);
+                return TYPE_E_CANTLOADLIBRARY;
+            },
+        },
+        LoadRegTypeLib: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, , , , out])=>{
+                writeU32(out >>> 0, 0);
+                return TYPE_E_LIBNOTREGISTERED;
+            },
+        },
+        RegisterTypeLib: {
+            argBytes: 12,
+            handler: ()=>TYPE_E_CANTLOADLIBRARY,
+        },
     };
 }
 
@@ -835,6 +879,10 @@ export const OLEAUT32_ORDINALS = Object.freeze({
     147: 'VariantChangeTypeEx',
     149: 'SysStringByteLen',
     150: 'SysAllocStringByteLen',
+    161: 'LoadTypeLib',
+    162: 'LoadRegTypeLib',
+    163: 'RegisterTypeLib',
+    183: 'LoadTypeLibEx',
     200: 'GetErrorInfo',
     201: 'SetErrorInfo',
 });

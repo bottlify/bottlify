@@ -247,3 +247,30 @@ test('a write replaces a key in place, adds what is missing, and removes with NU
     assert.equal(fns.WritePrivateProfileStringA.handler([0, KEY, VALUE, FILE]), 0,
         'a NULL section is refused');
 });
+
+test('a section is read back as its entries, key=value each, and win.ini is a fixed name', ()=>{
+    const { memory, files, fns } = setup();
+    files.put('C:\\WINDOWS\\TEMP\\setup.ini', INI);
+    memory.put(FILE, 'C:\\WINDOWS\\TEMP\\setup.ini');
+    memory.put(SECTION, 'Other');
+
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, FILE]),
+        'Key=Value\0'.length);
+    assert.equal(memory.raw(OUT, 11), 'Key=Value\0\0');
+    memory.put(SECTION, 'Nowhere');
+    assert.equal(fns.GetPrivateProfileSectionA.handler([SECTION, OUT, 64, FILE]), 0);
+    assert.equal(memory.raw(OUT, 1), '\0');
+    assert.equal(fns.GetPrivateProfileSectionA.argBytes, 16);
+
+    memory.put(SECTION, 'Desktop');
+    memory.put(KEY, 'Wallpaper');
+    memory.put(VALUE, 'none');
+    assert.equal(fns.WriteProfileStringA.handler([SECTION, KEY, VALUE]), 1);
+    assert.equal(files.text('C:\\WINDOWS\\win.ini'), '[Desktop]\r\nWallpaper=none\r\n');
+    assert.equal(fns.GetProfileStringA.handler([SECTION, KEY, 0, OUT, 64]), 4);
+    assert.equal(memory.readCString(OUT, 64), 'none');
+    assert.equal(fns.GetProfileIntA.handler([SECTION, KEY, 7]), 0, 'a word is zero');
+    assert.equal(fns.GetProfileStringA.argBytes, 20);
+    assert.equal(fns.GetProfileIntA.argBytes, 12);
+    assert.equal(fns.WriteProfileStringA.argBytes, 12);
+});

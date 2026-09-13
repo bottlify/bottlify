@@ -41,8 +41,44 @@ const SHELLEXECUTEINFO_HINSTAPP = 32;
 
 /** SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. */
 const SHFILEOPSTRUCT_ABORTED = 20;
-/** E_FAIL, for a shell folder there is no namespace to resolve. */
+const E_OUTOFMEMORY = 0x8007000e | 0;
+/** E_FAIL, for the shell namespace this build does not have. */
 const E_FAIL = 0x80004005 | 0;
+
+/** CSIDL_FLAG_CREATE and its kin ride in the high bits of the folder id. */
+const CSIDL_FLAG_MASK = 0xff00;
+
+/** A path argument is at most this long. */
+const MAX_PATH = 260;
+
+/**
+ * The folders a CSIDL names, by the registry's name for each. The desktop and
+ * its directory are one folder here, as they are on disk.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const CSIDL_FOLDERS = Object.freeze({
+    0x00: 'Desktop',
+    0x02: 'Programs',
+    0x05: 'Personal',
+    0x07: 'Startup',
+    0x0b: 'Start Menu',
+    0x10: 'Desktop',
+    0x14: 'Fonts',
+    0x16: 'Common Start Menu',
+    0x17: 'Common Programs',
+    0x18: 'Common Startup',
+    0x19: 'Common Desktop',
+    0x1a: 'AppData',
+    0x1c: 'Local AppData',
+    0x23: 'Common AppData',
+    0x24: 'Windows',
+    0x25: 'System',
+    0x26: 'ProgramFiles',
+    0x28: 'Profile',
+    0x2b: 'CommonFiles',
+    0x2e: 'Common Documents',
+});
 
 /**
  * @typedef {Object} ShellHost
@@ -55,7 +91,24 @@ const E_FAIL = 0x80004005 | 0;
  *           The process's IMalloc, the same one CoGetMalloc answers with.
  *           Absent in a build without ole32 behind it, and then SHGetMalloc
  *           is refused.
+ * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(bytes: number) => number} [allocate]
+ *           The task allocator's memory, which is what a caller frees an item
+ *           id list with. Without it no list can be made and the folder calls
+ *           fail as an out-of-memory would.
+ * @property {Readonly<Record<string, string>>} [folders]
+ *           The shell folders by the registry's names; absent, no CSIDL is known.
  */
+
+/** @param {string} text @returns {Uint8Array} eight-bit text with its terminator */
+const sz = text=>{
+    const bytes = new Uint8Array(text.length + 1);
+    for (let at = 0; at < text.length; at++)
+    {
+        bytes[at] = text.charCodeAt(at) & 0xff;
+    }
+    return bytes;
+};
 
 /** @param {number} value */
 const dword = value=>new Uint8Array([
@@ -68,6 +121,63 @@ const dword = value=>new Uint8Array([
 export function createShellFunctions(host){
     /** Which windows said they would take a drop. Nothing ever drops on them. */
     const accepting = new Set();
+
+    /** @param {number} csidl @returns {string | null} */
+    const folderOf = csidl=>host.folders?.[CSIDL_FOLDERS[csidl & ~CSIDL_FLAG_MASK]] ?? null;
+
+    /**
+     * A path into a buffer that MAX_PATH was sized for: written whole or, when
+     * the buffer is not there, not at all.
+     *
+     * @param {number} buffer @param {string} path
+     */
+    const writePath = (buffer, path)=>{
+        if (buffer !== 0)
+        {
+            host.writeMemory(buffer, sz(path.slice(0, MAX_PATH - 1)));
+        }
+    };
+
+    /**
+     * An item id list of one item whose data is the path, then the empty item
+     * that ends every list: `cb` is a WORD counting itself. A list made this
+     * way carries its path, so turning it back needs no table.
+     *
+     * @param {string} path
+     * @returns {number} where it was put, or zero
+     */
+    const listFor = path=>{
+        const text = sz(path);
+        const item = 2 + text.length;
+        if (!host.allocate)
+        {
+            return 0;
+        }
+        const at = host.allocate(item + 2);
+        const bytes = new Uint8Array(item + 2);
+        bytes[0] = item & 0xff;
+        bytes[1] = item >>> 8;
+        bytes.set(text, 2);
+        host.writeMemory(at, bytes);
+        return at;
+    };
+
+    /** @param {number} list @returns {string | null} */
+    const pathOf = list=>{
+        if (list === 0 || !host.readMemory)
+        {
+            return null;
+        }
+        const header = host.readMemory(list, 2);
+        const item = header[0] | header[1] << 8;
+        if (item < 3)
+        {
+            return null;
+        }
+        const text = host.readMemory(list + 2, item - 2);
+        const end = text.indexOf(0);
+        return String.fromCharCode(...text.subarray(0, end < 0 ? text.length : end));
+    };
 
     const table = {
         /**
@@ -160,18 +270,51 @@ export function createShellFunctions(host){
         /**
          * BOOL SHGetPathFromIDListA(PCIDLIST_ABSOLUTE pidl, LPSTR pszPath)
          *
-         * There are no item id lists to turn into paths, because the only thing
-         * that makes one is the browse above.
+         * A list made by the special-folder call below carries its path; any
+         * other -- the browse above never makes one -- has none, and the
+         * buffer is cleared so a caller that reads it regardless reads an
+         * empty path.
          */
         SHGetPathFromIDListA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([, path])=>{
-                if ((path >>> 0) !== 0)
-                {
-                    host.writeMemory(path >>> 0, new Uint8Array(1));
-                }
-                return 0;
+            handler: ([list, path])=>{
+                const found = pathOf(list >>> 0);
+                writePath(path >>> 0, found ?? '');
+                return found === null ? 0 : 1;
+            },
+        },
+
+        /**
+         * BOOL SHGetSpecialFolderPathA(HWND, LPSTR pszPath, int csidl, BOOL fCreate)
+         *
+         * The folder is not made on the volume: a program that asks to create
+         * it goes on to write into it, and the write makes it then.
+         */
+        SHGetSpecialFolderPathA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, path, csidl])=>{
+                const folder = folderOf(csidl | 0);
+                writePath(path >>> 0, folder ?? '');
+                return folder === null ? 0 : 1;
+            },
+        },
+
+        /**
+         * HRESULT SHGetFolderPathA(HWND, int csidl, HANDLE hToken, DWORD dwFlags,
+         *                          LPSTR pszPath)
+         *
+         * The later spelling of the same question; the token is the caller's
+         * own, which is the only one there is.
+         */
+        SHGetFolderPathA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, csidl, , , path])=>{
+                const folder = folderOf(csidl | 0);
+                writePath(path >>> 0, folder ?? '');
+                return folder === null ? E_INVALIDARG : S_OK;
             },
         },
 
@@ -266,25 +409,26 @@ export function createShellFunctions(host){
          * HRESULT SHGetSpecialFolderLocation(HWND hwnd, int csidl,
          *   LPITEMIDLIST *ppidl)
          *
-         * There is no shell namespace here to turn a CSIDL into an item id
-         * list, so this reports the failure the API defines rather than a
-         * success with nothing behind it: E_FAIL, and a null where the list
-         * would go. A caller checks the HRESULT and takes its own path -- an
-         * installer that cannot find the Programs folder this way asks the
-         * registry for it instead. Declared with its real argument size so the
-         * stack is whole whichever branch the caller then takes.
+         * The folders this machine has, as the registry's Shell Folders key
+         * also reports them: an installer asks here for Program Files and
+         * the Start Menu before it proposes a destination or writes a
+         * shortcut. The list is the caller's to free with the task allocator,
+         * which is the one it was made from. A folder this machine does not
+         * have is E_INVALIDARG with a null where the list would go.
          */
         SHGetSpecialFolderLocation: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , out])=>{
-                if ((out >>> 0) !== 0)
+            handler: ([, csidl, out])=>{
+                const folder = folderOf(csidl | 0);
+                if (folder === null)
                 {
                     host.writeMemory(out >>> 0, dword(0));
+                    return E_INVALIDARG;
                 }
-                host.divergence?.('SHGetSpecialFolderLocation',
-                    'no shell namespace: reports E_FAIL with a null id list');
-                return E_FAIL;
+                const list = listFor(folder);
+                host.writeMemory(out >>> 0, dword(list));
+                return list === 0 ? E_OUTOFMEMORY : S_OK;
             },
         },
 

@@ -14,7 +14,8 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
     withReadAhead, withWindow, refetchedIn,
-    resolveLibraryPath, startDirectoryOf, timedWait, pagePacing, PAGE_YIELD_MS,
+    resolveLibraryPath, startDirectoryOf, libraryCandidates, timedWait, pagePacing,
+    PAGE_YIELD_MS,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
     spaceAbove,
@@ -316,6 +317,20 @@ test('a resource is addressed relative to the module its instance names', ()=>{
     assert.equal(lookup.moduleBase(0x12345678), 0, 'an instance that names nothing');
     assert.equal(lookup.findResource(0x12345678, 5, 107), null);
     assert.equal(lookup.loadString(0, 1), null, 'a module without its file has no resources');
+});
+
+test('a bare name is looked for beside the executable, then where the system keeps its own', ()=>{
+    // An installer puts a library it brought into the system directory and
+    // loads it by bare name; a search that stops beside the executable
+    // reports it missing the moment it was put in place.
+    assert.deepEqual(libraryCandidates('cabinet.dll', IMAGE), [
+        'C:\\App\\cabinet.dll', 'C:\\WINDOWS\\system32\\cabinet.dll',
+        'C:\\WINDOWS\\cabinet.dll',
+    ]);
+    assert.deepEqual(libraryCandidates('C:\\Other\\x.dll', IMAGE), ['C:\\Other\\x.dll'],
+        'a qualified name has one place');
+    assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
+        ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
 });
 
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{

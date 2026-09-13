@@ -129,6 +129,7 @@ const TEMP_PATH = 'C:\\WINDOWS\\TEMP\\';
 /** The two system directories a search with no path of its own ends in. */
 const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
 const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
+const PROGRAM_FILES = 'C:\\Program Files';
 
 /**
  * WIN32_FIND_DATAA, laid out the way the guest compiled it.
@@ -258,15 +259,14 @@ export function createFileFunctions(host){
     const { files } = host;
 
     // A machine has these directories before any program runs: GetTempPath
-    // promises the one, and an installer's first act is to create its scratch
-    // file there. A promise of a directory that is not there fails that
-    // create with "access denied", which is the wrong answer to a question
-    // the program never asked. The system directory and the program files
-    // directory are promised the same way, by GetSystemDirectory and the
-    // registry, and an installer changes into the latter to find where it is
-    // going before it has made anything of its own.
+    // and GetSystemDirectory promise them, the registry names the program
+    // directories, and an installer's first act is to create its scratch
+    // file in one and its last to move a shared library into another. A
+    // promise of a directory that is not there fails that create or move
+    // with "access denied", which is the wrong answer to a question the
+    // program never asked.
     for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
-        'C:\\Program Files', 'C:\\Program Files\\Common Files'])
+        PROGRAM_FILES, `${PROGRAM_FILES}\\Common Files`])
     {
         try
         {
@@ -603,6 +603,8 @@ export function createFileFunctions(host){
      *           What the caller actually wrote, before resolution. One function
      *           needs it: GetFullPathName keeps a trailing separator the caller
      *           put there, and resolution is what takes it off.
+     * @property {(pointer: number) => string} list
+     *           A path list, which runs longer than any one path.
      * @property {(buffer: number, size: number, text: string) => number} write
      * @property {(address: number, entry: DirectoryEntry) => void} findData
      * @property {number} unit  Bytes per character, for pointer arithmetic.
@@ -612,6 +614,7 @@ export function createFileFunctions(host){
     const ANSI = {
         path: pathArgument,
         raw: pointer=>pointer === 0 ? '' : host.readCString(pointer >>> 0, MAX_PATH),
+        list: pointer=>host.readCString(pointer >>> 0, MAX_PATH_LIST),
         write: writeStringTo,
         findData: writeFindData,
         unit: 1,
@@ -622,6 +625,7 @@ export function createFileFunctions(host){
         path: pointer=>fullPath(
             pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH)),
         raw: pointer=>pointer === 0 ? '' : host.readWideString(pointer >>> 0, MAX_PATH),
+        list: pointer=>host.readWideString(pointer >>> 0, MAX_PATH_LIST),
         write: writeWideStringTo,
         findData: writeWideFindData,
         unit: 2,
@@ -687,6 +691,49 @@ export function createFileFunctions(host){
 
     const moveFile = bothForms(8, ([from, to], text)=>
         renamePath(text.path(from), text.path(to), false));
+
+    /** @param {number[]} args @param {TextForm} text */
+    const searchPathBody = ([pathList, fileName, extension, size, buffer, filePart], text)=>{
+        let name = text.raw(fileName);
+        if (name === '')
+        {
+            return fail(ERROR_INVALID_PARAMETER);
+        }
+        const bare = name.slice(
+            Math.max(name.lastIndexOf(SEPARATOR), name.lastIndexOf('/')) + 1);
+        if ((extension >>> 0) !== 0 && !bare.includes('.'))
+        {
+            name += text.raw(extension);
+        }
+        const qualified = /^[A-Za-z]:|^[\\/]/.test(name)
+            || name.includes(SEPARATOR) || name.includes('/');
+        const directories = qualified
+            ? ['']
+            : (pathList >>> 0) !== 0
+                ? text.list(pathList).split(';')
+                : [parentOf(host.imagePath?.() ?? ''), files.currentDirectory(),
+                    SYSTEM_DIRECTORY, WINDOWS_DIRECTORY];
+        for (const directory of directories)
+        {
+            const candidate = fullPath(directory === ''
+                ? name
+                : `${directory.replace(/[\\/]$/, '')}${SEPARATOR}${name}`);
+            const entry = files.stat(candidate);
+            if (!entry?.exists || entry.isDirectory)
+            {
+                continue;
+            }
+            const written = text.write(buffer >>> 0, size, candidate);
+            if (written === candidate.length)
+            {
+                writeDwordIf(filePart >>> 0,
+                    (buffer >>> 0) + (candidate.lastIndexOf(SEPARATOR) + 1) * text.unit);
+            }
+            return written;
+        }
+        return fail(ERROR_FILE_NOT_FOUND);
+    };
+    const searchPath = bothForms(24, searchPathBody);
 
     const createDirectory = bothForms(8, ([name], text)=>{
         const path = text.path(name);
@@ -1304,50 +1351,8 @@ export function createFileFunctions(host){
          * needed when the buffer is short, zero and ERROR_FILE_NOT_FOUND when
          * nothing is there.
          */
-        SearchPathA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([pathList, fileName, extension, size, buffer, filePart])=>{
-                let name = host.readCString(fileName >>> 0, MAX_PATH);
-                if (name === '')
-                {
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                const bare = name.slice(
-                    Math.max(name.lastIndexOf(SEPARATOR), name.lastIndexOf('/')) + 1);
-                if ((extension >>> 0) !== 0 && !bare.includes('.'))
-                {
-                    name += host.readCString(extension >>> 0, MAX_PATH);
-                }
-                const qualified = /^[A-Za-z]:|^[\\/]/.test(name)
-                    || name.includes(SEPARATOR) || name.includes('/');
-                const directories = qualified
-                    ? ['']
-                    : (pathList >>> 0) !== 0
-                        ? host.readCString(pathList >>> 0, MAX_PATH_LIST).split(';')
-                        : [parentOf(host.imagePath?.() ?? ''), files.currentDirectory(),
-                            SYSTEM_DIRECTORY, WINDOWS_DIRECTORY];
-                for (const directory of directories)
-                {
-                    const candidate = fullPath(directory === ''
-                        ? name
-                        : `${directory.replace(/[\\/]$/, '')}${SEPARATOR}${name}`);
-                    const entry = files.stat(candidate);
-                    if (!entry?.exists || entry.isDirectory)
-                    {
-                        continue;
-                    }
-                    const written = writeStringTo(buffer >>> 0, size, candidate);
-                    if (written === candidate.length)
-                    {
-                        writeDwordIf(filePart >>> 0,
-                            (buffer >>> 0) + candidate.lastIndexOf(SEPARATOR) + 1);
-                    }
-                    return written;
-                }
-                return fail(ERROR_FILE_NOT_FOUND);
-            },
-        },
+        SearchPathA: searchPath.ansi,
+        SearchPathW: searchPath.wide,
 
         /** DWORD GetFullPathName(LPCSTR, DWORD, LPSTR, LPSTR *lpFilePart) -- one body, both spellings. */
         GetFullPathNameA: getFullPathName.ansi,

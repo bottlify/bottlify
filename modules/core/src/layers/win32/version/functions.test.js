@@ -284,9 +284,67 @@ test('VerInstallFileA expands a compressed source into the destination directory
     assert.equal(memory[TMP], 0, 'and no temp file was named');
 
     // A source that is not there is reported as unreadable, not as created.
+    // The flag is the documented VIF_CANNOTREADSRC: a caller tests the bits
+    // it knows, and 0x40 is VIF_WRITEPROT, a different complaint.
     put(0x10, 'missing.dl_');
     assert.equal(
-        version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]), 0x40);
+        version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]), 0x10000);
+});
+
+test('VerInstallFileA keeps a newer file already in place and says so, unless forced', ()=>{
+    const memory = new Uint8Array(0x2000);
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>memory.set(
+        new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat([0])), at);
+    const files = /** @type {any} */ (fakeFiles());
+    files.nodes.set('C:\\TEMP\\new.dll', Uint8Array.from([1, 2]));
+    files.nodes.set('C:\\SYS\\old.dll', Uint8Array.from([9]));
+    files.nodes.set('C:\\SYS\\newer.dll', Uint8Array.from([9]));
+    /** @param {number} major */
+    const versioned = major=>{
+        const info = fixedInfo();
+        new DataView(info.buffer).setUint32(8, major << 16, true);
+        return node('VS_VERSION_INFO', { value: info });
+    };
+    /** @type {Record<string, Uint8Array>} */
+    const versions = {
+        'C:\\TEMP\\new.dll': versioned(10),
+        'C:\\SYS\\old.dll': versioned(9),
+        'C:\\SYS\\newer.dll': versioned(11),
+    };
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: (/** @type {number} */ a)=>{
+            let text = '';
+            for (let at = a; memory[at] !== 0 && at < memory.length; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        setLastError: ()=>{},
+        versionInfo: (/** @type {string} */ path)=>versions[path] ?? null,
+        files,
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    put(0x10, 'new.dll');
+    put(0x30, 'old.dll');
+    put(0x40, 'newer.dll');
+    put(0x50, 'C:\\TEMP');
+    put(0x80, 'C:\\SYS');
+    const VIF_SRCOLD = 0x4;
+    const VIFF_FORCEINSTALL = 0x1;
+
+    assert.equal(version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, 0, 0]), 0,
+        'an older one in place is replaced');
+    assert.deepEqual([...files.nodes.get('C:\\SYS\\old.dll')], [1, 2]);
+    assert.equal(version.VerInstallFileA.handler([0, 0x10, 0x40, 0x50, 0x80, 0, 0, 0]),
+        VIF_SRCOLD, 'a newer one is kept');
+    assert.deepEqual([...files.nodes.get('C:\\SYS\\newer.dll')], [9]);
+    assert.equal(version.VerInstallFileA.handler(
+        [VIFF_FORCEINSTALL, 0x10, 0x40, 0x50, 0x80, 0, 0, 0]), 0, 'unless forced');
+    assert.deepEqual([...files.nodes.get('C:\\SYS\\newer.dll')], [1, 2]);
 });
 
 test('VerInstallFileA without a volume reports it cannot create the file', ()=>{
@@ -298,5 +356,6 @@ test('VerInstallFileA without a volume reports it cannot create the file', ()=>{
         setLastError: ()=>{},
     };
     const version = /** @type {any} */ (createVersionFunctions(host));
-    assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, 0, 0]), 0x4);
+    assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, 0, 0]), 0x800,
+        'VIF_CANNOTCREATE by its documented value');
 });

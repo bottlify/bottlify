@@ -35,7 +35,7 @@ import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
 import { createTokenFunctions } from './advapi32/tokens.js';
-import { createHive } from './advapi32/registry.js';
+import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
 import { createSocketRegistry } from './wsock32/sockets.js';
@@ -803,9 +803,14 @@ export const win32Module = {
             }),
 
             'SHELL32.dll': createShellFunctions({
-                writeMemory,
+                writeMemory, readMemory,
                 divergence: config?.divergence,
                 taskAllocator,
+                // The task allocator's memory: a caller frees an item id list
+                // with CoTaskMemFree, which is this same heap.
+                /** @param {number} bytes */
+                allocate: bytes=>heap.allocate(bytes),
+                folders: SHELL_FOLDERS,
             }),
 
             'VERSION.dll': createVersionFunctions({

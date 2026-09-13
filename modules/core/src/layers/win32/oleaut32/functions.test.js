@@ -388,6 +388,22 @@ test('the ordinals are the ones a real oleaut32 exports', ()=>{
     assert.equal(OLEAUT32_ORDINALS[147], 'VariantChangeTypeEx');
     assert.equal(OLEAUT32_ORDINALS[149], 'SysStringByteLen');
     assert.equal(OLEAUT32_ORDINALS[150], 'SysAllocStringByteLen');
+    assert.equal(OLEAUT32_ORDINALS[161], 'LoadTypeLib');
+    assert.equal(OLEAUT32_ORDINALS[163], 'RegisterTypeLib');
+});
+
+test('a type library cannot be loaded, and the pointer says so as well as the code', ()=>{
+    setUp();
+    host.putWide(SLOT, 'xx');
+    assert.equal(call('LoadTypeLib', [TEXT, SLOT]) | 0, 0x80029c4a | 0);
+    assert.equal(host.u32(SLOT), 0);
+    host.putWide(SLOT, 'xx');
+    assert.equal(call('LoadRegTypeLib', [TEXT, 1, 0, 0, SLOT]) | 0, 0x8002801d | 0);
+    assert.equal(host.u32(SLOT), 0);
+    assert.equal(fx.LoadTypeLib.argBytes, 8);
+    assert.equal(fx.LoadTypeLibEx.argBytes, 12);
+    assert.equal(fx.LoadRegTypeLib.argBytes, 20);
+    assert.equal(fx.RegisterTypeLib.argBytes, 12);
 });
 
 test('the argument list of each entry is the one the guest pushed', ()=>{

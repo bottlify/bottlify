@@ -30,10 +30,64 @@ test('the shell namespace is refused out loud, with a name the reporter can key 
     const m = machine();
     assert.equal(m.shell.SHGetDesktopFolder.handler([0x100]) | 0, 0x80004005 | 0);
     assert.deepEqual([...m.memory.slice(0x100, 0x104)], [0, 0, 0, 0]);
-    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, 0, 0x100]) | 0, 0x80004005 | 0);
     assert.equal(m.shell.SHGetDesktopFolder.argBytes, 4);
-    assert.deepEqual(m.diverged.map(line=>line.split(':')[0]),
-        ['SHGetDesktopFolder', 'SHGetSpecialFolderLocation']);
+    assert.deepEqual(m.diverged.map(line=>line.split(':')[0]), ['SHGetDesktopFolder']);
+});
+
+/** The machine above with a heap and the folder table, for the special folders. */
+function machineWithFolders(){
+    const memory = new Uint8Array(0x1000).fill(0xaa);
+    let free = 0x800;
+    const host = {
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        allocate: (/** @type {number} */ bytes)=>{
+            const at = free;
+            free += bytes;
+            return at;
+        },
+        folders: { Desktop: 'C:\\Desk', ProgramFiles: 'C:\\Program Files' },
+    };
+    /** @param {number} at */
+    const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));
+    return { memory, string, shell: /** @type {any} */ (createShellFunctions(host)) };
+}
+
+test('a special folder is answered as a list that turns back into its path', ()=>{
+    const m = machineWithFolders();
+    const CSIDL_DESKTOPDIRECTORY = 0x10;
+    const CSIDL_FLAG_CREATE = 0x8000;
+
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler(
+        [0, CSIDL_DESKTOPDIRECTORY | CSIDL_FLAG_CREATE, 0x100]), 0);
+    const list = new DataView(m.memory.buffer).getUint32(0x100, true);
+    assert.notEqual(list, 0);
+    assert.equal(m.shell.SHGetPathFromIDListA.handler([list, 0x200]), 1);
+    assert.equal(m.string(0x200), 'C:\\Desk');
+    assert.equal(m.memory[list + (m.memory[list] | m.memory[list + 1] << 8)], 0,
+        'the list ends in an empty item');
+});
+
+test('a folder this machine does not have is refused, with the pointer and the path cleared', ()=>{
+    const m = machineWithFolders();
+    const CSIDL_NETWORK = 0x12;
+
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, CSIDL_NETWORK, 0x100]) | 0,
+        0x80070057 | 0);
+    assert.equal(new DataView(m.memory.buffer).getUint32(0x100, true), 0);
+    assert.equal(m.shell.SHGetSpecialFolderPathA.handler([0, 0x200, CSIDL_NETWORK, 0]), 0);
+    assert.equal(m.memory[0x200], 0);
+    assert.equal(m.shell.SHGetSpecialFolderLocation.argBytes, 12);
+});
+
+test('the path spellings answer the same folder', ()=>{
+    const m = machineWithFolders();
+    const CSIDL_PROGRAM_FILES = 0x26;
+
+    assert.equal(m.shell.SHGetSpecialFolderPathA.handler([0, 0x200, CSIDL_PROGRAM_FILES, 1]), 1);
+    assert.equal(m.string(0x200), 'C:\\Program Files');
+    assert.equal(m.shell.SHGetFolderPathA.handler([0, CSIDL_PROGRAM_FILES, 0, 0, 0x300]), 0);
+    assert.equal(m.string(0x300), 'C:\\Program Files');
 });
 
 test('launching something is refused, not quietly succeeded', ()=>{

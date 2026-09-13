@@ -207,7 +207,10 @@ export function createTokenFunctions(host){
          *   PHANDLE TokenHandle)
          *
          * Only the running process has a token to open. The access asked
-         * for is granted whatever it is: there is nobody to refuse.
+         * for is granted whatever it is: there is nobody to refuse. The last
+         * error is left as it was, as a call that succeeds leaves it: a
+         * program reads ERROR_NO_TOKEN back after this to know the thread's
+         * token was the one it lacked, and takes a zero for "not privileged".
          */
         OpenProcessToken: {
             argBytes: 12,
@@ -229,7 +232,6 @@ export function createTokenFunctions(host){
                     return fail(ERROR_INVALID_PARAMETER);
                 }
                 writeDword(out >>> 0, host.handles.open('token', { process: process >>> 0 }));
-                host.setLastError(ERROR_SUCCESS);
                 return 1;
             },
         },
@@ -381,6 +383,53 @@ export function createTokenFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([sid])=>8 + 4 * host.readMemory(sid >>> 0, 2)[1],
+        },
+
+        /**
+         * BOOL IsValidSid(PSID pSid)
+         *
+         * The revision is one and the count fits the format's eight, which is
+         * all a SID can be checked for without a directory behind it.
+         */
+        IsValidSid: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([sid])=>{
+                if ((sid >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const head = host.readMemory(sid >>> 0, 2);
+                return head[0] === 1 && head[1] <= 8 ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL CheckTokenMembership(HANDLE TokenHandle, PSID SidToCheck, PBOOL IsMember)
+         *
+         * A NULL token means the caller's own, and membership is what the
+         * groups above say: the same answer a program gets by walking them,
+         * asked in one call.
+         */
+        CheckTokenMembership: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([token, sid, out])=>{
+                if ((token >>> 0) !== 0 && !isToken(token))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((sid >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const length = 8 + 4 * host.readMemory(sid >>> 0, 2)[1];
+                const wanted = host.readMemory(sid >>> 0, length);
+                const member = [USER_SID, ...GROUP_SIDS].map(sidBytes).some(held=>
+                    held.length === wanted.length && held.every((byte, at)=>byte === wanted[at]));
+                host.writeMemory(out >>> 0, new Uint8Array([member ? 1 : 0, 0, 0, 0]));
+                return 1;
+            },
         },
     };
 }

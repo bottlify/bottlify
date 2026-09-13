@@ -335,6 +335,82 @@ export function createProfileFunctions(host){
             : [...lines.slice(0, at), line, ...lines.slice(at + 1)];
     };
 
+    /**
+     * The three questions, each asked of a private profile by path and of
+     * win.ini with its path fixed: the same body, so the two cannot differ.
+     */
+
+    /**
+     * @param {string | null} path @param {number} section @param {number} key
+     * @param {number} fallback @param {number} buffer @param {number} size
+     */
+    const getString = (path, section, key, fallback, buffer, size)=>{
+        const wanted = {
+            section: text(section, MAX_NAME),
+            key: text(key, MAX_NAME),
+            fallback: (text(fallback, MAX_VALUE) ?? '').replace(/\s+$/, ''),
+        };
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>deliver(buffer, size,
+            lookUp(lines, wanted.section, wanted.key, wanted.fallback));
+        const loaded = path === null ? [] : load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /**
+     * @param {string | null} path @param {number} section @param {number} key
+     * @param {number} fallback
+     */
+    const getInt = (path, section, key, fallback)=>{
+        const wanted = { section: text(section, MAX_NAME), key: text(key, MAX_NAME) };
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>{
+            // Neither name may be NULL here: there is no list to
+            // read a number out of, and the default is the answer.
+            if (wanted.section === null || wanted.key === null)
+            {
+                return fallback >>> 0;
+            }
+            const found = lookUp(lines, wanted.section, wanted.key, '');
+            const value = 'value' in found ? found.value : '';
+            return value === '' ? fallback >>> 0 : integerOf(value);
+        };
+        const loaded = path === null ? [] : load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /**
+     * @param {string | null} path @param {number} section @param {number} key
+     * @param {number} value
+     */
+    const put = (path, section, key, value)=>{
+        const wanted = {
+            section: text(section, MAX_NAME),
+            key: text(key, MAX_NAME),
+            value: text(value, MAX_VALUE),
+        };
+        if (path === null || wanted.section === null)
+        {
+            return 0;
+        }
+        /** @param {ProfileLine[]} lines */
+        const answer = lines=>{
+            const changed = edit(lines, /** @type {string} */ (wanted.section),
+                wanted.key, wanted.value);
+            return changed === null || store(path, changed) ? 1 : 0;
+        };
+        const loaded = load(path);
+        return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
+    };
+
+    /** @param {number} file @returns {string | null} */
+    const pathOf = file=>{
+        const name = text(file, MAX_VALUE);
+        return name === null ? null : resolve(name);
+    };
+
+    const WIN_INI = `${WINDOWS_DIRECTORY}\\win.ini`;
+
     return {
         /**
          * DWORD GetPrivateProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
@@ -343,19 +419,8 @@ export function createProfileFunctions(host){
         GetPrivateProfileStringA: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([section, key, fallback, buffer, size, file])=>{
-                const name = text(file, MAX_VALUE);
-                const wanted = {
-                    section: text(section, MAX_NAME),
-                    key: text(key, MAX_NAME),
-                    fallback: (text(fallback, MAX_VALUE) ?? '').replace(/\s+$/, ''),
-                };
-                /** @param {ProfileLine[]} lines */
-                const answer = lines=>deliver(buffer, size,
-                    lookUp(lines, wanted.section, wanted.key, wanted.fallback));
-                const loaded = name === null ? [] : load(resolve(name));
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
-            },
+            handler: ([section, key, fallback, buffer, size, file])=>
+                getString(pathOf(file), section, key, fallback, buffer, size),
         },
 
         /**
@@ -365,22 +430,34 @@ export function createProfileFunctions(host){
         GetPrivateProfileIntA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([section, key, fallback, file])=>{
-                const name = text(file, MAX_VALUE);
-                const wanted = { section: text(section, MAX_NAME), key: text(key, MAX_NAME) };
+            handler: ([section, key, fallback, file])=>getInt(pathOf(file), section, key, fallback),
+        },
+
+        /**
+         * DWORD GetPrivateProfileSectionA(LPCSTR lpAppName, LPSTR lpReturnedString,
+         *   DWORD nSize, LPCSTR lpFileName)
+         *
+         * Every entry of the section as `key=value`, as it stands in the
+         * file, in one NUL-separated list -- the shape a caller walks with
+         * the same loop it walks the key list with.
+         */
+        GetPrivateProfileSectionA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([section, buffer, size, file])=>{
+                const path = pathOf(file);
+                const name = text(section, MAX_NAME);
                 /** @param {ProfileLine[]} lines */
                 const answer = lines=>{
-                    // Neither name may be NULL here: there is no list to
-                    // read a number out of, and the default is the answer.
-                    if (wanted.section === null || wanted.key === null)
-                    {
-                        return fallback >>> 0;
-                    }
-                    const found = lookUp(lines, wanted.section, wanted.key, '');
-                    const value = 'value' in found ? found.value : '';
-                    return value === '' ? fallback >>> 0 : integerOf(value);
+                    const span = name === null ? null : sectionSpan(lines, name);
+                    const entries = span === null
+                        ? []
+                        : lines.slice(span.start + 1, span.end)
+                            .filter(line=>line.key !== null)
+                            .map(line=>line.text.trim());
+                    return writeList(buffer, size, entries);
                 };
-                const loaded = name === null ? [] : load(resolve(name));
+                const loaded = path === null ? [] : load(path);
                 return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
             },
         },
@@ -392,27 +469,32 @@ export function createProfileFunctions(host){
         WritePrivateProfileStringA: {
             argBytes: 16,
             /** @param {number[]} args */
-            handler: ([section, key, value, file])=>{
-                const name = text(file, MAX_VALUE);
-                const wanted = {
-                    section: text(section, MAX_NAME),
-                    key: text(key, MAX_NAME),
-                    value: text(value, MAX_VALUE),
-                };
-                if (name === null || wanted.section === null)
-                {
-                    return 0;
-                }
-                const path = resolve(name);
-                /** @param {ProfileLine[]} lines */
-                const answer = lines=>{
-                    const changed = edit(lines, /** @type {string} */ (wanted.section),
-                        wanted.key, wanted.value);
-                    return changed === null || store(path, changed) ? 1 : 0;
-                };
-                const loaded = load(path);
-                return loaded instanceof Promise ? loaded.then(answer) : answer(loaded);
-            },
+            handler: ([section, key, value, file])=>put(pathOf(file), section, key, value),
+        },
+
+        /**
+         * DWORD GetProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName,
+         *   LPCSTR lpDefault, LPSTR lpReturnedString, DWORD nSize)
+         * UINT GetProfileIntA(LPCSTR lpAppName, LPCSTR lpKeyName, INT nDefault)
+         * BOOL WriteProfileStringA(LPCSTR lpAppName, LPCSTR lpKeyName, LPCSTR lpString)
+         *
+         * win.ini: a private profile whose name is fixed.
+         */
+        GetProfileStringA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback, buffer, size])=>
+                getString(WIN_INI, section, key, fallback, buffer, size),
+        },
+        GetProfileIntA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, key, fallback])=>getInt(WIN_INI, section, key, fallback),
+        },
+        WriteProfileStringA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([section, key, value])=>put(WIN_INI, section, key, value),
         },
     };
 }

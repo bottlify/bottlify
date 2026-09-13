@@ -35,8 +35,15 @@ const VS_FFI_SIGNATURE = 0xfeef04bd;
 const FIXED_FILE_INFO_SIZE = 52;
 
 /** VerInstallFile return flags; zero is success. */
-const VIF_CANNOTCREATE = 0x00000004;
-const VIF_CANNOTREADSRC = 0x00000040;
+const VIF_SRCOLD = 0x00000004;
+const VIF_CANNOTCREATE = 0x00000800;
+const VIF_CANNOTREADSRC = 0x00010000;
+/** And what it is asked with. */
+const VIFF_FORCEINSTALL = 0x00000001;
+
+/** Where the fixed information keeps the file's own version. */
+const FIXED_FILE_VERSION_MS = 8;
+const FIXED_FILE_VERSION_LS = 12;
 
 /**
  * @typedef {Object} VersionHost
@@ -161,6 +168,27 @@ function find(block, path){
         node = found;
     }
     return node;
+}
+
+/**
+ * The file version a block carries, as one comparable number, or null when
+ * the block has no fixed information to read it from.
+ *
+ * @param {Uint8Array | null} block
+ */
+export function fileVersionOf(block){
+    const root = block ? readNode(block, 0) : null;
+    if (!block || !root || root.value + FIXED_FILE_INFO_SIZE > block.length)
+    {
+        return null;
+    }
+    const view = new DataView(block.buffer, block.byteOffset, block.byteLength);
+    if (view.getUint32(root.value, true) !== VS_FFI_SIGNATURE)
+    {
+        return null;
+    }
+    return view.getUint32(root.value + FIXED_FILE_VERSION_MS, true) * 0x1_0000_0000
+        + view.getUint32(root.value + FIXED_FILE_VERSION_LS, true);
 }
 
 /**
@@ -290,17 +318,17 @@ export function createVersionFunctions(host){
          * not be read (VIF_CANNOTREADSRC) or could not be written
          * (VIF_CANNOTCREATE).
          *
-         * The version checks the full API performs (comparing an existing
-         * destination's version, forcing or refusing) are not made: there is
-         * one user installing into an empty prefix, so the file is always
-         * installed. The temp-file handshake is likewise skipped -- the file
-         * is put at its final name and no temp is left for the caller to
-         * rename -- which is the branch a caller takes when the return is zero.
+         * A destination already there and newer than the source is kept and
+         * reported (VIF_SRCOLD), unless the caller forces the install -- which
+         * is what it does next, having asked. The temp-file handshake is
+         * skipped -- the file is put at its final name and no temp is left for
+         * the caller to rename -- which is the branch a caller takes when the
+         * return is zero.
          */
         VerInstallFileA: {
             argBytes: 32,
             /** @param {number[]} args */
-            handler: ([, srcName, destName, srcDir, destDir, , tmpFile, tmpLen])=>{
+            handler: ([flags, srcName, destName, srcDir, destDir, , tmpFile, tmpLen])=>{
                 if (!host.files)
                 {
                     return VIF_CANNOTCREATE;
@@ -318,6 +346,16 @@ export function createVersionFunctions(host){
                 if (!stat || !stat.exists || stat.isDirectory)
                 {
                     return VIF_CANNOTREADSRC;
+                }
+                if (host.files.stat(destination)?.exists
+                    && ((flags >>> 0) & VIFF_FORCEINSTALL) === 0)
+                {
+                    const theirs = fileVersionOf(host.versionInfo?.(destination) ?? null);
+                    const ours = fileVersionOf(host.versionInfo?.(source) ?? null);
+                    if (theirs !== null && ours !== null && theirs > ours)
+                    {
+                        return VIF_SRCOLD;
+                    }
                 }
                 const input = host.files.open(source, { read: true });
                 if (!input)

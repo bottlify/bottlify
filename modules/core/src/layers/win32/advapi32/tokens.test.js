@@ -74,6 +74,10 @@ test('the sequence an installer asks whether it is an administrator with', ()=>{
     assert.equal(fns.OpenProcessToken.handler([CURRENT_PROCESS, TOKEN_QUERY, OUT]), 1);
     const token = dword(OUT);
     assert.equal(table.get(token)?.type, 'token', 'a real handle, closed like any other');
+    // And it leaves the last error alone, as a call that succeeds does: the
+    // program reads ERROR_NO_TOKEN back here to know the thread's token was
+    // the one missing, and a zero written over it is read as "not privileged".
+    assert.deepEqual(errors, [ERROR_NO_TOKEN]);
 
     // Sized first, then read: the first call fails saying how much is needed.
     assert.equal(fns.GetTokenInformation.handler([token, TokenGroups, 0, 0, NEEDED]), 0);
@@ -149,4 +153,24 @@ test('a SID is laid out as Windows lays it out, and compared by its own length',
     bytes[SID + 0x40 + 12] = 0x20;
     assert.equal(fns.EqualSid.handler([SID, SID + 0x40]), 1);
     assert.equal(fns.GetLengthSid.handler([SID]), 16);
+});
+
+test('a SID is valid by its revision and count, and membership is asked in one call', ()=>{
+    const { bytes, fns, dword } = setup();
+    bytes.set(ADMINISTRATORS_SID, SID);
+    assert.equal(fns.IsValidSid.handler([SID]), 1);
+    bytes[SID + 0x40] = 2;
+    assert.equal(fns.IsValidSid.handler([SID + 0x40]), 0, 'a revision nothing wrote');
+    assert.equal(fns.IsValidSid.handler([0]), 0);
+
+    const ANSWER = SID + 0x80;
+    assert.equal(fns.CheckTokenMembership.handler([0, SID, ANSWER]), 1);
+    assert.equal(dword(ANSWER), 1, 'the caller is an administrator');
+    bytes.set(ADMINISTRATORS_SID, SID + 0x40);
+    bytes[SID + 0x40 + 12] = 0x27;
+    assert.equal(fns.CheckTokenMembership.handler([0, SID + 0x40, ANSWER]), 1);
+    assert.equal(dword(ANSWER), 0, 'and not a backup operator');
+    assert.equal(fns.CheckTokenMembership.handler([0x7777, SID, ANSWER]), 0,
+        'a handle nothing opened');
+    assert.equal(fns.CheckTokenMembership.argBytes, 12);
 });
