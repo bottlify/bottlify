@@ -158,7 +158,8 @@ function keyFromJSON(stored){
  * @typedef {Object} MachineKey
  * @property {number} root
  * @property {string} path
- * @property {Record<string, string | number>} [values]  Text is REG_SZ, a number REG_DWORD.
+ * @property {Record<string, string | number | Uint8Array>} [values]
+ *     Text is REG_SZ, a number REG_DWORD, bytes REG_BINARY.
  */
 
 /**
@@ -255,12 +256,17 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
             VendorIdentifier: 'GenuineIntel',
             '~MHz': PROCESSOR_MHZ,
         } },
-    // The DirectX this machine has, in the form its own setup library reads
-    // back: 9.0c, the newest of the interfaces the drawing layer answers for.
-    // An installer that finds no version here offers to install one, and the
-    // redistributable it carries cannot run.
+    // The DirectX this machine has, in the two forms its own setup library
+    // reads back: the version string, and the binary pair an older setup
+    // library consults first. 9.0c, the newest of the interfaces the drawing
+    // layer answers for, and every earlier one is inside it, so an installer
+    // asking for 8.1 is satisfied. An installer that finds no version here
+    // offers to install one, and the redistributable it carries cannot run.
     { root: HKEY_LOCAL_MACHINE, path: 'SOFTWARE\\Microsoft\\DirectX', values: {
         Version: '4.09.00.0904',
+        InstalledVersion: Uint8Array.of(0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x09, 0x04),
+        InstalledCount: 1,
+        RC: 0,
     } },
     { root: HKEY_CURRENT_USER, path: 'Software\\Microsoft\\Windows\\CurrentVersion\\Run' },
     { root: HKEY_CURRENT_USER,
@@ -350,7 +356,9 @@ export function createHive(){
                 {
                     node.values.set(fold(name), typeof value === 'number'
                         ? { name, type: REG_DWORD, data: dword(value) }
-                        : { name, type: REG_SZ, data: sz(value) });
+                        : value instanceof Uint8Array
+                            ? { name, type: REG_BINARY, data: value }
+                            : { name, type: REG_SZ, data: sz(value) });
                 }
             }
         }

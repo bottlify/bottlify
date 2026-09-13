@@ -80,6 +80,9 @@ test('the keys every machine carries are there before any program writes', ()=>{
     const dxVersion = directX && hive.getValue(directX, 'Version');
     assert.equal(dxVersion && String.fromCharCode(...dxVersion.data.subarray(0, 12)),
         '4.09.00.0904');
+    const installed = directX && hive.getValue(directX, 'InstalledVersion');
+    assert.equal(installed?.type, REG_BINARY, 'the older setup library reads the binary pair');
+    assert.deepEqual(installed && [...installed.data], [0, 0, 0, 9, 0, 0, 9, 4]);
     // A program reads the processor's speed here to scale its own clock
     // readings, and one that finds nothing calls this a 0 MHz machine.
     const processor = hive.open(local, 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0');
