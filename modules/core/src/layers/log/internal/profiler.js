@@ -84,14 +84,44 @@ export const FRAME_DELTAS = Object.freeze([
     { column: 'retired', layer: 'cpu', counter: 'instructions' },
     { column: 'entries', layer: 'cpu', counter: 'jit.entries' },
     { column: 'interpretedSteps', layer: 'cpu', counter: 'jit.interpretedSteps' },
+    // Beside it, the steps that did run compiled: a frame interpreting twice
+    // as much is a different story depending on whether it retired twice as
+    // much, and the interpreted count alone cannot tell the two apart.
+    { column: 'compiledSteps', layer: 'cpu', counter: 'jit.compiledSteps' },
     // Steps and entries together: their ratio is how long a stretch of
     // interpreted code ran before the compiler took over again, and a frame
     // full of short stretches is a different defect from one long one.
     { column: 'interpretedDispatches', layer: 'cpu', counter: 'jit.interpretedDispatches' },
+    // Why the interpreter ran, per frame rather than per run. The four reasons
+    // charge one dispatch each and so sum to the dispatches above, and the
+    // steps beside each separate a reason taken often for two instructions
+    // from one taken rarely for thousands. Sampling these on a timer beside
+    // the frame index was the only way to see them, and a sample is not a
+    // frame: a frame that stalls has to say its own reason.
+    { column: 'interpNoCode', layer: 'cpu', counter: 'jit.interpNoCode' },
+    { column: 'interpNoEntry', layer: 'cpu', counter: 'jit.interpNoEntry' },
+    { column: 'interpNearPageEnd', layer: 'cpu', counter: 'jit.interpNearPageEnd' },
+    { column: 'interpDifferentState', layer: 'cpu', counter: 'jit.interpDifferentState' },
+    { column: 'interpNoCodeSteps', layer: 'cpu', counter: 'jit.interpNoCodeSteps' },
+    { column: 'interpNoEntrySteps', layer: 'cpu', counter: 'jit.interpNoEntrySteps' },
+    { column: 'interpNearPageEndSteps', layer: 'cpu', counter: 'jit.interpNearPageEndSteps' },
+    { column: 'interpDifferentStateSteps', layer: 'cpu',
+        counter: 'jit.interpDifferentStateSteps' },
+    // What a compile would have saved: a page on its way to a module against
+    // one that had the heat and never got one. And the look that needed no
+    // dispatch at all, the page walk having turned up the entry it missed.
+    { column: 'interpBelowThreshold', layer: 'cpu', counter: 'jit.interpBelowThreshold' },
+    { column: 'interpCompileDeferred', layer: 'cpu', counter: 'jit.interpCompileDeferred' },
+    { column: 'interpEntryAfterPageWalk', layer: 'cpu', counter: 'jit.interpEntryAfterPageWalk' },
     { column: 'f80Conversions', layer: 'cpu', counter: 'jit.f80Conversions' },
     { column: 'x87TagLost', layer: 'cpu', counter: 'jit.x87TagLost' },
     { column: 'slowWrites', layer: 'cpu', counter: 'jit.slowWrites' },
     { column: 'codePageWritesKept', layer: 'cpu', counter: 'jit.codePageWritesKept' },
+    // What a write into a page holding code cost: the module thrown away, and
+    // the hotness of a page that had not compiled yet. A frame that fell back
+    // to the interpreter for code it had already compiled is this, and a frame
+    // reading zero here fell back for some other reason.
+    { column: 'modulesLostToWrites', layer: 'cpu', counter: 'jit.modulesLostToWrites' },
     { column: 'hotnessLostToWrites', layer: 'cpu', counter: 'jit.hotnessLostToWrites' },
     { column: 'hostWrittenBytes', layer: 'cpu', counter: 'jit.hostWrittenBytes' },
     { column: 'trapCrossings', layer: 'cpu', counter: 'trapCrossings' },

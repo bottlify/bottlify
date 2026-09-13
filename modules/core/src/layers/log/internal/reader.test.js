@@ -19,6 +19,23 @@ const setup = (/** @type {any} */ options = {})=>{
     return { journal, reader };
 };
 
+/**
+ * Writes a layer's mirrored counters by the column a frame's row names them
+ * by, so a test names the figure it means and the layout decides the order.
+ *
+ * @param {any} api @param {string} layer
+ */
+const mirroredBy = (api, layer)=>{
+    const wanted = FRAME_MIRROR.filter(entry=>entry.layer === layer);
+    const row = api.metrics.counters(layer, wanted.map(entry=>entry.counter));
+    /** @param {string} column @param {number} value */
+    return (column, value)=>{
+        const at = wanted.findIndex(entry=>entry.column === column);
+        assert.notEqual(at, -1, `no frame column named "${column}"`);
+        row[at] = value;
+    };
+};
+
 test('a subscriber is handed its topics at its level and nothing else', ()=>{
     const { journal, reader } = setup({ level: Level.TRACE });
     /** @type {string[]} */
@@ -208,19 +225,9 @@ test('frames and the profile are read from the tables the profiler publishes int
 test('a frame says what the program did and what it cost us, without a second run', async()=>{
     let time = 0;
     const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
-    // The layers whose counters a frame's row carries, registered as the
-    // layout names them rather than as any one layer happens to order them.
-    const owned = (/** @type {string} */ layer)=>{
-        const wanted = FRAME_MIRROR.filter(entry=>entry.layer === layer);
-        const row = api.metrics.counters(layer, wanted.map(entry=>entry.counter));
-        /** @param {string} column @param {number} value */
-        return (column, value)=>{
-            row[wanted.findIndex(entry=>entry.column === column)] = value;
-        };
-    };
-    const cpu = owned('cpu');
-    const kernel = owned('kernel');
-    const memory = owned('memory');
+    const cpu = mirroredBy(api, 'cpu');
+    const kernel = mirroredBy(api, 'kernel');
+    const memory = mirroredBy(api, 'memory');
     const regions = api.metrics.table('memory', 'regions',
         { rows: 4, columns: ['name', 'base', 'size', 'access'] });
     regions.set(0, 0, api.intern('Storm.dll'));
@@ -279,8 +286,19 @@ test('a frame says what the program did and what it cost us, without a second ru
     // The two things a count alone could not say: where the interpreter ran,
     // and which of our own calls put the bytes into the guest.
     assert.deepEqual(frames[2].interpreted, {
-        steps: 58_500, stretches: 100, perStretch: 585,
+        steps: 58_500, compiledSteps: 0, stretches: 100, perStretch: 585,
         worst: 48_000, at: 0x6f02000, module: 'Storm.dll',
+        // Every reason reported, and nothing left absent because no layer
+        // moved it: a field that only appears when it is interesting cannot
+        // be read as an answer when it is missing.
+        reasons: {
+            noCode: { stretches: 0, steps: 0 },
+            noEntry: { stretches: 0, steps: 0 },
+            nearPageEnd: { stretches: 0, steps: 0 },
+            differentState: { stretches: 0, steps: 0 },
+        },
+        belowThreshold: 0, compileDeferred: 0, entryAfterPageWalk: 0,
+        lostToWrites: { modules: 0, hotness: 0 },
     });
     assert.deepEqual(frames[2].wrote,
         { bytes: 895_000, busiest: 'CreateTexture', busiestBytes: 700_000 });
@@ -293,6 +311,83 @@ test('a frame says what the program did and what it cost us, without a second ru
     // is reported as no work rather than as negative work.
     frame(10, 10, 0);
     assert.equal(reader.frames().at(-1)?.instructions, 0);
+    await logModule.dispose();
+});
+
+test('a frame says why the interpreter ran, as the step the counters took in it', async()=>{
+    let time = 0;
+    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
+    const cpu = mirroredBy(api, 'cpu');
+    const reader = createLogReader({ memory: api.memory() });
+
+    /**
+     * The interpreter's reason counters as a frame's row carries them, and
+     * what each of them is worth cumulatively after the second frame. Named
+     * one by one on purpose: a list derived from the layout would still pass
+     * with a column dropped from it, and the point of this test is that none
+     * of these can go missing again unnoticed.
+     *
+     * @type {[string, number, number][]}
+     */
+    const reasons = [
+        ['interpNoCode', 100, 900],
+        ['interpNoEntry', 20, 25],
+        ['interpNearPageEnd', 7, 11],
+        ['interpDifferentState', 3, 3],
+        ['interpNoCodeSteps', 4_000, 44_000],
+        ['interpNoEntrySteps', 500, 700],
+        ['interpNearPageEndSteps', 60, 100],
+        ['interpDifferentStateSteps', 9, 9],
+        ['interpBelowThreshold', 80, 800],
+        ['interpEntryAfterPageWalk', 1_000, 1_400],
+        ['modulesLostToWrites', 2, 5],
+        ['hotnessLostToWrites', 6, 6],
+        ['compiledSteps', 1_000_000, 1_040_000],
+        // Left where it was on purpose: a reason the frame did not take has to
+        // report nothing, not report missing.
+        ['interpCompileDeferred', 0, 0],
+    ];
+
+    /** @param {number} ms @param {boolean} second  Which of the two readings to write. */
+    const frame = (ms, second)=>{
+        api.beginFrame();
+        api.begin('slice', 'guest');
+        time += ms;
+        api.end('slice', { instructions: 1000 });
+        for (const [column, before, after] of reasons)
+        {
+            cpu(column, second ? after : before);
+        }
+        api.endFrame();
+    };
+    frame(10, false);
+    frame(60, true);
+
+    const frames = reader.frames();
+    assert.equal(frames.length, 2);
+    for (const [column, before, after] of reasons)
+    {
+        assert.equal(frames[1].counters[column], after - before,
+            `${column} as the step this frame took, not as the run's total`);
+        assert.equal(frames[0].counters[column], 0,
+            `${column} claims nothing in a frame with nothing before it`);
+    }
+
+    // And as a reader reads them: the four reasons with the steps each one
+    // interpreted, which is what a bare step count could never say.
+    assert.deepEqual(frames[1].interpreted.reasons, {
+        noCode: { stretches: 800, steps: 40_000 },
+        noEntry: { stretches: 5, steps: 200 },
+        nearPageEnd: { stretches: 4, steps: 40 },
+        differentState: { stretches: 0, steps: 0 },
+    });
+    assert.equal(frames[1].interpreted.belowThreshold, 720);
+    assert.equal(frames[1].interpreted.compileDeferred, 0,
+        'a reason nothing moved is zero rather than absent');
+    assert.equal(frames[1].interpreted.entryAfterPageWalk, 400);
+    assert.deepEqual(frames[1].interpreted.lostToWrites, { modules: 3, hotness: 0 });
+    assert.equal(frames[1].interpreted.compiledSteps, 40_000,
+        'beside the interpreted steps, so the two can be compared in one frame');
     await logModule.dispose();
 });
 
