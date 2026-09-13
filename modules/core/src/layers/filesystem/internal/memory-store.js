@@ -181,9 +181,20 @@ export function createMemoryStore(seed = {}){
             const end = offset + bytes.length;
             if (end > entry.data.length)
             {
-                const grown = new Uint8Array(end);
-                grown.set(entry.data);
-                entry.data = grown;
+                // The file is a view over a buffer with room to spare, doubled
+                // when it runs out: an installer writes a file of hundreds of
+                // megabytes two kilobytes at a time, and a buffer grown to fit
+                // each write copies the whole file every time.
+                if (end > entry.data.buffer.byteLength)
+                {
+                    const grown = new Uint8Array(Math.max(end, entry.data.buffer.byteLength * 2));
+                    grown.set(entry.data);
+                    entry.data = grown.subarray(0, end);
+                }
+                else
+                {
+                    entry.data = new Uint8Array(entry.data.buffer, 0, end);
+                }
             }
             entry.data.set(bytes, offset);
         },

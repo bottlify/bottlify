@@ -230,8 +230,12 @@ function characterFor(key){
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
  *           Where a window procedure that has not returned is noted, for
  *           whoever is measuring. Absent in a build that is not.
- * @property {(wndProc: number, message: DispatchedMessage) => number} dispatch
+ * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
+ *           A caller that has awaited names the thread whose call it answers.
+ * @property {() => unknown} [callerThread]
+ *           Whose call is being handled, read before an await for `dispatch`
+ *           afterwards. Absent in a build with no bridge, and then unnamed.
  * @property {() => any} park   Stops the caller; returns the parked token.
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's resources. Absent in a build with no
@@ -559,6 +563,41 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Delivers a retrieved message to the procedure it is for: what
+     * DispatchMessage does, and what a modal loop does in its own pump.
+     *
+     * @param {DispatchedMessage & { time?: number }} message
+     * @param {unknown} [thread]  Whose call this answers, when the caller has awaited.
+     * @returns {number}
+     */
+    const deliver = (message, thread)=>{
+        // A timer that named a TIMERPROC is called instead of the window
+        // procedure, and that is the whole reason a timer may have no window
+        // at all: the procedure is where it goes.
+        if (message.message === WM_TIMER && message.lParam !== 0)
+        {
+            return host.dispatch(message.lParam >>> 0, {
+                ...message,
+                // A TIMERPROC takes the tick count where a window procedure
+                // takes the lParam.
+                lParam: message.time ?? 0,
+            }, thread);
+        }
+        // Not `live`: a WM_DESTROY still has to reach the procedure of the
+        // window it is telling about its own end. A window of a system class
+        // has no procedure here, and a message for it goes nowhere.
+        const record = windows.get(message.hwnd);
+        if (!record || record.wndProc === 0)
+        {
+            return 0;
+        }
+        // Whatever the host gives back is the answer, including a promise:
+        // running a window procedure means running guest code, and the bridge
+        // suspends this call until it returns.
+        return watchDispatch(host, message, host.dispatch(record.wndProc, message, thread));
+    };
+
+    /**
      * A window record and the handle that names it, with everything a window
      * has defaulted.
      *
@@ -774,7 +813,7 @@ export function createWindowFunctions(host){
             live, windows, classes,
         }),
         ...createObjectFunctions({ host, live }),
-        ...createDialogFunctions({ host, live, windows, makeWindow, destroyWindow }),
+        ...createDialogFunctions({ host, live, windows, makeWindow, destroyWindow, deliver }),
 
         /** ATOM RegisterClassA(const WNDCLASSA *lpWndClass) */
         RegisterClassA: {
@@ -1185,33 +1224,7 @@ export function createWindowFunctions(host){
         DispatchMessageA: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([msg])=>{
-                const message = readMessage(host, msg);
-                // A timer that named a TIMERPROC is called instead of the
-                // window procedure, and that is the whole reason a timer may
-                // have no window at all: the procedure is where it goes.
-                if (message.message === WM_TIMER && message.lParam !== 0)
-                {
-                    return host.dispatch(message.lParam >>> 0, {
-                        ...message,
-                        // A TIMERPROC takes the tick count where a window
-                        // procedure takes the lParam.
-                        lParam: /** @type {any} */ (message).time ?? 0,
-                    });
-                }
-                // Not `live`: a WM_DESTROY still has to reach the procedure of
-                // the window it is telling about its own end.
-                const record = windows.get(message.hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                // Whatever the host gives back is the answer, including a
-                // promise: running a window procedure means running guest code,
-                // and the bridge suspends this call until it returns.
-                return watchDispatch(host, message,
-                    host.dispatch(record.wndProc, message));
-            },
+            handler: ([msg])=>deliver(readMessage(host, msg)),
         },
 
         /** LRESULT DefWindowProcA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam) */

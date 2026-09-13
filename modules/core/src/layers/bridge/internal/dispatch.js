@@ -286,6 +286,7 @@ export function createDispatcher(deps){
         from: record.from,
         args: record.args.slice(),
         strings: record.strings ? record.strings.slice() : null,
+        kind: record.kind,
         result: describe(record),
         error: record.error,
     });
@@ -565,6 +566,13 @@ export function createDispatcher(deps){
                     const asked = copyOf(record);
                     result.then((/** @type {number} */ value)=>{
                         asked.result = `0x${(value >>> 0).toString(16)} (was waiting)`;
+                        onCall(asked);
+                    }, ()=>{
+                        // The failure itself is whoever suspended the call's
+                        // to report; a rejection nobody listened to here would
+                        // bring the host down before it could.
+                        asked.kind = 'threw';
+                        asked.result = 'threw (was waiting)';
                         onCall(asked);
                     });
                 }

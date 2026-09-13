@@ -358,6 +358,22 @@ test('CharNext walks a string a byte at a time and stops at its end', ()=>{
         'and never before the start');
 });
 
+test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages', ()=>{
+    // An archive's file names are OEM text: 0x81 is u-umlaut in page 437 and
+    // 0xfc in Windows-1252. Counted, so the terminator travels and a byte
+    // past the count is left alone.
+    const { memory, fns } = setup();
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0x81, 0x61, 0x00, 0x7a));
+
+    assert.equal(fns.OemToCharBuffA.handler([TEXT_BUFFER, TEXT_BUFFER + 8, 3]), 1);
+    assert.deepEqual([...memory.readMemory(TEXT_BUFFER + 8, 4)], [0xfc, 0x61, 0x00, 0x00]);
+    assert.equal(fns.CharToOemBuffA.handler([TEXT_BUFFER + 8, TEXT_BUFFER + 8, 3]), 1,
+        'and back in place');
+    assert.deepEqual([...memory.readMemory(TEXT_BUFFER + 8, 3)], [0x81, 0x61, 0x00]);
+    assert.equal(fns.OemToCharBuffA.argBytes, 12);
+    assert.equal(fns.CharToOemBuffA.argBytes, 12);
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.

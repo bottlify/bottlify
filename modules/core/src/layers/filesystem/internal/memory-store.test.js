@@ -30,6 +30,29 @@ test('a write past the end grows the file with zeroes', ()=>{
     assert.deepEqual([...store.read('a.dat', 0, 7)], [0, 0, 0, 0, 1, 2, 3]);
 });
 
+test('a file appended to in small pieces is whole, and its size is what was written', ()=>{
+    // An installer writes a file of hundreds of megabytes two kilobytes at a
+    // time. The room kept spare for that must never show: the size and the
+    // bytes are exactly what was written, growth or not, and a truncation
+    // afterwards still answers from the written length.
+    const store = createMemoryStore();
+    const piece = new Uint8Array(1000);
+    for (let index = 0; index < 100; index++)
+    {
+        piece.fill(index);
+        store.write('big.dat', index * piece.length, piece);
+    }
+    assert.equal(store.stat('big.dat')?.size, 100 * piece.length);
+    assert.deepEqual([...store.read('big.dat', 37 * piece.length - 1, 2)], [36, 37]);
+    assert.deepEqual([...store.read('big.dat', 99 * piece.length + 999, 8)], [99]);
+
+    store.write('big.dat', 50, Uint8Array.of(7));
+    assert.deepEqual([...store.read('big.dat', 49, 3)], [0, 7, 0], 'a write inside stays inside');
+    store.truncate('big.dat', 3);
+    assert.equal(store.stat('big.dat')?.size, 3);
+    assert.deepEqual([...store.read('big.dat', 0, 8)], [0, 0, 0]);
+});
+
 test('a read is clamped to what is there rather than failing', ()=>{
     const store = createMemoryStore();
     store.write('a.dat', 0, bytes);

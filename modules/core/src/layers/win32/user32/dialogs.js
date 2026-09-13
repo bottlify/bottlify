@@ -27,16 +27,24 @@
  * - **A control has no window procedure**, because its class is a system one
  *   this build does not implement. It holds its text and its identifier and
  *   nothing more, so SendDlgItemMessageA reaches nothing and says so.
- * - **There is no modal loop and no keyboard navigation.** DialogBox is not
- *   here; IsDialogMessageA reports that a message is not a dialog message, so
- *   the caller goes on to translate and dispatch it, which is the behaviour
- *   that loses nothing.
+ * - **The modal loop pumps, delivers, and knows two keys.** DialogBox
+ *   retrieves every message for the thread and hands each to its procedure
+ *   until EndDialog, which is the loop a program would have written itself.
+ *   Enter and Escape are the dialog manager's: Enter is a click on the default
+ *   button, or IDOK when there is none, and Escape is IDCANCEL, each reaching
+ *   the dialog procedure as the WM_COMMAND a button would have sent. That is
+ *   all IsDialogMessageA does too; there is no focus to move between controls
+ *   that have no procedures, so every other message is reported as not a
+ *   dialog message and the caller goes on to translate and dispatch it.
  * - **WM_INITDIALOG is posted rather than sent.** Sending means running the
  *   dialog procedure before this call returns, and a program that creates a
  *   dialog and then pumps sees no difference. One that creates a dialog and
  *   immediately reads a control the procedure was to fill in does, and that is
  *   the ceiling on this.
  */
+
+import { ANY_WINDOW, WM_QUIT } from './messages.js';
+import { readMessage } from './structs.js';
 
 /** DLGTEMPLATE, the fixed part before the variable-length names. */
 const DLGTEMPLATE = Object.freeze({
@@ -94,6 +102,23 @@ const DLU_PER_CHAR_Y = 8;
 /** Messages a dialog answers. */
 const WM_CLOSE = 0x0010;
 const WM_INITDIALOG = 0x0110;
+const WM_COMMAND = 0x0111;
+const WM_KEYDOWN = 0x0100;
+
+/** The two keys the dialog manager turns into commands, and where they go. */
+const VK_RETURN = 0x0d;
+const VK_ESCAPE = 0x1b;
+const IDOK = 1;
+const IDCANCEL = 2;
+const BN_CLICKED = 0;
+
+/** A button's kind is the low four bits of its style. */
+const BS_TYPEMASK = 0x0f;
+const BS_DEFPUSHBUTTON = 0x01;
+const BUTTON_CLASSES = new Set(['#128', 'button']);
+
+/** What DialogBox answers when the dialog could not be made. */
+const DIALOG_FAILED = -1;
 
 /** RT_DIALOG: the resource type a dialog template is filed under. */
 const RT_DIALOG = 5;
@@ -109,8 +134,10 @@ const MAX_RESOURCE_NAME = 256;
  * @param {Map<number, any>} options.windows
  * @param {(fields: any) => any} options.makeWindow
  * @param {(hwnd: number) => number} options.destroyWindow
+ * @param {(message: import('./structs.js').MessageFields, thread?: unknown) => number}
+ *     options.deliver  Hands a retrieved message to its procedure.
  */
-export function createDialogFunctions({ host, live, windows, makeWindow, destroyWindow }){
+export function createDialogFunctions({ host, live, windows, makeWindow, destroyWindow, deliver }){
     /**
      * A cursor over the template, so that every read advances it. The parts are
      * variable-length and consecutive, so an offset carried by hand is an
@@ -339,6 +366,105 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         return dialog.hwnd;
     };
 
+    /** @param {number} hwnd @param {number} dialog  Whether hwnd is the dialog or inside it. */
+    const within = (hwnd, dialog)=>{
+        for (let at = windows.get(hwnd); at; at = windows.get(at.parent))
+        {
+            if (at.hwnd === dialog)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    /**
+     * What Enter means: the default push button's id, or IDOK when the
+     * template marked none.
+     *
+     * @param {number} dialog
+     */
+    const defaultButton = dialog=>{
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && record.parent === dialog
+                && BUTTON_CLASSES.has(String(record.className).toLowerCase())
+                && (record.style & BS_TYPEMASK) === BS_DEFPUSHBUTTON)
+            {
+                return record.id;
+            }
+        }
+        return IDOK;
+    };
+
+    /**
+     * The keyboard half of the dialog manager: Enter and Escape, pressed
+     * anywhere in the dialog, become the command a button would have sent.
+     *
+     * @param {number} dialog
+     * @param {{ hwnd: number, message: number, wParam: number }} message
+     * @param {unknown} [thread]
+     * @returns {number | Promise<number> | null}  null when the message is not
+     *     one of the two; otherwise what the dialog procedure answered.
+     */
+    const dialogKey = (dialog, message, thread)=>{
+        const record = live(dialog);
+        if (!record || message.message !== WM_KEYDOWN || !within(message.hwnd, dialog))
+        {
+            return null;
+        }
+        const key = message.wParam >>> 0;
+        if (key !== VK_RETURN && key !== VK_ESCAPE)
+        {
+            return null;
+        }
+        const id = key === VK_RETURN ? defaultButton(dialog) : IDCANCEL;
+        return host.dispatch(record.wndProc, {
+            hwnd: dialog,
+            message: WM_COMMAND,
+            wParam: (BN_CLICKED << 16 | id & 0xffff) >>> 0,
+            lParam: controlOf(dialog, id)?.hwnd ?? 0,
+        }, thread);
+    };
+
+    /**
+     * The modal loop: the dialog's thread pumps until EndDialog destroys the
+     * window, and what EndDialog was given is the answer.
+     *
+     * A WM_QUIT retrieved here ends the dialog and is put back, because the
+     * quit belongs to the loop outside this one, which has not seen it yet.
+     *
+     * @param {number} hwnd
+     * @returns {Promise<number>}
+     */
+    const runModal = async hwnd=>{
+        // Read before the first await: afterwards the thread on the processor
+        // may be another, and every delivery below has to name this one.
+        const thread = host.callerThread?.();
+        const record = windows.get(hwnd);
+        if (!record)
+        {
+            return 0;
+        }
+        while (!record.destroyed)
+        {
+            const entry = host.queue.peek({ hwnd: ANY_WINDOW, first: 0, last: 0, remove: true });
+            if (!entry)
+            {
+                await host.idle();
+                continue;
+            }
+            if (entry.message === WM_QUIT)
+            {
+                host.queue.postQuit(entry.wParam | 0);
+                destroyWindow(hwnd);
+                break;
+            }
+            await (dialogKey(hwnd, entry, thread) ?? deliver(entry, thread));
+        }
+        return record.dialogResult ?? 0;
+    };
+
     /**
      * The address of a dialog template named in a module's resources, or zero.
      * The bytes are where the loader mapped them, so nothing is copied.
@@ -384,6 +510,38 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         },
 
         /**
+         * INT_PTR DialogBoxIndirectParamA(HINSTANCE hInstance,
+         *   LPCDLGTEMPLATEA hDialogTemplate, HWND hWndParent, DLGPROC lpDialogFunc,
+         *   LPARAM dwInitParam)
+         *
+         * The modal form: the same dialog, and this call does not return until
+         * EndDialog has been called on it. The owner is not disabled, because
+         * no window here answers input on its own account anyway.
+         */
+        DialogBoxIndirectParamA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, template, parent, dialogFunc, initParam])=>{
+                const hwnd = createDialog(instance, template, parent, dialogFunc, initParam);
+                return hwnd === 0 ? DIALOG_FAILED : runModal(hwnd);
+            },
+        },
+
+        /**
+         * INT_PTR DialogBoxParamA(HINSTANCE hInstance, LPCSTR lpTemplateName,
+         *   HWND hWndParent, DLGPROC lpDialogFunc, LPARAM dwInitParam)
+         */
+        DialogBoxParamA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, name, parent, dialogFunc, initParam])=>{
+                const hwnd = createDialog(instance, templateAddress(instance, name), parent,
+                    dialogFunc, initParam);
+                return hwnd === 0 ? DIALOG_FAILED : runModal(hwnd);
+            },
+        },
+
+        /**
          * LRESULT DefDlgProcA(HWND hDlg, UINT Msg, WPARAM wParam, LPARAM lParam)
          *
          * What a dialog procedure falls through to. The one message it must
@@ -405,10 +563,8 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         /**
          * BOOL EndDialog(HWND hDlg, INT_PTR nResult)
          *
-         * The result is remembered on the window even though nothing can return
-         * it: DialogBox is what hands it back, and DialogBox needs a modal loop
-         * that does not exist here. Keeping it is what makes adding one later a
-         * change to the loop rather than to this.
+         * The result is remembered on the window, where the modal loop reads
+         * it back once the window is gone.
          */
         EndDialog: {
             argBytes: 8,
@@ -505,15 +661,23 @@ export function createDialogFunctions({ host, live, windows, makeWindow, destroy
         /**
          * BOOL IsDialogMessageA(HWND hDlg, LPMSG lpMsg)
          *
-         * Reports that the message is not a dialog message, so the caller goes
-         * on to translate and dispatch it. That is the answer that loses
-         * nothing: claiming a message was handled would swallow every keystroke
-         * a dialog is open for, and there is no focus to move between controls
-         * that have no procedures.
+         * Enter and Escape are taken and turned into commands; everything else
+         * is reported as not a dialog message, so the caller goes on to
+         * translate and dispatch it. That is the answer that loses nothing:
+         * claiming a message was handled would swallow every keystroke a
+         * dialog is open for.
          */
         IsDialogMessageA: {
             argBytes: 8,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([dialog, msg])=>{
+                const answered = dialogKey(dialog >>> 0, readMessage(host, msg >>> 0));
+                if (answered === null)
+                {
+                    return 0;
+                }
+                return answered instanceof Promise ? answered.then(()=>1) : 1;
+            },
         },
     };
 }

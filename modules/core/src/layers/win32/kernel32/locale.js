@@ -264,6 +264,14 @@ const encodeSingleByte = (text, page)=>{
             continue;
         }
         const found = high.indexOf(code);
+        // A page whose table stops short of the top is Latin-1 above it, the
+        // way its decoder already reads it; without this the accented half of
+        // Windows-1252 came back as the default character.
+        if (found === -1 && code >= 0x80 + high.length && code <= 0xff)
+        {
+            bytes[at] = code;
+            continue;
+        }
         if (found === -1)
         {
             bytes[at] = DEFAULT_CHAR;
@@ -274,6 +282,21 @@ const encodeSingleByte = (text, page)=>{
     }
     return { bytes, usedDefault };
 };
+
+/**
+ * Bytes of one single-byte page re-encoded in another, byte for byte: what
+ * OemToChar and CharToOem do, and the same tables the code-page conversions
+ * use, so the two agree on every character.
+ *
+ * @param {Uint8Array} bytes @param {number} from @param {number} to
+ * @returns {Uint8Array}
+ */
+export const transcodeSingleByte = (bytes, from, to)=>
+    encodeSingleByte(decodeSingleByte(bytes, from), to).bytes;
+
+/** The pages the OEM/ANSI conversions translate between, for their callers. */
+export const OEM_PAGE = CP_OEM_437;
+export const ANSI_PAGE = CP_WINDOWS_1252;
 
 /** @param {number} code */
 const characterType = code=>{

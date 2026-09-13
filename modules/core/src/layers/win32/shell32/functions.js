@@ -48,7 +48,7 @@ export function createShellFunctions(host){
     /** Which windows said they would take a drop. Nothing ever drops on them. */
     const accepting = new Set();
 
-    return {
+    const table = {
         /**
          * HINSTANCE ShellExecuteA(HWND, LPCSTR lpOperation, LPCSTR lpFile,
          *                         LPCSTR lpParameters, LPCSTR lpDirectory,
@@ -170,5 +170,12 @@ export function createShellFunctions(host){
                 return E_NOTIMPL;
             },
         },
+    };
+    // The real library exports the ANSI browse under its bare name as well,
+    // and a program that looks the pair up by hand asks for the bare one.
+    return {
+        ...table,
+        SHBrowseForFolder: table.SHBrowseForFolderA,
+        SHGetPathFromIDList: table.SHGetPathFromIDListA,
     };
 }

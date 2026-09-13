@@ -46,6 +46,9 @@ test('browsing for a folder is a cancelled browse, and yields no path', ()=>{
     assert.equal(m.shell.SHBrowseForFolderA.handler([0x100]), 0);
     assert.equal(m.shell.SHGetPathFromIDListA.handler([0, 0x100]), 0);
     assert.equal(m.memory[0x100], 0);
+    assert.equal(m.shell.SHBrowseForFolder, m.shell.SHBrowseForFolderA,
+        'and the bare name the real library also exports finds the same entry');
+    assert.equal(m.shell.SHGetPathFromIDList, m.shell.SHGetPathFromIDListA);
 });
 
 test('the allocator is refused with a null written where it would have gone', ()=>{

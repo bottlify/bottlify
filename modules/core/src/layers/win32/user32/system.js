@@ -19,6 +19,7 @@
  */
 
 import { formatToString } from '../msvcrt/format.js';
+import { ANSI_PAGE, OEM_PAGE, transcodeSingleByte } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
@@ -895,6 +896,35 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * BOOL OemToCharBuffA(LPCSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength)
+         *
+         * A counted translation, not a string one: exactly cchDstLength bytes
+         * are converted, terminators included, and the two buffers may be the
+         * same. An archive's file names are OEM text, and this is how an
+         * extractor turns them into names the file system will take.
+         */
+        OemToCharBuffA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                host.writeMemory(target >>> 0, transcodeSingleByte(
+                    host.readMemory(source >>> 0, count >>> 0), OEM_PAGE, ANSI_PAGE));
+                return 1;
+            },
+        },
+
+        /** BOOL CharToOemBuffA(LPCSTR lpszSrc, LPSTR lpszDst, DWORD cchDstLength) */
+        CharToOemBuffA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, target, count])=>{
+                host.writeMemory(target >>> 0, transcodeSingleByte(
+                    host.readMemory(source >>> 0, count >>> 0), ANSI_PAGE, OEM_PAGE));
+                return 1;
+            },
+        },
+
+        /**
          * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)
          *
          * The previous character, never before the start: at the start the
@@ -1291,7 +1321,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
             /** @param {number[]} args */
             handler: ([hwnd, message, wParam, lParam])=>{
                 const record = live(hwnd);
-                if (!record)
+                // A window of a system class has no procedure here; what a
+                // control that ignored the message would answer is zero, the
+                // same answer SendDlgItemMessage gives for the same control.
+                if (!record || record.wndProc === 0)
                 {
                     return 0;
                 }

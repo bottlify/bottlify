@@ -529,3 +529,24 @@ test('a waiting call is reported to the sink twice: once as asked, once as answe
     assert.deepEqual(seen.map(call=>call.result), ['waiting', '0x40 (was waiting)']);
     assert.deepEqual(seen[1].args, [1, 2], 'the second line carries what was asked');
 });
+
+test('a waiting call that fails is reported to the sink, not left unhandled', async()=>{
+    // The sink's own continuation on the answer had no rejection handler, so
+    // a handler that awaited and then threw brought the host process down
+    // before whoever suspended the call could report the failure.
+    const m = machine({ args: [1, 2] });
+    /** @type {any[]} */
+    const seen = [];
+    const dispatcher = createDispatcher({
+        cpu: m.cpu, memory: m.memory, parking: m.parking, suspend: ()=>{},
+        onCall: (/** @type {any} */ call)=>seen.push({ ...call }),
+    });
+    dispatcher.register(3, {
+        name: 'X.dll!Read', ...STDCALL, argBytes: 8,
+        handler: ()=>Promise.reject(new Error('later')),
+    });
+    dispatcher.dispatch(3);
+    await Promise.resolve();
+    assert.deepEqual(seen.map(call=>[call.kind, call.result]),
+        [['waiting', 'waiting'], ['threw', 'threw (was waiting)']]);
+});

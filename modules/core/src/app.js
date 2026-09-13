@@ -804,6 +804,30 @@ export function jumpBytes(from, to){
 }
 
 /**
+ * Where the address space above the program begins: the system modules, the
+ * pool of thread stacks, and the heap, in that order.
+ *
+ * Placed relative to where the program's own image ends rather than at fixed
+ * addresses, because an image is as large as its headers say and a self-
+ * extracting installer carries its whole payload in a section: a few hundred
+ * megabytes mapped at 0x400000 reaches well past where a fixed layout put the
+ * modules, and a real loader simply maps everything else above it.
+ *
+ * @param {number} imageEnd  One past the last byte of the program's image.
+ * @returns {{ moduleBase: number, stackPoolBase: number, heapBase: number }}
+ */
+export function spaceAbove(imageEnd){
+    const granule = 0x00100000;
+    const lowest = 0x02000000;
+    const shift = Math.max(0, Math.ceil(imageEnd / granule) * granule - lowest);
+    return {
+        moduleBase: lowest + shift,
+        stackPoolBase: 0x08000000 + shift,
+        heapBase: 0x0c000000 + shift,
+    };
+}
+
+/**
  * How much of the guest's RAM the heap gets: what the caller asked for, or
  * everything from the heap's base to the end of RAM. The heap is the last
  * region, so the end of RAM is the only ceiling there is -- and a fixed size
@@ -1586,24 +1610,24 @@ async function buildApp(options){
     // library a game ships can itself be twelve megabytes, and a library
     // placed inside the heap would be overwritten by the first large
     // allocation.
-    const MODULE_BASE = 0x02000000;
+    const mainImage = parsePe(options.executable);
+    const { moduleBase: MODULE_BASE, stackPoolBase: STACK_POOL_BASE, heapBase: HEAP_BASE }
+        = spaceAbove(mainImage.imageBase + mainImage.sizeOfImage);
     const MODULE_STRIDE = 0x00100000;
     // Where a thread that is not the first gets its stack. Above the space
     // libraries are mapped into and below the heap, because a stack of the size
     // a program was linked for is a megabyte or more and the megabyte under the
     // image will not hold several of them.
-    const STACK_POOL_BASE = 0x08000000;
     const STACK_POOL_SIZE = 0x04000000;
     // What each of them gets: what the image was linked to expect, floored so a
     // program that asks for almost nothing still has room to make a call, and
     // capped so that a program asking for an enormous stack cannot leave the
     // pool with room for only one thread.
     const threadStackSize = Math.min(
-        Math.max(parsePe(options.executable).stackReserve, 0x10000),
+        Math.max(mainImage.stackReserve, 0x10000),
         Math.floor(STACK_POOL_SIZE / 16));
-    const HEAP_BASE = 0x0c000000;
     const memorySize = options.memorySize ?? DEFAULT_MEMORY_SIZE;
-    const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize);
+    const HEAP_SIZE = heapSizeFor(memorySize, options.heapSize, HEAP_BASE);
 
     /**
      * The modules win32 implements, filled in below. win32 is built before they

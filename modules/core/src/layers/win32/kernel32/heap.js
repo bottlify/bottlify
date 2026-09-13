@@ -706,6 +706,26 @@ export function createHeapFunctions(host){
             handler: ([handle])=>allocator.block(handle >>> 0)?.size ?? 0,
         },
 
+        /**
+         * HLOCAL LocalAlloc(UINT uFlags, SIZE_T uBytes)
+         *
+         * The other spelling of the same heap: LMEM_ZEROINIT is GMEM_ZEROINIT's
+         * value, and a block one family allocates the other may free.
+         */
+        LocalAlloc: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([flags, bytes])=>{
+                const size = bytes >>> 0;
+                const address = allocator.allocate(size === 0 ? 1 : size);
+                if (address !== 0 && (flags & GMEM_ZEROINIT))
+                {
+                    zero(address, size);
+                }
+                return address;
+            },
+        },
+
         /** HLOCAL LocalFree(HLOCAL hMem) */
         LocalFree: {
             argBytes: 4,

@@ -799,11 +799,13 @@ export const win32Module = {
                 // offered one the device it then creates does not have.
                 screen: config?.screen,
                 dispatching,
-                dispatch: (wndProc, message)=>bridge.callGuest({
+                dispatch: (wndProc, message, thread)=>bridge.callGuest({
                     entry: wndProc,
                     // The four arguments a window procedure declares, in order.
                     args: [message.hwnd, message.message, message.wParam, message.lParam],
+                    thread,
                 }),
+                callerThread: ()=>bridge.callerThread(),
                 park: ()=>bridge.park(),
                 idle,
                 created: config?.created ?? (()=>{}),

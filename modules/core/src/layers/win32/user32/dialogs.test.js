@@ -81,8 +81,11 @@ function fakeHandles(){
     };
 }
 
-/** @param {{ resources?: Record<string, number> }} [options] */
-function setup({ resources = {} } = {}){
+/**
+ * @param {{ resources?: Record<string, number>,
+ *           dispatch?: (wndProc: number, message: any, thread?: unknown) => number }} [options]
+ */
+function setup({ resources = {}, dispatch = ()=>0 } = {}){
     const memory = fakeMemory();
     const queue = createMessageQueue();
     const fns = createWindowFunctions({
@@ -92,7 +95,8 @@ function setup({ resources = {} } = {}){
         readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
         handles: fakeHandles(),
         queue,
-        dispatch: ()=>0,
+        dispatch,
+        callerThread: ()=>'the caller',
         park: ()=>({ parked: true }),
         idle: ()=>new Promise(()=>{}),
         // A module whose resources sit at fixed offsets from a fixed base:
@@ -169,7 +173,7 @@ function writer(memory, base){
  * A dialog forty units across and twenty down, holding the controls given.
  *
  * @param {any} memory
- * @param {{ id: number, x: number, y: number, cx: number, cy: number,
+ * @param {{ id: number, x: number, y: number, cx: number, cy: number, style?: number,
  *           className?: string, ordinal?: number, title?: string }[]} controls
  * @param {{ style?: number, menu?: string, title?: string }} [options]
  */
@@ -187,7 +191,7 @@ function putTemplate(memory, controls, options = {}){
     for (const control of controls)
     {
         template.align();
-        template.u32(0).u32(0);
+        template.u32(control.style ?? 0).u32(0);
         template.u16(control.x).u16(control.y).u16(control.cx).u16(control.cy);
         template.u16(control.id);
         if (control.ordinal !== undefined)
@@ -238,6 +242,133 @@ test('a dialog named in the resources is the template read where it was mapped',
     assert.equal(fns.CreateDialogParamA.handler([HINSTANCE, 201, 0, DIALOGPROC, 0]), 0,
         'a name the module does not carry is no dialog');
     assert.equal(fns.CreateDialogParamA.argBytes, 20);
+});
+
+test('DialogBox pumps until EndDialog and answers what it was given', async()=>{
+    // The modal form: WM_INITDIALOG reaches the procedure from inside the
+    // call, and the call returns only once the procedure has ended the
+    // dialog -- on the thread that made the call, named on every delivery
+    // because the loop has let the processor go by then.
+    /** @type {{ message: number, thread: unknown }[]} */
+    const delivered = [];
+    /** @type {any} */
+    let table = null;
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message, thread)=>{
+            delivered.push({ message: message.message, thread });
+            if (message.message === 0x0110)
+            {
+                table.EndDialog.handler([message.hwnd, 7]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+
+    const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    assert.equal(await answer, 7);
+    assert.deepEqual(delivered, [{ message: 0x0110, thread: 'the caller' }]);
+    assert.equal(fns.DialogBoxIndirectParamA.handler([HINSTANCE, 0, 0, DIALOGPROC, 0]), -1,
+        'and a dialog that cannot be made answers -1 at once');
+    assert.equal(fns.DialogBoxIndirectParamA.argBytes, 20);
+    assert.equal(fns.DialogBoxParamA.argBytes, 20);
+});
+
+test('a message sent to a control with no procedure is answered with nothing', ()=>{
+    // The same control SendDlgItemMessage already answers zero for: sent to
+    // by handle instead, it used to ask the bridge to run code at address
+    // zero, which stopped the machine inside the dialog's own initialisation.
+    const { memory, fns } = setup({
+        dispatch: ()=>{
+            throw new Error('nothing to run');
+        },
+    });
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const control = fns.GetDlgItem.handler([dialog, 100]);
+
+    const BM_SETCHECK = 0x00f1;
+    assert.equal(fns.SendMessageA.handler([control, BM_SETCHECK, 1, 0]), 0);
+
+    const MSG = 0x3000;
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, BM_SETCHECK, 0, 0, 0));
+    assert.equal(fns.DispatchMessageA.handler([MSG]), 0, 'and dispatched, the same');
+});
+
+test('Enter and Escape in a modal loop reach the procedure as a button\'s commands', async()=>{
+    // The dialog manager's two keys: Enter is the default push button, or
+    // IDOK without one, and Escape is IDCANCEL. A headless driver ends a
+    // dialog this way, and so does a person who never touches the mouse.
+    /** @type {any[]} */
+    const delivered = [];
+    /** @type {any} */
+    let table = null;
+    const { memory, queue, fns } = setup({
+        dispatch: (wndProc, message, thread)=>{
+            delivered.push({ ...message, thread });
+            if (message.message === 0x0111 && (message.wParam & 0xffff) === 7)
+            {
+                table.EndDialog.handler([message.hwnd, 42]);
+            }
+            return 0;
+        },
+    });
+    table = fns;
+    const BS_DEFPUSHBUTTON = 1;
+    putTemplate(memory, [
+        { id: 1, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' },
+        { id: 7, x: 4, y: 20, cx: 20, cy: 6, title: 'Go', style: BS_DEFPUSHBUTTON },
+    ]);
+    const answer = fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const dialog = delivered.length ? delivered[0].hwnd : 0;
+    assert.notEqual(dialog, 0, 'WM_INITDIALOG named the dialog');
+    const go = fns.GetDlgItem.handler([dialog, 7]);
+    queue.post({ hwnd: dialog, message: 0x0100, wParam: 0x1b, lParam: 0 });
+    queue.post({ hwnd: dialog, message: 0x0100, wParam: 0x0d, lParam: 0 });
+    assert.equal(await answer, 42);
+
+    const commands = delivered.filter(one=>one.message === 0x0111);
+    assert.deepEqual(commands.map(one=>one.wParam & 0xffff), [2, 7],
+        'Escape is IDCANCEL; Enter is the default button, not IDOK');
+    assert.equal(commands[1].lParam, go, 'and the command names the button it stands for');
+    assert.equal(commands[1].thread, 'the caller');
+});
+
+test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
+    /** @type {any[]} */
+    const delivered = [];
+    const { memory, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            delivered.push(message);
+            return 0;
+        },
+    });
+    putTemplate(memory, [{ id: 1, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
+    const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
+    const control = fns.GetDlgItem.handler([dialog, 1]);
+
+    const MSG = 0x3000;
+    memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, 0x00, 0x01, 0, 0, 0x0d));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 1, 'Enter on a control inside');
+    assert.deepEqual(delivered.map(one=>[one.message, one.wParam & 0xffff]), [[0x0111, 1]]);
+
+    memory.writeMemory(MSG + 8, Uint8Array.of(0x41));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0, 'a letter is not taken');
+    memory.writeMemory(MSG, Uint8Array.of(0x99, 0, 0, 0, 0, 0x01, 0, 0, 0x0d));
+    assert.equal(fns.IsDialogMessageA.handler([dialog, MSG]), 0,
+        'nor is Enter in a window outside the dialog');
+    assert.equal(fns.IsDialogMessageA.argBytes, 8);
+});
+
+test('a quit retrieved inside a modal loop ends the dialog and is put back', async()=>{
+    const { memory, queue, fns } = setup();
+    putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6 }]);
+    queue.postQuit(3);
+
+    assert.equal(await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]),
+        0);
+    assert.equal(queue.quitPending(), true, 'the loop outside has yet to see it');
 });
 
 test('coordinates are dialog units, not pixels', ()=>{

@@ -193,6 +193,20 @@ test('a character the page cannot hold is reported, not silently replaced', ()=>
         'and the caller was told that happened');
 });
 
+test('the Latin-1 half of the ANSI page survives a round trip', ()=>{
+    // Windows-1252 differs from Latin-1 only in 0x80..0x9f; above that the
+    // byte is the code point, and the encoder answered the default character
+    // for every one of them.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, 'é€');
+
+    const used = 0x400;
+    fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x100, 2, 0x200, 8, 0, used]);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x202)], [0xe9, 0x80]);
+    assert.equal(new DataView(host.bytes.buffer).getUint32(used, true), 0);
+});
+
 test('a conversion that loses nothing says so', ()=>{
     const host = fakeHost();
     const fns = createLocaleFunctions(host);

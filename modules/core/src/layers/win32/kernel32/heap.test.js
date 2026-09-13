@@ -379,6 +379,17 @@ test('LocalFree releases the same blocks GlobalAlloc hands out', ()=>{
     assert.equal(fns.LocalFree.handler([handle]), handle);
 });
 
+test('LocalAlloc allocates from the same heap, zeroed when asked', ()=>{
+    const { host, fns } = setup();
+
+    const handle = fns.LocalAlloc.handler([GMEM_ZEROINIT, 32]);
+    assert.notEqual(handle, 0);
+    assert.equal(all(host.bytes.subarray(handle, handle + 32), 0), true);
+    assert.equal(fns.GlobalSize.handler([handle]), 32);
+    assert.equal(fns.GlobalFree.handler([handle]), 0, 'and the other family frees it');
+    assert.equal(fns.LocalAlloc.argBytes, 8);
+});
+
 test('the global functions declare the stack they pop', ()=>{
     const { fns } = setup();
     assert.equal(fns.GlobalAlloc.argBytes, 8);

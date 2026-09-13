@@ -17,6 +17,7 @@ import {
     resolveLibraryPath, timedWait, pagePacing, PAGE_YIELD_MS,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
+    spaceAbove,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -637,6 +638,19 @@ test('the emulator is found beside the module unless the caller names it', ()=>{
     const given = emulatorArtifacts({ wasmBytes: bytes }, here);
     assert.equal(given.wasmBytes, bytes);
     assert.equal(given.wasmUrl, null, 'bytes in hand are not fetched again');
+});
+
+test('the space above the program moves up past an image too large for the fixed layout', ()=>{
+    // A self-extracting installer maps its whole payload as a section: a
+    // 346 MiB image at 0x400000 ends far above where the modules, the stack
+    // pool and the heap used to be placed, and registering any of them there
+    // was refused as an overlap before the first instruction ran.
+    assert.deepEqual(spaceAbove(0x400000 + 0x100000),
+        { moduleBase: 0x02000000, stackPoolBase: 0x08000000, heapBase: 0x0c000000 },
+        'a small image leaves the layout where it was');
+    assert.deepEqual(spaceAbove(0x400000 + 0x159e6000),
+        { moduleBase: 0x15e00000, stackPoolBase: 0x1be00000, heapBase: 0x1fe00000 },
+        'a large image pushes the whole layout above its end, on a megabyte');
 });
 
 test('the heap reaches the end of RAM unless a size was asked for', ()=>{
