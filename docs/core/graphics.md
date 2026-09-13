@@ -341,7 +341,9 @@ over the viewport under the scissor and the masks, which a pass's load operation
 The frame is shown through an opaque copy that alternates between two surfaces, because a
 program's destination alpha is its own scratch and a page composites a presented texture by its
 alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, level by level
-as the context marks them written; a cube map is six layers with a cube view.
+as the context marks them written; a cube map is six layers with a cube view. A copy from the
+framebuffer into a texture level is a render pass into a view of that level, sampling the back
+buffer with the row order GL's bottom-up framebuffer implies.
 
 Without a device, the same scene is drawn on the processor: `pipeline.js` runs the fixed-function
 stages in the specification's order (per-vertex lighting, fog, texture generation and matrix;
@@ -479,12 +481,12 @@ Accepted and reported through `divergence`:
   buffer is empty; a `glTexImage2D` format or type outside the supported set is accepted and
   uploads nothing; `glReadPixels` with an unsupported type and `glGetCompressedTexImage` are
   refused; a vertex-array or index draw with no way to read guest memory draws nothing. Every
-  unimplemented entry point is counted by name. On a device, the framebuffer is not read back:
-  `glReadPixels` answers black, a copy from the framebuffer into a texture copies black,
-  `glDrawPixels`, `glBitmap` and `glCopyPixels` draw nothing; a colour logic operation writes the
-  fragment as it is; a border clamp clamps to the edge; flat shading takes a primitive's first
-  vertex rather than its last; points and lines are one pixel wide; a fifth texture unit is not
-  drawn; a texture rewritten between two draws of one frame is seen by both as rewritten.
+  unimplemented entry point is counted by name. On a device, the framebuffer's pixels are not
+  brought back to the processor: `glReadPixels` answers black, `glDrawPixels`, `glBitmap` and
+  `glCopyPixels` draw nothing; a colour logic operation writes the fragment as it is; a border
+  clamp clamps to the edge; flat shading takes a primitive's first vertex rather than its last;
+  points and lines are one pixel wide; a fifth texture unit is not drawn; a texture rewritten
+  between two draws of one frame is seen by both as rewritten.
 
 Counted rather than reported (`seam.device.skipped`): Direct3D 8 draws skipped for `vertexShader`,
 `pixelShader`, `stride` (the stream's stride disagrees with the FVF), `indexFormat`, `stencilRect`

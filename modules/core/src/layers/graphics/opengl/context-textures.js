@@ -568,8 +568,9 @@ export function installTextureCalls(context, kernel){
     }
 
     /**
-     * A rectangle of the framebuffer as RGBA texels, y measured from the
-     * bottom as GL measures it.
+     * A rectangle of the processor's framebuffer as RGBA texels, y measured
+     * from the bottom as GL measures it. The device path copies on the GPU
+     * instead and never reads these bytes.
      *
      * @param {number} x
      * @param {number} y
@@ -580,12 +581,6 @@ export function installTextureCalls(context, kernel){
     function framebufferTexels(x, y, width, height){
         const frame = kernel.framebuffer();
         const out = new Uint8Array(width * height * 4);
-        if (kernel.gpuBacked())
-        {
-            kernel.diverge('a copy from the framebuffer into a texture was accepted and copied'
-                + ' black: the framebuffer lives on the device and is not read back');
-            return out;
-        }
         for (let row = 0; row < height; row++)
         {
             const fy = frame.height - 1 - (y + row);
@@ -1254,6 +1249,21 @@ export function installTextureCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
+            if (kernel.gpuBacked())
+            {
+                // The level's pixels live on the device, so it is given a shape
+                // with no texels and copied there. Marking it dirty would have
+                // the next draw upload these absent texels over the copy.
+                if (!enter('glCopyTexImage2D', [...args, null]))
+                {
+                    return;
+                }
+                image.texture.levels.set(levelKey(level, image.face),
+                    { width, height, internalFormat, border, baseFormat, texels: null });
+                kernel.copyToTexture?.(image.texture, level, image.face, 0, 0, x, y, width, height);
+                kernel.shareGroup().used = true;
+                return;
+            }
             const texels = framebufferTexels(x, y, width, height);
             if (!enter('glCopyTexImage2D', [...args, texels]))
             {
@@ -1294,6 +1304,19 @@ export function installTextureCalls(context, kernel){
                 || xoffset + width > existing.width || yoffset + height > existing.height)
             {
                 setError(GL.INVALID_VALUE);
+                return;
+            }
+            if (kernel.gpuBacked())
+            {
+                // The copy lands on the device, into the level as it already
+                // stands there. Not marked dirty, or the next draw would upload
+                // the processor's texels over what the copy wrote.
+                if (!enter('glCopyTexSubImage2D', [...args, null]))
+                {
+                    return;
+                }
+                kernel.copyToTexture?.(image.texture, level, image.face, xoffset, yoffset, x, y,
+                    width, height);
                 return;
             }
             const texels = framebufferTexels(x, y, width, height);

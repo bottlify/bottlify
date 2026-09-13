@@ -51,8 +51,9 @@ import {
     CANONICAL_LAYOUT, expandIndices, isList, packVertices, planLayout, scanIndices, topologyOf,
 } from './gpu-layout.js';
 import {
-    CLEAR_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey, drawDescriptor, drawKey,
-    generateClear, generateDraw, generateShow, showDescriptor, showKey,
+    CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
+    copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
+    showDescriptor, showKey,
 } from './wgsl.js';
 
 /** The formats every drawable is backed by. */
@@ -193,6 +194,7 @@ export function createGpuRenderer(services){
      * @property {number} height
      * @property {number} levels
      * @property {boolean} cube
+     * @property {Map<number, any>} views   a level as a target, by level key, once drawn into
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
     const textures = new WeakMap();
@@ -377,13 +379,16 @@ export function createGpuRenderer(services){
                     layers: cube ? 6 : 1,
                     dimension: cube ? 'cube' : undefined,
                     label: `gl-texture:${texture.name}`,
+                    // A target too: a program copies its framebuffer into a
+                    // level, and that copy is a draw into it.
                     usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
-                        | TextureUsage.COPY_SRC,
+                        | TextureUsage.COPY_SRC | TextureUsage.RENDER_ATTACHMENT,
                 }),
                 width: base.width,
                 height: base.height,
                 levels,
                 cube,
+                views: new Map(),
             };
             textures.set(texture, record);
             // A fresh copy has every level to receive.
@@ -779,6 +784,66 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * A copy of a framebuffer rectangle into a texture level, recorded as a
+     * draw into that level; the level's texels on the processor are left as
+     * they were, and are not what the GPU holds from here on.
+     *
+     * @param {object} context
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {number} level @param {number} face
+     * @param {number} xoffset @param {number} yoffset
+     * @param {number} x @param {number} y
+     * @param {number} width @param {number} height
+     */
+    const copyToTexture = (context, texture, level, face, xoffset, yoffset, x, y, width, height)=>{
+        const target = drawables.get(context);
+        if (!target || width <= 0 || height <= 0)
+        {
+            return;
+        }
+        const textureRecord = textureFor(texture);
+        const key = levelKey(level, face);
+        let view = textureRecord.views.get(key);
+        if (!view)
+        {
+            const image = texture.levels.get(key);
+            if (!image)
+            {
+                return;
+            }
+            view = {
+                texture: textureRecord.gpu.texture,
+                view: textureRecord.gpu.texture.createView({
+                    label: `gl-texture:${texture.name}:${key}`,
+                    dimension: '2d',
+                    baseMipLevel: level,
+                    mipLevelCount: 1,
+                    baseArrayLayer: face,
+                    arrayLayerCount: 1,
+                }),
+                width: image.width,
+                height: image.height,
+                format: TEXTURE_FORMAT,
+                label: `gl-texture:${texture.name}:${key}`,
+            };
+            textureRecord.views.set(key, view);
+        }
+        const recording = recordingOf(context);
+        const pipeline = pipelineFor(copyKey(TEXTURE_FORMAT), generateCopy(),
+            showDescriptor(TEXTURE_FORMAT), '2');
+        const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
+        uniforms.set([x, y, xoffset, yoffset, target.width, target.height], 0);
+        recording.pipelines.push(pipeline);
+        recording.commands.push({
+            kind: 'copy',
+            pipeline: recording.pipelines.length - 1,
+            uniforms,
+            target: view,
+            scissor: clampRect({ x: xoffset, y: yoffset, width, height }, view),
+        });
+    };
+
+    /**
      * @param {object} context
      * @param {ClearRequest} request
      */
@@ -845,22 +910,34 @@ export function createGpuRenderer(services){
         const frame = backend.beginFrame();
         try
         {
-            let pass = frame.beginPass({
-                target: target.colour,
-                clear: false,
-                depthStencilAttachment: {
-                    view: target.depth.view,
-                    depthLoadOp: 'load',
-                    depthStoreOp: 'store',
-                    stencilLoadOp: 'load',
-                    stencilStoreOp: 'store',
-                },
-            });
+            /** @type {any} */
+            let pass = null;
             /** @type {any} */
             let viewport = null;
             /** @type {any} */
             let scissor = null;
             let stencilReference = -1;
+            const drawing = ()=>{
+                if (pass)
+                {
+                    return pass;
+                }
+                pass = frame.beginPass({
+                    target: target.colour,
+                    clear: false,
+                    depthStencilAttachment: {
+                        view: target.depth.view,
+                        depthLoadOp: 'load',
+                        depthStoreOp: 'store',
+                        stencilLoadOp: 'load',
+                        stencilStoreOp: 'store',
+                    },
+                });
+                viewport = null;
+                scissor = null;
+                stencilReference = -1;
+                return pass;
+            };
             for (const command of recording.commands)
             {
                 const outcome = built[command.pipeline];
@@ -873,6 +950,24 @@ export function createGpuRenderer(services){
                     continue;
                 }
                 const pipeline = outcome.value;
+                if (command.kind === 'copy')
+                {
+                    // Into the level, reading the back buffer: its own pass,
+                    // after which the drawing pass is reopened over what it
+                    // holds.
+                    const into = frame.beginPass({ target: command.target, clear: false });
+                    into.setScissor(command.scissor);
+                    into.setPipeline(pipeline.gpu);
+                    into.setBindings(0, pipeline.layout, [
+                        { binding: 0, resource: into.uniforms(command.uniforms) },
+                        { binding: 1, resource: target.colour.view },
+                        { binding: 2, resource: showSamplerFor() },
+                    ]);
+                    into.draw(3, 1, 0);
+                    pass = null;
+                    continue;
+                }
+                drawing();
                 pass.setPipeline(pipeline.gpu);
                 if (!sameRect(viewport, command.viewport))
                 {
@@ -976,6 +1071,7 @@ export function createGpuRenderer(services){
         clear,
         drawArrays,
         draw: drawPacked,
+        copyToTexture,
 
         /**
          * The frame recorded since the last swap is replayed and shown; the

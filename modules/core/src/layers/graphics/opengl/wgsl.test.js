@@ -10,8 +10,8 @@ import { GL } from './constants.js';
 import { createTextureEnvironment } from './texture.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
-    UNIFORM, clearDescriptor, clearKey, drawDescriptor, drawKey, generateClear, generateDraw,
-    generateShow, showDescriptor,
+    UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
+    generateCopy, generateDraw, generateShow, showDescriptor,
 } from './wgsl.js';
 
 /**
@@ -264,4 +264,15 @@ test('the shown copy is opaque and reads the back buffer top row first', ()=>{
         /return vec4f\(textureSample\(sourceTexture, sourceSampler, input\.uv\)\.rgb, 1\.0\)/);
     assert.match(code, /out\.uv = vec2f\(\(x \+ 1\.0\) \* 0\.5, \(1\.0 - y\) \* 0\.5\)/);
     assert.equal(showDescriptor('bgra8unorm').depthStencil, undefined);
+});
+
+test('the copy key folds its target format, and the shader reads the source flipped', ()=>{
+    assert.notEqual(copyKey('rgba8unorm'), copyKey('bgra8unorm'),
+        'a copy into another format is another pipeline');
+    const { code } = generateCopy();
+    // GL counts framebuffer rows from the bottom and texture rows from the
+    // first one given, so the source is sampled with v measured from the top.
+    assert.match(code, /let u = \(uniforms\.rect\.x \+ k\.x\) \/ uniforms\.size\.x/);
+    assert.match(code,
+        /let v = \(uniforms\.size\.y - uniforms\.rect\.y - k\.y\) \/ uniforms\.size\.y/);
 });

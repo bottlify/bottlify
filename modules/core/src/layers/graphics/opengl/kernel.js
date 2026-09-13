@@ -41,6 +41,12 @@
  *           A draw straight from the arrays, when a renderer takes them as
  *           they lie: true when it did, false when the vertices are to be
  *           assembled here instead. Null in a build that draws on the processor.
+ * @property {((texture: import('./objects.js').TextureObject, level: number, face: number,
+ *             xoffset: number, yoffset: number, x: number, y: number, width: number,
+ *             height: number) => void) | null} copyToTexture
+ *           Copies a rectangle of the framebuffer into a texture level on the
+ *           device, as a render pass into a view of that level. Null in a build
+ *           that draws on the processor, where the copy reads `framebuffer()`.
  * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on
  *           a device rather than in `framebuffer()`, which then holds nothing
  * @property {() => any} currentVertex  the current attributes, as a vertex

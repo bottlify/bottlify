@@ -10,7 +10,7 @@ import { GL } from './constants.js';
 import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { CANONICAL_STRIDE } from './gpu-layout.js';
-import { UNIFORM } from './wgsl.js';
+import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
 import { createBackend } from '../webgpu/backend.js';
 import { createFakeDevice } from '../webgpu/internal/fake-device.js';
 
@@ -320,4 +320,103 @@ test('a read of the framebuffer on the device path is reported, not answered', (
     const { context } = r;
     context.glReadPixels(0, 0, 2, 2, GL.RGBA, GL.UNSIGNED_BYTE, 0x3000);
     assert.ok(r.divergences.some(d=>/glReadPixels was accepted and read black/.test(d)));
+});
+
+/**
+ * The one view of a single level the copy renders into, and its render pass.
+ *
+ * @param {ReturnType<typeof rig>} r
+ */
+function copyTarget(r){
+    const view = r.gpu.of('createView')
+        .find(c=>c.view.viewDescriptor.mipLevelCount === 1
+            && c.view.viewDescriptor.baseMipLevel !== undefined);
+    assert.ok(view, 'the copy made a view of one level');
+    const pass = r.gpu.of('beginRenderPass')
+        .find(p=>p.descriptor.colorAttachments[0].view === view.view);
+    assert.ok(pass, 'the copy is a render pass into that view');
+    return { view, pass };
+}
+
+/**
+ * The copy's uniform block: the source rect, its offset and the source size.
+ *
+ * @param {ReturnType<typeof rig>} r
+ */
+function copyUniforms(r){
+    const block = r.gpu.of('writeBuffer')
+        .find(w=>/uniforms/.test(w.buffer.descriptor.label)
+            && w.size === COPY_UNIFORM_FLOATS * 4);
+    assert.ok(block, 'the copy wrote a uniform block');
+    const floats = new Float32Array(block.bytes.buffer, block.bytes.byteOffset,
+        COPY_UNIFORM_FLOATS);
+    return [...floats.subarray(0, 6)];
+}
+
+test('glCopyTexSubImage2D renders the framebuffer rect into a view of the level', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 8, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(8 * 8 * 4));
+    context.glTexImage2D(GL.TEXTURE_2D, 1, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4 * 4 * 4));
+    context.glEnable(GL.TEXTURE_2D);
+    const draw = ()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+    };
+    draw();
+    // Framebuffer (3,4) 2x2, from the bottom -> level 1 at (1,1).
+    context.glCopyTexSubImage2D(GL.TEXTURE_2D, 1, 1, 1, 3, 4, 2, 2);
+    draw();
+    await r.swap();
+
+    const { view, pass } = copyTarget(r);
+    assert.equal(view.view.viewDescriptor.baseMipLevel, 1, 'a view of the level copied into');
+    assert.equal(view.view.viewDescriptor.dimension, '2d');
+    const scissor = r.gpu.of('setScissorRect').filter(c=>c.pass === pass.pass).map(c=>c.rect);
+    assert.ok(scissor.some(rect=>rect.join() === [1, 1, 2, 2].join()),
+        `the scissor is the destination rect, got ${JSON.stringify(scissor)}`);
+    assert.deepEqual(copyUniforms(r), [3, 4, 1, 1, 64, 32]);
+    // The level the copy wrote is uploaded by the first draw alone: the draw
+    // after the copy finds it clean and leaves the device's bytes alone.
+    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 1);
+    assert.equal(uploads.length, 1, 'the level was uploaded once, before the copy');
+    assert.ok(r.gpu.calls.indexOf(uploads[0]) < r.gpu.calls.indexOf(view),
+        'the upload precedes the copy; the later draw uploaded nothing over it');
+});
+
+test('glCopyTexImage2D gives a level a shape and copies the framebuffer into it', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    // Framebuffer (2,3) 8x8, from the bottom -> a whole new level.
+    context.glCopyTexImage2D(GL.TEXTURE_2D, 0, GL.RGB8, 2, 3, 8, 8, 0);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+
+    const { view, pass } = copyTarget(r);
+    assert.equal(view.view.viewDescriptor.baseMipLevel, 0);
+    const scissor = r.gpu.of('setScissorRect').filter(c=>c.pass === pass.pass).map(c=>c.rect);
+    assert.ok(scissor.some(rect=>rect.join() === [0, 0, 8, 8].join()),
+        'the scissor covers the whole level');
+    assert.deepEqual(copyUniforms(r), [2, 3, 0, 0, 64, 32]);
+    // Defined with a shape and no texels, and not marked dirty: the copy, not
+    // an upload of these absent texels, is what fills the level.
+    const stored = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.equal(stored.texels, null);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
 });

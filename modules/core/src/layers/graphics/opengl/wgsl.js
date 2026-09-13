@@ -790,6 +790,51 @@ fn fragmentMain(input: ShowVertex) -> @location(0) vec4f {
 }
 
 /**
+ * A copy from the framebuffer into a texture level is a draw into that level
+ * that samples the back buffer, because the two differ in row order: GL
+ * counts framebuffer rows from the bottom and texture rows from the first
+ * one given, and a plain copy would put the picture in upside down. The
+ * fragment's own position says which texel it is; the uniforms say which
+ * framebuffer pixel that texel takes.
+ *
+ * @param {string} targetFormat
+ */
+export function copyKey(targetFormat){
+    return `copy|${targetFormat}`;
+}
+
+/** The copy's uniform block, in floats: x, y, xoffset, yoffset; then the source size. */
+export const COPY_UNIFORM_FLOATS = 8;
+
+/** @returns {{ code: string, label: string }} */
+export function generateCopy(){
+    const code = `struct CopyUniforms {
+    rect: vec4f,
+    size: vec4f,
+};
+@group(0) @binding(0) var<uniform> uniforms: CopyUniforms;
+@group(0) @binding(1) var sourceTexture: texture_2d<f32>;
+@group(0) @binding(2) var sourceSampler: sampler;
+
+@vertex
+fn vertexMain(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+    let x = f32(index & 1u) * 4.0 - 1.0;
+    let y = f32((index >> 1u) & 1u) * 4.0 - 1.0;
+    return vec4f(x, y, 0.0, 1.0);
+}
+
+@fragment
+fn fragmentMain(@builtin(position) position: vec4f) -> @location(0) vec4f {
+    let k = position.xy - uniforms.rect.zw;
+    let u = (uniforms.rect.x + k.x) / uniforms.size.x;
+    let v = (uniforms.size.y - uniforms.rect.y - k.y) / uniforms.size.y;
+    return textureSample(sourceTexture, sourceSampler, vec2f(u, v));
+}
+`;
+    return { code, label: 'gl:copy' };
+}
+
+/**
  * @param {string} targetFormat
  * @returns {any}
  */

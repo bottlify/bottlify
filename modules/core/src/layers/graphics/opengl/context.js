@@ -316,6 +316,11 @@ export function createGlContext(options = {}){
                 ? false
                 : gpu.drawArrays(context, request, scenes.scene()))
             : null,
+        copyToTexture: gpu
+            ? (texture, level, face, xoffset, yoffset, x, y, width, height)=>
+                gpu.copyToTexture(context, texture, level, face, xoffset, yoffset, x, y,
+                    width, height)
+            : null,
         gpuBacked: ()=>gpu !== null && attached,
         currentVertex,
         side: {},
