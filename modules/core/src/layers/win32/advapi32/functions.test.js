@@ -628,3 +628,18 @@ test('a build with nowhere to put a SID says it ran out of memory rather than fa
     assert.equal(fns.AllocateAndInitializeSid.handler(
         [0x100, 1, 18, 0, 0, 0, 0, 0, 0, 0, OUT_HANDLE]), 0);
 });
+
+test('the wide file security call is refused like the narrow one, popping what it was pushed', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory, writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(), setLastError: code=>errors.push(code),
+    });
+
+    assert.equal(fns.SetFileSecurityW.handler(), 0);
+    assert.deepEqual(errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
+    assert.equal(fns.SetFileSecurityW.argBytes, 12);
+});

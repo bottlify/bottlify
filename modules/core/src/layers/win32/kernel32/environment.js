@@ -249,6 +249,29 @@ export function createEnvironmentFunctions(host){
         },
 
         /**
+         * DWORD ExpandEnvironmentStringsA(LPCSTR lpSrc, LPSTR lpDst, DWORD nSize)
+         *
+         * A `%NAME%` whose variable does not exist is left as it was, percent
+         * signs included; an unpaired `%` is ordinary text. The count is the
+         * whole answer including its terminator whether or not it fitted, and
+         * a buffer too small gets nothing: a caller sizes from a first call
+         * with no buffer and asks again.
+         */
+        ExpandEnvironmentStringsA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([source, destination, size])=>{
+                const text = host.readCString(source >>> 0, 0x8000);
+                const expanded = text.replace(/%([^%]*)%/g, (whole, name)=>variables.get(name) ?? whole);
+                if ((size >>> 0) >= expanded.length + 1 && (destination >>> 0) !== 0)
+                {
+                    reportPath(expanded, destination, size);
+                }
+                return expanded.length + 1;
+            },
+        },
+
+        /**
          * VOID GetStartupInfoA(LPSTARTUPINFOA lpStartupInfo)
          *
          * Every field but the size is zero, and that is a real answer rather than

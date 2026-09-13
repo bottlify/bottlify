@@ -32,6 +32,14 @@ function setup(){
     const fns = createTokenFunctions({
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: (address, maxLength)=>{
+            let text = '';
+            for (let at = 0; at < maxLength && bytes[address + at] !== 0; at++)
+            {
+                text += String.fromCharCode(bytes[address + at]);
+            }
+            return text;
+        },
         setLastError: code=>errors.push(code),
         handles: {
             open(type, object){
@@ -97,6 +105,37 @@ test('the sequence an installer asks whether it is an administrator with', ()=>{
 
     assert.equal(fns.GetTokenInformation.handler([0x1234, TokenGroups, BUFFER, 0x100, NEEDED]), 0);
     assert.equal(errors.at(-1), ERROR_INVALID_HANDLE);
+});
+
+test('a privilege is looked up by its fixed number and granted on the process token', ()=>{
+    // An archiver enables SeRestorePrivilege before it restores what it
+    // unpacks; refused, it takes the path for a user who may not.
+    const { bytes, errors, fns, dword } = setup();
+    const NAME = 0x100;
+    const LUID = 0x200;
+    const TOKEN_OUT = 0x300;
+    const STATE = 0x400;
+    const PREVIOUS = 0x500;
+    const LENGTH = 0x600;
+    bytes.set([...'SeRestorePrivilege'].map(c=>c.charCodeAt(0)), NAME);
+
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 1);
+    assert.equal(dword(LUID), 18);
+    assert.equal(dword(LUID + 4), 0);
+    bytes.set([...'SeNoSuchPrivilege\0'].map(c=>c.charCodeAt(0)), NAME);
+    assert.equal(fns.LookupPrivilegeValueA.handler([0, NAME, LUID]), 0);
+    assert.equal(errors.at(-1), 1313, 'ERROR_NO_SUCH_PRIVILEGE');
+
+    assert.equal(fns.OpenProcessToken.handler([0xffffffff, 0x28, TOKEN_OUT]), 1);
+    const token = dword(TOKEN_OUT);
+    assert.equal(fns.AdjustTokenPrivileges.handler([token, 0, STATE, 16, PREVIOUS, LENGTH]), 1);
+    assert.equal(errors.at(-1), 0, 'ERROR_SUCCESS: every privilege was assigned');
+    assert.equal(dword(PREVIOUS), 0, 'nothing was enabled before');
+    assert.equal(dword(LENGTH), 4);
+    assert.equal(fns.AdjustTokenPrivileges.handler([0x7777, 0, STATE, 0, 0, 0]), 0);
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+    assert.equal(fns.AdjustTokenPrivileges.argBytes, 24);
+    assert.equal(fns.LookupPrivilegeValueA.argBytes, 12);
 });
 
 test('a SID is laid out as Windows lays it out, and compared by its own length', ()=>{

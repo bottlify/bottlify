@@ -452,6 +452,14 @@ export function createRegistryFunctions(host){
             },
         },
 
+        SetFileSecurityW: {
+            argBytes: 12,
+            handler: ()=>{
+                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
+                return 0;
+            },
+        },
+
         /**
          * BOOL AllocateAndInitializeSid(PSID_IDENTIFIER_AUTHORITY pIdentifierAuthority,
          *                               BYTE nSubAuthorityCount, DWORD dwSubAuthority0..7,

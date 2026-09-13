@@ -43,13 +43,13 @@ import { createLoopbackAdapter } from './wsock32/loopback.js';
 import { createWinmmFunctions } from './winmm/functions.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
-import { createComctlFunctions } from './comctl32/functions.js';
+import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
-import { createOleFunctions } from './ole32/functions.js';
+import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
 import { createNtdllFunctions } from './ntdll/functions.js';
 import { createComRegistry } from './ole32/objects.js';
@@ -454,6 +454,16 @@ export const win32Module = {
             trace: text=>trace(text),
         });
 
+        // The one IMalloc, shared by ole32 and shell32: a block the shell
+        // hands out is freed through the allocator COM hands out.
+        const comVtables = {
+            /** @param {any} object @param {string} interfaceId */
+            publish: (object, interfaceId)=>bridge.publishInterface(object, interfaceId),
+        };
+        const taskAllocator = createTaskAllocator({
+            heap, registry: com, vtables: comVtables, readMemory, writeMemory,
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -773,6 +783,7 @@ export const win32Module = {
             'SHELL32.dll': createShellFunctions({
                 writeMemory,
                 divergence: config?.divergence,
+                taskAllocator,
             }),
 
             'VERSION.dll': createVersionFunctions({
@@ -890,6 +901,7 @@ export const win32Module = {
                 ...createTokenFunctions({
                     readMemory,
                     writeMemory,
+                    readCString,
                     setLastError: setError,
                     handles,
                 }),
@@ -903,12 +915,9 @@ export const win32Module = {
                 currentThread: ()=>kernel.currentThread(),
                 heap,
                 registry: com,
+                taskAllocator,
                 divergence: config?.divergence,
-                vtables: {
-                    /** @param {any} object @param {string} interfaceId */
-                    publish: (object, interfaceId)=>
-                        bridge.publishInterface(object, interfaceId),
-                },
+                vtables: comVtables,
             }),
 
             'OLEAUT32.dll': createAutomationFunctions({
@@ -976,6 +985,7 @@ export const win32Module = {
                 // Automation is imported this way and no other: a program links
                 // it through numbers, with no name in the import table at all.
                 'OLEAUT32.dll': OLEAUT32_ORDINALS,
+                'COMCTL32.dll': COMCTL32_ORDINALS,
             }),
 
             /**

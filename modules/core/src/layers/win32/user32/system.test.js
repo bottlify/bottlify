@@ -374,6 +374,42 @@ test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages',
     assert.equal(fns.CharToOemBuffA.argBytes, 12);
 });
 
+test('OemToCharA copies through the terminator and refuses a null on either side', ()=>{
+    const { memory, fns } = setup();
+    memory.writeMemory(TEXT_BUFFER, Uint8Array.of(0x81, 0x61, 0x00, 0x7a));
+    memory.fill(TEXT_BUFFER + 8, 2);
+
+    assert.equal(fns.OemToCharA.handler([TEXT_BUFFER, TEXT_BUFFER + 8]), 1);
+    assert.deepEqual([...memory.readMemory(TEXT_BUFFER + 8, 4)],
+        [0xfc, 0x61, 0x00, UNTOUCHED & 0xff]);
+    assert.equal(fns.OemToCharA.handler([0, TEXT_BUFFER + 8]), 0);
+    assert.equal(fns.OemToCharA.argBytes, 8);
+});
+
+test('wvsprintfA reads its arguments through the list it was handed', ()=>{
+    const { memory, fns } = setup();
+    memory.putString(FORMAT_BUFFER, '%s scored %d of %d');
+    memory.putString(TEXT_BUFFER, 'Player');
+    memory.putU32s(RECT_BUFFER, [TEXT_BUFFER, 42, 100]);
+
+    const written = fns.wvsprintfA.handler([OUT_BUFFER, FORMAT_BUFFER, RECT_BUFFER]);
+
+    assert.equal(memory.readCString(OUT_BUFFER, 64), 'Player scored 42 of 100');
+    assert.equal(written, 'Player scored 42 of 100'.length);
+    assert.equal(fns.wvsprintfA.argBytes, 12, 'stdcall: three pointers, and the callee pops them');
+});
+
+test('CopyRect copies the four fields and refuses a null on either side', ()=>{
+    const { memory, fns } = setup();
+    memory.putU32s(RECT_BUFFER, [1, 2, 3, 4]);
+
+    assert.equal(fns.CopyRect.handler([OUT_BUFFER, RECT_BUFFER]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(OUT_BUFFER + at)), [1, 2, 3, 4]);
+    assert.equal(fns.CopyRect.handler([OUT_BUFFER, 0]), 0);
+    assert.equal(fns.WaitForInputIdle.handler([0x1234, 5000]), 0, 'a process is idle at once');
+    assert.equal(fns.WaitForInputIdle.argBytes, 8);
+});
+
 test('CharLowerA and CharUpperA convert a string in place, or a character by value', ()=>{
     const { memory, fns } = setup();
     memory.putString(TEXT_BUFFER, 'Ab-Z\xe9\xdf');

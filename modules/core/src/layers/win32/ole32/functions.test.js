@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GUID_NULL, GUID_SIZE, formatGuid, parseGuid } from './guid.js';
 import { IID_IUNKNOWN, createComRegistry } from './objects.js';
-import { createOleFunctions } from './functions.js';
+import { createOleFunctions, createTaskAllocator } from './functions.js';
 
 const S_OK = 0x00000000;
 const S_FALSE = 0x00000001;
@@ -107,6 +107,8 @@ function fakeHost(){
         bytes,
         threads,
         published,
+        /** @type {{ pointer: () => number } | undefined} */
+        taskAllocator: undefined,
         /** @param {any} thread */
         run: thread=>{
             current = thread;
@@ -196,9 +198,17 @@ function fakeHost(){
 /**
  * @param {Object} [options]
  * @param {string[]} [options.interfaces]  Which IIDs the class answers to.
+ * @param {boolean} [options.taskAllocator]  Whether the process has an IMalloc to give.
  */
-function setup({ interfaces = [IID_TEST] } = {}){
+function setup({ interfaces = [IID_TEST], taskAllocator = true } = {}){
     const host = fakeHost();
+    if (taskAllocator)
+    {
+        host.taskAllocator = createTaskAllocator({
+            heap: host.heap, registry: host.registry, vtables: host.vtables,
+            readMemory: host.readMemory, writeMemory: host.writeMemory,
+        });
+    }
     /** @type {{ created: any[], destroyed: number }} */
     const log = { created: [], destroyed: 0 };
     host.registry.registerClass(CLSID_TEST, ()=>({
@@ -252,6 +262,23 @@ test('CoInitialize nests and only the matching CoUninitialize leaves', ()=>{
     fns.CoUninitialize.handler();
     assert.equal(host.threads.first.ole32, null);
     assert.equal(createInstance(fns), CO_E_NOTINITIALIZED);
+});
+
+test('OleInitialize enters the same apartment as CoInitialize and OleUninitialize leaves it', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.OleInitialize.handler(), S_OK);
+    assert.equal(fns.CoInitialize.handler(), S_FALSE);
+    assert.equal(host.threads.first.ole32.depth, 2);
+    fns.OleUninitialize.handler();
+    fns.CoUninitialize.handler();
+    assert.equal(host.threads.first.ole32, null);
+});
+
+test('a stream on a global is refused as an allocation failure and reported', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.CreateStreamOnHGlobal.handler([0x100, 1, PPV]), E_OUTOFMEMORY);
+    assert.equal(host.u32(PPV), 0);
+    assert.equal(host.reported.length, 1);
 });
 
 test('an unbalanced CoUninitialize does nothing', ()=>{
@@ -429,6 +456,63 @@ test('a failed CoTaskMemRealloc leaves the original block alone', ()=>{
     assert.deepEqual(host.readMemory(address, 4), Uint8Array.from([9, 9, 9, 9]));
 });
 
+test('the task allocator is one object over the task heap, and a Release never destroys it', ()=>{
+    const { host, fns } = setup();
+    const allocator = createTaskAllocator({
+        heap: host.heap, registry: host.registry, vtables: host.vtables,
+        readMemory: host.readMemory, writeMemory: host.writeMemory,
+    });
+    const pointer = allocator.pointer();
+    assert.notEqual(pointer, 0);
+    assert.equal(allocator.pointer(), pointer, 'the same pointer every time');
+
+    const record = [...host.published.entries()].find(([, at])=>at === pointer)?.[0];
+    assert.ok(record, 'published through the same vtables COM uses');
+    const methods = record.methods.map((/** @type {any} */ m)=>m.name);
+    assert.deepEqual(methods, ['QueryInterface', 'AddRef', 'Release',
+        'Alloc', 'Realloc', 'Free', 'GetSize', 'DidAlloc', 'HeapMinimize']);
+    const invoke = (/** @type {string} */ name, /** @type {number[]} */ args)=>
+        record.methods.find((/** @type {any} */ m)=>m.name === name).invoke(record.object, [pointer, ...args]);
+
+    // Memory taken through the interface is CoTaskMem memory, and the other
+    // way round.
+    const block = invoke('Alloc', [16]);
+    assert.notEqual(block, 0);
+    assert.equal(invoke('GetSize', [block]), 16);
+    assert.equal(invoke('DidAlloc', [block]), 1);
+    fns.CoTaskMemFree.handler([block]);
+    assert.equal(invoke('DidAlloc', [block]), 0);
+    const other = fns.CoTaskMemAlloc.handler([8]);
+    host.writeMemory(other, Uint8Array.from([5, 6, 7, 8]));
+    const grown = invoke('Realloc', [other, 64]);
+    assert.deepEqual(host.readMemory(grown, 4), Uint8Array.from([5, 6, 7, 8]));
+    assert.equal(invoke('Free', [grown]), 0);
+    assert.equal(host.heap.block(grown), null);
+    assert.equal(invoke('Free', [0]), 0, 'freeing NULL is nothing');
+
+    // A program releases what SHGetMalloc gave it on the way out; the
+    // allocator outlives that.
+    const before = record.object.refCount;
+    record.object.release();
+    assert.equal(record.object.destroyed, false);
+    assert.ok(before >= 1);
+});
+
+test('CoGetMalloc hands out the task allocator and refuses any other context', ()=>{
+    const { host, fns } = setup();
+    assert.equal(fns.CoGetMalloc.handler([1, PPV]), S_OK);
+    assert.notEqual(host.u32(PPV), 0);
+    assert.equal(fns.CoGetMalloc.handler([2, PPV]) | 0, E_INVALIDARG | 0);
+    assert.equal(host.u32(PPV), 0);
+    assert.equal(fns.CoGetMalloc.handler([1, 0]) | 0, E_INVALIDARG | 0);
+});
+
+test('without an allocator to give, CoGetMalloc fails as an allocation would', ()=>{
+    const { host, fns } = setup({ taskAllocator: false });
+    assert.equal(fns.CoGetMalloc.handler([1, PPV]), E_OUTOFMEMORY);
+    assert.equal(host.u32(PPV), 0);
+});
+
 test('StringFromGUID2 counts the terminator it writes', ()=>{
     const { host, fns } = setup();
     host.putGuid(GUID_OUT, IID_TEST);
@@ -521,12 +605,16 @@ test('the table declares stdcall argument sizes and nothing else', ()=>{
         CoInitialize: 4,
         CoInitializeEx: 8,
         CoUninitialize: 0,
+        OleInitialize: 4,
+        OleUninitialize: 0,
+        CreateStreamOnHGlobal: 12,
         CoFreeUnusedLibraries: 0,
         CoCreateInstance: 20,
         CoCreateGuid: 4,
         CoTaskMemAlloc: 4,
         CoTaskMemFree: 4,
         CoTaskMemRealloc: 8,
+        CoGetMalloc: 8,
         StringFromGUID2: 12,
         CLSIDFromString: 8,
         IIDFromString: 8,

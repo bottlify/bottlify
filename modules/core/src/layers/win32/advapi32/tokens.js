@@ -29,6 +29,31 @@ const ERROR_INVALID_HANDLE = 6;
 const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 const ERROR_NO_TOKEN = 1008;
+const ERROR_NO_SUCH_PRIVILEGE = 1313;
+
+/**
+ * The privileges Windows numbers, by name, as LookupPrivilegeValue answers
+ * them: the low part of the LUID, and a high part of zero. Fixed numbers,
+ * not a table read from anywhere -- these are the same on every machine.
+ */
+const PRIVILEGES = new Map([
+    ['SeCreateTokenPrivilege', 2], ['SeAssignPrimaryTokenPrivilege', 3],
+    ['SeLockMemoryPrivilege', 4], ['SeIncreaseQuotaPrivilege', 5],
+    ['SeMachineAccountPrivilege', 6], ['SeTcbPrivilege', 7], ['SeSecurityPrivilege', 8],
+    ['SeTakeOwnershipPrivilege', 9], ['SeLoadDriverPrivilege', 10],
+    ['SeSystemProfilePrivilege', 11], ['SeSystemtimePrivilege', 12],
+    ['SeProfileSingleProcessPrivilege', 13], ['SeIncreaseBasePriorityPrivilege', 14],
+    ['SeCreatePagefilePrivilege', 15], ['SeCreatePermanentPrivilege', 16],
+    ['SeBackupPrivilege', 17], ['SeRestorePrivilege', 18], ['SeShutdownPrivilege', 19],
+    ['SeDebugPrivilege', 20], ['SeAuditPrivilege', 21], ['SeSystemEnvironmentPrivilege', 22],
+    ['SeChangeNotifyPrivilege', 23], ['SeRemoteShutdownPrivilege', 24],
+    ['SeUndockPrivilege', 25], ['SeSyncAgentPrivilege', 26],
+    ['SeEnableDelegationPrivilege', 27], ['SeManageVolumePrivilege', 28],
+    ['SeImpersonatePrivilege', 29], ['SeCreateGlobalPrivilege', 30],
+]);
+
+/** The longest privilege name read out of the guest. */
+const MAX_PRIVILEGE_NAME = 64;
 
 /** TOKEN_INFORMATION_CLASS values this build answers. */
 const TokenUser = 1;
@@ -89,6 +114,7 @@ const sidBytes = sid=>{
  * @typedef {Object} TokenHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} setLastError
  * @property {{ open: (type: string, object: any) => number,
  *              resolve: (handle: number, type?: string) => any }} handles
@@ -283,6 +309,68 @@ export function createTokenFunctions(host){
                 const other = host.readMemory(second >>> 0, length);
                 host.setLastError(ERROR_SUCCESS);
                 return whole.every((byte, at)=>byte === other[at]) ? 1 : 0;
+            },
+        },
+
+        /**
+         * BOOL LookupPrivilegeValueA(LPCSTR lpSystemName, LPCSTR lpName, PLUID lpLuid)
+         *
+         * The system name is not read: there is one machine here, and a
+         * program names the local one with NULL.
+         */
+        LookupPrivilegeValueA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, name, out])=>{
+                if ((name >>> 0) === 0 || (out >>> 0) === 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                const value = PRIVILEGES.get(host.readCString(name >>> 0, MAX_PRIVILEGE_NAME));
+                if (value === undefined)
+                {
+                    return fail(ERROR_NO_SUCH_PRIVILEGE);
+                }
+                writeDword(out >>> 0, value);
+                writeDword((out >>> 0) + 4, 0);
+                host.setLastError(ERROR_SUCCESS);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL AdjustTokenPrivileges(HANDLE TokenHandle, BOOL DisableAllPrivileges,
+         *   PTOKEN_PRIVILEGES NewState, DWORD BufferLength,
+         *   PTOKEN_PRIVILEGES PreviousState, PDWORD ReturnLength)
+         *
+         * Granted, whatever was asked: the token is an administrator's and
+         * nothing here enforces a privilege, so enabling one changes nothing
+         * and refusing one would send a program down its unprivileged path
+         * for no reason. The previous state, when asked for, is an empty
+         * list -- nothing was enabled before, and the count says so.
+         */
+        AdjustTokenPrivileges: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([token, , newState, , previous, returnLength])=>{
+                if (!isToken(token))
+                {
+                    return fail(ERROR_INVALID_HANDLE);
+                }
+                if ((newState >>> 0) === 0 && (previous >>> 0) !== 0)
+                {
+                    return fail(ERROR_INVALID_PARAMETER);
+                }
+                if ((returnLength >>> 0) !== 0)
+                {
+                    writeDword(returnLength >>> 0, 4);
+                }
+                if ((previous >>> 0) !== 0)
+                {
+                    writeDword(previous >>> 0, 0);
+                }
+                host.setLastError(ERROR_SUCCESS);
+                return 1;
             },
         },
 

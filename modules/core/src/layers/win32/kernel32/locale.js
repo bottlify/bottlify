@@ -127,6 +127,30 @@ const SHORT_TIME = 'h:mm tt';
 /** sizeof(SYSTEMTIME), which the date and time formats are given one of. */
 const SYSTEMTIME_SIZE = 16;
 
+/**
+ * @typedef {Object} NumberPicture   A NUMBERFMT, read or defaulted.
+ * @property {number} digits         Decimal places.
+ * @property {number} leadingZero    Whether 0.5 is written with its zero.
+ * @property {number} grouping       Digits to a group, 0 for none.
+ * @property {string} decimal
+ * @property {string} thousand
+ * @property {number} negativeOrder  Where the sign goes, 0..4.
+ */
+
+/**
+ * How GetNumberFormat writes a number when handed no NUMBERFMT of its own:
+ * the locale's own picture, which for this one is two decimals, a leading
+ * zero, groups of three, and a minus sign in front.
+ *
+ * @type {Readonly<NumberPicture>}
+ */
+const NUMBER_DEFAULTS = Object.freeze({
+    digits: 2, leadingZero: 1, grouping: 3, decimal: '.', thousand: ',', negativeOrder: 1,
+});
+
+/** sizeof(NUMBERFMTA): six DWORD-sized fields, two of them pointers. */
+const NUMBERFMTA_SIZE = 24;
+
 /** ERROR_CALL_NOT_IMPLEMENTED, for the one function here that is not. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 
@@ -511,6 +535,77 @@ export function createLocaleFunctions(host){
     const writeFormatted = (text, buffer, count)=>writeAnswer(text, buffer, count, false);
 
     /**
+     * A NUMBERFMTA read out of the guest, or the locale's own picture when the
+     * caller passed none.
+     *
+     * @param {number} address
+     * @returns {Readonly<NumberPicture>}
+     */
+    const numberPicture = address=>{
+        if (address === 0)
+        {
+            return NUMBER_DEFAULTS;
+        }
+        const view = new DataView(host.readMemory(address, NUMBERFMTA_SIZE).slice().buffer);
+        return {
+            digits: view.getUint32(0, true),
+            leadingZero: view.getUint32(4, true),
+            grouping: view.getUint32(8, true),
+            decimal: readAnsiSpan(view.getUint32(12, true), -1),
+            thousand: readAnsiSpan(view.getUint32(16, true), -1),
+            negativeOrder: view.getUint32(20, true),
+        };
+    };
+
+    /**
+     * A number as text, in the picture given.
+     *
+     * The value arrives as text too -- digits, one optional point, one
+     * optional leading minus -- and is never turned into a float on the way:
+     * a size in bytes has more digits than a double keeps.
+     *
+     * @param {string} value @param {Readonly<NumberPicture>} picture
+     * @returns {string | null} null when the value is not a number
+     */
+    const formatNumber = (value, picture)=>{
+        const match = /^(-?)(\d*)(?:\.(\d*))?$/.exec(value);
+        if (!match || match[2].length + (match[3]?.length ?? 0) === 0)
+        {
+            return null;
+        }
+        let whole = match[2].replace(/^0+(?=\d)/, '');
+        if (whole === '' || whole === '0')
+        {
+            whole = picture.leadingZero !== 0 ? '0' : '';
+        }
+        // Grouping counts from the point leftwards; a group of zero is no
+        // grouping at all. Only the single-digit form is honoured (3 or 0):
+        // the "3;0" forms are a later era's and no caller here uses them.
+        const group = picture.grouping % 10;
+        if (group > 0)
+        {
+            whole = whole.replace(
+                new RegExp(`\\B(?=(\\d{${group}})+(?!\\d))`, 'g'), picture.thousand);
+        }
+        const fraction = (match[3] ?? '').padEnd(picture.digits, '0').slice(0, picture.digits);
+        const magnitude = fraction === '' ? whole : `${whole}${picture.decimal}${fraction}`;
+        const negative = match[1] === '-' && /[1-9]/.test(match[2] + (match[3] ?? ''));
+        if (!negative)
+        {
+            return magnitude;
+        }
+        // NegativeOrder: 0 "(1.1)", 1 "-1.1", 2 "- 1.1", 3 "1.1-", 4 "1.1 -".
+        switch (picture.negativeOrder)
+        {
+            case 0: return `(${magnitude})`;
+            case 2: return `- ${magnitude}`;
+            case 3: return `${magnitude}-`;
+            case 4: return `${magnitude} -`;
+            default: return `-${magnitude}`;
+        }
+    };
+
+    /**
      * @param {number} locale @param {number} type @param {number} buffer
      * @param {number} count @param {boolean} isWide
      */
@@ -805,8 +900,41 @@ export function createLocaleFunctions(host){
             },
         },
 
+        /**
+         * int GetNumberFormatA(LCID, DWORD dwFlags, LPCSTR lpValue,
+         *                      const NUMBERFMTA *lpFormat, LPSTR lpNumberStr, int cchNumber)
+         *
+         * The flags are LOCALE_NOUSEROVERRIDE alone, and there is no user to
+         * override anything, so they are not read.
+         */
+        GetNumberFormatA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([locale, , value, format, buffer, count])=>{
+                if (!isOurLocale(locale >>> 0))
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const text = formatNumber(
+                    readAnsiSpan(value >>> 0, -1), numberPicture(format >>> 0));
+                if (text === null)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                return writeFormatted(text, buffer >>> 0, count | 0);
+            },
+        },
+
         /** UINT GetOEMCP(VOID) */
         GetOEMCP: { argBytes: 0, handler: ()=>OEM_CODE_PAGE },
+
+        /** BOOL IsDBCSLeadByte(BYTE TestChar) -- the ANSI page's own answer, which is never. */
+        IsDBCSLeadByte: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
 
         /** BOOL GetCPInfo(UINT CodePage, LPCPINFO lpCPInfo) */
         GetCPInfo: {

@@ -137,6 +137,41 @@ test('a callback made from inside a callback goes below the stack in use', async
         'so the outer return address still points at the sentinel');
 });
 
+test('a callback made after a nested host call answered goes below that call, not the frame', ()=>{
+    // A dialog procedure, entered as a callback, opens a modal dialog of its
+    // own: that host call suspends below the procedure's locals, runs its
+    // callbacks, and answers. The outer modal loop then dispatches the next
+    // message with nothing in flight -- and the outer callback frame is
+    // still open, far above where the procedure is actually standing.
+    const worker = thread('main');
+    const { made, resumed, written } = callbacks([worker]);
+    made.reserve();
+
+    made.call({ thread: worker, entry: 0x400000, args: [1, 2, 3, 4], stackAtRest: 0x2ff000 });
+    const outerBase = resumed[0][1].esp;
+    // The procedure ran on, and its own host call suspended well below.
+    made.suspended(worker,
+        { name: 'DialogBoxParamA', restingStack: 0x2fe800, hostReturn: 0x401234 });
+    made.call({ thread: worker, entry: 0x401000, args: [1, 2, 3, 4] });
+    assert.equal(resumed[1][1].esp, 0x2fe800 - 4 * 5, 'below the suspended call');
+    made.returned(worker);
+
+    // The nested call is still suspended while its loop drains what is left.
+    made.call({ thread: worker, entry: 0x401000, args: [1, 2, 3, 4] });
+    assert.equal(resumed[2][1].esp, 0x2fe800 - 4 * 5, 'still below it, not at the outer frame');
+    assert.equal(written.get(outerBase), SENTINEL, 'the outer return address is untouched');
+    made.returned(worker);
+    made.finish(worker, 1);
+
+    // Answered: the procedure is running again on its own stack, and the next
+    // callback it can receive comes through a host call it makes -- whose
+    // free stack is what decides then. Nothing else is suspended, so the
+    // outer frame is the only record, and is right: a stopped thread with
+    // nothing below its frame is standing at it.
+    made.call({ thread: worker, entry: 0x401000, args: [], stackAtRest: 0x2fe700 });
+    assert.equal(resumed[4][1].esp, 0x2fe700 - 4);
+});
+
 test('a callback with no call in flight still finds a stack', ()=>{
     // Nothing is running that could say where the stack is, so the frames
     // themselves are the only answer there is.

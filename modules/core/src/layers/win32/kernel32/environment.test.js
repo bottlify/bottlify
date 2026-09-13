@@ -191,6 +191,25 @@ test('a variable that does not exist says so rather than answering empty', ()=>{
     assert.deepEqual(host.errors, [ERROR_ENVVAR_NOT_FOUND]);
 });
 
+test('expanding replaces the variables it knows and leaves the rest as written', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, '%TEMP%\\x %NOSUCH% 100%');
+
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 64]), 24);
+    assert.equal(host.readAnsi(0x200), 'C:\\TEMP\\x %NOSUCH% 100%');
+});
+
+test('expanding into a buffer too small writes nothing and still says what is needed', ()=>{
+    const host = fakeHost();
+    const fns = createEnvironmentFunctions(host);
+    host.plant(0x100, '%TEMP%');
+
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0, 0]), 8);
+    assert.equal(fns.ExpandEnvironmentStringsA.handler([0x100, 0x200, 7]), 8);
+    assert.equal(host.bytes[0x200], 0xaa);
+});
+
 test('setting a variable is visible to the next reader', ()=>{
     const host = fakeHost();
     const fns = createEnvironmentFunctions(host);

@@ -70,6 +70,9 @@ const COINIT_APARTMENTTHREADED = 0x2;
  *           for one is asking for a component it shipped or expects installed,
  *           and the code it gets back says only "not registered".
  * @property {import('./objects.js').ComRegistry} registry
+ * @property {{ pointer: () => number }} [taskAllocator]
+ *           The process's IMalloc, for CoGetMalloc. Absent, that call fails
+ *           as an allocation failure would.
  * @property {{ publish: (object: import('./objects.js').ComObject,
  *                        interfaceId: string) => number }} vtables
  *           Puts an interface into guest memory and answers with the interface
@@ -79,6 +82,121 @@ const COINIT_APARTMENTTHREADED = 0x2;
  *           to one object, and two addresses for one interface fails that test
  *           however correct the object model underneath is.
  */
+
+/**
+ * CoTaskMemRealloc's contract, which IMalloc::Realloc shares: NULL allocates,
+ * a size of zero frees and answers NULL, a block that cannot grow in place
+ * moves, and on failure the original block is untouched so a caller that
+ * kept its pointer still owns its data.
+ *
+ * @param {OleHeap} heap
+ * @param {{ readMemory: (address: number, length: number) => Uint8Array,
+ *           writeMemory: (address: number, bytes: Uint8Array) => void }} memory
+ * @param {number} pointer @param {number} size
+ */
+function reallocate(heap, memory, pointer, size){
+    const address = pointer >>> 0;
+    const wanted = size >>> 0;
+    if (address === 0)
+    {
+        return heap.allocate(wanted);
+    }
+    if (wanted === 0)
+    {
+        heap.free(address);
+        return 0;
+    }
+    const block = heap.block(address);
+    if (!block)
+    {
+        return 0;
+    }
+    if (heap.resize(address, wanted))
+    {
+        return address;
+    }
+    const moved = heap.allocate(wanted);
+    if (moved === 0)
+    {
+        return 0;
+    }
+    memory.writeMemory(moved, memory.readMemory(address, Math.min(block.size, wanted)).slice());
+    heap.free(address);
+    return moved;
+}
+
+/** IID_IMalloc, and the private class the task allocator is registered under. */
+const IID_IMALLOC = '{00000002-0000-0000-C000-000000000046}';
+const CLSID_TASK_ALLOCATOR = '{7b5b0b8e-1f8c-4b36-9d1c-2a6d4e4b0001}';
+
+/** The one memory context CoGetMalloc accepts. */
+const MEMCTX_TASK = 1;
+
+/**
+ * The process's task allocator: the IMalloc behind CoTaskMemAlloc, which
+ * CoGetMalloc and SHGetMalloc hand out.
+ *
+ * One object for the life of the process, published once and never
+ * destroyed by a Release: a program takes it at start-up, frees the shell's
+ * item id lists through it and releases it on the way out, and the same
+ * pointer has to keep answering through all of that. Blocks come from the
+ * same heap CoTaskMemAlloc uses, so memory taken one way is freed the other.
+ *
+ * @param {Object} deps
+ * @param {OleHeap} deps.heap
+ * @param {import('./objects.js').ComRegistry} deps.registry
+ * @param {{ publish: (object: import('./objects.js').ComObject, interfaceId: string) => number }}
+ *        deps.vtables
+ * @param {(address: number, length: number) => Uint8Array} deps.readMemory
+ * @param {(address: number, bytes: Uint8Array) => void} deps.writeMemory
+ */
+export function createTaskAllocator({ heap, registry, vtables, readMemory, writeMemory }){
+    const memory = { readMemory, writeMemory };
+    registry.registerClass(CLSID_TASK_ALLOCATOR, ()=>({
+        interfaces: [{
+            id: IID_IMALLOC,
+            methods: [
+                { name: 'Alloc', argBytes: 8,
+                    invoke: (object, [, bytes])=>heap.allocate(bytes >>> 0) },
+                { name: 'Realloc', argBytes: 12,
+                    invoke: (object, [, pointer, size])=>reallocate(heap, memory, pointer, size) },
+                { name: 'Free', argBytes: 8, invoke: (object, [, pointer])=>{
+                    if ((pointer >>> 0) !== 0)
+                    {
+                        heap.free(pointer >>> 0);
+                    }
+                    return 0;
+                } },
+                { name: 'GetSize', argBytes: 8,
+                    invoke: (object, [, pointer])=>heap.block(pointer >>> 0)?.size ?? 0xffffffff },
+                // 1 when the block is this allocator's, 0 when not: there is
+                // one heap, so a block it knows is one it made.
+                { name: 'DidAlloc', argBytes: 8,
+                    invoke: (object, [, pointer])=>(heap.block(pointer >>> 0) ? 1 : 0) },
+                { name: 'HeapMinimize', argBytes: 4, invoke: ()=>0 },
+            ],
+        }],
+    }));
+    let pointer = 0;
+    return {
+        /** The interface pointer, made on first use; 0 when nothing can hold it. */
+        pointer: ()=>{
+            if (pointer === 0)
+            {
+                const object = registry.create(CLSID_TASK_ALLOCATOR);
+                if (!object)
+                {
+                    return 0;
+                }
+                // The process's own reference, never released: the creation
+                // reference is the one the guest was handed and will give back.
+                object.addRef();
+                pointer = vtables.publish(object, IID_IMALLOC) >>> 0;
+            }
+            return pointer;
+        },
+    };
+}
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -158,6 +276,26 @@ export function createOleFunctions(host){
         return S_FALSE;
     };
 
+    const leaveApartment = ()=>{
+        const thread = host.currentThread();
+        const apartment = thread.ole32;
+        // Unbalanced on the other side: documented as something a
+        // program must not do, and there is nothing to report it with.
+        if (!apartment)
+        {
+            return 0;
+        }
+        apartment.depth--;
+        if (apartment.depth === 0)
+        {
+            // Windows also releases what the apartment still holds. That
+            // needs per-apartment ownership, which nothing tracks yet, so
+            // an object outliving its apartment stays alive here.
+            thread.ole32 = null;
+        }
+        return 0;
+    };
+
     /**
      * @param {number} guidPointer  Where a REFCLSID or REFIID argument points.
      * @returns {string | null}
@@ -200,24 +338,48 @@ export function createOleFunctions(host){
 
         CoUninitialize: {
             argBytes: 0,
-            handler: ()=>{
-                const thread = host.currentThread();
-                const apartment = thread.ole32;
-                // Unbalanced on the other side: documented as something a
-                // program must not do, and there is nothing to report it with.
-                if (!apartment)
+            handler: leaveApartment,
+        },
+
+        /**
+         * HRESULT OleInitialize(LPVOID pvReserved)
+         * void OleUninitialize(void)
+         *
+         * The apartment calls under another name: OleInitialize is documented
+         * as CoInitializeEx with the single-threaded model, plus the clipboard
+         * and drag-and-drop services, which nothing here provides and nothing
+         * fails for want of. It nests with the Co* pair, so one leave serves
+         * either.
+         */
+        OleInitialize: {
+            argBytes: 4,
+            handler: ()=>enterApartment(COINIT_APARTMENTTHREADED),
+        },
+
+        OleUninitialize: {
+            argBytes: 0,
+            handler: leaveApartment,
+        },
+
+        /**
+         * HRESULT CreateStreamOnHGlobal(HGLOBAL hGlobal, BOOL fDeleteOnRelease, LPSTREAM *ppstm)
+         *
+         * No IStream implementation exists yet, so the call is refused as an
+         * allocation failure -- the one HRESULT a caller of this function is
+         * written to handle -- and the refusal is reported, because a program
+         * loads a picture through a stream and one refused here shows none.
+         */
+        CreateStreamOnHGlobal: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                if ((out >>> 0) !== 0)
                 {
-                    return 0;
+                    writeU32(out >>> 0, 0);
                 }
-                apartment.depth--;
-                if (apartment.depth === 0)
-                {
-                    // Windows also releases what the apartment still holds. That
-                    // needs per-apartment ownership, which nothing tracks yet, so
-                    // an object outliving its apartment stays alive here.
-                    thread.ole32 = null;
-                }
-                return 0;
+                host.divergence?.('COM',
+                    'CreateStreamOnHGlobal has no IStream to hand out and refused');
+                return E_OUTOFMEMORY;
             },
         },
 
@@ -328,6 +490,32 @@ export function createOleFunctions(host){
             handler: ([bytes])=>host.heap.allocate(bytes >>> 0),
         },
 
+        /**
+         * HRESULT CoGetMalloc(DWORD dwMemContext, LPMALLOC *ppMalloc)
+         *
+         * The task allocator, and only that: the shared context of 16-bit
+         * OLE is gone and is refused as the documentation says.
+         */
+        CoGetMalloc: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([context, out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return E_INVALIDARG;
+                }
+                const pointer = (context >>> 0) === MEMCTX_TASK
+                    ? host.taskAllocator?.pointer() ?? 0
+                    : 0;
+                writeU32(out >>> 0, pointer);
+                if ((context >>> 0) !== MEMCTX_TASK)
+                {
+                    return E_INVALIDARG;
+                }
+                return pointer === 0 ? E_OUTOFMEMORY : S_OK;
+            },
+        },
+
         /** void CoTaskMemFree(LPVOID pv) */
         CoTaskMemFree: {
             argBytes: 4,
@@ -347,41 +535,7 @@ export function createOleFunctions(host){
         CoTaskMemRealloc: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([pointer, size])=>{
-                const address = pointer >>> 0;
-                const wanted = size >>> 0;
-                if (address === 0)
-                {
-                    return host.heap.allocate(wanted);
-                }
-                if (wanted === 0)
-                {
-                    // Documented: this frees the block and answers NULL, which is
-                    // the one case where NULL is not a failure.
-                    host.heap.free(address);
-                    return 0;
-                }
-                const block = host.heap.block(address);
-                if (!block)
-                {
-                    return 0;
-                }
-                if (host.heap.resize(address, wanted))
-                {
-                    return address;
-                }
-                const moved = host.heap.allocate(wanted);
-                // On failure the original block is untouched, so a caller that
-                // kept its pointer still owns its data.
-                if (moved === 0)
-                {
-                    return 0;
-                }
-                const kept = Math.min(block.size, wanted);
-                host.writeMemory(moved, host.readMemory(address, kept).slice());
-                host.heap.free(address);
-                return moved;
-            },
+            handler: ([pointer, size])=>reallocate(host.heap, host, pointer, size),
         },
 
         /** int StringFromGUID2(REFGUID rguid, LPOLESTR lpsz, int cchMax) */

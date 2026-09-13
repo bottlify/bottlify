@@ -13,6 +13,7 @@ const CP_UTF8 = 65001;
 const CP_WINDOWS_1252 = 1252;
 const CP_OEM_437 = 437;
 
+const ERROR_INVALID_PARAMETER = 87;
 const ERROR_INSUFFICIENT_BUFFER = 122;
 
 const CT_CTYPE1 = 1;
@@ -302,4 +303,38 @@ test('the UI language is the language everything else here is in', ()=>{
     assert.equal(fns.GetSystemDefaultUILanguage.handler(),
         fns.GetSystemDefaultLangID.handler());
     assert.equal(fns.GetSystemDefaultUILanguage.argBytes, 0);
+});
+
+test('a number is grouped and given the locale decimals when no picture is passed', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, '1234567.5');
+
+    assert.equal(fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0, 0x200, 32]), 13);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x200, 0x20c)), '1,234,567.50');
+});
+
+test('a caller\'s own NUMBERFMT decides the decimals, the grouping and the separators', ()=>{
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantAnsi(0x100, '-0001234');
+    host.plantAnsi(0x300, ',');
+    host.plantAnsi(0x310, ' ');
+    // NumDigits 0, LeadingZero 1, Grouping 3, lpDecimalSep, lpThousandSep, NegativeOrder 0.
+    const view = new DataView(host.bytes.buffer);
+    [0, 1, 3, 0x300, 0x310, 0].forEach((field, at)=>view.setUint32(0x320 + at * 4, field, true));
+
+    assert.equal(fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0x320, 0x200, 32]), 8);
+    assert.equal(String.fromCharCode(...host.bytes.slice(0x200, 0x207)), '(1 234)');
+    // A count of zero measures; a value that is not a number fails.
+    assert.equal(fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0x320, 0, 0]), 8);
+    host.plantAnsi(0x100, '12abc');
+    assert.equal(fns.GetNumberFormatA.handler([0x400, 0, 0x100, 0, 0x200, 32]), 0);
+    assert.deepEqual(host.errors, [ERROR_INVALID_PARAMETER]);
+});
+
+test('no byte leads a double-byte character on the pages this build carries', ()=>{
+    const fns = createLocaleFunctions(fakeHost());
+    assert.equal(fns.IsDBCSLeadByte.handler(), 0);
+    assert.equal(fns.IsDBCSLeadByte.argBytes, 4);
 });

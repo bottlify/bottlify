@@ -45,6 +45,18 @@ const point32 = (x, y)=>new Uint8Array([
 ]);
 
 /**
+ * Which ordinal is which export, for a program that links this library by
+ * number. Only the one that is implemented and is imported that way: an
+ * ordinal exported while pointing at nothing is a call that binds and then
+ * jumps into nowhere.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+export const COMCTL32_ORDINALS = Object.freeze({
+    17: 'InitCommonControls',
+});
+
+/**
  * @param {ComctlHost} host
  */
 export function createComctlFunctions(host){
@@ -260,6 +272,17 @@ export function createComctlFunctions(host){
                 }
                 return drag.list;
             },
+        },
+
+        /**
+         * void InitCommonControls(void)
+         *
+         * The older form, which registers every class at once and reports
+         * nothing. Imported by ordinal 17 as often as by name.
+         */
+        InitCommonControls: {
+            argBytes: 0,
+            handler: ()=>0,
         },
 
         /**

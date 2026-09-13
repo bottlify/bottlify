@@ -72,21 +72,34 @@ export function createCallbacks({ cpu, kernel, memory, reserveTrap }){
     const hostCalls = thread=>(thread.hostCalls ??= []);
 
     /**
-     * Where a thread's stack is while it is stopped: inside the innermost
-     * callback frame if it is in one, otherwise where the host call that
-     * suspended it left the stack.
+     * Where a thread's stack is while it is stopped: the lower of where its
+     * innermost callback frame began and where its innermost suspended host
+     * call left the stack.
+     *
+     * The lower, not the more recent kind. A callback frame that is still
+     * open belongs to a procedure that has since run on, pushed its locals
+     * and made a host call of its own; that call suspended below everything
+     * the procedure is using, and its resting stack is the true position.
+     * Taking the frame base instead built the next callback on top of the
+     * procedure's live locals and its return address -- which is what a
+     * modal loop does to the dialog procedure that opened it, the moment a
+     * message is dispatched after the nested dialog has ended.
      *
      * @param {any} thread
      * @returns {number | undefined}
      */
     function restingStack(thread){
         const frames = callbackFrames(thread);
-        if (frames.length > 0)
-        {
-            return frames[frames.length - 1].frameBase;
-        }
         const suspended = hostCalls(thread);
-        return suspended.length > 0 ? suspended[suspended.length - 1].restingStack : undefined;
+        const frame = frames.length > 0 ? frames[frames.length - 1].frameBase : undefined;
+        const call = suspended.length > 0
+            ? suspended[suspended.length - 1].restingStack
+            : undefined;
+        if (frame === undefined || call === undefined)
+        {
+            return frame ?? call;
+        }
+        return Math.min(frame, call);
     }
 
     return {

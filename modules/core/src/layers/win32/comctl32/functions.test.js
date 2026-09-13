@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createComctlFunctions } from './functions.js';
+import { COMCTL32_ORDINALS, createComctlFunctions } from './functions.js';
 
 /** @param {((bitmap: number) => { width: number, height: number }) | undefined} bitmapSize */
 function machine(bitmapSize = undefined){
@@ -106,4 +106,11 @@ test('a structure of the wrong size is refused rather than half read', ()=>{
     assert.equal(m.comctl._TrackMouseEvent.handler([0x210]), 1);
     m.put32(0x210, 24);
     assert.equal(m.comctl._TrackMouseEvent.handler([0x210]), 0);
+});
+
+test('InitCommonControls is the export ordinal 17 names, and takes nothing', ()=>{
+    const m = machine();
+    assert.equal(COMCTL32_ORDINALS[17], 'InitCommonControls');
+    assert.equal(m.comctl.InitCommonControls.argBytes, 0);
+    assert.equal(m.comctl.InitCommonControls.handler([]), 0);
 });

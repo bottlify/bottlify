@@ -30,6 +30,17 @@ const SE_ERR_NOASSOC = 31;
 
 /** E_NOTIMPL, for the allocator this build does not hand out. */
 const E_NOTIMPL = 0x80004001 | 0;
+const E_INVALIDARG = 0x80070057 | 0;
+const S_OK = 0;
+
+/** What SHFileOperation answers when it will not operate. */
+const ERROR_CALL_NOT_IMPLEMENTED = 120;
+
+/** SHELLEXECUTEINFOA: where hInstApp lives, which a caller reads on failure. */
+const SHELLEXECUTEINFO_HINSTAPP = 32;
+
+/** SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. */
+const SHFILEOPSTRUCT_ABORTED = 20;
 /** E_FAIL, for a shell folder there is no namespace to resolve. */
 const E_FAIL = 0x80004005 | 0;
 
@@ -39,6 +50,10 @@ const E_FAIL = 0x80004005 | 0;
  * @property {(notice: { api: string, detail: string }) => void} [divergence]
  *           Where a call whose answer differs from Windows says so, rather than
  *           failing silently.
+ * @property {{ pointer: () => number }} [taskAllocator]
+ *           The process's IMalloc, the same one CoGetMalloc answers with.
+ *           Absent in a build without ole32 behind it, and then SHGetMalloc
+ *           is refused.
  */
 
 /** @param {number} value */
@@ -156,24 +171,88 @@ export function createShellFunctions(host){
         /**
          * HRESULT SHGetMalloc(IMalloc **ppMalloc)
          *
-         * Not implemented, and null is written where the interface would go so
-         * that a caller which ignores the HRESULT fails on a null it can see
-         * rather than on a pointer to nothing.
-         *
-         * The allocator itself belongs in ole32 as CoGetMalloc, and this would
-         * forward to it. Nothing needs one yet: the only thing a caller frees
-         * with it is a list from the browse above, which never returns one.
+         * The task allocator, the same object CoGetMalloc hands out. A
+         * program takes it at start-up and releases it on the way out
+         * without looking at the HRESULT, so a refusal here is a call
+         * through whatever a null pointer's vtable holds; without an
+         * allocator to give, null is still written so that the failure is
+         * one a caller can see.
          */
         SHGetMalloc: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([out])=>{
-                if ((out >>> 0) !== 0)
+                if ((out >>> 0) === 0)
                 {
-                    host.writeMemory(out >>> 0, dword(0));
+                    return E_INVALIDARG;
                 }
-                return E_NOTIMPL;
+                const pointer = host.taskAllocator?.pointer() ?? 0;
+                host.writeMemory(out >>> 0, dword(pointer));
+                return pointer === 0 ? E_NOTIMPL : S_OK;
             },
+        },
+
+        /**
+         * BOOL ShellExecuteExA(SHELLEXECUTEINFOA *pExecInfo)
+         *
+         * The same refusal as ShellExecuteA, in the form a caller of this one
+         * reads: a FALSE, and the same error in the record's hInstApp.
+         */
+        ShellExecuteExA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([info])=>{
+                if ((info >>> 0) !== 0)
+                {
+                    host.writeMemory(
+                        (info >>> 0) + SHELLEXECUTEINFO_HINSTAPP, dword(SE_ERR_ACCESSDENIED));
+                }
+                return 0;
+            },
+        },
+
+        /**
+         * int SHFileOperationA(LPSHFILEOPSTRUCTA lpFileOp)
+         *
+         * A copy, move or delete with the shell's progress window and its
+         * recycle bin. Neither exists here, and a program that asks for one
+         * has the plain file calls to fall back on -- so it is refused as not
+         * implemented and told that nothing it asked for was done.
+         */
+        SHFileOperationA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([operation])=>{
+                if ((operation >>> 0) !== 0)
+                {
+                    host.writeMemory((operation >>> 0) + SHFILEOPSTRUCT_ABORTED, dword(1));
+                }
+                return ERROR_CALL_NOT_IMPLEMENTED;
+            },
+        },
+
+        /**
+         * void SHChangeNotify(LONG wEventId, UINT uFlags, LPCVOID dwItem1, LPCVOID dwItem2)
+         *
+         * Tells the shell a file or a folder changed so its windows repaint.
+         * There are no shell windows; the notice has nobody to reach.
+         */
+        SHChangeNotify: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /**
+         * DWORD_PTR SHGetFileInfoA(LPCSTR pszPath, DWORD dwFileAttributes,
+         *                          SHFILEINFOA *psfi, UINT cbFileInfo, UINT uFlags)
+         *
+         * Icons, type names and display names come from the shell's namespace,
+         * which this build does not have. Zero is failure, and the record is
+         * left as the caller filled it.
+         */
+        SHGetFileInfoA: {
+            argBytes: 20,
+            handler: ()=>0,
         },
 
         /**

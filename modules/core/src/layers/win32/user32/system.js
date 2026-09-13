@@ -38,6 +38,9 @@ import {
 } from './structs.js';
 
 /** GetSystemMetrics indices this build has a real answer for. */
+/** How many argument slots a `va_list` is read for, since it carries no count. */
+const VA_LIST_SLOTS = 64;
+
 const SM_CXSCREEN = 0;
 const SM_CYSCREEN = 1;
 const SM_CXVSCROLL = 2;
@@ -992,6 +995,31 @@ export function createSystemFunctions({ host, live, windows, classes }){
         },
 
         /**
+         * BOOL OemToCharA(LPCSTR lpszSrc, LPSTR lpszDst)
+         *
+         * The uncounted form: through the terminator, which travels with the
+         * text. Null on either side is refused, as Windows refuses it.
+         */
+        OemToCharA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([source, target])=>{
+                if ((source >>> 0) === 0 || (target >>> 0) === 0)
+                {
+                    return 0;
+                }
+                let length = 0;
+                while (host.readMemory((source >>> 0) + length, 1)[0] !== 0)
+                {
+                    length++;
+                }
+                host.writeMemory(target >>> 0, transcodeSingleByte(
+                    host.readMemory(source >>> 0, length + 1), OEM_PAGE, ANSI_PAGE));
+                return 1;
+            },
+        },
+
+        /**
          * LPSTR CharLowerA(LPSTR lpsz) / LPSTR CharUpperA(LPSTR lpsz)
          *
          * One argument with two meanings, told apart the way Windows tells
@@ -1054,6 +1082,42 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 const text = formatToString(readString(args[1]), args.slice(2), readString);
                 return writeString(args[0], text, text.length + 1);
             },
+        },
+
+        /**
+         * int wvsprintfA(LPSTR lpOut, LPCSTR lpFmt, va_list arglist)
+         *
+         * wsprintfA with its arguments already on the caller's stack and a
+         * pointer to them: stdcall, because the count is fixed. The list
+         * carries no length, so a window of it is read and the format decides
+         * how much of that is meaningful.
+         */
+        wvsprintfA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([out, format, list])=>{
+                const readString = (/** @type {number} */ address)=>
+                    (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
+                const view = new DataView(
+                    host.readMemory(list >>> 0, VA_LIST_SLOTS * 4).slice().buffer);
+                const varargs = Array.from({ length: VA_LIST_SLOTS },
+                    (unused, slot)=>view.getInt32(slot * 4, true));
+                const text = formatToString(readString(format), varargs, readString);
+                return writeString(out, text, text.length + 1);
+            },
+        },
+
+        /**
+         * DWORD WaitForInputIdle(HANDLE hProcess, DWORD dwMilliseconds)
+         *
+         * Answers that the process is idle at once. Nothing here can tell
+         * when a process it started has an empty queue, and a caller that
+         * goes on to find that process's window looks for it and retries,
+         * which is what it does on a machine where the wait returned early.
+         */
+        WaitForInputIdle: {
+            argBytes: 8,
+            handler: ()=>0,
         },
 
         /** BOOL MessageBeep(UINT uType) */
@@ -1643,6 +1707,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
                     writeU32s(host, out >>> 0, [host.processId ?? 0x1000]);
                 }
                 return host.currentThread?.().id >>> 0 || 1;
+            },
+        },
+
+        /** BOOL CopyRect(LPRECT lprcDst, const RECT *lprcSrc) */
+        CopyRect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([out, source])=>{
+                if ((out >>> 0) === 0 || (source >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeRect(host, out >>> 0, readRect(host, source >>> 0));
+                return 1;
             },
         },
 
