@@ -82,8 +82,10 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  *           [createDrawing]
  *           Called once, and answers with the drawing interface. Absent in a
  *           build that cannot draw.
- * @property {(record: any) => any | null} [surfaceFor]
- *           The pixels a device context draws into, or null when it has none.
+ * @property {(record: any, bitmap: any) => any | null} [surfaceFor]
+ *           The pixels a device context draws into, given the context and
+ *           what it reports as its surface -- the selected bitmap's own
+ *           attributes for a memory context -- or null when it has none.
  * @property {any} [pixelFormat]
  *           The pixel-format service: `choose(descriptor)`, `describe(index)`
  *           and `count()`. Absent in a build with no rendering surface.
@@ -202,7 +204,7 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         }
         if (!dc.boundSurface)
         {
-            const surface = services.surfaceFor(dc);
+            const surface = services.surfaceFor(dc, surfaceOf(dc));
             if (!surface)
             {
                 return null;

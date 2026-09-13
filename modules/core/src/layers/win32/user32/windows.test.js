@@ -41,6 +41,7 @@ const WM_CLOSE = 0x0010;
 const WM_QUIT = 0x0012;
 const WM_KEYDOWN = 0x0100;
 const WM_CHAR = 0x0102;
+const WM_PAINT = 0x000f;
 const WM_USER = 0x0400;
 
 const PM_NOREMOVE = 0;
@@ -751,6 +752,58 @@ test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut sho
     await tick();
     await tick();
     assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
+});
+
+test('a window with an area to paint is handed WM_PAINT when nothing else is queued', ()=>{
+    // Made up at retrieval, as Windows does: never posted, so a hundred
+    // invalidations are one paint, and the area stays until BeginPaint clears
+    // it -- a look that does not remove finds the same paint again.
+    const { fns, memory, queue, hwnd } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'nothing to paint');
+
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    fns.InvalidateRect.handler([hwnd, 0, 0]);
+    queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_USER, 'a posted message comes first');
+
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_NOREMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.hwnd), hwnd);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT,
+        'once, however many invalidations');
+
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0x100, 0x200, PM_REMOVE]), 0,
+        'a range that excludes WM_PAINT does not get one');
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1,
+        'still there: retrieving does not paint');
+    fns.DefWindowProcA.handler([hwnd, WM_PAINT, 0, 0]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 0,
+        'the default procedure validates what nobody painted');
+});
+
+test('WaitMessage yields until there is something to retrieve, and takes nothing', async()=>{
+    const { fns, queue, tick, hwnd } = withWindow();
+    const answer = /** @type {Promise<number>} */ (
+        /** @type {any} */ (fns.WaitMessage.handler()));
+    assert.equal(typeof answer.then, 'function', 'nothing to retrieve: it waits');
+    let settled = false;
+    answer.then(()=>{
+        settled = true;
+    });
+    await tick();
+    assert.equal(settled, false);
+
+    queue.post({ hwnd, message: WM_USER, wParam: 0, lParam: 0 });
+    await tick();
+    await tick();
+    assert.equal(await answer, 1);
+    assert.equal(queue.depth(), 1, 'the message is still there for the pump');
+    assert.equal(fns.WaitMessage.handler(), 1, 'and with one waiting it answers at once');
+    assert.equal(fns.WaitMessage.argBytes, 0);
 });
 
 test('GetMessageA reports an error for a window filter that names nothing', ()=>{

@@ -175,7 +175,12 @@ function fakeDrawing(){
         calls,
         services: {
             createDrawing: ()=>drawing,
-            surfaceFor: ()=>surface,
+            /** @param {any} dc @param {any} bitmap */
+            surfaceFor: (dc, bitmap)=>{
+                void dc;
+                void bitmap;
+                return surface;
+            },
             pixelFormat: {
                 count: ()=>3,
                 size: ()=>40,
@@ -240,6 +245,34 @@ test('with one, the calls reach it with the arguments they were given', ()=>{
         [['setPixel', hdc, 9, 10, 0x00abcdef]]);
     assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 1,
         'the surface is bound once, not on every call');
+});
+
+test('a memory context is bound to the bitmap selected into it, and rebound on a change', ()=>{
+    // The service is asked for the pixels with what the context reports as
+    // its surface: the selected bitmap's own attributes. Selecting another
+    // bitmap makes the binding stale, and the next draw binds the new one.
+    const graphics = fakeDrawing();
+    /** @type {any[]} */
+    const asked = [];
+    graphics.services.surfaceFor = (/** @type {any} */ dc, /** @type {any} */ bitmap)=>{
+        asked.push({ kind: dc.kind, bits: bitmap.bits });
+        return { width: bitmap.width, height: bitmap.height };
+    };
+    const { fns, hdc } = setup(graphics.services);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    const first = fns.CreateBitmap.handler([8, 8, 1, 32, 0x1000]);
+    const second = fns.CreateBitmap.handler([8, 8, 1, 32, 0x2000]);
+
+    fns.SelectObject.handler([memoryDc, first]);
+    assert.equal(fns.LineTo.handler([memoryDc, 1, 1]), 1);
+    assert.equal(fns.LineTo.handler([memoryDc, 2, 2]), 1);
+    assert.deepEqual(asked, [{ kind: 'memory', bits: 0x1000 }], 'bound once while nothing changes');
+
+    fns.SelectObject.handler([memoryDc, second]);
+    assert.equal(fns.LineTo.handler([memoryDc, 3, 3]), 1);
+    assert.deepEqual(asked.at(-1), { kind: 'memory', bits: 0x2000 });
+    assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 2,
+        'once per bitmap');
 });
 
 test('the blits that need no source, and the ones that scale, reach the service', ()=>{

@@ -13,6 +13,8 @@ import { createOpengl } from './opengl/exports.js';
 import { createVulkan } from './vulkan/runtime.js';
 import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
+import { createGdiDrawing } from './gdi/context.js';
+import { dibPitch, surfaceForDibSection } from './gdi/surface.js';
 
 /**
  * graphics — every drawing API a program might have been written against, over
@@ -401,6 +403,36 @@ export const graphicsModule = {
              * reach it, so the assembling caller hands this down.
              */
             opengl: ()=>seam.opengl,
+
+            /**
+             * GDI's own drawing, for the device contexts win32 keeps: the
+             * engine a context is bound to, and the pixels a context over a
+             * bitmap in guest memory draws into. A context over a window has
+             * no pixels here yet, and says so with null rather than drawing
+             * into a copy nobody presents.
+             */
+            gdiDrawing: ()=>({
+                /** @param {{ objects: any, metrics: (font: number) => any }} options */
+                create: options=>createGdiDrawing(options),
+                /**
+                 * @param {{ kind: string }} dc
+                 * @param {{ width: number, height: number, bitCount: number, bits?: number,
+                 *     topDown?: boolean, palette?: number[], format?: string }} bitmap
+                 */
+                surfaceFor: (dc, bitmap)=>{
+                    const bits = bitmap.bits ?? 0;
+                    if (dc.kind !== 'memory' || bits === 0)
+                    {
+                        return null;
+                    }
+                    // The bitmap's own bytes, not a copy: a program draws into
+                    // a DIB section and reads the pixels back through the
+                    // pointer it was given, so the drawing has to land there.
+                    const bytes = services.windowMemory(bits,
+                        dibPitch(bitmap.width, bitmap.bitCount) * bitmap.height);
+                    return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
+                },
+            }),
         };
     },
 

@@ -2182,6 +2182,13 @@ async function buildApp(options){
                 },
                 /** @param {number} hdc */
                 swapBuffers: hdc=>core.api('graphics').opengl().swapBuffers(hdc),
+                // GDI's drawing, and the pixels a context over a bitmap in
+                // guest memory draws into. Every draw a program makes through
+                // a device context lands here or fails.
+                /** @param {{ objects: any, metrics: (font: number) => any }} drawing */
+                createDrawing: drawing=>core.api('graphics').gdiDrawing().create(drawing),
+                /** @param {any} dc @param {any} bitmap */
+                surfaceFor: (dc, bitmap)=>core.api('graphics').gdiDrawing().surfaceFor(dc, bitmap),
             },
             // What a filter graph plays. Handed down rather than reached for:
             // win32 sits below the media layer and may not import it, and the
@@ -2566,15 +2573,18 @@ async function buildApp(options){
         const exports = Object.entries(table).map(([exported, fn])=>({
             name: exported,
             ordinal: declared.get(exported),
-            // An export is a trap into the host, or guest code that decides
-            // for itself when to trap: the builder hands such an entry the
-            // means to register the traps it falls back to.
-            target: fn.guest
-                ? fn.guest({
-                    /** @param {string} label @param {any} trap */
-                    register: (label, trap)=>bridge.register(label, trap),
-                })
-                : bridge.register(`${name}!${exported}`, fn),
+            // An export is a variable the program reads through its address,
+            // a trap into the host, or guest code that decides for itself
+            // when to trap: the builder hands such an entry the means to
+            // register the traps it falls back to.
+            ...fn.data ? { data: fn.data() } : {
+                target: fn.guest
+                    ? fn.guest({
+                        /** @param {string} label @param {any} trap */
+                        register: (label, trap)=>bridge.register(label, trap),
+                    })
+                    : bridge.register(`${name}!${exported}`, fn),
+            },
         }));
 
         const base = MODULE_BASE + index * MODULE_STRIDE;

@@ -148,6 +148,12 @@ const SURFACE_DC_DEPTHS = new Set([8, 16, 32]);
 const BI_RGB = 0;
 const BI_BITFIELDS = 3;
 
+/** iUsage: the colour table is palette indices, not colours. */
+const DIB_PAL_COLORS = 1;
+
+/** Entries an indexed DIB's colour table holds, by depth. */
+const colorTableSize = (/** @type {number} */ bitCount)=>1 << bitCount;
+
 /**
  * Font metrics with no font engine behind them.
  *
@@ -216,6 +222,55 @@ export function createGdiFunctions(host){
 
     /** @param {number} handle @returns {any | null} */
     const dcOf = handle=>contexts.get(handle >>> 0) ?? null;
+
+    /**
+     * The colour table that follows an indexed DIB's header, as the colours
+     * the drawing layer indexes by: 0x00RRGGBB, live for the bitmap's life.
+     *
+     * A palette-relative table (DIB_PAL_COLORS) holds indices into the
+     * palette the device has selected, and those are resolved now: the
+     * bitmap keeps colours, not a reference to a palette that may change.
+     *
+     * @param {number} at @param {number} count @param {number} usage @param {any} dc
+     * @returns {number[]}
+     */
+    const readColorTable = (at, count, usage, dc)=>{
+        const colors = [];
+        if (usage === DIB_PAL_COLORS)
+        {
+            const palette = objects.get(dc?.palette ?? 0)?.attributes.entries ?? [];
+            const indices = host.readMemory(at, count * 2);
+            for (let index = 0; index < count; index++)
+            {
+                // A PALETTEENTRY is red first; the surface wants red on top.
+                const entry = palette[indices[index * 2] | indices[index * 2 + 1] << 8] ?? 0;
+                colors.push(((entry & 0xff) << 16 | entry & 0xff00 | (entry >>> 16) & 0xff) >>> 0);
+            }
+            return colors;
+        }
+        const quads = host.readMemory(at, count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            colors.push((quads[index * 4] | quads[index * 4 + 1] << 8
+                | quads[index * 4 + 2] << 16) >>> 0);
+        }
+        return colors;
+    };
+
+    /**
+     * The colour table of the DIB section selected into a DC, or null when
+     * what is selected has none: only an indexed DIB section carries one.
+     *
+     * @param {number} hdc
+     * @returns {number[] | null}
+     */
+    const colorTableOf = hdc=>{
+        const dc = dcOf(hdc);
+        const bitmap = dc ? objects.get(dc.bitmap) : null;
+        return bitmap && bitmap.attributes.section && bitmap.attributes.palette
+            ? bitmap.attributes.palette
+            : null;
+    };
 
     /**
      * The stock objects, created once and handed back by index forever. They are
@@ -431,6 +486,12 @@ export function createGdiFunctions(host){
         objects.retain(handle);
         objects.release(previous);
         dc[record.type] = handle;
+        if (record.type === 'bitmap')
+        {
+            // The pixels the context was drawing into were the old bitmap's;
+            // the next draw binds it to the new one's.
+            dc.boundSurface = null;
+        }
         return previous;
     };
 
@@ -969,7 +1030,7 @@ export function createGdiFunctions(host){
         CreateDIBSection: {
             argBytes: 24,
             /** @param {number[]} args */
-            handler: ([, info, usage, bitsOut, section])=>{
+            handler: ([hdc, info, usage, bitsOut, section])=>{
                 const header = readBitmapInfoHeader(host, info);
                 if (header.size < 40)
                 {
@@ -1000,6 +1061,22 @@ export function createGdiFunctions(host){
                 {
                     writeU32s(host, bitsOut, [address]);
                 }
+                // An indexed section's colours are its own, read from the
+                // table behind the header and kept where SetDIBColorTable
+                // can change them and a blit can read them. The table is
+                // always full-sized: entries the caller left out are black,
+                // and an index past a shorter table would be no colour at all.
+                const palette = header.bitCount <= 8
+                    ? readColorTable(info + header.size,
+                        Math.min(header.clrUsed || colorTableSize(header.bitCount),
+                            colorTableSize(header.bitCount)),
+                        usage >>> 0, dcOf(hdc))
+                    : undefined;
+                if (palette)
+                {
+                    palette.push(...new Array(colorTableSize(header.bitCount) - palette.length)
+                        .fill(0));
+                }
                 return objects.create('bitmap', {
                     width: header.width,
                     height: Math.abs(header.height),
@@ -1011,7 +1088,60 @@ export function createGdiFunctions(host){
                     usage: usage >>> 0,
                     bits: address,
                     section: address,
+                    palette,
                 });
+            },
+        },
+
+        /**
+         * UINT SetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries,
+         *                       const RGBQUAD *prgbq)
+         * UINT GetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries, RGBQUAD *prgbq)
+         *
+         * The colour table of the DIB section selected into the DC, changed in
+         * place: a program draws with indices and sets what they mean later,
+         * and what it sets is what its next blit shows. Both answer how many
+         * entries they touched, which is none for a DC over anything else.
+         */
+        SetDIBColorTable: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, start, count, quads])=>{
+                const colors = colorTableOf(hdc);
+                if (!colors || (quads >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const first = start >>> 0;
+                const wanted = Math.min(count >>> 0, Math.max(0, colors.length - first));
+                readColorTable(quads >>> 0, wanted, 0, null).forEach((color, index)=>{
+                    colors[first + index] = color;
+                });
+                return wanted;
+            },
+        },
+
+        GetDIBColorTable: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hdc, start, count, quads])=>{
+                const colors = colorTableOf(hdc);
+                if (!colors || (quads >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const first = start >>> 0;
+                const wanted = Math.min(count >>> 0, Math.max(0, colors.length - first));
+                const bytes = new Uint8Array(wanted * 4);
+                for (let index = 0; index < wanted; index++)
+                {
+                    const color = colors[first + index];
+                    bytes[index * 4] = color & 0xff;
+                    bytes[index * 4 + 1] = (color >>> 8) & 0xff;
+                    bytes[index * 4 + 2] = (color >>> 16) & 0xff;
+                }
+                host.writeMemory(quads >>> 0, bytes);
+                return wanted;
             },
         },
 

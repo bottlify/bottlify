@@ -319,3 +319,25 @@ test('an export may be the entry point, and the header names it', ()=>{
         /entry point "Nope"/,
     );
 });
+
+test('a data export holds its bytes at the exported address, not a jump', ()=>{
+    // A runtime's `_acmdln` is a variable: a program reads a pointer through
+    // the address it imported, and a jump there is read as a pointer to
+    // nowhere. The slot is the variable, and the rest of it stays int3.
+    const value = new Uint8Array([0x78, 0x56, 0x34, 0x12]);
+    const module = synthesiseModule({
+        name: 'MSVCRT.dll',
+        base: BASE,
+        exports: [{ name: '_acmdln', data: value }, { name: 'exit', target: 0x2000 }],
+    });
+    const decoded = decodeExports(module.bytes);
+    const rva = decoded.functionRvas[decoded.nameOrdinals[decoded.names.indexOf('_acmdln')]];
+    assert.equal(module.addressOf('_acmdln'), BASE + rva);
+    assert.deepEqual([...module.bytes.subarray(rva, rva + 5)], [0x78, 0x56, 0x34, 0x12, 0xcc]);
+    assert.throws(
+        ()=>synthesiseModule({
+            name: 'A.dll', base: BASE, exports: [{ name: 'Big', data: new Uint8Array(17) }],
+        }),
+        /more than 16 bytes/,
+    );
+});

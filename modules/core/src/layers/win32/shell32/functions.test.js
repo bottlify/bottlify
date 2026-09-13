@@ -11,13 +11,30 @@ import { createShellFunctions } from './functions.js';
 /** @param {number} [allocator]  The IMalloc pointer ole32 would hand out, if any. */
 function machine(allocator){
     const memory = new Uint8Array(0x200).fill(0xaa);
+    /** @type {string[]} */
+    const diverged = [];
     const host = {
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>
             memory.set(b, a),
         taskAllocator: allocator === undefined ? undefined : { pointer: ()=>allocator },
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
     };
-    return { memory, shell: /** @type {any} */ (createShellFunctions(host)) };
+    return { memory, diverged, shell: /** @type {any} */ (createShellFunctions(host)) };
 }
+
+test('the shell namespace is refused out loud, with a name the reporter can key on', ()=>{
+    // The reporter takes the name and the detail as two arguments; a notice
+    // handed to it as one object is keyed as "[object Object]" and every
+    // refusal after the first is swallowed as a repeat.
+    const m = machine();
+    assert.equal(m.shell.SHGetDesktopFolder.handler([0x100]) | 0, 0x80004005 | 0);
+    assert.deepEqual([...m.memory.slice(0x100, 0x104)], [0, 0, 0, 0]);
+    assert.equal(m.shell.SHGetSpecialFolderLocation.handler([0, 0, 0x100]) | 0, 0x80004005 | 0);
+    assert.equal(m.shell.SHGetDesktopFolder.argBytes, 4);
+    assert.deepEqual(m.diverged.map(line=>line.split(':')[0]),
+        ['SHGetDesktopFolder', 'SHGetSpecialFolderLocation']);
+});
 
 test('launching something is refused, not quietly succeeded', ()=>{
     // Success for something that did not happen is the failure that costs most:

@@ -315,12 +315,29 @@ test('sprintf terminates the buffer and returns the count without the NUL', ()=>
     assert.deepEqual(host.output, [], 'sprintf writes to memory, not to stdout');
 });
 
+test('_vsnprintf formats from a list in memory and truncates the way _snprintf does', ()=>{
+    const { fns, host, put, at } = setup();
+    const format = put(0x100, '%s=%d');
+    const name = put(0x120, 'x');
+    host.writeMemory(0x140, new Uint8Array([name & 0xff, name >>> 8 & 0xff, 0, 0, 42, 0, 0, 0]));
+
+    assert.equal(fns._vsnprintf.handler([0x200, 16, format, 0x140]), 4);
+    assert.equal(at(0x200), 'x=42');
+    assert.equal(fns._vsnprintf.handler([0x300, 3, format, 0x140]), -1, 'too long: negative');
+    assert.deepEqual([...host.bytes.subarray(0x300, 0x304)], [0x78, 0x3d, 0x34, 0],
+        'and the buffer holds what fit, with nothing written past it');
+    assert.equal(fns._vsnprintf.argBytes, 16);
+});
+
 test('every function is cdecl and declares the stack its arguments occupy', ()=>{
     const { fns } = setup();
 
     for (const [name, fn] of Object.entries(fns))
     {
-        assert.equal(fn.convention, 'cdecl', `${name} is cdecl`);
+        // A C++ member is the one exception: `this` travels in ECX. Its
+        // decoration says so -- QBE/UAE are `const`/virtual thiscall members.
+        const expected = /@@[QU][AB]E/.test(name) ? 'thiscall' : 'cdecl';
+        assert.equal(fn.convention, expected, `${name} is ${expected}`);
         assert.equal(fn.argBytes % 4, 0, `${name} takes whole DWORDs`);
     }
 
@@ -343,10 +360,11 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
     assert.equal(fns.itoa.argBytes, 12);
     assert.equal(fns.puts.argBytes, 4);
 
-    // Variadic: only the fixed part is a fact about the stack. Everything after
-    // it arrives as the tail of the marshalled arguments.
-    assert.equal(fns.printf.argBytes, 4);
-    assert.equal(fns.sprintf.argBytes, 8);
+    // Variadic: the bridge reads exactly argBytes off the stack, so the tail
+    // has to be declared, and under cdecl declaring it pops nothing.
+    assert.ok(fns.printf.argBytes >= 4 + 4 * 4, 'printf reads a tail');
+    assert.ok(fns.sprintf.argBytes >= 8 + 4 * 4, 'sprintf reads a tail');
+    assert.ok(fns._snprintf.argBytes >= 12 + 4 * 4, '_snprintf reads a tail');
 });
 
 test('qsort orders through the comparator the program brought', async()=>{

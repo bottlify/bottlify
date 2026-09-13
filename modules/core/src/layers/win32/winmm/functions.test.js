@@ -681,3 +681,52 @@ test('a callback-form WOM_DONE goes to the notice thread, never to the caller', 
     const answer = m.winmm.waveOutGetID.handler([device, 0x210]);
     assert.equal(answer, 0, 'and no entry point is parked for it');
 });
+
+test('PlaySound plays a WAVE image from memory, loops it, and null stops it', async()=>{
+    const { createMixer } = await import('../../audio/output/mixer.js');
+    const memory = new Uint8Array(0x10000);
+    /** @type {string[]} */
+    const diverged = [];
+    const mixer = createMixer({ sampleRate: 48000 });
+    const wave = /** @type {any} */ (createWinmmFunctions({
+        /** @param {number} address @param {number} length */
+        readMemory: (address, length)=>memory.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} bytes */
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+        now: ()=>0,
+        output: ()=>mixer,
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+    }));
+    const winmm = wave.table;
+
+    // A RIFF WAVE of eight stereo 16-bit frames at 44.1 kHz, with an odd-sized
+    // chunk before the data so the pad byte is stepped over.
+    const text = (/** @type {string} */ s)=>[...s].map(c=>c.charCodeAt(0));
+    const le32 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff, v >>> 16 & 0xff, v >>> 24 & 0xff];
+    const fmt = [1, 0, 2, 0, ...le32(44100), ...le32(44100 * 4), 4, 0, 16, 0];
+    const body = [...text('WAVE'), ...text('fmt '), ...le32(16), ...fmt,
+        ...text('LIST'), ...le32(3), 1, 2, 3, 0,
+        ...text('data'), ...le32(32), ...new Array(32).fill(0x40)];
+    memory.set([...text('RIFF'), ...le32(body.length), ...body], 0x800);
+
+    assert.equal(winmm.PlaySoundA.handler([0x800, 0, 0x0001 | 0x0004 | 0x0008]), 1);
+    assert.equal(mixer.diagnostics().tracks, 1);
+    const speaker = new Float32Array(64 * 2);
+    for (let turn = 0; turn < 8; turn++)
+    {
+        mixer.pump();
+        mixer.ring.read(speaker);
+        wave.tick();
+    }
+    assert.ok(mixer.diagnostics().produced > 8 * 48000 / 44100 + 1,
+        'a looped sound is heard past its own end');
+
+    assert.equal(winmm.PlaySoundA.handler([0, 0, 0]), 1);
+    assert.equal(mixer.diagnostics().tracks, 0, 'null stops what is playing');
+
+    assert.equal(winmm.PlaySoundA.handler([0x800, 0, 0x00020000]), 0);
+    assert.equal(diverged.length, 1, 'a file is refused out loud, not silently');
+    assert.equal(winmm.PlaySoundA.argBytes, 12);
+    assert.equal(winmm.sndPlaySoundA.argBytes, 8);
+});

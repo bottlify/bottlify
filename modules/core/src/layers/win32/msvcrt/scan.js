@@ -23,6 +23,17 @@
 
 import { scanInteger, scanFloat } from './convert.js';
 
+/**
+ * How many stack slots a variadic function reads past its fixed arguments.
+ *
+ * The bridge reads exactly `argBytes` off the stack, and a format string is
+ * what decides how many of those a call actually uses. Under cdecl the caller
+ * pops, so declaring more than were pushed costs nothing: the slots nobody
+ * asked for are never looked at. Declaring only the fixed part hands every
+ * conversion a zero.
+ */
+export const VARIADIC_SLOTS = 32;
+
 const MAX_STRING = 1 << 20;
 
 /** Returned when the input ended before the first conversion could start. */
@@ -366,7 +377,10 @@ export function createScanFunctions(host){
      */
     const scanf = (fixed, inputOf)=>({
         convention: 'cdecl',
-        argBytes: fixed * 4,
+        // The pointers to store through are the variadic tail, and only as
+        // many slots as are declared are read: with the fixed part alone,
+        // every conversion would be stored through a null pointer.
+        argBytes: (fixed + VARIADIC_SLOTS) * 4,
         /** @param {number[]} args */
         handler: (/** @type {number[]} */ args)=>{
             let taken = fixed;

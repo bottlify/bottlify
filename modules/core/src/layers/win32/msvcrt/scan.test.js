@@ -131,6 +131,15 @@ test('%x reads hex with or without the prefix', ()=>{
     assert.equal(fixture.memory.i32(out), 16);
 });
 
+test('the scanners declare the variadic tail their pointers arrive in', ()=>{
+    // The bridge reads exactly argBytes off the stack; declared with the
+    // fixed part alone, every conversion is stored through a null pointer.
+    const { table } = build();
+    assert.ok(table.sscanf.argBytes >= 8 + 4 * 4);
+    assert.ok(table._snscanf.argBytes >= 12 + 4 * 4);
+    assert.equal(table.sscanf.convention, 'cdecl');
+});
+
 test('_snscanf reads no further than the count it was given', ()=>{
     const { memory, table } = build();
     const out = memory.allocate(8);

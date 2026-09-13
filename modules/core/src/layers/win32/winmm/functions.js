@@ -34,6 +34,8 @@
  * hear nothing from would not be handled at all.
  */
 
+import { parseWave } from './wave.js';
+
 /** Success, and the errors a caller distinguishes. */
 const MMSYSERR_NOERROR = 0;
 const MMSYSERR_BADDEVICEID = 2;
@@ -127,6 +129,13 @@ const MM_WOM_OPEN = 0x03bb;
 const MM_WOM_CLOSE = 0x03bc;
 const MM_WOM_DONE = 0x03bd;
 
+/** PlaySound's flags: where the sound is, and whether the call waits for it. */
+const SND_ASYNC = 0x0001;
+const SND_MEMORY = 0x0004;
+const SND_LOOP = 0x0008;
+const SND_FILENAME = 0x00020000;
+const SND_RESOURCE = 0x00040004;
+
 /** MMTIME's wType values. Milliseconds is 1, not 0 -- zero is no unit at all. */
 const TIME_MS = 0x0001;
 const TIME_BYTES = 0x0004;
@@ -163,7 +172,10 @@ const TIME_BYTES = 0x0004;
  *           audio layer sits above this one and cannot be imported from here.
  *           Absent, or answering null, means there is nothing listening and the
  *           cursor falls back to the clock.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call that answers differently from Windows says so.
  */
+
 
 /** @param {Uint8Array} bytes @param {number} at */
 const u32 = (bytes, at)=>(bytes[at] | bytes[at + 1] << 8
@@ -443,6 +455,63 @@ export function createWinmmFunctions(host){
 
     /** @param {number} argBytes */
     const noDevices = argBytes=>({ argBytes, handler: ()=>0 });
+
+    /**
+     * The one sound PlaySound plays at a time: starting another stops it.
+     *
+     * @type {{ track: any, pcm: Uint8Array, frames: number, loop: boolean } | null}
+     */
+    let playing = null;
+
+    const stopSound = ()=>{
+        playing?.track?.close();
+        playing = null;
+    };
+
+    /**
+     * PlaySound's body, shared with sndPlaySound: null stops what is playing,
+     * a WAVE image in memory replaces it. Waiting for the sound to finish --
+     * what a call without SND_ASYNC does -- is not done, and is reported.
+     *
+     * @param {number} sound @param {number} flags
+     */
+    const playSound = (sound, flags)=>{
+        if ((sound >>> 0) === 0)
+        {
+            stopSound();
+            return 1;
+        }
+        // SND_RESOURCE includes the SND_MEMORY bit, so it is told apart first.
+        if ((flags & SND_RESOURCE) === SND_RESOURCE || (flags & SND_MEMORY) === 0)
+        {
+            host.divergence?.('PlaySound', (flags & SND_RESOURCE) === SND_RESOURCE
+                ? 'a resource is not played'
+                : (flags & SND_FILENAME) !== 0 ? 'a file is not played'
+                    : 'a registry alias is not played');
+            return 0;
+        }
+        // The RIFF header carries the image's own length, so the whole of it
+        // can be read without the caller saying how much there is.
+        const head = host.readMemory(sound >>> 0, 8);
+        const wave = parseWave(host.readMemory(sound >>> 0, 8 + u32(head, 4)));
+        if (!wave)
+        {
+            return 0;
+        }
+        stopSound();
+        if ((flags & SND_ASYNC) === 0)
+        {
+            host.divergence?.('PlaySound', 'a synchronous call does not wait for the sound');
+        }
+        const track = host.output?.()?.open(wave.format) ?? null;
+        playing = {
+            track,
+            pcm: wave.pcm,
+            frames: track ? track.write(wave.pcm) : 0,
+            loop: (flags & SND_LOOP) !== 0,
+        };
+        return 1;
+    };
 
     const table = {
         /**
@@ -750,6 +819,21 @@ export function createWinmmFunctions(host){
         }),
 
         /**
+         * BOOL PlaySoundA(LPCSTR pszSound, HMODULE hmod, DWORD fdwSound)
+         * BOOL sndPlaySoundA(LPCSTR pszSound, UINT fuSound)
+         */
+        PlaySoundA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([sound, , flags])=>playSound(sound, flags >>> 0),
+        },
+        sndPlaySoundA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([sound, flags])=>playSound(sound, flags >>> 0),
+        },
+
+        /**
          * Recording. There is no capture device, and saying so is what lets a
          * program fall back; the rest of the wave-in surface then answers on a
          * handle nothing ever opened.
@@ -828,6 +912,12 @@ export function createWinmmFunctions(host){
             {
                 settle(device);
                 flush(device, MMSYSERR_NOERROR, false);
+            }
+            // A looped sound is fed a copy ahead of the one being heard, so
+            // the seam between two falls where the file's own end is.
+            if (playing?.loop && playing.track && playing.track.pending() < playing.frames)
+            {
+                playing.track.write(playing.pcm);
             }
         },
 

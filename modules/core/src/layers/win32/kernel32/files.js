@@ -261,8 +261,12 @@ export function createFileFunctions(host){
     // promises the one, and an installer's first act is to create its scratch
     // file there. A promise of a directory that is not there fails that
     // create with "access denied", which is the wrong answer to a question
-    // the program never asked.
-    for (const path of ['C:\\WINDOWS', TEMP_PATH.slice(0, -1)])
+    // the program never asked. The system directory and the program files
+    // directory are promised the same way, by GetSystemDirectory and the
+    // registry, and an installer changes into the latter to find where it is
+    // going before it has made anything of its own.
+    for (const path of [WINDOWS_DIRECTORY, TEMP_PATH.slice(0, -1), SYSTEM_DIRECTORY,
+        'C:\\Program Files', 'C:\\Program Files\\Common Files'])
     {
         try
         {

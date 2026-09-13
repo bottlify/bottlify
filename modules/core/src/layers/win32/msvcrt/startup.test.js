@@ -86,6 +86,10 @@ function fakeMachine(commandLine = '"C:\\App\\Game.exe"'){
             exited.push(code);
             return 'parked';
         },
+        /** @param {number} code */
+        exit: code=>{
+            exited.push(code);
+        },
     });
     return { machine, fns };
 }
@@ -269,6 +273,49 @@ test('exit ends the process and does not come back', ()=>{
     assert.deepEqual(machine.exited, [3, 4, 5]);
 });
 
+test('exit runs what _onexit registered, last first, and then ends the process', async()=>{
+    // atexit is built on _onexit and expects the function back, not zero: a
+    // start-up that gets zero reads its own registration as a failure.
+    const { machine, fns } = fakeMachine();
+    assert.equal(fns._onexit.handler([0x401000]), 0x401000);
+    assert.equal(fns._onexit.handler([0x402000]), 0x402000);
+
+    assert.equal(await fns.exit.handler([7]), 0);
+    assert.deepEqual(machine.called, [0x402000, 0x401000]);
+    assert.deepEqual(machine.exited, [7]);
+
+    assert.equal(fns.exit.handler([8]), 'parked', 'with nothing registered, exit parks at once');
+    assert.equal(fns._onexit.argBytes, 4);
+});
+
+test('__dllonexit grows the table a library keeps in its own variables', ()=>{
+    // The library walks the array between *pbegin and *pend itself when it is
+    // detached, so the entries have to be there, in order, and both pointers
+    // have to move. Minus one is how an untouched table is marked.
+    const { machine, fns } = fakeMachine();
+    const PBEGIN = 0x1000;
+    const PEND = 0x1004;
+    machine.putU32s(PBEGIN, [0xffffffff, 0xffffffff]);
+
+    assert.equal(fns.__dllonexit.handler([0x401000, PBEGIN, PEND]), 0x401000);
+    assert.equal(fns.__dllonexit.handler([0x402000, PBEGIN, PEND]), 0x402000);
+    const begin = machine.u32(PBEGIN);
+    assert.equal(machine.u32(PEND), begin + 8);
+    assert.deepEqual([machine.u32(begin), machine.u32(begin + 4)], [0x401000, 0x402000]);
+    assert.equal(fns.__dllonexit.argBytes, 12);
+});
+
+test('_acmdln is a variable holding the command line, and _adjust_fdiv is zero', ()=>{
+    // A start-up reads the pointer through the address it imported; an export
+    // that is code there is read as a pointer into the middle of a jump.
+    const { machine, fns } = fakeMachine('"C:\\App\\Setup.exe" /S');
+    const bytes = fns._acmdln.data();
+    assert.equal(bytes.length, 4);
+    const pointer = new DataView(bytes.buffer).getUint32(0, true);
+    assert.equal(machine.string(pointer), '"C:\\App\\Setup.exe" /S');
+    assert.deepEqual([...fns._adjust_fdiv.data()], [0, 0, 0, 0]);
+});
+
 test('_cexit runs the teardown and returns, which is not the same as exiting', ()=>{
     // A program calls this when it means to keep going afterwards, and ending
     // here would take away the rest of its shutdown.
@@ -286,6 +333,10 @@ test('every entry point is cdecl and declares the stack it does not pop', ()=>{
     const { fns } = fakeMachine();
     for (const [name, entry] of Object.entries(fns))
     {
+        if (entry.data)
+        {
+            continue;
+        }
         assert.equal(entry.convention, 'cdecl', `${name} is cdecl`);
     }
     assert.equal(fns.__getmainargs.argBytes, 20);

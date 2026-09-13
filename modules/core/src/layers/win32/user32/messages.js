@@ -135,6 +135,29 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     let timerLateMs = 0;
     let worstTimerLateMs = 0;
 
+    /**
+     * Where the windows that need painting are, when the window half has
+     * said. WM_PAINT is made up at retrieval like WM_TIMER: Windows never
+     * queues one, it hands one out when a program asks for a message, finds
+     * nothing posted, and some window has an area still to paint. That is
+     * why a hundred invalidations are one paint and why a program that only
+     * ever peeks still repaints.
+     *
+     * @type {((filter: MessageFilter) => number) | null}
+     */
+    let dirtyWindow = null;
+
+    /** @param {MessageFilter} filter */
+    const takePaint = filter=>{
+        const hwnd = dirtyWindow ? dirtyWindow(filter) : 0;
+        if (hwnd === 0)
+        {
+            return null;
+        }
+        const paint = { hwnd, message: WM_PAINT, wParam: 0, lParam: 0, time: now(), x: 0, y: 0 };
+        return accepts(paint, filter) ? paint : null;
+    };
+
     /** @param {MessageFilter} filter */
     const takeTimer = filter=>{
         const at = now();
@@ -384,8 +407,21 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 }
                 return entry;
             }
-            // Nothing queued: a due timer is made up now. After the queue and
-            // before the quit, which is the order Windows retrieves in.
+            // Nothing queued: a window with an area to paint is made up now,
+            // then a due timer, then the quit -- the order Windows retrieves
+            // in. Not removed, because retrieval does not paint: the area
+            // stays until BeginPaint clears it, and the next look finds it
+            // again exactly as Windows would.
+            const paint = takePaint(filter);
+            if (paint)
+            {
+                if (filter.remove)
+                {
+                    retrieved++;
+                    pumped.set(WM_PAINT, (pumped.get(WM_PAINT) ?? 0) + 1);
+                }
+                return paint;
+            }
             const due = takeTimer(filter);
             if (due)
             {
@@ -440,6 +476,16 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                     pending.splice(index, 1);
                 }
             }
+        },
+
+        /**
+         * Tells the queue how to find a window with an area to paint. The
+         * windows are the window half's; the queue only asks.
+         *
+         * @param {(filter: MessageFilter) => number} source
+         */
+        paintsFrom(source){
+            dirtyWindow = source;
         },
 
         /** How many real messages are waiting; a pending quit is not one. */

@@ -924,3 +924,55 @@ test('none of them declares a convention, because all of them are the default', 
         assert.equal(table[name].convention, undefined, `${name} is stdcall like the rest`);
     }
 });
+
+test('an indexed DIB section carries its colour table, which SetDIBColorTable changes', ()=>{
+    // A program draws with indices and sets what they mean afterwards; the
+    // table is the bitmap's own, full-sized, and a blit reads it live.
+    const { fns, memory, hdc } = withDC();
+    putBitmapInfo(memory, { width: 4, height: 1, bitCount: 8 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.biClrUsed, [2]);
+    // Two RGBQUADs: blue, green, red, reserved.
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.SIZE, [0x00010203, 0x00040506]);
+    const bitmap = fns.CreateDIBSection.handler([hdc, STRUCT, 0, BITS_POINTER, 0, 0]);
+    assert.ok(bitmap > 0);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([memoryDc, bitmap]);
+
+    const QUADS = STRUCT + 0x400;
+    assert.equal(fns.GetDIBColorTable.handler([memoryDc, 0, 3, QUADS]), 3);
+    assert.deepEqual([memory.u32(QUADS), memory.u32(QUADS + 4), memory.u32(QUADS + 8)],
+        [0x00010203, 0x00040506, 0], 'the two given, then black to the end of the table');
+
+    memory.putU32s(QUADS, [0x00aabbcc]);
+    assert.equal(fns.SetDIBColorTable.handler([memoryDc, 1, 1, QUADS]), 1);
+    assert.equal(fns.GetDIBColorTable.handler([memoryDc, 1, 1, QUADS + 0x10]), 1);
+    assert.equal(memory.u32(QUADS + 0x10), 0x00aabbcc);
+    assert.equal(fns.SetDIBColorTable.handler([memoryDc, 255, 4, QUADS]), 1, 'clipped at the end');
+    assert.equal(fns.SetDIBColorTable.handler([hdc, 0, 1, QUADS]), 0,
+        'a display DC has no table');
+    assert.equal(fns.SetDIBColorTable.argBytes, 16);
+    assert.equal(fns.GetDIBColorTable.argBytes, 16);
+});
+
+test('a palette-relative colour table is resolved through the palette the DC has', ()=>{
+    const { fns, memory, hdc } = withDC();
+    memory.putU16(STRUCT + 0x800, 0x300);
+    memory.putU16(STRUCT + 0x802, 2);
+    // PALETTEENTRY is red first: (r, g, b) = (1, 2, 3) and (4, 5, 6).
+    memory.putU32s(STRUCT + 0x804, [0x00030201, 0x00060504]);
+    const palette = fns.CreatePalette.handler([STRUCT + 0x800]);
+    assert.ok(fns.SelectPalette.handler([hdc, palette, 0]) > 0);
+
+    putBitmapInfo(memory, { width: 4, height: 1, bitCount: 8 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.biClrUsed, [2]);
+    memory.putU16(STRUCT + BITMAPINFOHEADER.SIZE, 1);
+    memory.putU16(STRUCT + BITMAPINFOHEADER.SIZE + 2, 0);
+    const bitmap = fns.CreateDIBSection.handler([hdc, STRUCT, 1, BITS_POINTER, 0, 0]);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([memoryDc, bitmap]);
+
+    const QUADS = STRUCT + 0x400;
+    assert.equal(fns.GetDIBColorTable.handler([memoryDc, 0, 2, QUADS]), 2);
+    assert.deepEqual([memory.u32(QUADS), memory.u32(QUADS + 4)], [0x00040506, 0x00010203],
+        'as RGBQUADs, blue first, in the order the indices named');
+});

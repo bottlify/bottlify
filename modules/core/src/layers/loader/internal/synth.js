@@ -56,7 +56,12 @@ const encoder = new TextEncoder();
  * @typedef {Object} SynthExport
  * @property {string} name
  * @property {number} [ordinal]  Given for all exports or for none; defaults to a dense table.
- * @property {number} target     Guest address of the host trap stub this export jumps to.
+ * @property {number} [target]   Guest address of the host trap stub this export jumps to.
+ * @property {Uint8Array} [data]
+ *   A variable rather than a function: the slot holds these bytes and the
+ *   export's address is theirs. A runtime exports its command line and its
+ *   flags this way, and a program reads through the address it imported --
+ *   a jump there would be read as a pointer.
  */
 
 /**
@@ -128,10 +133,22 @@ export function synthesiseModule({ name, base, exports, entryPoint }){
     exports.forEach((entry, index)=>{
         const rva = trampolinesRva + index * TRAMPOLINE_STRIDE;
         bytes.fill(INT3, rva, rva + TRAMPOLINE_STRIDE);
-        bytes[rva] = JMP_REL32;
-        // Relative to the instruction after the jump; 32-bit EIP arithmetic wraps,
-        // so any pair of guest addresses is reachable regardless of sign.
-        view.setUint32(rva + 1, (entry.target - (base + rva + 5)) >>> 0, true);
+        if (entry.data)
+        {
+            if (entry.data.length > TRAMPOLINE_STRIDE)
+            {
+                throw new Error(
+                    `export "${entry.name}" holds more than ${TRAMPOLINE_STRIDE} bytes`);
+            }
+            bytes.set(entry.data, rva);
+        }
+        else
+        {
+            bytes[rva] = JMP_REL32;
+            // Relative to the instruction after the jump; 32-bit EIP arithmetic wraps,
+            // so any pair of guest addresses is reachable regardless of sign.
+            view.setUint32(rva + 1, ((entry.target ?? 0) - (base + rva + 5)) >>> 0, true);
+        }
         view.setUint32(functionsRva + (ordinals[index] - ordinalBase) * 4, rva, true);
     });
 

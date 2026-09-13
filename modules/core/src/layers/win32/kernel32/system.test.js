@@ -23,8 +23,8 @@ const PARKED = Object.freeze({ parked: true });
 /** 100ns units between 1601-01-01 and 1970-01-01. */
 const FILETIME_AT_UNIX_EPOCH = 116_444_736_000_000_000n;
 
-function fakeHost(){
-    const bytes = new Uint8Array(0x1000);
+function fakeHost(size = 0x1000){
+    const bytes = new Uint8Array(size);
     /** @type {number[]} */
     const errors = [];
     /** @type {number[]} */
@@ -107,6 +107,23 @@ test('the lstr family answers NULL to a pointer that faults, as the real one doe
 
     assert.equal(fns.lstrcpyA.handler([0x300, 0x200]), 0x300, 'and a good pointer still copies');
     assert.equal(fns.lstrlenA.handler([0x300]), 1);
+});
+
+test('the lstr family has no length of its own: a whole script is one string', ()=>{
+    // Nothing in the signatures bounds a string, and a program hands lstrcpy
+    // the text of a file it just read. A cap inside these copies the first
+    // page and terminates it, and the program then reads a script that ends
+    // mid-statement.
+    const host = fakeHost(0x8000);
+    const fns = createSystemFunctions(host);
+    const long = 'x'.repeat(6000);
+    host.writeMemory(0x200, Uint8Array.from([...long].map(c=>c.charCodeAt(0)).concat(0)));
+
+    assert.equal(fns.lstrlenA.handler([0x200]), 6000);
+    assert.equal(fns.lstrcpyA.handler([0x4000, 0x200]), 0x4000);
+    assert.equal(host.bytes[0x4000 + 5999], 0x78);
+    assert.equal(host.bytes[0x4000 + 6000], 0);
+    assert.equal(fns.lstrcmpA.handler([0x4000, 0x200]), 0);
 });
 
 test('MulDiv keeps the product a caller could not have kept itself', ()=>{

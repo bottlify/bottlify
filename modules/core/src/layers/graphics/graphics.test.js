@@ -150,3 +150,30 @@ test('a frame is not delivered faster than the cap the caller set', async()=>{
 
     await graphicsModule.dispose();
 });
+
+test('GDI drawing binds a memory context to the bytes of its bitmap in guest memory', async()=>{
+    // A program draws into a DIB section and reads the pixels back through the
+    // pointer it was given, so the surface has to be the bytes themselves; a
+    // context over a window has no pixels here and is refused, not faked.
+    const ram = new Uint8Array(0x1000);
+    const api = await graphicsModule.create({}, hostWith({
+        readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+        writeBytes: ()=>{},
+        window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
+    }));
+    const gdi = api.gdiDrawing();
+    const bitmap = { width: 4, height: 2, bitCount: 32, bits: 0x100, topDown: true };
+    const surface = gdi.surfaceFor({ kind: 'memory' }, bitmap);
+    assert.ok(surface);
+
+    const drawing = gdi.create({ objects: { get: ()=>null } });
+    drawing.bind(1, surface);
+    assert.ok(drawing.setPixel(1, 1, 1, 0x000000ff), 'red, as a COLORREF');
+    assert.deepEqual([...ram.subarray(0x100 + 16 + 4, 0x100 + 16 + 8)], [0, 0, 0xff, 0],
+        'landed in guest memory, as BGRX');
+
+    assert.equal(gdi.surfaceFor({ kind: 'window' }, { width: 4, height: 2, bitCount: 32 }), null);
+    assert.equal(gdi.surfaceFor({ kind: 'memory' }, { ...bitmap, bits: 0 }), null,
+        'a bitmap with no storage has nothing to draw into');
+    await graphicsModule.dispose();
+});

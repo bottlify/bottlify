@@ -74,6 +74,12 @@ test('the keys every machine carries are there before any program writes', ()=>{
     const files = version && hive.getValue(version, 'ProgramFilesDir');
     assert.equal(files && String.fromCharCode(...files.data.subarray(0, files.data.length - 1)),
         'C:\\Program Files');
+    // DirectX's own setup library reads the version here and tells an
+    // installer whether to offer its redistributable.
+    const directX = hive.open(local, 'software\\microsoft\\directx');
+    const dxVersion = directX && hive.getValue(directX, 'Version');
+    assert.equal(dxVersion && String.fromCharCode(...dxVersion.data.subarray(0, 12)),
+        '4.09.00.0904');
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');

@@ -68,8 +68,14 @@ const CURRENT_THREAD = 0xfffffffe;
 const FORMAT_MESSAGE_ALLOCATE_BUFFER = 0x00000100;
 const FORMAT_MESSAGE_FROM_SYSTEM = 0x00001000;
 
-/** A string argument is at most this long; longer is a pointer that is not one. */
-const MAX_STRING = 4096;
+/**
+ * How far a string argument is read before it is taken for a pointer that is
+ * not one. Nothing in the lstr family bounds a string -- a program hands
+ * lstrcpy a whole script it just read from its archive -- so the bound is a
+ * whole address space away, and an unterminated buffer ends at the fault the
+ * family already survives.
+ */
+const MAX_STRING = 0x7fffffff;
 
 /** Codes this surface can also report. */
 const ERROR_INVALID_PARAMETER = 87;

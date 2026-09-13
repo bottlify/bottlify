@@ -847,6 +847,22 @@ export function createWindowFunctions(host){
     // door, what a program asks the system about itself after that, the things
     // a window owns, and dialogs. They share the window records rather than
     // each keeping a copy, which is why they are built here.
+    // Where WM_PAINT comes from: a visible window with an area still to
+    // paint, the one the filter names or the first found. Made up by the
+    // queue at retrieval rather than posted, because that is what keeps a
+    // hundred invalidations one paint.
+    host.queue.paintsFrom?.(filter=>{
+        for (const record of windows.values())
+        {
+            if (!record.destroyed && record.updateRect && (record.style & WS_VISIBLE) !== 0
+                && (filter.hwnd === ANY_WINDOW || filter.hwnd === record.hwnd))
+            {
+                return record.hwnd;
+            }
+        }
+        return 0;
+    });
+
     host.windowService?.({
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)
@@ -1455,6 +1471,34 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL WaitMessage(void)
+         *
+         * Yields until the queue has something to retrieve -- a posted
+         * message, a window to paint, a due timer, a quit -- and answers
+         * without taking it. A pump written as peek-then-wait spins without
+         * this, which from outside is a program at full speed doing nothing.
+         */
+        WaitMessage: {
+            argBytes: 0,
+            handler: ()=>{
+                const look = ()=>host.queue.peek({
+                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
+                });
+                if (look())
+                {
+                    return 1;
+                }
+                return (async()=>{
+                    while (!look())
+                    {
+                        await host.idle();
+                    }
+                    return 1;
+                })();
+            },
+        },
+
         /** BOOL TranslateMessage(const MSG *lpMsg) */
         TranslateMessage: {
             argBytes: 4,
@@ -1511,6 +1555,17 @@ export function createWindowFunctions(host){
                     case WM_CLOSE:
                         destroyWindow(hwnd);
                         return 0;
+                    // Validates the window: a procedure that hands WM_PAINT
+                    // here has nothing to draw, and the area has to be
+                    // cleared or the same paint is retrieved for ever.
+                    case WM_PAINT: {
+                        const record = live(hwnd);
+                        if (record)
+                        {
+                            record.updateRect = null;
+                        }
+                        return 0;
+                    }
                     // WM_DESTROY is deliberately not handled, and that is the
                     // whole of it: Windows' default procedure does nothing with
                     // it. Ending the message loop is the program's own

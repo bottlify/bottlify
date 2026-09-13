@@ -454,8 +454,8 @@ test('a write to a standard handle goes to the console, not to the filesystem', 
     assert.equal(result, 1);
     assert.deepEqual(console, [{ handle: HANDLE_STDOUT, text: 'hello' }]);
     assert.equal(memory.dword(OUT_COUNT), 5);
-    // The volume holds what it held plus the machine's own two directories.
-    assert.equal(files.nodes.size, 4, 'nothing was created for it');
+    // The volume holds what it held plus the machine's own five directories.
+    assert.equal(files.nodes.size, 7, 'nothing was created for it');
 });
 
 test('a write to a file lands at the position and moves it on', ()=>{
@@ -1145,4 +1145,19 @@ test('the short form of a path is the path: this volume keeps no 8.3 aliases', (
     assert.equal(length, 'C:\\Program Files\\Title\\title.exe'.length);
     assert.equal(fns.GetShortPathNameA.handler([at(NAME, 'C:\\absent.exe'), OUT_PATH, 260]), 0);
     assert.equal(fns.GetShortPathNameA.argBytes, 12);
+});
+
+test('the directories the machine promises exist before a program asks', ()=>{
+    // GetSystemDirectory and the registry's ProgramFilesDir name them, and an
+    // installer changes into Program Files to find its destination; a
+    // machine on which they are missing sends it looking on every other drive.
+    const { files, fns, at } = setup();
+    const promised = [
+        'C:\\WINDOWS\\system32', 'C:\\Program Files', 'C:\\Program Files\\Common Files',
+    ];
+    for (const path of promised)
+    {
+        assert.ok(files.stat(path)?.isDirectory, path);
+        assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, path)]), 1, path);
+    }
 });

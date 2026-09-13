@@ -174,3 +174,18 @@ test('terminate stops it too, by the decorated name a compiler emits', ()=>{
     table['?terminate@@YAXXZ'].handler([]);
     assert.deepEqual(aborted, ['terminate']);
 });
+
+test('raw_name is the decorated name inside the descriptor; the destructor pops nothing', ()=>{
+    // typeid(x) == typeid(y) is a strcmp of raw_name(): an answer of zero
+    // there is a null pointer handed to strcmp. Both are thiscall, with `this`
+    // in ECX and nothing on the stack, so the stub must pop nothing.
+    const { graph, memory, table } = build();
+    const raw = table['?raw_name@type_info@@QBEPBDXZ'];
+    assert.equal(memory.readCString(raw.handler([graph.types.derived]), 64), '.?AVDerived@@');
+    assert.equal(raw.convention, 'thiscall');
+    assert.equal(raw.argBytes, 4);
+    const destructor = table['??1type_info@@UAE@XZ'];
+    assert.equal(destructor.handler([graph.types.derived]), 0);
+    assert.equal(destructor.convention, 'thiscall');
+    assert.equal(destructor.argBytes, 4);
+});

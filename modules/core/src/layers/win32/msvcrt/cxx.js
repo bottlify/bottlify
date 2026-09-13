@@ -170,6 +170,32 @@ export function createCxxFunctions(host){
             },
         },
 
+        /**
+         * const char *type_info::raw_name() const
+         *
+         * The decorated name, which lives inside the descriptor itself: a
+         * program compares two types by this string, and `typeid(x) == typeid(y)`
+         * is a `strcmp` of it. Undecorating is `name()`'s job, not this one's.
+         */
+        '?raw_name@type_info@@QBEPBDXZ': {
+            convention: 'thiscall',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([self])=>(self >>> 0) + TYPE_NAME,
+        },
+
+        /**
+         * type_info::~type_info()
+         *
+         * Frees the undecorated name `name()` would have cached. Nothing here
+         * caches one, so there is nothing to free.
+         */
+        '??1type_info@@UAE@XZ': {
+            convention: 'thiscall',
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
         /** void terminate(void) */
         '?terminate@@YAXXZ': {
             convention: 'cdecl',

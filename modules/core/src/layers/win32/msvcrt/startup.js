@@ -119,6 +119,11 @@ export function splitCommandLine(line){
  * @property {(code: number) => any} exitProcess
  *           Ends the process. Returns whatever the caller must return to stop
  *           the calling thread, since `exit` does not come back.
+ * @property {(code: number) => void} [exit]
+ *           Records the exit without stopping anything, for a call that has
+ *           already left the bridge: `exit` after the handlers it ran in the
+ *           guest. The process ends before the thread runs another instruction,
+ *           because the run loop reads the code before it hands out a slice.
  */
 
 /**
@@ -215,6 +220,15 @@ export function createStartupFunctions(host){
     /** An int in guest memory that a `__p__*` accessor can hand out. */
     /** @type {Map<string, number>} */
     const cells = new Map();
+
+    /**
+     * What `_onexit` registered, in the order it was registered. Run backwards
+     * by `exit`, which is the contract `atexit` is built on: a handler may rely
+     * on what an earlier one set up still being there.
+     *
+     * @type {number[]}
+     */
+    const onExit = [];
 
     /** @param {string} name @param {number} initial */
     const cell = (name, initial)=>{
@@ -431,12 +445,107 @@ export function createStartupFunctions(host){
          */
         __setusermatherr: { convention: 'cdecl', argBytes: 4, handler: ()=>0 },
 
-        /** void exit(int code) / void _exit(int code) */
+        /**
+         * char *_acmdln
+         *
+         * A variable, not a function: the runtime's copy of the command line,
+         * which a start-up reads through the address it imported to find where
+         * the program name ends. The same text GetCommandLineA reports, because
+         * a program is free to read either and compare.
+         */
+        _acmdln: {
+            data: ()=>{
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setUint32(0, publish(host.commandLine()), true);
+                return bytes;
+            },
+        },
+
+        /**
+         * int _adjust_fdiv
+         *
+         * Zero: the processor has no division defect to work around, and a
+         * start-up that reads a non-zero here takes the slow path for every
+         * division the program does.
+         */
+        _adjust_fdiv: { data: ()=>new Uint8Array(4) },
+
+        /**
+         * _onexit_t _onexit(_onexit_t func)
+         *
+         * The function itself on success, null on failure; `atexit` is this
+         * with the answer folded to zero or minus one.
+         */
+        _onexit: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([fn])=>{
+                onExit.push(fn >>> 0);
+                return fn >>> 0;
+            },
+        },
+
+        /**
+         * _onexit_t __dllonexit(_onexit_t func, _PVFV **pbegin, _PVFV **pend)
+         *
+         * A library's own table, kept in the library's variables rather than
+         * ours: the runtime grows the array between `*pbegin` and `*pend` by
+         * one entry and writes the function at the end, and the library walks
+         * that array itself when it is detached. An empty table is null or
+         * minus one, which is how a start-up marks one nothing has touched.
+         */
+        __dllonexit: {
+            convention: 'cdecl',
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([fn, pbegin, pend])=>{
+                const begin = readU32(pbegin);
+                const empty = begin === 0 || begin === 0xffffffff;
+                const count = empty ? 0 : (readU32(pend) - begin) >>> 2;
+                // ponytail: a fresh array per entry, the old one left to the
+                // library's own free at detach; resize when a table gets long.
+                const grown = host.allocate((count + 1) * 4);
+                if (grown === 0)
+                {
+                    return 0;
+                }
+                if (count > 0)
+                {
+                    host.writeMemory(grown, host.readMemory(begin, count * 4));
+                }
+                writeU32(grown + count * 4, fn >>> 0);
+                writeU32(pbegin, grown);
+                writeU32(pend, grown + (count + 1) * 4);
+                return fn >>> 0;
+            },
+        },
+
+        /**
+         * void exit(int code) / void _exit(int code)
+         *
+         * `exit` runs what `_onexit` registered, last first, before it ends
+         * the process; `_exit` ends it without. A handler is guest code, so a
+         * process with any is ended once the last of them has returned.
+         */
         exit: {
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([code])=>host.exitProcess(code >>> 0),
+            handler: ([code])=>{
+                if (onExit.length === 0 || !host.exit)
+                {
+                    return host.exitProcess(code >>> 0);
+                }
+                const asked = host.currentThread?.();
+                const handlers = onExit.splice(0).reverse();
+                return handlers.reduce(
+                    (waiting, entry)=>waiting.then(()=>host.callGuest(entry, [], asked)),
+                    Promise.resolve(0)).then(()=>{
+                    host.exit?.(code >>> 0);
+                    return 0;
+                });
+            },
         },
 
         _exit: {

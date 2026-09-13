@@ -403,6 +403,7 @@ export const win32Module = {
             // built after win32 and does not exist yet when this configuration
             // is read.
             output: config?.output,
+            divergence: config?.divergence,
             // Honouring what waveOutOpen was asked for. A program that asked to
             // be called back does not poll the flags, so accepting the request
             // and never delivering it leaves it waiting for something that
@@ -770,6 +771,9 @@ export const win32Module = {
                     exitProcess: (/** @type {number} */ code)=>{
                         exitCode = code;
                         return bridge.park();
+                    },
+                    exit: (/** @type {number} */ code)=>{
+                        exitCode = code;
                     },
                     files: volume,
                     // The same set GetLogicalDrives reports, from the same

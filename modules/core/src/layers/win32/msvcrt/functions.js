@@ -22,7 +22,7 @@ import { HANDLE_STDOUT } from '../kernel32/console.js';
 import { formatToString } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
-import { createScanFunctions } from './scan.js';
+import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
 import { createPathFunctions } from './paths.js';
@@ -70,6 +70,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @property {() => string} [commandLine]
  *           What the process was started with, as GetCommandLineA reports it.
  * @property {(code: number) => any} [exitProcess]
+ * @property {(code: number) => void} [exit]
+ *           Records an exit for a call that has already left the bridge and
+ *           cannot park: `exit` once its handlers have run.
  *           Ends the process; answers with what the calling thread must return,
  *           since `exit` does not come back.
  * @property {(message: string) => void} [abort]
@@ -418,13 +421,13 @@ export function createMsvcrtFunctions(host){
         /**
          * int printf(const char *format, ...)
          *
-         * `argBytes` counts the format pointer alone. Under cdecl the variadic
-         * arguments sit contiguously above it on the caller's stack, so they
-         * arrive as the tail of `args` -- everything from index 1 on.
+         * The variadic arguments sit contiguously above the format pointer on
+         * the caller's stack and arrive as the tail of `args` -- everything
+         * from index 1 on -- for as many slots as `argBytes` reads.
          */
         printf: {
             convention: 'cdecl',
-            argBytes: 4,
+            argBytes: 4 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
                 const text = render(args, 1);
@@ -490,7 +493,7 @@ export function createMsvcrtFunctions(host){
          */
         sprintf: {
             convention: 'cdecl',
-            argBytes: 8,
+            argBytes: 8 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
                 const text = render(args, 2);
@@ -508,7 +511,7 @@ export function createMsvcrtFunctions(host){
          */
         _snprintf: {
             convention: 'cdecl',
-            argBytes: 12,
+            argBytes: 12 + VARIADIC_SLOTS * 4,
             /** @param {number[]} args */
             handler: args=>{
                 const limit = args[1] >>> 0;
@@ -530,6 +533,29 @@ export function createMsvcrtFunctions(host){
             /** @param {number[]} args */
             handler: ([buffer, format, list])=>{
                 const text = formatToString(readString(format), varargsAt(list), readString);
+                writeString(buffer, text);
+                return text.length;
+            },
+        },
+
+        /**
+         * int _vsnprintf(char *buffer, size_t count, const char *format, va_list args)
+         *
+         * _snprintf with its arguments in memory: the same negative answer
+         * and unterminated buffer when the text does not fit.
+         */
+        _vsnprintf: {
+            convention: 'cdecl',
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([buffer, count, format, list])=>{
+                const limit = count >>> 0;
+                const text = formatToString(readString(format), varargsAt(list), readString);
+                if (text.length > limit)
+                {
+                    host.writeMemory(buffer, packInto(new Uint8Array(limit), text));
+                    return -1;
+                }
                 writeString(buffer, text);
                 return text.length;
             },
@@ -633,6 +659,7 @@ export function createMsvcrtFunctions(host){
                 callGuest: host.callGuest,
                 currentThread: host.currentThread,
                 exitProcess: host.exitProcess,
+                exit: host.exit,
             })
             : {}),
 

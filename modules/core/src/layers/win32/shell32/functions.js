@@ -47,9 +47,10 @@ const E_FAIL = 0x80004005 | 0;
 /**
  * @typedef {Object} ShellHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(notice: { api: string, detail: string }) => void} [divergence]
+ * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call whose answer differs from Windows says so, rather than
- *           failing silently.
+ *           failing silently -- the name and the detail, as the assembling
+ *           caller's reporter takes them.
  * @property {{ pointer: () => number }} [taskAllocator]
  *           The process's IMalloc, the same one CoGetMalloc answers with.
  *           Absent in a build without ole32 behind it, and then SHGetMalloc
@@ -281,10 +282,29 @@ export function createShellFunctions(host){
                 {
                     host.writeMemory(out >>> 0, dword(0));
                 }
-                host.divergence?.({
-                    api: 'SHELL32.dll!SHGetSpecialFolderLocation',
-                    detail: 'no shell namespace: reports E_FAIL with a null id list',
-                });
+                host.divergence?.('SHGetSpecialFolderLocation',
+                    'no shell namespace: reports E_FAIL with a null id list');
+                return E_FAIL;
+            },
+        },
+
+        /**
+         * HRESULT SHGetDesktopFolder(IShellFolder **ppshf)
+         *
+         * The root of the shell namespace, which a folder browser walks. There
+         * is none here: E_FAIL, and a null where the interface would go, so a
+         * caller that ignores the HRESULT fails on a null it can see.
+         */
+        SHGetDesktopFolder: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    host.writeMemory(out >>> 0, dword(0));
+                }
+                host.divergence?.('SHGetDesktopFolder',
+                    'no shell namespace: reports E_FAIL with a null interface');
                 return E_FAIL;
             },
         },
