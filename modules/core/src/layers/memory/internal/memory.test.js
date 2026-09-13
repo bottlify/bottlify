@@ -206,6 +206,45 @@ test('C strings are read up to the NUL, and a missing one is an error', ()=>{
     assert.throws(()=>accessors.readCString(0x2200, 8), /No NUL within 8 bytes/);
 });
 
+test('a string read copies the string, not the region it sits in', ()=>{
+    // A limit is how far the caller will look, not how long the string is, and
+    // the two differ by orders of magnitude: a name read with a megabyte of
+    // headroom must not copy a megabyte. Counting what the scan asks memory for
+    // is the only way to see it from outside, since the answer is the same.
+    const size = 0x100000;
+    const bytes = new Uint8Array(size);
+    let asked = 0;
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            asked += length;
+            return bytes.subarray(address, address + length);
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    };
+    const regions = createRegionMap();
+    regions.register({
+        name: 'heap', base: 0x1000, size,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    const accessors = createAccessors({ raw, regions });
+
+    bytes.set([0x4b, 0x33, 0x32, 0x00], 0x1000); // "K32"
+    asked = 0;
+    assert.equal(accessors.readCString(0x1000, size), 'K32');
+    assert.ok(asked < 0x1000,
+        `a four-byte string is found without copying the region: ${asked} bytes read`);
+
+    // A string longer than one chunk is still read whole, a wide one the same
+    // way, and a terminator missing within the limit is still the error it was.
+    bytes.set(new Uint8Array(600).fill(0x41), 0x2000);
+    assert.equal(accessors.readCString(0x2000, size).length, 600);
+    bytes.set([0x41, 0x00, 0x42, 0x00, 0x00, 0x00], 0x4000); // "AB" as UTF-16LE
+    assert.equal(accessors.readWideString(0x4000, size), 'AB');
+    assert.throws(()=>accessors.readCString(0x2000, 8), /No NUL within 8 bytes/);
+});
+
 test('a dword read remembers its region and forgets it when the map changes', ()=>{
     // Nearly every dword a host call reads falls in the region the last one
     // did, so the region is remembered -- but a region added or re-protected

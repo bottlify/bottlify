@@ -31,6 +31,19 @@
  */
 
 /**
+ * How much a scan for a string's terminator reads at a time.
+ *
+ * A limit on a string read is how far the caller is willing to look, not how
+ * long the string is, and the two differ by orders of magnitude: a handler that
+ * reads a name hands over a megabyte of headroom for a few dozen bytes. Reading
+ * the whole span to find the end copied that megabyte for every string however
+ * short, so the scan walks the same span a chunk at a time and copies only the
+ * string it found. The chunk is large enough that a long string is not a
+ * thousand reads and small enough that a short one is not a region copied.
+ */
+const SCAN_CHUNK = 256;
+
+/**
  * @param {Object} options
  * @param {RawMemory} options.raw            Physical memory, normally the cpu layer.
  * @param {ReturnType<import('./regions.js').createRegionMap>} options.regions
@@ -234,14 +247,23 @@ export function createAccessors({ raw, regions, charge = null }){
          * @returns {string}
          */
         readCString(address, limit = 4096){
-            const bytes = read(address, scannable(address, limit));
-            const end = bytes.indexOf(0);
-            if (end === -1)
+            const span = scannable(address, limit);
+            let length = -1;
+            for (let at = 0; at < span; at += SCAN_CHUNK)
+            {
+                const end = read(address + at, Math.min(SCAN_CHUNK, span - at)).indexOf(0);
+                if (end !== -1)
+                {
+                    length = at + end;
+                    break;
+                }
+            }
+            if (length === -1)
             {
                 throw new Error(
                     `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
             }
-            return new TextDecoder('latin1').decode(bytes.subarray(0, end));
+            return new TextDecoder('latin1').decode(read(address, length));
         },
 
         /**
@@ -253,16 +275,28 @@ export function createAccessors({ raw, regions, charge = null }){
          * @returns {string}
          */
         readWideString(address, limit = 8192){
-            const bytes = read(address, scannable(address, limit) & ~1);
-            for (let at = 0; at + 1 < bytes.length; at += 2)
+            // The span and the chunk are both even, so a code unit never straddles
+            // two chunks and the scan can read a chunk at a time like the byte one.
+            const span = scannable(address, limit) & ~1;
+            let length = -1;
+            for (let at = 0; at < span && length === -1; at += SCAN_CHUNK)
             {
-                if (bytes[at] === 0 && bytes[at + 1] === 0)
+                const bytes = read(address + at, Math.min(SCAN_CHUNK, span - at));
+                for (let i = 0; i + 1 < bytes.length; i += 2)
                 {
-                    return new TextDecoder('utf-16le').decode(bytes.subarray(0, at));
+                    if (bytes[i] === 0 && bytes[i + 1] === 0)
+                    {
+                        length = at + i;
+                        break;
+                    }
                 }
             }
-            throw new Error(
-                `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+            if (length === -1)
+            {
+                throw new Error(
+                    `No wide NUL within ${limit} bytes of 0x${address.toString(16)}`);
+            }
+            return new TextDecoder('utf-16le').decode(read(address, length));
         },
     };
 }
