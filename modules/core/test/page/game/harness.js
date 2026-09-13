@@ -566,7 +566,9 @@ export function createHarness(canvas, how = {}){
      * Runs one title and reports what came out of it.
      *
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
-     *           maxTurns?: number, trace?: boolean }} request
+     *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
+     *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
+     *           click?: { x: number, y: number, after: number } | null }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -682,8 +684,10 @@ export function createHarness(canvas, how = {}){
             },
             media: decoder ? { wasmBytes: decoder } : undefined,
             imagePath: request.imagePath,
+            screen: request.screen ?? undefined,
             // A run is read afterwards, which is exactly when a stack string is gone.
             traceStrings: request.trace !== false,
+            profileCalls: request.profileCalls === true,
             // Every call, not the last two hundred. What a program decided is
             // decided early, and by the time it stops the ring that would have
             // shown it has been overwritten many times over. Kept as formatted
@@ -758,6 +762,24 @@ export function createHarness(canvas, how = {}){
                             app.input.send({ kind: 'pointerButton', button: 'left', down: true });
                         }
                     }
+                    // One click, a frame long, once the program has drawn a
+                    // number of frames: pressed on one presented frame and
+                    // released on the next, which is how a person's click
+                    // reaches a program that reads the button once a frame.
+                    if (request.click && presents === request.click.after)
+                    {
+                        // With the motion that would have brought a pointer
+                        // there from the corner: a program that reads the
+                        // mouse as relative motion moves its own cursor by it.
+                        app.input.send({ kind: 'pointerMove',
+                            x: request.click.x, y: request.click.y,
+                            dx: request.click.x, dy: request.click.y });
+                        app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                    }
+                    if (request.click && presents === request.click.after + 1)
+                    {
+                        app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+                    }
                 },
             },
             bundle: {
@@ -796,7 +818,10 @@ export function createHarness(canvas, how = {}){
         const started = performance.now();
         try
         {
-            result.exitCode = await app.run({ maxTurns: request.maxTurns ?? 200000 });
+            result.exitCode = await app.run({
+                maxTurns: request.maxTurns ?? 200000,
+                timeoutMs: request.maxMs ?? null,
+            });
             result.stopped = `exited with ${result.exitCode}`;
             result.ok = true;
         }

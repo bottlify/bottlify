@@ -290,9 +290,11 @@ implements).
 
 Stated as the code states them.
 
-- **Display modes are listed but not switched.** `ChangeDisplaySettingsA`/`ExA` succeed only for
-  the mode already in effect (and its depth, when named) and answer `DISP_CHANGE_BADMODE` for any
-  other, while `EnumDisplaySettingsA` lists several. `EnumDisplayDevicesA` reports no devices.
+- **Every listed display mode can be set.** `ChangeDisplaySettingsA`/`ExA` switch the screen to
+  any mode `EnumDisplaySettingsA` lists -- the metrics, the desktop rectangle and the current
+  settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
+  a null mode returns to the display's own size -- and answer `DISP_CHANGE_BADMODE` for a size or
+  depth the list does not carry. `EnumDisplayDevicesA` reports no devices.
 - **One process, no children.** `CreateProcess`/`WinExec` record the request and succeed; the child
   replaces the parent once the parent has nothing left to do. `ShellExecute` answers
   `SE_ERR_NOASSOC`/`SE_ERR_ACCESSDENIED`; `SHBrowseForFolder` and the common dialogs are cancelled.

@@ -15,7 +15,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { ANY_WINDOW, WM_TIMER, createMessageQueue } from './messages.js';
-import { DEVMODEA, DM_BITSPERPEL, PAINTSTRUCT, RECT } from './structs.js';
+import {
+    DEVMODEA, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, PAINTSTRUCT, RECT,
+} from './structs.js';
 import { createWindowFunctions } from './windows.js';
 
 const CLASS_NAME = 0x10000;
@@ -149,8 +151,12 @@ function fakeContexts(){
  *        What a window procedure answers; nothing unless given.
  * @param {(instance: number, id: number) => string | null} [options.loadString]
  *        The string table of the program's own image.
+ * @param {{ width: number, height: number, bitsPerPixel: number,
+ *           displayWidth?: number, displayHeight?: number }} [options.screen]
+ *        The screen, its own object per test because a mode switch moves it.
  */
-function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0 } = {}){
+function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, screen } = {}){
+    screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
     const clock = { at: 0 };
     const queue = createMessageQueue({ now: ()=>clock.at });
@@ -168,7 +174,7 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0 } 
         readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
         handles: fakeHandles(),
         queue,
-        screen: SCREEN,
+        screen,
         dc: ()=>contexts.service,
         dispatch,
         park: ()=>({ parked: true }),
@@ -188,7 +194,7 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0 } 
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock, notices, said, diverged };
+    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, screen };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -683,20 +689,54 @@ function putMode(memory, width, height){
     memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth, [width, height]);
 }
 
-test('ChangeDisplaySettingsA accepts the mode already in effect and refuses another', ()=>{
-    const { memory, fns } = setup();
+test('ChangeDisplaySettingsA sets any listed mode, and the screen follows it', ()=>{
+    const { memory, fns, screen } = setup();
+    const CDS_FULLSCREEN = 0x4;
+    const CDS_TEST = 0x2;
 
     putMode(memory, SCREEN.width, SCREEN.height);
     assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
-        DISP_CHANGE_SUCCESSFUL);
+        DISP_CHANGE_SUCCESSFUL, 'the mode in effect is on the list');
 
+    // A program of this era asks for the size it was configured for, names
+    // the fields it filled, and walks up its own list when refused. Every
+    // size EnumDisplaySettings offered can be set, and the metrics move with
+    // it: a window created "fullscreen" afterwards is the mode's size.
     putMode(memory, 640, 480);
-    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields,
+        [DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [32]);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmDisplayFrequency, [85]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, CDS_FULLSCREEN]),
+        DISP_CHANGE_SUCCESSFUL, 'a listed mode is set, whatever refresh rate was asked');
+    assert.equal(fns.GetSystemMetrics.handler([SM_CXSCREEN]), 640);
+    assert.equal(fns.GetSystemMetrics.handler([SM_CYSCREEN]), 480);
+    memory.putU32s(DEVMODE_BUFFER, new Array(40).fill(0));
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, 0xffffffff, DEVMODE_BUFFER]), 1);
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 640,
+        'and the current settings answer the mode set');
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, 2, DEVMODE_BUFFER]), 1,
+        'while the list still offers the larger sizes of the display');
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 1024);
+
+    putMode(memory, 700, 500);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, CDS_FULLSCREEN]),
         DISP_CHANGE_BADMODE,
-        'reporting a switch that did not happen makes every later metric disagree');
+        'a size the list does not carry is refused: a switch reported and not made'
+        + ' makes every later metric disagree');
+    assert.equal(screen.width, 640, 'and nothing moved');
+
+    putMode(memory, 800, 600);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, CDS_TEST]),
+        DISP_CHANGE_SUCCESSFUL, 'CDS_TEST answers whether a mode could be set');
+    assert.equal(screen.width, 640, 'without setting it');
 
     assert.equal(fns.ChangeDisplaySettingsA.handler([0, 0]), DISP_CHANGE_SUCCESSFUL,
-        'a null mode means what is already on the screen');
+        'a null mode means the registry mode: the size of the display');
+    assert.equal(screen.width, SCREEN.width);
+    assert.equal(screen.height, SCREEN.height);
 
     // A depth the caller names is checked too: a program walks its own list
     // of modes and takes the first accepted as the display's depth, so a
@@ -708,7 +748,14 @@ test('ChangeDisplaySettingsA accepts the mode already in effect and refuses anot
         DISP_CHANGE_BADMODE, 'a shallower depth is another mode');
     memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmBitsPerPel, [SCREEN.bitsPerPixel]);
     assert.equal(fns.ChangeDisplaySettingsA.handler([DEVMODE_BUFFER, 0]),
-        DISP_CHANGE_SUCCESSFUL, 'and the screen\'s own depth is the mode in effect');
+        DISP_CHANGE_SUCCESSFUL, 'and the depth of the screen is the mode in effect');
+
+    // The Ex spelling carries the flags two words further along.
+    putMode(memory, 800, 600);
+    memory.putU32s(DEVMODE_BUFFER + DEVMODEA.dmFields, [DM_PELSWIDTH | DM_PELSHEIGHT]);
+    assert.equal(fns.ChangeDisplaySettingsExA.handler([0, DEVMODE_BUFFER, 0, CDS_FULLSCREEN, 0]),
+        DISP_CHANGE_SUCCESSFUL);
+    assert.equal(screen.width, 800);
 });
 
 test('the current settings are answered by name, and say how deep the screen is', ()=>{

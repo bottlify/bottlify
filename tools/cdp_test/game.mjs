@@ -16,7 +16,7 @@
  * It is not a test and cannot be one: it needs a bundle of a game nobody can
  * put in a repository. Without that bundle it says so and stops.
  *
- *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS]
+ *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video]
  */
 
@@ -109,6 +109,19 @@ function parse(argv){
     return {
         id,
         turns: number('--turns', 200000),
+        // How long the engine itself runs before it stops and reports, for a
+        // title that reaches its loop and would otherwise run out the turns
+        // hours later. Zero means the turns alone decide.
+        runSeconds: number('--run-seconds', 0),
+        // The display the program is told it has, as `WxH`. The launcher
+        // names the person's own screen, which is rarely a size a program of
+        // this era lists, so what a title does on one is a different path.
+        screen: argv.includes('--screen')
+            ? (()=>{
+                const [width, height] = argv[argv.indexOf('--screen') + 1].split('x').map(Number);
+                return { width, height, bitsPerPixel: 32 };
+            })()
+            : null,
         // A run that reads a gigabyte of bundle over HTTP one block at a time
         // is slower than one reading a local file, and the page cannot be asked
         // how it is doing while it runs.
@@ -130,6 +143,10 @@ function parse(argv){
         // one every run had before there was one.
         video: !argv.includes('--no-video'),
         dumpDraws: argv.includes('--dump-draws'),
+        // Every host call timed as a phase of its own, so the report's phase
+        // table says which API a frame's host time went to, not only that it
+        // went to the crossing.
+        profileCalls: argv.includes('--profile-calls'),
         // Draws per frame, for bisecting which one painted a region.
         maxDraws: number('--max-draws', -1),
         // A texture id from a draws dump, e.g. "t4". Every draw sampling it is
@@ -145,6 +162,14 @@ function parse(argv){
             ? (()=>{
                 const [x, y, down] = argv[argv.indexOf('--pointer') + 1].split(',');
                 return { x: Number(x), y: Number(y), down: down === 'down' };
+            })()
+            : null,
+        // One click in the program's own pixels after that many presented
+        // frames, as `x,y,after`: pressed on one frame, released on the next.
+        click: argv.includes('--click')
+            ? (()=>{
+                const [x, y, after] = argv[argv.indexOf('--click') + 1].split(',').map(Number);
+                return { x, y, after: after || 30 };
             })()
             : null,
         fog: !argv.includes('--no-fog'),
@@ -548,8 +573,10 @@ function describe(result, context, calls){
     for (const file of result.files ?? [])
     {
         say('');
-        say(`  ${file.path} (${file.bytes} bytes)`);
-        say(file.tail.split('\n').map((/** @type {string} */ text)=>`    ${text}`).join('\n'));
+        say(`  ${file.path} (${file.bytes} bytes${file.saved ? `, saved as ${file.saved}` : ''})`);
+        // The whole file is beside the report; its end is what the program
+        // wrote last, which is the part that says why it stopped.
+        say(file.text.split('\n').slice(-40).map((/** @type {string} */ text)=>`    ${text}`).join('\n'));
     }
 
     return `${lines.join('\n')}\n`;
@@ -630,15 +657,19 @@ export async function game(options){
             // loaded from inside its own installation.
             imagePath: `C:\\App\\${manifest.entry}`,
             maxTurns: options.turns,
+            maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
+            screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),
             logLines: options.logLines,
             video: options.video,
             dumpDraws: options.dumpDraws,
+            profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
             fog: options.fog,
             pointer: options.pointer,
+            click: options.click,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,

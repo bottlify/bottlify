@@ -146,6 +146,25 @@ test('a float argument is the bits of one, not the word', ()=>{
     assert.equal(read.getFloat32(12, true), 1);
 });
 
+test('a GLboolean argument is its low byte, not the word', ()=>{
+    // A compiler answers a comparison in a byte register and pushes the whole
+    // register, so FALSE arrives as 0x100 with whatever the upper bytes held.
+    // Read as a word that is TRUE, and a mask meant to keep a channel closed
+    // writes into it: a light pass meant for the alpha channel lands in red.
+    const { table, box } = library();
+    startDrawing(table);
+
+    table.glColorMask.handler([0x100, 0x1, 0x200, 0x101]);
+    const out = 0x2000;
+    table.glGetIntegerv.handler([GL.COLOR_WRITEMASK, out]);
+    const mask = new DataView(box.bytes.buffer, out, 16);
+    assert.deepEqual([0, 1, 2, 3].map(k=>mask.getInt32(k * 4, true)), [0, 1, 0, 1]);
+
+    table.glDepthMask.handler([0x100]);
+    table.glGetIntegerv.handler([GL.DEPTH_WRITEMASK, out]);
+    assert.equal(mask.getInt32(0, true), 0, 'and the depth mask reads the same byte');
+});
+
 test('a double argument is the bits of two words, low word first', ()=>{
     const { table, box } = library();
     startDrawing(table);

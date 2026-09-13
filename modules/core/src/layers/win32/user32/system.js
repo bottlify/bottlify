@@ -135,9 +135,11 @@ const WS_DISABLED = 0x08000000;
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
 
-/** ChangeDisplaySettingsEx succeeds only for the mode already in effect. */
+/** ChangeDisplaySettings' answers: switched, or no such mode. */
 const DISP_CHANGE_SUCCESSFUL = 0;
 const DISP_CHANGE_BADMODE = -2;
+/** ChangeDisplaySettings' flag that asks whether a mode could be set, without setting it. */
+const CDS_TEST = 0x2;
 
 /** The refresh rate reported for the one mode this build offers. */
 
@@ -455,46 +457,61 @@ export function createSystemFunctions({ host, live, windows, classes }){
         return clipped.length;
     };
 
+    /** @param {number} address */
+    const readU32 = address=>{
+        const bytes = host.readMemory(address, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
     /**
      * The one implementation both ChangeDisplaySettings entry points call.
      *
-     * The one mode on offer is the one already in effect, so asking for it
-     * succeeds and asking for another fails. A build that reported success for
-     * a mode it did not switch to would have every later metric disagree with
-     * what the program believes.
+     * Every mode EnumDisplaySettings lists can be set, and setting one moves
+     * the screen: the metrics, the desktop rectangle and the modes a device
+     * is offered all follow, as they do when a Direct3D device is created at
+     * a size. A mode the list does not carry is refused, because a switch
+     * reported and not made would have every later metric disagree with what
+     * the program believes. A field the caller did not name keeps its value;
+     * the refresh rate is accepted as asked, since a browser presents at its
+     * own pace whatever the mode says.
      *
      * @param {number} devMode
+     * @param {number} flags
      */
-    const changeDisplaySettings = devMode=>{
+    const changeDisplaySettings = (devMode, flags)=>{
+        const display = /** @type {{ displayWidth?: number, displayHeight?: number }} */ (screen);
         if ((devMode >>> 0) === 0)
         {
-            // A null mode means "go back to what the registry says", which here
-            // is what is already on the screen.
+            // A null mode means "go back to what the registry says": the
+            // display's own size, which is where the launch put the screen.
+            if ((flags & CDS_TEST) === 0)
+            {
+                screen.width = display.displayWidth ?? screen.width;
+                screen.height = display.displayHeight ?? screen.height;
+            }
             return DISP_CHANGE_SUCCESSFUL;
         }
-        const wanted = host.readMemory(devMode + DEVMODEA.dmPelsWidth, 8);
-        const width = (wanted[0] | wanted[1] << 8 | wanted[2] << 16
-            | wanted[3] << 24) >>> 0;
-        const height = (wanted[4] | wanted[5] << 8 | wanted[6] << 16
-            | wanted[7] << 24) >>> 0;
-        if (width !== screen.width || height !== screen.height)
-        {
-            return DISP_CHANGE_BADMODE;
-        }
+        const named = readU32(devMode + DEVMODEA.dmFields);
+        const width = (named & DM_PELSWIDTH) !== 0
+            ? readU32(devMode + DEVMODEA.dmPelsWidth) : screen.width;
+        const height = (named & DM_PELSHEIGHT) !== 0
+            ? readU32(devMode + DEVMODEA.dmPelsHeight) : screen.height;
         // The depth as well, when the caller named one. A program that walks
         // its own list of modes takes the first this accepts as the depth of
         // the display, and accepting a sixteen-bit request for a thirty-two-bit
         // screen makes every surface it creates after sixteen bits deep.
-        const fields = host.readMemory(devMode + DEVMODEA.dmFields, 4);
-        const named = (fields[0] | fields[1] << 8 | fields[2] << 16 | fields[3] << 24) >>> 0;
-        if ((named & DM_BITSPERPEL) !== 0)
+        const bits = (named & DM_BITSPERPEL) !== 0
+            ? readU32(devMode + DEVMODEA.dmBitsPerPel) : screen.bitsPerPixel;
+        const offered = displayModes(screen).some(mode=>
+            mode.width === width && mode.height === height && mode.bitsPerPixel === bits);
+        if (!offered)
         {
-            const depth = host.readMemory(devMode + DEVMODEA.dmBitsPerPel, 4);
-            const bits = (depth[0] | depth[1] << 8 | depth[2] << 16 | depth[3] << 24) >>> 0;
-            if (bits !== screen.bitsPerPixel)
-            {
-                return DISP_CHANGE_BADMODE;
-            }
+            return DISP_CHANGE_BADMODE;
+        }
+        if ((flags & CDS_TEST) === 0)
+        {
+            screen.width = width;
+            screen.height = height;
         }
         return DISP_CHANGE_SUCCESSFUL;
     };
@@ -776,15 +793,14 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * LONG ChangeDisplaySettingsExA(LPCSTR lpszDeviceName, DEVMODEA *lpDevMode,
          *                              HWND hwnd, DWORD dwflags, LPVOID lParam)
          *
-         * The one mode on offer is the one already in effect, so asking for it
-         * succeeds and asking for another fails. A build that reported success
-         * for a mode it did not switch to would have every later metric disagree
-         * with what the program believes.
+         * Any listed mode can be set and the screen follows it; a mode the
+         * list does not carry is refused, so a program walking its own list
+         * takes the first the display actually offers.
          */
         ChangeDisplaySettingsExA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([, devMode])=>changeDisplaySettings(devMode),
+            handler: ([, devMode, , flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
         },
 
         /**
@@ -800,7 +816,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         ChangeDisplaySettingsA: {
             argBytes: 8,
             /** @param {number[]} args */
-            handler: ([devMode])=>changeDisplaySettings(devMode),
+            handler: ([devMode, flags])=>changeDisplaySettings(devMode >>> 0, flags >>> 0),
         },
 
         /**

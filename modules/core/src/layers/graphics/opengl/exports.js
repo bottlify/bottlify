@@ -177,6 +177,19 @@ const HANDLE_BASE = 0x0e000000;
 /** Scratch for reinterpreting words as the floating-point values they carry. */
 const bits = new DataView(new ArrayBuffer(8));
 
+/**
+ * A GLboolean argument: one byte on the stack, whatever the caller pushed
+ * beside it. A compiler passes the result of a comparison in a byte register
+ * and pushes the whole register, so the word above the byte is what happened
+ * to be there -- 0x100 arrives for FALSE, and reading the word says TRUE.
+ *
+ * @param {number} word
+ * @returns {number} 0 or 1
+ */
+function asBoolean(word){
+    return (word & 0xff) !== 0 ? 1 : 0;
+}
+
 /** @param {number} word @returns {number} */
 function asFloat(word){
     bits.setUint32(0, word >>> 0, true);
@@ -1037,10 +1050,11 @@ export function createOpengl(services){
         glBlendFunc: ([source, destination])=>
             call(context=>context.glBlendFunc(source >>> 0, destination >>> 0)),
         glDepthFunc: ([func])=>call(context=>context.glDepthFunc(func >>> 0)),
-        glDepthMask: ([flag])=>call(context=>context.glDepthMask(flag >>> 0)),
+        glDepthMask: ([flag])=>call(context=>context.glDepthMask(asBoolean(flag))),
         glDepthRange: ([nl, nh, fl, fh])=>
             call(context=>context.glDepthRange(asDouble(nl, nh), asDouble(fl, fh))),
-        glColorMask: ([r, g, b, a])=>call(context=>context.glColorMask(r, g, b, a)),
+        glColorMask: ([r, g, b, a])=>call(context=>
+            context.glColorMask(asBoolean(r), asBoolean(g), asBoolean(b), asBoolean(a))),
         glCullFace: ([mode])=>call(context=>context.glCullFace(mode >>> 0)),
         glFrontFace: ([mode])=>call(context=>context.glFrontFace(mode >>> 0)),
         glShadeModel: ([mode])=>call(context=>context.glShadeModel(mode >>> 0)),
@@ -1236,7 +1250,7 @@ export function createOpengl(services){
 
         glBegin: ([mode])=>call(context=>context.glBegin(mode >>> 0)),
         glEnd: ()=>call(context=>context.glEnd()),
-        glEdgeFlag: ([flag])=>call(context=>context.glEdgeFlag(flag >>> 0)),
+        glEdgeFlag: ([flag])=>call(context=>context.glEdgeFlag(asBoolean(flag))),
         glEdgeFlagv: ([address])=>
             call(context=>context.glEdgeFlag(services.readMemory(address >>> 0, 1)[0])),
         glFogCoordfEXT: ([coord])=>call(context=>context.glFogCoordfEXT(asFloat(coord))),
