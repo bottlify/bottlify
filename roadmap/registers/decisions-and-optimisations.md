@@ -1572,3 +1572,134 @@ not compiled for. Every reading asserts the relationship the account rests on: t
 to the dispatches and their steps sum to the instructions interpreted. The entry found on the
 second look and the page that reached the threshold and got no module are not provoked -- both need
 a race a test cannot stage -- so both are covered only by that sum holding when they move.
+
+## A program is told it is the active application once it has a window
+
+**The cause.** Input is wired to the viewport when a run starts, which is before the program has
+executed a single instruction and therefore before it owns a window. Activation was sent at that
+moment: WM_ACTIVATEAPP, WM_ACTIVATE and WM_SETFOCUS all went to window zero, were retrieved by the
+first GetMessage asking for any window, and were dispatched to no procedure at all. The latch was
+set on having tried, so nothing could correct it afterwards, and a program of this era reads "I am
+in the background" as a reason to ignore input. The symptom was a title whose opening cinematic
+could not be skipped and whose buttons did nothing, while the same build responded normally
+elsewhere -- the two runs differed only in when the first window happened to appear.
+
+**The change.** The latch is set on having delivered. Activation does nothing while the target
+window is zero and is offered again whenever a window appears, which is the order Windows uses too:
+a window is told it became active after it exists, never before. Page focus is still not activation
+and never becomes it -- a person clicking beside the canvas is not a program going into the
+background.
+
+**The measurement.** Not a frame-time change; a title that ignored every keystroke and every click
+now takes both. Confirmed by the person playing, on the machine where it had failed.
+
+**The tests.** Activation sends nothing while there is no window, reaches the real window when one
+appears, and is delivered exactly once however many windows follow.
+
+## A press is written down, because a dead button asks a question a log could not answer
+
+**The cause.** Tracing input meant switching on the calls a program makes into USER32 and DINPUT,
+which say what was asked and never whether anything arrived. "Did the click get in, and where did
+it land" was therefore unanswerable from a journal -- the one question a viewport that ignores the
+mouse actually raises. Being unable to see why something failed is a gap in the instruments, and
+the instrument is then what to fix.
+
+**The change.** One record per press or release, carrying the button, the position it was mapped
+to, and the window message synthesised from it -- both halves in one line, because a reader pairing
+two records answers the question worse. Its own topic, at trace level, formatted behind the level
+check, written into the shared ring with nothing asked of the engine thread.
+
+**The measurement.** The cost when nobody is reading is a comparison per press. A press is a human
+gesture, so there is no rate at which this matters.
+
+**The tests.** A press is written down with the position it was mapped to and with the message,
+window and parameters the guest will read; an unrecognised button is written down nowhere.
+
+## A surface describes itself completely, and a back buffer is given storage for every pixel
+
+**The cause.** Two faults on the same per-frame path, found together because a screen that reads
+what was just rendered -- a credits roll -- exercises both every frame. First, the implicit back
+buffer and its depth-stencil were allocated a fixed megabyte whatever the mode, while a lock hands
+the program that address and it reads and writes the whole surface through it: anything above
+512x512 at four bytes a pixel ran off the end of the allocation, further past it the larger the
+mode. Second, and this is the one that killed the program: a descriptor is written into memory the
+program supplied, usually a local, and the writer fills only the fields it is given. Direct3D 8's
+surface descriptor has a slot for the surface's length in bytes and one for the sample type, and
+neither was ever written, so both kept whatever was on that stack frame. A program sizing its work
+from a length we never gave it wrote past its own buffer, and its own stack-cookie check terminated
+it with STATUS_STACK_BUFFER_OVERRUN at a moment that depended on what the call history had left
+there.
+
+**The change.** Every surface takes the size it actually has. Every field either version of the
+structure has a slot for is written, at the source, so both seams and every kind of surface are
+described completely. A windowed device is also entitled to ask for a back buffer of zero by zero,
+meaning the size of its window, and a nullish default does not defend against zero: that is
+resolved to the configured display where the parameters are read, and reported as a divergence
+rather than assumed quietly.
+
+**The measurement.** A title that killed itself within a minute of reaching that screen stopped
+doing so. The allocation change is not a frame-time change; it is a write that used to land outside
+its own memory.
+
+**The tests.** A descriptor written over a caller's struct pre-filled with a recognisable pattern
+leaves not one word of it -- proven to fail with the fields removed again -- and reports a length
+equal to the whole surface. Across three formats and four modes, the description's width, height
+and format agree with the mode, the lock's pitch agrees with the width, the reported length agrees
+with pitch times height, the allocation covers that length, and nothing else lies inside the span a
+lock hands out.
+
+## Guest memory is cleared where it lies, not copied from a buffer of zeroes
+
+**The cause.** Clearing a megabyte of the guest's memory allocated a megabyte on the host, had the
+runtime zero it, and copied it across: three passes over the same bytes plus a large short-lived
+allocation, all inside the guest's own call, where the machine's memory is a typed array that can
+be filled in place. A capture of a real title found the largest writer into guest memory in 24 of
+29 long frames to be VirtualAlloc, moving 2.44 MB in the median long frame and 12.3 MB in the
+worst, against 41 KB in an ordinary one. An installer, which reallocates constantly, pays it
+continuously rather than occasionally.
+
+**The change.** The machine gained a fill beside its write, and the memory layer a fill that
+asserts the same region, charges the writer account once for the range, and falls back to a write
+where the target is executable -- a page holding translated code has to be announced to the
+compiler, and that is what a write does. Every caller whose length comes from the program goes
+through it: the heap handing over a zeroed or grown block and recommitting a decommitted range,
+memset -- and through it the two Rtl fills implemented by the same handler -- calloc, the in-memory
+stream extending itself, and the safe array's clears. Clears of fixed-size structures keep their
+small buffers: the same shape, but bounded and tiny. The lazy-zeroing model is untouched; arena
+never handed out is still never rewritten.
+
+**The measurement.** Measured in Node over the real accessors: 1 MB falls from 1.020 ms to
+0.025 ms, 12 MB from 16.203 ms to 0.333 ms, and 20 000 clears of the sizes an install produces --
+2.48 GiB in all -- from 2636.8 ms to 63.3 ms, which is 131.8 us per clear against 3.2 us. Against
+the frames above, the median long frame's clearing falls from about 2.5 ms to 0.06 ms and the
+worst's from about 16 ms to 0.34 ms. Not yet measured on the title itself.
+
+**The tests.** A fill covers exactly its range, unaligned and across a page boundary; it is charged
+once and for the bytes the equivalent write would be; over executable memory it takes the path a
+write there takes; it still fills where the machine offers no fill of its own; and it is refused
+wherever a write would be refused. A recycled block is cleared in place with no buffer of zeroes
+copied, while the clearing contract is unchanged -- recycled memory reads as zeroes, memory never
+handed out is not rewritten.
+
+## A frame says why the interpreter ran in it
+
+**The cause.** The emulator counts every reason it has for not entering compiled code, but a frame
+row carried only how many steps were interpreted. The reason could be had only by sampling those
+counters on a timer beside the frame index, and a 250 ms sample is not a frame: an investigation
+into long frames could see interpreted steps rise and compiled steps fall around them and could not
+say by how much, in which frame.
+
+**The change.** The reasons, their step counts, the dispatches below the compile threshold or with
+compilation deferred, the entry found after a page walk, and what was lost to writes are all
+carried per frame, by the mechanism the existing per-frame deltas already use -- a counter read at
+frame close, nothing walked, no second path. Compiled steps come with them, because a frame that
+interpreted more and a frame that merely retired more cannot be told apart without the denominator
+in the same row.
+
+**The measurement.** Thirteen loads and thirteen stores more at frame close; the frame row grows
+from 53 columns to 66 and the shared table from about 102 KB to 127 KB at 240 rows. What it buys is
+not yet spent: the capture that uses it is the next step.
+
+**The tests.** Each new column is named literally in the test rather than derived from the layout,
+so a dropped column fails; a frame reports the difference the counters took in it, and a counter
+that did not move reports zero rather than absent.
