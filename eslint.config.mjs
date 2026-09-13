@@ -17,6 +17,8 @@ export default [
             'tools/cdp_test/reports/**',
             '.ghidra/**',
             '.ghidra-home/**',
+            // Agents' scratch checkouts: full copies of the tree that are not this tree.
+            '.claude/**',
             'dbg/**',
             '.certs/**',
             'roadmap/**',
