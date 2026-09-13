@@ -40,8 +40,32 @@ export function createClock({
     let overtaken = 0;
     /** @type {number | null} */
     let suspendedAt = null;
+    /**
+     * Told after every move of the clock, so whoever mirrors it for the guest
+     * to read without a call writes the value a call would have answered.
+     *
+     * @type {(() => void)[]}
+     */
+    const moved = [];
+    const tell = ()=>{
+        for (const listener of moved)
+        {
+            listener();
+        }
+    };
 
     return {
+        /**
+         * Asks to be told whenever virtual time moves. Every move goes
+         * through `advance`, `skipTo` and `resume`, so a mirror kept this way
+         * is never stale by more than the call that is moving it.
+         *
+         * @param {() => void} listener
+         */
+        whenMoved(listener){
+            moved.push(listener);
+        },
+
         /** Milliseconds of guest time since boot. */
         virtualTime: ()=>virtualMs,
 
@@ -62,6 +86,7 @@ export function createClock({
          */
         advance(elapsedMs){
             virtualMs += elapsedMs;
+            tell();
         },
 
         /**
@@ -89,6 +114,7 @@ export function createClock({
                 return 0;
             }
             virtualMs += jump;
+            tell();
             skippedMs += jump;
             return jump;
         },
@@ -129,6 +155,7 @@ export function createClock({
             }
             virtualMs += credit;
             creditedMs += credit;
+            tell();
             return credit;
         },
 

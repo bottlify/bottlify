@@ -521,6 +521,10 @@ export const win32Module = {
                     currentThread: ()=>kernel.currentThread(),
                     now: ()=>kernel.clock.virtualTime(),
                     systemTimeMs: ()=>kernel.clock.wallClock(),
+                    // The clock a program reads without calling us: the block
+                    // is refreshed wherever guest time moves, so a routine that
+                    // reads it answers what a call would have answered.
+                    publishClock: refresh=>kernel.clock.whenMoved(refresh),
                     moduleHandle: name=>modules.find(name)?.base ?? 0,
                     // Actually waiting is the scheduler's, and there is no timed
                     // wait yet. Crediting the clock is what we can honour, and
