@@ -502,3 +502,44 @@ test('a slow slice is written into its table when it is recorded', ()=>{
     assert.deepEqual(rows[0], [300, 500, 0x4000, 0x4000, 7], 'longest first');
     assert.equal(rows[1][0], 120);
 });
+
+test('each publish names the thread the machine was spent on and where its heaviest slice ran',
+    ()=>{
+        let retire = 100;
+        let at = 0x400000;
+        const cpu = { ...fakeCpu(), runSlice: ()=>retire, eip: ()=>at };
+        /** @type {string[]} */
+        const words = [];
+        const intern = (/** @type {string} */ text)=>{
+            const known = words.indexOf(text);
+            return known >= 0 ? known : words.push(text) - 1;
+        };
+        const counters = new Float64Array(SCHEDULER_COUNTERS.length);
+        const column = (/** @type {string} */ name)=>
+            counters[SCHEDULER_COUNTERS.indexOf(name)];
+        const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 100_000,
+            counters, intern });
+        sched.create({ entry: 0x1000, stackTop: 0x2000, tebAddress: 0, name: 'main' });
+        sched.create({ entry: 0x3000, stackTop: 0x4000, tebAddress: 0, name: 'worker' });
+
+        // main takes one small turn, the worker one large one from another module.
+        sched.runOnce();
+        retire = 90_000;
+        at = 0x6f0000;
+        sched.runOnce();
+        sched.publish();
+
+        assert.equal(words[column('frameThread')], 'worker', 'the busiest of the interval');
+        assert.equal(column('frameThreadInstructions'), 90_000);
+        assert.equal(column('frameAt'), 0x6f0000, 'where the heaviest slice began');
+
+        // The next interval is the next interval: nothing of this one carries over.
+        retire = 200;
+        at = 0x400000;
+        sched.runOnce();
+        sched.publish();
+        assert.equal(words[column('frameThread')], 'main');
+        assert.equal(column('frameThreadInstructions'), 200,
+            'what it retired since the last publish, not since it started');
+        assert.equal(column('frameAt'), 0x400000);
+    });

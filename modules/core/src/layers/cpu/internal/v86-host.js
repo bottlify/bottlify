@@ -306,6 +306,16 @@ export async function createV86Host(config){
 
     /** @type {((value: number) => void) | null} */
     let trapHandler = null;
+    /**
+     * How many times the guest has left its own code for ours.
+     *
+     * Every import, every COM method and every fault arrives through this one
+     * port, so the count is the number of times a frame crossed out of
+     * emulation -- and a frame that crossed far more often than its neighbours
+     * is a frame the program spent on us rather than on itself, which nothing
+     * else distinguishes from the emulator running slowly.
+     */
+    let trapCrossings = 0;
 
     cpu.io.register_write(
         config.trapPort,
@@ -313,6 +323,7 @@ export async function createV86Host(config){
         undefined,
         undefined,
         (/** @type {number} */ value)=>{
+            trapCrossings++;
             if (trapHandler)
             {
                 trapHandler(value >>> 0);
@@ -625,6 +636,9 @@ export async function createV86Host(config){
 
         /** Bytes the host has written into guest memory so far. */
         hostWrittenBytes: ()=>hostWrittenBytes,
+
+        /** Times the guest has trapped out into our code so far. */
+        trapCrossings: ()=>trapCrossings,
 
         /** Instructions the interpreter has run so far, in a build that counts. */
         interpretedSteps: ()=>(cpu.wm.exports.bottlify_stat

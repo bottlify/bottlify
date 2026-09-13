@@ -214,6 +214,9 @@ test('registers are readable and writable from the host', async()=>{
 
     assert.equal(seen, 0x5150f00d, 'guest observed the value the host wrote');
     assert.equal(host.readReg32('eax'), 0x5150f00d, "host reads the guest's register back");
+    // The crossing itself is counted, whoever handles it: a frame that left the
+    // guest far more often than its neighbours is a frame spent on us.
+    assert.equal(host.trapCrossings(), 1);
 });
 
 test('eip and eflags are readable by name, as a CONTEXT record needs', async()=>{

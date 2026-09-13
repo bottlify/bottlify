@@ -133,7 +133,7 @@ the kernel publishes through the log layer's registry, written in place and neve
 
 | table | rows | columns | when written |
 |-------|------|---------|--------------|
-| `kernel/counters` | 1 | `SCHEDULER_COUNTERS`: `quantum`, `turns`, `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceMs`, `expiries`, `boosts`, `stackEscapes`, `threads`, `current` (thread id). | `turns` on every turn; the rest once a frame. |
+| `kernel/counters` | 1 | `SCHEDULER_COUNTERS`: `quantum`, `turns`, `overruns`, `worstSlice`, `worstSliceAt`, `worstSliceFrom`, `worstSliceMs`, `expiries`, `boosts`, `stackEscapes`, `threads`, `current` (thread id), `frameThread` (the name id of the thread that retired the most since the last publish), `frameThreadInstructions`, `frameAt` (where the heaviest slice of that interval began, which names the module). | `turns` on every turn; the rest once a frame. The last three are the interval's rather than the run's, and are cleared by the publish that reports them — a frame's row in the log layer carries a copy, so a stall can name the thread and the module it was spent on. |
 | `kernel/threads` | up to 512 | `THREAD_COLUMNS`: `id`, `name` (dictionary id), `instructions`, `state` (index in `THREAD_STATES`), `priority`, `boosts`, `boosted`, `waitingOn` (dictionary id or -1), `stackUsed`, `stackSize`. | Once a frame, by `publish()`. |
 | `kernel/slowSlices` | 8 | `SLOW_SLICE_COLUMNS`: `ms`, `instructions`, `from`, `at`, `thread` (dictionary id). Longest first. | When a slice of 40 ms or more is recorded. |
 | `kernel/pages` | one per 64 KiB of guest memory, plus one | `instructions`. | One add per turn. An address outside guest memory goes to the last row. |

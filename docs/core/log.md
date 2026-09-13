@@ -123,10 +123,23 @@ thread; an aligned eight-byte store is one instruction on every platform this ru
 read would be one bad sample, not a bad count. Strings go in the journal's dictionary and a table
 holds the id.
 
-The registry hands tables out by layer and name, keeps the descriptors for `describe()`, and runs
-the samplers registered with `onFrame` when `endFrame()` closes a frame. The profiler mirrors each
-closed frame into `log/frames` (`FRAME_COLUMNS`) and every phase row into `log/phases`
-(`PHASE_COLUMNS`) as the row changes.
+The registry hands tables out by layer and name, keeps the descriptors for `describe()`, runs the
+samplers registered with `onFrame` when `endFrame()` closes a frame, and answers `find(layer, name)`
+for the one case where a layer's row feeds another's. The profiler mirrors each closed frame into
+`log/frames` (`FRAME_COLUMNS`) and every phase row into `log/phases` (`PHASE_COLUMNS`) as the row
+changes.
+
+Each frame's row also carries a copy of a few counters other layers keep, so that a single frame can
+say why it was slow without a second run: `FRAME_DELTAS` names the cumulative ones — instructions
+retired, `entries`, `interpretedSteps`, `f80Conversions`, `x87TagLost`, `slowWrites`,
+`codePageWritesKept`, `hotnessLostToWrites`, `hostWrittenBytes` and `trapCrossings` — and
+`FRAME_VALUES` the ones already per frame where they are written: which thread the machine was spent
+on, what it retired, and the address the frame's heaviest slice began at. The samplers run *before*
+the row is written, so a row holds the counters as they stood at its close. Nothing is computed on
+the engine's thread: a mirrored column is one copy, and the subtraction that turns a cumulative
+counter into the frame's own figure is the reader's. Where each column is read from is resolved once,
+at the first frame, because the layers that own those rows are created after this one; a column no
+layer answers reads zero and is reported in `diagnostics().issues`.
 
 ### The reader (`src/layers/log/internal/reader.js`, re-exported from `src/layers/log/reader.js`)
 
@@ -139,6 +152,13 @@ tables; `frames(count)`, `profile(worst)`, `guestByModule()` and `threads()` are
 the diagnostics tables used to carry, computed on the reader's thread from the kernel's, the
 memory's and the profiler's tables. Nothing here schedules itself: whoever owns the thread calls
 `poll()`.
+
+`frames(count)` answers each row as the engine-side record plus what only a reader can work out:
+`instructions` and `counters` (each mirrored cumulative counter as this frame's own step, never
+negative, and zero for the oldest row on the ring, which has no predecessor), `idleMs`,
+`longestGuest.rate` in instructions per second, and `thread` — `{ name, instructions, at, module }`,
+the module being the region the heaviest slice's address falls in, named from the memory layer's
+regions table.
 
 ### The ring (`src/layers/log/internal/ring.js`)
 
@@ -204,8 +224,10 @@ never reports the guest at less than nothing. `snapshot().hostShare` over the wi
 to `byKind`; a frame's own `hostShare` is measured only.
 
 Frames are a ring of `FrameRecord`s (`index, startedAt, ms, byKind, sampled, hostShare, longest,
-longestGuest, waits, compiles, notes`), 240 deep by default; the frame still being measured is never
-reported. `snapshot(worst)` sorts every phase row (`name, kind, count, totalMs, selfMs, worstMs`)
+longestGuest, waits, compiles, idleMs, notes`), 240 deep by default; the frame still being measured
+is never reported. `idleMs` is how much of the frame the machine had nothing of the program's to run
+and was parked on us (any `idle-*` phase), which is what separates a frame we made long from a frame
+the program or the emulator made long. `snapshot(worst)` sorts every phase row (`name, kind, count, totalMs, selfMs, worstMs`)
 by self time, names the `worst` slowest frames, and takes `hostShare` over the whole history rather
 than the last frame, because the threshold it serves is about sustained cost.
 
@@ -269,7 +291,7 @@ All are `node:test` unit tests with a hand-stepped clock; run with `npm test` fr
 | `src/layers/log/internal/shared-journal.test.js` | A record round-trips with numbers as numbers and words by id; non-string arguments stringify; layout from options; an inline template when the dictionary is full; lapped sequences refused and counted exactly; bytes written over under a live index slot refused; the writer never waits and never grows (200 k records, under 10 µs each); a `worker_threads` reader sees every record whole and in order. |
 | `src/layers/log/internal/table.test.js` | A store where it happens is what a reader picks up; a ring of rows reads oldest first; a reader on another thread sees a later store. |
 | `src/layers/log/internal/metrics.test.js` | Counters registered once and updated in place; a duplicate name refused; samplers run on `sample()` only. |
-| `src/layers/log/internal/reader.test.js` | Subscribers get their topics at their level; removal; `recent`/`drain` as the engine answered them; exact lost count on a lagging poll; counters and tables read from the same memory; a reader on another thread drains without the engine answering; `guestByModule` from the kernel's pages and the memory's regions; frames and the profile from the profiler's tables. |
+| `src/layers/log/internal/reader.test.js` | Subscribers get their topics at their level; removal; `recent`/`drain` as the engine answered them; exact lost count on a lagging poll; counters and tables read from the same memory; a reader on another thread drains without the engine answering; `guestByModule` from the kernel's pages and the memory's regions; frames and the profile from the profiler's tables; a frame's mirrored counters read back as its own figures — the oldest row claiming none, a counter that went backwards reporting none, an interpret burst landing in the frame that had it, and the thread, module and worst-slice rate named. |
 | `src/layers/log/internal/journal.test.js` | Level filtering; the message stays a template until read; unnamed arguments appended; timestamps from the clock, order from the sequence; sinks get detached copies once; lapped records counted; `recent` does not move the flush position; template summary; level names; bounded storage; `drain` semantics, resume, limit and gap reporting. |
-| `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases scale the sums and never a single occurrence. |
+| `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases scale the sums and never a single occurrence; a frame reports how long the machine was parked on us and resets it; closing a frame stores one row of fixed width whatever the frame held; mirrored columns copied from the sources given and zero for the rest. |
 | `src/layers/log/module.test.js` | The module keeps its contract; configuration by name; the no-clock issue; diagnostics carry `hostShare`; phases use the host clock, not the guest's; sub-millisecond resolution without a configured clock; the phase table holds the loop and the calls together. |

@@ -46,6 +46,12 @@ const PAGE = 0x10000;
 export const SCHEDULER_COUNTERS = [
     'quantum', 'turns', 'overruns', 'worstSlice', 'worstSliceAt', 'worstSliceFrom',
     'worstSliceMs', 'expiries', 'boosts', 'stackEscapes', 'threads', 'current',
+    // Which of the program's threads the machine was spent on since these
+    // were last published, and where its heaviest single slice began. Every
+    // other figure here is the run's; these three are the interval's, because
+    // the question they answer -- which thread and which module made this
+    // frame slow -- has no answer averaged over a run.
+    'frameThread', 'frameThreadInstructions', 'frameAt',
 ];
 export const THREAD_COLUMNS = [
     'id', 'name', 'instructions', 'state', 'priority', 'boosts', 'boosted', 'waitingOn',
@@ -129,6 +135,12 @@ export function createScheduler(options){
      * @type {((thread: any, reason: string | null, value: number) => void) | null}
      */
     const onResume = options.onResume ?? null;
+    /**
+     * The heaviest single slice since the figures were last published, and
+     * where it began.
+     */
+    let heaviestSlice = 0;
+    let heaviestFrom = 0;
     /** Turns where the emulator ran past the slice it was given, and the worst. */
     let overruns = 0;
     let worstSlice = 0;
@@ -328,6 +340,12 @@ export function createScheduler(options){
                 entry,
                 context: cpu.newContext({ entry, stackTop }),
                 instructions: 0,
+                /**
+                 * The same since the figures were last published. Kept on the
+                 * thread so a slice costs one add, and reset where they are
+                 * published, which is once a frame.
+                 */
+                sincePublished: 0,
                 exitCode: null,
                 /**
                  * The relative priority a program set, in Windows's own
@@ -478,6 +496,16 @@ export function createScheduler(options){
             const instructions = cpu.runSlice(quantum);
             const held = wall() - began;
             next.instructions += instructions;
+            next.sincePublished += instructions;
+            // Where the heaviest slice of the interval began: one page names
+            // the module, and a slice weighs what it retired, so this is the
+            // code the machine was actually in rather than the code it was in
+            // most often.
+            if (instructions > heaviestSlice)
+            {
+                heaviestSlice = instructions;
+                heaviestFrom = from;
+            }
             const slowest = slowSlices[slowSlices.length - 1];
             const kept = slowSlices.length < SLOW_SLICES_KEPT || held > slowest.ms;
             if (held >= SLOW_SLICE_MS && kept)
@@ -651,30 +679,50 @@ export function createScheduler(options){
             counters[9] = escaped.length;
             counters[10] = threads.length;
             counters[11] = current ? current.id : -1;
-            if (!threadTable)
-            {
-                return;
-            }
-            const rows = Math.min(threads.length, threadTable.rows);
-            for (let row = 0; row < rows; row++)
+            counters[14] = heaviestFrom;
+            heaviestSlice = 0;
+            heaviestFrom = 0;
+            /** The busiest thread's name and what it retired, kept as numbers:
+             * its own tally is cleared in the same walk. */
+            let busiest = -1;
+            let busiestRetired = 0;
+            const table = threadTable;
+            const rows = table ? Math.min(threads.length, table.rows) : 0;
+            for (let row = 0; row < threads.length; row++)
             {
                 const thread = threads[row];
-                threadTable.set(row, 0, thread.id);
-                threadTable.set(row, 1, intern(thread.name));
-                threadTable.set(row, 2, thread.instructions);
-                threadTable.set(row, 3, THREAD_STATES.indexOf(thread.state));
-                threadTable.set(row, 4, absolutePriority(thread.priority));
-                threadTable.set(row, 5, thread.boosts);
-                threadTable.set(row, 6, thread.boosted ? 1 : 0);
-                threadTable.set(row, 7, thread.waitingOn ? intern(thread.waitingOn) : -1);
+                // Which thread the machine was spent on since the last
+                // publish, found and cleared in the walk that was happening
+                // anyway: no second pass and nothing to allocate.
+                if (thread.sincePublished > busiestRetired || busiest < 0)
+                {
+                    busiest = intern(thread.name);
+                    busiestRetired = thread.sincePublished;
+                }
+                if (!table || row >= rows)
+                {
+                    thread.sincePublished = 0;
+                    continue;
+                }
+                table.set(row, 0, thread.id);
+                table.set(row, 1, intern(thread.name));
+                table.set(row, 2, thread.instructions);
+                table.set(row, 3, THREAD_STATES.indexOf(thread.state));
+                table.set(row, 4, absolutePriority(thread.priority));
+                table.set(row, 5, thread.boosts);
+                table.set(row, 6, thread.boosted ? 1 : 0);
+                table.set(row, 7, thread.waitingOn ? intern(thread.waitingOn) : -1);
                 const low = lowWater.get(thread);
-                threadTable.set(row, 8, low !== undefined && thread.stackTop !== undefined
+                table.set(row, 8, low !== undefined && thread.stackTop !== undefined
                     ? thread.stackTop - low : 0);
-                threadTable.set(row, 9,
+                table.set(row, 9,
                     thread.stackTop !== undefined && thread.stackLimit !== undefined
                         ? thread.stackTop - thread.stackLimit : 0);
+                thread.sincePublished = 0;
             }
-            threadTable.used(rows);
+            counters[12] = busiest;
+            counters[13] = busiestRetired;
+            table?.used(rows);
         },
 
         diagnostics(){

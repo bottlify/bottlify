@@ -7,7 +7,7 @@
 import { createJournalCursor, openJournalMemory, INLINE_TEMPLATE } from './shared-journal.js';
 import { readTable } from './table.js';
 import { Level, formatText, levelName } from './journal.js';
-import { NOTES_PER_FRAME, PhaseKind } from './profiler.js';
+import { FRAME_DELTAS, NOTES_PER_FRAME, PhaseKind } from './profiler.js';
 
 /** A frame's kinds, in the order the frame table stores them. */
 const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT];
@@ -29,6 +29,49 @@ const PAGE = 0x10000;
  * it likes: nothing here schedules itself, because a page and a worker wait
  * differently and the reader should not know which it is on.
  */
+
+/**
+ * Which module an address is in, from the regions the memory layer publishes.
+ *
+ * Read once and searched per address, on this thread: naming the code a frame
+ * was spent in is a reader's question, and the engine stores only the address.
+ *
+ * @param {Record<string, Record<string, import('./table.js').TableDescriptor>>} tables
+ * @param {{ word: (id: number) => string }} cursor
+ * @returns {(address: number) => string | null}
+ */
+function regionNamer(tables, cursor){
+    const descriptor = tables.memory?.regions;
+    if (!descriptor)
+    {
+        return ()=>null;
+    }
+    const regions = readTable(descriptor).all()
+        .map(row=>({ base: row.base, end: row.base + row.size, name: cursor.word(row.name) }))
+        .sort((one, two)=>one.base - two.base);
+    return address=>{
+        let low = 0;
+        let high = regions.length - 1;
+        while (low <= high)
+        {
+            const middle = (low + high) >> 1;
+            const region = regions[middle];
+            if (address < region.base)
+            {
+                high = middle - 1;
+            }
+            else if (address >= region.end)
+            {
+                low = middle + 1;
+            }
+            else
+            {
+                return region.name;
+            }
+        }
+        return null;
+    };
+}
 
 /**
  * @typedef {Object} Subscriber
@@ -220,7 +263,9 @@ export function createLogReader({ memory }){
                 return [];
             }
             const rows = readTable(table).all();
-            return rows.slice(Math.max(0, rows.length - count)).map(row=>{
+            const named = regionNamer(tables, cursor);
+            const from = Math.max(0, rows.length - count);
+            return rows.slice(from).map((row, at)=>{
                 /** @type {Record<string, number>} */
                 const notes = {};
                 for (let i = 0; i < NOTES_PER_FRAME; i++)
@@ -229,6 +274,21 @@ export function createLogReader({ memory }){
                     {
                         notes[cursor.word(row[`note${i}`])] = row[`amount${i}`];
                     }
+                }
+                // The mirrored counters are cumulative where they are written,
+                // so a frame's own figure is the step from the row before it.
+                // The oldest row on the ring has no predecessor and reports
+                // nothing rather than its whole run's total, and a counter that
+                // went backwards -- a machine restarted under the reader --
+                // reports nothing rather than a negative count.
+                const before = rows[from + at - 1] ?? null;
+                /** @type {Record<string, number>} */
+                const counters = {};
+                for (const entry of FRAME_DELTAS)
+                {
+                    counters[entry.column] = before
+                        ? Math.max(0, row[entry.column] - before[entry.column])
+                        : 0;
                 }
                 return {
                     index: row.index,
@@ -239,10 +299,26 @@ export function createLogReader({ memory }){
                         row[`sampled${kind[0].toUpperCase()}${kind.slice(1)}`]])),
                     hostShare: row.hostShare,
                     longest: { name: cursor.word(row.longest), ms: row.longestMs },
+                    // With the rate it managed, in instructions per second:
+                    // one slow quantum is what most stalls are made of, and a
+                    // count and a duration side by side do not say so.
                     longestGuest: { ms: row.longestGuestMs,
-                        instructions: row.longestGuestInstructions },
+                        instructions: row.longestGuestInstructions,
+                        rate: row.longestGuestMs > 0
+                            ? row.longestGuestInstructions / row.longestGuestMs * 1000 : 0 },
                     waits: row.waits,
                     compiles: row.compiles,
+                    idleMs: row.idleMs,
+                    instructions: counters.retired,
+                    counters,
+                    // Whose instructions they were, and the code the frame's
+                    // heaviest slice began in.
+                    thread: {
+                        name: row.thread >= 0 ? cursor.word(row.thread) : null,
+                        instructions: row.threadInstructions,
+                        at: row.threadAt,
+                        module: named(row.threadAt),
+                    },
                     notes,
                 };
             });

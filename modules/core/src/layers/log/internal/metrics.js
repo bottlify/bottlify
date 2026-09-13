@@ -26,6 +26,7 @@ import { createTable } from './table.js';
 /**
  * @typedef {Object} MetricsRegistry
  * @property {(layer: string, names: string[]) => Float64Array} counters
+ * @property {(layer: string, name: string) => import('./table.js').TableWriter | null} find
  * @property {(layer: string, name: string, spec: { rows: number, columns: string[] })
  *     => import('./table.js').TableWriter} table
  * @property {(sampler: () => void) => () => void} onFrame
@@ -64,6 +65,16 @@ export function createMetrics(options = {}){
 
     return {
         table,
+
+        /**
+         * A table already registered, or null. For the few figures one
+         * layer's row feeds another's -- a frame's row carries a copy of the
+         * emulator's counters -- resolved once rather than looked up as they
+         * are read.
+         *
+         * @param {string} layer @param {string} name
+         */
+        find: (layer, name)=>layers.get(layer)?.get(name) ?? null,
 
         /**
          * One row of named counters, for the figures a layer keeps as it runs.

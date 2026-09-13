@@ -6,7 +6,7 @@
 
 import { Level, createJournal, toLevel } from './internal/journal.js';
 import {
-    FRAME_COLUMNS, PHASE_COLUMNS, PHASE_ROWS, PhaseKind, createProfiler,
+    FRAME_COLUMNS, FRAME_MIRROR, PHASE_COLUMNS, PHASE_ROWS, PhaseKind, createProfiler,
 } from './internal/profiler.js';
 import { createMetrics } from './internal/metrics.js';
 
@@ -123,6 +123,35 @@ export const logModule = {
             own[UNBALANCED] = profiler.unbalanced();
         });
 
+        /**
+         * Where each of a frame's mirrored columns is read from. Resolved at
+         * the first frame rather than here: the layers whose counters a frame
+         * carries are created after this one, so there is nothing to find yet.
+         * A column no layer answers is reported and reads as zero, rather
+         * than changing the row's layout under the reader.
+         */
+        let mirrored = false;
+        const resolveMirror = ()=>{
+            mirrored = true;
+            /** @type {(Float64Array | null)[]} */
+            const rows = [];
+            /** @type {number[]} */
+            const indices = [];
+            for (const entry of FRAME_MIRROR)
+            {
+                const table = registry.find(entry.layer, 'counters');
+                const index = table ? table.describe().columns.indexOf(entry.counter) : -1;
+                rows.push(index >= 0 && table ? table.values : null);
+                indices.push(index >= 0 ? index : 0);
+                if (index < 0)
+                {
+                    issues.push(`No ${entry.layer} counter named "${entry.counter}":`
+                        + ` every frame reports ${entry.column} as zero.`);
+                }
+            }
+            profiler.mirror(rows, indices);
+        };
+
         for (const sink of config?.sinks ?? [])
         {
             journal.addSink(sink);
@@ -205,11 +234,16 @@ export const logModule = {
             note: (name, amount)=>profiler.note(name, amount),
             beginFrame: ()=>profiler.beginFrame(),
             // The one moment on the engine thread when figures nobody keeps
-            // as they run are copied into their tables.
+            // as they run are copied into their tables -- before the frame's
+            // own row is written, so that the row carries the counters as they
+            // stand at its close rather than as they stood at the one before.
             endFrame: ()=>{
-                const frame = profiler.endFrame();
                 registry.sample();
-                return frame;
+                if (!mirrored)
+                {
+                    resolveMirror();
+                }
+                return profiler.endFrame();
             },
             /** @param {number} [count] */
             frames: count=>profiler.frames(count),

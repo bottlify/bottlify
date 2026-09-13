@@ -10,6 +10,7 @@ import { Worker } from 'node:worker_threads';
 import { Level, createJournal } from './journal.js';
 import { createLogReader } from './reader.js';
 import { createMetrics } from './metrics.js';
+import { FRAME_DELTAS, FRAME_VALUES } from './profiler.js';
 import { logModule } from '../module.js';
 
 const setup = (/** @type {any} */ options = {})=>{
@@ -191,7 +192,8 @@ test('frames and the profile are read from the tables the profiler publishes int
     assert.equal(frame.byKind.guest, 8);
     assert.equal(frame.byKind.host, 2);
     assert.deepEqual(frame.longest, { name: 'turn', ms: 10 });
-    assert.deepEqual(frame.longestGuest, { ms: 8, instructions: 1000 });
+    assert.deepEqual(frame.longestGuest, { ms: 8, instructions: 1000, rate: 125_000 },
+        'with the rate the slice managed, which is what a stall is told by');
     assert.deepEqual(frame.notes, { instructions: 1000 });
 
     const profile = reader.profile();
@@ -200,5 +202,68 @@ test('frames and the profile are read from the tables the profiler publishes int
         [['slice', 'guest', 8], ['turn', 'host', 2]]);
     assert.equal(profile.hostShare, 2 / 12);
     assert.deepEqual(reader.counters('log'), { rejected: 0, unbalancedPhases: 0 });
+    await logModule.dispose();
+});
+
+test('a frame says what the program did and what it cost us, without a second run', async()=>{
+    let time = 0;
+    const api = await logModule.create({ now: ()=>time, wallClock: ()=>time, shared: false });
+    // The layers whose counters a frame's row carries, registered as the
+    // layout names them rather than as any one layer happens to order them.
+    const owned = (/** @type {string} */ layer, /** @type {readonly any[]} */ entries)=>{
+        const wanted = entries.filter(entry=>entry.layer === layer);
+        const row = api.metrics.counters(layer, wanted.map(entry=>entry.counter));
+        /** @param {string} column @param {number} value */
+        return (column, value)=>{
+            row[wanted.findIndex(entry=>entry.column === column)] = value;
+        };
+    };
+    const cpu = owned('cpu', FRAME_DELTAS);
+    const kernel = owned('kernel', FRAME_VALUES);
+    const regions = api.metrics.table('memory', 'regions',
+        { rows: 4, columns: ['name', 'base', 'size', 'access'] });
+    regions.set(0, 0, api.intern('Storm.dll'));
+    regions.set(0, 1, 0x6f00000);
+    regions.set(0, 2, 0x100000);
+    regions.used(1);
+    const reader = createLogReader({ memory: api.memory() });
+
+    /** @param {number} ms @param {number} retired @param {number} interpreted */
+    const frame = (ms, retired, interpreted)=>{
+        api.beginFrame();
+        api.begin('slice', 'guest');
+        time += ms;
+        api.end('slice', { instructions: retired });
+        cpu('retired', retired);
+        cpu('interpretedSteps', interpreted);
+        kernel('thread', api.intern('main'));
+        kernel('threadInstructions', retired);
+        kernel('threadAt', 0x6f01000);
+        api.endFrame();
+    };
+
+    // Three frames of a counter that only ever grows, read as three frames.
+    frame(10, 1_000_000, 500);
+    frame(10, 3_000_000, 1500);
+    frame(100, 3_500_000, 60_000);
+    const frames = reader.frames();
+    assert.equal(frames.length, 3);
+    assert.deepEqual(frames.map(one=>one.instructions), [0, 2_000_000, 500_000],
+        'the oldest row has nothing to subtract from and claims nothing');
+    assert.deepEqual(frames.map(one=>one.counters.interpretedSteps), [0, 1000, 58_500]);
+    assert.equal(frames[2].counters.interpretedSteps > frames[1].counters.interpretedSteps * 50,
+        true, 'the interpret burst is in the frame that had it');
+    assert.equal(frames[2].instructions / frames[2].ms < frames[1].instructions / frames[1].ms,
+        true, 'and that frame ran the program slower than the one before');
+    assert.equal(frames[2].counters.x87TagLost, 0, 'a counter nothing wrote reads as nothing');
+    assert.deepEqual(frames[2].thread,
+        { name: 'main', instructions: 3_500_000, at: 0x6f01000, module: 'Storm.dll' });
+    assert.equal(frames[2].longestGuest.rate, 35_000_000,
+        'the worst slice of the frame, in instructions a second');
+
+    // A counter that went backwards -- a machine restarted under the reader --
+    // is reported as no work rather than as negative work.
+    frame(10, 10, 0);
+    assert.equal(reader.frames().at(-1)?.instructions, 0);
     await logModule.dispose();
 });

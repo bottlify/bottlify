@@ -94,7 +94,8 @@ otherwise.
 | `protectedMode` | `CR0.PE`. | Set during `boot()`, never cleared. |
 | `traps`         | Slots taken in the stub table, park loop included. | Every `registerTrap`. |
 | `trapCapacity`  | Slots available in total. | Fixed at `boot()`. |
-| `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, dirtyPages, finalised, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. |
+| `trapCrossings` | Times the guest has left its own code for ours — every import, COM method and fault comes through the one trap port. | Every crossing. |
+| `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, slowWrites, codePageWritesKept, x87TagLost, x87Sites, dirtyPages, finalised, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. |
 | `eip`           | The guest's instruction pointer. | Continuously; sampling it names a loop no host call would reveal. |
 
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it
@@ -104,9 +105,14 @@ compiler is alive.
 `diagnostics()` is the cold path: it reads thirty emulator exports and builds an object, and is
 for a one-off look. The same figures are published once a frame into the `cpu/counters` table of
 the log layer (`CPU_COUNTERS` in `module.js`: `running`, `instructions`, `protectedMode`, `traps`,
-`trapCapacity`, `eip`, and every numeric `jit.*` field), sampled when the profiler's frame closes;
-a reader elsewhere takes them from shared memory and never asks this thread. `jit.dirtyPages` and
-`jit.refused` are strings and stay in `diagnostics()` only.
+`trapCapacity`, `eip`, `trapCrossings`, and every numeric `jit.*` field), sampled when the profiler's
+frame closes; a reader elsewhere takes them from shared memory and never asks this thread.
+`jit.dirtyPages`, `jit.x87Sites` and `jit.refused` are strings and stay in `diagnostics()` only.
+
+Some of that row is copied into every frame's own row as well (`FRAME_DELTAS` in the log layer), so
+that one slow frame can be told apart from one busy frame without a second run: an emulator that
+refused to answer reports `-1` rather than a record, and the sampler checks for that, because reading
+fields off a number would leave every counter — and every frame's figure subtracted from it — `NaN`.
 
 ## 3. How it works
 

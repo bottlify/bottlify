@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PhaseKind, createProfiler } from './profiler.js';
+import {
+    FRAME_COLUMNS, FRAME_MIRROR, PHASE_ROWS, PhaseKind, createProfiler,
+} from './profiler.js';
 
 /**
  * A clock the test sets to an exact reading before every call, so a duration in
@@ -268,4 +270,103 @@ test('a frame whose one sample outweighs it never reports the guest at less than
     assert.equal(frame.byKind.host + frame.byKind.guest, frame.ms, 'the split is the frame');
     assert.deepEqual(frame.longest, { name: 'guest', ms: 40 });
     assert.equal(frame.sampled.host, 37 * 7);
+});
+
+test('a frame says how long the machine had nothing of the program\'s to run', ()=>{
+    const { at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('guest', PhaseKind.GUEST);
+    at(10).end('guest', { instructions: 100 });
+    at(10).begin('idle-host');
+    at(30).end('idle-host');
+    at(30).begin('idle-fetch-wait');
+    at(45).end('idle-fetch-wait');
+    const frame = at(50).endFrame();
+
+    assert.equal(frame.idleMs, 35, 'both idle turns, whether they waited on a timer or not');
+    assert.equal(frame.waits, 1, 'only the one that waited');
+    at(50).beginFrame();
+    assert.equal(at(60).endFrame().idleMs, 0, 'the next frame starts from nothing');
+});
+
+/**
+ * A frame table that counts what closing a frame costs: how many columns were
+ * stored, and how many rows taken.
+ */
+function countingTables(){
+    let stores = 0;
+    let advances = 0;
+    /** @param {number} rows @param {number} width */
+    const table = (rows, width)=>({
+        rows,
+        width,
+        values: new Float64Array(rows * width),
+        /** @param {number} row @param {number} column @param {number} value */
+        set(row, column, value){
+            stores++;
+            this.values[row * width + column] = value;
+        },
+        /** @param {number} row @param {number} column @param {number} amount */
+        add(row, column, amount){
+            stores++;
+            this.values[row * width + column] += amount;
+        },
+        used(){},
+        advance(){ return advances++ % rows; },
+        describe(){ return { buffer: new ArrayBuffer(0), rows, columns: [] }; },
+    });
+    return {
+        cost: ()=>({ stores, advances }),
+        reset: ()=>{ stores = 0; advances = 0; },
+        tables: { frames: table(8, FRAME_COLUMNS.length), phases: table(PHASE_ROWS, 6) },
+    };
+}
+
+test('closing a frame stores one row and nothing more, whatever the frame held', ()=>{
+    const counted = countingTables();
+    const { at } = harness({ tables: counted.tables, frames: 8 });
+
+    at(0).beginFrame();
+    at(0).endFrame();
+    const { stores, advances } = counted.cost();
+    assert.equal(advances, 1);
+    assert.equal(stores, FRAME_COLUMNS.length, 'every column of the row, and no other store');
+
+    // The same row, written the same way, for a frame that held hundreds of
+    // phases: a frame's close must not walk what the frame did.
+    counted.reset();
+    at(0).beginFrame();
+    for (let turn = 0; turn < 200; turn++)
+    {
+        at(turn).begin('guest', PhaseKind.GUEST);
+        at(turn + 1).end('guest', { instructions: 1000 });
+        at(turn + 1).note('instructions', 1000);
+    }
+    at(300).endFrame();
+    assert.equal(counted.cost().advances, 1);
+    assert.equal(counted.cost().stores, FRAME_COLUMNS.length + 2 + 200 * 4,
+        'the row, the two stores naming a new phase row, and four per close');
+});
+
+test('a frame carries the counters of the layers it was given, and zero for the rest', ()=>{
+    const counted = countingTables();
+    const { profiler, at } = harness({ tables: counted.tables, frames: 8 });
+    const cpu = new Float64Array([0, 1000, 0]);
+
+    // One column answered, the rest absent: the row's layout is the same either way.
+    profiler.mirror(FRAME_MIRROR.map(entry=>entry.column === 'retired' ? cpu : null),
+        FRAME_MIRROR.map(entry=>entry.column === 'retired' ? 1 : 0));
+    const row = counted.tables.frames.values;
+    const column = (/** @type {string} */ name)=>row[FRAME_COLUMNS.indexOf(name)];
+    at(0).beginFrame();
+    at(10).endFrame();
+    assert.equal(column('retired'), 1000, 'as the counter stood when the frame closed');
+    assert.equal(column('entries'), 0, 'a column no layer answers');
+
+    cpu[1] = 4000;
+    at(10).beginFrame();
+    at(20).endFrame();
+    assert.equal(row[FRAME_COLUMNS.length + FRAME_COLUMNS.indexOf('retired')], 4000,
+        'the next row carries the next reading, cumulative as the counter is');
 });

@@ -6,6 +6,9 @@
 
 import { createRing } from './ring.js';
 
+/** What a mirrored column reads from when no layer publishes its counter. */
+const ABSENT = new Float64Array(1);
+
 /**
  * The phase profiler: where a frame went, and how much of it was ours.
  *
@@ -56,12 +59,64 @@ const KINDS = [PhaseKind.HOST, PhaseKind.GUEST, PhaseKind.GPU, PhaseKind.PRESENT
  * ids, which is what `intern` answers.
  */
 export const NOTES_PER_FRAME = 8;
+
+/**
+ * @typedef {Object} MirroredCounter
+ * @property {string} column   Its column in the frame table.
+ * @property {string} layer    Whose counter row it is read from.
+ * @property {string} counter  Its name in that row.
+ */
+
+/**
+ * Counters of other layers that every frame's row keeps a copy of, so that a
+ * frame can say why it was slow without a second run.
+ *
+ * These are the ones a stall is told apart by: whether the program did more
+ * work, or whether we ran its instructions more slowly. They are cumulative
+ * where they are written, and copied here as they stand when the frame
+ * closes -- so the frame's own figure is the difference between its row and
+ * the row before it, which is the reader's subtraction, not the engine's.
+ * Nothing is computed on the engine's thread but a copy per column.
+ *
+ * @type {readonly MirroredCounter[]}
+ */
+export const FRAME_DELTAS = Object.freeze([
+    { column: 'retired', layer: 'cpu', counter: 'instructions' },
+    { column: 'entries', layer: 'cpu', counter: 'jit.entries' },
+    { column: 'interpretedSteps', layer: 'cpu', counter: 'jit.interpretedSteps' },
+    { column: 'f80Conversions', layer: 'cpu', counter: 'jit.f80Conversions' },
+    { column: 'x87TagLost', layer: 'cpu', counter: 'jit.x87TagLost' },
+    { column: 'slowWrites', layer: 'cpu', counter: 'jit.slowWrites' },
+    { column: 'codePageWritesKept', layer: 'cpu', counter: 'jit.codePageWritesKept' },
+    { column: 'hotnessLostToWrites', layer: 'cpu', counter: 'jit.hotnessLostToWrites' },
+    { column: 'hostWrittenBytes', layer: 'cpu', counter: 'jit.hostWrittenBytes' },
+    { column: 'trapCrossings', layer: 'cpu', counter: 'trapCrossings' },
+]);
+
+/**
+ * The same mirroring for figures that are already per frame where they are
+ * written, and so are read as they stand rather than subtracted: which of the
+ * program's threads the machine was spent on, how much it retired, and the
+ * address the frame's heaviest slice began at, which names the module.
+ *
+ * @type {readonly MirroredCounter[]}
+ */
+export const FRAME_VALUES = Object.freeze([
+    { column: 'thread', layer: 'kernel', counter: 'frameThread' },
+    { column: 'threadInstructions', layer: 'kernel', counter: 'frameThreadInstructions' },
+    { column: 'threadAt', layer: 'kernel', counter: 'frameAt' },
+]);
+
+/** Every mirrored column, in the order a frame's row stores them. */
+export const FRAME_MIRROR = Object.freeze([...FRAME_DELTAS, ...FRAME_VALUES]);
+
 export const FRAME_COLUMNS = [
     'index', 'startedAt', 'ms',
     'host', 'guest', 'gpu', 'present',
     'sampledHost', 'sampledGuest', 'sampledGpu', 'sampledPresent',
     'hostShare', 'longest', 'longestMs', 'longestGuestMs', 'longestGuestInstructions',
-    'waits', 'compiles',
+    'waits', 'compiles', 'idleMs',
+    ...FRAME_MIRROR.map(entry=>entry.column),
     ...Array.from({ length: NOTES_PER_FRAME }, (_, i)=>[`note${i}`, `amount${i}`]).flat(),
 ];
 /** One row per phase name, kept up to date as phases close. */
@@ -88,6 +143,11 @@ export const PHASE_ROWS = 512;
  *     The longest guest slice in the frame, and how much it retired.
  * @property {number} waits      Turns the machine spent waiting for a fetch.
  * @property {number} compiles   Modules the emulator compiled during the frame.
+ * @property {number} idleMs
+ *     Of the frame, how long the machine had nothing of the program's to run
+ *     and was parked on us -- a host call that had not answered, a fetch, an
+ *     empty message queue. A frame long for this reason is not a frame the
+ *     program or the emulator was slow in, and nothing else told them apart.
  * @property {Record<string, number>} notes
  *     Whatever else the frame's owner counted into it -- instructions
  *     retired, instructions interpreted -- summed by name.
@@ -119,11 +179,15 @@ const blankFrame = ()=>({
     longestGuest: { ms: 0, instructions: 0 },
     waits: 0,
     compiles: 0,
+    idleMs: 0,
     notes: {},
 });
 
 /** A turn the machine spent waiting for something to arrive from outside. */
 const isWait = (/** @type {string} */ name)=>name.startsWith('idle-') && name.endsWith('-wait');
+
+/** A turn the machine had nothing of the program's to run at all. */
+const isIdle = (/** @type {string} */ name)=>name.startsWith('idle-');
 
 /** @param {FrameRecord} frame */
 const copyFrame = frame=>({
@@ -149,6 +213,18 @@ export function createProfiler(options){
     const history = createRing(options.frames ?? 240, blankFrame);
     const tables = options.tables ?? null;
     const intern = options.intern ?? (()=>-1);
+
+    /**
+     * Where each mirrored column is read from when a frame closes: one counter
+     * row per column and the index in it. Resolved once by whoever assembles
+     * the engine, because the layers that own those rows are created after
+     * this one -- and a column nobody answers reads from a row of zeroes, so
+     * the frame's layout never depends on which layers a build has.
+     *
+     * @type {Float64Array[]}
+     */
+    const mirrorRows = new Array(FRAME_MIRROR.length).fill(ABSENT);
+    const mirrorAt = new Int32Array(FRAME_MIRROR.length);
 
     /**
      * The open phases, innermost last. Entries are reused by depth: a profiler
@@ -234,6 +310,14 @@ export function createProfiler(options){
         put(frame.longestGuest.instructions);
         put(frame.waits);
         put(frame.compiles);
+        put(frame.idleMs);
+        // The counters other layers keep, as they stand now. A copy per
+        // column and no more: the subtraction that turns them into this
+        // frame's own figures is the reader's, on the reader's thread.
+        for (let at = 0; at < mirrorRows.length; at++)
+        {
+            put(mirrorRows[at][mirrorAt[at]]);
+        }
         let noted = 0;
         for (const name in frame.notes)
         {
@@ -353,9 +437,13 @@ export function createProfiler(options){
                     open.longestGuest.ms = elapsed;
                     open.longestGuest.instructions = detail?.instructions ?? 0;
                 }
-                if (isWait(entry.name))
+                if (isIdle(entry.name))
                 {
-                    open.waits++;
+                    open.idleMs += elapsed;
+                    if (isWait(entry.name))
+                    {
+                        open.waits++;
+                    }
                 }
             }
             return elapsed;
@@ -371,6 +459,23 @@ export function createProfiler(options){
             if (open)
             {
                 open.compiles += count;
+            }
+        },
+
+        /**
+         * Where a mirrored column is read from: the counter row that holds it
+         * and the index in that row, in the order of `FRAME_MIRROR`. A null
+         * source leaves the column reading zero.
+         *
+         * @param {(Float64Array | null)[]} sources
+         * @param {number[]} indices
+         */
+        mirror(sources, indices){
+            for (let at = 0; at < FRAME_MIRROR.length; at++)
+            {
+                const row = sources[at] ?? null;
+                mirrorRows[at] = row ?? ABSENT;
+                mirrorAt[at] = row ? indices[at] : 0;
             }
         },
 
@@ -403,6 +508,7 @@ export function createProfiler(options){
             slot.longestGuest.instructions = 0;
             slot.waits = 0;
             slot.compiles = 0;
+            slot.idleMs = 0;
             slot.notes = {};
             open = slot;
         },

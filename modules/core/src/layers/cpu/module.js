@@ -61,11 +61,12 @@ const JIT_FIELDS = [
     'disabled', 'maxPages', 'loopSafety', 'cache', 'tableFree', 'compiledSteps',
     'interpretedSteps', 'entries', 'interpretedDispatches', 'f80Conversions', 'codePageWrites',
     'modulesLostToWrites', 'hotnessLostToWrites', 'chaining', 'chained', 'chainMissed',
-    'chainRefused', 'flagsDead', 'slowWrites', 'finalised', 'discarded', 'hostWrites',
-    'hostWrittenBytes',
+    'chainRefused', 'flagsDead', 'slowWrites', 'codePageWritesKept', 'x87TagLost',
+    'finalised', 'discarded', 'hostWrites', 'hostWrittenBytes',
 ];
 export const CPU_COUNTERS = [
     'running', 'instructions', 'protectedMode', 'traps', 'trapCapacity', 'eip',
+    'trapCrossings',
     ...JIT_FIELDS.map(field=>`jit.${field}`),
 ];
 
@@ -95,13 +96,17 @@ export const cpuModule = {
                 counters[3] = thunks ? thunks.size : 0;
                 counters[4] = thunks ? thunks.capacity : 0;
                 counters[5] = host.eip();
+                counters[6] = host.trapCrossings();
                 const jit = host.jitState();
-                if (jit)
+                // An emulator that refused to answer reports `-1` rather than a
+                // record, and reading fields off a number leaves every counter
+                // NaN -- which a frame's own figures are then subtracted from.
+                if (jit && typeof jit === 'object')
                 {
                     for (let field = 0; field < JIT_FIELDS.length; field++)
                     {
                         const value = jit[JIT_FIELDS[field]];
-                        counters[6 + field] = typeof value === 'number' ? value : Number(value);
+                        counters[7 + field] = typeof value === 'number' ? value : Number(value);
                     }
                 }
             });
