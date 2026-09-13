@@ -1130,6 +1130,13 @@ test('a move delayed until reboot is refused, not quietly accepted', ()=>{
     assert.equal(error.code, ERROR_NOT_SUPPORTED);
 });
 
+test('no device answers a control code', ()=>{
+    const { fns, error } = setup();
+    assert.equal(fns.DeviceIoControl.handler(), 0);
+    assert.equal(error.code, 1, 'ERROR_INVALID_FUNCTION');
+    assert.equal(fns.DeviceIoControl.argBytes, 32);
+});
+
 test('the installer file family declares the stack it pops', ()=>{
     const { fns } = setup();
     assert.equal(fns._lopen.argBytes, 8);

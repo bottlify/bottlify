@@ -33,6 +33,7 @@ import { msToFileTime } from './filetime.js';
 
 /** Codes this surface reports through the last-error slot. */
 const ERROR_SUCCESS = 0;
+const ERROR_INVALID_FUNCTION = 1;
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_PATH_NOT_FOUND = 3;
 const ERROR_ACCESS_DENIED = 5;
@@ -1768,6 +1769,21 @@ export function createFileFunctions(host){
             argBytes: 20,
             /** @param {number[]} args */
             handler: ([handle])=>object(handle, 'file') ? 1 : fail(ERROR_INVALID_HANDLE),
+        },
+
+        /**
+         * BOOL DeviceIoControl(HANDLE hDevice, DWORD dwIoControlCode, LPVOID lpInBuffer,
+         *     DWORD nInBufferSize, LPVOID lpOutBuffer, DWORD nOutBufferSize,
+         *     LPDWORD lpBytesReturned, LPOVERLAPPED lpOverlapped)
+         *
+         * No device here answers a control code: the volume is a file store,
+         * not a driver. ERROR_INVALID_FUNCTION is what a driver says of a code
+         * it does not handle, and a program asking a disk or a VxD for
+         * something takes the documented no.
+         */
+        DeviceIoControl: {
+            argBytes: 32,
+            handler: ()=>fail(ERROR_INVALID_FUNCTION),
         },
     };
 }

@@ -144,6 +144,10 @@ const SIF_TRACKPOS = 0x0010;
 /** Which bar: the two a window has, or a scroll-bar control. */
 const SB_HORZ = 0;
 const SB_VERT = 1;
+const SB_BOTH = 3;
+
+/** EnableScrollBar's wArrows: both arrows usable is the state a bar starts in. */
+const ESB_ENABLE_BOTH = 0;
 
 /**
  * ACCEL is six bytes, not eight: a BYTE, a pad byte, then two WORDs. An array
@@ -300,9 +304,20 @@ export function createObjectFunctions({ host, live }){
         if (!record.scroll.has(which))
         {
             record.scroll.set(which,
-                { min: 0, max: 100, page: 0, pos: 0, trackPos: 0 });
+                { min: 0, max: 100, page: 0, pos: 0, trackPos: 0, arrows: ESB_ENABLE_BOTH });
         }
         return record.scroll.get(which);
+    };
+
+    /**
+     * Where a thumb can actually sit: the range less the page. The position
+     * is clamped there after any change to the range, the page or itself.
+     * @param {{ min: number, max: number, page: number, pos: number }} held
+     */
+    const clampScroll = held=>{
+        const ceiling = Math.max(held.min, held.max - Math.max(held.page - 1, 0));
+        held.pos = Math.min(Math.max(held.pos, held.min), ceiling);
+        return held.pos;
     };
 
     return {
@@ -1078,9 +1093,7 @@ export function createObjectFunctions({ host, live }){
                 {
                     held.pos = readU32(info + SCROLLINFO.nPos) | 0;
                 }
-                const ceiling = Math.max(held.min, held.max - Math.max(held.page - 1, 0));
-                held.pos = Math.min(Math.max(held.pos, held.min), ceiling);
-                return held.pos;
+                return clampScroll(held);
             },
         },
 
@@ -1096,9 +1109,109 @@ export function createObjectFunctions({ host, live }){
                 }
                 const held = scrollOf(record, bar);
                 const previous = held.pos;
-                const ceiling = Math.max(held.min, held.max - Math.max(held.page - 1, 0));
-                held.pos = Math.min(Math.max(position | 0, held.min), ceiling);
+                held.pos = position | 0;
+                clampScroll(held);
                 return previous;
+            },
+        },
+
+        /**
+         * The older, pre-SCROLLINFO half of the same state: a range set through
+         * one is read through the other, since a program of the era mixes them.
+         *
+         * BOOL GetScrollRange(HWND hWnd, int nBar, LPINT lpMinPos, LPINT lpMaxPos)
+         */
+        GetScrollRange: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, bar, minOut, maxOut])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const held = scrollOf(record, bar);
+                if ((minOut >>> 0) !== 0)
+                {
+                    writeU32s(minOut >>> 0, [held.min]);
+                }
+                if ((maxOut >>> 0) !== 0)
+                {
+                    writeU32s(maxOut >>> 0, [held.max]);
+                }
+                return 1;
+            },
+        },
+
+        /** BOOL SetScrollRange(HWND hWnd, int nBar, int nMinPos, int nMaxPos, BOOL bRedraw) */
+        SetScrollRange: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, bar, min, max])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const held = scrollOf(record, bar);
+                held.min = min | 0;
+                held.max = max | 0;
+                clampScroll(held);
+                return 1;
+            },
+        },
+
+        /** int GetScrollPos(HWND hWnd, int nBar) */
+        GetScrollPos: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, bar])=>{
+                const record = live(hwnd);
+                return record ? scrollOf(record, bar).pos : 0;
+            },
+        },
+
+        /**
+         * BOOL ShowScrollBar(HWND hWnd, int wBar, BOOL bShow)
+         *
+         * Nothing here draws a window's own scroll bars, so there is nothing
+         * to show or hide; the call succeeds for a live window, which is all
+         * a caller checks.
+         */
+        ShowScrollBar: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>live(hwnd) ? 1 : 0,
+        },
+
+        /**
+         * BOOL EnableScrollBar(HWND hWnd, UINT wSBflags, UINT wArrows)
+         *
+         * Zero when the arrows were already in the state asked for: a caller
+         * that tracks its own state counts on the answer to say whether
+         * anything changed.
+         */
+        EnableScrollBar: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([hwnd, bar, arrows])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                const bars = (bar | 0) === SB_BOTH ? [SB_HORZ, SB_VERT] : [bar | 0];
+                let changed = 0;
+                for (const which of bars)
+                {
+                    const held = scrollOf(record, which);
+                    if (held.arrows !== (arrows >>> 0))
+                    {
+                        held.arrows = arrows >>> 0;
+                        changed = 1;
+                    }
+                }
+                return changed;
             },
         },
     };

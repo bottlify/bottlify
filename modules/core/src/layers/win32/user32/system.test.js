@@ -424,6 +424,21 @@ test('a banner bitmap and a program-manager conversation are refused with the st
     assert.equal(fns.DdeNameService.argBytes, 16);
 });
 
+test('a DDE client finds no server, and each refusal pops what it was pushed', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.DdeConnect.handler([1, 0, 0, 0]), 0);
+    assert.equal(fns.DdeClientTransaction.handler([0, 0, 0, 0, 1, 0x4050, 1000, 0]), 0);
+    assert.equal(fns.DdeCreateDataHandle.handler([1, 0, 0, 0, 0, 1, 0]), 0);
+    assert.equal(fns.DdeGetData.handler([0, 0, 0, 0]), 0);
+    assert.equal(fns.DdeQueryStringA.handler([1, 0, 0, 0, 0]), 0);
+    assert.equal(fns.DdeDisconnect.handler([0]), 0);
+    assert.equal(fns.DdeGetLastError.handler([1]), 0, 'DMLERR_NO_ERROR');
+    assert.deepEqual(
+        ['DdeConnect', 'DdeDisconnect', 'DdeClientTransaction', 'DdeCreateDataHandle',
+            'DdeGetData', 'DdeQueryStringA', 'DdeGetLastError'].map(name=>fns[name].argBytes),
+        [16, 4, 32, 28, 16, 20, 4]);
+});
+
 test('CharNext walks a string a byte at a time and stops at its end', ()=>{
     // A program walks a path with this and stops when the pointer stops
     // moving; a stub that answered zero sent it on to copy from address zero.

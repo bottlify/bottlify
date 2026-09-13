@@ -903,6 +903,14 @@ test('the extents a DC has are read back, and a metafile is refused', ()=>{
         fns.PlayMetaFile, fns.DeleteMetaFile].map(fn=>fn.argBytes), [8, 8, 8, 8, 4]);
 });
 
+test('a font file cannot be added to the fixed font table, with the stack intact', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.AddFontResourceA.handler(), 0);
+    assert.equal(fns.CreateScalableFontResourceA.handler(), 0);
+    assert.deepEqual([fns.AddFontResourceA.argBytes, fns.CreateScalableFontResourceA.argBytes],
+        [4, 16]);
+});
+
 test('every function declares the stack its arguments occupy', ()=>{
     const { fns } = setup();
     /** @type {Record<string, number>} */

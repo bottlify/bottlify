@@ -243,6 +243,68 @@ function fakeFiles(){
     };
 }
 
+test('VerFindFileA recommends the program directory, and reports a copy that lives elsewhere', ()=>{
+    const memory = new Uint8Array(0x2000);
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>memory.set(
+        new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat([0])), at);
+    /** @param {number} at */
+    const readAt = at=>{
+        let text = '';
+        for (; memory[at] !== 0; at++)
+        {
+            text += String.fromCharCode(memory[at]);
+        }
+        return text;
+    };
+    const files = /** @type {any} */ (fakeFiles());
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: readAt,
+        setLastError: ()=>{},
+        files,
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    put(0x10, 'Game.dll');
+    put(0x30, 'C:\\WINDOWS');
+    put(0x50, 'C:\\Games\\Doom');
+    const CUR = 0x400;
+    const CURLEN = 0x500;
+    const DEST = 0x600;
+    const DESTLEN = 0x700;
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+
+    // A fresh install: no copy anywhere, so the current directory is empty.
+    assert.equal(
+        version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 0);
+    assert.equal(readAt(DEST), 'C:\\Games\\Doom');
+    assert.equal(readAt(CUR), '');
+    assert.equal(memory[CURLEN], 1, 'the terminator alone');
+    assert.equal(memory[DESTLEN], 'C:\\Games\\Doom'.length + 1);
+
+    // A shared file goes to the system directory; a copy in the Windows
+    // directory is reported as living somewhere other than the destination.
+    files.nodes.set('C:\\WINDOWS\\Game.dll', Uint8Array.from([1]));
+    const VFFF_ISSHAREDFILE = 1;
+    // The lengths are in/out: the first call left the sizes it needed there.
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), CURLEN);
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), DESTLEN);
+    assert.equal(version.VerFindFileA.handler(
+        [VFFF_ISSHAREDFILE, 0x10, 0x30, 0x50, CUR, CURLEN, DEST, DESTLEN]), 1, 'VFF_CURNEDEST');
+    assert.equal(readAt(DEST), 'C:\\WINDOWS\\system32');
+    assert.equal(readAt(CUR), 'C:\\WINDOWS');
+
+    // A buffer too short is told the length it needed, and given what fits.
+    memory.set(new Uint8Array([4, 0, 0, 0]), DESTLEN);
+    assert.equal(version.VerFindFileA.handler([0, 0x10, 0x30, 0x50, 0, 0, DEST, DESTLEN]),
+        4, 'VFF_BUFFTOOSMALL');
+    assert.equal(readAt(DEST), 'C:\\');
+    assert.equal(memory[DESTLEN], 'C:\\Games\\Doom'.length + 1);
+    assert.equal(version.VerFindFileA.argBytes, 32);
+});
+
 test('VerInstallFileA expands a compressed source into the destination directory', ()=>{
     const memory = new Uint8Array(0x2000);
     /** @param {number} at @param {string} text */

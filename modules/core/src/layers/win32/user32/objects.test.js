@@ -398,3 +398,46 @@ test('SetScrollPos answers with where the thumb was, not where it went', ()=>{
     fns.GetScrollInfo.handler([hwnd, SB_HORZ, INFO]);
     assert.equal(memory.u32(INFO + SCROLLINFO.nPos), 100, 'and clamps what it was given');
 });
+
+test('a range set through SCROLLINFO is read through GetScrollRange, and the other way round', ()=>{
+    // One state behind both halves: a program of the era sets the range with
+    // the old call and reads it with the new one, or the reverse.
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    memory.putU32s(INFO, [SCROLLINFO.SIZE, SIF_RANGE | SIF_POS, 7, 42, 0, 30, 0]);
+    fns.SetScrollInfo.handler([hwnd, SB_HORZ, INFO, 0]);
+
+    assert.equal(fns.GetScrollRange.handler([hwnd, SB_HORZ, OUT, OUT + 4]), 1);
+    assert.deepEqual([memory.u32(OUT), memory.u32(OUT + 4)], [7, 42]);
+    assert.equal(fns.GetScrollPos.handler([hwnd, SB_HORZ]), 30);
+
+    assert.equal(fns.SetScrollRange.handler([hwnd, SB_HORZ, 0, 10, 1]), 1);
+    memory.putU32s(INFO, [SCROLLINFO.SIZE, SIF_RANGE | SIF_POS, 0, 0, 0, 0, 0]);
+    fns.GetScrollInfo.handler([hwnd, SB_HORZ, INFO]);
+    assert.equal(memory.u32(INFO + SCROLLINFO.nMax), 10);
+    assert.equal(memory.u32(INFO + SCROLLINFO.nPos), 10, 'the thumb follows a range that shrank');
+    assert.equal(fns.GetScrollPos.handler([0x9999, SB_HORZ]), 0, 'no window, no position');
+});
+
+test('EnableScrollBar says whether the arrows changed, and SB_BOTH covers both bars', ()=>{
+    const ESB_DISABLE_BOTH = 3;
+    const SB_VERT = 1;
+    const SB_BOTH = 3;
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+    assert.equal(fns.EnableScrollBar.handler([hwnd, SB_HORZ, 0]), 0, 'already enabled');
+    assert.equal(fns.EnableScrollBar.handler([hwnd, SB_BOTH, ESB_DISABLE_BOTH]), 1);
+    assert.equal(fns.EnableScrollBar.handler([hwnd, SB_VERT, ESB_DISABLE_BOTH]), 0,
+        'already disabled');
+    assert.equal(fns.ShowScrollBar.handler([hwnd, SB_BOTH, 1]), 1);
+    assert.equal(fns.ShowScrollBar.handler([0x9999, SB_BOTH, 1]), 0);
+});
+
+test('the scroll-range family declares the stack it pops', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.GetScrollRange.argBytes, 16);
+    assert.equal(fns.SetScrollRange.argBytes, 20);
+    assert.equal(fns.GetScrollPos.argBytes, 8);
+    assert.equal(fns.ShowScrollBar.argBytes, 12);
+    assert.equal(fns.EnableScrollBar.argBytes, 12);
+});

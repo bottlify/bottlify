@@ -147,6 +147,8 @@ const ENUM_REGISTRY_SETTINGS = -2;
 
 /** DdeInitialize's answer when the exchange cannot be set up at all. */
 const DMLERR_SYS_ERROR = 0x400f;
+/** DdeGetLastError with no instance to report on: nothing has gone wrong in it. */
+const DMLERR_NO_ERROR = 0;
 
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 const REGISTERED_MESSAGE_FIRST = 0xc000;
@@ -1463,6 +1465,68 @@ export function createSystemFunctions({ host, live, windows, classes }){
         DdeNameService: {
             argBytes: 16,
             handler: ()=>0,
+        },
+
+        /**
+         * The client half: with no server to converse with, a conversation
+         * never opens, a transaction yields no data, and a string handle --
+         * of which none was ever created -- has no text. Each is the null
+         * the documentation names for failure.
+         *
+         * HCONV DdeConnect(DWORD idInst, HSZ hszService, HSZ hszTopic,
+         *                  PCONVCONTEXT pCC)
+         */
+        DdeConnect: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /** BOOL DdeDisconnect(HCONV hConv) */
+        DdeDisconnect: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
+        /**
+         * HDDEDATA DdeClientTransaction(LPBYTE pData, DWORD cbData, HCONV hConv,
+         *     HSZ hszItem, UINT wFmt, UINT wType, DWORD dwTimeout, LPDWORD pdwResult)
+         */
+        DdeClientTransaction: {
+            argBytes: 32,
+            handler: ()=>0,
+        },
+
+        /**
+         * HDDEDATA DdeCreateDataHandle(DWORD idInst, LPBYTE pSrc, DWORD cb,
+         *     DWORD cbOff, HSZ hszItem, UINT wFmt, UINT afCmd)
+         */
+        DdeCreateDataHandle: {
+            argBytes: 28,
+            handler: ()=>0,
+        },
+
+        /** DWORD DdeGetData(HDDEDATA hData, LPBYTE pDst, DWORD cbMax, DWORD cbOff) */
+        DdeGetData: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
+        /** DWORD DdeQueryStringA(DWORD idInst, HSZ hsz, LPSTR psz, DWORD cchMax, int iCodePage) */
+        DdeQueryStringA: {
+            argBytes: 20,
+            handler: ()=>0,
+        },
+
+        /**
+         * UINT DdeGetLastError(DWORD idInst)
+         *
+         * No instance was ever handed out, so there is none to have recorded
+         * an error; a program that asks after a refused connect is told so
+         * and gives up on the exchange rather than retrying.
+         */
+        DdeGetLastError: {
+            argBytes: 4,
+            handler: ()=>DMLERR_NO_ERROR,
         },
 
         /**

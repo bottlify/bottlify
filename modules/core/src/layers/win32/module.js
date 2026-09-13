@@ -53,6 +53,7 @@ import { createImmFunctions } from './imm32/functions.js';
 import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
+import { createNetworkFunctions } from './mpr/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
@@ -846,6 +847,8 @@ export const win32Module = {
             'd3dx9_27.dll': createD3dxFunctions({ readMemory, writeMemory }),
 
             'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
+
+            'MPR.dll': createNetworkFunctions({ setLastError: setError }),
 
             // The transport is the assembling caller's to supply and is absent
             // by default: this build has no network, and the entry points say

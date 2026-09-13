@@ -1524,6 +1524,26 @@ export function createGdiFunctions(host){
             handler: ()=>0,
         },
 
+        /**
+         * The font table here is fixed: a font file cannot be added to it,
+         * and a scalable font resource cannot be written for one. Zero is the
+         * documented failure of each, which an installer notes and moves on
+         * from -- the file itself was already copied.
+         *
+         * int AddFontResourceA(LPCSTR lpszFilename)
+         * BOOL CreateScalableFontResourceA(DWORD fdwHidden, LPCSTR lpszFontRes,
+         *                                  LPCSTR lpszFontFile, LPCSTR lpszCurrentPath)
+         */
+        AddFontResourceA: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
+        CreateScalableFontResourceA: {
+            argBytes: 16,
+            handler: ()=>0,
+        },
+
         ScaleViewportExtEx: {
             argBytes: 24,
             /** @param {number[]} args */

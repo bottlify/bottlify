@@ -41,6 +41,16 @@ const VIF_CANNOTREADSRC = 0x00010000;
 /** And what it is asked with. */
 const VIFF_FORCEINSTALL = 0x00000001;
 
+/** VerFindFile: a shared file belongs in the system directory, not the program's. */
+const VFFF_ISSHAREDFILE = 0x0001;
+/** Its answers, or'd; zero is "put it where recommended". */
+const VFF_CURNEDEST = 0x0001;
+const VFF_BUFFTOOSMALL = 0x0004;
+
+/** Where a shared file is looked for and recommended to go. */
+const WINDOWS_DIRECTORY = 'C:\\WINDOWS';
+const SYSTEM_DIRECTORY = 'C:\\WINDOWS\\system32';
+
 /** Where the fixed information keeps the file's own version. */
 const FIXED_FILE_VERSION_MS = 8;
 const FIXED_FILE_VERSION_LS = 12;
@@ -201,7 +211,77 @@ export function createVersionFunctions(host){
         return host.versionInfo?.(path) ?? null;
     };
 
+    /** @param {string} base @param {string} leaf */
+    const joinPath = (base, leaf)=>
+        base === '' ? leaf : `${base.replace(/[\\/]+$/, '')}\\${leaf}`;
+
+    /**
+     * Writes a directory answer the way VerFindFile does: the text as far as
+     * the buffer holds, and the length the buffer needed, terminator included,
+     * where the caller passed its own length in.
+     * @param {number} buffer @param {number} lengthAt @param {string} text
+     * @returns {number} VFF_BUFFTOOSMALL when the buffer was short, else 0
+     */
+    const writeDirectory = (buffer, lengthAt, text)=>{
+        if ((lengthAt >>> 0) === 0)
+        {
+            return 0;
+        }
+        const room = host.readMemory(lengthAt >>> 0, 4);
+        const have = (room[0] | room[1] << 8 | room[2] << 16 | room[3] << 24) >>> 0;
+        const needed = text.length + 1;
+        if ((buffer >>> 0) !== 0 && have > 0)
+        {
+            const kept = text.slice(0, have - 1);
+            const bytes = new Uint8Array(kept.length + 1);
+            for (let at = 0; at < kept.length; at++)
+            {
+                bytes[at] = kept.charCodeAt(at) & 0xff;
+            }
+            host.writeMemory(buffer >>> 0, bytes);
+        }
+        host.writeMemory(lengthAt >>> 0, dword(needed));
+        return needed > have ? VFF_BUFFTOOSMALL : 0;
+    };
+
     return {
+        /**
+         * DWORD VerFindFileA(DWORD uFlags, LPCSTR szFileName, LPCSTR szWinDir,
+         *   LPCSTR szAppDir, LPSTR szCurDir, PUINT puCurDirLen,
+         *   LPSTR szDestDir, PUINT puDestDirLen)
+         *
+         * Where a file should go and where it already is. The recommended
+         * destination is the program's own directory, or the system directory
+         * for a file marked shared; the current directory is wherever a copy
+         * is found -- the destination first, then the Windows directory for a
+         * shared file -- and empty when there is none, which is what an
+         * installer of a fresh program reads. Zero means "install where
+         * recommended"; VFF_CURNEDEST says a copy lives somewhere else.
+         *
+         * Nothing here can tell whether a file is in use, so VFF_FILEINUSE is
+         * never reported: the installer then copies over it, which is what the
+         * volume permits anyway.
+         */
+        VerFindFileA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([flags, fileName, , appDir, curDir, curDirLen, destDir, destDirLen])=>{
+                const leaf = host.readCString(fileName >>> 0, MAX_PATH);
+                const shared = ((flags >>> 0) & VFFF_ISSHAREDFILE) !== 0;
+                const destination = shared
+                    ? SYSTEM_DIRECTORY
+                    : host.readCString(appDir >>> 0, MAX_PATH);
+                const candidates = shared ? [destination, WINDOWS_DIRECTORY] : [destination];
+                const current = candidates.find(
+                    dir=>host.files?.stat(joinPath(dir, leaf))?.exists) ?? '';
+
+                let result = current !== '' && current !== destination ? VFF_CURNEDEST : 0;
+                result |= writeDirectory(curDir, curDirLen, current);
+                result |= writeDirectory(destDir, destDirLen, destination);
+                return result;
+            },
+        },
+
         /**
          * DWORD GetFileVersionInfoSizeA(LPCSTR lptstrFilename, LPDWORD lpdwHandle)
          *
@@ -334,11 +414,8 @@ export function createVersionFunctions(host){
                     return VIF_CANNOTCREATE;
                 }
                 /** @param {number} dir @param {number} name */
-                const join = (dir, name)=>{
-                    const base = host.readCString(dir >>> 0, MAX_PATH);
-                    const leaf = host.readCString(name >>> 0, MAX_PATH);
-                    return base === '' ? leaf : `${base.replace(/[\\/]+$/, '')}\\${leaf}`;
-                };
+                const join = (dir, name)=>joinPath(
+                    host.readCString(dir >>> 0, MAX_PATH), host.readCString(name >>> 0, MAX_PATH));
                 const source = join(srcDir, srcName);
                 const destination = join(destDir, destName);
 
