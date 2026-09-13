@@ -36,6 +36,7 @@ import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
 import { createTokenFunctions } from './advapi32/tokens.js';
 import { createServiceFunctions } from './advapi32/services.js';
+import { createCryptoFunctions } from './advapi32/crypto.js';
 import { createHive, SHELL_FOLDERS } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -1041,6 +1042,13 @@ export const win32Module = {
                 ...createServiceFunctions({
                     readCString,
                     hive,
+                    setLastError: setError,
+                    divergence: config?.divergence,
+                }),
+                ...createCryptoFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
                     setLastError: setError,
                     divergence: config?.divergence,
                 }),
