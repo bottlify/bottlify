@@ -159,7 +159,9 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
     const clock = { at: 0 };
-    const queue = createMessageQueue({ now: ()=>clock.at });
+    // The same key-state thunk the real host hands to both, as in module.js:
+    // a hot key fires on a combination, and the queue is what reads it.
+    const queue = createMessageQueue({ now: ()=>clock.at, keyState });
     const contexts = fakeContexts();
     /** @type {any[]} */
     const notices = [];
@@ -167,6 +169,8 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
     const said = [];
     /** @type {string[]} */
     const diverged = [];
+    /** @type {number[]} */
+    const errors = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -189,12 +193,14 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
         say: text=>said.push(text),
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+        /** @param {number} code */
+        setLastError: code=>errors.push(code),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, screen };
+    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors, screen };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -950,6 +956,170 @@ test('a message box with neither text nor caption still reports', ()=>{
     const { fns, notices } = setup();
     assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
     assert.deepEqual(notices, [{ text: '', caption: '', type: 0 }]);
+});
+
+// --- hot keys ---
+
+const WM_KEYDOWN = 0x0100;
+const WM_HOTKEY = 0x0312;
+
+test('a registered hot key answers 1, and its pair is what identifies it', ()=>{
+    const { memory, fns } = setup();
+    const hwnd = makeWindow(memory, fns);
+
+    assert.equal(fns.RegisterHotKey.handler([hwnd, 7, 0x0001, 0x2a]), 1, 'Alt+F');
+    assert.equal(fns.RegisterHotKey.argBytes, 16);
+    assert.equal(fns.UnregisterHotKey.argBytes, 8);
+
+    // The same (hwnd, id) again with a different combination replaces it, as
+    // the contract says, rather than colliding with itself.
+    assert.equal(fns.RegisterHotKey.handler([hwnd, 7, 0x0002, 0x2b]), 1);
+    assert.equal(fns.UnregisterHotKey.handler([hwnd, 7]), 1, 'and exactly one is gone');
+    assert.equal(fns.UnregisterHotKey.handler([hwnd, 7]), 0, 'a second release names nothing');
+});
+
+test('a combination already taken fails with 1409, however the windows are related', ()=>{
+    const { memory, fns, errors } = setup();
+    const first = makeWindow(memory, fns);
+    memory.putString(CLASS_NAME, 'Second');
+    memory.putU32s(CLASS_STRUCT, [
+        0x0003, WNDPROC, 0, 0, HINSTANCE, 0x11, 0x22, 0x33, 0, CLASS_NAME,
+    ]);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const second = fns.CreateWindowExA.handler(
+        [0, CLASS_NAME, TITLE, WS_OVERLAPPED, 0, 0, 320, 240, 0, 0, HINSTANCE, 0]);
+
+    assert.equal(fns.RegisterHotKey.handler([first, 1, 0x0001, 0x09]), 1, 'Alt+Tab');
+    assert.equal(fns.RegisterHotKey.handler([second, 1, 0x0001, 0x09]), 0,
+        'the same id on another window is still another claim');
+    assert.deepEqual(errors, [1409]);
+    // MOD_NOREPEAT is a rule about repeats, not part of the combination, so
+    // a registration differing only in it collides with the first as well.
+    assert.equal(fns.RegisterHotKey.handler([second, 2, 0x4001, 0x09]), 0);
+    assert.equal(fns.RegisterHotKey.handler([first, 3, 0x0003, 0x09]), 1,
+        'a different modifier set is a different combination');
+
+    assert.equal(fns.UnregisterHotKey.handler([second, 99]), 0, 'never registered');
+    assert.equal(errors.at(-1), 1410);
+});
+
+const WM_SYSKEYDOWN = 0x0104;
+/** The lParam of a first press: transition bit, scan code, nothing else. */
+const PRESS = 1 | 0x0f << 16;
+/** The same press again while it is held: the previous-state bit says so. */
+const REPEAT = PRESS | 0x40000000;
+
+test('a keystroke whose combination is taken becomes WM_HOTKEY, not the key', ()=>{
+    const { memory, fns, queue } = setup();
+    const hwnd = makeWindow(memory, fns);
+    assert.equal(fns.RegisterHotKey.handler([hwnd, 7, 0x0000, 0x41]), 1);
+
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x41, lParam: PRESS, x: 0, y: 0 });
+
+    const fired = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.ok(fired);
+    assert.equal(fired.message, WM_HOTKEY);
+    assert.equal(fired.hwnd, hwnd, 'to the window that registered it');
+    assert.equal(fired.wParam, 7, 'wParam is the id');
+    assert.equal(fired.lParam, 0x41 << 16, 'lParam is MAKELONG(modifiers, vk)');
+    assert.equal(queue.depth(), 0, 'and the key itself is gone, not merely followed');
+});
+
+test('the held modifiers decide whether a press matches its registration', ()=>{
+    // The Alt+Tab a full-screen game registers, spelled the way the input
+    // layer actually reports it: Alt down, then Tab as a system key.
+    const { fns, queue } = setup({ keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    assert.equal(fns.RegisterHotKey.handler([0x40, 1, 0x0001, 0x09]), 1);
+
+    queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: PRESS, x: 0, y: 0 });
+    const fired = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.ok(fired);
+    assert.equal(fired.message, WM_HOTKEY);
+    assert.equal(fired.hwnd, 0x40);
+    assert.equal(fired.lParam, 0x09 << 16 | 0x0001);
+
+    // The same Tab with Alt *not* held is not the combination, and stays the
+    // window's own key.
+    const idle = setup();
+    idle.fns.RegisterHotKey.handler([0x40, 1, 0x0001, 0x09]);
+    idle.queue.post({ hwnd: 0x40, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: PRESS,
+        x: 0, y: 0 });
+    assert.equal(idle.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.message,
+        WM_SYSKEYDOWN, 'nobody held Alt: the window gets its key');
+});
+
+test('a program\'s own key post is not a keystroke and never fires a hot key', ()=>{
+    const { memory, fns, queue } = setup();
+    const hwnd = makeWindow(memory, fns);
+    assert.equal(fns.RegisterHotKey.handler([hwnd, 7, 0x0000, 0x41]), 1);
+
+    // PostMessage names no position; the same virtual key from the input
+    // layer does. Windows claims hardware, not a program talking to itself.
+    queue.post({ hwnd: 0x99, message: WM_KEYDOWN, wParam: 0x41, lParam: PRESS });
+    const kept = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.ok(kept);
+    assert.equal(kept.message, WM_KEYDOWN, 'it reaches the queue as posted');
+    assert.equal(kept.hwnd, 0x99);
+});
+
+test('MOD_NOREPEAT fires on the press and swallows the repeats', ()=>{
+    const { fns, queue } = setup({ keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    assert.equal(fns.RegisterHotKey.handler([0, 0, 0x4001, 0x09]), 1, 'a thread hot key');
+
+    queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: PRESS, x: 0, y: 0 });
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.message,
+        WM_HOTKEY, 'the first press');
+    queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: REPEAT, x: 0, y: 0 });
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'the repeat is eaten without a second notification');
+
+    // Without the flag, every repeat reports, which is what the ones who did
+    // not ask for quiet expect.
+    const loud = setup({ keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    loud.fns.RegisterHotKey.handler([0, 0, 0x0001, 0x09]);
+    loud.queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: REPEAT, x: 0, y: 0 });
+    assert.equal(loud.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.message,
+        WM_HOTKEY);
+});
+
+test('a thread hot key is posted with no window, and only an every-window pump sees it', ()=>{
+    const { fns, queue } = setup({ keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    assert.equal(fns.RegisterHotKey.handler([0, 0, 0x0001, 0x09]), 1);
+
+    queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: PRESS, x: 0, y: 0 });
+    assert.equal(queue.peek({ hwnd: 0x40, first: 0, last: 0, remove: true }), null,
+        'a pump naming another window passes it by');
+    const fired = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.ok(fired);
+    assert.equal(fired.message, WM_HOTKEY);
+    assert.equal(fired.hwnd, 0, 'with no window: the thread\'s own message');
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'and nothing of it is left behind');
+});
+
+test('a destroyed window takes its hot keys with it', ()=>{
+    const { memory, fns, queue } = setup();
+    const hwnd = makeWindow(memory, fns);
+    assert.equal(fns.RegisterHotKey.handler([hwnd, 7, 0x0000, 0x41]), 1);
+    assert.equal(fns.DestroyWindow.handler([hwnd]), 1);
+
+    queue.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x41, lParam: PRESS, x: 0, y: 0 });
+    // The range filter walks past WM_DESTROY the destruction left queued.
+    const kept = queue.peek({ hwnd: null, first: WM_KEYDOWN, last: WM_HOTKEY, remove: true });
+    assert.equal(kept?.message, WM_KEYDOWN,
+        'the key is the focused window\'s again, not a dead one\'s');
+});
+
+test('a hot key is waiting news, in the class GetQueueStatus asks about', ()=>{
+    const { fns, queue } = setup({ keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    assert.equal(fns.RegisterHotKey.handler([0, 0, 0x0001, 0x09]), 1);
+    const QS_HOTKEY = 0x0080;
+
+    queue.post({ hwnd: 0, message: WM_SYSKEYDOWN, wParam: 0x09, lParam: PRESS, x: 0, y: 0 });
+    const status = queue.status();
+    assert.equal(status.inQueue & QS_HOTKEY, QS_HOTKEY);
+    assert.equal(status.changed & QS_HOTKEY, QS_HOTKEY, 'and it is news until looked at');
+    assert.equal(queue.status().changed & QS_HOTKEY, 0, 'one look spends the news');
 });
 
 // --- rectangles and the small string helpers ---

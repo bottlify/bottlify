@@ -205,8 +205,13 @@ export const win32Module = {
         const volume = createVolume(filesystem, config?.fetchBlocks ?? null);
         const hive = createHive();
         // The guest's clock, because a timer is due against the clock the
-        // program itself reads.
-        const queue = createMessageQueue({ now: ()=>kernel.clock.virtualTime() });
+        // program itself reads, and the input layer's key state, because a
+        // hot key fires on a combination and only the layer that sees the
+        // presses knows which modifiers are down when one arrives.
+        const queue = createMessageQueue({
+            now: ()=>kernel.clock.virtualTime(),
+            keyState: config?.keyState,
+        });
 
         /**
          * Where a thread's start routine returns to.

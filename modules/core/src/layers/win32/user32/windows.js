@@ -831,6 +831,9 @@ export function createWindowFunctions(host){
         // Its timers go with it. Windows destroys them, and one left behind
         // would go on making WM_TIMER for a window that no longer exists.
         host.queue.killTimersFor?.(record.hwnd);
+        // So do its hot keys: one left registered would keep eating the
+        // keystroke for a window that can no longer be delivered to.
+        host.queue.unregisterHotKeysFor?.(record.hwnd);
         // Windows *sends* WM_DESTROY, which means running the window procedure
         // before this call returns, and that road goes through the bridge.
         // Queuing it preserves the order the program observes and keeps the

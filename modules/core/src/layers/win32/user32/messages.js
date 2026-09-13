@@ -80,6 +80,31 @@ const WM_KEYLAST = 0x0108;
 const WM_MOUSELAST = 0x020d;
 const WM_HOTKEY = 0x0312;
 
+/** The two presses a hot key can be registered on; a release never fires one. */
+const WM_KEYDOWN = 0x0100;
+const WM_SYSKEYDOWN = 0x0104;
+
+/** RegisterHotKey's modifier bits. */
+const MOD_ALT = 0x0001;
+const MOD_CONTROL = 0x0002;
+const MOD_SHIFT = 0x0004;
+const MOD_WIN = 0x0008;
+/** Not a modifier held with the key but a rule about repeats, hence masked
+ *  out of the combination when two registrations are compared. */
+const MOD_NOREPEAT = 0x4000;
+/** The bits that *are* the combination: the keys held while it fires. */
+const MOD_HELD = MOD_ALT | MOD_CONTROL | MOD_SHIFT | MOD_WIN;
+
+/** The virtual keys the held-modifier state is read from. */
+const VK_SHIFT = 0x10;
+const VK_CONTROL = 0x11;
+const VK_MENU = 0x12;
+const VK_LWIN = 0x5b;
+const VK_RWIN = 0x5c;
+
+/** The key-up/previous-state bit of a key message's lParam. */
+const PREVIOUS_KEY_STATE = 0x40000000;
+
 /**
  * Which class a message belongs to, by its number.
  *
@@ -127,8 +152,13 @@ const classOf = message=>{
  * @param {() => number} [options.now]
  *        The guest's clock, in milliseconds. A timer is due against the clock
  *        the program itself reads, never the host's.
+ * @param {(key: number) => number} [options.keyState]
+ *        Which keys are down, in GetKeyState's form. A hot key is registered
+ *        with a combination and fires on the key alone, so the modifiers have
+ *        to be read at the moment the press arrives -- from the input layer,
+ *        which is above this one and is handed down as a thunk.
  */
-export function createMessageQueue({ now = ()=>0 } = {}){
+export function createMessageQueue({ now = ()=>0, keyState = ()=>0 } = {}){
     /** @type {import('./structs.js').MessageFields[]} */
     const pending = [];
     /** @type {number | null} */
@@ -178,6 +208,17 @@ export function createMessageQueue({ now = ()=>0 } = {}){
      */
     const composed = [];
     const COMPOSED_LIMIT = 16;
+
+    /**
+     * Hot keys, keyed by the `hwnd:id` pair RegisterHotKey identifies a
+     * registration by. They are matched on the way in rather than at
+     * retrieval, because the point of a hot key is that the keystroke it
+     * claims never reaches the window that would otherwise have received it.
+     *
+     * @type {Map<string, { hwnd: number, id: number, modifiers: number,
+     *     vk: number }>}
+     */
+    const hotKeys = new Map();
 
     /**
      * Timers, which are not queued messages.
@@ -315,6 +356,126 @@ export function createMessageQueue({ now = ()=>0 } = {}){
         return entry.message >= filter.first && entry.message <= filter.last;
     };
 
+    /** Which modifiers are held right now, in RegisterHotKey's bits. */
+    const heldModifiers = ()=>{
+        /** @param {number} vk */
+        const down = vk=>(keyState(vk) & 0x8000) !== 0;
+        let bits = 0;
+        if (down(VK_MENU))
+        {
+            bits |= MOD_ALT;
+        }
+        if (down(VK_CONTROL))
+        {
+            bits |= MOD_CONTROL;
+        }
+        if (down(VK_SHIFT))
+        {
+            bits |= MOD_SHIFT;
+        }
+        if (down(VK_LWIN) || down(VK_RWIN))
+        {
+            bits |= MOD_WIN;
+        }
+        return bits;
+    };
+
+    /**
+     * The registration that claims this keystroke, or null.
+     *
+     * Only presses the input layer reports are claimable: a WM_KEYDOWN a
+     * program posted to itself names no position -- the same test the router
+     * uses to tell its own traffic from the hardware's -- and firing a hot
+     * key for a key nobody pressed would have the window act on input that
+     * never happened.
+     *
+     * @param {PostedMessage} message
+     */
+    const hotKeyFor = message=>{
+        const kind = message.message >>> 0;
+        if ((kind !== WM_KEYDOWN && kind !== WM_SYSKEYDOWN) || message.x === undefined)
+        {
+            return null;
+        }
+        const vk = message.wParam >>> 0;
+        const held = heldModifiers();
+        for (const entry of hotKeys.values())
+        {
+            if (entry.vk === vk && (entry.modifiers & MOD_HELD) === held)
+            {
+                return entry;
+            }
+        }
+        return null;
+    };
+
+    /**
+     * The one path in: the input layer posts through here like everything
+     * else, because a keystroke and a program's own post are the same
+     * operation on a queue once the hot keys have had their claim.
+     *
+     * @param {PostedMessage} incoming
+     */
+    const postMessage = incoming=>{
+        const claimed = hotKeyFor(incoming);
+        if (claimed)
+        {
+            // The key is consumed either way -- the combination belongs to
+            // the system, not to the window that would have had it -- but a
+            // registration that asked for no repeats keeps silent while the
+            // keyboard repeats the press on its own.
+            const repeated = (incoming.lParam & PREVIOUS_KEY_STATE) !== 0;
+            if (!repeated || (claimed.modifiers & MOD_NOREPEAT) === 0)
+            {
+                postMessage({
+                    hwnd: claimed.hwnd,
+                    message: WM_HOTKEY,
+                    wParam: claimed.id >>> 0,
+                    // MAKELONG(fsModifiers, vk), without the repeat rule a
+                    // handler was not asked to know about.
+                    lParam: ((claimed.vk & 0xffff) << 16
+                        | (claimed.modifiers & MOD_HELD)) >>> 0,
+                    time: now() >>> 0,
+                });
+            }
+            return;
+        }
+        const message = router ? router(incoming) : incoming;
+        if (!message)
+        {
+            return;
+        }
+        changed |= classOf(message.message >>> 0);
+        if ((message.message >>> 0) === WM_MOUSEMOVE)
+        {
+            // Replaced in place rather than dropped and re-appended: a move
+            // that overtook the keystroke before it would report the button
+            // as pressed somewhere the pointer had already left.
+            const held = pending.find(entry=>entry.message === WM_MOUSEMOVE
+                && entry.hwnd === (message.hwnd >>> 0));
+            if (held)
+            {
+                held.wParam = message.wParam >>> 0;
+                held.lParam = message.lParam >>> 0;
+                held.time = (message.time ?? 0) >>> 0;
+                held.x = (message.x ?? 0) | 0;
+                held.y = (message.y ?? 0) | 0;
+                posted++;
+                return;
+            }
+        }
+        pending.push({
+            hwnd: message.hwnd >>> 0,
+            message: message.message >>> 0,
+            wParam: message.wParam >>> 0,
+            lParam: message.lParam >>> 0,
+            time: (message.time ?? 0) >>> 0,
+            x: (message.x ?? 0) | 0,
+            y: (message.y ?? 0) | 0,
+        });
+        posted++;
+    };
+
     return {
         /**
          * A character the host's keyboard layout made out of a key press.
@@ -362,41 +523,65 @@ export function createMessageQueue({ now = ()=>0 } = {}){
         },
 
         /** @param {PostedMessage} incoming */
-        post(incoming){
-            const message = router ? router(incoming) : incoming;
-            if (!message)
+        post: postMessage,
+
+        /**
+         * Registers a hot key, or replaces the registration this `hwnd` and
+         * `id` already had.
+         *
+         * The combination -- the virtual key and the modifiers held with it --
+         * may belong to one registration only: a second claim on it, even by
+         * the same window under another id, is what Windows refuses, and with
+         * the error the caller reads back. MOD_NOREPEAT is not part of the
+         * combination, which is why two registrations differing only in it
+         * collide rather than coexist.
+         *
+         * @param {number} hwnd  Zero for a hot key belonging to the thread.
+         * @param {number} id
+         * @param {number} modifiers
+         * @param {number} vk
+         * @returns {boolean} false when another registration holds the combination
+         */
+        registerHotKey(hwnd, id, modifiers, vk){
+            const key = `${hwnd >>> 0}:${id | 0}`;
+            for (const [other, entry] of hotKeys)
             {
-                return;
-            }
-            changed |= classOf(message.message >>> 0);
-            if ((message.message >>> 0) === WM_MOUSEMOVE)
-            {
-                // Replaced in place rather than dropped and re-appended: a move
-                // that overtook the keystroke before it would report the button
-                // as pressed somewhere the pointer had already left.
-                const held = pending.find(entry=>entry.message === WM_MOUSEMOVE
-                    && entry.hwnd === (message.hwnd >>> 0));
-                if (held)
+                if (other !== key && entry.vk === (vk >>> 0)
+                    && (entry.modifiers & MOD_HELD) === (modifiers & MOD_HELD))
                 {
-                    held.wParam = message.wParam >>> 0;
-                    held.lParam = message.lParam >>> 0;
-                    held.time = (message.time ?? 0) >>> 0;
-                    held.x = (message.x ?? 0) | 0;
-                    held.y = (message.y ?? 0) | 0;
-                    posted++;
-                    return;
+                    return false;
                 }
             }
-            pending.push({
-                hwnd: message.hwnd >>> 0,
-                message: message.message >>> 0,
-                wParam: message.wParam >>> 0,
-                lParam: message.lParam >>> 0,
-                time: (message.time ?? 0) >>> 0,
-                x: (message.x ?? 0) | 0,
-                y: (message.y ?? 0) | 0,
+            hotKeys.set(key, {
+                hwnd: hwnd >>> 0, id: id | 0,
+                modifiers: modifiers >>> 0, vk: vk >>> 0,
             });
-            posted++;
+            return true;
+        },
+
+        /**
+         * @param {number} hwnd @param {number} id
+         * @returns {boolean} false when nothing carried that pair
+         */
+        unregisterHotKey(hwnd, id){
+            return hotKeys.delete(`${hwnd >>> 0}:${id | 0}`);
+        },
+
+        /**
+         * Drops every hot key a destroyed window registered. Left behind, one
+         * would keep swallowing the keystroke for a window nobody can deliver
+         * to, taking the key away from whatever is focused now.
+         *
+         * @param {number} hwnd
+         */
+        unregisterHotKeysFor(hwnd){
+            for (const [key, entry] of hotKeys)
+            {
+                if (entry.hwnd === (hwnd >>> 0))
+                {
+                    hotKeys.delete(key);
+                }
+            }
         },
 
         /**
@@ -671,6 +856,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 return soonest;
             })(),
             timers: timers.size,
+            hotKeys: hotKeys.size,
             // What each armed timer actually asked for, and when it is next
             // due. A machine that spends two fifths of every frame waiting for
             // a timer is waiting for one of these, and until now a report could

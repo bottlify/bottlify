@@ -155,6 +155,10 @@ const DMLERR_NO_ERROR = 0;
 /** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
 const REGISTERED_MESSAGE_FIRST = 0xc000;
 
+/** RegisterHotKey's failure codes, which a caller reads with GetLastError. */
+const ERROR_HOTKEY_ALREADY_REGISTERED = 1409;
+const ERROR_HOTKEY_NOT_REGISTERED = 1410;
+
 /** The one deferred-placement batch there ever is, as the handle a caller holds. */
 const DEFER_TOKEN = 0x4d50;
 
@@ -1814,6 +1818,48 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([flag])=>[4, 0, 12][flag >>> 0] ?? 0,
+        },
+
+        /**
+         * BOOL RegisterHotKey(HWND hWnd, int id, UINT fsModifiers, UINT vk)
+         *
+         * A keystroke a program wants for itself whatever window has the
+         * focus -- Alt+Tab to keep it from the task switcher, Ctrl+Alt+Delete
+         * where a program owns the screen. The claim lives with the message
+         * queue, because that is where the press arrives and where it has to
+         * be taken back out; a window with no queue for it to travel through
+         * would otherwise be registered against nothing.
+         *
+         * A null hWnd belongs to the thread rather than to a window: the
+         * WM_HOTKEY that comes of it is posted with no window, which is
+         * exactly what a pump asking for every window retrieves and what one
+         * naming a window never sees.
+         */
+        RegisterHotKey: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, id, modifiers, vk])=>{
+                if (!host.queue.registerHotKey(hwnd >>> 0, id | 0, modifiers >>> 0, vk >>> 0))
+                {
+                    host.setLastError?.(ERROR_HOTKEY_ALREADY_REGISTERED);
+                    return 0;
+                }
+                return 1;
+            },
+        },
+
+        /** BOOL UnregisterHotKey(HWND hWnd, int id) */
+        UnregisterHotKey: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd, id])=>{
+                if (!host.queue.unregisterHotKey(hwnd >>> 0, id | 0))
+                {
+                    host.setLastError?.(ERROR_HOTKEY_NOT_REGISTERED);
+                    return 0;
+                }
+                return 1;
+            },
         },
 
         /**

@@ -485,3 +485,52 @@ test('a pending quit is something waiting, so a loop watching the queue wakes fo
     assert.equal(status.inQueue & QS_POSTMESSAGE, QS_POSTMESSAGE);
     assert.equal(status.changed & QS_POSTMESSAGE, QS_POSTMESSAGE);
 });
+
+// --- hot keys ---
+
+test('a hot key is the window-and-id pair, which replaces itself and nothing else', ()=>{
+    const queue = createMessageQueue();
+    assert.equal(queue.registerHotKey(0x40, 1, 0x0001, 0x09), true, 'Alt+Tab');
+    // The same pair with a new combination replaces it rather than colliding
+    // with its own earlier claim.
+    assert.equal(queue.registerHotKey(0x40, 1, 0x0002, 0x2b), true, 'Ctrl+plus');
+    // A combination already taken is refused however the pair differs...
+    assert.equal(queue.registerHotKey(0x44, 1, 0x0002, 0x2b), false, 'another window');
+    assert.equal(queue.registerHotKey(0x40, 2, 0x0002, 0x2b), false, 'another id');
+    // ...and MOD_NOREPEAT is a rule about repeats, not part of the combination,
+    // so a registration differing only in it collides all the same.
+    assert.equal(queue.registerHotKey(0x44, 2, 0x4002, 0x2b), false);
+
+    assert.equal(queue.unregisterHotKey(0x40, 9), false, 'an unknown id is no registration');
+    assert.equal(queue.unregisterHotKey(0x40, 1), true);
+    assert.equal(queue.registerHotKey(0x44, 1, 0x0002, 0x2b), true, 'the freed combination fits');
+});
+
+test('a destroyed window takes its hot keys with it, and only its own', ()=>{
+    const queue = createMessageQueue();
+    queue.registerHotKey(0x40, 1, 0, 0x41);
+    queue.registerHotKey(0x44, 1, 0, 0x42);
+    queue.unregisterHotKeysFor(0x40);
+
+    assert.equal(queue.unregisterHotKey(0x40, 1), false, 'gone with the window');
+    assert.equal(queue.unregisterHotKey(0x44, 1), true, 'the neighbour kept its claim');
+});
+
+test('a claimed keystroke leaves the queue as WM_HOTKEY, with the id and the combination', ()=>{
+    const WM_HOTKEY = 0x0312;
+    const queue = createMessageQueue({ now: ()=>77 });
+    queue.registerHotKey(0x40, 3, 0x0001, 0x41);
+
+    // The held-Alt state arrives through the thunk the host hands down.
+    const alt = createMessageQueue({ now: ()=>77, keyState: key=>(key === 0x12 ? 0x8000 : 0) });
+    alt.registerHotKey(0x40, 3, 0x0001, 0x41);
+    alt.post({ hwnd: 0, message: WM_KEYDOWN, wParam: 0x41, lParam: 1, x: 0, y: 0, time: 5 });
+    assert.deepEqual(alt.peek(ALL), {
+        hwnd: 0x40, message: WM_HOTKEY, wParam: 3,
+        lParam: 0x41 << 16 | 0x0001, time: 77, x: 0, y: 0,
+    });
+
+    // With nothing held, the registration does not fit and the key stands.
+    queue.post({ hwnd: 0x99, message: WM_KEYDOWN, wParam: 0x41, lParam: 1, x: 0, y: 0 });
+    assert.equal(queue.peek(ALL)?.message, WM_KEYDOWN);
+});
