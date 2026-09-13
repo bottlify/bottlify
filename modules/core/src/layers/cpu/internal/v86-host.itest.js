@@ -219,6 +219,26 @@ test('registers are readable and writable from the host', async()=>{
     assert.equal(host.trapCrossings(), 1);
 });
 
+test('the views follow the memory when the emulator grows it', async()=>{
+    // The host reads registers and memory through views taken once, and the
+    // emulator grows its memory in place when its compiler needs room --
+    // which detaches the buffer those views were on. A read after that has to
+    // find the new buffer rather than answer zero off a dead view.
+    const host = await boot();
+    host.writeReg32('ebx', 0x600d0000);
+    host.writePhysical(GUEST_CODE, new Uint8Array(u32(0xcafe1234)));
+    assert.equal(host.readReg32('ebx'), 0x600d0000);
+
+    const grown = host.cpu().wasm_memory.grow(1);
+    assert.ok(grown > 0, 'the memory grew');
+
+    assert.equal(host.readReg32('ebx'), 0x600d0000, 'a register read after the growth');
+    assert.equal(host.readU32(GUEST_CODE), 0xcafe1234, 'a dword read after the growth');
+    host.writeReg32('ecx', 0x1234);
+    assert.equal(host.cpu().reg32[1], 0x1234, 'a write after the growth reaches the machine');
+    host.stop();
+});
+
 test('eip and eflags are readable by name, as a CONTEXT record needs', async()=>{
     // Neither lives in the general-purpose file, and both are asked for by
     // name: describing an exception to the code that will handle it means

@@ -191,35 +191,41 @@ export async function createV86Host(config){
     // the proxies' own offsets, and taken again only if the emulator ever
     // replaces its memory.
     /**
-     * @type {{ buffer: ArrayBuffer | null, ram: Uint8Array, ramOffset: number,
+     * @type {{ ram: Uint8Array, ramOffset: number,
      *     data: DataView, reg32: Int32Array, eip: Int32Array, flags: Int32Array,
      *     flagsChanged: Int32Array, cr: Int32Array, inHlt: Uint8Array,
      *     counter: Uint32Array }}
      */
     const views = {
-        buffer: null, ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
+        ram: new Uint8Array(0), ramOffset: 0, data: new DataView(new ArrayBuffer(0)),
         reg32: new Int32Array(0), eip: new Int32Array(0), flags: new Int32Array(0),
         flagsChanged: new Int32Array(0), cr: new Int32Array(0), inHlt: new Uint8Array(0),
         counter: new Uint32Array(0),
     };
     const v = ()=>{
-        const buffer = cpu.wasm_memory.buffer;
-        if (views.buffer !== buffer)
+        // Whether the memory has moved since the views were taken is read off
+        // the views themselves: the emulator grows its memory in place, which
+        // detaches the buffer they were made on, and a view on a detached
+        // buffer is empty. Asking the emulator for its buffer instead went
+        // through a native accessor on every register and memory access --
+        // six or more a crossing -- and was a fifth of what a crossing cost.
+        if (views.ram.length !== 0)
         {
-            /** @param {any} proxied @param {any} Type */
-            const take = (proxied, Type)=>new Type(buffer, proxied.byteOffset, proxied.length);
-            views.buffer = buffer;
-            views.ram = take(cpu.mem8, Uint8Array);
-            views.ramOffset = views.ram.byteOffset;
-            views.data = new DataView(buffer);
-            views.reg32 = take(cpu.reg32, Int32Array);
-            views.eip = take(cpu.instruction_pointer, Int32Array);
-            views.flags = take(cpu.flags, Int32Array);
-            views.flagsChanged = take(cpu.flags_changed, Int32Array);
-            views.cr = take(cpu.cr, Int32Array);
-            views.inHlt = take(cpu.in_hlt, Uint8Array);
-            views.counter = take(cpu.instruction_counter, Uint32Array);
+            return views;
         }
+        const buffer = cpu.wasm_memory.buffer;
+        /** @param {any} proxied @param {any} Type */
+        const take = (proxied, Type)=>new Type(buffer, proxied.byteOffset, proxied.length);
+        views.ram = take(cpu.mem8, Uint8Array);
+        views.ramOffset = views.ram.byteOffset;
+        views.data = new DataView(buffer);
+        views.reg32 = take(cpu.reg32, Int32Array);
+        views.eip = take(cpu.instruction_pointer, Int32Array);
+        views.flags = take(cpu.flags, Int32Array);
+        views.flagsChanged = take(cpu.flags_changed, Int32Array);
+        views.cr = take(cpu.cr, Int32Array);
+        views.inHlt = take(cpu.in_hlt, Uint8Array);
+        views.counter = take(cpu.instruction_counter, Uint32Array);
         return views;
     };
     // How many compiled modules the emulator actually published, and the first
