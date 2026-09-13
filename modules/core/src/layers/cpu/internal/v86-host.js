@@ -94,6 +94,16 @@ const OPCODE_TABLES = {
 const JIT_CONFIG_CHAINING = 6;
 
 /**
+ * Why the interpreter ran, in the order of the emulator's reason counters.
+ *
+ * One of the four is charged to every interpreted dispatch, so they sum to the
+ * dispatch count, and the same order indexes the bits the emulator records per
+ * page: a page interpreted for one reason is a different finding from a page
+ * interpreted for two.
+ */
+const INTERP_REASON_NAMES = ['nocode', 'noentry', 'pageend', 'state'];
+
+/**
  * What each x87 site counter is, in the emulator's own order.
  *
  * The first group names the instruction whose helper left a register in the
@@ -349,6 +359,35 @@ export async function createV86Host(config){
         }
         return pairs.sort((left, right)=>right[1] - left[1])
             .map(([page, count])=>`0x${(page * 4096).toString(16)}:${count}`).join(' ');
+    };
+
+    /**
+     * Where the interpreter ran, as "page:steps:reasons" triples.
+     *
+     * The reason counters say why a dispatch did not enter generated code; this
+     * says which code it was, so a stall spent outside compiled code can be
+     * looked up by address rather than guessed at. Sixteen pages at most, the
+     * ones interpreted most.
+     */
+    const interpPages = ()=>{
+        const exports = cpu.wm.exports;
+        if (typeof exports.bottlify_interp_page !== 'function')
+        {
+            return '';
+        }
+        const rows = [];
+        for (let i = 0; i < 16; i++)
+        {
+            const steps = exports.bottlify_interp_steps(i);
+            if (steps > 0)
+            {
+                const bits = exports.bottlify_interp_reasons(i) >>> 0;
+                const why = INTERP_REASON_NAMES.filter((name, reason)=>bits >> reason & 1);
+                rows.push([exports.bottlify_interp_page(i) >>> 0, steps, why.join(',')]);
+            }
+        }
+        return rows.sort((left, right)=>right[1] - left[1])
+            .map(([page, steps, why])=>`0x${(page * 4096).toString(16)}:${steps}:${why}`).join(' ');
     };
 
     /**
@@ -723,6 +762,31 @@ export async function createV86Host(config){
                     // a register in the 80-bit format, and which inline form
                     // then paid for it.
                     x87Sites: x87Sites(),
+                    // Why the interpreter ran, which a release build could not
+                    // say before: the four reasons charge one dispatch each and
+                    // so sum to the dispatches above, and the steps beside each
+                    // separate a reason that happens often and interprets two
+                    // instructions from one that happens rarely and interprets
+                    // thousands. `entryAfterPageWalk` is not one of the four --
+                    // it is a dispatch that did not happen, the page walk
+                    // having turned up the entry the look before it missed.
+                    interpNoCode: read(15),
+                    interpNoEntry: read(16),
+                    interpNearPageEnd: read(17),
+                    interpDifferentState: read(18),
+                    interpNoCodeSteps: read(19),
+                    interpNoEntrySteps: read(20),
+                    interpNearPageEndSteps: read(21),
+                    interpDifferentStateSteps: read(22),
+                    interpEntryAfterPageWalk: read(23),
+                    // Of the dispatches, the ones whose page is on its way to
+                    // being compiled against the ones whose page had the heat
+                    // for it and got no module: the first is what a program
+                    // pays once for code it has just reached, the second is a
+                    // page that stays interpreted however hot it gets.
+                    interpBelowThreshold: read(24),
+                    interpCompileDeferred: read(25),
+                    interpPages: interpPages(),
                     dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,

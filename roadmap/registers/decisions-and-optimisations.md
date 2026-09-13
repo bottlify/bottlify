@@ -1525,3 +1525,50 @@ the per-site counters asserted zero for each of those forms and for every inline
 iteration count, charged wholly to `fld m80`, and the multiply that reads it the only inline arm in
 the program that calls its helper. A nasm test covers the same forms; it is unrun here, because
 this machine has no nasm.
+
+## A release build says why the interpreter ran, and on which page
+
+**The cause.** A recording of real play attributed 123 stall frames, 21.4 seconds, to the emulator
+falling out of compiled code -- nearly half of all the stall time in that capture. What the build
+that runs could report about it was two numbers: the instructions the interpreter retired and the
+number of times it was dispatched. Every reason the emulator has for not entering generated code
+was a profiler counter, and the profiler's whole body is compiled out of a release build, so a
+capture could say that a frame went outside compiled code and never why. The commonest case of all
+-- no compiled code for the page at all -- had no counter in any build: it was an empty match arm.
+
+**The change.** Four reasons are counted in the emulator's ordinary counters, decided where the
+decision is already made and committed once per dispatch, so they partition the dispatch count: no
+compiled code for the page, a module for this state with no entry point at this address, the same
+within an instruction's reach of the page's end, and a module compiled for a different state. Each
+carries the instructions it interpreted, taken from a difference the dispatch computes anyway --
+which separates a reason taken often for two instructions each from one taken rarely for thousands.
+The reason is decided before the page walk and counted after it, because the walk may turn up the
+entry the look before it missed; that outcome has its own counter and is deliberately outside the
+partition, since no dispatch happened. Beside them, and counted where the page's hotness is in hand
+already: the dispatches whose page is still under the compile threshold -- what a program pays once
+for code it has just reached -- against the dispatches whose page had the heat for a module and got
+none, because the compiler was busy or the address space had moved.
+
+Where, as well as why: sixteen slots keyed by the page of the eip a dispatch started at, weighted
+by what was interpreted there and carrying a bit per reason seen at that page, in the shape of the
+table that names the pages written while they hold code. The slot of the page interpreted least is
+given up to a page not in the table, so a page interpreted steadily keeps its own. All of it reads
+out through `jitState()`: the counters by name, and the pages as `page:steps:reasons` triples.
+
+**The measurement.** Not measured on the title yet -- this is the instrument, and the capture that
+uses it is the next step. What the interpreter costs a frame is already known (123 frames, 21.4
+seconds); what a capture can say now, and could not before, is which of the four reasons those
+frames went to, how many instructions each reason interpreted, and which pages they were. The cost
+of the instrument is an increment on paths that already branch, plus a sixteen-slot scan per
+dispatch -- a dispatch that runs the interpreter over several instructions already.
+
+**The tests.** Each reason provoked deliberately against a real emulator build: a page nothing has
+compiled, where every dispatch is charged to `nocode` and every one of them leaves its page under
+the compile threshold, with nothing compiled and the page named in the table; then a page a module
+was compiled for, entered at an address it holds no entry point for, at the last instruction of the
+page with cross-page compiling off (and the same address charged to the plain missing entry while
+blocks may cross a page end, which is what a paging-off run does), and in a state the module was
+not compiled for. Every reading asserts the relationship the account rests on: the four reasons sum
+to the dispatches and their steps sum to the instructions interpreted. The entry found on the
+second look and the page that reached the threshold and got no module are not provoked -- both need
+a race a test cannot stage -- so both are covered only by that sum holding when they move.

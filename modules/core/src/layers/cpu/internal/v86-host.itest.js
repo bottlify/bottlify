@@ -1669,3 +1669,145 @@ test('an x87 value a double holds keeps its tag through the helpers', async()=>{
     assert.ok(helpers.x87TagLost > 5 * N,
         `${helpers.x87TagLost} with the group off, against ${inline.x87TagLost} with it on`);
 });
+
+test('the emulator says why the interpreter ran, and on which page', async()=>{
+    // Interpreted steps and dispatches were all a build that runs could report,
+    // so a stall spent outside generated code named no cause. The reasons are a
+    // partition: every dispatch is charged to exactly one, which makes the sum
+    // checkable rather than a hope -- `account` checks it on every run below,
+    // and each reason is then provoked on purpose.
+    /** @param {any} host @returns {Record<string, number|string>} */
+    const state = host=>{
+        const read = host.jitState();
+        assert.notEqual(read, -1, 'the emulator reports its state');
+        return read;
+    };
+    const REASONS = ['interpNoCode', 'interpNoEntry', 'interpNearPageEnd',
+        'interpDifferentState'];
+    /**
+     * What the interpreter did between two readings, by reason.
+     *
+     * @param {Record<string, number|string>} before
+     * @param {Record<string, number|string>} after
+     */
+    const account = (before, after)=>{
+        /** @param {string} field */
+        const of = field=>Number(after[field]) - Number(before[field]);
+        const counts = REASONS.map(of);
+        const steps = REASONS.map(reason=>of(`${reason}Steps`));
+        const dispatches = of('interpretedDispatches');
+        assert.equal(counts.reduce((sum, count)=>sum + count, 0), dispatches,
+            `the reasons account for every dispatch (${counts} against ${dispatches})`);
+        assert.equal(steps.reduce((sum, count)=>sum + count, 0), of('interpretedSteps'),
+            `and their steps for every instruction interpreted (${steps})`);
+        return { dispatches, steps, nocode: counts[0], noentry: counts[1],
+            pageend: counts[2], mismatch: counts[3], below: of('interpBelowThreshold') };
+    };
+
+    // A page nothing has compiled: the program retires six hundred instructions
+    // and the compiler wants two hundred thousand on a page before it looks.
+    const cold = await boot();
+    cold.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(200),         // mov ecx, 200
+        0x49,                      // loop: dec ecx
+        0x75, 0xfd,                //       jnz loop
+        0xf4,                      // hlt
+    ]));
+    cold.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    cold.cpu().in_hlt[0] = 0;
+    cold.cpu().instruction_pointer[0] = GUEST_CODE;
+    const coldBefore = state(cold);
+    for (let slice = 0; slice < 100 && !cold.cpu().in_hlt[0]; slice++)
+    {
+        cold.cpu().run_slice(1000);
+    }
+    assert.ok(cold.cpu().in_hlt[0], 'the loop ran to its end');
+    const coldAfter = state(cold);
+    const cool = account(coldBefore, coldAfter);
+    assert.ok(cool.dispatches > 0, 'the interpreter ran');
+    assert.equal(cool.nocode, cool.dispatches, 'and every dispatch of it found no code');
+    assert.equal(cool.below, cool.dispatches, 'each leaving its page under the threshold');
+    assert.equal(Number(coldAfter.compiledSteps) - Number(coldBefore.compiledSteps), 0,
+        'nothing was compiled, so nothing ran compiled');
+    assert.match(String(coldAfter.interpPages), /(^| )0x8000:\d+:nocode( |$)/,
+        `the page is named, and by that reason: ${coldAfter.interpPages}`);
+    cold.stop();
+
+    // A page a module was compiled for, entered where the module cannot be: at
+    // an address it holds no entry point for, at one within an instruction's
+    // reach of the page's end, and in a state it was not compiled for.
+    const host = await boot();
+    host.cpu().wm.exports.set_jit_config(4, 1000);   // a page compiles sooner
+    const pageEnd = (GUEST_CODE & ~0xfff) + 0xffc;
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(200000),      // mov ecx, 200000
+        0x49,                      // loop: dec ecx
+        0x75, 0xfd,                //       jnz loop
+        0xf4,                      // hlt
+    ]));
+    host.writePhysical(GUEST_CODE + 0x800, new Uint8Array([0xf4]));   // hlt
+    host.writePhysical(pageEnd, new Uint8Array([0xf4]));              // hlt
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    const opened = state(host);
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    for (let slice = 0; slice < 2000 && !host.cpu().in_hlt[0]; slice++)
+    {
+        host.cpu().run_slice(1000);
+        if (slice % 10 === 0)
+        {
+            // The module is finalised off a promise, so the loop has to yield
+            // for the page to end up compiled at all.
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    assert.ok(host.cpu().in_hlt[0], 'the loop ran to its end');
+    assert.ok(Number(state(host).compiledSteps) > 0, 'and was compiled while it ran');
+
+    /** One dispatch, taken where the caller says. @param {number} at */
+    const dispatch = at=>{
+        const before = state(host);
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = at;
+        host.cpu().run_slice(1);
+        const one = account(before, state(host));
+        assert.equal(one.dispatches, 1, `exactly one dispatch at 0x${at.toString(16)}`);
+        assert.equal(one.steps.reduce((sum, count)=>sum + count, 0), 1, 'of one instruction');
+        return one;
+    };
+
+    assert.equal(dispatch(GUEST_CODE + 0x800).noentry, 1,
+        'a page with a module, entered where the module has no entry point');
+    // The end of a page is only a reason while a block may not cross one: with
+    // paging off the compiler goes on into the next page and the case cannot
+    // arise, so the same address is charged to the plain missing entry.
+    assert.equal(dispatch(pageEnd).noentry, 1,
+        'the page end, while a block may cross it, is nothing of its own');
+    host.cpu().wm.exports.set_jit_config(10, 0);
+    assert.equal(dispatch(pageEnd).pageend, 1,
+        'and once a block may not cross it, the end of the page is the reason');
+    host.cpu().wm.exports.set_jit_config(10, 1);
+    // The module was compiled for a 32-bit stack; with a 16-bit one no address
+    // in the page may be entered, entry point or not.
+    host.cpu().stack_size_32[0] = 0;
+    host.cpu().update_state_flags();
+    assert.equal(dispatch(GUEST_CODE + 0x800).mismatch, 1,
+        'a state the module was not compiled for');
+    host.cpu().stack_size_32[0] = 1;
+    host.cpu().update_state_flags();
+
+    const closed = state(host);
+    // Over the whole run, reasons and dispatches still agree -- which is the
+    // relationship that makes the account worth reading, and which the page
+    // walk's own counter is deliberately outside of: it counts the dispatches
+    // that did not happen, the entry having turned up on the second look.
+    const whole = account(opened, closed);
+    // `noentry` is more than the two provoked deliberately: a compiled page is
+    // re-entered where it holds no entry point while the loop runs, which is
+    // what this account exists to make visible.
+    assert.ok(whole.nocode > 0 && whole.noentry >= 2 && whole.pageend === 1
+        && whole.mismatch === 1, `every reason was provoked: ${JSON.stringify(whole)}`);
+    assert.match(String(closed.interpPages), /(^| )0x8000:\d+:nocode,noentry,pageend,state( |$)/,
+        `the page carries every reason seen at it: ${closed.interpPages}`);
+    host.stop();
+});

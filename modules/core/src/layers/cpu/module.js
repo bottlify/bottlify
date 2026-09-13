@@ -77,6 +77,14 @@ const JIT_FIELDS = [
     'interpretedSteps', 'entries', 'interpretedDispatches', 'f80Conversions', 'codePageWrites',
     'modulesLostToWrites', 'hotnessLostToWrites', 'chaining', 'chained', 'chainMissed',
     'chainRefused', 'flagsDead', 'slowWrites', 'codePageWritesKept', 'x87TagLost',
+    // Why the interpreter ran, per frame: the four reasons partition the
+    // dispatches, and the steps beside them say which reason the frame actually
+    // lost its time to -- a reason taken often for two instructions each and a
+    // reason taken rarely for thousands read the same until these are separate.
+    'interpNoCode', 'interpNoEntry', 'interpNearPageEnd', 'interpDifferentState',
+    'interpNoCodeSteps', 'interpNoEntrySteps', 'interpNearPageEndSteps',
+    'interpDifferentStateSteps', 'interpEntryAfterPageWalk',
+    'interpBelowThreshold', 'interpCompileDeferred',
     'finalised', 'discarded', 'hostWrites', 'hostWrittenBytes',
 ];
 /** Where this layer's own counters sit, before the emulator's. */
