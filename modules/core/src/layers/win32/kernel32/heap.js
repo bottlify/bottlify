@@ -121,6 +121,11 @@ const roundUp = (value, to)=>Math.ceil(value / to) * to;
  * @property {number} size       What the guest asked for; what HeapSize reports.
  * @property {number} capacity   What was actually taken from the arena.
  * @property {any} owner         The heap handle, or the VirtualAlloc marker.
+ * @property {boolean} fresh
+ *     Whether every byte of it comes from arena the allocator had never handed
+ *     out before. Guest memory begins zero and only the guest writes into it,
+ *     so fresh memory reads as zeroes already; recycled memory holds whatever
+ *     its previous owner left, and a caller promising zeroes has to clear it.
  */
 
 /**
@@ -132,13 +137,23 @@ const roundUp = (value, to)=>Math.ceil(value / to) * to;
  * the fragmentation difference between the two only starts to matter at
  * lifetimes far longer than a process.
  *
- * @param {{ base: number, size: number }} arena
+ * @param {{ base: number, size: number }} arena  Memory nothing has written yet.
  */
 export function createHeapAllocator({ base, size }){
     /** @type {{ base: number, size: number }[]} */
     const spans = [{ base, size }];
     /** @type {Map<number, HeapBlock>} */
     const live = new Map();
+    /**
+     * The first address in the arena that has never been inside a block.
+     *
+     * Above it the arena is untouched, and untouched arena is zero: nothing but
+     * the guest writes there, and the guest can only write where it was given
+     * memory. That is what lets a caller who has to hand over zeroes skip the
+     * memset -- the cost real Windows never pays either, because there a
+     * committed page is a promise the first touch collects on.
+     */
+    let handedTo = base;
 
     /** @param {{ base: number, size: number }} span */
     const release = span=>{
@@ -200,7 +215,9 @@ export function createHeapAllocator({ base, size }){
                 }
                 spans.splice(i, 1, ...remainder);
 
-                live.set(start, { address: start, size: bytes, capacity, owner });
+                const fresh = start >= handedTo;
+                handedTo = Math.max(handedTo, end);
+                live.set(start, { address: start, size: bytes, capacity, owner, fresh });
                 return start;
             }
             return 0;
@@ -366,6 +383,43 @@ export function createHeapFunctions(host){
     };
 
     /**
+     * A block handed over as zeroes, at the price of what it actually costs.
+     *
+     * The observable contract is exact -- the caller reads zeroes -- but a
+     * block out of arena that has never been handed out is already zero, and
+     * writing a megabyte of zeroes over a megabyte of zeroes is a memset the
+     * program pays for inside its own call. Windows pays nothing there either:
+     * a committed page is backed and reads as zero, and the cost of making it
+     * so is spread over the program's own first writes.
+     *
+     * Recycled memory is the case that has to be cleared, and it is the one
+     * that matters: without it one allocation's data leaks into the next.
+     *
+     * @param {number} address @param {number} length
+     */
+    const zeroHandedOver = (address, length)=>{
+        if (!allocator.block(address)?.fresh)
+        {
+            zero(address, length);
+        }
+    };
+
+    /**
+     * Reservations with pages the program gave back, as one range covering
+     * them.
+     *
+     * A decommitted page is gone on Windows, and committing it again yields a
+     * fresh zero-filled one. Page-level commit state is not modelled here, so
+     * what is modelled is that promise: the range is noted, and cleared when
+     * the program commits inside it again. Noted rather than cleared at the
+     * decommit, so a program that never asks for the memory back never pays
+     * for it.
+     *
+     * @type {Map<number, { from: number, to: number }>}
+     */
+    const decommitted = new Map();
+
+    /**
      * The block at `address`, but only if it belongs to `heap`. Windows leaves
      * a cross-heap free undefined; refusing it turns a bug that would otherwise
      * surface as unrelated corruption into a FALSE the caller can see.
@@ -477,7 +531,7 @@ export function createHeapFunctions(host){
                 }
                 if (flags & HEAP_ZERO_MEMORY)
                 {
-                    zero(address, size);
+                    zeroHandedOver(address, size);
                 }
                 return address;
             },
@@ -548,8 +602,6 @@ export function createHeapFunctions(host){
                 const requested = pointer >>> 0;
                 const rounded = roundUp(size, PAGE_SIZE);
 
-                let address;
-                let span;
                 if (requested !== 0)
                 {
                     // Reserve-then-commit is a common two-step, and the second
@@ -584,46 +636,64 @@ export function createHeapFunctions(host){
                             : 'no reservation there'}`);
                         return 0;
                     }
-                    address = page;
-                    span = needed;
-                }
-                else
-                {
-                    // A reservation is granted in whole allocation granules,
-                    // as Windows grants it: a program that reserves a size and
-                    // commits pages up to the granule's end is within its
-                    // rights, and was refused here as if it had left its
-                    // reservation.
-                    span = roundUp(size, ALLOCATION_GRANULARITY);
-                    address = allocator.allocate(span,
-                        { alignment: ALLOCATION_GRANULARITY, owner: VIRTUAL });
-                    if (address === 0)
+                    // Committing inside a reservation writes nothing.
+                    //
+                    // A page of a reservation the program has not committed
+                    // yet reads as zero already -- the reservation was handed
+                    // over that way below, and the program cannot have written
+                    // where it had not committed -- so the zeroes Windows
+                    // promises are there without anyone putting them there.
+                    // What is not free is a page the program gave back: that
+                    // one it did write, and Windows would hand it over fresh.
+                    const given = decommitted.get(existing.address);
+                    if (given)
                     {
-                        // A caller checks the return and then asks why. A zero
-                        // with no code behind it leaves whatever the previous
-                        // call happened to set, which is worse than useless.
-                        host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
-                        refused('VirtualAlloc', rounded);
-                        return 0;
+                        const from = Math.max(page, given.from);
+                        const to = Math.min(page + needed, given.to);
+                        zero(from, Math.max(0, to - from));
                     }
+                    // A page that is already committed keeps what the program
+                    // put in it: Windows documents committing one twice as
+                    // succeeding without zeroing, and an allocator that
+                    // commits up to its high-water mark each time it grows
+                    // does exactly that.
+                    return page;
                 }
 
-                // Zeroed whether this call commits or only reserves.
+                // A reservation is granted in whole allocation granules, as
+                // Windows grants it: a program that reserves a size and commits
+                // pages up to the granule's end is within its rights, and was
+                // refused here as if it had left its reservation.
+                const span = roundUp(size, ALLOCATION_GRANULARITY);
+                const address = allocator.allocate(span,
+                    { alignment: ALLOCATION_GRANULARITY, owner: VIRTUAL });
+                if (address === 0)
+                {
+                    // A caller checks the return and then asks why. A zero with
+                    // no code behind it leaves whatever the previous call
+                    // happened to set, which is worse than useless.
+                    host.setLastError(ERROR_NOT_ENOUGH_MEMORY);
+                    refused('VirtualAlloc', rounded);
+                    return 0;
+                }
+                // The whole reservation reads as zero from here on, whether
+                // this call commits any of it or not, and that is what lets
+                // every commit inside it above cost nothing.
                 //
-                // Committing has to zero: Windows hands out zero-filled pages
-                // and a program relies on it. Reserving has to zero here for a
-                // different reason -- the arena hands back memory something
-                // else finished with, and a page a program reserved but has not
-                // committed reads as whatever was there before. On Windows
-                // touching it faults; here it yields old bytes, and a stale
-                // value that happens to look like a pointer is read as one. The
-                // program then passes it to something that dereferences it, far
-                // from anything that would explain where it came from.
+                // Two things want it. A commit has to yield zero-filled pages,
+                // which a program relies on. And a page the program reserved
+                // but has not committed reads as whatever was there before --
+                // on Windows touching it faults, here it yields old bytes, and
+                // a stale value that happens to look like a pointer is read as
+                // one, then dereferenced far from anything that would explain
+                // where it came from. Reading zero where Windows would fault is
+                // the more forgiving of the two wrong answers, and the only one
+                // that cannot be mistaken for data.
                 //
-                // Reading zero where Windows would fault is the more forgiving
-                // of the two wrong answers, and the only one that cannot be
-                // mistaken for data.
-                zero(address, span);
+                // Arena that was never handed out is zero already; only what
+                // something else finished with costs a write.
+                decommitted.delete(address);
+                zeroHandedOver(address, span);
                 return address;
             },
         },
@@ -643,13 +713,32 @@ export function createHeapFunctions(host){
                 {
                     // Documented: MEM_RELEASE frees the whole reservation and
                     // dwSize must be zero.
-                    return bytes === 0 && allocator.free(address) ? 1 : 0;
+                    if (bytes !== 0 || !allocator.free(address))
+                    {
+                        return 0;
+                    }
+                    decommitted.delete(address);
+                    return 1;
+                }
+                if ((type & MEM_DECOMMIT) === 0)
+                {
+                    return 0;
                 }
                 // Decommit keeps the reservation. Page-level commit state is not
                 // modelled, so the memory stays readable -- observably identical
                 // except for the fault a program would have to be provoking on
-                // purpose to notice.
-                return (type & MEM_DECOMMIT) ? 1 : 0;
+                // purpose to notice. What is remembered is the range, because a
+                // commit of it later has to read as zeroes: Windows took those
+                // pages away and gives back new ones.
+                const span = bytes >>> 0;
+                const to = address + (span === 0
+                    ? block.capacity
+                    : Math.min(roundUp(span, PAGE_SIZE), block.capacity));
+                const given = decommitted.get(address);
+                decommitted.set(address, given
+                    ? { from: Math.min(given.from, address), to: Math.max(given.to, to) }
+                    : { from: address, to });
+                return 1;
             },
         },
 
@@ -675,7 +764,7 @@ export function createHeapFunctions(host){
                 }
                 if (flags & GMEM_ZEROINIT)
                 {
-                    zero(address, size);
+                    zeroHandedOver(address, size);
                 }
                 return address;
             },
@@ -774,7 +863,7 @@ export function createHeapFunctions(host){
                 const address = allocator.allocate(size === 0 ? 1 : size);
                 if (address !== 0 && (flags & GMEM_ZEROINIT))
                 {
-                    zero(address, size);
+                    zeroHandedOver(address, size);
                 }
                 return address;
             },

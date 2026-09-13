@@ -63,6 +63,13 @@ Accessors (all validated through `assert`):
 | `readCString` | `(address, limit = 4096) => string` | NUL-terminated Latin-1 string. Throws if no NUL within `limit` bytes (clamped to the region). |
 | `readWideString` | `(address, limit = 8192) => string` | NUL-terminated UTF-16LE string; `limit` is in bytes. Throws if no terminator within it. |
 
+Who is writing (see [§3](#who-writes-into-guest-memory)):
+
+| member | signature | meaning |
+|--------|-----------|---------|
+| `writer` | `(name) => number` | The number a name's writes are charged under, resolved once by whoever registers the name. `-1` with no log registry. |
+| `charging` | `(slot) => number` | Charges what follows to a number and answers who was being charged, for the caller to put back on the way out. A number outside the table leaves the charge where it was. |
+
 ### Diagnostics
 
 `status` is `'created'` before `create()` and `'ready'` after.
@@ -116,6 +123,36 @@ shape it:
 
 A string scan may read up to `limit` bytes but is clamped to the region, so a string at the end
 of a mapped span is ordinary and the scan cannot wander into the next region.
+
+### Who writes into guest memory
+
+Every byte the host puts into the guest's address space passes through `writeBytes`, and by
+itself that is one number for the whole run — the number that rises fastest in a stalling frame
+and the one that cannot be acted on. So each write is charged to whoever is in flight: the
+[bridge](./bridge.md) resolves each registered function's name to a number once and hands it to
+`charging` around the call, restoring the previous number on the way out, so a handler that
+calls guest code back into another host call nests without a stack of its own. A write with no
+host call in flight is charged to `<no host call>` rather than to whoever ran last.
+
+The account is published as the `memory/writers` table (`WRITER_COLUMNS`: `name` as a journal
+dictionary id, `bytes`, `writes`; `WRITER_ROWS` = 256), cumulative over the run, plus two
+counters of the frame that just closed: `frameWriter` (the busiest writer's name id, `-1` if
+nothing wrote) and `frameWriterBytes`. The busiest writer is found as the writes happen — a
+stamp per row says whether its frame total belongs to this frame — so closing a frame bumps the
+stamp instead of clearing anything.
+
+Two properties are deliberate and both are pinned by tests:
+
+- **A row is taken at a name's first write, not at its registration.** Registration order is the
+  order the engine builds its libraries in, so rows taken there go to the first few dozen
+  kernel32 functions, most of which never write a byte, and everything registered afterwards —
+  which is most of what writes — ends up sharing the overflow row `<beyond the table>`. Taken at
+  the first write, the table holds the writers.
+- **The write path allocates nothing and touches no string.** A charge is an array read, a
+  branch and four array operations; names are interned once, where a row is taken.
+
+With the log layer stubbed nothing is published, no account is built, and the write path takes a
+branch rather than a call.
 
 ### The address space, as it is laid out today
 

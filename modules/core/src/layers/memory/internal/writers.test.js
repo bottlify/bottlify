@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BEYOND, WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './writers.js';
+import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './writers.js';
 import { createTable, readTable } from '../../log/internal/table.js';
 
 /** The account over a real table, with a dictionary that numbers words in order. */
@@ -63,20 +63,40 @@ test('a write is charged to the call in flight, and nesting puts the caller back
     });
 });
 
-test('a name keeps its slot, and names past the table share one row', ()=>{
+test('a row goes to a name that writes, not to a name that was registered', ()=>{
+    // Two rows are reserved and two are left, so the registration order below
+    // would spend both on names that never write a byte.
     const it = account(4);
-    assert.equal(it.writer('a'), it.writer('a'), 'a name resolves to the same slot');
-    assert.equal(it.writer('a'), 2, 'the first two rows are reserved');
-    assert.equal(it.writer('b'), 3);
-    assert.equal(it.writer('c'), BEYOND, 'a table that is full names no more writers');
-    assert.equal(it.writer('d'), BEYOND);
+    const quiet = it.writer('GetTickCount');
+    const alsoQuiet = it.writer('Sleep');
+    const loud = it.writer('ReadFile');
 
-    it.charging(it.writer('c'));
-    it.charge(7);
-    it.charging(it.writer('d'));
-    it.charge(3);
-    assert.deepEqual(it.rows()['<beyond the table>'], { bytes: 10, writes: 2 },
-        'what the table has no room for is counted rather than lost');
+    it.charging(loud);
+    it.charge(9);
+
+    assert.deepEqual(it.rows(), {
+        '<no host call>': { bytes: 0, writes: 0 },
+        '<beyond the table>': { bytes: 0, writes: 0 },
+        ReadFile: { bytes: 9, writes: 1 },
+    }, 'the writer is named and the two that only registered are not in the table at all');
+    assert.notEqual(quiet, alsoQuiet, 'each name is still numbered for itself');
+});
+
+test('a name keeps its row, and writers past the table share one', ()=>{
+    const it = account(4);
+    assert.equal(it.writer('a'), it.writer('a'), 'a name is numbered once');
+
+    for (const who of ['a', 'b', 'c', 'd'])
+    {
+        it.charging(it.writer(who));
+        it.charge(1);
+    }
+    assert.deepEqual(it.rows(), {
+        '<no host call>': { bytes: 0, writes: 0 },
+        '<beyond the table>': { bytes: 2, writes: 2 },
+        a: { bytes: 1, writes: 1 },
+        b: { bytes: 1, writes: 1 },
+    }, 'what the table has no room for is counted rather than lost');
 });
 
 test('the frame reports its busiest writer and then starts again', ()=>{

@@ -135,6 +135,22 @@ function fakeApp({ capacity = 4096, shared = true } = {}){
                 app.levels.push(level);
             },
         },
+        /** How the account was asked for, in order, so the page's words can be checked. */
+        profiled: /** @type {any[]} */ ([]),
+        guestProfile: {
+            available: ()=>true,
+            instructionStats: ()=>({ counters: { RETIRED: 3 }, opcodes: [] }),
+            /** @param {{ keepCode?: boolean }} [how] */
+            start(how){
+                app.profiled.push({ start: how ?? null });
+                return true;
+            },
+            read: ()=>({ entries: [{ address: 0x401000, instructions: 12, hits: 12 }],
+                dropped: 1 }),
+            stop(){
+                app.profiled.push({ stop: true });
+            },
+        },
         registry: ()=>({ toJSON: ()=>({ HKLM: {} }) }),
         session: { export: ()=>[{ path: 'C:\\a.txt', bytes: Uint8Array.of(1, 2) }] },
         diagnostics: ()=>[
@@ -481,6 +497,24 @@ test('diagnostics cross as they are, less what a clone refuses, whole or one lay
     assert.deepEqual(await remote.diagnostics('nothing'), []);
     const counted = remote.traffic();
     assert.ok(counted.request >= 3 && counted.answer >= 3, 'the port counts what crossed');
+    await remote.dispose();
+});
+
+test('the page starts, reads and stops the account of where the guest ran', async()=>{
+    const { remote, app } = await connect();
+
+    assert.equal(await remote.guestProfile.available(), true);
+    assert.equal(await remote.guestProfile.start({ keepCode: true }), true);
+    assert.deepEqual(await remote.guestProfile.read(), {
+        entries: [{ address: 0x401000, instructions: 12, hits: 12 }],
+        dropped: 1,
+    });
+    await remote.guestProfile.stop();
+    assert.deepEqual((await remote.guestProfile.instructionStats()).counters, { RETIRED: 3 });
+
+    // keepCode is the whole reason the options object crosses: without it the
+    // account is the compiler's blocks rather than the interpreter's steps.
+    assert.deepEqual(app.profiled, [{ start: { keepCode: true } }, { stop: true }]);
     await remote.dispose();
 });
 

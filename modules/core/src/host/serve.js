@@ -610,6 +610,21 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         trace: ()=>app.trace(),
         presented: ()=>({ count: frames, history: presented.slice() }),
         /*
+         * The emulator's account of where the guest ran, by address. Only the
+         * engine's own thread can start it, and the run worth taking an account
+         * of is the one the page drives -- so without these there is no way to
+         * ask for one where it matters. Requests rather than shared memory: it
+         * is started for a measurement and read twice, not polled.
+         */
+        'guestProfile.available': ()=>app.guestProfile.available(),
+        'guestProfile.instructionStats': ()=>app.guestProfile.instructionStats(),
+        // The options object crosses whole, because `keepCode` is what makes the
+        // account the interpreter's own instructions rather than the compiler's.
+        'guestProfile.start': (/** @type {{ keepCode?: boolean }} */ how)=>
+            app.guestProfile.start(how),
+        'guestProfile.read': ()=>app.guestProfile.read(),
+        'guestProfile.stop': ()=>app.guestProfile.stop(),
+        /*
          * The reading half of the log, for a page that has no shared memory
          * to read it in. Every one of these is a request the page does not
          * make when the block crossed at start: there it reads the same

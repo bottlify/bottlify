@@ -280,6 +280,34 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         trace: ()=>request('trace'),
         /** @returns {Promise<{ count: number, history: import('./messages.js').Presented[] }>} */
         presented: ()=>request('presented'),
+
+        /**
+         * The emulator's account of where the guest ran, by address, weighted by
+         * the instructions retired there. The same surface the local controller
+         * offers, because the run worth profiling is the one a page drives.
+         *
+         * Costs a call per compiled block while it is kept, so it is started for
+         * a measurement and stopped after.
+         */
+        guestProfile: {
+            /** @returns {Promise<boolean>} */
+            available: ()=>request('guestProfile.available'),
+            /** @returns {Promise<{ counters: Record<string, number>,
+             *     opcodes: { kind: string, is0f: boolean, opcode: number, isMem: boolean,
+             *         group: number, count: number }[] } | null>} */
+            instructionStats: ()=>request('guestProfile.instructionStats'),
+            /**
+             * @param {{ keepCode?: boolean }} [how] Kept code makes the account
+             *     the interpreter's own instructions.
+             * @returns {Promise<boolean>}
+             */
+            start: how=>request('guestProfile.start', [how]),
+            /** @returns {Promise<{ entries: { address: number, instructions: number,
+             *     hits: number }[], dropped: number } | null>} */
+            read: ()=>request('guestProfile.read'),
+            /** @returns {Promise<void>} */
+            stop: ()=>request('guestProfile.stop'),
+        },
         /** Frames shown, as of the last frame event. */
         frames: ()=>frames,
 

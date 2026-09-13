@@ -122,7 +122,9 @@ Three kinds go to the engine, two come back. Only requests carry an id.
 | from engine | `event` | `name`, `payload` | An event the page subscribed to with `on`, or `frame`, which is always sent. |
 
 The method table in `serve.js`: `start`, `run`, `pause`, `resume`, `stop`, `dispose`,
-`diagnostics`, `trace`, `presented`, `log.setLevel`, `log.setDefaultLevel`, `input.attach`,
+`diagnostics`, `trace`, `presented`, `guestProfile.available`, `guestProfile.start`,
+`guestProfile.read`, `guestProfile.stop`, `guestProfile.instructionStats`, `log.setLevel`,
+`log.setDefaultLevel`, `input.attach`,
 `input.detach`, `on`, and — only for a page without shared memory — `log.recent`, `log.drain`,
 `log.profile`, `log.frames`, `log.counters`, `log.threads`, `log.guestByModule`. Any
 request other than `start` or `dispose` before a program has started is refused with `nothing has
@@ -159,6 +161,11 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `presented()` | `Promise<{ count, history: Presented[] }>` | The last 600 presented frames: `{ index, at, ms, w, h, failed }`. |
 | `frames()` | `number` | Frames shown as of the last `frame` event. Synchronous. |
 | `traffic()` | `{ input, request, visibility, answer, event }` | Messages by kind since start, both ways. Synchronous. |
+| `guestProfile.available()` | `Promise<boolean>` | Whether the emulator was built with the by-address account. |
+| `guestProfile.start(how?)` | `Promise<boolean>` | Starts it. `how.keepCode` leaves the compiled code alone, which makes the account the interpreter's own instructions: a block counts itself only if it was compiled with the account on, so a warm cache stays silent and what lands in the table is interpreted code, one instruction at a time. |
+| `guestProfile.read()` | `Promise<{ entries: { address, instructions, hits }[], dropped } \| null>` | Where the guest ran, by address, weighted by instructions retired there. An entry whose `instructions` equals its `hits` was interpreted. |
+| `guestProfile.stop()` | `Promise<void>` | |
+| `guestProfile.instructionStats()` | `Promise<{ counters, opcodes } \| null>` | A profiler build's own counters and retired instructions by opcode; counts only grow, so a window is two readings. `null` without such a build. |
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
 | `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |

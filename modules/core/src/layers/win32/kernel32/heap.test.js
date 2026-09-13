@@ -26,23 +26,40 @@ const ARENA = { base: 0x1000, size: 0x4000 };
 const RESERVING_ARENA = { base: GRANULARITY, size: 4 * GRANULARITY };
 
 /**
- * Guest memory, dirtied on purpose.
+ * Guest memory, as the emulator's own is: zero until something writes.
  *
- * Every byte starts at 0xaa so that "this range is zero" is an assertion about
- * what the allocator did, not about what a fresh buffer happened to contain.
+ * The fixture holds that premise rather than contradicting it, because it is
+ * what the allocator's zeroing rests on -- a pre-dirtied arena would describe a
+ * machine this engine does not have. What a previous owner left behind is
+ * produced the way a program produces it, by writing into a block and giving it
+ * back, which is what `dirty` below does.
+ *
+ * `written` counts the bytes the host put into guest memory, because a memset
+ * that never crosses is the whole point of not zeroing what is already zero.
  */
 function fakeHost(arena = ARENA){
     const bytes = new Uint8Array(arena.base + arena.size);
-    bytes.fill(0xaa);
+    let written = 0;
 
     return {
         bytes,
         arena,
+        written: ()=>written,
+        /**
+         * The program writing into memory it was given: straight into the
+         * buffer, because the host is not the one doing it.
+         *
+         * @param {number} address @param {number} length
+         */
+        dirty(address, length){
+            bytes.fill(0xaa, address, address + length);
+        },
         /** @param {number} address @param {number} length */
         readMemory: (address, length)=>bytes.subarray(address, address + length),
         setLastError: ()=>{},
         /** @param {number} address @param {Uint8Array} data */
         writeMemory(address, data){
+            written += data.length;
             for (let i = 0; i < data.length; i++)
             {
                 bytes[address + i] = data[i];
@@ -141,12 +158,26 @@ test('HEAP_ZERO_MEMORY zeroes the memory it hands over', ()=>{
     const { host, fns } = setup();
     const heap = fns.GetProcessHeap.handler();
 
-    const dirty = fns.HeapAlloc.handler([heap, 0, 64]);
     const clean = fns.HeapAlloc.handler([heap, HEAP_ZERO_MEMORY, 64]);
-
     assert.ok(all(host.bytes.subarray(clean, clean + 64), 0),
         'the flag is the whole reason a program passes it');
-    assert.ok(dirty !== 0);
+    assert.equal(host.written(), 0,
+        'arena nobody has had is zero already, and a memset over it is time the program pays');
+});
+
+test('memory handed out again does not carry the last owner\'s data into this one', ()=>{
+    const { host, fns } = setup();
+    const heap = fns.GetProcessHeap.handler();
+
+    const first = fns.HeapAlloc.handler([heap, HEAP_ZERO_MEMORY, 64]);
+    host.dirty(first, 64);
+    assert.equal(fns.HeapFree.handler([heap, 0, first]), 1);
+
+    const again = fns.HeapAlloc.handler([heap, HEAP_ZERO_MEMORY, 64]);
+    assert.equal(again, first, 'the same memory comes back');
+    assert.ok(all(host.bytes.subarray(again, again + 64), 0),
+        'this is the case a lazy zeroing must not get wrong: it is a data leak');
+    assert.equal(host.written(), 64, 'and it is paid for exactly once');
 });
 
 test('HeapAlloc returns NULL when the arena cannot fit the request', ()=>{
@@ -291,7 +322,59 @@ test('VirtualAlloc commits granular, zeroed memory', ()=>{
     assert.equal(address % GRANULARITY, 0);
     assert.ok(all(host.bytes.subarray(address, address + PAGE_SIZE), 0),
         'a committed page reads as zero on Windows, and code depends on it');
+    assert.equal(host.written(), 0,
+        'and on Windows that costs nothing at the call: the page is a promise, not a memset');
     assert.equal(fns.VirtualAlloc.handler([0, 0, MEM_COMMIT, 0x04]), 0, 'zero bytes is a failure');
+});
+
+test('a reservation over memory something else had is cleared before it is handed back', ()=>{
+    const { host, fns } = setup(RESERVING_ARENA);
+
+    const first = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, 0x04]);
+    host.dirty(first, GRANULARITY);
+    assert.equal(fns.VirtualFree.handler([first, 0, MEM_RELEASE]), 1);
+
+    const again = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, 0x04]);
+    assert.equal(again, first);
+    assert.ok(all(host.bytes.subarray(again, again + GRANULARITY), 0),
+        'a program that reserves memory must not be able to read the last tenant\'s');
+});
+
+test('committing a page a second time keeps what the program put in it', ()=>{
+    // Documented: MEM_COMMIT on already-committed pages succeeds and does not
+    // zero them. An allocator built on VirtualAlloc commits up to its own
+    // high-water mark every time it grows, so it does this constantly -- and
+    // zeroing there would erase the objects it is growing around.
+    const { host, fns } = setup(RESERVING_ARENA);
+    const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, 0x04]);
+
+    assert.equal(fns.VirtualAlloc.handler([reserved, PAGE_SIZE, MEM_COMMIT, 0x04]), reserved);
+    host.dirty(reserved, PAGE_SIZE);
+    const before = host.written();
+
+    assert.equal(fns.VirtualAlloc.handler([reserved, PAGE_SIZE * 2, MEM_COMMIT, 0x04]), reserved);
+    assert.ok(all(host.bytes.subarray(reserved, reserved + PAGE_SIZE), 0xaa),
+        'the page that was already committed keeps its contents');
+    assert.ok(all(host.bytes.subarray(reserved + PAGE_SIZE, reserved + PAGE_SIZE * 2), 0),
+        'and the page that was not reads as zero');
+    assert.equal(host.written(), before, 'neither costs a write');
+});
+
+test('a page given back reads as zeroes when the program commits it again', ()=>{
+    const { host, fns } = setup(RESERVING_ARENA);
+    const reserved = fns.VirtualAlloc.handler([0, GRANULARITY, MEM_RESERVE, 0x04]);
+    fns.VirtualAlloc.handler([reserved, PAGE_SIZE * 2, MEM_COMMIT, 0x04]);
+    host.dirty(reserved, PAGE_SIZE * 2);
+
+    // Windows takes the pages away and gives new ones back on the next commit.
+    assert.equal(fns.VirtualFree.handler([reserved, PAGE_SIZE, MEM_DECOMMIT]), 1);
+    const before = host.written();
+    assert.equal(fns.VirtualAlloc.handler([reserved, PAGE_SIZE, MEM_COMMIT, 0x04]), reserved);
+
+    assert.ok(all(host.bytes.subarray(reserved, reserved + PAGE_SIZE), 0));
+    assert.equal(host.written() - before, PAGE_SIZE, 'exactly the page that was given back');
+    assert.ok(all(host.bytes.subarray(reserved + PAGE_SIZE, reserved + PAGE_SIZE * 2), 0xaa),
+        'the page that was kept is untouched');
 });
 
 test('VirtualFree releases whole reservations only', ()=>{
@@ -355,8 +438,11 @@ test('a zero-initialised global allocation is actually zeroed', ()=>{
     const handle = fns.GlobalAlloc.handler([GMEM_ZEROINIT, 32]);
     assert.equal(all(host.bytes.subarray(handle, handle + 32), 0), true);
 
-    const dirty = fns.GlobalAlloc.handler([0, 32]);
-    assert.equal(all(host.bytes.subarray(dirty, dirty + 32), 0xaa), true,
+    host.dirty(handle, 32);
+    assert.equal(fns.GlobalFree.handler([handle]), 0);
+    const kept = fns.GlobalAlloc.handler([0, 32]);
+    assert.equal(kept, handle);
+    assert.equal(all(host.bytes.subarray(kept, kept + 32), 0xaa), true,
         'and one that did not ask for it is left as it was found');
 });
 
