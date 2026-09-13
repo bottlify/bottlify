@@ -19,9 +19,9 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createV86Host } from '../../cpu/internal/v86-host.js';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, lockCode, setIndicesCode, setMaterialCode,
-    setRenderStateCode, setStreamSourceCode, setTextureCode, setTextureStageStateCode,
-    setTransformCode, setVertexShaderCode, unlockCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, TEXTURE, getSurfaceLevelCode, lockCode, setIndicesCode,
+    setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
+    setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
 import { D3DERR_INVALIDCALL, D3DTSS } from '../d3d8/constants.js';
 
@@ -32,7 +32,7 @@ const PROGRAM = 0x8000;
 const ROUTINES = {
     renderState: 0x8800, transform: 0x8880, lock: 0x8900, unlock: 0x89a0,
     stream: 0x8a00, indices: 0x8a80, shader: 0x8b00, texture: 0x8b80, stageState: 0x8c00,
-    material: 0x8c80,
+    material: 0x8c80, surfaceLevel: 0x8d80,
 };
 /** Where the routines jump when they leave the case to the host: a halt here. */
 const TRAP = 0x8d00;
@@ -49,6 +49,10 @@ const VBASE = 0xd000;
 const VLENGTH = 0x100;
 const OUT = 0xc800;
 const MATERIAL = 0xcc00;
+/** A texture object and its block: three levels, the middle one published. */
+const TEX = 0x9c00;
+const TBLOCK = 0xd400;
+const LEVEL1 = 0x4711;
 const STACK = 0x300000;
 
 /** @param {number} value @returns {number[]} */
@@ -92,6 +96,10 @@ const STEPS = [
     step(ROUTINES.stageState, OBJECT, [8, D3DTSS.COLOROP, 5]),   // 23: no such stage: refused here
     step(ROUTINES.material, OBJECT, [MATERIAL]),         // 24: copied in
     step(ROUTINES.material, OBJECT, [0]),                // 25: null: the trap
+    step(ROUTINES.surfaceLevel, TEX, [1, OUT]),          // 26: the published level
+    step(ROUTINES.surfaceLevel, TEX, [0, OUT]),          // 27: not published yet: the trap
+    step(ROUTINES.surfaceLevel, TEX, [3, OUT]),          // 28: no such level: refused here
+    step(ROUTINES.surfaceLevel, TEX, [1, 0]),            // 29: nowhere to put it: the trap
 ];
 
 /** @param {typeof STEPS[number]} entry @param {number} at */
@@ -144,7 +152,13 @@ test('the guest routines write the blocks and leave what they cannot take to the
     host.writePhysical(ROUTINES.texture, setTextureCode(ROUTINES.texture, TRAP));
     host.writePhysical(ROUTINES.stageState, setTextureStageStateCode(ROUTINES.stageState, TRAP));
     host.writePhysical(ROUTINES.material, setMaterialCode(ROUTINES.material, TRAP));
+    host.writePhysical(ROUTINES.surfaceLevel,
+        getSurfaceLevelCode(ROUTINES.surfaceLevel, TRAP));
     host.writePhysical(TRAP, new Uint8Array([0xf4]));
+    host.writePhysical(TEX + 4, new Uint8Array(u32(TBLOCK)));
+    host.writePhysical(TBLOCK, new Uint8Array(TEXTURE.SIZE));
+    host.writePhysical(TBLOCK + TEXTURE.LEVEL_COUNT, new Uint8Array(u32(3)));
+    host.writePhysical(TBLOCK + TEXTURE.LEVELS + 4, new Uint8Array(u32(LEVEL1)));
     host.writePhysical(OBJECT + 4, new Uint8Array(u32(BLOCK)));
     host.writePhysical(VBUF + 4, new Uint8Array(u32(VBLOCK)));
     host.writePhysical(BARE, new Uint8Array(8));
@@ -294,6 +308,21 @@ test('the guest routines write the blocks and leave what they cannot take to the
     assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
     assert.equal(run(25), 'trap', 'a null material is the host\'s to refuse');
     assert.equal(read(BLOCK + SHADOW.MATERIAL_CALLS), 1);
+
+    write(OUT, 0);
+    assert.equal(run(26), 'ok');
+    assert.equal(read(OUT), LEVEL1, 'the pointer the host published for that level');
+    assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and the reference it owes is counted');
+
+    write(OUT, 0);
+    assert.equal(run(27), 'trap', 'a level the host has not published yet');
+    assert.equal(read(TBLOCK + TEXTURE.REFS), 1, 'and nothing owed for it');
+    assert.equal(read(OUT), 0);
+
+    assert.equal(run(28), 'invalid', 'a level the texture has not got, refused without the trap');
+    assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
+    assert.equal(run(29), 'trap', 'a null out-pointer is refused by the host');
+    assert.equal(read(TBLOCK + TEXTURE.REFS), 1);
 
     host.stop();
 });

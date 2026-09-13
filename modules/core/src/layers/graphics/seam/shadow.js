@@ -48,6 +48,13 @@
  * render states between two draws costs the next draw a scan of the render
  * states, not of every word in the block.
  *
+ * A getter answers from the block too, where what it answers cannot change:
+ * a texture's level is one surface however often it is asked for, so the
+ * pointer sits in the texture's own block and the guest reads it. What such a
+ * call owes is a reference, and a reference cannot be taken without the host
+ * -- so the guest counts them and the host charges the count before any
+ * reference of that texture is read or given back.
+ *
  * A pointer the guest wrote names an object only while the program holds
  * it. When the last reference goes the host marks every slot still naming
  * that pointer as stale -- in the block and in its copy -- so the device
@@ -153,6 +160,32 @@ export const BUFFER = {
     /** The device's block, for the counters and the ring. */
     DEVICE: 28,
     SIZE: 32,
+};
+
+/**
+ * Byte offsets within a texture's block, which answers for its levels.
+ *
+ * A level's surface is one object however often it is asked for, so the
+ * pointer a program is handed for it never changes -- and a program of this
+ * era asks for one before every copy and every lock, hundreds of times a
+ * frame, for a pointer it was already given. The table is filled by the host
+ * the first time a level is asked for, because that is when the surface is
+ * made and published; after that the answer is in the guest's own memory.
+ */
+export const TEXTURE = {
+    /** Bit 0 set by the host: take the slow path. */
+    FLAGS: 0,
+    /** How many levels the texture has; a level past them is refused here. */
+    LEVEL_COUNT: 4,
+    /**
+     * Levels handed out by the guest routine, counted by it. Each is a
+     * reference the program owns and the host has not charged yet.
+     */
+    REFS: 8,
+    /** A pointer per level, zero for one the host has not published yet. */
+    LEVELS: 12,
+    LEVEL_SLOTS: 16,
+    SIZE: 12 + 16 * 4,
 };
 
 export const FLAG_SLOW_PATH = 1;
@@ -631,7 +664,7 @@ export function setVertexShaderCode(at, trap){
 }
 
 /**
- * The tail a routine answers a stage past the last with: the refusal the
+ * The tail a routine answers an argument out of range with: the refusal the
  * interface documents, without a crossing to fetch it.
  *
  *   invalid:
@@ -641,7 +674,7 @@ export function setVertexShaderCode(at, trap){
  * @param {number} popped
  * @returns {(number[] | { label: string })[]}
  */
-const invalidStage = popped=>[
+const invalidTail = popped=>[
     { label: 'invalid' },
     [0xb8, ...dword(D3DERR_INVALIDCALL)],                        // mov eax, D3DERR_INVALIDCALL
     [0xc2, popped, 0x00],                                        // ret n
@@ -675,7 +708,7 @@ export function setTextureCode(at, trap){
         [0xff, 0x81, ...dword(SHADOW.TEXTURE_CALLS)],            // inc dword [ecx+disp]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x0c, 0x00],                                      // ret 12
-        ...invalidStage(12),
+        ...invalidTail(12),
     ]);
 }
 
@@ -723,7 +756,7 @@ export function setTextureStageStateCode(at, trap){
         [0xff, 0x81, ...dword(SHADOW.STAGE_STATE_CALLS)],        // inc dword [ecx+disp]
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x10, 0x00],                                      // ret 16
-        ...invalidStage(16),
+        ...invalidTail(16),
     ]);
 }
 
@@ -768,6 +801,65 @@ export function setMaterialCode(at, trap){
         [0x5e],                                                  // pop esi
         [0x31, 0xc0],                                            // xor eax, eax
         [0xc2, 0x08, 0x00],                                      // ret 8
+    ]);
+}
+
+/**
+ * HRESULT GetSurfaceLevel(this, UINT level, IDirect3DSurface8** out), as
+ * guest code for a texture. The pointer is the one the host published for
+ * that level, out of the texture's own block; a level the texture has not
+ * got is refused here, as the interface refuses it.
+ *
+ * The reference the call owes is counted rather than taken: taking one is
+ * the host's business, and the count is what the host charges before any
+ * reference of that texture is read or given back. A level the host has not
+ * published yet reads zero and goes to the host, which makes the surface and
+ * fills the slot in.
+ *
+ *     mov ecx, [esp+4]            ; this
+ *     mov ecx, [ecx+4]            ; the block
+ *     test ecx, ecx
+ *     jz slow
+ *     test dword [ecx], 1
+ *     jnz slow
+ *     mov eax, [esp+8]            ; level
+ *     cmp eax, [ecx+LEVEL_COUNT]
+ *     jae invalid                 ; no such level
+ *     cmp eax, LEVEL_SLOTS
+ *     jae slow                    ; a level the table does not hold
+ *     mov edx, [ecx + eax*4 + LEVELS]
+ *     test edx, edx
+ *     jz slow                     ; not published yet
+ *     mov eax, [esp+12]           ; out
+ *     test eax, eax
+ *     jz slow                     ; a null out-pointer is the host's to refuse
+ *     mov [eax], edx
+ *     inc dword [ecx + REFS]
+ *     xor eax, eax                ; D3D_OK
+ *     ret 12
+ *
+ * @param {number} at @param {number} trap
+ * @returns {Uint8Array}
+ */
+export function getSurfaceLevelCode(at, trap){
+    return routine(at, trap, [
+        ...prologue(),
+        [0x8b, 0x44, 0x24, 0x08],                                // mov eax, [esp+8]
+        [0x3b, 0x41, TEXTURE.LEVEL_COUNT],                       // cmp eax, [ecx+4]
+        { jcc: 0x73, to: 'invalid' },                            // jae invalid
+        [0x3d, ...dword(TEXTURE.LEVEL_SLOTS)],                   // cmp eax, 16
+        { jcc: 0x73, to: 'slow' },                               // jae slow
+        [0x8b, 0x94, 0x81, ...dword(TEXTURE.LEVELS)],            // mov edx, [ecx+eax*4+disp]
+        [0x85, 0xd2],                                            // test edx, edx
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x8b, 0x44, 0x24, 0x0c],                                // mov eax, [esp+12]
+        [0x85, 0xc0],                                            // test eax, eax
+        { jcc: 0x74, to: 'slow' },                               // jz slow
+        [0x89, 0x10],                                            // mov [eax], edx
+        [0xff, 0x41, TEXTURE.REFS],                              // inc dword [ecx+8]
+        [0x31, 0xc0],                                            // xor eax, eax
+        [0xc2, 0x0c, 0x00],                                      // ret 12
+        ...invalidTail(12),
     ]);
 }
 
@@ -823,6 +915,10 @@ export function materialFloats(material){
  */
 
 /**
+ * @typedef {Object} ShadowTexture
+ * @property {number} levels
+ * @property {() => number} addRef
+ *
  * @typedef {Object} ShadowDevice
  * @property {(state: number, value: number) => number} SetRenderState
  * @property {(state: number, out: { value?: number }) => number} GetRenderState
@@ -899,7 +995,18 @@ export function createShadow(deps){
     const blocks = new Map();
     /** @type {WeakMap<object, number>} */
     const blockOf = new WeakMap();
-    /** Buffer blocks are carved from pages of their own, for the same reason as the device's. */
+    /**
+     * The textures with a block, with how many of the references the guest
+     * took on their levels the host has charged. One count for the texture
+     * and all of its levels, because that is how the resource itself counts
+     * them.
+     *
+     * @type {WeakMap<object, { block: number, charged: number }>}
+     */
+    const textureBlocks = new WeakMap();
+    /** References charged so far, which is what the guest routine absorbed. */
+    let levelRefs = 0;
+    /** Resource blocks are carved from pages of their own, for the same reason as the device's. */
     const pool = { at: 0, left: 0 };
 
     /** @param {number} value */
@@ -926,6 +1033,22 @@ export function createShadow(deps){
         // allocation straddles.
         const span = deps.allocate(bytes + PAGE);
         return span === 0 ? 0 : (span + PAGE - 1) & ~(PAGE - 1);
+    };
+    /** @param {number} bytes @returns {number} a span out of the resource pages, or 0 */
+    const carve = bytes=>{
+        if (pool.left < bytes)
+        {
+            pool.at = allocatePage(PAGE);
+            pool.left = pool.at === 0 ? 0 : PAGE;
+            if (pool.at === 0)
+            {
+                return 0;
+            }
+        }
+        const block = pool.at;
+        pool.at += bytes;
+        pool.left -= bytes;
+        return block;
     };
     /** @param {string} api @param {string} detail */
     const refuse = (api, detail)=>{
@@ -1420,23 +1543,83 @@ export function createShadow(deps){
             {
                 return 0;
             }
-            if (pool.left < BUFFER.SIZE)
+            const block = carve(BUFFER.SIZE);
+            if (block === 0)
             {
-                pool.at = allocatePage(PAGE);
-                pool.left = pool.at === 0 ? 0 : PAGE;
-                if (pool.at === 0)
-                {
-                    return 0;
-                }
+                return 0;
             }
-            const block = pool.at;
-            pool.at += BUFFER.SIZE;
-            pool.left -= BUFFER.SIZE;
             deps.writeMemory(block,
                 dwordsBytes([0, buffer.base, buffer.length, 0, 0, 0, 0, owner]));
             blocks.set(block, { buffer, hostLocked: false });
             blockOf.set(buffer, block);
             return block;
+        },
+
+        /**
+         * A texture's block, made on first use: how many levels it has, and a
+         * table of their pointers the host fills in as it publishes them.
+         *
+         * @param {ShadowTexture} texture
+         * @returns {number} the block, or 0 when there is no memory for one
+         */
+        attachTexture(texture){
+            const existing = textureBlocks.get(texture);
+            if (existing)
+            {
+                return existing.block;
+            }
+            const block = carve(TEXTURE.SIZE);
+            if (block === 0)
+            {
+                return 0;
+            }
+            const zeroed = new Uint8Array(TEXTURE.SIZE);
+            zeroed.set(dwordBytes(texture.levels ?? 1), TEXTURE.LEVEL_COUNT);
+            deps.writeMemory(block, zeroed);
+            textureBlocks.set(texture, { block, charged: 0 });
+            return block;
+        },
+
+        /**
+         * The host published a level's surface: the guest may hand that
+         * pointer out itself from now on.
+         *
+         * @param {ShadowTexture} texture @param {number} level @param {number} pointer
+         */
+        noteLevel(texture, level, pointer){
+            const entry = textureBlocks.get(texture);
+            if (!entry || level >= TEXTURE.LEVEL_SLOTS || pointer === 0)
+            {
+                return;
+            }
+            deps.writeMemory(entry.block + TEXTURE.LEVELS + level * 4, dwordBytes(pointer));
+        },
+
+        /**
+         * Charges the references the guest took on a texture's levels.
+         *
+         * Called before any reference of that texture -- or of one of its
+         * levels, which share its count -- is read or given back, and that is
+         * the whole of what keeps the count honest: a Release the program
+         * makes for a level it obtained in the guest would otherwise take the
+         * count one past what it owes, and a texture the program still holds
+         * would be destroyed under it.
+         *
+         * @param {ShadowTexture} texture
+         */
+        settleTexture(texture){
+            const entry = textureBlocks.get(texture);
+            if (!entry)
+            {
+                return;
+            }
+            const taken = readWord(entry.block + TEXTURE.REFS);
+            for (let owed = taken - entry.charged; owed > 0; owed--)
+            {
+                texture.addRef();
+                levelRefs++;
+            }
+            entry.charged = taken;
         },
 
         /**
@@ -1487,6 +1670,10 @@ export function createShadow(deps){
             stageStateCalls: calls.stageStates,
             materialCalls: calls.materials,
             buffers: blocks.size,
+            // Levels handed out in the guest, as the references charged for
+            // them: a level the program still holds is counted once the host
+            // next looks at that texture's references.
+            surfaceLevelCalls: levelRefs,
             // How often an entry found something to adopt, against how often
             // the counters said there was nothing.
             synced,

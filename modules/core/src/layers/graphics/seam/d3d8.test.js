@@ -25,7 +25,7 @@ import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { createPublisher } from './com.js';
 import { createGraphicsLibraries } from './exports.js';
-import { BUFFER, SHADOW, STALE_POINTER } from './shadow.js';
+import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
@@ -1171,6 +1171,53 @@ test('a device is handed out with its block already in place, and reads what the
     assert.equal(h.buffer(vb, 'Unlock'), D3D_OK);
     assert.equal(h.box.memory.readU32(vblock + BUFFER.LOCKED), 0);
     assert.equal(h.libraries.shadow().buffers, 1);
+    assert.deepEqual(h.divergences, []);
+});
+
+test('a level obtained in the guest leaves the count where the host path leaves it', ()=>{
+    // GetSurfaceLevel takes a reference on the surface it hands back, and a
+    // level's surface shares its texture's count. The guest routine cannot
+    // take one, so it counts what it owes and the host charges the count
+    // before any reference is read or given back -- and if that is wrong in
+    // either direction, a program that asks for a level every frame either
+    // leaks its texture or loses it while it is still drawing with it.
+    const h = seamed({ shadow: true });
+    const device = h.createDevice(h.create());
+    const out = 0xe500;
+    assert.equal(h.device(device,
+        'CreateTexture', [8, 8, 2, 0, D3DFMT.A8R8G8B8, D3DPOOL.MANAGED, out]), D3D_OK);
+    const texture = h.box.memory.readU32(out);
+    const block = h.box.memory.readU32(texture + 4);
+    assert.notEqual(block, 0, 'the texture was handed out with its block in place');
+    assert.equal(h.box.memory.readU32(block + TEXTURE.LEVEL_COUNT), 2);
+    assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), 0, 'nothing published yet');
+    const object = h.object(texture);
+    const held = object.refCount;
+
+    // The host's path, which is what the routine falls back to: it publishes
+    // the level and fills its slot in.
+    assert.equal(h.box.trap(texture, 'GetSurfaceLevel', [0, out]), D3D_OK);
+    const level = h.box.memory.readU32(out);
+    assert.notEqual(level, 0);
+    assert.equal(h.box.memory.readU32(block + TEXTURE.LEVELS), level);
+    assert.equal(object.refCount, held + 1, 'the reference the call owes');
+    assert.equal(h.release(level), held, 'and the program gives it back');
+    assert.equal(object.refCount, held);
+
+    // What the guest routine does with the slot now filled: the pointer, and
+    // the reference counted rather than taken.
+    h.box.memory.writeU32(block + TEXTURE.REFS, 1);
+    assert.equal(h.release(level), held, 'charged, then given back');
+    assert.equal(object.refCount, held, 'the same count the host path left');
+    assert.equal(h.libraries.shadow().surfaceLevelCalls, 1);
+
+    // And the count is honest while the program still holds such a level: a
+    // Release of the texture cannot take it to zero under the program.
+    h.box.memory.writeU32(block + TEXTURE.REFS, 2);
+    assert.equal(h.release(texture), 1, 'the level the guest took keeps it alive');
+    assert.equal(object.refCount, 1);
+    assert.equal(h.release(level), 0);
+    assert.equal(object.refCount, 0, 'and the last reference is the one that ends it');
     assert.deepEqual(h.divergences, []);
 });
 

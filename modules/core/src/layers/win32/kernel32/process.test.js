@@ -8,7 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TEB } from './teb.js';
 import {
-    TLS_SLOTS, createProcessFunctions, getLastErrorCode, setLastErrorCode, tlsGetValueCode,
+    CLOCK, TLS_SLOTS, createProcessFunctions, getLastErrorCode, queryPerformanceCounterCode,
+    queryPerformanceFrequencyCode, setLastErrorCode, tickCountCode, tlsGetValueCode,
 } from './process.js';
 
 const TLS_OUT_OF_INDEXES = 0xffffffff;
@@ -23,8 +24,15 @@ const IMAGE_BASE = 0x00400000;
 /** 100ns units between 1601-01-01 and 1970-01-01, the FILETIME epoch shift. */
 const FILETIME_AT_UNIX_EPOCH = 116444736000000000n;
 
-function fakeHost(){
-    const bytes = new Uint8Array(0x2000);
+/**
+ * @param {Object} [options]
+ * @param {number} [options.arena]  Guest memory for the fast paths and their
+ *     blocks, past the first pages the tests write structures into. Without it
+ *     the host has no allocator and nowhere to publish a clock, which is the
+ *     build where every clock export stays a trap.
+ */
+function fakeHost({ arena = 0 } = {}){
+    const bytes = new Uint8Array(0x2000 + arena);
     const view = new DataView(bytes.buffer);
     /** @type {{ first: { id: number, tebAddress?: number }, second: { id: number, tebAddress?: number } }} */
     const threads = {
@@ -33,6 +41,10 @@ function fakeHost(){
     };
     /** @type {number[]} */
     const sleeps = [];
+    /** What the engine was handed to keep the clock block current. */
+    /** @type {(() => void)[]} */
+    const refreshes = [];
+    let free = 0x2000;
     const clock = { uptimeMs: 0, wallMs: 0 };
     /** @type {any} */
     let current = threads.first;
@@ -42,6 +54,7 @@ function fakeHost(){
         view,
         threads,
         sleeps,
+        refreshes,
         clock,
         /** @param {any} thread */
         run: thread=>{
@@ -78,6 +91,17 @@ function fakeHost(){
         /** @param {number} milliseconds */
         sleep: milliseconds=>sleeps.push(milliseconds),
         park: ()=>PARKED,
+        ...arena === 0 ? {} : {
+            /** @param {number} size */
+            allocate: size=>{
+                const at = free;
+                free += size;
+                assert.ok(free <= bytes.length, 'the fixture arena is big enough');
+                return at;
+            },
+            /** @param {() => void} refresh */
+            publishClock: refresh=>refreshes.push(refresh),
+        },
     };
     return host;
 }
@@ -85,8 +109,9 @@ function fakeHost(){
 /** The token a parked call answers with; identity is all that matters. */
 const PARKED = Symbol('parked');
 
-function setup(){
-    const host = fakeHost();
+/** @param {{ arena?: number }} [options] */
+function setup(options = {}){
+    const host = fakeHost(options);
     const fns = createProcessFunctions(host);
 
     /** @param {number} address @param {string} text */
@@ -437,4 +462,129 @@ test('SleepEx and the priority and affinity calls pop their own stdcall bytes', 
     assert.equal(fns.SetPriorityClass.argBytes, 8);
     assert.equal(fns.GetProcessAffinityMask.argBytes, 12);
     assert.equal(fns.SetProcessAffinityMask.argBytes, 8);
+});
+
+test('the clock routines read one block, and what they read is what a trap would answer', ()=>{
+    const at = 0x20000;
+    const trap = 0x7f000010;
+    const block = 0x31000;
+
+    // The counter is two words of the block, copied into the caller's
+    // LARGE_INTEGER; the pointer is the only case left to the host.
+    const counter = queryPerformanceCounterCode(at, trap, block);
+    const view = new DataView(counter.buffer);
+    assert.deepEqual([...counter.slice(0, 6)], [0x8b, 0x4c, 0x24, 0x04, 0x85, 0xc9],
+        'the out-pointer, tested');
+    assert.equal(counter[6], 0x74, 'jz to the slow path');
+    const slow = 8 + counter[7];
+    assert.equal(counter[8], 0xa1, 'mov eax, [block]');
+    assert.equal(view.getUint32(9, true), block + CLOCK.COUNTER);
+    assert.deepEqual([...counter.slice(13, 15)], [0x8b, 0x15]);
+    assert.equal(view.getUint32(15, true), block + CLOCK.COUNTER + 4);
+    assert.deepEqual([...counter.slice(slow - 3, slow)], [0xc2, 0x04, 0x00],
+        'the fast path pops its one argument');
+    assert.equal(counter[slow], 0xe9);
+    assert.equal((at + slow + 5 + view.getInt32(slow + 1, true)) >>> 0, trap,
+        'and the slow path lands on the trap');
+    assert.equal(counter.length, slow + 5);
+
+    // The frequency is a constant of this machine, so it is an immediate.
+    const frequency = queryPerformanceFrequencyCode(at, trap);
+    const constant = new DataView(frequency.buffer);
+    assert.deepEqual([...frequency.slice(8, 10)], [0xc7, 0x01]);
+    assert.equal(constant.getUint32(10, true), 1_000_000, 'one megahertz');
+    assert.deepEqual([...frequency.slice(14, 17)], [0xc7, 0x41, 0x04]);
+    assert.equal(constant.getUint32(17, true), 0, 'and nothing in the high word');
+    const frequencySlow = 8 + frequency[7];
+    assert.equal(frequency[frequencySlow], 0xe9);
+    assert.equal((at + frequencySlow + 5 + constant.getInt32(frequencySlow + 1, true)) >>> 0,
+        trap);
+
+    // The tick count cannot fail and takes no argument, so it is a read and a
+    // return with no case left for the host at all.
+    const ticks = tickCountCode(block);
+    assert.deepEqual([...ticks], [0xa1,
+        ...[0, 8, 16, 24].map(shift=>(block + CLOCK.TICKS) >>> shift & 0xff), 0xc3]);
+});
+
+/**
+ * The address an export binds to: the guest routine it offers, or the trap
+ * that routine would have fallen back to.
+ *
+ * @param {{ guest?: (builder: import('./sync.js').GuestBuilder) => number }} entry
+ * @param {import('./sync.js').GuestBuilder} builder
+ */
+const boundTo = (entry, builder)=>{
+    assert.ok(entry.guest, 'the export offers guest code');
+    return entry.guest(builder);
+};
+
+test('the clock the guest reads is the one the engine credits', ()=>{
+    const { host, fns, u64 } = setup({ arena: 0x4000 });
+    const out = 0x400;
+    host.clock.uptimeMs = 1500;
+
+    // Binding a clock export is what takes the block and hands the engine the
+    // means to keep it current.
+    const trap = 0x7f000010;
+    /** @type {import('./sync.js').GuestBuilder} */
+    const builder = { register: ()=>trap };
+    const counter = boundTo(fns.QueryPerformanceCounter, builder);
+    assert.notEqual(counter, trap, 'the routine was placed');
+    assert.equal(host.refreshes.length, 1, 'and the engine knows how to keep it current');
+    assert.notEqual(boundTo(fns.QueryPerformanceFrequency, builder), trap);
+    const tickCount = boundTo(fns.GetTickCount, builder);
+    assert.equal(host.refreshes.length, 1, 'one block for all of them');
+
+    // One block, and a page of its own: the engine writes it whenever the
+    // clock moves, and a write into a page holding compiled code costs the
+    // emulator everything it compiled there -- including these routines.
+    const block = host.view.getUint32(counter + 9, true) - CLOCK.COUNTER;
+    assert.equal(host.view.getUint32(tickCount + 1, true) - CLOCK.TICKS, block,
+        'the tick count reads the same block');
+    assert.equal(block & 0xfff, 0, 'on a page boundary');
+    assert.ok(block >= 0x2000, 'out of the arena, not over the program');
+
+    // What the guest reads is what the host would have answered, to the word.
+    assert.equal(fns.QueryPerformanceCounter.handler([out]), 1);
+    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out));
+    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), fns.GetTickCount.handler());
+
+    // The block moves only when the engine says the clock did, which is what
+    // makes the two answers agree: guest time does not pass while the guest is
+    // the one running.
+    host.clock.uptimeMs = 2500;
+    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 1500);
+    host.refreshes[0]();
+    assert.equal(host.view.getUint32(block + CLOCK.TICKS, true), 2500);
+    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), 2_500_000n,
+        'one megahertz of ticks for every millisecond credited');
+    fns.QueryPerformanceCounter.handler([out]);
+    assert.equal(host.view.getBigUint64(block + CLOCK.COUNTER, true), u64(out),
+        'and still what a trap would have answered');
+
+    // A clock that is asked again before anything credits it answers the same
+    // thing rather than something smaller: a program timing a frame with it
+    // must never see time run backwards.
+    let last = 0n;
+    for (const uptime of [2500, 2500, 2501, 4000, 4000, 9999])
+    {
+        host.clock.uptimeMs = uptime;
+        host.refreshes[0]();
+        const now = host.view.getBigUint64(block + CLOCK.COUNTER, true);
+        assert.ok(now >= last, `${uptime} did not take the counter backwards`);
+        last = now;
+    }
+});
+
+test('a build with nowhere to publish a clock keeps every clock export a trap', ()=>{
+    // The block is the engine's to keep current. Without one, a routine
+    // reading it would hand a program a clock that never moves -- so the
+    // exports offer no guest code at all and are bound the way they always
+    // were, under their own names.
+    const { fns } = setup();
+
+    assert.equal(fns.QueryPerformanceCounter.guest, undefined);
+    assert.equal(fns.QueryPerformanceFrequency.guest, undefined);
+    assert.equal(fns.GetTickCount.guest, undefined);
 });

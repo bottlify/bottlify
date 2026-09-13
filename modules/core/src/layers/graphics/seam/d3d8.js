@@ -46,9 +46,9 @@ import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
 import { expandTexels, vertexCountOf } from '../d3d8/render.js';
 import {
-    createShadow, lockCode, materialFloats, materialOf, setIndicesCode, setMaterialCode,
-    setRenderStateCode, setStreamSourceCode, setTextureCode, setTextureStageStateCode,
-    setTransformCode, setVertexShaderCode, unlockCode,
+    createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
+    setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
+    setTextureStageStateCode, setTransformCode, setVertexShaderCode, unlockCode,
 } from './shadow.js';
 
 /**
@@ -293,6 +293,49 @@ export function createDirect3D8Seam(
         return at;
     };
 
+    /** @type {Record<string, (builder: { trap: number }) => number>} */
+    const textureGuests = allocate
+        ? { GetSurfaceLevel: ({ trap })=>placeCode(at=>getSurfaceLevelCode(at, trap)) }
+        : {};
+
+    /**
+     * A texture gets its block before it is handed out, for the same reason a
+     * buffer does: the block's address is written when the interface is
+     * published.
+     *
+     * @param {any} device @param {any} texture
+     */
+    const attachTexture = (device, texture)=>{
+        const shadow = shadowOf(device);
+        if (!shadow)
+        {
+            return;
+        }
+        resourceShadows.set(texture, shadow);
+        texture.guestState = ()=>shadow.attachTexture(texture);
+        texture.settleGuestRefs = ()=>shadow.settleTexture(texture);
+    };
+
+    /**
+     * A level's surface has been published, so the guest may answer with its
+     * pointer from now on. The surface charges the texture's guest-side
+     * references too: the two share one count, so a Release through either
+     * has to meet what the program owes.
+     *
+     * @param {any} texture @param {number} level @param {any} surface
+     */
+    const noteLevel = (texture, level, surface)=>{
+        const shadow = resourceShadows.get(texture);
+        if (!shadow)
+        {
+            return;
+        }
+        surface.settleGuestRefs = ()=>shadow.settleTexture(texture);
+        // Publishing is memoised, so this is the pointer the program now holds.
+        shadow.noteLevel(texture, level,
+            publisher.publish(surface, surfaceInterfaces, IID_IDirect3DSurface8));
+    };
+
     /**
      * A resource, published as whichever interface it is.
      *
@@ -379,12 +422,17 @@ export function createDirect3D8Seam(
             /** @type {{ surface?: any }} */
             const held = {};
             const hr = texture.GetSurfaceLevel(level >>> 0, held);
-            if (hr === D3D_OK && held.surface && (out >>> 0) !== 0)
+            if (hr !== D3D_OK || !held.surface || (out >>> 0) === 0)
             {
-                return handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
-                    out >>> 0);
+                return hr;
             }
-            return hr;
+            const answer = handBack(held.surface, surfaceInterfaces, IID_IDirect3DSurface8,
+                out >>> 0);
+            if (answer === D3D_OK)
+            {
+                noteLevel(texture, level >>> 0, held.surface);
+            }
+            return answer;
         },
 
         // A level's description is the description of its surface, which is
@@ -434,7 +482,7 @@ export function createDirect3D8Seam(
         // Noted and nothing else: an unlock already marks the whole level for
         // upload, so there is no smaller area for this to narrow it to.
         AddDirtyRect: ()=>D3D_OK,
-    }, {}, retire)];
+    }, textureGuests, retire)];
 
     /**
      * A buffer hands back an address in the guest's own memory, so locking is
@@ -751,11 +799,7 @@ export function createDirect3D8Seam(
                 format >>> 0, pool >>> 0, held);
             if (hr === D3D_OK && held.texture && (out >>> 0) !== 0)
             {
-                const shadow = shadowOf(device);
-                if (shadow)
-                {
-                    resourceShadows.set(held.texture, shadow);
-                }
+                attachTexture(device, held.texture);
                 return handBack(held.texture, textureInterfaces, IID_IDirect3DTexture8,
                     out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             }

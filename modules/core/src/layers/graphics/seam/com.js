@@ -88,6 +88,14 @@ function methodsFor(descriptor){
 function adapt(api, interfaces, onGone){
     const declared = new Map(interfaces.map(entry=>[entry.id, entry]));
 
+    /**
+     * References a program took without crossing into the host -- a texture
+     * level handed back by guest code -- are charged before the count is read
+     * or lowered. Without it a Release for such a reference takes the count
+     * one past what the program owes, and the object dies while it is held.
+     */
+    const settle = ()=>api.settleGuestRefs?.();
+
     const adapter = {
         api,
         // Where a method that runs in the guest finds the object's memory:
@@ -120,7 +128,10 @@ function adapt(api, interfaces, onGone){
         // Forwarded with the interface it was called through, because an API
         // whose generations count separately needs to know which one.
         /** @param {string} [id] */
-        addRef: id=>api.addRef?.(id) ?? 1,
+        addRef(id){
+            settle();
+            return api.addRef?.(id) ?? 1;
+        },
 
         /**
          * The object's own release, and the one moment this file learns that an
@@ -143,6 +154,7 @@ function adapt(api, interfaces, onGone){
             {
                 return 0;
             }
+            settle();
             const left = api.release(id);
             if (left === 0 && api.destroyed !== false)
             {

@@ -77,6 +77,31 @@ const CURRENT_PROCESS = 0xffffffff;
  */
 const PERFORMANCE_FREQUENCY = 1_000_000n;
 
+/**
+ * Byte offsets within the block the clock routines read.
+ *
+ * A program times its own frames, and it times them by asking the machine
+ * what time it is hundreds of times a second -- for a number the engine
+ * already knows and nothing in the guest can change. So the number is written
+ * where the guest can read it, and reading it is what the clock exports do.
+ */
+export const CLOCK = {
+    /** The performance counter, 64-bit, in PERFORMANCE_FREQUENCY ticks. */
+    COUNTER: 0,
+    /** Milliseconds since boot, as GetTickCount and timeGetTime answer it. */
+    TICKS: 8,
+    SIZE: 12,
+};
+
+/**
+ * The block takes a page of its own, and the reason is the emulator's: the
+ * engine writes the block whenever the guest's clock moves, and a write into
+ * a page holding compiled code makes the emulator discard everything compiled
+ * for that page -- so a block sharing a page with the routines above would
+ * have every credit throw them away and run them interpreted after.
+ */
+const PAGE = 4096;
+
 /** Milliseconds between the FILETIME epoch (1601-01-01) and the Unix one. */
 const FILETIME_EPOCH_MS = 11_644_473_600_000n;
 
@@ -104,6 +129,11 @@ const NORMAL_PRIORITY_CLASS = 0x20;
  *           of their blocks.
  * @property {(bytes: number) => number} [allocate]
  *           Guest memory the processor executes, for the fast paths.
+ * @property {(refresh: () => void) => void} [publishClock]
+ *           Handed a function that copies the guest's clock into a block in
+ *           guest memory, to be called whenever that clock moves and before
+ *           the guest runs again. Without it the clocks stay traps: a block
+ *           nobody refreshes would freeze a program's notion of time.
  * @property {number} [processId]
  */
 
@@ -223,6 +253,83 @@ export function tlsGetValueCode(at, trap){
 }
 
 /**
+ * QueryPerformanceCounter as guest code: the two words of the block, copied
+ * into the caller's LARGE_INTEGER.
+ *
+ * The answer is the one the host would have given, not an approximation of
+ * it: the guest's clock does not move while the guest is running -- it is
+ * credited between slices -- so the block holds exactly what a trap taken
+ * here would have read.
+ *
+ *     mov ecx, [esp+4]
+ *     test ecx, ecx
+ *     jz slow                     ; a null pointer is the host's, as before
+ *     mov eax, [block]
+ *     mov edx, [block+4]
+ *     mov [ecx], eax
+ *     mov [ecx+4], edx
+ *     mov eax, 1
+ *     ret 4
+ *   slow:
+ *     jmp trap
+ *
+ * @param {number} at     Where the code lands, for the jump to the trap.
+ * @param {number} trap   The host's QueryPerformanceCounter.
+ * @param {number} block  The clock block.
+ */
+export function queryPerformanceCounterCode(at, trap, block){
+    const slow = 32;
+    return new Uint8Array([
+        0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
+        0x85, 0xc9,                                                  // test ecx, ecx
+        0x74, slow - 8,                                              // jz slow
+        0xa1, ...dword(block + CLOCK.COUNTER),                       // mov eax, [block]
+        0x8b, 0x15, ...dword(block + CLOCK.COUNTER + 4),             // mov edx, [block+4]
+        0x89, 0x01,                                                  // mov [ecx], eax
+        0x89, 0x51, 0x04,                                            // mov [ecx+4], edx
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc2, 0x04, 0x00,                                            // ret 4
+        // slow:
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * QueryPerformanceFrequency as guest code. The frequency is a constant of
+ * this machine, so it is an immediate rather than a word of the block.
+ *
+ * @param {number} at @param {number} trap
+ */
+export function queryPerformanceFrequencyCode(at, trap){
+    const slow = 29;
+    return new Uint8Array([
+        0x8b, 0x4c, 0x24, 0x04,                                      // mov ecx, [esp+4]
+        0x85, 0xc9,                                                  // test ecx, ecx
+        0x74, slow - 8,                                              // jz slow
+        0xc7, 0x01, ...dword(Number(PERFORMANCE_FREQUENCY)),         // mov dword [ecx], 1000000
+        0xc7, 0x41, 0x04, ...dword(0),                               // mov dword [ecx+4], 0
+        0xb8, ...dword(1),                                           // mov eax, 1
+        0xc2, 0x04, 0x00,                                            // ret 4
+        // slow:
+        0xe9, ...dword(trap - (at + slow + 5)),                      // jmp trap
+    ]);
+}
+
+/**
+ * GetTickCount as guest code -- and timeGetTime, which answers the same
+ * milliseconds. Neither takes an argument and neither can fail, so there is
+ * no case left for the host and no trap to leave for.
+ *
+ * @param {number} block
+ */
+export function tickCountCode(block){
+    return new Uint8Array([
+        0xa1, ...dword(block + CLOCK.TICKS),                         // mov eax, [block+8]
+        0xc3,                                                        // ret
+    ]);
+}
+
+/**
  * Builds the function table: name -> { argBytes, handler }.
  *
  * All of these are stdcall, which is the bridge's default, so none of them says
@@ -291,6 +398,117 @@ export function createProcessFunctions(host){
         };
         return fastPaths;
     };
+
+    /**
+     * The clock in guest memory: made on the first bind of a clock export,
+     * and kept current by the engine from there on.
+     *
+     * @type {number}
+     */
+    let clockAt = 0;
+    /** One buffer, because this is written every time the clock moves. */
+    const clockBytes = new Uint8Array(CLOCK.SIZE);
+    const clockView = new DataView(clockBytes.buffer);
+    /** @param {number} milliseconds */
+    const ticksOf = milliseconds=>BigInt(
+        Math.round(milliseconds * Number(PERFORMANCE_FREQUENCY) / 1000));
+    const refreshClock = ()=>{
+        if (clockAt === 0)
+        {
+            return;
+        }
+        const milliseconds = host.now();
+        clockView.setBigUint64(CLOCK.COUNTER, ticksOf(milliseconds), true);
+        clockView.setUint32(CLOCK.TICKS, Math.floor(milliseconds) >>> 0, true);
+        host.writeMemory(clockAt, clockBytes);
+    };
+    /**
+     * The block, taken once and alone on its page, with the engine told where
+     * it is. Zero when this build has nowhere to put it or nobody to keep it
+     * current, and then every clock export stays a trap.
+     */
+    const clockBlock = ()=>{
+        if (clockAt !== 0 || !host.allocate || !host.publishClock)
+        {
+            return clockAt;
+        }
+        // A page-aligned span out of what the heap hands back, which is
+        // aligned to nothing in particular.
+        const span = host.allocate(CLOCK.SIZE + PAGE);
+        if (span === 0)
+        {
+            return 0;
+        }
+        clockAt = (span + PAGE - 1) & ~(PAGE - 1);
+        refreshClock();
+        host.publishClock(refreshClock);
+        return clockAt;
+    };
+    /**
+     * The clock routines, placed once and shared by the exports that read
+     * them.
+     *
+     * @type {{ counter: number, frequency: number, ticks: number } | null}
+     */
+    let clocks = null;
+    /** @param {import('./sync.js').GuestBuilder} builder */
+    const placedClocks = builder=>{
+        if (clocks)
+        {
+            return clocks;
+        }
+        const block = clockBlock();
+        const allocate = host.allocate;
+        /**
+         * One routine, or the trap it would have fallen back to when there is
+         * nowhere to put it: an export whose address is zero is no export.
+         *
+         * @param {string} label @param {string} name
+         * @param {(at: number, trap: number) => Uint8Array} code
+         */
+        const place = (label, name, code)=>{
+            const trap = builder.register(label, {
+                argBytes: table[name].argBytes,
+                /** @param {number[]} args */
+                handler: args=>table[name].handler(args),
+            });
+            if (block === 0 || !allocate)
+            {
+                return trap;
+            }
+            // Sized by a throwaway rendering: every encoding here is a fixed
+            // length, so the bytes depend on where they land only through the
+            // one relative jump.
+            const at = allocate(code(0, trap).length);
+            host.writeMemory(at, code(at, trap));
+            return at;
+        };
+        clocks = {
+            counter: place('<performance-counter>', 'QueryPerformanceCounter',
+                (at, trap)=>queryPerformanceCounterCode(at, trap, block)),
+            frequency: place('<performance-frequency>', 'QueryPerformanceFrequency',
+                queryPerformanceFrequencyCode),
+            ticks: place('<tick-count>', 'GetTickCount', ()=>tickCountCode(block)),
+        };
+        return clocks;
+    };
+
+    /**
+     * A clock export's guest routine, where there is one to have.
+     *
+     * Without an allocator, or without an engine to keep the block current,
+     * there is no entry at all rather than an entry that answers with the
+     * trap: an export bound the ordinary way carries its own name, and that
+     * name is what a profile of the run reads.
+     *
+     * @param {'counter' | 'frequency' | 'ticks'} which
+     */
+    const clockGuest = which=>(host.allocate && host.publishClock
+        ? {
+            /** @param {import('./sync.js').GuestBuilder} builder */
+            guest: builder=>placedClocks(builder)[which],
+        }
+        : {});
 
     /**
      * Mirrors a slot into the block the compiler reads.
@@ -447,6 +665,7 @@ export function createProcessFunctions(host){
             // compares them does not, and that is the behaviour it was written
             // against.
             handler: ()=>Math.floor(host.now()) >>> 0,
+            ...clockGuest('ticks'),
         },
 
         /** VOID GetSystemTimeAsFileTime(LPFILETIME lpSystemTimeAsFileTime) */
@@ -466,10 +685,10 @@ export function createProcessFunctions(host){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([pointer])=>{
-                const ticks = BigInt(Math.round(host.now() * Number(PERFORMANCE_FREQUENCY) / 1000));
-                writeU64(pointer >>> 0, ticks);
+                writeU64(pointer >>> 0, ticksOf(host.now()));
                 return 1;
             },
+            ...clockGuest('counter'),
         },
 
         /** BOOL QueryPerformanceFrequency(LARGE_INTEGER *lpFrequency) */
@@ -480,6 +699,7 @@ export function createProcessFunctions(host){
                 writeU64(pointer >>> 0, PERFORMANCE_FREQUENCY);
                 return 1;
             },
+            ...clockGuest('frequency'),
         },
 
         /** VOID Sleep(DWORD dwMilliseconds) */

@@ -7,10 +7,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    BUFFER, FLAG_SLOW_PATH, SHADOW, STALE_POINTER, createShadow, lockCode, materialFloats,
-    materialOf, setIndicesCode, setMaterialCode, setRenderStateCode, setStreamSourceCode,
-    setTextureCode, setTextureStageStateCode, setTransformCode, setVertexShaderCode,
-    transformSlot, transformType, unlockCode,
+    BUFFER, FLAG_SLOW_PATH, SHADOW, STALE_POINTER, TEXTURE, createShadow, getSurfaceLevelCode,
+    lockCode, materialFloats, materialOf, setIndicesCode, setMaterialCode, setRenderStateCode,
+    setStreamSourceCode, setTextureCode, setTextureStageStateCode, setTransformCode,
+    setVertexShaderCode, transformSlot, transformType, unlockCode,
 } from './shadow.js';
 import { D3DTSS } from '../d3d8/constants.js';
 
@@ -294,6 +294,11 @@ test('the block fits its two pages and its regions follow one another', ()=>{
     assert.equal(SHADOW.STAGE_STATES + SHADOW.STAGE_COUNT * SHADOW.STAGE_STATE_STRIDE * 4,
         SHADOW.SIZE);
     assert.equal(BUFFER.SIZE, 32);
+    assert.equal(TEXTURE.LEVELS + TEXTURE.LEVEL_SLOTS * 4, TEXTURE.SIZE);
+    // Enough for the longest chain a texture of this era can have: a 32768
+    // texel side is sixteen levels, and no device of the era reports one.
+    assert.ok(TEXTURE.LEVEL_SLOTS >= 14);
+    assert.ok(TEXTURE.SIZE <= 4096, 'a texture block comes out of one page with others');
 });
 
 test('the routines end in a jump to their own trap, and check the flag first', ()=>{
@@ -334,6 +339,26 @@ test('the routines end in a jump to their own trap, and check the flag first', (
     }
     const lock = rets.lock[0];
     assert.equal(lock[lock.length - 11], 0x5b, 'the lock pops what it pushed first');
+
+    // The level getter refuses a level the texture has not got where the two
+    // setters refuse a stage, and reads the count out of the block rather
+    // than assuming the table's length is it.
+    const level = getSurfaceLevelCode(0x20a00, 0x1050a0);
+    assert.deepEqual([...level.slice(0, 7)], [...rs.slice(0, 7)],
+        'the level getter starts the same');
+    assert.deepEqual([...level.slice(11, 17)], [0xf7, 0x01, FLAG_SLOW_PATH, 0, 0, 0]);
+    assert.deepEqual([...level.slice(19, 26)],
+        [0x8b, 0x44, 0x24, 0x08, 0x3b, 0x41, TEXTURE.LEVEL_COUNT],
+        'the level, against the count in the block');
+    assert.deepEqual([...level.slice(level.length - 13, level.length - 5)],
+        [0xb8, 0x6c, 0x08, 0x76, 0x88, 0xc2, 12, 0x00],
+        'D3DERR_INVALIDCALL for a level the texture has not got');
+    assert.deepEqual([...level.slice(level.length - 18, level.length - 13)],
+        [0x31, 0xc0, 0xc2, 12, 0x00], 'D3D_OK, popping its three arguments');
+    assert.equal(level[level.length - 5], 0xe9);
+    assert.equal(0x20a00 + level.length
+        + new DataView(level.buffer).getInt32(level.length - 4, true), 0x1050a0,
+    'the jump lands on the trap');
 
     // The two that refuse a stage themselves end in that refusal, after the
     // D3D_OK tail, and pop the same count either way.
@@ -825,4 +850,75 @@ test('a material the guest wrote reaches the device as its seventeen floats', ()
     m.shadow.sync();
     assert.equal(m.device.calls.length, 1);
     assert.equal(m.shadow.diagnostics().materialCalls, 2);
+});
+
+/**
+ * A texture and its levels, sharing one count as the device's do: what makes
+ * a reference taken in the guest and given back through a level's surface the
+ * same reference.
+ *
+ * @param {number} levels
+ */
+function fakeTexture(levels){
+    let count = 1;
+    return {
+        levels,
+        get refCount(){
+            return count;
+        },
+        addRef: ()=>++count,
+        release: ()=>--count,
+    };
+}
+
+test('a texture block says how many levels it has and holds a pointer for each', ()=>{
+    const m = machine();
+    const texture = fakeTexture(3);
+    const block = m.shadow.attachTexture(texture);
+
+    assert.notEqual(block, 0);
+    assert.equal(m.shadow.attachTexture(texture), block, 'once');
+    assert.equal(m.u32(block + TEXTURE.LEVEL_COUNT), 3);
+    assert.equal(m.u32(block + TEXTURE.REFS), 0);
+    for (let level = 0; level < TEXTURE.LEVEL_SLOTS; level++)
+    {
+        assert.equal(m.u32(block + TEXTURE.LEVELS + level * 4), 0,
+            'no level answers until the host has published one');
+    }
+
+    m.shadow.noteLevel(texture, 1, 0x7100);
+    assert.equal(m.u32(block + TEXTURE.LEVELS + 4), 0x7100);
+    assert.equal(m.u32(block + TEXTURE.LEVELS), 0, 'and only that level');
+    // A level past the table leaves the table alone rather than writing past it.
+    m.shadow.noteLevel(texture, TEXTURE.LEVEL_SLOTS, 0x7200);
+    assert.equal(m.u32(block + TEXTURE.SIZE), 0);
+});
+
+test('the references the guest took on levels are charged before any is given back', ()=>{
+    const m = machine();
+    const texture = fakeTexture(2);
+    const block = m.shadow.attachTexture(texture);
+    m.shadow.noteLevel(texture, 0, 0x7100);
+
+    // What the guest routine does: hand the pointer back, count the reference.
+    m.bump(block + TEXTURE.REFS);
+    m.bump(block + TEXTURE.REFS);
+    assert.equal(texture.refCount, 1, 'the host has not been told yet');
+
+    m.shadow.settleTexture(texture);
+    assert.equal(texture.refCount, 3, 'two references the program owns');
+    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 2);
+
+    // Settling again charges nothing: the count is the one already charged.
+    m.shadow.settleTexture(texture);
+    assert.equal(texture.refCount, 3);
+    m.bump(block + TEXTURE.REFS);
+    m.shadow.settleTexture(texture);
+    assert.equal(texture.refCount, 4);
+    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 3);
+
+    // A texture nobody attached a block to is not an error: a build with no
+    // block at all still has a working GetSurfaceLevel through the host.
+    m.shadow.settleTexture(fakeTexture(1));
+    assert.equal(m.shadow.diagnostics().surfaceLevelCalls, 3);
 });
