@@ -28,9 +28,10 @@ const WM_XBUTTONDOWN = 0x020b;
  * behind the second: the point of the layer is that one event reaches both, so
  * a fake device would test half of it.
  *
- * @param {{ bounds?: (() => { width: number, height: number }) | null }} [options]
+ * @param {{ bounds?: (() => { width: number, height: number }) | null,
+ *           window?: () => number }} [options]
  */
-function harness({ bounds = null } = {}){
+function harness({ bounds = null, window = ()=>HWND } = {}){
     /** @type {any[]} */
     const messages = [];
     /** @type {any[]} */
@@ -44,6 +45,8 @@ function harness({ bounds = null } = {}){
 
     /** @type {{ character: number, lParam: number }[]} */
     const composed = [];
+    /** @type {import('./router.js').PressRecord[]} */
+    const presses = [];
     const router = createInputRouter({
         post: message=>messages.push(message),
         /** @param {number} character @param {number} lParam */
@@ -53,8 +56,9 @@ function harness({ bounds = null } = {}){
             return event.kind === 'key' ? keyboard.post(event) : mouse.post(event);
         },
         now: ()=>clock,
-        target: ()=>HWND,
+        target: ()=>window(),
         bounds,
+        trace: press=>presses.push(press),
     });
 
     return {
@@ -78,6 +82,12 @@ function harness({ bounds = null } = {}){
         all(){
             const taken = [...messages];
             messages.length = 0;
+            return taken;
+        },
+        /** Every press written down, as a reader of the journal would see it. */
+        presses(){
+            const taken = [...presses];
+            presses.length = 0;
             return taken;
         },
         /** The characters handed to the queue for TranslateMessage to deliver. */
@@ -506,4 +516,58 @@ test('the cursor is confined to the viewport showing the program, not a configur
     h.drain();
     assert.deepEqual(h.router.diagnostics().cursor, { x: 639, y: 479 },
         'detaching gives the configured screen back');
+});
+
+test('activation waits for a window rather than being spent on hwnd zero', ()=>{
+    // Input is wired to the viewport when a run starts, which is before the
+    // program has executed anything and therefore before it owns a window.
+    let hwnd = 0;
+    const h = harness({ window: ()=>hwnd });
+
+    h.router.arm();
+    assert.deepEqual(h.all(), [],
+        'nothing is sent while there is no window: a message posted to zero is'
+        + ' retrieved by the next GetMessage and dispatched to no procedure');
+
+    hwnd = HWND;
+    h.router.arm();
+    const told = h.all();
+    assert.deepEqual(told.map(entry=>entry.message),
+        [WM.ACTIVATEAPP, WM.ACTIVATE, WM.SETFOCUS]);
+    assert.deepEqual(told.map(entry=>entry.hwnd), [HWND, HWND, HWND]);
+
+    // Latched on having delivered, so a second window does not activate twice.
+    h.router.arm();
+    assert.deepEqual(h.all(), []);
+});
+
+test('a press is written down with the position it was mapped to', ()=>{
+    const h = harness();
+    h.send({ kind: 'pointerMove', x: 320, y: 240 });
+    h.drain();
+    h.send({ kind: 'pointerButton', button: 'left', down: true });
+
+    const [press] = h.presses();
+    assert.equal(press.button, 'left');
+    assert.equal(press.down, true);
+    assert.equal(press.x, 320);
+    assert.equal(press.y, 240);
+    // And the message the guest will actually read, so the two can be compared:
+    // a press recorded here that the program never acts on is a different fault
+    // from one that never arrived.
+    assert.equal(press.hwnd, HWND);
+    assert.equal(press.message, WM_LBUTTONDOWN);
+    assert.equal(press.wParam, MK_LBUTTON);
+    assert.equal(press.lParam, 240 << 16 | 320);
+
+    h.send({ kind: 'pointerButton', button: 'left', down: false });
+    const [release] = h.presses();
+    assert.equal(release.down, false);
+    assert.equal(release.message, WM_LBUTTONUP);
+});
+
+test('a press nothing recognises is written down nowhere', ()=>{
+    const h = harness();
+    assert.equal(h.send({ kind: 'pointerButton', button: 'thumb', down: true }), false);
+    assert.deepEqual(h.presses(), []);
 });

@@ -86,6 +86,10 @@ export const inputModule = {
             // assembled the process knows which one a person is looking at.
             target: config?.foreground ?? (()=>0),
             bounds: config?.bounds ?? null,
+            // Where a press is written down. Handed in because only whoever
+            // assembled the process has a journal, and because a build that
+            // wants no record should pay for none.
+            trace: config?.trace,
         });
 
         /** @type {ReturnType<typeof createDomInput> | null} */
@@ -173,6 +177,15 @@ export const inputModule = {
              * @param {{ left: number, top: number, right: number, bottom: number } | null} rect
              */
             clip: rect=>router.clip(rect),
+
+            /**
+             * Says a window has appeared, which is when a program can be told
+             * it is the active application at all. Called on every window
+             * rather than guessed at: activation is owed to a window, and until
+             * one exists there is nowhere to deliver it. Does nothing once the
+             * program has been told.
+             */
+            arm: ()=>router.arm(),
 
             /** @param {number} vk */
             keyState: vk=>router.keyState(vk),

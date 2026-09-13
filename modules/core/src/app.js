@@ -2111,6 +2111,32 @@ async function buildApp(options){
             // has: a program that reads a position outside its own screen
             // concludes the mouse left the window.
             bounds: display && (()=>({ width: display.width, height: display.height })),
+            /**
+             * One line per press, and nothing at all when nobody asked for it.
+             *
+             * A press used to leave no trace anywhere: `call.input` is the
+             * program's own calls into USER32 and DINPUT, so it says what was
+             * asked and never whether anything arrived. "Did the click get in,
+             * and where did it land" was then unanswerable from a log, which is
+             * the one question a dead button asks.
+             *
+             * Its own category so a reader can take this and nothing else, and
+             * formatted behind the level check so a run nobody is watching pays
+             * a comparison per press.
+             *
+             * @param {import('./layers/input/router.js').PressRecord} press
+             */
+            trace: press=>{
+                if (!journal.enabled('input.press', journal.Level.TRACE))
+                {
+                    return;
+                }
+                journal.write('trace', 'input.press', '{0} {1} at={2} {3}',
+                    press.button, press.down ? 'down' : 'up', `${press.x},${press.y}`,
+                    `hwnd=0x${press.hwnd.toString(16)} msg=0x${press.message.toString(16)}`
+                    + ` wParam=0x${press.wParam.toString(16)}`
+                    + ` lParam=0x${press.lParam.toString(16)}`);
+            },
         },
         graphics: {
             // Where a COM interface goes when a program asks for one. Without
@@ -2455,6 +2481,13 @@ async function buildApp(options){
             /** @param {number} hwnd */
             created: hwnd=>{
                 foreground = hwnd;
+                // A program becomes the active application when it has a window
+                // to be told through, and not before: input is wired to the
+                // viewport when the run starts, which is earlier than the
+                // program's first instruction. Told here, where there is finally
+                // a window; the input layer ignores every call after the first
+                // that lands.
+                core.api('input')?.arm?.();
             },
         },
     });
@@ -4152,13 +4185,19 @@ async function buildApp(options){
             /** @param {string | number} level */
             setDefaultLevel: level=>core.api('log').setDefaultLevel(level),
             /**
-             * The areas a host call can be filed under, for a reader offering a
-             * filter. Named here rather than discovered from what has been
-             * logged, so a filter can offer an area before anything in it has
-             * happened.
+             * The topics a reader can switch on, for one offering a filter.
+             * Named here rather than discovered from what has been logged, so a
+             * filter can offer a topic before anything in it has happened.
+             *
+             * Most are the areas a host call is filed under; `input.press` is
+             * not a call at all but the other end of the same question -- what
+             * arrived from outside, as against what the program asked.
              */
-            areas: ()=>['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
-                .map(area=>`call.${area}`),
+            areas: ()=>[
+                ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
+                    .map(area=>`call.${area}`),
+                'input.press',
+            ],
 
             /**
              * Where a frame's time went: every phase by self time, the slowest

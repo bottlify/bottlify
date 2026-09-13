@@ -399,8 +399,13 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
             setLevel: (category, level)=>request('log.setLevel', [category, level]),
             /** @param {string | number} level */
             setDefaultLevel: level=>request('log.setDefaultLevel', [level]),
-            areas: ()=>['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
-                .map(area=>`call.${area}`),
+            // The same list the engine answers with. Kept here because the
+            // page offers the filter before a run exists to be asked.
+            areas: ()=>[
+                ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
+                    .map(area=>`call.${area}`),
+                'input.press',
+            ],
 
             /** @param {number} [worst] */
             profile: worst=>reader ? reader.profile(worst) : request('log.profile', [worst]),

@@ -102,6 +102,25 @@ const BUTTONS = Object.freeze({
  */
 
 /**
+ * One press or release, as it arrived and as the guest will read it.
+ *
+ * Both halves in one record on purpose: the question a dead button raises is
+ * whether the press arrived and whether the position it was mapped to is the
+ * one the program hit-tests against, and two records a reader has to pair up
+ * answer it worse than one line that carries both.
+ *
+ * @typedef {Object} PressRecord
+ * @property {string} button    A key of BUTTONS, as the page named it.
+ * @property {boolean} down
+ * @property {number} x         Where it landed, in the picture's own pixels.
+ * @property {number} y
+ * @property {number} hwnd      The window the message went to.
+ * @property {number} message   The window message synthesised from it.
+ * @property {number} wParam
+ * @property {number} lParam
+ */
+
+/**
  * @typedef {Object} RouterDeps
  * @property {(message: {
  *     hwnd: number, message: number, wParam: number, lParam: number,
@@ -109,6 +128,10 @@ const BUTTONS = Object.freeze({
  *     Where a window message goes: the thread's message queue.
  * @property {(event: import('./dinput/devices.js').InputEvent) => unknown} device
  *     Where the DirectInput reading goes.
+ * @property {(press: PressRecord) => void} [trace]
+ *     Where a press or a release is written down as it arrives, for a reader
+ *     asking whether one arrived at all. Absent in a build with nothing
+ *     listening, and then a press costs no record.
  * @property {(character: number, lParam: number) => void} [compose]
  *     Where a character the host's layout produced is left for the
  *     TranslateMessage that will turn it into a WM_CHAR. Absent in a build with
@@ -122,13 +145,15 @@ const BUTTONS = Object.freeze({
 /**
  * @param {RouterDeps} deps
  */
-export function createInputRouter({ post, device, now, target, bounds = null, compose }){
+export function createInputRouter({ post, device, now, target, bounds, compose, trace }){
+    /** The configured screen, or nothing: what the cursor falls back to. */
+    const screen = bounds ?? null;
     // Where the cursor may go. The configured screen until something wires a
     // viewport to the machine, and that viewport's own pixels afterwards: the
     // picture a person is looking at is the space they are pointing into, and
     // confining the cursor to a different one leaves a strip of the picture
     // that cannot be reached however far the mouse is moved.
-    let confinedTo = bounds;
+    let confinedTo = screen;
     const clock = now ?? (()=>0);
     const targetWindow = target ?? (()=>0);
     const composeCharacter = compose ?? (()=>{});
@@ -400,7 +425,21 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
         // cursor, so the question is always asked again here.
         cursorDirty = true;
         announceCursor(message);
-        emit(message, extra << 16 | mask(), point());
+        const wParam = (extra << 16 | mask()) >>> 0;
+        const lParam = point();
+        emit(message, wParam, lParam);
+        // After the message, so a record exists only for a press the guest was
+        // actually told about, and its absence means the press never got here.
+        trace?.({
+            button: String(event.button),
+            down: event.down === true,
+            x: cursor.x,
+            y: cursor.y,
+            hwnd: targetWindow() >>> 0,
+            message,
+            wParam,
+            lParam,
+        });
         device({ kind: 'mouseButton', code: index, down: event.down === true });
         return true;
     };
@@ -489,7 +528,7 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
          * @param {(() => { width: number, height: number }) | null} viewport
          */
         confineTo(viewport){
-            confinedTo = viewport ?? bounds;
+            confinedTo = viewport ?? screen;
         },
 
         /**
@@ -512,8 +551,26 @@ export function createInputRouter({ post, device, now, target, bounds = null, co
             residualY = 0;
         },
 
+        /**
+         * Tells the program it is the active application, once it has a window
+         * to be told through.
+         *
+         * Latched on having delivered, never on having tried. Input is wired to
+         * the viewport when a run starts, which is before the program has
+         * executed a single instruction and therefore before it owns a window:
+         * activation sent then goes to window zero, is retrieved by the first
+         * GetMessage that asks for every window, and is dispatched to no
+         * procedure at all. Latching there left a program believing for the
+         * whole run that it was in the background -- which a program of this era
+         * takes as a reason to ignore input -- and nothing could say otherwise
+         * afterwards.
+         *
+         * So this is called again whenever a window appears, and does nothing
+         * until one has. Windows works the same way round: a window is told it
+         * became active after it exists, never before.
+         */
         arm(){
-            if (activated)
+            if (activated || targetWindow() === 0)
             {
                 return;
             }
