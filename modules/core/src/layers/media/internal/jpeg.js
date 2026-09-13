@@ -170,10 +170,20 @@ class BitReader {
 }
 
 /**
- * The inverse DCT of one block, separable and in floating point. Speed is not
- * the point of this decoder -- being off the emulated path is -- and a
- * straightforward transform is one whose correctness a test can check
- * against the definition.
+ * The inverse DCT of one block, separable and in floating point: the transform
+ * by its definition, which is what a test can check against, with the terms
+ * that are exactly zero left out.
+ *
+ * Leaving them out is not an approximation. A sum here starts at +0 and every
+ * skipped term is a product with an integer zero, so it adds +0 or -0 -- and
+ * adding either to a float leaves it alone, including when that float is the
+ * +0 the sum started as. Every output byte is therefore the one the full sum
+ * produces, which matters because this decoder's output is compared exactly.
+ *
+ * It is worth the two extra branches because of what a quantised block looks
+ * like: most of the sixty-four coefficients of a photograph survive
+ * quantisation as zero, and the emptiest rows are the ones the naive transform
+ * spends the same thousand multiplications on as the fullest.
  */
 const COS = new Float32Array(64);
 for (let x = 0; x < 8; x++)
@@ -185,33 +195,98 @@ for (let x = 0; x < 8; x++)
 }
 
 /**
- * @param {Int32Array} coefficients  64, in natural order, already dequantised.
- * @param {Float32Array} out         64 samples, row-major, unclamped, centred on zero.
+ * The first pass's output, between the two passes. One block is transformed at
+ * a time and nothing here yields, so a single buffer serves every block of
+ * every picture -- and a buffer per block is an allocation per block, which a
+ * picture has thousands of.
  */
-function inverseDct(coefficients, out){
-    const rows = new Float32Array(64);
+const PASS = new Float32Array(64);
+
+/** Which rows of the first pass held anything, in ascending order. */
+const LIVE = new Uint8Array(8);
+
+/**
+ * One block, transformed and written into its plane as samples. The transform
+ * and the write are one function because the second pass already has the value
+ * in hand: staging sixty-four floats and reading them back was a pass over the
+ * block for nothing.
+ *
+ * `Math.fround` is what keeps that merge honest -- the staging buffer was
+ * single precision, so its rounding is part of every sample this decoder has
+ * ever produced, and dropping it would shift bytes by one.
+ *
+ * @param {Int32Array} coefficients  64, in natural order, already dequantised.
+ * @param {Uint8Array} plane         The component's own plane.
+ * @param {number} at               Where this block's top-left sample goes.
+ * @param {number} planeWidth
+ */
+function inverseDct(coefficients, plane, at, planeWidth){
+    let count = 0;
     for (let y = 0; y < 8; y++)
     {
+        const base = y * 8;
+        // Bitwise, not a sum: coefficients that cancel must still count as
+        // present, and only an OR cannot lose one.
+        let ac = 0;
+        for (let u = 1; u < 8; u++)
+        {
+            ac |= coefficients[base + u];
+        }
+        if (ac === 0)
+        {
+            const dc = coefficients[base];
+            if (dc === 0)
+            {
+                PASS.fill(0, base, base + 8);
+                continue;
+            }
+            // Only the constant term, which every x shares. COS[0] rather than
+            // Math.SQRT1_2: the table is single precision, and the general sum
+            // multiplies by what the table holds.
+            PASS.fill(COS[0] * dc / 2, base, base + 8);
+            LIVE[count++] = y;
+            continue;
+        }
         for (let x = 0; x < 8; x++)
         {
             let sum = 0;
             for (let u = 0; u < 8; u++)
             {
-                sum += COS[x * 8 + u] * coefficients[y * 8 + u];
+                const c = coefficients[base + u];
+                if (c !== 0)
+                {
+                    sum += COS[x * 8 + u] * c;
+                }
             }
-            rows[y * 8 + x] = sum / 2;
+            PASS[base + x] = sum / 2;
         }
+        LIVE[count++] = y;
     }
-    for (let x = 0; x < 8; x++)
+    if (count === 0)
     {
         for (let y = 0; y < 8; y++)
         {
+            plane.fill(128, at + y * planeWidth, at + y * planeWidth + 8);
+        }
+        return;
+    }
+    // Rows outermost, so the samples are written in the order they lie. The
+    // second pass sums down a column and the transform would rather be written
+    // that way round, but then every store of a 512-wide plane lands on a
+    // different cache line, and the sums are independent of each other anyway.
+    for (let y = 0; y < 8; y++)
+    {
+        const row = at + y * planeWidth;
+        for (let x = 0; x < 8; x++)
+        {
             let sum = 0;
-            for (let v = 0; v < 8; v++)
+            for (let i = 0; i < count; i++)
             {
-                sum += COS[y * 8 + v] * rows[v * 8 + x];
+                const v = LIVE[i];
+                sum += COS[y * 8 + v] * PASS[v * 8 + x];
             }
-            out[y * 8 + x] = sum / 2;
+            const value = Math.round(Math.fround(sum / 2) + 128);
+            plane[row + x] = value < 0 ? 0 : value > 255 ? 255 : value;
         }
     }
 }
@@ -538,7 +613,6 @@ function assemble(components, quant, width, height, hmax, vmax, adobe, transform
     const count = components.length;
     const samples = new Uint8Array(width * height * count);
     const coefficients = new Int32Array(64);
-    const block = new Float32Array(64);
     components.forEach((c, index)=>{
         const q = quant[c.tq];
         if (!q)
@@ -558,27 +632,35 @@ function assemble(components, quant, width, height, hmax, vmax, adobe, transform
                 {
                     coefficients[i] = c.blocks[offset + i] * q[i];
                 }
-                inverseDct(coefficients, block);
-                for (let y = 0; y < 8; y++)
-                {
-                    for (let x = 0; x < 8; x++)
-                    {
-                        const value = Math.round(block[y * 8 + x] + 128);
-                        plane[(row * 8 + y) * planeWidth + column * 8 + x] =
-                            value < 0 ? 0 : value > 255 ? 255 : value;
-                    }
-                }
+                inverseDct(coefficients, plane,
+                    row * 8 * planeWidth + column * 8, planeWidth);
             }
         }
         const sx = c.h / hmax;
         const sy = c.v / vmax;
+        // A component sampled at the frame's own rate needs no sampling: this
+        // is every component of an unsubsampled picture and the luma of every
+        // other one, so the cheap path is the common one, and a multiply and a
+        // floor per pixel of it is a million of each for a 512-square texture.
+        const direct = sx === 1 && sy === 1;
         for (let y = 0; y < height; y++)
         {
-            const py = Math.floor(y * sy);
+            const py = direct ? y : Math.floor(y * sy);
+            let to = y * width * count + index;
+            const from = py * planeWidth;
+            if (direct)
+            {
+                for (let x = 0; x < width; x++)
+                {
+                    samples[to] = plane[from + x];
+                    to += count;
+                }
+                continue;
+            }
             for (let x = 0; x < width; x++)
             {
-                samples[(y * width + x) * count + index] =
-                    plane[py * planeWidth + Math.floor(x * sx)];
+                samples[to] = plane[from + Math.floor(x * sx)];
+                to += count;
             }
         }
     });

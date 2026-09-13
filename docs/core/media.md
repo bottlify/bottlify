@@ -137,6 +137,24 @@ texture format that stores its own channels wants. `ijlErrorStr` names the libra
 (`SOF0`/`SOF1`), one to four components, any sampling factors, restart intervals, 8-bit samples,
 components returned interleaved in the frame's order.
 
+`ijlRead` is synchronous, because the library it stands in for is: the caller hands over a DIB and
+the picture is in it when the call returns, so the decode happens inside the guest's call and the
+frame waits for it. That makes the cost of one call the thing that matters, not the total. Measured
+in Node on a four-component picture of the kind a texture is stored as, best of forty runs:
+
+| picture | per `ijlRead` |
+|---|---|
+| 64x64 | 0.12 ms |
+| 128x128 | 0.42 ms |
+| 256x256 | 1.7 ms |
+| 512x512 | 8 ms |
+
+The transform leaves out the terms that are exactly zero (see `inverseDct`), which is most of a
+quantised block and costs nothing in accuracy -- a term skipped would have added +0 or -0 to the
+sum. Going faster than this means a different transform: the butterfly factorisations are several
+times quicker and none of them produces the same bytes, so adopting one would change every texture
+in every game at once. That is the ceiling, and it is deliberate.
+
 ### When it is absent
 
 `media: null` in the module configuration, or a build with no `wasmBytes`, comes up: `available()`
@@ -169,14 +187,14 @@ guest code.
 
 ## Tests
 
-All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 19 `test()` cases.
+All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 33 `test()` cases.
 
 | file | kind | what it pins |
 |---|---|---|
 | `src/layers/media/module.test.js` | Wiring | A build with no binary comes up and says so; a configured build is not instantiated until something is opened; `closeAll` is safe before anything was opened. |
 | `src/layers/media/internal/decoder.test.js` | Contract against the real binary; skips with `video-decoder.wasm is absent: run npm run fetch:video-decoder` when it has not been fetched | A file the build cannot make sense of is refused by name; an empty file is refused; a WAVE clip reports what it holds and hands back every sample; a decoded clip is counted and `closeAll` lets it go. |
-| `src/layers/media/internal/ijl.test.js` | Contract, over a flat guest memory | Ordinals; `ijlInit` clears the structure and sets the default quality; parameters without decoding; the whole image lands in the DIB four channels as they lie; row order, negative height and padding; refusals with the library's own codes and names. |
-| `src/layers/media/internal/jpeg.test.js` | Byte-exact, against pictures computed from the definition of the transform | Streams built from coefficients with the file's own Huffman tables: no fixture from anywhere and nothing taken on trust from another decoder. |
+| `src/layers/media/internal/ijl.test.js` | Contract, over a flat guest memory | Ordinals; `ijlInit` clears the structure and sets the default quality; parameters without decoding; the whole image lands in the DIB four channels as they lie; row order, negative height and padding; refusals with the library's own codes and names. Each of the four routes from the picture's components to the DIB's channels -- converted for RGB, converted and exchanged for BGR, components dropped, channels padded opaque -- is pinned to exact bytes, because the route is chosen once per picture and one taken by mistake is a texture in the wrong colour that nothing reports. |
+| `src/layers/media/internal/jpeg.test.js` | Byte-exact, against pictures computed from the definition of the transform, and against itself | Streams built from coefficients with the file's own Huffman tables: no fixture from anywhere and nothing taken on trust from another decoder. Five blocks -- empty, DC only, one AC term, sparse, and every coefficient present -- are pinned to exact samples with no tolerance, because the transform takes a different route through each and a route that drifts by one has changed every texture in the game. |
 
 No test in the tree decodes a video stream; the decoder's video path is reachable only through
 the browser harness, and no tracked scenario asserts on a decoded frame.

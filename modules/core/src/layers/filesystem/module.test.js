@@ -143,6 +143,46 @@ test('the source survives everything the program does to it', async()=>{
     await filesystemModule.dispose();
 });
 
+test('a read asks the source for what was asked of it, once, and nothing more', async()=>{
+    // The cost of a read is whatever the source charges for the bytes: for a
+    // bundle that is a block fetched and decompressed, and a program streaming
+    // its art is waiting inside the call. So the layer above it must not add a
+    // second read, a wider read, or a read of the whole file to slice from --
+    // each of which is invisible against a fast source and multiplies a slow
+    // one by the size of the file.
+    const held = createMemoryStore({ 'Game\\Art.mpq': 'abcdefghijklmnopqrstuvwxyz' });
+    /** @type {{ offset: number, length: number }[]} */
+    const asked = [];
+    const source = {
+        list: ()=>held.list(),
+        /** @param {string} path */
+        stat: path=>held.stat(path),
+        /** @param {string} path @param {number} offset @param {number} length */
+        read(path, offset, length){
+            asked.push({ offset, length });
+            return held.read(path, offset, length);
+        },
+    };
+    const fs = await filesystemModule.create({ drives: { C: { source } } });
+
+    const handle = fs.open('C:\\Game\\Art.mpq');
+    fs.seek(handle, 4, fs.SeekFrom.BEGIN);
+    assert.equal(text(fs.read(handle, 6)), 'efghij');
+    assert.deepEqual(asked, [{ offset: 4, length: 6 }], 'one read, exactly the range wanted');
+
+    // Reading off the end is shortened before the source sees it, not after:
+    // a source asked for more than the file holds may pay for the whole tail.
+    fs.seek(handle, 24, fs.SeekFrom.BEGIN);
+    assert.equal(text(fs.read(handle, 1000)), 'yz');
+    assert.deepEqual(asked[1], { offset: 24, length: 2 });
+    // And a read that lands past the end asks for nothing at all.
+    assert.equal(fs.read(handle, 16).length, 0);
+    assert.equal(asked.length, 2, 'end of file is not a read');
+
+    fs.close(handle);
+    await filesystemModule.dispose();
+});
+
 test('diagnostics answer before and after the volume exists', async()=>{
     await filesystemModule.dispose();
     assert.deepEqual(filesystemModule.diagnostics(),

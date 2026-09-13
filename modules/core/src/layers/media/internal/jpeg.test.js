@@ -50,6 +50,80 @@ test('AC coefficients come out as the transform defines them', ()=>{
     });
 });
 
+/**
+ * The transform takes a different route through a block depending on how much
+ * of it survived quantisation -- an empty block, a block with only a DC term, a
+ * row of coefficients that is entirely zero -- because a term that is exactly
+ * zero is left out of the sum instead of being added to it. Leaving it out is
+ * supposed to be free of consequence, so these are exact bytes rather than the
+ * tolerance the check against the definition can afford: a route that drifts by
+ * one has changed every texture in the game, and a tolerance would not say so.
+ */
+/** @type {[string, number[], number[], number[]][]} A name, a block, its quantiser, one row. */
+const PATHS = [
+    ['a block with nothing in it', block(0), FLAT, [
+        128, 128, 128, 128, 128, 128, 128, 128,
+    ]],
+    ['a block with only a DC term', block(48), FLAT, [
+        134, 134, 134, 134, 134, 134, 134, 134,
+    ]],
+    ['one AC term in the first row', block(0, [[1, 40]]), FLAT, [
+        135, 134, 132, 129, 127, 124, 122, 121,
+    ]],
+];
+
+for (const [name, coefficients, quant, firstRow] of PATHS)
+{
+    test(`${name} transforms to exactly the same bytes as ever`, ()=>{
+        const bytes = encode({ width: 8, height: 8, quant,
+            components: [{ h: 1, v: 1, blocks: [coefficients] }] });
+        const samples = decodeJpeg(bytes).samples;
+        // Each of these has a constant column, so one row pins the whole block.
+        for (let y = 0; y < 8; y++)
+        {
+            assert.deepEqual([...samples.subarray(y * 8, y * 8 + 8)], firstRow, `row ${y}`);
+        }
+    });
+}
+
+test('a block whose coefficients are all present transforms to exactly the same bytes as ever',
+    ()=>{
+        // The route with nothing skipped, so the two paths are pinned against
+        // each other as well as against themselves.
+        const quant = FLAT.map((_, i)=>1 + (i % 7));
+        const coefficients = Array.from({ length: 64 }, (_, i)=>((i * 7) % 23) - 11);
+        const bytes = encode({ width: 8, height: 8, quant,
+            components: [{ h: 1, v: 1, blocks: [coefficients] }] });
+        assert.deepEqual([...decodeJpeg(bytes).samples], [
+            129, 105, 130, 133, 109, 144, 162, 120,
+            143, 114, 146, 150, 91, 166, 129, 98,
+            151, 97, 139, 124, 138, 158, 97, 89,
+            104, 106, 117, 152, 148, 87, 131, 127,
+            155, 84, 151, 90, 125, 152, 112, 151,
+            142, 166, 127, 108, 121, 81, 107, 147,
+            120, 149, 96, 93, 40, 169, 128, 106,
+            118, 131, 136, 75, 183, 225, 130, 149,
+        ]);
+    });
+
+test('a sparse block transforms to exactly the same bytes as ever', ()=>{
+    // Low-frequency corner only: some rows of the transform are empty and some
+    // are not, which is the mixture a photograph actually produces.
+    const quant = FLAT.map((_, i)=>1 + (i % 5));
+    const bytes = encode({ width: 8, height: 8, quant,
+        components: [{ h: 1, v: 1, blocks: [block(-24, [[1, 11], [8, -9], [9, 4], [2, -3]])] }] });
+    assert.deepEqual([...decodeJpeg(bytes).samples], [
+        126, 125, 124, 122, 119, 114, 111, 109,
+        126, 126, 125, 123, 120, 116, 112, 110,
+        127, 126, 126, 124, 122, 118, 115, 113,
+        127, 127, 127, 126, 124, 122, 119, 118,
+        128, 128, 128, 128, 127, 125, 123, 122,
+        128, 129, 130, 130, 130, 129, 127, 126,
+        129, 129, 131, 132, 132, 131, 130, 129,
+        129, 130, 131, 133, 133, 132, 131, 131,
+    ]);
+});
+
 test('four components interleave in the frame order, untouched', ()=>{
     // A texture library stores its four channels as four components; what
     // it wants back is those channels in that order, not a colour space.

@@ -120,6 +120,58 @@ test('the whole image lands in the DIB, four channels as they lie', ()=>{
     assert.equal(g.diagnostics().open, 0);
 });
 
+/**
+ * A three-component picture whose channels are far enough apart that a colour
+ * conversion, an exchange of red and blue, and no conversion at all all produce
+ * different bytes -- 200/60/30 as Y/Cb/Cr.
+ */
+const THREE = encode({ width: 8, height: 8, quant: FLAT,
+    components: [200, 60, 30].map(dc=>({ h: 1, v: 1, blocks: [block((dc - 128) * 8)] })) });
+/** One flat component at 135. */
+const GREY = encode({ width: 8, height: 8, quant: FLAT,
+    components: [{ h: 1, v: 1, blocks: [block(56)] }] });
+
+/**
+ * How the picture's components reach the DIB's channels. Which of these a
+ * caller gets is decided once per picture rather than per pixel, and the four
+ * answers are different enough that a route taken by mistake is visible in the
+ * first pixel: exact bytes, because a channel delivered in the wrong place is
+ * a texture drawn in the wrong colour and nothing reports it.
+ */
+/**
+ * @type {[string, Uint8Array, number, number, number[]][]}
+ *       A name, the stream, the DIB's channel count and colour, and one pixel.
+ */
+const ROUTES = [
+    ['a YCbCr picture converts for an RGB DIB', THREE, 3, 1, [63, 255, 80]],
+    ['and converts with red and blue exchanged for a BGR one', THREE, 4, 2,
+        [80, 255, 63, 255]],
+    ['components a DIB has no channel for are dropped', FOUR, 3, 255, [138, 148, 158]],
+    ['channels the picture has no component for are opaque', GREY, 4, 4,
+        [135, 255, 255, 255]],
+];
+
+for (const [name, bytes, channels, color, first] of ROUTES)
+{
+    test(name, ()=>{
+        const g = guest();
+        g.fns.ijlInit.handler([PROPS]);
+        g.place(JPEG_AT, bytes);
+        g.u32(PROPS + OFF.JPGBytes, JPEG_AT);
+        g.u32(PROPS + OFF.JPGSizeBytes, bytes.length);
+        g.u32(PROPS + OFF.DIBWidth, 8);
+        g.u32(PROPS + OFF.DIBHeight, 8);
+        g.u32(PROPS + OFF.DIBChannels, channels);
+        g.u32(PROPS + OFF.DIBColor, color);
+        g.u32(PROPS + OFF.DIBBytes, DIB_AT);
+        assert.equal(g.fns.ijlRead.handler([PROPS, 3]), IJL.OK);
+        // The picture is flat, so every pixel of it is the first one.
+        assert.deepEqual([...g.memory.subarray(DIB_AT, DIB_AT + channels)], first);
+        assert.deepEqual([...g.memory.subarray(DIB_AT + channels, DIB_AT + channels * 2)], first,
+            'the second pixel too, so the stride is right');
+    });
+}
+
 test('rows keep the picture\'s order, a negative height reverses them, padding is honoured', ()=>{
     // Two rows of blocks with different levels, so the order of rows shows.
     // A program reading a texture atlas out of the DIB depends on the order:

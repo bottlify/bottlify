@@ -198,8 +198,14 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
         // the channel count asked for.
         const convert = n === 3 && (color === COLOR.RGB || color === COLOR.BGR)
             && (!image.adobe || image.transform === 1);
+        // `swap` implies three components, because both spellings that reach it
+        // require them -- which is what lets the loops below exchange two real
+        // samples rather than a sample and a padding byte.
         const swap = color === COLOR.BGR && (convert || (n === 3 && !image.adobe));
-        const pixel = new Uint8Array(4);
+        // A DIB wanting exactly the channels the picture has, in that order, is
+        // the picture: a texture stored as four components asking for four is
+        // the common case here, and there is nothing to do to it per pixel.
+        const asIs = !convert && !swap && n === channels;
         for (let y = 0; y < h; y++)
         {
             // Rows land in the picture's own order for the usual positive
@@ -208,37 +214,59 @@ export function createIjlLibrary({ readMemory, writeMemory, allocate, warn }){
             // the wrong cells out of it. A negative height asks for the
             // rows reversed.
             const row = signedHeight < 0 ? height - 1 - y : y;
-            for (let x = 0; x < w; x++)
+            const from = y * image.width * n;
+            let to = row * stride;
+            if (asIs)
             {
-                const at = (y * image.width + x) * n;
-                if (convert)
+                out.set(src.subarray(from, from + w * n), to);
+                continue;
+            }
+            if (convert)
+            {
+                for (let x = 0; x < w; x++)
                 {
-                    const Y = src[at];
+                    const at = from + x * n;
+                    const luma = src[at];
                     const cb = src[at + 1] - 128;
                     const cr = src[at + 2] - 128;
-                    pixel[0] = clamp(Y + 1.402 * cr);
-                    pixel[1] = clamp(Y - 0.344136 * cb - 0.714136 * cr);
-                    pixel[2] = clamp(Y + 1.772 * cb);
-                    pixel[3] = 255;
-                }
-                else
-                {
-                    for (let c = 0; c < 4; c++)
+                    const red = clamp(luma + 1.402 * cr);
+                    const blue = clamp(luma + 1.772 * cb);
+                    out[to] = swap ? blue : red;
+                    if (channels > 1)
                     {
-                        pixel[c] = c < n ? src[at + c] : 255;
+                        out[to + 1] = clamp(luma - 0.344136 * cb - 0.714136 * cr);
                     }
+                    if (channels > 2)
+                    {
+                        out[to + 2] = swap ? red : blue;
+                    }
+                    for (let c = 3; c < channels; c++)
+                    {
+                        out[to + c] = 255;
+                    }
+                    to += channels;
                 }
-                if (swap)
-                {
-                    const r = pixel[0];
-                    pixel[0] = pixel[2];
-                    pixel[2] = r;
-                }
-                const to = row * stride + x * channels;
+                continue;
+            }
+            // The components as they lie, cut or padded to the channel count.
+            // The exchange is guarded on having three channels to exchange
+            // between: every BGR request that reaches `swap` has three
+            // components and therefore converts, so this is the shape of the
+            // rule rather than a case a caller can currently produce.
+            for (let x = 0; x < w; x++)
+            {
+                const at = from + x * n;
                 for (let c = 0; c < channels; c++)
                 {
-                    out[to + c] = c < 4 ? pixel[c] : 255;
+                    out[to + c] = c < n ? src[at + c] : 255;
                 }
+                if (swap && channels > 2)
+                {
+                    const red = out[to];
+                    out[to] = out[to + 2];
+                    out[to + 2] = red;
+                }
+                to += channels;
             }
         }
         writeMemory(dib, out);
