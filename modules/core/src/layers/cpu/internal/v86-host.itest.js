@@ -1316,3 +1316,196 @@ test('a write compiled without paging checks a range and a byte, and matches the
         `${edgesFlat.slow} writes took the slow path, out of ${5 * N}`);
     host.stop();
 });
+
+test('an x87 value that keeps its tag computes what the helpers compute', async()=>{
+    // The forms beyond arithmetic -- an exchange, a constant, a sign change, a
+    // compare, a register-to-register store, a square root, an integer load
+    // and an integer store -- are emitted inline on a register the generated
+    // code tagged as holding a double. With the group off each is the call it
+    // was, and the call writes the 80-bit form back, so the registers it
+    // touches lose their tag and every later inline operation on them takes
+    // its helper arm too. The same program is run compiled both ways and every
+    // result compared word for word: a NaN on both sides of a compare, a
+    // negative zero through the sign changes, halves rounded in each of the
+    // four modes the control word names, a chain of exchanges, roots that are
+    // exact and roots that are not, and the integers at either end of a word.
+    //
+    // A root that is not exact is stored as a single: rounded to a double
+    // through the 80-bit format and rounded to a double directly can differ in
+    // the last bit, but rounding a double's worth of root to a single cannot.
+    const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
+    const bits = (/** @type {number} */ v)=>new Uint32Array(Float32Array.of(v).buffer)[0];
+    const DATA = 0x9000;
+    const [A, B, NEGZERO, NAN32] = [0x9000, 0x9004, 0x9008, 0x900c];
+    const [HALF, NEGHALF, SQUARE, TWO] = [0x9010, 0x9014, 0x9018, 0x901c];
+    const [IMAX, IMIN, CW, CWBASE] = [0x9020, 0x9024, 0x9028, 0x902c];
+    const RESULTS = 0x9100;
+    const N = 20000;
+
+    /** @param {number} at */
+    const abs = at=>u32(at);
+    const program = [
+        0xb9, ...u32(N),                        //       mov ecx, N
+        0xdb, 0xe3,                             // loop: fninit
+        // a chain of exchanges, then a multiply reading both registers
+        0xd9, 0x05, ...abs(A),                  //       fld dword [1.5]
+        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
+        0xd9, 0xc9,                             //       fxch st1
+        0xd9, 0xc9,                             //       fxch st1
+        0xd9, 0xc9,                             //       fxch st1
+        0xde, 0xc9,                             //       fmulp st1, st0   3.375
+        0xd9, 0x1d, ...abs(RESULTS + 0x00),
+        // a register-to-register store, the copy then used as an operand
+        0xd9, 0x05, ...abs(A),                  //       fld dword [1.5]
+        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
+        0xdd, 0xd1,                             //       fst st1
+        0xde, 0xc9,                             //       fmulp st1, st0   5.0625
+        0xd9, 0x1d, ...abs(RESULTS + 0x04),
+        // a negative zero through the sign changes
+        0xd9, 0x05, ...abs(NEGZERO),            //       fld dword [-0.0]
+        0xd9, 0xe1,                             //       fabs             +0.0
+        0xd9, 0x1d, ...abs(RESULTS + 0x08),
+        0xd9, 0xee,                             //       fldz
+        0xd9, 0xe0,                             //       fchs             -0.0
+        0xd9, 0x1d, ...abs(RESULTS + 0x0c),
+        // a root that is exact and one that is not
+        0xd9, 0x05, ...abs(SQUARE),             //       fld dword [1.5625]
+        0xd9, 0xfa,                             //       fsqrt            1.25
+        0xd9, 0x1d, ...abs(RESULTS + 0x10),
+        0xd9, 0x05, ...abs(TWO),                //       fld dword [2.0]
+        0xd9, 0xfa,                             //       fsqrt
+        0xd9, 0x1d, ...abs(RESULTS + 0x14),
+        // the integers at either end of a word
+        0xdb, 0x05, ...abs(IMAX),               //       fild dword [0x7fffffff]
+        0xdb, 0x1d, ...abs(RESULTS + 0x18),     //       fistp dword
+        0xdb, 0x05, ...abs(IMIN),               //       fild dword [0x80000000]
+        0xdb, 0x1d, ...abs(RESULTS + 0x1c),     //       fistp dword
+        // a NaN on one side of a compare, signalling and quiet
+        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
+        0xd9, 0x05, ...abs(NAN32),              //       fld dword [nan]
+        0x31, 0xc0,                             //       xor eax, eax
+        0xd8, 0xd1,                             //       fcom st1
+        0xdf, 0xe0,                             //       fnstsw ax
+        0xa3, ...abs(RESULTS + 0x20),           //       mov [.], eax
+        0x31, 0xc0,                             //       xor eax, eax
+        0xdd, 0xe9,                             //       fucomp st1
+        0xdf, 0xe0,                             //       fnstsw ax
+        0xa3, ...abs(RESULTS + 0x24),           //       mov [.], eax
+        0xdd, 0xd8,                             //       fstp st0
+        // an ordinary compare that pops both registers
+        0xd9, 0x05, ...abs(A),                  //       fld dword [1.5]
+        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
+        0x31, 0xc0,                             //       xor eax, eax
+        0xde, 0xd9,                             //       fcompp
+        0xdf, 0xe0,                             //       fnstsw ax
+        0xa3, ...abs(RESULTS + 0x28),           //       mov [.], eax
+        // the constants
+        0xd9, 0xeb,                             //       fldpi
+        0xd9, 0xe8,                             //       fld1
+        0xde, 0xc9,                             //       fmulp st1, st0
+        0xd9, 0x1d, ...abs(RESULTS + 0x2c),     //       fstp dword       pi
+        // the control word's rounding field, read once and put back below
+        0xc7, 0x05, ...abs(CW), ...u32(0),      //       mov dword [cw], 0
+        0xd9, 0x3d, ...abs(CW),                 //       fnstcw [cw]
+        0xa1, ...abs(CW),                       //       mov eax, [cw]
+        0x25, ...u32(0xfffff3ff),               //       and eax, ~0x0c00
+        0xa3, ...abs(CWBASE),                   //       mov [cwbase], eax
+    ];
+    // A half rounded from 2.5 and from -2.5 under each mode: to nearest with
+    // ties to even, down, up, and towards zero.
+    [0x0000, 0x0400, 0x0800, 0x0c00].forEach((mode, index)=>{
+        program.push(
+            0xa1, ...abs(CWBASE),               //       mov eax, [cwbase]
+            0x0d, ...u32(mode),                 //       or eax, mode
+            0xa3, ...abs(CW),                   //       mov [cw], eax
+            0xd9, 0x2d, ...abs(CW),             //       fldcw [cw]
+            0xd9, 0x05, ...abs(HALF),           //       fld dword [2.5]
+            0xdf, 0x1d, ...abs(RESULTS + 0x30 + 4 * index),      // fistp word
+            0xd9, 0x05, ...abs(NEGHALF),        //       fld dword [-2.5]
+            0xdf, 0x1d, ...abs(RESULTS + 0x32 + 4 * index),      // fistp word
+        );
+    });
+    program.push(0x49);                                             // dec ecx
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32((GUEST_CODE + 5) - (jnzAt + 6)));  // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    /** @param {number} tagged */
+    const run = async tagged=>{
+        const host = await boot();
+        host.cpu().wm.exports.set_jit_config(12, tagged);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, new Uint8Array([
+            ...f32(1.5), ...f32(2.25), ...f32(-0), ...[0x00, 0x00, 0xc0, 0x7f],
+            ...f32(2.5), ...f32(-2.5), ...f32(1.5625), ...f32(2),
+            ...u32(0x7fffffff), ...u32(0x80000000), ...u32(0), ...u32(0),
+        ]));
+        host.writePhysical(RESULTS, new Uint8Array(0x40));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slice = 0; slice < 5000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const state = host.jitState();
+        assert.ok(state !== -1 && state.compiledSteps > 0, 'and was compiled');
+        const results = host.readPhysical(RESULTS, 0x40);
+        const tagLost = state.x87TagLost;
+        host.stop();
+        return { results, tagLost };
+    };
+
+    const helpers = await run(0);
+    const inline = await run(1);
+    assert.deepEqual([...inline.results], [...helpers.results], 'the same results either way');
+
+    const word = (/** @type {Uint8Array} */ r, /** @type {number} */ at)=>
+        (r[at] | r[at + 1] << 8 | r[at + 2] << 16 | r[at + 3] << 24) >>> 0;
+    const half = (/** @type {Uint8Array} */ r, /** @type {number} */ at)=>
+        r[at] | r[at + 1] << 8;
+    const r = inline.results;
+
+    assert.equal(word(r, 0x00), bits(3.375), 'a chain of exchanges, then a multiply');
+    assert.equal(word(r, 0x04), bits(5.0625), 'a register copied and used as an operand');
+    assert.equal(word(r, 0x08), 0, 'a negative zero made positive');
+    assert.equal(word(r, 0x0c), 0x80000000, 'a zero made negative');
+    assert.equal(word(r, 0x10), bits(1.25), 'a root that is exact');
+    assert.equal(word(r, 0x14), bits(Math.sqrt(2)), 'a root that is not, as a single');
+    assert.equal(word(r, 0x18), 0x7fffffff, 'the largest integer a word holds');
+    assert.equal(word(r, 0x1c), 0x80000000, 'and the most negative');
+    assert.equal(word(r, 0x2c), bits(Math.PI), 'pi times one');
+
+    // A NaN on either side is unordered: C3, C2 and C0 all set. The signalling
+    // compare calls it an invalid operation as well; the quiet one does not,
+    // and the flag it finds set is the one the signalling compare left.
+    assert.equal(word(r, 0x20) & 0x4500, 0x4500, 'a signalling compare of a NaN is unordered');
+    assert.equal(word(r, 0x20) & 1, 1, 'and an invalid operation');
+    assert.equal(word(r, 0x24) & 0x4500, 0x4500, 'the quiet compare is unordered too');
+    assert.equal(word(r, 0x28) & 0x4500, 0, 'st(0) above the other register: none of the three');
+
+    assert.deepEqual(
+        [half(r, 0x30), half(r, 0x32)], [2, 0xfffe], 'to nearest, ties to even');
+    assert.deepEqual(
+        [half(r, 0x34), half(r, 0x36)], [2, 0xfffd], 'down');
+    assert.deepEqual(
+        [half(r, 0x38), half(r, 0x3a)], [3, 0xfffe], 'up');
+    assert.deepEqual(
+        [half(r, 0x3c), half(r, 0x3e)], [2, 0xfffe], 'towards zero');
+
+    // With the group on, nothing in this program takes a helper arm for want
+    // of a tag; with it off, the exchange, the constants, the sign changes and
+    // the register store strip the tag off registers the arithmetic and the
+    // stores then read, so those fall to their helpers on every iteration.
+    assert.ok(inline.tagLost < 100,
+        `${inline.tagLost} helper arms taken for want of a tag over ${N} iterations`);
+    assert.ok(helpers.tagLost > 10000,
+        `${helpers.tagLost} with the group off, against ${inline.tagLost} with it on`);
+});

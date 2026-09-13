@@ -631,6 +631,14 @@ export async function createV86Host(config){
                     // Writes into a page holding code that landed beside its
                     // instructions and so kept the code and the page's hotness.
                     codePageWritesKept: read(13),
+                    // x87 operations that had an inline arm and took their
+                    // helper arm instead, because a register they read no
+                    // longer held a tagged double. A program whose x87 values
+                    // stay tagged reads near zero here; a number that tracks
+                    // the x87 instructions retired means a form the compiler
+                    // still leaves to a helper is poisoning the tag ahead of
+                    // them, and the profile will show the helper.
+                    x87TagLost: read(14),
                     dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
                     discarded: clearedFunctions,

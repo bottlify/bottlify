@@ -1228,6 +1228,63 @@ oracle test runs a program mixing loads, arithmetic against memory and registers
 compare and a helper-kept square root, compiled, with the inline path off and on, and compares
 every stored result word for word, with the exact ones checked outright.
 
+## An x87 value keeps its tag through the exchange, the constants and the compares
+
+**The cause.** The inline path above covers the arithmetic, the loads and the stores; every other
+x87 form was still a call, and a helper reads a register through `fpu_canonical` and writes the
+80-bit format back. So a value that passed through an exchange, a constant, a sign change, a
+compare, a register-to-register store, a square root or an integer load lost its tag, and from
+then on every inline operation that read it took its helper arm as well, for the rest of that
+value's life. In the saved battle that is what the remaining x87 share was made of: the slow arm
+of `fstp m32` alone 0.69% of the page, the canonicalisation the helpers do about 1%, the exchange
+0.30% and the compares 0.25%, with x87 7% of the instructions a match retires and 17% of a menu's.
+
+**The change.** Those forms are emitted inline too, on registers that carry the tag. The exchange
+swaps two of them where they lie, with no conversion either way. A constant is pushed as the
+double it rounds to -- the value the shortcut gives it at its first use in any case, since every
+arithmetic operation converts its operands to a double first, so this is the precision position
+the shortcut already takes and not a wider one. The sign changes are one wasm instruction, and so
+is the square root. A register-to-register store copies the tag with the bits, so the copy is as
+cheap to use as the original. A compare sets C3, C2 and C0 from three double comparisons, a NaN on
+either side unordered, and the signalling forms call that an invalid operation as the processor
+does. An integer load whose value a double holds exactly (a half or a word) pushes a tagged
+register; an integer store rounds by the control word's rounding field -- one wasm instruction for
+each of the four modes, selected without a branch, so a program that changes the mode around every
+conversion, as a C runtime's float-to-integer does, pays nothing for the change -- and leaves to
+the helper what the width cannot hold.
+
+Left in the helper deliberately: `fcomi` and its forms, which write no register and so poison no
+tag, are not in the measured profile, and would have to read and write the status word on every
+execution to keep the invalid-operation flag; the transcendentals and the environment; and the
+80-bit and 64-bit integer conversions, whose values a double does not hold. Given up on the inline
+path: what it already gave up -- the stack-fault bookkeeping, and the mantissa bits below a
+double's. Configuration index 12 switches the group off on its own; index 7 still switches the
+whole inline path off.
+
+**The counter.** Every arm of the inline path, the ones that were there before included, counts at
+`bottlify_stat` index 14 -- `jitState().x87TagLost` -- when it falls to its helper because a
+register it reads has lost its tag. The count is emitted on the helper arm only, where a call is
+being made anyway, so the inline arm pays nothing for it. A program whose x87 values stay tagged
+reads near zero; a count that tracks the x87 instructions retired means a form still left to a
+helper is poisoning the tag ahead of them.
+
+**The measurement.** The counter, on the oracle program below: 165 160 helper arms taken for want
+of a tag with the group off, and 0 with it on. What this is worth in a frame is not measured yet --
+it needs a browser run against the recorded menu (frame ms) and the saved battle (guest M/s at
+640x480, against 172 M/s in the guest, and the x87 helper share in the worker profile against
+3.6%).
+
+**The tests.** A test in the emulator's own suite runs every changed form once and compares the
+whole machine against a processor. An oracle test runs a program compiled with the group off and
+on and compares every result word for word: a chain of exchanges feeding a multiply that reads
+both registers, a register copied and then used as an operand, a negative zero through both sign
+changes, roots that are exact and roots that are not, the integers at either end of a word loaded
+and stored again, a NaN on one side of a signalling compare and of a quiet one, a compare that
+pops both registers, the constants, and a half rounded from 2.5 and from -2.5 under each of the
+four modes. A root that is not exact is stored as a single, because a root rounded to a double
+through the 80-bit format and one rounded to a double directly can differ in the last bit, while
+rounding a double's worth of root to a single cannot.
+
 ## The hosted Layer 3 provider answers in the call
 
 **The cause.** The music that a title plays through its sound middleware was heard repeating at
