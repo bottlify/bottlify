@@ -135,6 +135,116 @@ test('freeing something that was never allocated says so instead of corrupting t
     assert.equal(allocator.block(address), null);
 });
 
+test('a block freed between two free neighbours becomes one span with both', ()=>{
+    const allocator = createHeapAllocator(ARENA);
+
+    const first = allocator.allocate(0x400);
+    const second = allocator.allocate(0x400);
+    const third = allocator.allocate(0x400);
+    allocator.allocate(0x400);
+
+    assert.ok(allocator.free(first));
+    assert.ok(allocator.free(third));
+    assert.ok(allocator.free(second));
+
+    assert.equal(allocator.allocate(0xc00), first, 'three neighbours came back as one');
+    assert.equal(allocator.diagnostics().blocks, 2);
+});
+
+test('the same requests yield the same addresses, whatever the heap has been through', ()=>{
+    /** @param {ReturnType<typeof createHeapAllocator>} allocator */
+    const exercise = allocator=>{
+        /** @type {number[]} */
+        const out = [];
+        /** @type {number[]} */
+        const held = [];
+        let seed = 7;
+        for (let i = 0; i < 2000; i++)
+        {
+            seed = (seed * 1103515245 + 12345) >>> 0;
+            const address = allocator.allocate(1 + (seed >>> 8) % 300);
+            out.push(address);
+            held.push(address);
+            if ((seed & 3) === 0 && held.length > 0)
+            {
+                allocator.free(/** @type {number} */ (held.splice((seed >>> 4) % held.length, 1)[0]));
+            }
+        }
+        return out;
+    };
+    const arena = { base: 0x10000, size: 0x100000 };
+    assert.deepEqual(exercise(createHeapAllocator(arena)), exercise(createHeapAllocator(arena)));
+});
+
+test('an allocation costs the same in a heap of a hundred thousand blocks as in an empty one', t=>{
+    // What a program pays for a block once it has loaded a level, where every
+    // free list walked in order and every map deleted from grew with the
+    // heap: at a hundred thousand live blocks an allocation of sixteen bytes
+    // and its free were measured at two hundred microseconds together.
+    const allocator = createHeapAllocator({ base: 0x10000000, size: 0x30000000 });
+    const held = [];
+    let seed = 12345;
+    for (let i = 0; i < 200000; i++)
+    {
+        seed = (seed * 1103515245 + 12345) >>> 0;
+        held.push(allocator.allocate(16 + (seed >>> 8) % 500));
+    }
+    for (let i = 0; i < held.length; i += 2)
+    {
+        allocator.free(held[i]);
+    }
+    const PAIRS = 20000;
+    const started = process.hrtime.bigint();
+    for (let i = 0; i < PAIRS; i++)
+    {
+        allocator.free(allocator.allocate(16));
+    }
+    const perPair = Number(process.hrtime.bigint() - started) / PAIRS;
+    t.diagnostic(
+        `allocate and free among 100000 live blocks: ${(perPair / 1000).toFixed(2)} us a pair`);
+    assert.ok(perPair < 50_000, `${perPair} ns a pair is a walk over the heap, not a lookup`);
+    assert.equal(allocator.diagnostics().blocks, 100000);
+});
+
+test('handing the same address out and back many times does not grow the allocator', ()=>{
+    // The maps by address are never deleted from -- see the allocator -- so
+    // they are rebuilt once the entries that went away outnumber the ones
+    // that are there. Everything has to keep working across that.
+    const allocator = createHeapAllocator({ base: 0x10000, size: 0x100000 });
+    const kept = allocator.allocate(64);
+    const neighbour = allocator.allocate(64);
+    let address = 0;
+    for (let i = 0; i < 70000; i++)
+    {
+        const next = allocator.allocate(64);
+        assert.ok(address === 0 || next === address, 'the same span answers every time');
+        address = next;
+        assert.ok(allocator.free(next));
+    }
+    assert.equal(allocator.block(kept)?.size, 64, 'a block that stayed is still found');
+    assert.equal(allocator.block(address), null, 'a block that went is not');
+    assert.ok(allocator.free(neighbour));
+    assert.ok(allocator.free(kept));
+    assert.equal(allocator.allocate(0x100000), 0x10000,
+        'and everything coalesced back to one span');
+});
+
+test('a sliver too small for any block is never handed out', ()=>{
+    // An arena that starts off the alignment leaves four bytes in front of
+    // its first block, and the tail can end the same way. They coalesce with
+    // a neighbour that is freed, and until then nobody gets them.
+    const allocator = createHeapAllocator({ base: 0x1004, size: 0x20 });
+
+    assert.equal(allocator.allocate(8), 0x1008);
+    assert.equal(allocator.allocate(8), 0x1010);
+    assert.equal(allocator.allocate(8), 0x1018);
+    assert.equal(allocator.allocate(8), 0, 'eight bytes are left, in two slivers of four');
+    assert.ok(allocator.free(0x1018));
+    assert.equal(allocator.diagnostics().largestFree, 12,
+        'the tail sliver came back with its neighbour');
+    assert.equal(allocator.allocate(8), 0x1018);
+});
+
 test('the allocator honours a coarser alignment than its default', ()=>{
     const allocator = createHeapAllocator({ base: 0x1004, size: 0x8000 });
 

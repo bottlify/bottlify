@@ -147,21 +147,99 @@ const roundUp = (value, to)=>Math.ceil(value / to) * to;
  */
 
 /**
- * A first-fit allocator over one byte range.
+ * @typedef {Object} FreeSpan
+ * @property {number} base
+ * @property {number} size
+ * @property {number} bin   Which size class holds it.
+ * @property {number} at    Its index in that class, so it can be removed without a search.
+ */
+
+/**
+ * The size classes free spans are kept in.
  *
- * Free space is a list of spans kept in address order and never adjacent, so
- * two blocks freed side by side become one span and a later request the size of
- * both still fits. First fit rather than best fit: it is the cheaper scan, and
- * the fragmentation difference between the two only starts to matter at
- * lifetimes far longer than a process.
+ * Class zero holds what is too small to hand out at all -- the slivers a
+ * coarser alignment leaves in front of a block, kept only so they can
+ * coalesce. Then one class per multiple of eight up to a kilobyte, which is
+ * where nearly every allocation a program makes lands, so a request of that
+ * size is answered from spans of exactly its class. Above that, one class
+ * per power of two.
+ */
+const SMALL_CLASSES = 128;
+const SMALL_LIMIT = SMALL_CLASSES * ALIGNMENT;
+const BINS = SMALL_CLASSES + 32;
+
+/** How many null entries the address maps carry before they are rebuilt. */
+const STALE_LIMIT = 65536;
+
+/** @param {number} size */
+const binOf = size=>(size < SMALL_LIMIT
+    ? size >>> 3
+    : SMALL_CLASSES + (31 - Math.clz32(size)) - (31 - Math.clz32(SMALL_LIMIT)));
+
+/**
+ * An allocator over one byte range.
+ *
+ * Free space is kept in size classes -- a stack of spans per class, taken
+ * last in first out -- and coalesced through two maps that find a span by
+ * where it ends and where it begins, so a block freed between two free
+ * neighbours becomes one span with them and a later request the size of all
+ * three still fits. Every step is a lookup or a push: a free list walked in
+ * address order cost a walk over every span per call, and a program that had
+ * loaded a level had thousands, which made an allocation of sixteen bytes
+ * the most expensive thing it did.
+ *
+ * Deterministic: the same sequence of requests yields the same addresses,
+ * which is what makes a heap bug reproducible.
  *
  * @param {{ base: number, size: number }} arena  Memory nothing has written yet.
  */
 export function createHeapAllocator({ base, size }){
-    /** @type {{ base: number, size: number }[]} */
-    const spans = [{ base, size }];
-    /** @type {Map<number, HeapBlock>} */
-    const live = new Map();
+    /** @type {FreeSpan[][]} */
+    const bins = Array.from({ length: BINS }, ()=>[]);
+    // Three maps by address, and none of them is ever deleted from: an entry
+    // that goes away is set to null and stays. Deleting a key from a large
+    // map and setting it again -- which is what freeing a block and handing
+    // the same address out again does, and what a program does all day --
+    // cost tens of microseconds a time in the engine underneath, growing
+    // with the map, where writing over a key that is there costs nothing.
+    // The maps are rebuilt without their nulls once those outnumber the
+    // entries, so a long run does not keep every address it ever used.
+    /** @type {Map<number, FreeSpan | null>} */
+    let byBase = new Map();
+    /** @type {Map<number, FreeSpan | null>} */
+    let byEnd = new Map();
+    /** @type {Map<number, HeapBlock | null>} */
+    let live = new Map();
+    let stale = 0;
+    let liveBlocks = 0;
+    let liveSpans = 0;
+    /**
+     * @template T
+     * @param {Map<number, T | null>} map
+     * @returns {Map<number, T | null>}
+     */
+    const compacted = map=>{
+        /** @type {Map<number, T | null>} */
+        const kept = new Map();
+        for (const [key, value] of map)
+        {
+            if (value !== null)
+            {
+                kept.set(key, value);
+            }
+        }
+        return kept;
+    };
+    const forget = ()=>{
+        stale++;
+        if (stale >= STALE_LIMIT && stale > liveBlocks + 2 * liveSpans)
+        {
+            byBase = compacted(byBase);
+            byEnd = compacted(byEnd);
+            live = compacted(live);
+            stale = 0;
+        }
+    };
     /**
      * The first address in the arena that has never been inside a block.
      *
@@ -173,30 +251,71 @@ export function createHeapAllocator({ base, size }){
      */
     let handedTo = base;
 
-    /** @param {{ base: number, size: number }} span */
-    const release = span=>{
-        let at = spans.findIndex(candidate=>candidate.base > span.base);
-        if (at < 0)
-        {
-            at = spans.length;
-        }
-        spans.splice(at, 0, span);
-
-        const previous = spans[at - 1];
-        if (previous && previous.base + previous.size === span.base)
-        {
-            previous.size += span.size;
-            spans.splice(at, 1);
-            at--;
-        }
-        const merged = spans[at];
-        const next = spans[at + 1];
-        if (next && merged.base + merged.size === next.base)
-        {
-            merged.size += next.size;
-            spans.splice(at + 1, 1);
-        }
+    /** @param {number} spanBase @param {number} spanSize */
+    const insert = (spanBase, spanSize)=>{
+        const bin = binOf(spanSize);
+        const span = { base: spanBase, size: spanSize, bin, at: bins[bin].length };
+        bins[bin].push(span);
+        byBase.set(spanBase, span);
+        byEnd.set(spanBase + spanSize, span);
+        liveSpans++;
     };
+
+    /** @param {FreeSpan} span */
+    const remove = span=>{
+        const bin = bins[span.bin];
+        const last = /** @type {FreeSpan} */ (bin.pop());
+        if (last !== span)
+        {
+            bin[span.at] = last;
+            last.at = span.at;
+        }
+        byBase.set(span.base, null);
+        byEnd.set(span.base + span.size, null);
+        liveSpans--;
+        forget();
+    };
+
+    /**
+     * A span at least `need` bytes long, or null.
+     *
+     * The smallest class that can hold it is looked at first, and the classes
+     * above it in turn. A class above a kilobyte holds spans of more than one
+     * size, so the class the request falls in is searched for one that fits;
+     * every class above it fits without looking.
+     *
+     * @param {number} need
+     * @returns {FreeSpan | null}
+     */
+    const fit = need=>{
+        let bin = binOf(need);
+        if (need >= SMALL_LIMIT)
+        {
+            const candidates = bins[bin];
+            for (let i = candidates.length - 1; i >= 0; i--)
+            {
+                if (candidates[i].size >= need)
+                {
+                    return candidates[i];
+                }
+            }
+            bin++;
+        }
+        for (; bin < BINS; bin++)
+        {
+            const candidates = bins[bin];
+            if (candidates.length > 0)
+            {
+                return candidates[candidates.length - 1];
+            }
+        }
+        return null;
+    };
+
+    if (size > 0)
+    {
+        insert(base, size);
+    }
 
     return {
         /**
@@ -210,35 +329,35 @@ export function createHeapAllocator({ base, size }){
             // A zero-byte request still yields a distinct pointer, because a
             // program compares it against NULL to decide whether it failed.
             const capacity = Math.max(ALIGNMENT, roundUp(bytes, ALIGNMENT));
-
-            for (let i = 0; i < spans.length; i++)
+            if (capacity > size)
             {
-                const span = spans[i];
-                const start = roundUp(span.base, alignment);
-                const end = start + capacity;
-                if (end > span.base + span.size)
-                {
-                    continue;
-                }
-
-                /** @type {{ base: number, size: number }[]} */
-                const remainder = [];
-                if (start > span.base)
-                {
-                    remainder.push({ base: span.base, size: start - span.base });
-                }
-                if (end < span.base + span.size)
-                {
-                    remainder.push({ base: end, size: span.base + span.size - end });
-                }
-                spans.splice(i, 1, ...remainder);
-
-                const fresh = start >= handedTo;
-                handedTo = Math.max(handedTo, end);
-                live.set(start, { address: start, size: bytes, capacity, owner, fresh });
-                return start;
+                return 0;
             }
-            return 0;
+            // Room for the padding a coarser alignment may need in front: a
+            // span begins on an eight-byte boundary, so at most this much.
+            const span = fit(capacity + (alignment > ALIGNMENT ? alignment - ALIGNMENT : 0));
+            if (span === null)
+            {
+                return 0;
+            }
+            const start = roundUp(span.base, alignment);
+            const end = start + capacity;
+            const spanEnd = span.base + span.size;
+            remove(span);
+            if (start > span.base)
+            {
+                insert(span.base, start - span.base);
+            }
+            if (end < spanEnd)
+            {
+                insert(end, spanEnd - end);
+            }
+
+            const fresh = start >= handedTo;
+            handedTo = Math.max(handedTo, end);
+            live.set(start, { address: start, size: bytes, capacity, owner, fresh });
+            liveBlocks++;
+            return start;
         },
 
         /**
@@ -251,8 +370,24 @@ export function createHeapAllocator({ base, size }){
             {
                 return false;
             }
-            live.delete(address);
-            release({ base: block.address, size: block.capacity });
+            live.set(address, null);
+            liveBlocks--;
+            forget();
+            let spanBase = block.address;
+            let spanEnd = block.address + block.capacity;
+            const before = byEnd.get(spanBase);
+            if (before)
+            {
+                remove(before);
+                spanBase = before.base;
+            }
+            const after = byBase.get(spanEnd);
+            if (after)
+            {
+                remove(after);
+                spanEnd = after.base + after.size;
+            }
+            insert(spanBase, spanEnd - spanBase);
             return true;
         },
 
@@ -271,7 +406,7 @@ export function createHeapAllocator({ base, size }){
         blockContaining(address){
             for (const block of live.values())
             {
-                if (address >= block.address && address < block.address + block.capacity)
+                if (block && address >= block.address && address < block.address + block.capacity)
                 {
                     return block;
                 }
@@ -302,25 +437,27 @@ export function createHeapAllocator({ base, size }){
         /** @param {any} owner @returns {number[]} */
         owned(owner){
             return [...live.values()]
-                .filter(block=>block.owner === owner)
-                .map(block=>block.address);
+                .filter(block=>block !== null && block.owner === owner)
+                .map(block=>(/** @type {HeapBlock} */ (block)).address);
         },
 
         diagnostics(){
             let used = 0;
             for (const block of live.values())
             {
-                used += block.capacity;
+                used += block ? block.capacity : 0;
             }
-            return {
-                blocks: live.size,
-                used,
-                free: spans.reduce((total, span)=>total + span.size, 0),
-                // A large free total next to a small largest span is
-                // fragmentation, and it is the reason an allocation fails while
-                // the heap looks half empty.
-                largestFree: spans.reduce((largest, span)=>Math.max(largest, span.size), 0),
-            };
+            let free = 0;
+            let largestFree = 0;
+            for (const span of byBase.values())
+            {
+                free += span ? span.size : 0;
+                largestFree = Math.max(largestFree, span ? span.size : 0);
+            }
+            // A large free total next to a small largest span is
+            // fragmentation, and it is the reason an allocation fails while
+            // the heap looks half empty.
+            return { blocks: liveBlocks, used, free, largestFree };
         },
     };
 }
