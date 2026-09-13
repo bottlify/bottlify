@@ -442,6 +442,32 @@ test('a palette is real, selectable, and realizes no entries', ()=>{
     assert.equal(fns.GetDIBColorTable.handler([hdc, 0, 256, OUT]), 0);
 });
 
+test('UnrealizeObject succeeds for any live object and fails for one that is not', ()=>{
+    // The realization it undoes changes nothing here, so all that is left to get
+    // right is the handle check: TRUE for an object that exists -- a brush or a
+    // palette, and on modern Windows any other kind too -- FALSE for a handle
+    // that names nothing.
+    const { fns, hdc } = setup();
+    const brush = fns.CreateSolidBrush.handler([0x00112233]);
+    const palette = fns.CreateHalftonePalette.handler([hdc]);
+    const pen = fns.CreatePen.handler([0, 1, 0x00ffffff]);
+    assert.notEqual(brush, 0);
+    assert.notEqual(palette, 0);
+
+    assert.equal(fns.UnrealizeObject.handler([brush]), 1, 'a brush can be unrealized');
+    assert.equal(fns.UnrealizeObject.handler([palette]), 1, 'and so can a palette');
+    assert.equal(fns.UnrealizeObject.handler([pen]), 1,
+        'any live object answers TRUE, as modern Windows does');
+
+    assert.equal(fns.UnrealizeObject.handler([0x1234]), 0, 'a stale handle is not an object');
+    assert.equal(fns.UnrealizeObject.handler([hdc]), 0,
+        'a device context is not a GDI object it can unrealize');
+
+    fns.DeleteObject.handler([brush]);
+    assert.equal(fns.UnrealizeObject.handler([brush]), 0,
+        'and a handle whose object was deleted no longer names one');
+});
+
 // --- pixel formats ---
 
 test('a pixel format is set through the service that OPENGL32 reads, never on the DC', ()=>{

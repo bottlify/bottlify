@@ -940,6 +940,21 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         },
 
         /**
+         * BOOL UnrealizeObject(HGDIOBJ h)
+         *
+         * Undoes a realization so the next selection re-realizes it: a palette's
+         * realization, or a brush's origin. This pipeline realizes no palette
+         * entries and never moves a brush origin, so there is nothing to undo and
+         * the call reduces to the handle check Windows itself answers with --
+         * TRUE for any object that exists, FALSE for one that does not.
+         */
+        UnrealizeObject: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>(objects.get(handle) ? 1 : 0),
+        },
+
+        /**
          * UINT GetDIBColorTable(HDC hdc, UINT iStart, UINT cEntries,
          *                       RGBQUAD *prgbq)
          *
