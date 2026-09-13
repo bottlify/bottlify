@@ -37,6 +37,12 @@
  * @property {() => import('./raster.js').Box} scissorBox
  * @property {Record<string, import('./matrix.js').MatrixStack>} stacks
  * @property {(mode: number, vertices: any[]) => void} drawVertices
+ * @property {((request: import('./gpu.js').DrawRequest) => boolean) | null} drawArrays
+ *           A draw straight from the arrays, when a renderer takes them as
+ *           they lie: true when it did, false when the vertices are to be
+ *           assembled here instead. Null in a build that draws on the processor.
+ * @property {() => boolean} gpuBacked   whether the framebuffer's pixels live on
+ *           a device rather than in `framebuffer()`, which then holds nothing
  * @property {() => any} currentVertex  the current attributes, as a vertex
  * @property {Record<string, any>} side  state that is not a query: texture
  *           units, lights, arrays -- each installer adds its own

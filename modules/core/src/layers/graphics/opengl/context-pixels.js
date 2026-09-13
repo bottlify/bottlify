@@ -147,6 +147,12 @@ export function installPixelCalls(context, kernel){
         const zoomX = record(GL.ZOOM_X).values[0];
         const zoomY = record(GL.ZOOM_Y).values[0];
         const frame = kernel.framebuffer();
+        if (kernel.gpuBacked())
+        {
+            kernel.diverge('pixels drawn at the raster position were accepted and drew'
+                + ' nothing: the framebuffer lives on the device and takes only primitives');
+            return;
+        }
         const scene = kernel.side.scene();
         const box = kernel.scissorBox();
         const fog = scene.fog
@@ -274,6 +280,11 @@ export function installPixelCalls(context, kernel){
                 return null;
             }
             const frame = kernel.framebuffer();
+            if (kernel.gpuBacked())
+            {
+                kernel.diverge('glReadPixels was accepted and read black: the framebuffer'
+                    + ' lives on the device and is not read back');
+            }
             if (format === GL.DEPTH_COMPONENT)
             {
                 if (!frame.depth)
@@ -391,6 +402,12 @@ export function installPixelCalls(context, kernel){
                     return;
                 }
                 diverge('glCopyPixels of depth or stencil was accepted and copied nothing');
+                return;
+            }
+            if (kernel.gpuBacked())
+            {
+                diverge('glCopyPixels was accepted and copied nothing: the framebuffer lives'
+                    + ' on the device');
                 return;
             }
             const frame = kernel.framebuffer();

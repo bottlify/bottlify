@@ -45,6 +45,8 @@ export function createFakeDevice(options = {}){
         const record = (op, args)=>calls.push({ op, pass, ...args });
         pass.setViewport = (/** @type {number[]} */ ...rect)=>record('setViewport', { rect });
         pass.setScissorRect = (/** @type {number[]} */ ...rect)=>record('setScissorRect', { rect });
+        pass.setStencilReference = (/** @type {number} */ reference)=>
+            record('setStencilReference', { reference });
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
         pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ group,
             /** @type {number[] | undefined} */ offsets)=>
@@ -87,6 +89,9 @@ export function createFakeDevice(options = {}){
         encoder.copyTextureToBuffer = (/** @type {any} */ source, /** @type {any} */ destination,
             /** @type {any} */ size)=>calls.push(
             { op: 'copyTextureToBuffer', encoder, source, destination, size });
+        encoder.copyTextureToTexture = (/** @type {any} */ source, /** @type {any} */ destination,
+            /** @type {any} */ size)=>calls.push(
+            { op: 'copyTextureToTexture', encoder, source, destination, size });
         encoder.finish = ()=>{
             const buffer = object('commandBuffer', { encoder, deferred });
             calls.push({ op: 'finish', encoder, buffer });

@@ -568,7 +568,7 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
-     *           click?: { x: number, y: number, after: number } | null }} request
+     *           clicks?: { x: number, y: number, after: number }[] }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -592,6 +592,8 @@ export function createHarness(canvas, how = {}){
         /** @type {any} */
         let presented = null;
         let pointerDown = false;
+        /** Where the last click left the pointer, for the motion to the next. */
+        let pointerAt = { x: 0, y: 0 };
         /** @type {any} */
         const collected = { failures: [], missing: [], output: [], events: [] };
 
@@ -762,23 +764,27 @@ export function createHarness(canvas, how = {}){
                             app.input.send({ kind: 'pointerButton', button: 'left', down: true });
                         }
                     }
-                    // One click, a frame long, once the program has drawn a
+                    // A click, a frame long, once the program has drawn a
                     // number of frames: pressed on one presented frame and
                     // released on the next, which is how a person's click
                     // reaches a program that reads the button once a frame.
-                    if (request.click && presents === request.click.after)
+                    for (const click of request.clicks ?? [])
                     {
-                        // With the motion that would have brought a pointer
-                        // there from the corner: a program that reads the
-                        // mouse as relative motion moves its own cursor by it.
-                        app.input.send({ kind: 'pointerMove',
-                            x: request.click.x, y: request.click.y,
-                            dx: request.click.x, dy: request.click.y });
-                        app.input.send({ kind: 'pointerButton', button: 'left', down: true });
-                    }
-                    if (request.click && presents === request.click.after + 1)
-                    {
-                        app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+                        if (presents === click.after)
+                        {
+                            // With the motion that would have brought a pointer
+                            // there from where it was: a program that reads the
+                            // mouse as relative motion moves its own cursor by it.
+                            app.input.send({ kind: 'pointerMove',
+                                x: click.x, y: click.y,
+                                dx: click.x - pointerAt.x, dy: click.y - pointerAt.y });
+                            pointerAt = { x: click.x, y: click.y };
+                            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+                        }
+                        if (presents === click.after + 1)
+                        {
+                            app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+                        }
                     }
                 },
             },

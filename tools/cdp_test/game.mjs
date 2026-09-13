@@ -164,14 +164,17 @@ function parse(argv){
                 return { x: Number(x), y: Number(y), down: down === 'down' };
             })()
             : null,
-        // One click in the program's own pixels after that many presented
-        // frames, as `x,y,after`: pressed on one frame, released on the next.
-        click: argv.includes('--click')
-            ? (()=>{
-                const [x, y, after] = argv[argv.indexOf('--click') + 1].split(',').map(Number);
-                return { x, y, after: after || 30 };
-            })()
-            : null,
+        // Clicks in the program's own pixels after that many presented
+        // frames each, as `x,y,after`: pressed on one frame, released on the
+        // next. Given more than once for a path through several screens.
+        clicks: argv.flatMap((flag, index)=>{
+            if (flag !== '--click')
+            {
+                return [];
+            }
+            const [x, y, after] = argv[index + 1].split(',').map(Number);
+            return [{ x, y, after: after || 30 }];
+        }),
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
         // Guest instructions per scheduler turn when a profile is asked for.
@@ -669,7 +672,7 @@ export async function game(options){
             skipTexture: options.skipTexture,
             fog: options.fog,
             pointer: options.pointer,
-            click: options.click,
+            clicks: options.clicks,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,

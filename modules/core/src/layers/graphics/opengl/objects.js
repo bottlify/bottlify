@@ -74,6 +74,8 @@ const MIPMAP_FILTERS = new Set([
  * @property {Map<number, number>} parameters
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
+ * @property {Set<number>} dirty   the level keys written since a copy kept
+ *           elsewhere last read them
  */
 
 /**
@@ -84,10 +86,12 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} access
  * @property {Uint8Array} data
  * @property {number} mapped  the guest address it is mapped at, or zero
+ * @property {{ start: number, end: number } | null} written   the bytes the
+ *           program has rewritten since a copy kept elsewhere last read them
  */
 
 /** Cube map levels are kept in one map, six faces apart. */
-const FACE_STRIDE = 32;
+export const FACE_STRIDE = 32;
 
 /**
  * @param {number} level
@@ -136,6 +140,7 @@ export function createTextureObject(name, target){
         parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
         borderColour: [0, 0, 0, 0],
         levels: new Map(),
+        dirty: new Set(),
     };
 }
 
@@ -145,7 +150,7 @@ export function createTextureObject(name, target){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0 };
+        mapped: 0, written: null };
 }
 
 /**

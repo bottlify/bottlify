@@ -196,6 +196,10 @@ const ATTRIB_STACK_LIMIT = 16;
  * @property {(detail: string) => void} [divergence]
  *           Told, once per distinct message, when a call was accepted but
  *           its effect is not what the real API would have had.
+ * @property {ReturnType<typeof import('./gpu.js').createGpuRenderer>} [gpu]
+ *           A renderer that draws on a device. With one, the processor
+ *           pipeline is not run and the framebuffer here holds nothing;
+ *           without one, every draw lands in `framebuffer`.
  */
 
 /** @typedef {import('./kernel.js').ContextKernel} ContextKernel */
@@ -208,6 +212,7 @@ export function createGlContext(options = {}){
     shareGroup.contexts++;
     const extensions = [...(options.extensions ?? [])];
     const memory = options.memory ?? null;
+    const gpu = options.gpu ?? null;
 
     let attached = false;
     let state = createDefaultState({ width: 0, height: 0, doubleBuffered: false });
@@ -303,6 +308,15 @@ export function createGlContext(options = {}){
         scissorBox,
         stacks,
         drawVertices,
+        // A draw by arrays reaches the device only when it is neither being
+        // compiled into a list -- a list holds vertices, not pointers -- nor
+        // refused by the renderer for a shape it cannot bind.
+        drawArrays: gpu
+            ? request=>(compiling || !attached
+                ? false
+                : gpu.drawArrays(context, request, scenes.scene()))
+            : null,
+        gpuBacked: ()=>gpu !== null && attached,
         currentVertex,
         side: {},
     };
@@ -345,6 +359,15 @@ export function createGlContext(options = {}){
             }
             attached = true;
             state = createDefaultState(drawable);
+            if (gpu)
+            {
+                gpu.attach(context, drawable);
+                // The size without the pixels: the scissor and the viewport
+                // are measured against it, and the pixels are on the device.
+                framebuffer = { ...createFramebuffer(0, 0), width: drawable.width,
+                    height: drawable.height };
+                return;
+            }
             framebuffer = createFramebuffer(drawable.width, drawable.height,
                 { depth: (drawable.depthBits ?? 0) > 0 });
         },
@@ -540,6 +563,20 @@ export function createGlContext(options = {}){
                 return;
             }
             const box = scissorBox();
+            if (gpu && attached)
+            {
+                gpu.clear(context, {
+                    mask,
+                    colour: record(GL.COLOR_CLEAR_VALUE).values,
+                    depth: record(GL.DEPTH_CLEAR_VALUE).values[0],
+                    stencil: record(GL.STENCIL_CLEAR_VALUE).values[0],
+                    colourMask: record(GL.COLOR_WRITEMASK).values.map(value=>value !== 0),
+                    depthMask: record(GL.DEPTH_WRITEMASK).values[0] !== 0,
+                    stencilMask: record(GL.STENCIL_WRITEMASK).values[0],
+                    scissor: box,
+                });
+                return;
+            }
             if (mask & GL.COLOR_BUFFER_BIT)
             {
                 fillBox(framebuffer, record(GL.COLOR_CLEAR_VALUE).values.map(toByte), box,
@@ -1561,7 +1598,19 @@ export function createGlContext(options = {}){
      * @param {any[]} vertices
      */
     function draw(mode, vertices){
-        if (vertices.length === 0 || framebuffer.width === 0)
+        if (vertices.length === 0)
+        {
+            return;
+        }
+        if (gpu)
+        {
+            if (attached)
+            {
+                gpu.draw(context, scenes.scene(), mode, vertices);
+            }
+            return;
+        }
+        if (framebuffer.width === 0)
         {
             return;
         }

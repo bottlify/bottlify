@@ -263,14 +263,21 @@ export const graphicsModule = {
                 allocate: config?.allocate,
                 free: config?.free,
             }),
-            // OpenGL draws on the processor and asks for no device at all, so
-            // it is the one API here that a headless build can run to a
-            // finished frame.
+            // OpenGL asks for a device only when there is one, so it is the
+            // one API here that a headless build can run to a finished frame.
             /** @returns {any} */
             opengl: (/** @type {any} */ options)=>createOpengl({
                 readMemory: services.readMemory,
                 writeMemory: services.writeMemory,
                 screen: ()=>services.screen,
+                // With a device, contexts draw on it through the one backend
+                // and claim their pictures with the presenter; without one
+                // they draw on the processor, which is the headless build.
+                backend: device ? ()=>api.backend() : undefined,
+                createSampler: device
+                    ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
+                    : undefined,
+                presenter: ()=>presenter,
                 // Which window a DC belongs to is GDI's knowledge, and the
                 // pixel format belongs to the window: without this every DC
                 // would be a drawable of its own and a format set on one

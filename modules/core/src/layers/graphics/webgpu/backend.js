@@ -231,12 +231,16 @@ export function createBackend(options){
     const createSurface = descriptor=>{
         const label = descriptor.label === undefined ? 'surface' : descriptor.label;
         const mipLevelCount = descriptor.mipLevelCount === undefined ? 1 : descriptor.mipLevelCount;
+        // A cube map is six layers of one texture and a view that says so; a
+        // sampler given a plain 2D view of it reads one face and the shader
+        // that declared a cube fails to bind.
+        const layers = descriptor.layers === undefined ? 1 : descriptor.layers;
         const texture = device.createTexture({
             label,
             size: {
                 width: descriptor.width,
                 height: descriptor.height,
-                depthOrArrayLayers: 1,
+                depthOrArrayLayers: layers,
             },
             // The whole chain a program supplies, so a sampler can filter
             // between levels: a far surface sampled from its top level alone
@@ -252,11 +256,14 @@ export function createBackend(options){
         profiler.count('surfacesCreated');
         return {
             texture,
-            view: texture.createView({ label }),
+            view: texture.createView(descriptor.dimension === undefined
+                ? { label }
+                : { label, dimension: descriptor.dimension }),
             width: descriptor.width,
             height: descriptor.height,
             format: descriptor.format,
             mipLevelCount,
+            layers,
             label,
         };
     };
@@ -308,6 +315,17 @@ export function createBackend(options){
             /** @param {{ x: number, y: number, width: number, height: number }} rect */
             setScissor(rect){
                 raw.setScissorRect(rect.x, rect.y, rect.width, rect.height);
+            },
+
+            /**
+             * The value a stencil test compares against and a replace writes.
+             * Dynamic state rather than part of the pipeline, which is what
+             * lets a shadow pass count up and down without a pipeline each.
+             *
+             * @param {number} reference
+             */
+            setStencilReference(reference){
+                raw.setStencilReference(reference);
             },
 
             /** @param {any} next */
@@ -542,6 +560,19 @@ export function createBackend(options){
                     // it interrupted rather than corrupting the recording.
                     closeCurrentPass();
                     encoder.copyBufferToTexture(source, destination, size);
+                },
+
+                /**
+                 * A region of one texture into another, outside any pass.
+                 * The two must share a format; the copy is what a program
+                 * that reads its own render target back into a texture asks
+                 * for, and a draw between the two would see the old texels.
+                 *
+                 * @param {any} source @param {any} destination @param {any} size
+                 */
+                copyTexture(source, destination, size){
+                    closeCurrentPass();
+                    encoder.copyTextureToTexture(source, destination, size);
                 },
 
                 /**

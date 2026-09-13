@@ -284,6 +284,30 @@ export function unpackImage(bytes, width, height, format, type, unpack){
     {
         return null;
     }
+    if (type === GL.UNSIGNED_BYTE && (format === GL.RGBA || format === GL.BGRA
+        || format === GL.RGB || format === GL.BGR))
+    {
+        // The common case, byte for byte: a texture a program streams every
+        // frame goes through here, and a general path that builds an array
+        // per texel costs it milliseconds.
+        const reversed = format === GL.BGRA || format === GL.BGR;
+        const opaque = format === GL.RGB || format === GL.BGR;
+        for (let y = 0; y < height; y++)
+        {
+            let at = (unpack.skipRows + y) * layout.stride + unpack.skipPixels * layout.pixelBytes;
+            let out = y * width * 4;
+            for (let x = 0; x < width; x++)
+            {
+                texels[out] = bytes[reversed ? at + 2 : at];
+                texels[out + 1] = bytes[at + 1];
+                texels[out + 2] = bytes[reversed ? at : at + 2];
+                texels[out + 3] = opaque ? 255 : bytes[at + 3];
+                at += layout.pixelBytes;
+                out += 4;
+            }
+        }
+        return texels;
+    }
     for (let y = 0; y < height; y++)
     {
         let at = (unpack.skipRows + y) * layout.stride + unpack.skipPixels * layout.pixelBytes;

@@ -85,6 +85,9 @@ import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './
  *           every context made here reads its pixels and arrays through it.
  * @property {(detail: string) => void} [divergence]
  *           Handed to every context, for the calls it accepts and cannot honour.
+ * @property {ReturnType<typeof import('./gpu.js').createGpuRenderer>} [gpu]
+ *           Handed to every context: where its draws go when this build has a
+ *           device. Absent, a context draws on the processor.
  */
 
 /**
@@ -278,6 +281,7 @@ export function createWgl(options){
                 extensions: Object.keys(extensions).filter(name=>!name.startsWith('WGL_')),
                 memory: contextMemory,
                 divergence: options.divergence,
+                gpu: options.gpu,
             });
             live.set(context, {
                 key: drawable.key,

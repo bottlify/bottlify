@@ -336,6 +336,80 @@ export function installArrayCalls(context, kernel){
     }
 
     /**
+     * The enabled arrays as a renderer takes them, the vertex array first.
+     *
+     * @returns {import('./gpu-layout.js').ArrayRequest[]}
+     */
+    function enabledArrays(){
+        const enabled = (/** @type {string} */ name)=>record(ARRAYS[name].enable).values[0] !== 0;
+        /** @type {import('./gpu-layout.js').ArrayRequest[]} */
+        const arrays = [{ name: 'position', pointer: pointers.vertex, normalised: false }];
+        for (const [name, as] of [['color', 'color'], ['secondary', 'secondary'],
+            ['normal', 'normal'], ['fogCoord', 'fogCoord']])
+        {
+            if (enabled(name))
+            {
+                arrays.push({
+                    name: as, pointer: pointers[name], normalised: ARRAYS[name].normalised,
+                });
+            }
+        }
+        for (let unit = 0; unit < TEXTURE_UNITS; unit++)
+        {
+            if (texCoordEnabled[unit] !== 0)
+            {
+                arrays.push({ name: `texCoord${unit}`, pointer: texCoordPointers[unit],
+                    normalised: false });
+            }
+        }
+        return arrays;
+    }
+
+    /**
+     * Hands a draw to the renderer as arrays, when there is one and it takes
+     * them; otherwise the vertices are assembled here.
+     *
+     * @param {number} mode
+     * @param {number} first
+     * @param {number} count
+     * @param {{ type: number, indices: number | Uint8Array } | null} indexed
+     * @returns {boolean}
+     */
+    function drawFromArrays(mode, first, count, indexed){
+        if (!kernel.drawArrays || !readerFor(pointers.vertex))
+        {
+            return false;
+        }
+        /** @type {{ bytes: Uint8Array, type: number } | null} */
+        let indices = null;
+        if (indexed)
+        {
+            const length = count * componentBytes(indexed.type);
+            const bound = record(GL.ELEMENT_ARRAY_BUFFER_BINDING).values[0];
+            const read = indexed.indices instanceof Uint8Array
+                ? (/** @type {number} */ at, /** @type {number} */ n)=>
+                    /** @type {Uint8Array} */ (indexed.indices).subarray(at, at + n)
+                : readerFor({ size: 1, type: indexed.type, stride: 0, pointer: 0, buffer: bound });
+            if (!read)
+            {
+                return false;
+            }
+            const base = indexed.indices instanceof Uint8Array ? 0 : indexed.indices;
+            indices = { bytes: read(base, length), type: indexed.type };
+        }
+        const memory = kernel.memory();
+        return kernel.drawArrays({
+            mode,
+            first,
+            count,
+            indices,
+            arrays: enabledArrays(),
+            read: memory ? (at, n)=>memory.read(at, n) : ()=>new Uint8Array(0),
+            bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
+        });
+    }
+
+    /**
      * @param {string} name
      * @param {number} mode
      * @param {number[]} indices
@@ -676,6 +750,21 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return;
             }
+            if (!PRIMITIVE_MODES.has(mode))
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (kernel.inPrimitive())
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (record(GL.VERTEX_ARRAY).values[0] === 0
+                || drawFromArrays(mode, first, count, null))
+            {
+                return;
+            }
             drawIndexed('glDrawArrays', mode,
                 Array.from({ length: count }, (unused, i)=>first + i));
         },
@@ -701,6 +790,16 @@ export function installArrayCalls(context, kernel){
             if (!PRIMITIVE_MODES.has(mode))
             {
                 setError(GL.INVALID_ENUM);
+                return;
+            }
+            if (kernel.inPrimitive())
+            {
+                setError(GL.INVALID_OPERATION);
+                return;
+            }
+            if (record(GL.VERTEX_ARRAY).values[0] === 0
+                || drawFromArrays(mode, 0, count, { type, indices }))
+            {
                 return;
             }
             const list = readIndices(count, type, indices);
@@ -887,6 +986,7 @@ export function installArrayCalls(context, kernel){
             buffer.data = new Uint8Array(size);
             buffer.size = size;
             buffer.usage = usage;
+            buffer.written = size > 0 ? { start: 0, end: size } : null;
             if (data instanceof Uint8Array)
             {
                 buffer.data.set(data.subarray(0, size));
@@ -930,9 +1030,13 @@ export function installArrayCalls(context, kernel){
             const memory = kernel.memory();
             const bytes = data instanceof Uint8Array ? data.subarray(0, size)
                 : memory ? memory.read(data, size) : null;
-            if (bytes)
+            if (bytes && size > 0)
             {
                 buffer.data.set(bytes, offset);
+                buffer.written = buffer.written
+                    ? { start: Math.min(buffer.written.start, offset),
+                        end: Math.max(buffer.written.end, offset + size) }
+                    : { start: offset, end: offset + size };
             }
         },
 
@@ -1025,6 +1129,7 @@ export function installArrayCalls(context, kernel){
             if (memory && buffer.access !== GL.READ_ONLY && buffer.size > 0)
             {
                 buffer.data.set(memory.read(buffer.mapped, buffer.size));
+                buffer.written = { start: 0, end: buffer.size };
             }
             buffer.mapped = 0;
             return GL.TRUE;

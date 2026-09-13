@@ -424,3 +424,47 @@ test('a bound vertex shader is refused rather than quietly given fixed function'
         /must be translated before it reaches the backend/,
     );
 });
+
+test('a surface can be six layers with a cube view, and defaults to one plain layer', ()=>{
+    const { gpu, backend } = harness();
+    const cube = backend.createSurface({
+        width: 32, height: 32, format: 'rgba8unorm', layers: 6, dimension: 'cube', label: 'cube',
+    });
+    const plain = target(backend, 16);
+
+    const [cubeTexture, plainTexture] = gpu.of('createTexture');
+    assert.equal(cubeTexture.descriptor.size.depthOrArrayLayers, 6);
+    assert.equal(plainTexture.descriptor.size.depthOrArrayLayers, 1);
+    assert.equal(cube.layers, 6);
+    assert.equal(plain.layers, 1);
+    const [cubeView, plainView] = gpu.of('createView');
+    assert.equal(cubeView.view.viewDescriptor.dimension, 'cube');
+    assert.equal(plainView.view.viewDescriptor.dimension, undefined,
+        'a plain surface leaves the view dimension to the texture');
+});
+
+test('a pass takes a stencil reference as dynamic state', ()=>{
+    const { gpu, backend } = harness();
+    const frame = backend.beginFrame();
+    const pass = frame.beginPass({ target: target(backend) });
+    pass.setStencilReference(0x80);
+    frame.end();
+    assert.deepEqual(gpu.of('setStencilReference').map((/** @type {any} */ c)=>c.reference),
+        [0x80]);
+});
+
+test('a texture copy closes the pass it interrupts and records on the frame encoder', ()=>{
+    const { gpu, backend } = harness();
+    const a = target(backend, 64);
+    const b = target(backend, 64);
+    const frame = backend.beginFrame();
+    frame.beginPass({ target: a });
+    frame.copyTexture({ texture: a.texture }, { texture: b.texture, mipLevel: 0 },
+        { width: 8, height: 8, depthOrArrayLayers: 1 });
+    frame.end();
+    const ops = gpu.calls.map((/** @type {any} */ c)=>c.op)
+        .filter((/** @type {string} */ op)=>['beginRenderPass', 'endPass', 'copyTextureToTexture']
+            .includes(op));
+    assert.deepEqual(ops, ['beginRenderPass', 'endPass', 'copyTextureToTexture']);
+    assert.equal(gpu.count('createCommandEncoder'), 1);
+});

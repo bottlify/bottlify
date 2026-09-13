@@ -320,17 +320,43 @@ and replays a record onto one backend frame at present.
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
 renderer `Bottlify OpenGL`, 22 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
 string is a promise that every function it defines is obtainable, and the test checks the list,
-the context and the marshalling agree). It draws on the processor: `pipeline.js` runs the
-fixed-function stages in the specification's order (per-vertex lighting, fog, texture generation
-and matrix; near, far and user-plane clipping in clip space; division and viewport; assembly with
-culling and polygon mode; rasterisation with texture environment, colour sum, fog and alpha test),
+the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
+and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
+the build.
+
+With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is
+recorded as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has
+compiled. A buffer object is a dynamic backend buffer whose writes pick their own lock flag from
+the byte ranges the unflushed frames' draws read -- a write over a read range renames the buffer,
+any other travels as a range. Vertex arrays are bound as they lie (one slot per buffer and stride,
+an attribute per array; `gpu-layout.js` decides which shapes the GPU can read) and only the index
+list is read on the processor, for its range and to widen it; arrays in client memory are copied
+by that range into a ring, and a vertex assembled on the processor -- immediate mode, a lit draw,
+a type the GPU has no format for -- is packed into one canonical layout. `wgsl.js` writes the
+fixed-function formula as a shader per draw state (texture environment per base format, combine
+with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
+GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
+colour mask, polygon offset); every field either reads is in the cache key. A clear is a triangle
+over the viewport under the scissor and the masks, which a pass's load operation would ignore.
+The frame is shown through an opaque copy that alternates between two surfaces, because a
+program's destination alpha is its own scratch and a page composites a presented texture by its
+alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, level by level
+as the context marks them written; a cube map is six layers with a cube view.
+
+Without a device, the same scene is drawn on the processor: `pipeline.js` runs the fixed-function
+stages in the specification's order (per-vertex lighting, fog, texture generation and matrix;
+near, far and user-plane clipping in clip space; division and viewport; assembly with culling and
+polygon mode; rasterisation with texture environment, colour sum, fog and alpha test),
 `raster.js` owns the fill rule (pixel centres, top-left tie-break, perspective-correct
 interpolation) and the framebuffer operations, `texture.js` keeps every image as RGBA and honours
-the pixel-store state. `wgl.js` is the seam with GDI, every rule of it measured: a pixel format
-belongs to the drawable, can be set once, a DC without one cannot make a context, a context is
-current on one thread, `wglGetProcAddress` returns null for core names. `SwapBuffers` hands the
-frame to the presenter through guest scratch memory, so this is the one API a headless build can
-run to a finished frame.
+the pixel-store state. That path is the formula the byte-exact tests hold to, the way
+`reference.js` is for Direct3D; what the compiled shader computes only a device can show.
+
+`wgl.js` is the seam with GDI, every rule of it measured: a pixel format belongs to the drawable,
+can be set once, a DC without one cannot make a context, a context is current on one thread,
+`wglGetProcAddress` returns null for core names. `SwapBuffers` replays the recorded frame on a
+device, and on the processor hands the frame to the presenter through guest scratch memory -- so
+this is the one API a headless build can run to a finished frame.
 
 **Vulkan** (`src/layers/graphics/vulkan/`). One physical device, described from what WebGPU
 guarantees of every adapter (`physical.js`). Instances, devices, queues, surfaces and swapchains
@@ -447,13 +473,18 @@ Accepted and reported through `divergence`:
 - Vulkan: more than one subpass, more than one colour attachment, a render area smaller than the
   framebuffer (the whole attachment is cleared), a viewport or scissor other than the first, a
   present of more than one swapchain, and every unimplemented command on first call.
-- OpenGL: selection and feedback modes record nothing; the stencil test is enabled with no stencil
-  buffer; two-sided lighting lights back faces as front; `glDrawPixels`, `glBitmap` and
-  `glCopyPixels` of depth or stencil are accepted and draw nothing; the accumulation buffer is
-  empty; a `glTexImage2D` format or type outside the supported set is accepted and uploads nothing;
-  `glReadPixels` with an unsupported type and `glGetCompressedTexImage` are refused; a vertex-array
-  or index draw with no way to read guest memory draws nothing. Every unimplemented entry point is
-  counted by name.
+- OpenGL: selection and feedback modes record nothing; on the processor the stencil test is
+  enabled with no stencil buffer; two-sided lighting lights back faces as front; `glDrawPixels`,
+  `glBitmap` and `glCopyPixels` of depth or stencil are accepted and draw nothing; the accumulation
+  buffer is empty; a `glTexImage2D` format or type outside the supported set is accepted and
+  uploads nothing; `glReadPixels` with an unsupported type and `glGetCompressedTexImage` are
+  refused; a vertex-array or index draw with no way to read guest memory draws nothing. Every
+  unimplemented entry point is counted by name. On a device, the framebuffer is not read back:
+  `glReadPixels` answers black, a copy from the framebuffer into a texture copies black,
+  `glDrawPixels`, `glBitmap` and `glCopyPixels` draw nothing; a colour logic operation writes the
+  fragment as it is; a border clamp clamps to the edge; flat shading takes a primitive's first
+  vertex rather than its last; points and lines are one pixel wide; a fifth texture unit is not
+  drawn; a texture rewritten between two draws of one frame is seen by both as rewritten.
 
 Counted rather than reported (`seam.device.skipped`): Direct3D 8 draws skipped for `vertexShader`,
 `pixelShader`, `stride` (the stream's stride disagrees with the FVF), `indexFormat`, `stencilRect`
@@ -477,10 +508,10 @@ predication, subroutines or vertex-shader texture reads.
 |---|---|
 | Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
-| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`. |
+| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies). |
 | Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
-| Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`. |
+| Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a

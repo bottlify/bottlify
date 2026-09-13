@@ -1,0 +1,267 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { GL } from './constants.js';
+import { createTextureEnvironment } from './texture.js';
+import { CANONICAL_LAYOUT } from './gpu-layout.js';
+import {
+    UNIFORM, clearDescriptor, clearKey, drawDescriptor, drawKey, generateClear, generateDraw,
+    generateShow, showDescriptor,
+} from './wgsl.js';
+
+/**
+ * @param {Partial<import('./wgsl.js').UnitState>} [fields]
+ * @returns {import('./wgsl.js').UnitState}
+ */
+const unit = (fields = {})=>({
+    index: 0,
+    cube: false,
+    mode: GL.MODULATE,
+    combine: createTextureEnvironment().combine,
+    hasColour: true,
+    hasAlpha: true,
+    intensity: false,
+    rgbOnly: false,
+    generation: [null, null, null, null],
+    ...fields,
+});
+
+/**
+ * @param {Partial<import('./wgsl.js').DrawState>} [fields]
+ * @returns {import('./wgsl.js').DrawState}
+ */
+const state = (fields = {})=>({
+    attributes: CANONICAL_LAYOUT.attributes,
+    strides: CANONICAL_LAYOUT.slots.map(slot=>slot.stride),
+    topology: 'triangle-list',
+    targetFormat: 'bgra8unorm',
+    depthFormat: 'depth24plus-stencil8',
+    units: [],
+    colourSum: false,
+    fog: null,
+    alphaFunc: null,
+    flat: false,
+    blend: null,
+    depth: { test: true, func: GL.LESS, write: true },
+    stencil: null,
+    cull: 'none',
+    frontIsCcw: true,
+    colourMask: 0xf,
+    polygonOffset: null,
+    ...fields,
+});
+
+test('every field the descriptor or the shader reads changes the key', ()=>{
+    const base = drawKey(state());
+    /** @type {Partial<import('./wgsl.js').DrawState>[]} */
+    const variants = [
+        { attributes: CANONICAL_LAYOUT.attributes.slice(0, 1) },
+        { strides: [64] },
+        { topology: 'line-list' },
+        { targetFormat: 'rgba8unorm' },
+        { units: [unit()] },
+        { units: [unit({ cube: true })] },
+        { units: [unit({ mode: GL.REPLACE })] },
+        { units: [unit({ hasAlpha: false })] },
+        { units: [unit({ generation: [GL.OBJECT_LINEAR, null, null, null] })] },
+        { units: [unit({ mode: GL.COMBINE,
+            combine: { ...createTextureEnvironment().combine, rgb: GL.DOT3_RGBA } })] },
+        { colourSum: true },
+        { fog: { mode: GL.LINEAR, fromCoordinate: false } },
+        { fog: { mode: GL.LINEAR, fromCoordinate: true } },
+        { alphaFunc: GL.GREATER },
+        { flat: true },
+        { blend: { src: GL.ONE, dst: GL.ONE } },
+        { depth: { test: false, func: GL.LESS, write: true } },
+        { depth: { test: true, func: GL.LEQUAL, write: true } },
+        { depth: { test: true, func: GL.LESS, write: false } },
+        { stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
+            readMask: 0xff, writeMask: 0xff } },
+        { cull: 'back' },
+        { frontIsCcw: false },
+        { colourMask: 0x8 },
+        { polygonOffset: { factor: 0, units: -600 } },
+    ];
+    const keys = new Set([base]);
+    for (const variant of variants)
+    {
+        const key = drawKey(state(variant));
+        assert.ok(!keys.has(key), `${JSON.stringify(variant)} folds into another key`);
+        keys.add(key);
+    }
+});
+
+test('a unit reads its own coordinate set, divides by q, and applies its environment', ()=>{
+    const { code } = generateDraw(state({ units: [unit({ index: 1 })] }));
+    assert.match(code, /@binding\(1\) var t1Texture: texture_2d<f32>/);
+    assert.match(code, /out\.tc1 = uniforms\.textureMatrix\[1\] \* tc1/);
+    assert.match(code, /textureSample\(t1Texture, t1Sampler, input\.tc1\.xy \/ input\.tc1\.w\)/);
+    assert.match(code, /current = vec4f\(current\.rgb \* t1\.rgb, current\.a \* t1\.a\)/,
+        'MODULATE on an RGBA texture multiplies both');
+});
+
+test('the environment table follows the base format', ()=>{
+    const replaceRgb = generateDraw(state({ units: [unit({ mode: GL.REPLACE, hasAlpha: false,
+        rgbOnly: true })] })).code;
+    assert.match(replaceRgb, /current = vec4f\(t0\.rgb, current\.a\)/,
+        'REPLACE on an RGB texture keeps the fragment\'s alpha');
+    const decalRgb = generateDraw(state({ units: [unit({ mode: GL.DECAL, hasAlpha: false,
+        rgbOnly: true })] })).code;
+    assert.match(decalRgb, /current = vec4f\(t0\.rgb, current\.a\)/);
+    const decal = generateDraw(state({ units: [unit({ mode: GL.DECAL })] })).code;
+    assert.match(decal, /mix\(current\.rgb, t0\.rgb, t0\.a\)/);
+    const intensityAdd = generateDraw(state({ units: [unit({ mode: GL.ADD, intensity: true })] }))
+        .code;
+    assert.match(intensityAdd, /min\(current\.a \+ t0\.a, 1\.0\)/,
+        'ADD on an intensity texture adds the alpha too');
+});
+
+test('GL_COMBINE writes the dot product for both colour and alpha under DOT3_RGBA', ()=>{
+    const combine = {
+        ...createTextureEnvironment().combine,
+        rgb: GL.DOT3_RGBA,
+        sourceRgb: [GL.TEXTURE, GL.PREVIOUS, GL.CONSTANT],
+        operandRgb: [GL.SRC_COLOR, GL.SRC_COLOR, GL.SRC_ALPHA],
+        rgbScale: 2,
+    };
+    const { code } = generateDraw(state({ units: [unit({ mode: GL.COMBINE, combine })] }));
+    assert.match(code,
+        /4\.0 \* dot\(\(t0\)\.rgb - vec3f\(0\.5\), \(current\)\.rgb - vec3f\(0\.5\)\)/);
+    assert.match(code, /\* 2\.0, vec3f\(0\.0\), vec3f\(1\.0\)\)/, 'the scale is applied and clamped');
+    assert.match(code, /current = vec4f\(rgb, rgb\.x\)/, 'the alpha is the dot product');
+});
+
+test('texture generation reads the plane of its coordinate, in object or eye space', ()=>{
+    const { code } = generateDraw(state({ units: [unit({
+        generation: [GL.OBJECT_LINEAR, GL.EYE_LINEAR, null, GL.OBJECT_LINEAR],
+    })] }));
+    assert.match(code, /tc0\.x = dot\(objectPosition, uniforms\.planes\[0\]\)/);
+    assert.match(code, /tc0\.y = dot\(eyePosition, uniforms\.planes\[1\]\)/);
+    assert.doesNotMatch(code, /tc0\.z =/);
+    assert.match(code, /tc0\.w = dot\(objectPosition, uniforms\.planes\[3\]\)/);
+});
+
+test('the clip depth is remapped, and an absent attribute is the current value', ()=>{
+    const { code } = generateDraw(state({
+        attributes: CANONICAL_LAYOUT.attributes.filter(a=>a.name === 'position'),
+    }));
+    assert.match(code, /out\.position = vec4f\(clip\.x, clip\.y, \(clip\.z \+ clip\.w\) \* 0\.5, clip\.w\)/);
+    assert.match(code, /out\.color = uniforms\.color;/);
+    assert.match(code, /out\.secondary = uniforms\.secondary;/);
+});
+
+test('an integer attribute is converted and a short one widened', ()=>{
+    const { code } = generateDraw(state({
+        attributes: [
+            { name: 'position', slot: 0, offset: 0, format: 'sint32x2', components: 2,
+                scalar: 'i32' },
+        ],
+        strides: [8],
+    }));
+    assert.match(code, /@location\(0\) position: vec2<i32>/);
+    assert.match(code, /let objectPosition = vec4f\(vec2f\(vertex\.position\), 0\.0, 1\.0\);/);
+});
+
+test('the alpha test discards, fog mixes, and the colour sum adds before it', ()=>{
+    const { code } = generateDraw(state({
+        alphaFunc: GL.GEQUAL, fog: { mode: GL.EXP2, fromCoordinate: false }, colourSum: true,
+    }));
+    assert.match(code, /exp\(-\(uniforms\.fogParams\.x \* c\) \* \(uniforms\.fogParams\.x \* c\)\)/);
+    const sum = code.indexOf('input.secondary');
+    const fog = code.indexOf('mix(uniforms.fogColor.rgb');
+    const discard = code.indexOf('discard');
+    assert.ok(sum > 0 && sum < fog && fog < discard, 'colour sum, then fog, then the alpha test');
+    assert.match(code, /if \(!\(current\.a >= uniforms\.misc\.x\)\)/);
+});
+
+test('flat shading marks the colour varyings flat', ()=>{
+    const { code } = generateDraw(state({ flat: true }));
+    assert.match(code, /@location\(0\) @interpolate\(flat\) color: vec4f/);
+});
+
+test('the uniform block layout the shader declares is the one the renderer fills', ()=>{
+    // Each field's float offset, as WGSL lays the struct out: matrices are
+    // sixteen floats, vectors four, and nothing here needs padding.
+    assert.equal(UNIFORM.modelView, 16);
+    assert.equal(UNIFORM.textureMatrix, 48);
+    assert.equal(UNIFORM.planes, UNIFORM.textureMatrix + 4 * 16);
+    assert.equal(UNIFORM.color, UNIFORM.planes + 16 * 4);
+    assert.equal(UNIFORM.texCoord, UNIFORM.normal + 4);
+    assert.equal(UNIFORM.envColor, UNIFORM.texCoord + 4 * 4);
+    assert.equal(UNIFORM.fogColor, UNIFORM.envColor + 4 * 4);
+    assert.equal(UNIFORM.floats, UNIFORM.misc + 4);
+    assert.equal(UNIFORM.floats % 4, 0);
+});
+
+test('the descriptor maps GL state onto WebGPU\'s, with the stencil on both faces', ()=>{
+    const descriptor = drawDescriptor(state({
+        blend: { src: GL.SRC_ALPHA, dst: GL.ONE_MINUS_SRC_ALPHA },
+        depth: { test: true, func: GL.GEQUAL, write: false },
+        stencil: { func: GL.GEQUAL, fail: GL.KEEP, zfail: GL.DECR, zpass: GL.INCR_WRAP,
+            readMask: 0xff, writeMask: 0x7f },
+        cull: 'front',
+        frontIsCcw: false,
+        colourMask: 0x8,
+        polygonOffset: { factor: 0, units: -600 },
+    }));
+    assert.deepEqual(descriptor.target.blend.color,
+        { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha', operation: 'add' });
+    assert.equal(descriptor.target.writeMask, 0x8);
+    assert.equal(descriptor.primitive.cullMode, 'front');
+    assert.equal(descriptor.primitive.frontFace, 'cw');
+    assert.equal(descriptor.depthStencil.depthCompare, 'greater-equal');
+    assert.equal(descriptor.depthStencil.depthWriteEnabled, false);
+    assert.deepEqual(descriptor.depthStencil.stencilFront, {
+        compare: 'greater-equal', failOp: 'keep', depthFailOp: 'decrement-clamp',
+        passOp: 'increment-wrap',
+    });
+    assert.deepEqual(descriptor.depthStencil.stencilBack, descriptor.depthStencil.stencilFront);
+    assert.equal(descriptor.depthStencil.stencilWriteMask, 0x7f);
+    assert.equal(descriptor.depthStencil.depthBias, -600);
+    assert.deepEqual(descriptor.vertexBuffers[0].attributes[1],
+        { shaderLocation: 1, offset: 16, format: 'float32x4' });
+});
+
+test('a depth test that is off is always-passing, with the attachment kept', ()=>{
+    const descriptor = drawDescriptor(
+        state({ depth: { test: false, func: GL.LESS, write: true } }));
+    assert.equal(descriptor.depthStencil.depthCompare, 'always');
+    assert.equal(descriptor.depthStencil.format, 'depth24plus-stencil8');
+    assert.equal(descriptor.depthStencil.stencilWriteMask, 0, 'no stencil test writes nothing');
+});
+
+test('a blend factor GL has and WebGPU lacks is refused by name', ()=>{
+    assert.throws(()=>drawDescriptor(state({ blend: { src: 0x9999, dst: GL.ONE } })),
+        /Unsupported source blend: 0x9999/);
+});
+
+test('a clear is a triangle over the target under the masks it was asked with', ()=>{
+    const cleared = { targetFormat: 'bgra8unorm', depthFormat: 'depth24plus-stencil8',
+        colourMask: 0x7, depth: true, stencilMask: 0xff };
+    const descriptor = clearDescriptor(cleared);
+    assert.equal(descriptor.target.writeMask, 0x7);
+    assert.equal(descriptor.depthStencil.depthCompare, 'always');
+    assert.equal(descriptor.depthStencil.depthWriteEnabled, true);
+    assert.equal(descriptor.depthStencil.stencilFront.passOp, 'replace');
+    assert.equal(descriptor.depthStencil.stencilWriteMask, 0xff);
+    assert.notEqual(clearKey(cleared), clearKey({ ...cleared, depth: false }));
+    assert.notEqual(clearKey(cleared), clearKey({ ...cleared, stencilMask: 0 }));
+    assert.notEqual(clearKey(cleared), clearKey({ ...cleared, colourMask: 0 }));
+    const { code } = generateClear();
+    assert.match(code, /return vec4f\(x, y, uniforms\.depth\.x, 1\.0\)/);
+    const untouched = clearDescriptor({ ...cleared, stencilMask: 0 });
+    assert.equal(untouched.depthStencil.stencilFront.passOp, 'keep');
+});
+
+test('the shown copy is opaque and reads the back buffer top row first', ()=>{
+    const { code } = generateShow();
+    assert.match(code,
+        /return vec4f\(textureSample\(sourceTexture, sourceSampler, input\.uv\)\.rgb, 1\.0\)/);
+    assert.match(code, /out\.uv = vec2f\(\(x \+ 1\.0\) \* 0\.5, \(1\.0 - y\) \* 0\.5\)/);
+    assert.equal(showDescriptor('bgra8unorm').depthStencil, undefined);
+});

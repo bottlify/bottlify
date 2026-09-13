@@ -164,6 +164,7 @@ export function createSceneBuilder(kernel){
             const generated = unit.genEnabled.some((/** @type {number} */ g)=>g !== 0);
             return {
                 index,
+                texture,
                 images,
                 cube,
                 baseFormat: texture.levels.get(levelKey(0)).baseFormat,
@@ -210,6 +211,25 @@ export function createSceneBuilder(kernel){
             lighting,
             fog,
             units,
+            current: kernel.currentVertex(),
+            blend: blendOn ? { src, dst } : null,
+            stencil: on(GL.STENCIL_TEST)
+                ? {
+                    func: record(GL.STENCIL_FUNC).values[0],
+                    reference: record(GL.STENCIL_REF).values[0],
+                    readMask: record(GL.STENCIL_VALUE_MASK).values[0] & 0xff,
+                    writeMask: record(GL.STENCIL_WRITEMASK).values[0] & 0xff,
+                    fail: record(GL.STENCIL_FAIL).values[0],
+                    zfail: record(GL.STENCIL_PASS_DEPTH_FAIL).values[0],
+                    zpass: record(GL.STENCIL_PASS_DEPTH_PASS).values[0],
+                }
+                : null,
+            polygonOffset: on(GL.POLYGON_OFFSET_FILL)
+                ? {
+                    factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],
+                    units: record(GL.POLYGON_OFFSET_UNITS).values[0],
+                }
+                : null,
             colourSum: on(GL.COLOR_SUM)
                 || (lighting !== null && lighting.model.separateSpecular),
             cull: on(GL.CULL_FACE)

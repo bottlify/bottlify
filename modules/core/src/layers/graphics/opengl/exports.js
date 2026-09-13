@@ -49,6 +49,7 @@ import {
     PIXELFORMATDESCRIPTOR,
 } from './pixelformat.js';
 import { createWgl } from './wgl.js';
+import { createGpuRenderer } from './gpu.js';
 import { imageBytes, unpackImage } from './texture.js';
 import { packImage } from './context-pixels.js';
 import { PFD } from './constants.js';
@@ -292,6 +293,15 @@ const LIST_TYPES = new Map([
  *           cannot be handed out is a crash a program cannot see coming.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that was accepted but not honoured is reported.
+ * @property {() => any} [backend]
+ *           The rendering backend, reached when the first context is made.
+ *           With one, every context draws on the device; without, on the
+ *           processor -- which is what a headless build does.
+ * @property {(descriptor: any) => any} [createSampler]
+ *           What the device samples textures with; needed alongside `backend`.
+ * @property {() => { claim: (buffer: number, show: () => void) => void } | null} [presenter]
+ *           Where a picture the device drew is claimed by its address, so a
+ *           present of that address shows the texture and reads no memory.
  */
 
 /**
@@ -319,6 +329,9 @@ export function createOpengl(services){
         // lookup are one promise, and both are kept or neither is.
         extensions: exportAddress ? { ...GL_EXTENSIONS, ...WGL_EXTENSIONS } : {},
         divergence: detail=>services.divergence?.('OpenGL', detail),
+        get gpu(){
+            return gpuRenderer();
+        },
     });
 
     /** @type {Map<number, any>} guest handle -> the context it names */
@@ -336,6 +349,27 @@ export function createOpengl(services){
 
     /** @type {Map<string, number>} what a program called that is not implemented */
     const unimplemented = new Map();
+
+    /**
+     * The device renderer, made when the first context is: a program that
+     * never makes a context never builds a GPU.
+     *
+     * @type {ReturnType<typeof createGpuRenderer> | null}
+     */
+    let gpu = null;
+    const gpuRenderer = ()=>{
+        if (!gpu && services.backend && services.createSampler)
+        {
+            gpu = createGpuRenderer({
+                backend: services.backend(),
+                createSampler: services.createSampler,
+                divergence: detail=>services.divergence?.('OpenGL', detail),
+            });
+        }
+        return gpu ?? undefined;
+    };
+    /** @type {Set<number>} the handles whose pictures the presenter has been told are the device's */
+    const claimed = new Set();
 
     /** @param {any} context @returns {number} */
     const handleFor = context=>{
@@ -473,7 +507,38 @@ export function createOpengl(services){
      */
     const presentCurrentFrame = ()=>{
         const context = current();
-        if (!context || !services.present || !services.scratch)
+        if (!context || !services.present)
+        {
+            return;
+        }
+        if (gpu)
+        {
+            const shown = gpu.present(context);
+            const handle = handles.get(context) ?? 0;
+            if (!shown || handle === 0)
+            {
+                return;
+            }
+            // The handle stands in for a surface address: the presenter is
+            // told the device owns the picture there, and a present of it
+            // shows the frame the renderer just replayed rather than reading
+            // guest memory that holds nothing.
+            if (!claimed.has(handle))
+            {
+                claimed.add(handle);
+                services.presenter?.()?.claim(handle, ()=>{});
+            }
+            services.present({
+                buffer: handle,
+                width: shown.width,
+                height: shown.height,
+                pitch: shown.width * 4,
+                bitCount: 32,
+                palette: null,
+            });
+            return;
+        }
+        if (!services.scratch)
         {
             return;
         }
@@ -1457,6 +1522,7 @@ export function createOpengl(services){
             // What a program reached for and did not get is the most useful
             // thing this layer can say about a run that drew nothing.
             unimplemented: Object.fromEntries(unimplemented),
+            gpu: gpu ? gpu.diagnostics() : null,
         }),
     };
 }

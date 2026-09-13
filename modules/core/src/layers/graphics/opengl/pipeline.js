@@ -63,6 +63,8 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
 /**
  * @typedef {Object} SceneUnit
  * @property {number} index  which texture coordinate set it reads
+ * @property {import('./objects.js').TextureObject} texture   the object bound,
+ *           for a renderer that keeps a copy of it elsewhere
  * @property {import('./texture.js').TexelImage[]} images  one, or six for a cube map
  * @property {boolean} cube
  * @property {number} baseFormat
@@ -93,6 +95,17 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  */
 
 /**
+ * @typedef {Object} SceneStencil
+ * @property {number} func
+ * @property {number} reference
+ * @property {number} readMask
+ * @property {number} writeMask
+ * @property {number} fail
+ * @property {number} zfail
+ * @property {number} zpass
+ */
+
+/**
  * @typedef {Object} Scene
  * @property {ArrayLike<number>} modelview
  * @property {ArrayLike<number>} projection
@@ -104,6 +117,11 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {SceneLighting | null} lighting
  * @property {SceneFog | null} fog
  * @property {readonly SceneUnit[]} units  the enabled, complete texture units
+ * @property {PipelineVertex} current   the current attributes, for an array that is off
+ * @property {{ src: number, dst: number } | null} blend   the factors, when blending is on
+ * @property {SceneStencil | null} stencil   when the stencil test is on
+ * @property {{ factor: number, units: number } | null} polygonOffset   when filled
+ *           polygons are offset
  * @property {boolean} colourSum
  * @property {{ mode: number, frontIsCcw: boolean } | null} cull
  * @property {boolean} frontIsCcw

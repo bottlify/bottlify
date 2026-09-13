@@ -66,6 +66,7 @@
  * @property {(source: any, destination: any, size: any)=>void} copyTextureToBuffer
  * @property {(source: any, sourceOffset: number, destination: any, destinationOffset: number,
  *            size: number)=>void} copyBufferToBuffer
+ * @property {(source: any, destination: any, size: any)=>void} copyTextureToTexture
  * @property {(desc?: any)=>any} finish
  */
 
@@ -79,6 +80,7 @@
  * @property {number} height
  * @property {string} format
  * @property {number} [mipLevelCount]  One unless the surface carries a chain.
+ * @property {number} [layers]         Array layers; six for a cube map.
  * @property {string} label
  */
 

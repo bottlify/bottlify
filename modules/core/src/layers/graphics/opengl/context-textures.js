@@ -488,6 +488,7 @@ export function installTextureCalls(context, kernel){
             width, height, internalFormat: internal, border, baseFormat,
             texels: texels instanceof Uint8Array ? texels : null,
         });
+        image.texture.dirty.add(levelKey(level, image.face));
         kernel.shareGroup().used = true;
     }
 
@@ -541,6 +542,7 @@ export function installTextureCalls(context, kernel){
         {
             conformTexels(texels, existing.baseFormat);
             writeSubImage(existing, x0, y0, width, height, texels);
+            image.texture.dirty.add(levelKey(level, image.face));
         }
     }
 
@@ -578,6 +580,12 @@ export function installTextureCalls(context, kernel){
     function framebufferTexels(x, y, width, height){
         const frame = kernel.framebuffer();
         const out = new Uint8Array(width * height * 4);
+        if (kernel.gpuBacked())
+        {
+            kernel.diverge('a copy from the framebuffer into a texture was accepted and copied'
+                + ' black: the framebuffer lives on the device and is not read back');
+            return out;
+        }
         for (let row = 0; row < height; row++)
         {
             const fy = frame.height - 1 - (y + row);
@@ -932,6 +940,7 @@ export function installTextureCalls(context, kernel){
             compressedFormat: internal,
             compressedBytes: size,
         });
+        image.texture.dirty.add(levelKey(level, image.face));
         kernel.shareGroup().used = true;
     }
 
@@ -1253,6 +1262,7 @@ export function installTextureCalls(context, kernel){
             conformTexels(texels, baseFormat);
             image.texture.levels.set(levelKey(level, image.face),
                 { width, height, internalFormat, border, baseFormat, texels });
+            image.texture.dirty.add(levelKey(level, image.face));
             kernel.shareGroup().used = true;
         },
 
@@ -1293,6 +1303,7 @@ export function installTextureCalls(context, kernel){
             }
             conformTexels(texels, existing.baseFormat);
             writeSubImage(existing, xoffset, yoffset, width, height, texels);
+            image.texture.dirty.add(levelKey(level, image.face));
         },
 
         /**
@@ -1469,6 +1480,7 @@ export function installTextureCalls(context, kernel){
             if (texels)
             {
                 writeSubImage(existing, x0, y0, width, height, texels);
+                image.texture.dirty.add(levelKey(level, image.face));
             }
         },
 
