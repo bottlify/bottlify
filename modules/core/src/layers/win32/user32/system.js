@@ -19,7 +19,7 @@
  */
 
 import { formatToString } from '../msvcrt/format.js';
-import { ANSI_PAGE, OEM_PAGE, transcodeSingleByte } from '../kernel32/locale.js';
+import { ANSI_PAGE, OEM_PAGE, mapCaseAnsi, transcodeSingleByte } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { REFRESH_HZ, displayModes } from './display.js';
 import {
@@ -179,6 +179,73 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /** Windows in creation order, which is the only order this build has. */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
+
+    /**
+     * The bytes of a terminated string, terminator excluded, read a piece at
+     * a time so a long one is not read whole and a short one is not read past.
+     *
+     * @param {number} address
+     */
+    const readStringBytes = address=>{
+        const STEP = 64;
+        const LIMIT = 0x10000;
+        /** @type {Uint8Array[]} */
+        const pieces = [];
+        for (let at = 0; at < LIMIT; at += STEP)
+        {
+            const piece = host.readMemory(address + at, STEP);
+            const end = piece.indexOf(0);
+            if (end >= 0)
+            {
+                pieces.push(piece.subarray(0, end));
+                break;
+            }
+            pieces.push(piece);
+        }
+        const bytes = new Uint8Array(pieces.reduce((sum, piece)=>sum + piece.length, 0));
+        let at = 0;
+        for (const piece of pieces)
+        {
+            bytes.set(piece, at);
+            at += piece.length;
+        }
+        return bytes;
+    };
+
+    /** @param {boolean} upper */
+    const caseOfString = upper=>({
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([text])=>{
+            const at = text >>> 0;
+            if (at === 0)
+            {
+                return 0;
+            }
+            if ((at & 0xffff0000) === 0)
+            {
+                return mapCaseAnsi(new Uint8Array([at & 0xff]), upper)[0];
+            }
+            host.writeMemory(at, mapCaseAnsi(readStringBytes(at), upper));
+            return at;
+        },
+    });
+
+    /** @param {boolean} upper */
+    const caseOfBuffer = upper=>({
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([text, count])=>{
+            const at = text >>> 0;
+            const length = count >>> 0;
+            if (at === 0 || length === 0)
+            {
+                return 0;
+            }
+            host.writeMemory(at, mapCaseAnsi(host.readMemory(at, length), upper));
+            return length;
+        },
+    });
 
     /** @param {number} hwnd @returns {any | null} the class a window was made from */
     const classOfWindow = hwnd=>{
@@ -923,6 +990,28 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 return 1;
             },
         },
+
+        /**
+         * LPSTR CharLowerA(LPSTR lpsz) / LPSTR CharUpperA(LPSTR lpsz)
+         *
+         * One argument with two meanings, told apart the way Windows tells
+         * them apart: a value whose high word is zero is a single character,
+         * converted and handed back as a value; anything else is a pointer to
+         * a string converted in place, and the pointer is the answer.
+         */
+        CharLowerA: caseOfString(false),
+        CharUpperA: caseOfString(true),
+
+        /**
+         * DWORD CharLowerBuffA(LPSTR lpsz, DWORD cchLength)
+         * DWORD CharUpperBuffA(LPSTR lpsz, DWORD cchLength)
+         *
+         * A counted buffer rather than a terminated string: every one of the
+         * cchLength bytes is converted, a NUL among them included, and the
+         * count is the answer.
+         */
+        CharLowerBuffA: caseOfBuffer(false),
+        CharUpperBuffA: caseOfBuffer(true),
 
         /**
          * LPSTR CharPrevA(LPCSTR lpszStart, LPCSTR lpszCurrent)

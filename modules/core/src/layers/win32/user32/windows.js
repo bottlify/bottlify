@@ -153,6 +153,12 @@ const GWL_USERDATA = -21;
 /** PeekMessage's wRemoveMsg is a flag word; PM_NOREMOVE is the absence of this. */
 const PM_REMOVE = 1;
 
+/** What MsgWaitForMultipleObjects answers, in kernel32's terms. */
+const WAIT_OBJECT_0 = 0;
+const WAIT_TIMEOUT = 0x102;
+const WAIT_FAILED = 0xffffffff;
+const INFINITE = 0xffffffff;
+
 /** PeekMessage takes this where a window goes to mean "thread messages only". */
 const HWND_THREAD_MESSAGES = 0xffffffff;
 
@@ -255,6 +261,12 @@ function characterFor(key){
  *           is what this used to do always.
  * @property {(address: number) => void} [release]
  * @property {() => Promise<void>} idle
+ * @property {(args: number[]) => number | Promise<number>} [waitForObjects]
+ *           kernel32's WaitForMultipleObjects, by its own arguments. What a
+ *           wait that also watches the queue defers the handles to; absent, a
+ *           wait on handles fails and a wait on the queue alone still works.
+ * @property {() => number} [now]
+ *           The guest's clock in milliseconds, for a wait with a deadline.
  * @property {(service: WindowService) => void} [windowService]
  *     Handed the two things the rest of the machine needs from the windows:
  *     a reader of every top-level window's rectangle, for a diagnostic -- the
@@ -1115,6 +1127,31 @@ export function createWindowFunctions(host){
             },
         },
 
+        /**
+         * BOOL SendNotifyMessageA(HWND hWnd, UINT Msg, WPARAM wParam, LPARAM lParam)
+         *
+         * Like SendMessage to another thread's window and like PostMessage to
+         * one's own: it does not wait for the window procedure to answer. There
+         * is one message loop here, so it posts and returns at once -- the
+         * window sees the message when it next pumps, which is what a sender
+         * that did not want to block asked for. Declared with its four
+         * arguments so an installer that fires one off does not lose four bytes
+         * of stack to it.
+         */
+        SendNotifyMessageA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([hwnd, message, wParam, lParam])=>{
+                const target = hwnd >>> 0;
+                if (target !== 0 && !live(target))
+                {
+                    return 0;
+                }
+                host.queue.post({ hwnd: target, message, wParam, lParam });
+                return 1;
+            },
+        },
+
         /** VOID PostQuitMessage(int nExitCode) */
         PostQuitMessage: {
             argBytes: 4,
@@ -1142,6 +1179,83 @@ export function createWindowFunctions(host){
                 }
                 writeMessage(host, out, entry);
                 return 1;
+            },
+        },
+
+        /**
+         * DWORD MsgWaitForMultipleObjects(DWORD nCount, const HANDLE *pHandles,
+         *   BOOL fWaitAll, DWORD dwMilliseconds, DWORD dwWakeMask)
+         *
+         * A wait on handles that also ends when a message arrives, answered
+         * with the count of handles when it is the message that ended it.
+         * The handles are kernel32's business and are deferred to it; the
+         * queue is looked at here, and the two are asked in that order because
+         * a handle and a message both ready is answered with the handle.
+         *
+         * The wake mask is not applied: a message of any kind ends the wait.
+         * The one program-visible difference is a wait that ends a message
+         * early, and a loop written round this call goes on to pump the queue
+         * and wait again.
+         *
+         * A wait on nothing but the queue -- a count of zero -- is a sleep
+         * the queue can cut short. A program uses that to pump messages while
+         * waiting out an interval, and it must not stop the thread for good.
+         */
+        MsgWaitForMultipleObjects: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([count, handles, waitAll, timeout])=>{
+                const total = count >>> 0;
+                const wait = timeout >>> 0;
+                const queued = ()=>host.queue.peek({
+                    hwnd: ANY_WINDOW, first: 0, last: 0, remove: false,
+                }) !== null;
+                /** @param {number} milliseconds */
+                const askHandles = milliseconds=>{
+                    if (total === 0)
+                    {
+                        return WAIT_TIMEOUT;
+                    }
+                    return host.waitForObjects
+                        ? host.waitForObjects([total, handles, waitAll, milliseconds])
+                        : WAIT_FAILED;
+                };
+
+                // Handles first, then the queue: a poll answers both at once.
+                const polled = askHandles(0);
+                if (polled !== WAIT_TIMEOUT)
+                {
+                    return polled;
+                }
+                if (queued())
+                {
+                    return WAIT_OBJECT_0 + total;
+                }
+                if (wait === 0)
+                {
+                    return WAIT_TIMEOUT;
+                }
+                // A real wait with handles in it is kernel32's to hold, and a
+                // handle that can only be signalled by a process that is to
+                // take this one's place holds it for good. What is given up
+                // is a message arriving while it is held; nobody posts one to
+                // a thread that is stopped.
+                if (total > 0)
+                {
+                    return askHandles(wait);
+                }
+                const deadline = wait === INFINITE ? null : (host.now?.() ?? 0) + wait;
+                return (async()=>{
+                    while (!queued())
+                    {
+                        if (deadline !== null && (host.now?.() ?? 0) >= deadline)
+                        {
+                            return WAIT_TIMEOUT;
+                        }
+                        await host.idle();
+                    }
+                    return WAIT_OBJECT_0;
+                })();
             },
         },
 

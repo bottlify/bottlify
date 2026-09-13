@@ -206,3 +206,97 @@ test('a query for something that is not there fails rather than guessing', ()=>{
 
     assert.equal(m.version.VerQueryValueA.handler([0x400, 0x20, 0x30, 0x34]), 0);
 });
+
+
+/** A minimal filesystem: a flat map of full path to bytes. */
+function fakeFiles(){
+    /** @type {Map<string, Uint8Array>} */
+    const nodes = new Map();
+    return {
+        nodes,
+        /** @param {string} path */
+        stat: path=>(nodes.has(path)
+            ? { exists: true, isDirectory: false, size: /** @type {any} */ (nodes.get(path)).length }
+            : null),
+        /** @param {string} path @param {import('../kernel32/files.js').OpenMode} mode */
+        open(path, mode){
+            if (!nodes.has(path) && !mode.create)
+            {
+                return null;
+            }
+            if (!nodes.has(path) || mode.truncate)
+            {
+                nodes.set(path, new Uint8Array(0));
+            }
+            return { path };
+        },
+        /** @param {{ path: string }} handle @param {number} offset @param {number} length */
+        read(handle, offset, length){
+            return /** @type {any} */ (nodes.get(handle.path)).slice(offset, offset + length);
+        },
+        /** @param {{ path: string }} handle @param {number} offset @param {Uint8Array} bytes */
+        write(handle, offset, bytes){
+            nodes.set(handle.path, bytes.slice());
+            return bytes.length;
+        },
+        close(){},
+    };
+}
+
+test('VerInstallFileA expands a compressed source into the destination directory', ()=>{
+    const memory = new Uint8Array(0x2000);
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>memory.set(
+        new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat([0])), at);
+    const files = /** @type {any} */ (fakeFiles());
+    // "abababab" packed the SZDD way: two literals then an eight-byte backref.
+    files.nodes.set('C:\\TEMP\\set3.TMP', Uint8Array.from([
+        0x53, 0x5a, 0x44, 0x44, 0x88, 0xf0, 0x27, 0x33, 0x41, 0, 8, 0, 0, 0,
+        0b00000011, 0x61, 0x62, 0xf0, 0xf3,
+    ]));
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: (/** @type {number} */ a)=>{
+            let text = '';
+            for (let at = a; memory[at] !== 0 && at < memory.length; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        setLastError: ()=>{},
+        files,
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    put(0x10, 'set3.TMP');
+    put(0x30, 'Setup.dll');
+    put(0x50, 'C:\\TEMP');
+    put(0x80, 'C:\\TEMP\\isp2.TMP');
+    const TMP = 0x400;
+    const TMPLEN = 0x500;
+    memory.set(new Uint8Array([0x04, 1, 0, 0]), TMPLEN);
+
+    const result = version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]);
+    assert.equal(result, 0, 'zero is success, and the branch that leaves no temp file');
+    assert.equal(new TextDecoder().decode(files.nodes.get('C:\\TEMP\\isp2.TMP\\Setup.dll')),
+        'abababab', 'the destination holds the expanded bytes');
+    assert.equal(memory[TMP], 0, 'and no temp file was named');
+
+    // A source that is not there is reported as unreadable, not as created.
+    put(0x10, 'missing.dl_');
+    assert.equal(
+        version.VerInstallFileA.handler([0, 0x10, 0x30, 0x50, 0x80, 0, TMP, TMPLEN]), 0x40);
+});
+
+test('VerInstallFileA without a volume reports it cannot create the file', ()=>{
+    const memory = new Uint8Array(0x100);
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: ()=>{},
+        readCString: ()=>'x',
+        setLastError: ()=>{},
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+    assert.equal(version.VerInstallFileA.handler([0, 0, 0, 0, 0, 0, 0, 0]), 0x4);
+});

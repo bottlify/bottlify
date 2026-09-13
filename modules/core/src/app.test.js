@@ -18,6 +18,7 @@ import {
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
     spaceAbove,
+    resourceLookup,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -292,6 +293,21 @@ test('a name that already says where it is, is taken as given', ()=>{
 test('a relative name with a directory in it still searches beside the executable', ()=>{
     assert.equal(resolveLibraryPath('plugins\\Sound.dll', IMAGE),
         'C:\\App\\plugins\\Sound.dll');
+});
+
+test('a resource is addressed relative to the module its instance names', ()=>{
+    // LockResource adds a resource's RVA to its module's base. Without the
+    // base a program was handed the RVA as a pointer, which is inside the
+    // first 64 KiB and mapped by nothing.
+    const main = { base: 0x00400000, file: null };
+    const library = { base: 0x10000000, file: null };
+    const lookup = resourceLookup(()=>main, new Map([[library.base, library]]));
+
+    assert.equal(lookup.moduleBase(0), 0x00400000, 'zero is the running program');
+    assert.equal(lookup.moduleBase(0x10000000), 0x10000000);
+    assert.equal(lookup.moduleBase(0x12345678), 0, 'an instance that names nothing');
+    assert.equal(lookup.findResource(0x12345678, 5, 107), null);
+    assert.equal(lookup.loadString(0, 1), null, 'a module without its file has no resources');
 });
 
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{

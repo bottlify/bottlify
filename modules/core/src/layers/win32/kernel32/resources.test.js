@@ -42,6 +42,22 @@ test('the name comes before the type, which is the opposite of the tree', ()=>{
     assert.deepEqual(asked, [{ instance: 0, type: RT_BITMAP, name: 101 }]);
 });
 
+test('FindResourceExA is FindResource with the type and name swapped in order', ()=>{
+    // FindResourceExA(hModule, lpType, lpName, wLanguage): type first, unlike
+    // FindResourceA, and it stops the stack corruption an unimplemented import
+    // causes -- it is a 16-byte stdcall the loader would otherwise pop nothing
+    // for.
+    const { fns, asked } = setup();
+    const found = fns.FindResourceExA.handler([0, RT_BITMAP, 101, 0x409]);
+
+    assert.notEqual(found, 0);
+    assert.deepEqual(asked.at(-1), { instance: 0, type: RT_BITMAP, name: 101 });
+    assert.equal(fns.LockResource.handler([found]), 0x00402000,
+        'and it lands where FindResourceA would');
+    assert.equal(fns.FindResourceExA.argBytes, 16, 'four arguments, so the stack stays whole');
+    assert.equal(fns.FindResourceExA.handler([0, RT_BITMAP, 999, 0]), 0);
+});
+
 test('a value below 64 KiB is an identifier and above it is a pointer', ()=>{
     // MAKEINTRESOURCE is exactly this trick. Reading the wrong one of the two
     // turns a numeric type into a wild pointer.

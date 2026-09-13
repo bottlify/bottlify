@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { expand } from '../lz32/expand.js';
+
 /**
  * version — what a file says about itself.
  *
@@ -32,6 +34,10 @@ const VS_FFI_SIGNATURE = 0xfeef04bd;
 /** VS_FIXEDFILEINFO is this long, and a caller sizes its own copy from it. */
 const FIXED_FILE_INFO_SIZE = 52;
 
+/** VerInstallFile return flags; zero is success. */
+const VIF_CANNOTCREATE = 0x00000004;
+const VIF_CANNOTREADSRC = 0x00000040;
+
 /**
  * @typedef {Object} VersionHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
@@ -43,6 +49,10 @@ const FIXED_FILE_INFO_SIZE = 52;
  *           none. Absent in a build with no loader behind it, which then
  *           answers as a file that carries no version information -- a size of
  *           zero, which is exactly what a caller checks.
+ * @property {import('../kernel32/files.js').FileSystem} [files]
+ *           The volume VerInstallFile reads its source from and writes its
+ *           destination to. Absent, VerInstallFile reports it cannot create
+ *           the file (VIF_CANNOTCREATE), which is a documented failure.
  */
 
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
@@ -265,6 +275,88 @@ export function createVersionFunctions(host){
                 host.writeMemory(length >>> 0, dword(
                     isRoot ? FIXED_FILE_INFO_SIZE : node.valueLength));
                 return 1;
+            },
+        },
+
+        /**
+         * DWORD VerInstallFileA(DWORD uFlags, LPCSTR szSrcFileName,
+         *   LPCSTR szDestFileName, LPCSTR szSrcDir, LPCSTR szDestDir,
+         *   LPCSTR szCurDir, LPSTR szTmpFile, PUINT lpuTmpFileLen)
+         *
+         * Installs a file, expanding it if the COMPRESS tool packed it: the
+         * source is read from szSrcDir, LZ-expanded when it carries the SZDD
+         * header, and written to szDestDir under szDestFileName. Zero is
+         * success, and the flags a caller acts on are the failures -- it could
+         * not be read (VIF_CANNOTREADSRC) or could not be written
+         * (VIF_CANNOTCREATE).
+         *
+         * The version checks the full API performs (comparing an existing
+         * destination's version, forcing or refusing) are not made: there is
+         * one user installing into an empty prefix, so the file is always
+         * installed. The temp-file handshake is likewise skipped -- the file
+         * is put at its final name and no temp is left for the caller to
+         * rename -- which is the branch a caller takes when the return is zero.
+         */
+        VerInstallFileA: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([, srcName, destName, srcDir, destDir, , tmpFile, tmpLen])=>{
+                if (!host.files)
+                {
+                    return VIF_CANNOTCREATE;
+                }
+                /** @param {number} dir @param {number} name */
+                const join = (dir, name)=>{
+                    const base = host.readCString(dir >>> 0, MAX_PATH);
+                    const leaf = host.readCString(name >>> 0, MAX_PATH);
+                    return base === '' ? leaf : `${base.replace(/[\\/]+$/, '')}\\${leaf}`;
+                };
+                const source = join(srcDir, srcName);
+                const destination = join(destDir, destName);
+
+                const stat = host.files.stat(source);
+                if (!stat || !stat.exists || stat.isDirectory)
+                {
+                    return VIF_CANNOTREADSRC;
+                }
+                const input = host.files.open(source, { read: true });
+                if (!input)
+                {
+                    return VIF_CANNOTREADSRC;
+                }
+                const raw = host.files.read(input, 0, stat.size);
+                host.files.close(input);
+                // A temp file the installer copied in is always resident, so a
+                // promise here would be a source on a bundle -- which
+                // VerInstallFile is never asked to expand. Refuse rather than
+                // guess at a partial read.
+                if (typeof (/** @type {any} */ (raw))?.then === 'function')
+                {
+                    return VIF_CANNOTREADSRC;
+                }
+                const expanded = expand(/** @type {Uint8Array} */ (raw));
+
+                const output = host.files.open(destination,
+                    { write: true, create: true, truncate: true });
+                if (!output)
+                {
+                    return VIF_CANNOTCREATE;
+                }
+                host.files.write(output, 0, expanded);
+                host.files.close(output);
+
+                // The temp-file out-parameters name no temp file, because none
+                // was left: an empty string and a length of zero, which is what
+                // a caller reads when the install completed on its own.
+                if ((tmpFile >>> 0) !== 0)
+                {
+                    host.writeMemory(tmpFile >>> 0, new Uint8Array([0]));
+                }
+                if ((tmpLen >>> 0) !== 0)
+                {
+                    host.writeMemory(tmpLen >>> 0, dword(0));
+                }
+                return 0;
             },
         },
     };

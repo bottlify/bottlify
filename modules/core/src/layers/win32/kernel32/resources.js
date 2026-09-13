@@ -119,6 +119,33 @@ export function createResourceFunctions(host){
             },
         },
 
+        /**
+         * HRSRC FindResourceExA(HMODULE hModule, LPCSTR lpType, LPCSTR lpName,
+         *   WORD wLanguage)
+         *
+         * The same lookup as FindResourceA with a language selector added --
+         * and note the argument order swaps type before name, the opposite of
+         * FindResourceA. A wLanguage of zero (MAKELANGID(LANG_NEUTRAL, ...))
+         * means "whatever language is there", which is how the two spellings
+         * agree on a module whose resources carry one language.
+         */
+        FindResourceExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([instance, type, name])=>{
+                const entry = host.findResource(
+                    instance >>> 0, identifier(type), identifier(name));
+                if (!entry)
+                {
+                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+                }
+                const handle = nextHandle;
+                nextHandle += 4;
+                found.set(handle, { ...entry, base: host.moduleBase(instance >>> 0) });
+                return handle;
+            },
+        },
+
         /** DWORD SizeofResource(HMODULE hModule, HRSRC hResInfo) */
         SizeofResource: {
             argBytes: 8,

@@ -981,6 +981,51 @@ export async function inParallel(items, limit, work){
 }
 
 /**
+ * How a program reaches a module's resources by the instance it holds.
+ *
+ * An HINSTANCE is the base a module was mapped at, and zero means the running
+ * program -- which is what a program passes when it asks for its own strings,
+ * dialogs and icons, which is nearly always. All three answers are made from
+ * one lookup so that they cannot disagree about which module an instance
+ * names: a resource found in one module and addressed relative to another's
+ * base is a pointer into the wrong image.
+ *
+ * @param {() => any} main       The running program's module, once loaded.
+ * @param {Map<number, any>} byBase  Every mapped module by its base.
+ */
+export function resourceLookup(main, byBase){
+    /** @param {number} instance */
+    const moduleOf = instance=>(instance === 0 ? main() : byBase.get(instance >>> 0) ?? null);
+    return {
+        /** @param {number} instance @param {number} id */
+        loadString: (instance, id)=>{
+            const module = moduleOf(instance);
+            return module?.file ? loadString(module.file, module.image, id) : null;
+        },
+        /**
+         * Whether a module carries a resource, and where: what a cursor or
+         * icon loaded out of the program's own image is checked against
+         * before a handle to it is handed out.
+         *
+         * @param {number} instance @param {number} type @param {number | string} name
+         */
+        findResource: (instance, type, name)=>{
+            const module = moduleOf(instance);
+            return module?.file ? findResource(module.file, module.image, type, name) : null;
+        },
+        /**
+         * Where a module is mapped: the address a resource's RVA is relative
+         * to. An instance that names no module is zero, and a caller adding
+         * an RVA to that gets an address nothing is mapped at rather than one
+         * inside the wrong module.
+         *
+         * @param {number} instance
+         */
+        moduleBase: instance=>moduleOf(instance)?.base ?? 0,
+    };
+}
+
+/**
  * Sorts a parent's deferred writes into the ones that land in the child's image
  * and the ones that do not.
  *
@@ -2199,38 +2244,7 @@ async function buildApp(options){
                 load: name=>loadLibraryAtRuntime(name),
                 /** @param {any} asked */
                 resolved: asked=>events.emit('resolved', asked),
-                /**
-                 * A string out of a module's own resources.
-                 *
-                 * An HINSTANCE is the base a module was mapped at, and zero
-                 * means the running program -- which is what a program passes
-                 * when it asks for its own strings, which is nearly always.
-                 *
-                 * @param {number} instance @param {number} id
-                 */
-                loadString: (instance, id)=>{
-                    const module = instance === 0
-                        ? mainModule
-                        : byBase.get(instance >>> 0) ?? null;
-                    return module?.file
-                        ? loadString(module.file, module.image, id)
-                        : null;
-                },
-                /**
-                 * Whether a module carries a resource, and where: what a cursor
-                 * or icon loaded out of the program's own image is checked
-                 * against before a handle to it is handed out.
-                 *
-                 * @param {number} instance @param {number} type @param {number | string} name
-                 */
-                findResource: (instance, type, name)=>{
-                    const module = instance === 0
-                        ? mainModule
-                        : byBase.get(instance >>> 0) ?? null;
-                    return module?.file
-                        ? findResource(module.file, module.image, type, name)
-                        : null;
-                },
+                ...resourceLookup(()=>mainModule, byBase),
             },
             commandLine: options.commandLine,
             // Every child a program asks for, while the stack that asked is

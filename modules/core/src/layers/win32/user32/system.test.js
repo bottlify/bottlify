@@ -374,6 +374,29 @@ test('OemToCharBuff translates a counted buffer between the OEM and ANSI pages',
     assert.equal(fns.CharToOemBuffA.argBytes, 12);
 });
 
+test('CharLowerA and CharUpperA convert a string in place, or a character by value', ()=>{
+    const { memory, fns } = setup();
+    memory.putString(TEXT_BUFFER, 'Ab-Z\xe9\xdf');
+
+    assert.equal(fns.CharUpperA.handler([TEXT_BUFFER]), TEXT_BUFFER, 'the pointer is the answer');
+    assert.equal(memory.readCString(TEXT_BUFFER, 16), 'AB-Z\xc9\xdf',
+        'a letter with no single-byte upper case is left alone');
+    assert.equal(fns.CharLowerA.handler([TEXT_BUFFER]), TEXT_BUFFER);
+    assert.equal(memory.readCString(TEXT_BUFFER, 16), 'ab-z\xe9\xdf');
+    assert.equal(memory.bytes[TEXT_BUFFER + 6], 0, 'and the terminator stays');
+
+    assert.equal(fns.CharLowerA.handler(['Q'.charCodeAt(0)]), 'q'.charCodeAt(0),
+        'a value with a zero high word is one character');
+    assert.equal(fns.CharUpperA.handler([0]), 0);
+
+    memory.putString(TEXT_BUFFER, 'ab');
+    memory.bytes[TEXT_BUFFER + 3] = 'c'.charCodeAt(0);
+    assert.equal(fns.CharUpperBuffA.handler([TEXT_BUFFER, 4]), 4, 'a counted buffer, NUL included');
+    assert.deepEqual([...memory.bytes.subarray(TEXT_BUFFER, TEXT_BUFFER + 4)],
+        [0x41, 0x42, 0, 0x43]);
+    assert.equal(fns.CharLowerBuffA.handler([0, 4]), 0);
+});
+
 test('wsprintfA reads its arguments off the stack and pops none of them', ()=>{
     // cdecl: the caller cleans up, so the count declared here says how many
     // slots to read. Declaring too few is a conversion that gets nothing.

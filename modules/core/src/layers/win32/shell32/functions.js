@@ -30,10 +30,15 @@ const SE_ERR_NOASSOC = 31;
 
 /** E_NOTIMPL, for the allocator this build does not hand out. */
 const E_NOTIMPL = 0x80004001 | 0;
+/** E_FAIL, for a shell folder there is no namespace to resolve. */
+const E_FAIL = 0x80004005 | 0;
 
 /**
  * @typedef {Object} ShellHost
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(notice: { api: string, detail: string }) => void} [divergence]
+ *           Where a call whose answer differs from Windows says so, rather than
+ *           failing silently.
  */
 
 /** @param {number} value */
@@ -168,6 +173,34 @@ export function createShellFunctions(host){
                     host.writeMemory(out >>> 0, dword(0));
                 }
                 return E_NOTIMPL;
+            },
+        },
+
+        /**
+         * HRESULT SHGetSpecialFolderLocation(HWND hwnd, int csidl,
+         *   LPITEMIDLIST *ppidl)
+         *
+         * There is no shell namespace here to turn a CSIDL into an item id
+         * list, so this reports the failure the API defines rather than a
+         * success with nothing behind it: E_FAIL, and a null where the list
+         * would go. A caller checks the HRESULT and takes its own path -- an
+         * installer that cannot find the Programs folder this way asks the
+         * registry for it instead. Declared with its real argument size so the
+         * stack is whole whichever branch the caller then takes.
+         */
+        SHGetSpecialFolderLocation: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, , out])=>{
+                if ((out >>> 0) !== 0)
+                {
+                    host.writeMemory(out >>> 0, dword(0));
+                }
+                host.divergence?.({
+                    api: 'SHELL32.dll!SHGetSpecialFolderLocation',
+                    detail: 'no shell namespace: reports E_FAIL with a null id list',
+                });
+                return E_FAIL;
             },
         },
     };

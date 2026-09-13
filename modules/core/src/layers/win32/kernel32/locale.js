@@ -264,21 +264,21 @@ const encodeSingleByte = (text, page)=>{
             continue;
         }
         const found = high.indexOf(code);
-        // A page whose table stops short of the top is Latin-1 above it, the
-        // way its decoder already reads it; without this the accented half of
-        // Windows-1252 came back as the default character.
-        if (found === -1 && code >= 0x80 + high.length && code <= 0xff)
+        if (found !== -1)
+        {
+            bytes[at] = 0x80 + found;
+            continue;
+        }
+        // A table that stops short of the top of the page leaves the rest of
+        // it Latin-1, exactly as decoding reads it: an accented letter is a
+        // byte of its own there, not the default character.
+        if (code >= 0x80 + high.length && code <= 0xff)
         {
             bytes[at] = code;
             continue;
         }
-        if (found === -1)
-        {
-            bytes[at] = DEFAULT_CHAR;
-            usedDefault = true;
-            continue;
-        }
-        bytes[at] = 0x80 + found;
+        bytes[at] = DEFAULT_CHAR;
+        usedDefault = true;
     }
     return { bytes, usedDefault };
 };
@@ -297,6 +297,30 @@ export const transcodeSingleByte = (bytes, from, to)=>
 /** The pages the OEM/ANSI conversions translate between, for their callers. */
 export const OEM_PAGE = CP_OEM_437;
 export const ANSI_PAGE = CP_WINDOWS_1252;
+
+/**
+ * Bytes of the ANSI page with their case changed, one byte to one byte.
+ *
+ * What CharUpper and CharLower do to a buffer: a byte whose mapping is not
+ * itself one character of the page -- a sharp s, which Unicode uppercases to
+ * two letters -- is left as it was, because a buffer being converted in place
+ * has no room for it to grow.
+ *
+ * @param {Uint8Array} bytes @param {boolean} upper
+ * @returns {Uint8Array}
+ */
+export const mapCaseAnsi = (bytes, upper)=>{
+    const text = decodeSingleByte(bytes, ANSI_CODE_PAGE);
+    const mapped = new Uint8Array(bytes.length);
+    for (let at = 0; at < text.length; at++)
+    {
+        const character = text[at];
+        const changed = upper ? character.toUpperCase() : character.toLowerCase();
+        const { bytes: encoded, usedDefault } = encodeSingleByte(changed, ANSI_CODE_PAGE);
+        mapped[at] = changed.length === 1 && !usedDefault ? encoded[0] : bytes[at];
+    }
+    return mapped;
+};
 
 /** @param {number} code */
 const characterType = code=>{
@@ -829,8 +853,15 @@ export function createLocaleFunctions(host){
                 {
                     return text.length;
                 }
+                // A destination too small is filled as far as it goes and then
+                // reported as too small. Both halves are the contract: a
+                // program that sized a buffer from the measuring call less the
+                // terminator -- a BSTR, whose own terminator sits past its
+                // length -- reads the converted text back after the failure,
+                // and nothing written leaves it holding an empty string.
                 if (text.length > (destinationChars | 0))
                 {
+                    writeWide(destination >>> 0, text.slice(0, destinationChars | 0));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }
@@ -872,8 +903,12 @@ export function createLocaleFunctions(host){
                 {
                     return encoded.bytes.length;
                 }
+                // Filled as far as it goes, for the reason MultiByteToWideChar
+                // gives.
                 if (encoded.bytes.length > (destinationBytes | 0))
                 {
+                    host.writeMemory(destination >>> 0,
+                        encoded.bytes.subarray(0, destinationBytes | 0));
                     host.setLastError(ERROR_INSUFFICIENT_BUFFER);
                     return 0;
                 }

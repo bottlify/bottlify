@@ -12,12 +12,14 @@ import { createProcessFunctions, createThreadState } from './kernel32/process.js
 import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
+import { createProfileFunctions } from './kernel32/profile.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
 import { createSpawnFunctions } from './kernel32/spawn.js';
+import { createAtomFunctions } from './kernel32/atoms.js';
 import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createSeh } from './kernel32/seh.js';
 import { createCrtSeh } from './msvcrt/seh.js';
@@ -32,6 +34,7 @@ import { createMsvcrtFunctions } from './msvcrt/functions.js';
 import { createWindowFunctions } from './user32/windows.js';
 import { createMessageQueue } from './user32/messages.js';
 import { createRegistryFunctions } from './advapi32/functions.js';
+import { createTokenFunctions } from './advapi32/tokens.js';
 import { createHive } from './advapi32/registry.js';
 import { createGdiFunctions } from './gdi32/functions.js';
 import { createWinsockFunctions } from './wsock32/functions.js';
@@ -544,6 +547,11 @@ export const win32Module = {
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
                 }),
+                ...createProfileFunctions({
+                    writeMemory,
+                    readCString,
+                    files: volume,
+                }),
                 ...createDriveFunctions({
                     readCString, readWideString, readMemory, writeMemory,
                     setLastError: setError,
@@ -624,6 +632,11 @@ export const win32Module = {
                     exit: code=>{
                         exitCode = code >>> 0;
                     },
+                }),
+                ...createAtomFunctions({
+                    writeMemory,
+                    readCString,
+                    setLastError: setError,
                 }),
                 ...createSpawnFunctions({
                     kernel,
@@ -757,7 +770,10 @@ export const win32Module = {
 
             'COMCTL32.dll': createComctlFunctions({ readMemory, writeMemory }),
 
-            'SHELL32.dll': createShellFunctions({ writeMemory }),
+            'SHELL32.dll': createShellFunctions({
+                writeMemory,
+                divergence: config?.divergence,
+            }),
 
             'VERSION.dll': createVersionFunctions({
                 readMemory,
@@ -766,6 +782,9 @@ export const win32Module = {
                 setLastError: setError,
                 /** @param {string} path */
                 versionInfo: path=>modules.versionInfo?.(path) ?? null,
+                // Where VerInstallFile reads a compressed source and writes the
+                // expanded file: the same volume every other file call uses.
+                files: volume,
             }),
 
             'COMDLG32.dll': createCommonDialogFunctions({ readMemory }),
@@ -808,6 +827,12 @@ export const win32Module = {
                 callerThread: ()=>bridge.callerThread(),
                 park: ()=>bridge.park(),
                 idle,
+                // The handles half of a wait that also watches the queue.
+                // Read at call time: the table it lives in is built below.
+                /** @param {number[]} args */
+                waitForObjects: args=>
+                    libraries['KERNEL32.dll'].WaitForMultipleObjects.handler(args),
+                now: ()=>kernel.clock.virtualTime(),
                 created: config?.created ?? (()=>{}),
                 /** @param {number} instance @param {number} id */
                 loadString: (instance, id)=>modules.loadString?.(instance, id) ?? null,
@@ -851,16 +876,24 @@ export const win32Module = {
                 release: address=>heap.free(address),
             }),
 
-            'ADVAPI32.dll': createRegistryFunctions({
-                readMemory,
-                writeMemory,
-                readCString,
-                hive,
-                setLastError: setError,
-                // A SID has to live where a program can compare it byte by byte.
-                /** @param {number} bytes */
-                allocate: bytes=>heap.allocate(bytes),
-            }),
+            'ADVAPI32.dll': {
+                ...createRegistryFunctions({
+                    readMemory,
+                    writeMemory,
+                    readCString,
+                    hive,
+                    setLastError: setError,
+                    // A SID has to live where a program can compare it byte by byte.
+                    /** @param {number} bytes */
+                    allocate: bytes=>heap.allocate(bytes),
+                }),
+                ...createTokenFunctions({
+                    readMemory,
+                    writeMemory,
+                    setLastError: setError,
+                    handles,
+                }),
+            },
 
             'GDI32.dll': gdi.table,
 

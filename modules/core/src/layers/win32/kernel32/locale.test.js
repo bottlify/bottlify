@@ -135,13 +135,40 @@ test('a zero destination measures and writes nothing at all', ()=>{
     assert.equal(host.bytes[0x200], 0xee, 'the destination was not touched');
 });
 
-test('a destination too small fails and says why, rather than truncating', ()=>{
+test('a destination too small is filled as far as it goes, and the call still fails', ()=>{
+    // Windows converts what fits before reporting the buffer too small. A
+    // program that sized a BSTR from the measuring call less the terminator
+    // reads the text back after the failure, and gets an empty string if
+    // nothing was written.
     const host = fakeHost();
     const fns = createLocaleFunctions(host);
     host.plantAnsi(0x100, 'hello');
+    host.bytes.fill(0xee, 0x200, 0x210);
 
     assert.equal(fns.MultiByteToWideChar.handler([CP_ACP, 0, 0x100, -1, 0x200, 3]), 0);
     assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER]);
+    assert.equal(host.readWide(0x200, 3), 'hel');
+    assert.equal(host.bytes[0x206], 0xee, 'and not one character past the buffer');
+
+    host.plantWide(0x300, 'world');
+    host.bytes.fill(0xee, 0x400, 0x410);
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x300, -1, 0x400, 2, 0, 0]), 0);
+    assert.deepEqual(host.errors, [ERROR_INSUFFICIENT_BUFFER, ERROR_INSUFFICIENT_BUFFER]);
+    assert.deepEqual([...host.bytes.subarray(0x400, 0x403)], [0x77, 0x6f, 0xee]);
+});
+
+test('the upper half of Windows-1252 past the punctuation block encodes as Latin-1', ()=>{
+    // Decoding already read 0xa0..0xff as Latin-1; encoding turned every one
+    // of them into the default character, so an accented name came back as
+    // question marks after a round trip through a wide string.
+    const host = fakeHost();
+    const fns = createLocaleFunctions(host);
+    host.plantWide(0x100, 'caf\xe9 \xc9');
+
+    assert.equal(fns.WideCharToMultiByte.handler([CP_ACP, 0, 0x100, -1, 0x200, 16, 0, 0x300]), 7);
+    assert.deepEqual([...host.bytes.subarray(0x200, 0x207)],
+        [0x63, 0x61, 0x66, 0xe9, 0x20, 0xc9, 0]);
+    assert.equal(host.bytes[0x300], 0, 'and no default character was used');
 });
 
 test('Windows-1252 is not Latin-1 in the sixteen places it matters', ()=>{

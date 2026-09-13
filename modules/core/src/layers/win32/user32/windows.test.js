@@ -134,6 +134,10 @@ function fakeHandles(){
 }
 
 /** Stands in for the bridge's parked token: identity is all that matters. */
+const WAIT_OBJECT_0 = 0;
+const WAIT_TIMEOUT = 0x102;
+const INFINITE = 0xffffffff;
+const QS_ALLINPUT = 0x04ff;
 const PARKED = Object.freeze({ parked: true });
 
 /**
@@ -143,8 +147,10 @@ const PARKED = Object.freeze({ parked: true });
  *        which is the degraded path a build with no heap takes.
  * @param {(message: any) => any} [options.reply] What a window procedure answers,
  *        so a test can refuse a window or make the answer arrive late.
+ * @param {(args: number[]) => number} [options.waitForObjects] kernel32's wait, faked.
+ * @param {() => number} [options.now] The guest clock, for a wait with a deadline.
  */
-function setup({ heap = false, reply } = {}){
+function setup({ heap = false, reply, waitForObjects, now } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -181,6 +187,8 @@ function setup({ heap = false, reply } = {}){
             return PARKED;
         },
         idle: ()=>new Promise(resolve=>idlers.push(()=>resolve(undefined))),
+        waitForObjects,
+        now,
         allocate: heap ? (/** @type {number} */ bytes)=>{
             const at = heapNext;
             heapNext += bytes;
@@ -655,6 +663,52 @@ test('GetMessageA waits for a message rather than reporting an empty queue', asy
     // which is the half a parked return value cannot carry.
     assert.equal(memory.readU32(MSG_BUFFER + 4), 0x0401);
     assert.equal(memory.readU32(MSG_BUFFER + 8), 7);
+});
+
+test('MsgWaitForMultipleObjects answers a ready handle first, then a queued message', ()=>{
+    /** @type {number[][]} */
+    const asked = [];
+    let handleAnswer = WAIT_TIMEOUT;
+    const { fns, queue } = setup({ waitForObjects: args=>{
+        asked.push(args);
+        return handleAnswer;
+    } });
+
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([2, 0x100, 0, 0, QS_ALLINPUT]), WAIT_TIMEOUT,
+        'a poll with nothing ready times out');
+    assert.deepEqual(asked, [[2, 0x100, 0, 0]], 'and the handles were polled, not waited on');
+
+    queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([2, 0x100, 0, INFINITE, QS_ALLINPUT]), 2,
+        'a message is reported as the index past the last handle');
+    assert.equal(queue.depth(), 1, 'and left in the queue for the program to retrieve');
+
+    handleAnswer = 1;
+    assert.equal(fns.MsgWaitForMultipleObjects.handler([2, 0x100, 0, INFINITE, QS_ALLINPUT]), 1,
+        'a handle that is ready wins over the message');
+});
+
+test('MsgWaitForMultipleObjects with no handles is a sleep the queue can cut short', async()=>{
+    let clock = 1000;
+    const { fns, queue, tick } = setup({ now: ()=>clock });
+
+    const answer = /** @type {Promise<number>} */ (/** @type {any} */ (
+        fns.MsgWaitForMultipleObjects.handler([0, 0, 0, 500, QS_ALLINPUT])));
+    assert.equal(typeof answer.then, 'function', 'the thread is not stopped for good');
+    await tick();
+    queue.post({ hwnd: 0, message: 0x0401, wParam: 0, lParam: 0 });
+    await tick();
+    await tick();
+    assert.equal(await answer, WAIT_OBJECT_0, 'zero handles: the message is index zero');
+
+    queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    const expired = /** @type {Promise<number>} */ (/** @type {any} */ (
+        fns.MsgWaitForMultipleObjects.handler([0, 0, 0, 500, QS_ALLINPUT])));
+    await tick();
+    clock += 600;
+    await tick();
+    await tick();
+    assert.equal(await expired, WAIT_TIMEOUT, 'and the deadline is kept on the guest clock');
 });
 
 test('GetMessageA reports an error for a window filter that names nothing', ()=>{
