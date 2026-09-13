@@ -733,7 +733,15 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 lockable: ((presentParameters.flags ?? 0)
                     & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
                 divergence: services.divergence ?? null,
-                base: allocate(0x100000),
+                // The surface's own size, like every other surface's. A fixed
+                // megabyte covered nothing above 512x512 at four bytes a pixel:
+                // a lock hands out this address and the program reads and writes
+                // the whole surface through it, so a mode any larger ran off the
+                // end of the allocation and into whatever the heap put next --
+                // further past it the larger the mode, which is a corruption
+                // whose reach depends on the display the run was configured for.
+                base: allocate(surfaceBytes(
+                    presentParameters.backBufferFormat ?? D3DFMT.X8R8G8B8, width, height)),
                 count: implicitCount(),
             }));
         }
@@ -745,7 +753,8 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format: presentParameters.autoDepthStencilFormat ?? D3DFMT.D24S8,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL,
-                base: allocate(0x100000),
+                base: allocate(surfaceBytes(
+                    presentParameters.autoDepthStencilFormat ?? D3DFMT.D24S8, width, height)),
                 count: implicitCount(),
             })
             : null;
@@ -2247,6 +2256,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.RENDERTARGET,
+                divergence: services.divergence ?? null,
                 lockable,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
@@ -2274,6 +2284,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 format,
                 pool: D3DPOOL.DEFAULT,
                 usage: D3DUSAGE.DEPTHSTENCIL,
+                divergence: services.divergence ?? null,
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
             });

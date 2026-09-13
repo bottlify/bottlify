@@ -380,3 +380,44 @@ test('a rectangle into a compressed surface is addressed by block', ()=>{
     assert.equal(offsetOfRect(D3DFMT.DXT1, pitch, { top: 4, left: 8 }), pitch + 16);
     assert.equal(offsetOfRect(D3DFMT.A8R8G8B8, 1024, { top: 4, left: 8 }), 4096 + 32);
 });
+
+test('a write to a render target says the bytes are discarded, and a read says they are stale',
+    ()=>{
+        /** @type {string[]} */
+        const said = [];
+        /** @param {string} type */
+        const target = type=>createSurface({
+            type, width: SIZE, height: SIZE, format: D3DFMT.A8R8G8B8,
+            pool: D3DPOOL.DEFAULT, usage: 0, base: 0x1000, lockable: true,
+            count: createReferenceCount(),
+            divergence: (_api, detail)=>said.push(detail),
+        });
+        const locked = { pBits: 0, Pitch: 0 };
+
+        // Nothing uploads a standalone surface's bytes when the lock ends, so a
+        // program drawing into one by hand loses what it drew -- and used to
+        // lose it in silence, because only the read direction was reported.
+        const written = target(SURFACE_TYPE.RENDER_TARGET);
+        assert.equal(written.LockRect(locked, null, 0), D3D_OK);
+        assert.equal(written.UnlockRect(), D3D_OK);
+        assert.equal(said.length, 1);
+        assert.match(said[0], /a write to a rendertarget surface/);
+        assert.match(said[0], /discarded/);
+
+        // A read-only lock discards nothing: reporting that it did would be a
+        // false report of the worse fault.
+        said.length = 0;
+        const read = target(SURFACE_TYPE.RENDER_TARGET);
+        assert.equal(read.LockRect(locked, null, 0x10), D3D_OK);
+        assert.equal(said.length, 1);
+        assert.match(said[0], /a read of a rendertarget surface/);
+        assert.doesNotMatch(said[0], /discarded/);
+
+        // A plain surface is not in this class at all: its bytes are read out of
+        // guest memory by whatever copies from it, so a write into one arrives.
+        said.length = 0;
+        const plain = target(SURFACE_TYPE.PLAIN);
+        assert.equal(plain.LockRect(locked, null, 0), D3D_OK);
+        assert.equal(plain.UnlockRect(), D3D_OK);
+        assert.deepEqual(said, []);
+    });

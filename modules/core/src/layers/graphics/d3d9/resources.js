@@ -38,6 +38,13 @@ import {
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 
 /**
+ * D3DLOCK_READONLY, which is the same number in both versions of the API. Here
+ * rather than imported because it decides which half of a lock's divergence is
+ * being reported, and that is this file's own business.
+ */
+const D3DLOCK_READONLY = 0x00000010;
+
+/**
  * @typedef {Object} ReferenceCount
  * @property {number} value
  * @property {boolean} destroyed
@@ -219,18 +226,26 @@ export function createSurface(options){
             {
                 return D3DERR_INVALIDCALL;
             }
-            // What is drawn lives on the GPU, and nothing copies it back into
-            // the guest's own bytes. The lock is right to succeed -- refusing
+            // A surface that lives on the GPU is not copied back into the
+            // guest's own bytes, and the guest's bytes are not copied onto the
+            // GPU when the lock ends. The lock is right to succeed -- refusing
             // it sends a program that asked for a lockable surface down a path
-            // it was not written for -- but what it hands out is not the
-            // picture, and reading a surface back is the only way to know what
-            // is in it.
+            // it was not written for -- but it is two different wrongs
+            // depending on which way the program means to use it, and only one
+            // of them is a lost picture.
+            //
+            // Said apart because a read-only lock discards nothing, and warning
+            // that it does would be a false report of the more serious fault. A
+            // texture level is neither: its unlock uploads what was written.
             if (options.type === SURFACE_TYPE.RENDER_TARGET
                 || options.type === SURFACE_TYPE.DEPTH_STENCIL)
             {
-                options.divergence?.('Direct3D',
-                    `a lock of a ${options.type} surface is accepted and hands out guest`
-                    + ' memory that the rendered pixels are never copied into');
+                options.divergence?.('Direct3D', (flags & D3DLOCK_READONLY) !== 0
+                    ? `a read of a ${options.type} surface is accepted and hands out guest`
+                        + ' memory that the rendered pixels are never copied into'
+                    : `a write to a ${options.type} surface is accepted and goes into guest`
+                        + ' memory that the unlock never copies to the surface, so what the'
+                        + ' program draws by hand is discarded');
             }
             locked = true;
             out.Pitch = pitch;

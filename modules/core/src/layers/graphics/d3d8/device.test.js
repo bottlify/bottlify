@@ -8,10 +8,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     D3DCLEAR, D3DCREATE, D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL,
-    D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DORDER, D3DPOOL, D3DPT, D3DRS, D3DRS_MAX,
+    D3DERR_NOTFOUND, D3DFMT, D3DFMT_INDEX, D3DLIGHTTYPE, D3DLOCK, D3DORDER, D3DPOOL, D3DPT, D3DRS,
+    D3DRS_MAX,
     D3DPRESENTFLAG, D3DRS_REMOVED_IN_D3D9, D3DSWAPEFFECT, D3DTA, D3DTOP, D3DTS, D3DTSS,
     D3DUSAGE, D3D_OK,
-    dwordToFloat, floatToDword, isShaderHandle,
+    dwordToFloat, floatToDword, isShaderHandle, surfaceBytes,
 } from './constants.js';
 import { DEFAULT_STAGE_STATES } from './stagestates.js';
 import { D3DRS as D3DRS9 } from '../d3d9/constants.js';
@@ -1449,7 +1450,7 @@ test('a back buffer is lockable exactly when the program asked for one', ()=>{
     assert.equal(asked.GetBackBuffer(0, 0, held), D3D_OK);
     /** @type {any} */
     const locked = {};
-    assert.equal(held.surface.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(held.surface.LockRect(locked, null, D3DLOCK.READONLY), D3D_OK);
     assert.ok(locked.pBits > 0, 'and it hands out somewhere to read');
     // Succeeding is right and is not the whole truth: what is drawn lives on
     // the GPU and is never copied into those bytes. Accepting a call and not
@@ -1457,6 +1458,15 @@ test('a back buffer is lockable exactly when the program asked for one', ()=>{
     // error, so it says so.
     assert.ok(reported.some(line=>/never copied into/.test(line)),
         'and says that what it hands out is not the rendered picture');
+    assert.equal(held.surface.UnlockRect(), D3D_OK);
+
+    // The other direction of the same lock, and the worse of the two: a program
+    // drawing into its back buffer by hand has those bytes thrown away, because
+    // only a texture's unlock uploads what was written.
+    reported.length = 0;
+    assert.equal(held.surface.LockRect(locked, null, 0), D3D_OK);
+    assert.ok(reported.some(line=>/discarded/.test(line)),
+        'and says that what the program writes into it never reaches the surface');
     assert.equal(held.surface.UnlockRect(), D3D_OK);
     asked.release();
 });
@@ -1537,4 +1547,51 @@ test('the cursor is kept as the program set it, and refused when it could not be
     made.surface.release();
     wrong.surface.release();
     assertFullyReleased(device);
+});
+
+test('a lockable back buffer is given storage for the whole mode, not a fixed megabyte', ()=>{
+    // A lock hands the program this address and it reads and writes the whole
+    // surface through it. The allocation was a fixed megabyte whatever the mode,
+    // so anything above 512x512 at four bytes a pixel ran off the end of it and
+    // into whatever the heap put next -- and further past it the larger the mode,
+    // which makes the damage depend on the display a run was configured for.
+    /** @type {{ address: number, bytes: number }[]} */
+    const given = [];
+    let next = 0x10000;
+    const device = createDevice({
+        parameters: {
+            backBufferWidth: 1600,
+            backBufferHeight: 1200,
+            flags: D3DPRESENTFLAG.LOCKABLE_BACKBUFFER,
+        },
+        caps: {
+            /** @param {number} bytes */
+            allocate: (/** @type {number} */ bytes)=>{
+                const address = next;
+                next += bytes;
+                given.push({ address, bytes });
+                return address;
+            },
+        },
+    });
+
+    /** @type {{ surface?: any }} */
+    const held = {};
+    assert.equal(device.GetBackBuffer(0, 0, held), D3D_OK);
+    /** @type {any} */
+    const locked = {};
+    assert.equal(held.surface.LockRect(locked, null, D3DLOCK.READONLY), D3D_OK);
+
+    const surface = given.find(entry=>entry.address === held.surface.base);
+    assert.ok(surface, 'the back buffer was given guest memory of its own');
+    assert.ok(surface.bytes >= surfaceBytes(D3DFMT.X8R8G8B8, 1600, 1200),
+        'and enough of it for every pixel of the mode');
+    // Nothing else may be sitting inside the span a lock hands out.
+    const end = held.surface.base + surfaceBytes(D3DFMT.X8R8G8B8, 1600, 1200);
+    const overlapping = given.filter(entry=>entry !== surface
+        && entry.address < end && entry.address + entry.bytes > held.surface.base);
+    assert.deepEqual(overlapping, [], 'and nothing else was put inside it');
+
+    assert.equal(held.surface.UnlockRect(), D3D_OK);
+    device.release();
 });
