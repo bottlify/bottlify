@@ -726,8 +726,72 @@ test('a message box is handed up whole, not only written to the log', ()=>{
         'and it still reaches the log, for a reader who only has that');
 });
 
+test('a message registered by name is the same number every time, whatever the case', ()=>{
+    const { memory, fns } = setup();
+    memory.putString(TEXT_BUFFER, 'commdlg_FindReplace');
+    memory.putString(FORMAT_BUFFER, 'COMMDLG_FINDREPLACE');
+
+    const first = fns.RegisterWindowMessageA.handler([TEXT_BUFFER]);
+    assert.ok(first >= 0xc000 && first <= 0xffff, 'in the range Windows keeps for them');
+    assert.equal(fns.RegisterWindowMessageA.handler([FORMAT_BUFFER]), first);
+
+    memory.putString(FORMAT_BUFFER, 'another');
+    assert.notEqual(fns.RegisterWindowMessageA.handler([FORMAT_BUFFER]), first);
+    assert.equal(fns.RegisterWindowMessageA.handler([0]), 0, 'and no name is no message');
+    assert.equal(fns.RegisterWindowMessageA.argBytes, 4);
+});
+
 test('a message box with neither text nor caption still reports', ()=>{
     const { fns, notices } = setup();
     assert.equal(fns.MessageBoxA.handler([0, 0, 0, 0]), 1);
     assert.deepEqual(notices, [{ text: '', caption: '', type: 0 }]);
+});
+
+// --- rectangles and the small string helpers ---
+
+test('the rectangle helpers work over the caller\'s memory and refuse a null pointer', ()=>{
+    const { memory, fns } = setup();
+    const rect = TEXT_BUFFER;
+    const other = FORMAT_BUFFER;
+    memory.putU32s(rect, [10, 20, 30, 40]);
+
+    assert.equal(fns.CopyRect.handler([other, rect]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(other + at)), [10, 20, 30, 40]);
+    assert.equal(fns.EqualRect.handler([other, rect]), 1);
+
+    assert.equal(fns.OffsetRect.handler([other, 5, -5]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(other + at) | 0), [15, 15, 35, 35]);
+    assert.equal(fns.EqualRect.handler([other, rect]), 0);
+
+    assert.equal(fns.InflateRect.handler([other, 1, 2]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(other + at) | 0), [14, 13, 36, 37]);
+
+    assert.equal(fns.PtInRect.handler([rect, 10, 20]), 1, 'the top-left edge is inside');
+    assert.equal(fns.PtInRect.handler([rect, 30, 20]), 0, 'the right edge is outside');
+    assert.equal(fns.PtInRect.handler([rect, -1, -1]), 0);
+
+    assert.equal(fns.SetRectEmpty.handler([rect]), 1);
+    assert.deepEqual([0, 4, 8, 12].map(at=>memory.u32(rect + at)), [0, 0, 0, 0]);
+
+    /** @type {[string, number[]][]} */
+    const nulls = [['SetRectEmpty', [0]], ['CopyRect', [0, rect]],
+        ['EqualRect', [rect, 0]], ['OffsetRect', [0, 1, 1]], ['InflateRect', [0, 1, 1]],
+        ['PtInRect', [0, 1, 1]]];
+    for (const [name, args] of nulls)
+    {
+        assert.equal(fns[name].handler(args), 0, name);
+    }
+    assert.equal(fns.PtInRect.argBytes, 12, 'the POINT is two words on the stack');
+    assert.equal(fns.OffsetRect.argBytes, 12);
+    assert.equal(fns.CopyRect.argBytes, 8);
+});
+
+test('GetMessageTime and GetMessagePos describe the message last taken off the queue', ()=>{
+    const { queue, fns } = setup();
+    assert.equal(fns.GetMessageTime.handler([]), 0, 'nothing yet');
+    queue.post({ hwnd: 0x40, message: 0x400, wParam: 0, lParam: 0, time: 5000, x: 17, y: 23 });
+    queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(fns.GetMessageTime.handler([]), 5000);
+    assert.equal(fns.GetMessagePos.handler([]), 17 | 23 << 16);
+    assert.equal(fns.GetMessageTime.argBytes, 0);
 });

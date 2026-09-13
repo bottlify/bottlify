@@ -32,6 +32,8 @@ const FAILED = -1;
  *           How large a bitmap handle is, for counting the images in a strip.
  *           Absent in a build without gdi32 behind it, and then a strip counts
  *           as the single image it can be sure of.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call that does less than the real one says so.
  */
 
 /** @param {Uint8Array} bytes @param {number} at */
@@ -282,6 +284,32 @@ export function createComctlFunctions(host){
          */
         InitCommonControls: {
             argBytes: 0,
+            handler: ()=>0,
+        },
+
+        /**
+         * BOOL ImageList_Draw(HIMAGELIST, int i, HDC, int x, int y, UINT fStyle)
+         * BOOL ImageList_GetImageInfo(HIMAGELIST, int i, IMAGEINFO *)
+         *
+         * A list holds its images as handles, not pixels: nothing here can
+         * draw one or say where in a bitmap it lies. Both refuse, and an
+         * index the list does not have refuses the same way.
+         */
+        ImageList_Draw: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, index])=>{
+                const list = listOf(handle);
+                if (list && (index | 0) >= 0 && (index | 0) < list.images.length)
+                {
+                    host.divergence?.('ImageList_Draw', 'an image list is not drawn here');
+                }
+                return 0;
+            },
+        },
+
+        ImageList_GetImageInfo: {
+            argBytes: 12,
             handler: ()=>0,
         },
 

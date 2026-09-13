@@ -13,7 +13,7 @@ import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
-import { findResource, loadString } from './layers/loader/internal/resources.js';
+import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
@@ -936,6 +936,23 @@ export async function bytesAt(url){
 }
 
 /**
+ * Where a program starts: its own directory.
+ *
+ * That is where the shell puts a process it starts from an icon or a disc's
+ * autorun, and a program that opens its files by bare name -- a companion
+ * library, a configuration beside it -- is written against it. The root of
+ * the drive keeps its backslash, since `C:` alone names a drive's current
+ * directory rather than its root.
+ *
+ * @param {string} imagePath
+ */
+export function startDirectoryOf(imagePath){
+    const cut = Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/'));
+    const directory = imagePath.slice(0, cut + 1);
+    return /^[A-Za-z]:[\\/]$/.test(directory) ? directory : directory.replace(/[\\/]$/, '');
+}
+
+/**
  * Where a LoadLibrary at run time actually looks.
  *
  * A name that already says where it is, is where it is. Windows searches for a
@@ -1008,10 +1025,23 @@ export function resourceLookup(main, byBase){
          * before a handle to it is handed out.
          *
          * @param {number} instance @param {number} type @param {number | string} name
+         * @param {number | null} [language]  Absent means the first language there is.
          */
-        findResource: (instance, type, name)=>{
+        findResource: (instance, type, name, language = null)=>{
             const module = moduleOf(instance);
-            return module?.file ? findResource(module.file, module.image, type, name) : null;
+            return module?.file
+                ? findResource(module.file, module.image, type, name, language)
+                : null;
+        },
+        /**
+         * Everything a module carries, for the enumerations: a program picks
+         * its string table by language this way.
+         *
+         * @param {number} instance
+         */
+        listResources: instance=>{
+            const module = moduleOf(instance);
+            return module?.file ? listResources(module.file, module.image) : [];
         },
         /**
          * Where a module is mapped: the address a resource's RVA is relative
@@ -2457,6 +2487,16 @@ async function buildApp(options){
         filesystem.apply(options.seed);
     }
 
+    // A program starts in its own directory. One loaded from bytes alone, with
+    // nothing at its path on the volume, starts at the root as before.
+    try
+    {
+        filesystem.setCurrentDirectory(startDirectoryOf(options.imagePath ?? 'C:\\app.exe'));
+    }
+    catch (e){
+        void e;
+    }
+
     const { entryVector, initialStack, thunkBase } = cpu.layout;
 
     // The first thread gets the stack its own image asked the linker for.
@@ -2820,6 +2860,10 @@ async function buildApp(options){
             },
         });
         missingImports.set(label, address);
+        // Said at bind time as well as when called: a program that is about
+        // to run is the moment to read what it imports and nobody answers,
+        // before the first of them corrupts a stack.
+        events.emit('import-unresolved', { import: label });
         return address;
     };
 
@@ -3150,7 +3194,7 @@ async function buildApp(options){
         // A line chosen by whoever started this process wins, because a child
         // is entitled to the arguments its parent gave it.
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
-        currentDirectory: 'C:\\',
+        currentDirectory: filesystem.currentDirectory(),
         standardHandles: { input: 0, output: 0, error: 0 },
     });
     threadBlocks = process;

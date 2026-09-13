@@ -314,3 +314,24 @@ test('a priority on a handle that is not a thread is a reported failure', ()=>{
     assert.equal(fns.SetThreadPriority.handler([0x99, 0]), 0);
     assert.deepEqual(host.errors, [6, 6], 'ERROR_INVALID_HANDLE each time');
 });
+
+test('lstrcmpW compares wide strings by sign, folded or not', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    /** @param {number} at @param {string} text */
+    const wide = (at, text)=>{
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let i = 0; i < text.length; i++)
+        {
+            bytes[i * 2] = text.charCodeAt(i) & 0xff;
+            bytes[i * 2 + 1] = text.charCodeAt(i) >> 8;
+        }
+        host.writeMemory(at, bytes);
+    };
+    wide(0x200, 'abc');
+    wide(0x300, 'ABD');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x300]), 1, '"a" sorts after "A"');
+    assert.equal(fns.lstrcmpiW.handler([0x200, 0x300]), -1, 'folded, "abc" is before "abd"');
+    assert.equal(fns.lstrcmpW.handler([0x200, 0x200]), 0);
+    assert.equal(fns.lstrcmpW.argBytes, 8);
+});

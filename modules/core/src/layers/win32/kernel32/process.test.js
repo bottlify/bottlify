@@ -419,3 +419,22 @@ test('the guest-side paths read the block and fall back to the host past it', ()
     assert.equal(code[slow - 3], 0xc2, 'the fast path returns just before it');
     assert.equal(code.length, slow + 5);
 });
+
+test('SleepEx and the priority and affinity calls pop their own stdcall bytes', ()=>{
+    const { fns, host } = setup();
+    assert.equal(fns.SleepEx.handler([0, 1]), 0, 'a zero sleep yields');
+    assert.equal(fns.SleepEx.handler([16, 0]), PARKED, 'a real sleep parks');
+    assert.equal(fns.SleepEx.argBytes, 8);
+
+    assert.equal(fns.GetPriorityClass.handler([0xffffffff]), 0x20);
+    assert.equal(fns.SetPriorityClass.handler([0xffffffff, 0x80]), 1);
+    assert.equal(fns.SetProcessAffinityMask.handler([0xffffffff, 3]), 1);
+    assert.equal(fns.GetProcessAffinityMask.handler([0xffffffff, 0x200, 0x204]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 1, 'one processor in the process mask');
+    assert.equal(host.view.getUint32(0x204, true), 1, 'and in the system mask');
+
+    assert.equal(fns.GetPriorityClass.argBytes, 4);
+    assert.equal(fns.SetPriorityClass.argBytes, 8);
+    assert.equal(fns.GetProcessAffinityMask.argBytes, 12);
+    assert.equal(fns.SetProcessAffinityMask.argBytes, 8);
+});

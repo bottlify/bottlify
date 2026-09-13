@@ -23,7 +23,10 @@
 const HEAP_ZERO_MEMORY = 0x00000008;
 
 /** GlobalAlloc's spelling of the same request. */
+const GMEM_MOVEABLE = 0x00000002;
 const GMEM_ZEROINIT = 0x00000040;
+const GMEM_MODIFY = 0x00000080;
+const GMEM_INVALID_HANDLE = 0x8000;
 const HEAP_REALLOC_IN_PLACE_ONLY = 0x00000010;
 
 const MEM_COMMIT = 0x00001000;
@@ -374,7 +377,46 @@ export function createHeapFunctions(host){
         return block && block.owner === heap ? block : null;
     };
 
-    return {
+    /**
+     * A block given a new size, where it is if it fits and elsewhere if it may
+     * move. The address it ends up at, or 0 with the block left exactly as it
+     * was: callers written as `p = realloc(p, n)` leak on failure, but callers
+     * written correctly still own their data.
+     *
+     * @param {{ address: number, size: number, owner: any }} block
+     * @param {number} wanted
+     * @param {{ zeroTail: boolean, mayMove: boolean }} how
+     */
+    const reallocate = (block, wanted, { zeroTail, mayMove })=>{
+        const { address, size: previous } = block;
+        if (allocator.resize(address, wanted))
+        {
+            if (zeroTail && wanted > previous)
+            {
+                zero(address + previous, wanted - previous);
+            }
+            return address;
+        }
+        if (!mayMove)
+        {
+            return 0;
+        }
+        const moved = allocator.allocate(wanted, { owner: block.owner });
+        if (moved === 0)
+        {
+            return 0;
+        }
+        const kept = Math.min(previous, wanted);
+        host.writeMemory(moved, host.readMemory(address, kept).slice());
+        if (zeroTail && wanted > kept)
+        {
+            zero(moved + kept, wanted - kept);
+        }
+        allocator.free(address);
+        return moved;
+    };
+
+    const table = {
         /** HANDLE GetProcessHeap(VOID) */
         GetProcessHeap: {
             argBytes: 0,
@@ -448,43 +490,15 @@ export function createHeapFunctions(host){
             handler: ([handle, flags, pointer, bytes])=>{
                 const heap = handle >>> 0;
                 const address = pointer >>> 0;
-                const wanted = bytes >>> 0;
                 const block = blockOf(heap, address);
                 if (!block)
                 {
                     return 0;
                 }
-
-                const previous = block.size;
-                if (allocator.resize(address, wanted))
-                {
-                    if ((flags & HEAP_ZERO_MEMORY) && wanted > previous)
-                    {
-                        zero(address + previous, wanted - previous);
-                    }
-                    return address;
-                }
-                if (flags & HEAP_REALLOC_IN_PLACE_ONLY)
-                {
-                    return 0;
-                }
-
-                const moved = allocator.allocate(wanted, { owner: heap });
-                // On failure the original block stays exactly as it was: callers
-                // written as `p = realloc(p, n)` leak on failure, but callers
-                // written correctly still own their data.
-                if (moved === 0)
-                {
-                    return 0;
-                }
-                const kept = Math.min(previous, wanted);
-                host.writeMemory(moved, host.readMemory(address, kept).slice());
-                if ((flags & HEAP_ZERO_MEMORY) && wanted > kept)
-                {
-                    zero(moved + kept, wanted - kept);
-                }
-                allocator.free(address);
-                return moved;
+                return reallocate(block, bytes >>> 0, {
+                    zeroTail: (flags & HEAP_ZERO_MEMORY) !== 0,
+                    mayMove: (flags & HEAP_REALLOC_IN_PLACE_ONLY) === 0,
+                });
             },
         },
 
@@ -665,6 +679,46 @@ export function createHeapFunctions(host){
                 }
                 return address;
             },
+        },
+
+        /**
+         * HGLOBAL GlobalReAlloc(HGLOBAL hMem, SIZE_T dwBytes, UINT uFlags)
+         *
+         * A fixed block stays put unless the caller allowed it to move, which
+         * is what GMEM_MOVEABLE means on this call; GMEM_MODIFY changes only
+         * attributes, and there are none here to change.
+         */
+        GlobalReAlloc: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, bytes, flags])=>{
+                const block = allocator.block(handle >>> 0);
+                if (!block)
+                {
+                    return 0;
+                }
+                if (flags & GMEM_MODIFY)
+                {
+                    return handle >>> 0;
+                }
+                return reallocate(block, bytes >>> 0, {
+                    zeroTail: (flags & GMEM_ZEROINIT) !== 0,
+                    mayMove: (flags & GMEM_MOVEABLE) !== 0,
+                });
+            },
+        },
+
+        /**
+         * UINT GlobalFlags(HGLOBAL hMem)
+         *
+         * Nothing here is discardable or moveable and nothing is locked, so a
+         * live block has no flags and no lock count; a handle that is not a
+         * block is GMEM_INVALID_HANDLE.
+         */
+        GlobalFlags: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>allocator.block(handle >>> 0) ? 0 : GMEM_INVALID_HANDLE,
         },
 
         /** HGLOBAL GlobalFree(HGLOBAL hMem) */
@@ -989,5 +1043,16 @@ export function createHeapFunctions(host){
                 return 0;
             },
         },
+    };
+
+    // The rest of the local family is the global one under another name: the
+    // same heap, the same handles, the same flag values.
+    return {
+        ...table,
+        LocalReAlloc: table.GlobalReAlloc,
+        LocalLock: table.GlobalLock,
+        LocalUnlock: table.GlobalUnlock,
+        LocalSize: table.GlobalSize,
+        LocalHandle: table.GlobalHandle,
     };
 }

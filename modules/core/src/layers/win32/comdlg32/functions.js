@@ -21,7 +21,12 @@
 /**
  * @typedef {Object} CommonDialogHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, maxLength: number) => string} [readCString]
+ * @property {(address: number, bytes: Uint8Array) => void} [writeMemory]
  */
+
+/** As long as a path a program hands GetFileTitle may be. */
+const MAX_PATH = 0x1000;
 
 /** OPENFILENAME's first field, and the only one that has to be right here. */
 const OFN_STRUCT_SIZE = 0;
@@ -55,6 +60,44 @@ export function createCommonDialogFunctions(host){
     };
 
     return {
+        /**
+         * short GetFileTitleA(LPCSTR lpszFile, LPSTR lpszTitle, WORD cbBuf)
+         *
+         * The file's name out of its path. Zero on success, the room needed
+         * (terminator included) when the buffer is too small, and negative
+         * for a name that is not a file's -- empty, or ending in a separator.
+         */
+        GetFileTitleA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([file, title, size])=>{
+                if (!host.readCString || (file >>> 0) === 0)
+                {
+                    return -1;
+                }
+                const path = host.readCString(file >>> 0, MAX_PATH);
+                const cut = Math.max(
+                    path.lastIndexOf('\\'), path.lastIndexOf('/'), path.lastIndexOf(':'));
+                const name = path.slice(cut + 1);
+                if (name.length === 0 || /[*?]/.test(name))
+                {
+                    return -1;
+                }
+                const room = size & 0xffff;
+                if ((title >>> 0) === 0 || room < name.length + 1)
+                {
+                    return name.length + 1;
+                }
+                const bytes = new Uint8Array(name.length + 1);
+                for (let at = 0; at < name.length; at++)
+                {
+                    bytes[at] = name.charCodeAt(at) & 0xff;
+                }
+                host.writeMemory?.(title >>> 0, bytes);
+                return 0;
+            },
+        },
+
         /** BOOL GetOpenFileNameA(LPOPENFILENAMEA) */
         GetOpenFileNameA: {
             argBytes: 4,

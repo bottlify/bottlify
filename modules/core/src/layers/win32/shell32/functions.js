@@ -139,6 +139,12 @@ export function createShellFunctions(host){
             handler: ()=>0,
         },
 
+        /** void DragFinish(HDROP hDrop) -- there was never a drop to release. */
+        DragFinish: {
+            argBytes: 4,
+            handler: ()=>0,
+        },
+
         /**
          * PIDLIST_ABSOLUTE SHBrowseForFolderA(LPBROWSEINFOA lpbi)
          *

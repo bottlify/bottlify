@@ -75,7 +75,9 @@ function fakeKernel(){
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.exited.push({ thread, code }),
         /** @param {any} thread @param {string} [reason] */
-        block: (thread, reason)=>state.blocked.push({ thread, reason }),
+        /** @param {any} thread @param {string} reason @param {any} [timed] */
+        block: (thread, reason, timed)=>state.blocked.push(
+            timed === undefined ? { thread, reason } : { thread, reason, timed }),
         handles: {
             /** @param {string} type @param {any} object */
             open(type, object){
@@ -383,4 +385,74 @@ test('every function declares the stack it pops', ()=>{
     assert.equal(fns.CloseHandle.argBytes, 4);
     assert.equal(fns.OpenEventA.argBytes, 12);
     assert.equal(fns.OpenMutexA.argBytes, 12);
+});
+
+test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
+    const { fns, host, written, errors } = setup();
+    host.processId = 0x2a4;
+    host.imagePath = ()=>'C:\\App\\Setup.exe';
+    const bytes = new Uint8Array(0x1000);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    bytes.set([296 & 0xff, 296 >> 8, 0, 0], 0x100);
+
+    const snapshot = fns.CreateToolhelp32Snapshot.handler([0x2, 0]);
+    assert.ok(snapshot > 0);
+    assert.equal(fns.Process32First.handler([snapshot, 0x100]), 1);
+    const entry = written.get(0x100);
+    assert.ok(entry);
+    const view = new DataView(entry.buffer, entry.byteOffset);
+    assert.equal(view.getUint32(8, true), 0x2a4, 'th32ProcessID');
+    assert.equal(new TextDecoder().decode(entry.subarray(36, 45)), 'Setup.exe', 'szExeFile');
+    assert.equal(fns.Process32Next.handler([snapshot, 0x100]), 0);
+    assert.equal(errors.at(-1), 18, 'ERROR_NO_MORE_FILES');
+
+    bytes.set([100, 0, 0, 0], 0x100);
+    assert.equal(fns.Process32First.handler([snapshot, 0x100]), 0, 'too small an entry');
+    assert.equal(errors.at(-1), 122, 'ERROR_INSUFFICIENT_BUFFER');
+    assert.equal(fns.CloseHandle.handler([snapshot]), 1);
+    assert.equal(fns.Process32First.handler([snapshot, 0x100]), 0, 'closed');
+    assert.equal(fns.CreateToolhelp32Snapshot.argBytes, 8);
+    assert.equal(fns.Process32First.argBytes, 8);
+    assert.equal(fns.Process32Next.argBytes, 8);
+});
+
+test('a wait on an armed timer sleeps until it is due on the guest clock, then consumes it', ()=>{
+    const { fns, kernel, host, errors } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    assert.ok(timer > 0);
+    assert.equal(kernel.handles.typeOf(timer), 'timer');
+
+    // -160000 in hundreds of nanoseconds: 16 ms from now, one-shot.
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]), 1);
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED,
+        'not due yet, so the thread sleeps');
+    assert.deepEqual(kernel.state.blocked.at(-1).timed, { deadline: 1016, result: 0 },
+        'until the due time, waking with WAIT_OBJECT_0');
+    kernel.state.now = 1016;
+    fns.WaitForSingleObject.handler([timer, 0xffffffff]);
+    assert.equal(kernel.state.waits.at(-1).object, kernel.handles.resolve(timer, 'timer'),
+        'consumed by the sleep: a one-shot timer is now unarmed and the wait is on its event');
+
+    // Periodic: due at once, consumed and re-armed a period on.
+    new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
+    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 20, 0, 0, 0]), 1);
+    kernel.state.now = 1100;
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), 0, 'already due');
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0]), 0x102,
+        'polled before the next period');
+    assert.equal(fns.WaitForSingleObject.handler([timer, 5]), PARKED);
+    assert.deepEqual(kernel.state.blocked.at(-1).timed, { deadline: 1105, result: 0x102 },
+        'a wait shorter than the period times out on its own clock');
+
+    assert.equal(fns.CancelWaitableTimer.handler([timer]), 1);
+    assert.equal(fns.SetWaitableTimer.handler([0x999, 0x10, 0, 0, 0, 0]), 0, 'a stranger fails');
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+
+    assert.equal(fns.CreateWaitableTimerA.argBytes, 12);
+    assert.equal(fns.SetWaitableTimer.argBytes, 24, 'six stdcall arguments, or the stack leaks');
+    assert.equal(fns.CancelWaitableTimer.argBytes, 4);
 });

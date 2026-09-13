@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import {
     createMacrotask, groupBlocks, idleWait, inParallel, pacedYield, pageIsHidden, placePatches,
     withReadAhead, withWindow, refetchedIn,
-    resolveLibraryPath, timedWait, pagePacing, PAGE_YIELD_MS,
+    resolveLibraryPath, startDirectoryOf, timedWait, pagePacing, PAGE_YIELD_MS,
     retryingFetch,
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
     spaceAbove,
@@ -273,6 +273,14 @@ test('requests overlap, but only so many at a time', async()=>{
 });
 
 const IMAGE = 'C:\\App\\Game.exe';
+
+test('a program starts in its own directory, and at the root the backslash stays', ()=>{
+    // `C:` alone names the drive's current directory, not its root.
+    assert.equal(startDirectoryOf(IMAGE), 'C:\\App');
+    assert.equal(startDirectoryOf('C:\\Install\\Disc\\Setup.exe'), 'C:\\Install\\Disc');
+    assert.equal(startDirectoryOf('C:\\app.exe'), 'C:\\');
+    assert.equal(startDirectoryOf('C:/App/Game.exe'), 'C:/App');
+});
 
 test('a bare library name is looked for beside the executable', ()=>{
     assert.equal(resolveLibraryPath('Storm.dll', IMAGE), 'C:\\App\\Storm.dll');

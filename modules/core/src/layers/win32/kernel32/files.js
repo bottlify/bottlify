@@ -1506,6 +1506,16 @@ export function createFileFunctions(host){
         GetLongPathNameW: getLongPathName.wide,
 
         /**
+         * DWORD GetShortPathNameA(LPCSTR, LPSTR, DWORD)
+         *
+         * This volume keeps no 8.3 aliases, so a name's short form is the name
+         * itself: a program that reopens the file by what it is handed finds
+         * it, and only one that counts on the dotted-eight shape sees a
+         * difference.
+         */
+        GetShortPathNameA: getLongPathName.ansi,
+
+        /**
          * HFILE OpenFile(LPCSTR lpFileName, LPOFSTRUCT lpReOpenBuff, UINT uStyle)
          *
          * The 16-bit call that predates CreateFile, still linked against by

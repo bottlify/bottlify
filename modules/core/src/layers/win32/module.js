@@ -12,7 +12,6 @@ import { createProcessFunctions, createThreadState } from './kernel32/process.js
 import { TEB } from './kernel32/teb.js';
 import { createModuleFunctions } from './kernel32/modules.js';
 import { createFileFunctions } from './kernel32/files.js';
-import { createProfileFunctions } from './kernel32/profile.js';
 import { createSyncFunctions } from './kernel32/sync.js';
 import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
@@ -24,6 +23,7 @@ import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createSeh } from './kernel32/seh.js';
 import { createCrtSeh } from './msvcrt/seh.js';
 import { createResourceFunctions } from './kernel32/resources.js';
+import { createProfileFunctions } from './kernel32/profile.js';
 import { createDriveFunctions } from './kernel32/drives.js';
 import { createMappingFunctions } from './kernel32/mapping.js';
 import { createIoCompletionPorts } from './kernel32/iocp.js';
@@ -49,6 +49,9 @@ import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
 import { createCommonDialogFunctions } from './comdlg32/functions.js';
 import { createImmFunctions } from './imm32/functions.js';
+import { createShlwapiFunctions } from './shlwapi/functions.js';
+import { createD3dxFunctions } from './d3dx9/functions.js';
+import { createSpoolerFunctions } from './winspool/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
@@ -310,6 +313,7 @@ export const win32Module = {
             readMemory,
             writeMemory,
             readCString,
+            divergence: config?.divergence,
             handles: {
                 /** @param {string} type @param {any} object */
                 open: (type, object)=>kernel.handles.open(type, object),
@@ -486,6 +490,9 @@ export const win32Module = {
                     // first time a thread is made, because registering it costs
                     // a stub and a build that never makes a thread needs none.
                     threadReturn: ()=>threadReturnAddress(),
+                    processId: 0x1000,
+                    imagePath: ()=>modules.imagePath(),
+                    divergence: config?.divergence,
                     // Every thread gets a block of its own, made by whoever
                     // owns the process's, which win32 is only handed.
                     threadBlock: config?.threadBlock,
@@ -553,10 +560,17 @@ export const win32Module = {
                     readCString,
                     setLastError: setError,
                     /** @param {number} instance @param {any} type @param {any} name */
-                    findResource: (instance, type, name)=>
-                        modules.findResource?.(instance, type, name) ?? null,
+                    findResource: (instance, type, name, language = null)=>
+                        modules.findResource?.(instance, type, name, language) ?? null,
+                    /** @param {number} instance */
+                    listResources: instance=>modules.listResources?.(instance) ?? [],
                     /** @param {number} instance */
                     moduleBase: instance=>modules.moduleBase?.(instance) ?? 0,
+                    /**
+                     * @param {number} entry @param {number[]} args @param {any} [thread]
+                     */
+                    call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
+                    callerThread: ()=>bridge.callerThread(),
                 }),
                 ...createProfileFunctions({
                     writeMemory,
@@ -780,7 +794,9 @@ export const win32Module = {
 
             'WINMM.dll': winmm.table,
 
-            'COMCTL32.dll': createComctlFunctions({ readMemory, writeMemory }),
+            'COMCTL32.dll': createComctlFunctions({
+                readMemory, writeMemory, divergence: config?.divergence,
+            }),
 
             'SHELL32.dll': createShellFunctions({
                 writeMemory,
@@ -802,9 +818,20 @@ export const win32Module = {
 
             'LZ32.dll': createLzFunctions({ readCString, writeMemory, files: volume }),
 
-            'COMDLG32.dll': createCommonDialogFunctions({ readMemory }),
+            'COMDLG32.dll': createCommonDialogFunctions({ readMemory, readCString, writeMemory }),
 
             'IMM32.dll': createImmFunctions({ writeMemory }),
+
+            'SHLWAPI.dll': createShlwapiFunctions({ readCString, writeMemory }),
+
+            // The maths half of the Direct3D helper: pure vector and matrix
+            // functions, here for their stack width as much as their answers,
+            // since d3dx9 exports them undecorated though they are stdcall.
+            'd3dx9_26.dll': createD3dxFunctions({ readMemory, writeMemory }),
+            'd3dx9_25.dll': createD3dxFunctions({ readMemory, writeMemory }),
+            'd3dx9_27.dll': createD3dxFunctions({ readMemory, writeMemory }),
+
+            'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
 
             // The transport is the assembling caller's to supply and is absent
             // by default: this build has no network, and the entry points say
@@ -839,7 +866,9 @@ export const win32Module = {
                     args: [message.hwnd, message.message, message.wParam, message.lParam],
                     thread,
                 }),
+                call: (entry, args, thread)=>bridge.callGuest({ entry, args, thread }),
                 callerThread: ()=>bridge.callerThread(),
+                divergence: config?.divergence,
                 park: ()=>bridge.park(),
                 idle,
                 // The handles half of a wait that also watches the queue.
@@ -989,6 +1018,8 @@ export const win32Module = {
                 // Automation is imported this way and no other: a program links
                 // it through numbers, with no name in the import table at all.
                 'OLEAUT32.dll': OLEAUT32_ORDINALS,
+                // The one common-controls entry point the header exports by
+                // number: a framework's start-up calls it and nothing else.
                 'COMCTL32.dll': COMCTL32_ORDINALS,
             }),
 

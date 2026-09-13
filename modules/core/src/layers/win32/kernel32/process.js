@@ -82,6 +82,8 @@ const FILETIME_EPOCH_MS = 11_644_473_600_000n;
 
 /** Nothing sensible names a module beyond MAX_PATH. */
 const MAX_MODULE_NAME = 260;
+/** The one priority a process runs at here. */
+const NORMAL_PRIORITY_CLASS = 0x20;
 
 /**
  * @typedef {Object} ProcessHost
@@ -496,6 +498,73 @@ export function createProcessFunctions(host){
                 host.sleep(wait);
                 return host.park();
             },
+        },
+
+        /**
+         * DWORD SleepEx(DWORD dwMilliseconds, BOOL bAlertable)
+         *
+         * Sleep, plus a flag that lets a queued APC wake it early. No APC is
+         * delivered here, so it always sleeps the whole interval and answers 0
+         * (nothing woke it). Declared with its own two arguments: kernel32
+         * exports it undecorated though it is stdcall, and a stub popping only
+         * Sleep's one argument leaks four bytes of stack on every call -- which
+         * a frame loop that calls it makes fatal.
+         */
+        SleepEx: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([milliseconds])=>{
+                const wait = milliseconds >>> 0;
+                if (wait === 0)
+                {
+                    return 0;
+                }
+                host.sleep(wait);
+                return host.park();
+            },
+        },
+
+        /**
+         * The process priority and processor affinity a program reads and sets
+         * to tune itself. There is one processor and one priority here; the
+         * settings are accepted and have nothing to act on, and the queries
+         * report the single-processor machine honestly.
+         *
+         * DWORD GetPriorityClass(HANDLE hProcess)
+         * BOOL SetPriorityClass(HANDLE hProcess, DWORD dwPriorityClass)
+         * BOOL GetProcessAffinityMask(HANDLE, PDWORD_PTR lpProcessAffinityMask,
+         *                             PDWORD_PTR lpSystemAffinityMask)
+         * BOOL SetProcessAffinityMask(HANDLE, DWORD_PTR dwProcessAffinityMask)
+         */
+        GetPriorityClass: {
+            argBytes: 4,
+            handler: ()=>NORMAL_PRIORITY_CLASS,
+        },
+
+        SetPriorityClass: {
+            argBytes: 8,
+            handler: ()=>1,
+        },
+
+        GetProcessAffinityMask: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, processMask, systemMask])=>{
+                if ((processMask >>> 0) !== 0)
+                {
+                    memory.writeU32(processMask >>> 0, 1);
+                }
+                if ((systemMask >>> 0) !== 0)
+                {
+                    memory.writeU32(systemMask >>> 0, 1);
+                }
+                return 1;
+            },
+        },
+
+        SetProcessAffinityMask: {
+            argBytes: 8,
+            handler: ()=>1,
         },
 
         /** DWORD TlsAlloc(VOID) */

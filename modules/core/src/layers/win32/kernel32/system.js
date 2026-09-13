@@ -843,5 +843,20 @@ export function createSystemFunctions(host){
                 readAnsi(first >>> 0, MAX_STRING).toLowerCase(),
                 readAnsi(second >>> 0, MAX_STRING).toLowerCase())),
         },
+
+        lstrcmpW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: survivesFault(([first, second])=>compare(
+                readWide(first >>> 0, MAX_STRING), readWide(second >>> 0, MAX_STRING))),
+        },
+
+        lstrcmpiW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: survivesFault(([first, second])=>compare(
+                readWide(first >>> 0, MAX_STRING).toLowerCase(),
+                readWide(second >>> 0, MAX_STRING).toLowerCase())),
+        },
     };
 }

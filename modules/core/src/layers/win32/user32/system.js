@@ -160,6 +160,12 @@ const ENUM_REGISTRY_SETTINGS = -2;
 /** DdeInitialize's answer when the exchange cannot be set up at all. */
 const DMLERR_SYS_ERROR = 0x400f;
 
+/** Where RegisterWindowMessage numbers start: 0xc000 to 0xffff is theirs. */
+const REGISTERED_MESSAGE_FIRST = 0xc000;
+
+/** The one deferred-placement batch there ever is, as the handle a caller holds. */
+const DEFER_TOKEN = 0x4d50;
+
 /**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
@@ -179,6 +185,46 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
     /** The window that has the mouse, shared by SetCapture and ReleaseCapture. */
     let captured = 0;
+
+    /**
+     * Messages registered by name, in the range Windows keeps for them. The
+     * same name answers the same number for the life of the process, which is
+     * how two windows that never met agree on a message; case does not matter,
+     * as it does not for any other name the window manager keeps.
+     *
+     * @type {Map<string, number>}
+     */
+    const registeredMessages = new Map();
+
+    /**
+     * SetWindowPos, shared with the deferred form. The two flags that say
+     * "ignore what I passed" are the whole of the behaviour worth having: a
+     * program moves without resizing and resizes without moving by setting
+     * them, and honouring the arguments anyway would put the window somewhere
+     * it never asked for.
+     *
+     * @param {number[]} args  hWnd, hWndInsertAfter, X, Y, cx, cy, uFlags.
+     */
+    const setWindowPos = ([hwnd, , x, y, cx, cy, flags])=>{
+        const SWP_NOSIZE = 0x0001;
+        const SWP_NOMOVE = 0x0002;
+        const record = live(hwnd);
+        if (!record)
+        {
+            return 0;
+        }
+        if ((flags & SWP_NOMOVE) === 0)
+        {
+            record.x = x | 0;
+            record.y = y | 0;
+        }
+        if ((flags & SWP_NOSIZE) === 0)
+        {
+            record.width = cx | 0;
+            record.height = cy | 0;
+        }
+        return 1;
+    };
 
     /** Windows in creation order, which is the only order this build has. */
     const ordered = ()=>[...windows.values()].filter(record=>!record.destroyed);
@@ -889,26 +935,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         SetWindowPos: {
             argBytes: 28,
             /** @param {number[]} args */
-            handler: ([hwnd, , x, y, cx, cy, flags])=>{
-                const SWP_NOSIZE = 0x0001;
-                const SWP_NOMOVE = 0x0002;
-                const record = live(hwnd);
-                if (!record)
-                {
-                    return 0;
-                }
-                if ((flags & SWP_NOMOVE) === 0)
-                {
-                    record.x = x | 0;
-                    record.y = y | 0;
-                }
-                if ((flags & SWP_NOSIZE) === 0)
-                {
-                    record.width = cx | 0;
-                    record.height = cy | 0;
-                }
-                return 1;
-            },
+            handler: args=>setWindowPos(args),
         },
 
         /** HWND BringWindowToTop(HWND hWnd) */
@@ -1118,6 +1145,111 @@ export function createSystemFunctions({ host, live, windows, classes }){
         WaitForInputIdle: {
             argBytes: 8,
             handler: ()=>0,
+        },
+
+        /**
+         * The entry points a windowing framework imports and this build has
+         * nothing behind: menus and accelerators out of resources, help, DDE
+         * packing, the drawing of text this build does not draw, a session
+         * end. Each pops what it was pushed and answers as the call does when
+         * the thing asked for is not there; a stub popping nothing would walk
+         * the caller's stack off by the width of its arguments.
+         *
+         * HMENU LoadMenuA(HINSTANCE, LPCSTR)
+         * HACCEL LoadAcceleratorsA(HINSTANCE, LPCSTR)
+         * BOOL UnpackDDElParam(UINT, LPARAM, PUINT_PTR, PUINT_PTR)
+         * LPARAM ReuseDDElParam(LPARAM, UINT, UINT, UINT_PTR, UINT_PTR)
+         * BOOL GrayStringA(HDC, HBRUSH, GRAYSTRINGPROC, LPARAM, int, int, int, int, int)
+         * LONG TabbedTextOutA(HDC, int, int, LPCSTR, int, int, const INT *, int)
+         * BOOL WinHelpA(HWND, LPCSTR, UINT, ULONG_PTR)
+         * HWND GetNextDlgTabItem(HWND, HWND, BOOL)
+         * BOOL ExitWindowsEx(UINT, DWORD)
+         */
+        LoadMenuA: { argBytes: 8, handler: ()=>0 },
+        LoadAcceleratorsA: { argBytes: 8, handler: ()=>0 },
+        UnpackDDElParam: { argBytes: 16, handler: ()=>0 },
+        ReuseDDElParam: { argBytes: 20, handler: ()=>0 },
+        GrayStringA: { argBytes: 36, handler: ()=>0 },
+        TabbedTextOutA: { argBytes: 32, handler: ()=>0 },
+        WinHelpA: { argBytes: 16, handler: ()=>0 },
+        GetNextDlgTabItem: { argBytes: 12, handler: ()=>0 },
+        ExitWindowsEx: {
+            argBytes: 8,
+            handler: ()=>{
+                host.divergence?.('ExitWindowsEx', 'there is no session to end');
+                return 0;
+            },
+        },
+
+        /**
+         * The deferred window placement: a batch of SetWindowPos calls applied
+         * at once. Nothing here is ever mid-paint, so each is applied as it
+         * arrives and the batch handle is a token that says the batch is open.
+         *
+         * HDWP BeginDeferWindowPos(int nNumWindows)
+         * HDWP DeferWindowPos(HDWP, HWND, HWND hWndInsertAfter, int x, int y,
+         *                     int cx, int cy, UINT uFlags)
+         * BOOL EndDeferWindowPos(HDWP)
+         */
+        BeginDeferWindowPos: { argBytes: 4, handler: ()=>DEFER_TOKEN },
+        DeferWindowPos: {
+            argBytes: 32,
+            /** @param {number[]} args */
+            handler: ([token, ...placement])=>{
+                if ((token >>> 0) !== DEFER_TOKEN)
+                {
+                    return 0;
+                }
+                return setWindowPos(placement) ? DEFER_TOKEN : 0;
+            },
+        },
+        EndDeferWindowPos: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([token])=>((token >>> 0) === DEFER_TOKEN ? 1 : 0),
+        },
+
+        /**
+         * HWND GetLastActivePopup(HWND hWnd)
+         *
+         * The window itself when none of its popups was active last, which
+         * with no popup tracking is always.
+         */
+        GetLastActivePopup: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(live(hwnd) ? hwnd >>> 0 : 0),
+        },
+
+        /** BOOL ShowOwnedPopups(HWND hWnd, BOOL fShow) */
+        ShowOwnedPopups: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>(live(hwnd) ? 1 : 0),
+        },
+
+        /** UINT RegisterWindowMessageA(LPCSTR lpString) */
+        RegisterWindowMessageA: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([name])=>{
+                if ((name >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const key = host.readCString(name >>> 0, MAX_NAME).toLowerCase();
+                if (key.length === 0)
+                {
+                    return 0;
+                }
+                let id = registeredMessages.get(key);
+                if (id === undefined)
+                {
+                    id = REGISTERED_MESSAGE_FIRST + registeredMessages.size;
+                    registeredMessages.set(key, id);
+                }
+                return id;
+            },
         },
 
         /** BOOL MessageBeep(UINT uType) */
@@ -1710,7 +1842,30 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** BOOL CopyRect(LPRECT lprcDst, const RECT *lprcSrc) */
+        /**
+         * The rectangle helpers: arithmetic over the caller's own memory, each
+         * refusing a null pointer with FALSE rather than faulting inside.
+         *
+         * BOOL SetRectEmpty(LPRECT)
+         * BOOL CopyRect(LPRECT lprcDst, const RECT *lprcSrc)
+         * BOOL EqualRect(const RECT *, const RECT *)
+         * BOOL OffsetRect(LPRECT, int dx, int dy)
+         * BOOL InflateRect(LPRECT, int dx, int dy)
+         * BOOL PtInRect(const RECT *, POINT pt)
+         */
+        SetRectEmpty: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([out])=>{
+                if ((out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeRect(host, out >>> 0, { left: 0, top: 0, right: 0, bottom: 0 });
+                return 1;
+            },
+        },
+
         CopyRect: {
             argBytes: 8,
             /** @param {number[]} args */
@@ -1721,6 +1876,91 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 }
                 writeRect(host, out >>> 0, readRect(host, source >>> 0));
                 return 1;
+            },
+        },
+
+        EqualRect: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([first, second])=>{
+                if ((first >>> 0) === 0 || (second >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const a = readRect(host, first >>> 0);
+                const b = readRect(host, second >>> 0);
+                return a.left === b.left && a.top === b.top
+                    && a.right === b.right && a.bottom === b.bottom ? 1 : 0;
+            },
+        },
+
+        OffsetRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([rect, dx, dy])=>{
+                if ((rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const r = readRect(host, rect >>> 0);
+                writeRect(host, rect >>> 0, {
+                    left: r.left + (dx | 0), top: r.top + (dy | 0),
+                    right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
+                });
+                return 1;
+            },
+        },
+
+        InflateRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([rect, dx, dy])=>{
+                if ((rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const r = readRect(host, rect >>> 0);
+                writeRect(host, rect >>> 0, {
+                    left: r.left - (dx | 0), top: r.top - (dy | 0),
+                    right: r.right + (dx | 0), bottom: r.bottom + (dy | 0),
+                });
+                return 1;
+            },
+        },
+
+        /** The POINT is passed by value: two words on the stack. */
+        PtInRect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([rect, x, y])=>{
+                if ((rect >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const r = readRect(host, rect >>> 0);
+                const px = x | 0;
+                const py = y | 0;
+                return px >= r.left && px < r.right && py >= r.top && py < r.bottom ? 1 : 0;
+            },
+        },
+
+        /**
+         * LONG GetMessageTime(VOID) and DWORD GetMessagePos(VOID)
+         *
+         * About the message most recently taken off this thread's queue. A
+         * framework reads both from inside a handler to date the event it is
+         * handling; before the first message there is nothing to date.
+         */
+        GetMessageTime: {
+            argBytes: 0,
+            handler: ()=>host.queue.last?.()?.time ?? 0,
+        },
+
+        GetMessagePos: {
+            argBytes: 0,
+            handler: ()=>{
+                const at = host.queue.last?.();
+                return at ? (at.x & 0xffff) | (at.y & 0xffff) << 16 : 0;
             },
         },
 

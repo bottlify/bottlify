@@ -75,6 +75,11 @@ export function loadResourceObject(host, kind, type, instance, name){
 /** How a menu item is addressed: by its command id, or by where it sits. */
 const MF_BYCOMMAND = 0x0000;
 const MF_BYPOSITION = 0x0400;
+const MF_GRAYED = 0x0001;
+const MF_DISABLED = 0x0002;
+const MF_CHECKED = 0x0008;
+/** The check mark of the default menu font, in pixels each way. */
+const CHECK_MARK_SIZE = 13;
 
 /** MENUITEMINFOA, whose cbSize says which of the two versions was compiled. */
 const MENUITEMINFO = Object.freeze({
@@ -385,6 +390,143 @@ export function createObjectFunctions({ host, live }){
                 host.handles.close(menu.handle);
                 return 1;
             },
+        },
+
+        /** HMENU GetSubMenu(HMENU hMenu, int nPos) */
+        GetSubMenu: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, position])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, position, MF_BYPOSITION) : null;
+                return found ? found.menu.items[found.at].submenu >>> 0 : 0;
+            },
+        },
+
+        /**
+         * UINT GetMenuItemID(HMENU hMenu, int nPos)
+         *
+         * -1 for an item that opens a submenu, as documented: a submenu has no
+         * command of its own.
+         */
+        GetMenuItemID: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, position])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, position, MF_BYPOSITION) : null;
+                if (!found)
+                {
+                    return -1;
+                }
+                const item = found.menu.items[found.at];
+                return item.submenu ? -1 : item.id >>> 0;
+            },
+        },
+
+        /**
+         * UINT GetMenuState(HMENU hMenu, UINT uId, UINT uFlags)
+         *
+         * The item's state and type flags together, which is the shape of the
+         * old MF_ bits; for a submenu the low byte is the number of items in
+         * it. -1 when there is no such item.
+         */
+        GetMenuState: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, id, flags])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, id, flags) : null;
+                if (!found)
+                {
+                    return -1;
+                }
+                const item = found.menu.items[found.at];
+                const child = menuOf(item.submenu);
+                const bits = (item.state | item.type) >>> 0;
+                return child ? (bits & 0xffffff00) | (child.items.length & 0xff) : bits;
+            },
+        },
+
+        /**
+         * BOOL EnableMenuItem(HMENU, UINT uIDEnableItem, UINT uEnable)
+         * DWORD CheckMenuItem(HMENU, UINT uIDCheckItem, UINT uCheck)
+         *
+         * Each answers the previous state of the bits it sets, or -1 for no
+         * such item, which is the documented shape for both.
+         */
+        EnableMenuItem: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, id, flags])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, id, flags) : null;
+                if (!found)
+                {
+                    return -1;
+                }
+                const item = found.menu.items[found.at];
+                const previous = item.state & (MF_GRAYED | MF_DISABLED);
+                item.state = (item.state & ~(MF_GRAYED | MF_DISABLED))
+                    | (flags & (MF_GRAYED | MF_DISABLED));
+                return previous;
+            },
+        },
+
+        CheckMenuItem: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, id, flags])=>{
+                const menu = menuOf(handle);
+                const found = menu ? findItem(menu, id, flags) : null;
+                if (!found)
+                {
+                    return -1;
+                }
+                const item = found.menu.items[found.at];
+                const previous = item.state & MF_CHECKED;
+                item.state = (item.state & ~MF_CHECKED) | (flags & MF_CHECKED);
+                return previous;
+            },
+        },
+
+        /**
+         * BOOL ModifyMenuA(HMENU, UINT uPosition, UINT uFlags, UINT_PTR uIDNewItem,
+         *                  LPCSTR lpNewItem)
+         * BOOL SetMenuItemBitmaps(HMENU, UINT uPosition, UINT uFlags,
+         *                         HBITMAP hBitmapUnchecked, HBITMAP hBitmapChecked)
+         *
+         * The old-style edit and the check-mark pictures. Neither changes a
+         * menu here, and each says so once: a program that redraws its menu on
+         * every command would otherwise be told, silently, that every one of
+         * those redraws failed.
+         */
+        ModifyMenuA: {
+            argBytes: 20,
+            handler: ()=>{
+                host.divergence?.('ModifyMenuA', 'the item is left as it was');
+                return 1;
+            },
+        },
+
+        SetMenuItemBitmaps: {
+            argBytes: 20,
+            handler: ()=>{
+                host.divergence?.('SetMenuItemBitmaps', 'a menu draws no check-mark pictures here');
+                return 1;
+            },
+        },
+
+        /**
+         * LONG GetMenuCheckMarkDimensions(VOID)
+         *
+         * The size of the check mark a menu draws, width in the low word. A
+         * program sizes its owner-drawn items from it, so it is a metric
+         * rather than nothing: the one the display's default menu font gives.
+         */
+        GetMenuCheckMarkDimensions: {
+            argBytes: 0,
+            handler: ()=>CHECK_MARK_SIZE | CHECK_MARK_SIZE << 16,
         },
 
         /** BOOL DeleteMenu(HMENU hMenu, UINT uPosition, UINT uFlags) */

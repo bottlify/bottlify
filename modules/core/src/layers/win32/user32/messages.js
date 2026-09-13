@@ -72,6 +72,13 @@ export function createMessageQueue({ now = ()=>0 } = {}){
     let quitCode = null;
     let posted = 0;
     let retrieved = 0;
+    /**
+     * The message most recently taken off the queue, for GetMessageTime and
+     * GetMessagePos: both answer about it, whichever window it was for.
+     *
+     * @type {import('./structs.js').MessageFields | null}
+     */
+    let last = null;
 
     /**
      * What a program actually pumps, by message.
@@ -372,6 +379,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
                 {
                     pending.splice(index, 1);
                     retrieved++;
+                    last = entry;
                     pumped.set(entry.message, (pumped.get(entry.message) ?? 0) + 1);
                 }
                 return entry;
@@ -383,6 +391,7 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             {
                 if (filter.remove)
                 {
+                    last = due;
                     pumped.set(WM_TIMER, (pumped.get(WM_TIMER) ?? 0) + 1);
                 }
                 return due;
@@ -408,9 +417,13 @@ export function createMessageQueue({ now = ()=>0 } = {}){
             {
                 quitCode = null;
                 retrieved++;
+                last = quit;
             }
             return quit;
         },
+
+        /** The message most recently taken, or null before the first. */
+        last: ()=>last,
 
         /**
          * Drops everything queued for a window. A destroyed window's pending

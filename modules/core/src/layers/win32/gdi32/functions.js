@@ -79,6 +79,10 @@ const R2_COPYPEN = 13;
 const R2_WHITE = 16;
 
 /** Mapping modes: MM_TEXT through MM_ANISOTROPIC. */
+/** What a region query answers: an error, or a region that is one rectangle. */
+const REGION_ERROR = 0;
+const SIMPLE_REGION = 2;
+
 const MM_TEXT = 1;
 const MM_ISOTROPIC = 7;
 const MM_ANISOTROPIC = 8;
@@ -189,6 +193,8 @@ const MAX_FACE_NAME = 64;
  *           many bytes a format needs; it never decides where they live.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What GetDeviceCaps reports for a display DC.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call that does less than the real one says so.
  * @property {import('./drawing.js').DrawingServices} [graphics]
  *           Where pixels go. Absent in a build that cannot draw, and every
  *           entry point that needs it then fails truthfully.
@@ -1217,6 +1223,94 @@ export function createGdiFunctions(host){
             argBytes: 16,
             /** @param {number[]} args */
             handler: args=>setOrigin(args, 'position'),
+        },
+
+        /**
+         * Clipping and scaling a framework's device-context class wraps,
+         * whether or not the program draws. Nothing is clipped here, so every
+         * point and rectangle is visible and the clip box is the whole
+         * surface; the scaled extents are the plain ones, since the transform
+         * is not applied to anything; an escape is a printer's, and there is
+         * no printer.
+         *
+         * BOOL PtVisible(HDC, int x, int y)
+         * BOOL RectVisible(HDC, const RECT *)
+         * int GetClipBox(HDC, LPRECT)
+         * BOOL ScaleViewportExtEx(HDC, int, int, int, int, LPSIZE)
+         * BOOL ScaleWindowExtEx(HDC, int, int, int, int, LPSIZE)
+         * int Escape(HDC, int, int, LPCSTR, LPVOID)
+         * HBRUSH CreatePatternBrush(HBITMAP)
+         */
+        PtVisible: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
+        },
+
+        RectVisible: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>(dcOf(handle) ? 1 : 0),
+        },
+
+        GetClipBox: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, rect])=>{
+                const dc = dcOf(handle);
+                if (!dc || (rect >>> 0) === 0)
+                {
+                    return REGION_ERROR;
+                }
+                const surface = surfaceOf(dc);
+                writeU32s(host, rect >>> 0, [0, 0, surface.width, surface.height]);
+                return SIMPLE_REGION;
+            },
+        },
+
+        ScaleViewportExtEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, , , , , out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeSize(host, out >>> 0, dc.viewportExt);
+                }
+                return 1;
+            },
+        },
+
+        ScaleWindowExtEx: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, , , , , out])=>{
+                const dc = dcOf(handle);
+                if (!dc)
+                {
+                    return 0;
+                }
+                if ((out >>> 0) !== 0)
+                {
+                    writeSize(host, out >>> 0, dc.windowExt);
+                }
+                return 1;
+            },
+        },
+
+        Escape: { argBytes: 20, handler: ()=>0 },
+
+        CreatePatternBrush: {
+            argBytes: 4,
+            handler: ()=>{
+                host.divergence?.('CreatePatternBrush',
+                    'a brush cannot be made from a bitmap here');
+                return 0;
+            },
         },
 
         /** int GetDeviceCaps(HDC hdc, int index) */

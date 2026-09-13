@@ -338,3 +338,12 @@ test('no byte leads a double-byte character on the pages this build carries', ()
     assert.equal(fns.IsDBCSLeadByte.handler(), 0);
     assert.equal(fns.IsDBCSLeadByte.argBytes, 4);
 });
+
+test('the thread locale is the one locale, and the default placeholders resolve to it', ()=>{
+    const fns = createLocaleFunctions(fakeHost());
+    assert.equal(fns.GetThreadLocale.handler(), 0x0409);
+    assert.equal(fns.ConvertDefaultLocale.handler([0x0400]), 0x0409, 'LOCALE_USER_DEFAULT');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x0800]), 0x0409, 'LOCALE_SYSTEM_DEFAULT');
+    assert.equal(fns.ConvertDefaultLocale.handler([0x0407]), 0x0407, 'a real locale is itself');
+    assert.equal(fns.ConvertDefaultLocale.argBytes, 4);
+});

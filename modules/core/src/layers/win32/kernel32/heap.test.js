@@ -379,15 +379,51 @@ test('LocalFree releases the same blocks GlobalAlloc hands out', ()=>{
     assert.equal(fns.LocalFree.handler([handle]), handle);
 });
 
-test('LocalAlloc allocates from the same heap, zeroed when asked', ()=>{
+test('the local heap is the global heap, flags and handles alike', ()=>{
     const { host, fns } = setup();
 
     const handle = fns.LocalAlloc.handler([GMEM_ZEROINIT, 32]);
     assert.notEqual(handle, 0);
     assert.equal(all(host.bytes.subarray(handle, handle + 32), 0), true);
-    assert.equal(fns.GlobalSize.handler([handle]), 32);
-    assert.equal(fns.GlobalFree.handler([handle]), 0, 'and the other family frees it');
+    assert.equal(fns.LocalLock.handler([handle]), handle);
+    assert.equal(fns.LocalSize.handler([handle]), 32);
+    assert.equal(fns.LocalHandle.handler([handle]), handle);
+    assert.equal(fns.LocalUnlock.handler([handle]), 1);
+    assert.equal(fns.GlobalFree.handler([handle]), 0, 'and the other spelling frees it');
     assert.equal(fns.LocalAlloc.argBytes, 8);
+    assert.equal(fns.LocalLock.argBytes, 4);
+});
+
+test('a global block grows in place when it can and moves only when allowed to', ()=>{
+    const { host, fns } = setup();
+
+    const handle = fns.GlobalAlloc.handler([0, 16]);
+    host.writeMemory(handle, new Uint8Array([1, 2, 3, 4]));
+    // The neighbour stops the first block from growing where it is.
+    const neighbour = fns.GlobalAlloc.handler([0, 16]);
+    assert.notEqual(neighbour, 0);
+
+    assert.equal(fns.GlobalReAlloc.handler([handle, 8, 0]), handle, 'shrinking stays put');
+    assert.equal(fns.GlobalReAlloc.handler([handle, 4096, 0]), 0,
+        'growing past the neighbour without GMEM_MOVEABLE fails');
+    assert.equal(fns.GlobalSize.handler([handle]), 8, 'and leaves the block as it was');
+
+    const moved = fns.LocalReAlloc.handler([handle, 4096, GMEM_MOVEABLE | GMEM_ZEROINIT]);
+    assert.notEqual(moved, 0);
+    assert.notEqual(moved, handle);
+    assert.deepEqual([...host.bytes.subarray(moved, moved + 4)], [1, 2, 3, 4],
+        'the data went with it');
+    assert.equal(all(host.bytes.subarray(moved + 8, moved + 4096), 0), true, 'the tail is zeroed');
+    assert.equal(fns.GlobalLock.handler([handle]), 0, 'the old block is gone');
+    assert.equal(fns.GlobalReAlloc.argBytes, 12);
+});
+
+test('a live global block has no flags and a stranger is GMEM_INVALID_HANDLE', ()=>{
+    const { fns } = setup();
+    const handle = fns.GlobalAlloc.handler([GMEM_MOVEABLE, 16]);
+    assert.equal(fns.GlobalFlags.handler([handle]), 0);
+    assert.equal(fns.GlobalFlags.handler([0x1234]), 0x8000);
+    assert.equal(fns.GlobalFlags.argBytes, 4);
 });
 
 test('the global functions declare the stack they pop', ()=>{

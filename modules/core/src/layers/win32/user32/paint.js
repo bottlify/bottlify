@@ -94,6 +94,36 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
     /** The DC service, or null in a build that cannot make one. */
     const contexts = ()=>host.dc?.() ?? null;
 
+    /**
+     * DrawTextA, and DrawTextExA without its parameter block. The metrics are
+     * estimates and the code says so; a program that lays out against them is
+     * consistent with itself, which is what matters until real font metrics
+     * exist.
+     *
+     * @param {number[]} args
+     */
+    const drawText = ([hdc, text, count, rect, format])=>{
+        const limit = (count | 0) < 0 ? 0x10000 : count | 0;
+        const string = (text >>> 0) === 0
+            ? ''
+            : host.readCString(text, limit).slice(0, limit === 0 ? 0 : undefined);
+        const lines = (format & DT_SINGLELINE) !== 0 ? [string] : string.split('\n');
+        const widest = lines.reduce((most, line)=>Math.max(most, line.length), 0);
+        const height = Math.max(lines.length, 1) * ESTIMATED_LINE_HEIGHT;
+
+        if ((format & DT_CALCRECT) !== 0 && (rect >>> 0) !== 0)
+        {
+            const bounds = readRect(host, rect);
+            writeRect(host, rect, {
+                left: bounds.left,
+                top: bounds.top,
+                right: bounds.left + widest * ESTIMATED_CHAR_WIDTH,
+                bottom: bounds.top + height,
+            });
+        }
+        return (hdc >>> 0) === 0 && (format & DT_CALCRECT) === 0 ? 0 : height;
+    };
+
     return {
         /** HDC GetDC(HWND hWnd) */
         GetDC: {
@@ -255,34 +285,24 @@ export function createPaintFunctions({ host, live, queue, WM_PAINT }){
          *
          * DT_CALCRECT measures instead of drawing and writes the rectangle back,
          * which is what a program uses to lay itself out -- so this has to answer
-         * even in a build with nothing to draw on. The metrics are estimates and
-         * the code says so; a program that lays out against them is consistent
-         * with itself, which is what matters until real font metrics exist.
+         * even in a build with nothing to draw on.
          */
         DrawTextA: {
             argBytes: 20,
             /** @param {number[]} args */
-            handler: ([hdc, text, count, rect, format])=>{
-                const limit = (count | 0) < 0 ? 0x10000 : count | 0;
-                const string = (text >>> 0) === 0
-                    ? ''
-                    : host.readCString(text, limit).slice(0, limit === 0 ? 0 : undefined);
-                const lines = (format & DT_SINGLELINE) !== 0 ? [string] : string.split('\n');
-                const widest = lines.reduce((most, line)=>Math.max(most, line.length), 0);
-                const height = Math.max(lines.length, 1) * ESTIMATED_LINE_HEIGHT;
+            handler: args=>drawText(args),
+        },
 
-                if ((format & DT_CALCRECT) !== 0 && (rect >>> 0) !== 0)
-                {
-                    const bounds = readRect(host, rect);
-                    writeRect(host, rect, {
-                        left: bounds.left,
-                        top: bounds.top,
-                        right: bounds.left + widest * ESTIMATED_CHAR_WIDTH,
-                        bottom: bounds.top + height,
-                    });
-                }
-                return (hdc >>> 0) === 0 && (format & DT_CALCRECT) === 0 ? 0 : height;
-            },
+        /**
+         * int DrawTextExA(HDC, LPSTR, int, LPRECT, UINT, LPDRAWTEXTPARAMS)
+         *
+         * DrawTextA with a parameter block on the end -- margins and a tab
+         * width -- which the estimate above does not use.
+         */
+        DrawTextExA: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: args=>drawText(args.slice(0, 5)),
         },
 
         /**

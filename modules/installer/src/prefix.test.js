@@ -26,6 +26,30 @@ test('the distribution is seeded where the guest can open it, and named as the i
     assert.deepEqual((await options.storage.load()).map(file=>file.path), [options.imagePath]);
 });
 
+test('the rest of the media is seeded beside the entry, none of it counted as produced', async()=>{
+    const options = prefixOptions({
+        name: 'Setup.exe', bytes: bytes('MZ'),
+        files: [
+            { name: 'setup.exe', bytes: bytes('MZ') },
+            { name: 'data.zip', bytes: bytes('PK') },
+            { name: 'Support\\readme.txt', bytes: bytes('hi') },
+        ],
+    });
+
+    // A disc's entry reads its archives from beside itself, so they are on the
+    // volume before the first instruction, under the entry's own directory.
+    assert.deepEqual((await options.storage.load()).map(file=>file.path), [
+        `${MEDIA_DIRECTORY}\\Setup.exe`,
+        `${MEDIA_DIRECTORY}\\data.zip`,
+        `${MEDIA_DIRECTORY}\\Support\\readme.txt`,
+    ]);
+    const prefix = collect({
+        files: tree([...options.seeded, 'C:\\Games\\Title\\title.exe']),
+        seeded: options.seeded,
+    });
+    assert.deepEqual(prefix.files.map(file=>file.path), ['title.exe']);
+});
+
 test('what was seeded is not part of what the installer produced', ()=>{
     const media = prefixOptions({ name: 'Setup.exe', bytes: bytes('MZ') });
     const prefix = collect({

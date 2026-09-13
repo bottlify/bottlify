@@ -24,6 +24,10 @@ const INFINITE = 0xffffffff;
 const WAIT_FAILED = 0xffffffff;
 /** The wait ran out of time; the object was never signalled. */
 const WAIT_TIMEOUT = 0x102;
+/** The object waited for was signalled, or the timer waited for came due. */
+const WAIT_OBJECT_0 = 0;
+/** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
+const FILETIME_EPOCH_MS = 11644473600000;
 
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
@@ -57,11 +61,34 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  *           Where a start routine returns to. A thread that returns has ended,
  *           and if nothing notices it stays runnable for ever, is picked every
  *           turn, retires nothing, and keeps whatever it was holding.
+ * @property {number} [processId]      What the running process is numbered.
+ * @property {() => string} [imagePath]  Where its image is, for a snapshot's entry.
  * @property {(handle: number) => string | null} [handleType]
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call that does less than the real one says so.
  *           What kind of object a handle names. The kernel's handle table
  *           knows; it is not forwarded through the kernel API yet, and
  *           without it DuplicateHandle refuses rather than guessing.
  */
+
+/** PROCESSENTRY32, as a caller of the era declares it: 296 bytes. */
+const PROCESSENTRY32 = Object.freeze({
+    dwSize: 0,
+    th32ProcessID: 8,
+    cntThreads: 20,
+    pcPriClassBase: 28,
+    szExeFile: 36,
+    SIZE: 296,
+});
+const MAX_PATH = 260;
+const TH32CS_SNAPPROCESS = 0x2;
+const NORMAL_PRIORITY_BASE = 8;
+const ERROR_NO_MORE_FILES = 18;
+const ERROR_INSUFFICIENT_BUFFER = 122;
+
+/** @param {Uint8Array} bytes @param {number} at */
+const readU32 = (bytes, at)=>
+    (bytes[at] | bytes[at + 1] << 8 | bytes[at + 2] << 16 | bytes[at + 3] << 24) >>> 0;
 
 /**
  * Builds the function table: name -> { argBytes, handler }.
@@ -72,6 +99,77 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
+    /**
+     * Each armed timer's due time on the guest clock and its period in
+     * milliseconds, by the event that stands for it. A timer that is not here
+     * is not armed, and a wait on it is a wait on an event nobody signals.
+     *
+     * @type {WeakMap<object, { due: number, period: number }>}
+     */
+    const armed = new WeakMap();
+
+    /**
+     * A single-object wait on a timer: the thread sleeps until the due time,
+     * or until its own timeout if that comes first, and the timer is consumed
+     * -- re-armed a period on, or disarmed -- as the real one is when a wait
+     * takes it.
+     *
+     * @param {any} timer @param {any} thread @param {number} timeout
+     * @returns {number | null} the wait result, or null once the thread is blocked
+     */
+    const waitForTimer = (timer, thread, timeout)=>{
+        const state = armed.get(timer);
+        if (!state)
+        {
+            return null;
+        }
+        const now = kernel.clock.virtualTime();
+        const consume = ()=>{
+            if (state.period > 0)
+            {
+                // The next period boundary after now: a timer nobody waited on
+                // for a while signalled once, not once per period missed.
+                const missed = Math.floor((now - state.due) / state.period) + 1;
+                state.due += missed * state.period;
+            }
+            else
+            {
+                armed.delete(timer);
+            }
+            kernel.resetEvent(timer);
+            return WAIT_OBJECT_0;
+        };
+        if (state.due <= now)
+        {
+            return consume();
+        }
+        if (timeout === 0)
+        {
+            return WAIT_TIMEOUT;
+        }
+        if (timeout !== INFINITE && now + timeout < state.due)
+        {
+            kernel.block(thread, `timer "${timer.name}"`,
+                { deadline: now + timeout, result: WAIT_TIMEOUT });
+            return null;
+        }
+        // Consumed now rather than at the wake: the deadline is the wake, and
+        // nothing runs on this thread between the two.
+        kernel.block(thread, `timer "${timer.name}"`, { deadline: state.due, result: consume() });
+        return null;
+    };
+
+    /** @param {number} handle @returns {{ flags: number, walked: boolean } | null} */
+    const snapshotOf = handle=>{
+        try
+        {
+            return host.kernel.handles.resolve(handle >>> 0, 'snapshot');
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
     const { kernel } = host;
 
     /**
@@ -234,6 +332,11 @@ export function createThreadingFunctions(host){
                     }
                     kernel.block(thread, `child process ${target.imagePath}`);
                     return host.park(thread);
+                }
+
+                if (host.handleType?.(handle >>> 0) === 'timer' && armed.has(target))
+                {
+                    return settle(waitForTimer(target, thread, wait));
                 }
 
                 // Zero is a poll, not a wait: it asks whether the object is
@@ -508,6 +611,95 @@ export function createThreadingFunctions(host){
             },
         },
 
+        /**
+         * The waitable timer, which a frame limiter arms and then waits on.
+         *
+         * A kernel event with a due time on the guest's clock. A wait on it
+         * is a wait for that time: the thread is blocked with the due time as
+         * its deadline and WAIT_OBJECT_0 as its answer, so the interval is
+         * measured out on the virtual clock exactly as a sleep is, and a
+         * periodic timer is re-armed a period on as it is consumed. Declared
+         * for the stack it pops as much as for what it does: these are
+         * stdcall and exported undecorated, so a stub popping nothing walks
+         * the caller's stack off -- which for a limiter called every frame
+         * exhausts the stack.
+         *
+         * Only a single-object wait knows the due time; a timer among several
+         * objects is its event, which is signalled when a single wait on it
+         * consumes it and otherwise not.
+         *
+         * HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, LPCSTR)
+         * BOOL SetWaitableTimer(HANDLE, const LARGE_INTEGER* pDueTime, LONG lPeriod,
+         *     PTIMERAPCROUTINE, LPVOID, BOOL fResume)
+         * BOOL CancelWaitableTimer(HANDLE)
+         */
+        CreateWaitableTimerA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, manualReset, namePointer])=>{
+                const name = nameOf(namePointer);
+                const found = existing(name, 'timer');
+                if (found === TAKEN)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const timer = found ?? kernel.createEvent({
+                    manualReset: Boolean(manualReset),
+                    signalled: false,
+                    name: name ?? 'timer',
+                });
+                remember(name, 'timer', timer, found !== null);
+                const handle = kernel.handles.open('timer', timer);
+                if (name === null)
+                {
+                    timer.name = `#${handle.toString(16)}`;
+                }
+                return handle;
+            },
+        },
+
+        SetWaitableTimer: {
+            argBytes: 24,
+            /** @param {number[]} args */
+            handler: ([handle, dueTime, period])=>{
+                const timer = object(handle >>> 0, 'timer');
+                if (!timer || (dueTime >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                // A negative due time is relative, in hundreds of nanoseconds;
+                // a positive one is an absolute FILETIME.
+                const bytes = host.readMemory(dueTime >>> 0, 8);
+                const raw = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigInt64(0, true);
+                const now = kernel.clock.virtualTime();
+                const due = raw < 0n
+                    ? now + Number(-raw) / 10000
+                    : now + Math.max(0,
+                        Number(raw / 10000n) - FILETIME_EPOCH_MS - kernel.clock.wallClock());
+                armed.set(timer, { due, period: Math.max(0, period | 0) });
+                kernel.resetEvent(timer);
+                return 1;
+            },
+        },
+
+        CancelWaitableTimer: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const timer = object(handle >>> 0, 'timer');
+                if (!timer)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                armed.delete(timer);
+                kernel.resetEvent(timer);
+                return 1;
+            },
+        },
+
         /** VOID ExitThread(DWORD dwExitCode) — does not return */
         ExitThread: {
             argBytes: 4,
@@ -519,6 +711,72 @@ export function createThreadingFunctions(host){
                 const thread = host.currentThread();
                 kernel.exitThread(thread, code >>> 0);
                 return host.park(thread);
+            },
+        },
+
+        /**
+         * The Toolhelp snapshot, which a program walks to see whether another
+         * copy of itself is running. One process is running here, so the
+         * snapshot holds one entry -- this one -- and the walk ends after it,
+         * with the error the end of a real walk carries.
+         *
+         * HANDLE CreateToolhelp32Snapshot(DWORD dwFlags, DWORD th32ProcessID)
+         * BOOL Process32First(HANDLE, LPPROCESSENTRY32)
+         * BOOL Process32Next(HANDLE, LPPROCESSENTRY32)
+         */
+        CreateToolhelp32Snapshot: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([flags])=>
+                kernel.handles.open('snapshot', { flags: flags >>> 0, walked: false }),
+        },
+
+        Process32First: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, entry])=>{
+                const snapshot = snapshotOf(handle);
+                if (!snapshot)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                if ((snapshot.flags & TH32CS_SNAPPROCESS) === 0 || (entry >>> 0) === 0)
+                {
+                    host.setLastError(ERROR_NO_MORE_FILES);
+                    return 0;
+                }
+                const size = readU32(host.readMemory(entry >>> 0, 4), 0);
+                if (size < PROCESSENTRY32.SIZE)
+                {
+                    host.setLastError(ERROR_INSUFFICIENT_BUFFER);
+                    return 0;
+                }
+                const bytes = new Uint8Array(PROCESSENTRY32.SIZE);
+                const view = new DataView(bytes.buffer);
+                view.setUint32(PROCESSENTRY32.dwSize, PROCESSENTRY32.SIZE, true);
+                view.setUint32(PROCESSENTRY32.th32ProcessID,
+                    (host.processId ?? 0x1000) >>> 0, true);
+                view.setUint32(PROCESSENTRY32.cntThreads, 1, true);
+                view.setUint32(PROCESSENTRY32.pcPriClassBase, NORMAL_PRIORITY_BASE, true);
+                const path = host.imagePath?.() ?? '';
+                const name = path.slice(path.lastIndexOf('\\') + 1).slice(0, MAX_PATH - 1);
+                for (let at = 0; at < name.length; at++)
+                {
+                    bytes[PROCESSENTRY32.szExeFile + at] = name.charCodeAt(at) & 0xff;
+                }
+                host.writeMemory(entry >>> 0, bytes);
+                snapshot.walked = true;
+                return 1;
+            },
+        },
+
+        Process32Next: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                host.setLastError(snapshotOf(handle) ? ERROR_NO_MORE_FILES : ERROR_INVALID_HANDLE);
+                return 0;
             },
         },
 

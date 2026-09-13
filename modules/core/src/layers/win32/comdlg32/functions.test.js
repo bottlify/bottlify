@@ -50,3 +50,32 @@ test('both sizes the structure has had are accepted', ()=>{
     m.dialogs.GetOpenFileNameA.handler([0]);
     assert.equal(m.dialogs.CommDlgExtendedError.handler([]), 1, 'CDERR_STRUCTSIZE');
 });
+
+test('GetFileTitleA is the name out of the path, or the room it needs, or a refusal', ()=>{
+    const memory = new Uint8Array(0x200);
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>{
+        memory.set(new TextEncoder().encode(`${text}\0`), at);
+        return at;
+    };
+    const fns = createCommonDialogFunctions({
+        readMemory: (address, length)=>memory.subarray(address, address + length),
+        readCString: (address, maxLength)=>{
+            let end = address;
+            while (memory[end] !== 0 && end - address < maxLength)
+            {
+                end++;
+            }
+            return String.fromCharCode(...memory.subarray(address, end));
+        },
+        writeMemory: (address, bytes)=>memory.set(bytes, address),
+    });
+    assert.equal(fns.GetFileTitleA.handler([put(0x10, 'C:\\Games\\Title\\title.exe'), 0x100, 32]),
+        0);
+    assert.equal(String.fromCharCode(...memory.subarray(0x100, 0x109)), 'title.exe');
+    assert.equal(fns.GetFileTitleA.handler([0x10, 0x100, 4]), 10,
+        'the room needed, terminator included');
+    assert.equal(fns.GetFileTitleA.handler([put(0x10, 'C:\\Games\\'), 0x100, 32]), -1);
+    assert.equal(fns.GetFileTitleA.handler([put(0x10, '*.exe'), 0x100, 32]), -1);
+    assert.equal(fns.GetFileTitleA.argBytes, 12);
+});

@@ -137,6 +137,12 @@ export function createRegistryFunctions(host){
         return (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0;
     };
 
+    /** The consumer line's answer to a security call: FALSE, and it says why. */
+    const notImplemented = ()=>{
+        host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
+        return 0;
+    };
+
     /** @param {number} address @param {number} value */
     const writeDword = (address, value)=>{
         host.writeMemory(address, new Uint8Array([
@@ -436,21 +442,53 @@ export function createRegistryFunctions(host){
          * copies a file and carries on when told so; told nothing -- a zero
          * with a stale error behind it -- it takes the copy for failed.
          */
-        GetFileSecurityA: {
-            argBytes: 20,
-            handler: ()=>{
-                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
-        },
+        GetFileSecurityA: { argBytes: 20, handler: notImplemented },
+        SetFileSecurityA: { argBytes: 12, handler: notImplemented },
 
-        SetFileSecurityA: {
-            argBytes: 12,
-            handler: ()=>{
-                host.setLastError?.(ERROR_CALL_NOT_IMPLEMENTED);
-                return 0;
-            },
-        },
+        /**
+         * The token and impersonation calls, and the access check built on
+         * them. This process has no security context: there is no token to
+         * open, nobody to impersonate and no descriptor to check against,
+         * which is what the consumer line of Windows said too, with the same
+         * code. A program of the era asks before it decides whether a
+         * directory is writable and takes the refusal as "cannot tell"; each
+         * is declared so it pops what it was pushed.
+         *
+         * BOOL LookupPrivilegeValueA(LPCSTR, LPCSTR, PLUID)
+         * BOOL AdjustTokenPrivileges(HANDLE, BOOL, PTOKEN_PRIVILEGES, DWORD,
+         *                            PTOKEN_PRIVILEGES, PDWORD)
+         * BOOL AccessCheck(PSECURITY_DESCRIPTOR, HANDLE, DWORD, PGENERIC_MAPPING,
+         *                  PPRIVILEGE_SET, LPDWORD, LPDWORD, LPBOOL)
+         * BOOL InitializeSecurityDescriptor(PSECURITY_DESCRIPTOR, DWORD)
+         * BOOL IsValidSecurityDescriptor(PSECURITY_DESCRIPTOR)
+         * BOOL SetSecurityDescriptorOwner(PSECURITY_DESCRIPTOR, PSID, BOOL)
+         * BOOL SetSecurityDescriptorGroup(PSECURITY_DESCRIPTOR, PSID, BOOL)
+         * BOOL SetSecurityDescriptorDacl(PSECURITY_DESCRIPTOR, BOOL, PACL, BOOL)
+         * BOOL InitializeAcl(PACL, DWORD, DWORD)
+         * BOOL AddAccessAllowedAce(PACL, DWORD, DWORD, PSID)
+         */
+        InitializeSecurityDescriptor: { argBytes: 8, handler: notImplemented },
+        IsValidSecurityDescriptor: { argBytes: 4, handler: notImplemented },
+        SetSecurityDescriptorOwner: { argBytes: 12, handler: notImplemented },
+        SetSecurityDescriptorGroup: { argBytes: 12, handler: notImplemented },
+        SetSecurityDescriptorDacl: { argBytes: 16, handler: notImplemented },
+        InitializeAcl: { argBytes: 12, handler: notImplemented },
+        AddAccessAllowedAce: { argBytes: 16, handler: notImplemented },
+        LookupPrivilegeValueA: { argBytes: 12, handler: notImplemented },
+        AdjustTokenPrivileges: { argBytes: 24, handler: notImplemented },
+        AccessCheck: { argBytes: 32, handler: notImplemented },
+
+        /**
+         * BOOL ImpersonateSelf(SECURITY_IMPERSONATION_LEVEL)
+         * BOOL RevertToSelf(VOID)
+         *
+         * Impersonating oneself is the one impersonation that always
+         * succeeds, and reverting from it is nothing. Both answer TRUE, so a
+         * program that impersonates before opening its token goes on to open
+         * it rather than stopping at a refusal Windows would not give.
+         */
+        ImpersonateSelf: { argBytes: 4, handler: ()=>1 },
+        RevertToSelf: { argBytes: 0, handler: ()=>1 },
 
         SetFileSecurityW: {
             argBytes: 12,
@@ -611,6 +649,29 @@ export function createRegistryFunctions(host){
                     default:
                         return ERROR_FILE_NOT_FOUND;
                 }
+            }),
+        },
+
+        /**
+         * LONG RegEnumKeyA(HKEY, DWORD dwIndex, LPSTR lpName, DWORD cchName)
+         *
+         * The older form: a buffer and its size by value, no class, no time.
+         */
+        RegEnumKeyA: {
+            argBytes: 16,
+            handler: onKey((key, [, index, name, size])=>{
+                const names = hive.subkeys(key);
+                const at = index >>> 0;
+                if (at >= names.length)
+                {
+                    return ERROR_NO_MORE_ITEMS;
+                }
+                if (name === 0 || (size >>> 0) <= names[at].length)
+                {
+                    return ERROR_MORE_DATA;
+                }
+                writeText(name, names[at]);
+                return ERROR_SUCCESS;
             }),
         },
 

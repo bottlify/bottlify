@@ -22,6 +22,13 @@ const MSG_BUFFER = 0x11000;
 const RECT_BUFFER = 0x11100;
 const TEXT_BUFFER = 0x11200;
 const HEAP_BASE = 0x12000;
+/** What the bridge names as the thread whose call is being answered. */
+const THREAD = { name: 'main' };
+const WH_CBT = 5;
+const WH_KEYBOARD = 2;
+const HCBT_CREATEWND = 3;
+const HOOK_PROC = 0x403000;
+const OLDER_HOOK_PROC = 0x403100;
 
 const WNDPROC = 0x401000;
 const HINSTANCE = 0x400000;
@@ -149,8 +156,10 @@ const PARKED = Object.freeze({ parked: true });
  *        so a test can refuse a window or make the answer arrive late.
  * @param {(args: number[]) => number} [options.waitForObjects] kernel32's wait, faked.
  * @param {() => number} [options.now] The guest clock, for a wait with a deadline.
+ * @param {(entry: number, args: number[]) => any} [options.hookReply] What a hook
+ *        procedure answers.
  */
-function setup({ heap = false, reply, waitForObjects, now } = {}){
+function setup({ heap = false, reply, waitForObjects, now, hookReply } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -158,6 +167,10 @@ function setup({ heap = false, reply, waitForObjects, now } = {}){
     const dispatched = [];
     /** @type {any[]} */
     const parked = [];
+    /** @type {{ entry: number, args: number[], thread: unknown }[]} */
+    const called = [];
+    /** @type {string[]} */
+    const divergences = [];
     /** Resolvers for a waiting call, released a turn at a time by the test. */
     /** @type {(() => void)[]} */
     const idlers = [];
@@ -178,10 +191,17 @@ function setup({ heap = false, reply, waitForObjects, now } = {}){
         windowService: handed=>{
             service = handed;
         },
-        dispatch: (wndProc, message)=>{
-            dispatched.push({ wndProc, ...message });
+        dispatch: (wndProc, message, thread)=>{
+            dispatched.push(thread === undefined
+                ? { wndProc, ...message } : { wndProc, ...message, thread });
             return reply ? reply(message) : 0x1234;
         },
+        call: (entry, args, thread)=>{
+            called.push({ entry, args, thread });
+            return hookReply ? hookReply(entry, args) : 0;
+        },
+        callerThread: ()=>THREAD,
+        divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         park: ()=>{
             parked.push(true);
             return PARKED;
@@ -208,6 +228,7 @@ function setup({ heap = false, reply, waitForObjects, now } = {}){
     };
 
     return { memory, handles, queue, fns, dispatched, parked, tick, idlers, released,
+        called, divergences,
         service: /** @type {import('./windows.js').WindowService} */ (
             /** @type {unknown} */ (service)) };
 }
@@ -326,6 +347,27 @@ test('GetClassInfoA fills WNDCLASSA at the documented offsets', ()=>{
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.hInstance), HINSTANCE);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.hCursor), 0x22);
     assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSA.lpszClassName), CLASS_NAME);
+});
+
+test('GetClassInfoExA fills the extended structure behind the caller\'s cbSize', ()=>{
+    const { memory, fns } = setup();
+    putClass(memory, { windowExtra: 8 });
+    memory.putU32s(CLASS_STRUCT + WNDCLASSEXA.cbSize, [WNDCLASSEXA.SIZE]);
+    memory.putU32s(CLASS_STRUCT + WNDCLASSEXA.hIconSm, [0x44]);
+    // The classic fields sit four bytes along in the extended layout.
+    memory.putU32s(CLASS_STRUCT + WNDCLASSEXA.style, [0x0003, WNDPROC, 0, 8, HINSTANCE,
+        0x11, 0x22, 0x33, 0, CLASS_NAME]);
+    assert.notEqual(fns.RegisterClassExA.handler([CLASS_STRUCT]), 0);
+
+    memory.fill(TEXT_BUFFER, WNDCLASSEXA.SIZE / 4);
+    memory.putU32s(TEXT_BUFFER + WNDCLASSEXA.cbSize, [WNDCLASSEXA.SIZE]);
+    assert.equal(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, TEXT_BUFFER]), 1);
+    assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbSize), WNDCLASSEXA.SIZE, 'left alone');
+    assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpfnWndProc), WNDPROC);
+    assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.cbWndExtra), 8);
+    assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.lpszClassName), CLASS_NAME);
+    assert.equal(memory.u32(TEXT_BUFFER + WNDCLASSEXA.hIconSm), 0x44);
+    assert.equal(fns.GetClassInfoExA.handler([HINSTANCE, CLASS_NAME, 0]), 0);
 });
 
 test('GetClassInfoA on a class nobody registered writes nothing', ()=>{
@@ -1181,4 +1223,104 @@ test('a modifier does not take the character meant for the key after it', ()=>{
     h.memory.putU32s(MSG_BUFFER, [0x40, WM_KEYDOWN, 0x41, 0x001e0001, 0, 0, 0]);
     h.fns.TranslateMessage.handler([MSG_BUFFER]);
     assert.equal(h.queue.peek({ hwnd: null, first: 0, last: 0, remove: true })?.wParam, 0x41);
+});
+
+// --- hooks ---
+
+test('a CBT hook is told of a window before its procedure is, and can refuse it', ()=>{
+    // A framework attaches its own object to the window from this hook and
+    // subclasses the procedure there, so what WM_CREATE reaches is the
+    // framework. That is why the hook comes first.
+    const { memory, fns, dispatched, called } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const hook = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+    assert.notEqual(hook, 0);
+
+    const hwnd = createWindow(fns, memory);
+    assert.equal(called.length, 1);
+    const [{ entry, args, thread }] = called;
+    assert.equal(entry, HOOK_PROC);
+    assert.equal(args[0], HCBT_CREATEWND);
+    assert.equal(args[1], hwnd);
+    assert.equal(thread, THREAD, 'named, because the send after it is made after an await');
+    // lParam is a CBT_CREATEWND whose first word is the CREATESTRUCT the
+    // procedure is then handed.
+    assert.equal(memory.u32(args[2]), dispatched[0].lParam);
+    assert.equal(memory.u32(dispatched[0].lParam + CREATESTRUCT.lpszClass), CLASS_NAME);
+    assert.equal(dispatched[0].message, WM_CREATE);
+    assert.equal(dispatched[0].thread, THREAD);
+});
+
+test('a CBT hook answering non-zero refuses the window before WM_CREATE', ()=>{
+    const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>1 });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+
+    const hwnd = createWindow(fns, memory);
+    assert.equal(hwnd, 0);
+    assert.deepEqual(dispatched, [], 'the procedure never hears of a window the hook refused');
+});
+
+test('a hook that answers late leaves the caller a promise, and WM_CREATE follows it', async()=>{
+    /** @type {(value: number) => void} */
+    let answer = ()=>{};
+    const pending = new Promise(resolve=>{
+        answer = resolve;
+    });
+    const { memory, fns, dispatched } = setup({ heap: true, hookReply: ()=>pending });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+
+    const result = createWindow(fns, memory);
+    assert.equal(typeof result.then, 'function');
+    assert.deepEqual(dispatched, [], 'not yet');
+    answer(0);
+    assert.notEqual(await result, 0);
+    assert.equal(/** @type {any} */ (dispatched[0]).message, WM_CREATE);
+});
+
+test('the newest hook is called first and reaches the older through CallNextHookEx', ()=>{
+    const { memory, fns, called } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const older = fns.SetWindowsHookExA.handler([WH_CBT, OLDER_HOOK_PROC, HINSTANCE, 1]);
+    const newer = fns.SetWindowsHookExA.handler([WH_CBT, HOOK_PROC, HINSTANCE, 1]);
+
+    createWindow(fns, memory);
+    assert.deepEqual(called.map(call=>call.entry), [HOOK_PROC]);
+
+    assert.equal(fns.CallNextHookEx.handler([newer, HCBT_CREATEWND, 0x40, 0x50]), 0);
+    assert.deepEqual(called.at(-1), { entry: OLDER_HOOK_PROC, args: [HCBT_CREATEWND, 0x40, 0x50],
+        thread: THREAD });
+    assert.equal(fns.CallNextHookEx.handler([older, HCBT_CREATEWND, 0x40, 0x50]), 0,
+        'the last in the chain has nobody to pass to');
+    assert.equal(called.length, 2);
+
+    assert.equal(fns.UnhookWindowsHookEx.handler([newer]), 1);
+    assert.equal(fns.UnhookWindowsHookEx.handler([newer]), 0, 'and not twice');
+    createWindow(fns, memory);
+    assert.equal(called.at(-1)?.entry, OLDER_HOOK_PROC, 'the older is the newest now');
+});
+
+test('a hook of a type that is never called says so once, and is still installed', ()=>{
+    const { memory, fns, called, divergences } = setup({ heap: true });
+    putClass(memory);
+    fns.RegisterClassA.handler([CLASS_STRUCT]);
+    assert.notEqual(fns.SetWindowsHookExA.handler([WH_KEYBOARD, HOOK_PROC, HINSTANCE, 1]), 0);
+    assert.equal(divergences.length, 1);
+    assert.match(divergences[0], /SetWindowsHookExA: hook type 2/);
+    createWindow(fns, memory);
+    assert.deepEqual(called, []);
+    assert.equal(fns.SetWindowsHookExA.handler([WH_CBT, 0, HINSTANCE, 1]), 0,
+        'no procedure is no hook');
+});
+
+test('the hook functions declare the stack they pop', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.SetWindowsHookExA.argBytes, 16);
+    assert.equal(fns.UnhookWindowsHookEx.argBytes, 4);
+    assert.equal(fns.CallNextHookEx.argBytes, 16);
 });

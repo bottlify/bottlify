@@ -29,6 +29,7 @@ import {
     readWindowClass,
     writeMessage,
     writeRect,
+    writeU32s,
     writeWindowClassA,
 } from './structs.js';
 
@@ -47,6 +48,13 @@ const WM_CHAR = 0x0102;
 const WM_SYSKEYDOWN = 0x0104;
 const WM_SYSKEYUP = 0x0105;
 const WM_SYSCHAR = 0x0106;
+
+/** The one hook type this build calls, and the one event it calls it for. */
+const WH_CBT = 5;
+const HCBT_CREATEWND = 3;
+
+/** CBT_CREATEWNDA: what a CBT hook is handed for HCBT_CREATEWND. */
+const CBT_CREATEWNDA = Object.freeze({ lpcs: 0, hwndInsertAfter: 4, SIZE: 8 });
 
 /** TranslateMessage answers for exactly these, translated or not. */
 const KEY_MESSAGES = new Set([WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP]);
@@ -239,9 +247,14 @@ function characterFor(key){
  * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  *           A caller that has awaited names the thread whose call it answers.
+ * @property {(entry: number, args: number[], thread?: unknown) => number} [call]
+ *           Runs any guest routine with the arguments it declares -- a hook
+ *           procedure. Absent in a build with no bridge, and then no hook is
+ *           ever called.
  * @property {() => unknown} [callerThread]
  *           Whose call is being handled, read before an await for `dispatch`
  *           afterwards. Absent in a build with no bridge, and then unnamed.
+ * @property {(api: string, detail: string) => void} [divergence]
  * @property {() => any} park   Stops the caller; returns the parked token.
  * @property {(instance: number, id: number) => string | null} [loadString]
  *           A string out of a module's resources. Absent in a build with no
@@ -610,6 +623,44 @@ export function createWindowFunctions(host){
     };
 
     /**
+     * Hooks, in the order they were installed: the newest is called first and
+     * reaches the older ones through CallNextHookEx. Only a CBT hook is ever
+     * called, and only for a window being created, which is what a framework
+     * installs one for -- to attach its own object to the window before the
+     * window's procedure runs.
+     *
+     * ponytail: a hook's thread is recorded and not consulted -- every hook of
+     * a type is called whichever thread creates the window. Per-thread
+     * delivery when a program is seen to hook one thread and create on another.
+     *
+     * @type {{ handle: number, type: number, proc: number, thread: number }[]}
+     */
+    const hooks = [];
+
+    /**
+     * Calls the newest hook of a type, or the one older than `after`.
+     *
+     * @param {number} type @param {number | null} after  A hook handle, or null for the newest.
+     * @param {number[]} args @param {unknown} thread
+     * @returns {number | Promise<number>} what the hook answered; 0 with none to call.
+     */
+    const callHook = (type, after, args, thread)=>{
+        let from = hooks.length - 1;
+        if (after !== null)
+        {
+            from = hooks.findIndex(hook=>hook.handle === after) - 1;
+        }
+        for (let at = from; at >= 0; at--)
+        {
+            if (hooks[at].type === type && host.call)
+            {
+                return host.call(hooks[at].proc, args, thread);
+            }
+        }
+        return 0;
+    };
+
+    /**
      * A window record and the handle that names it, with everything a window
      * has defaulted.
      *
@@ -714,12 +765,14 @@ export function createWindowFunctions(host){
         {
             return record.hwnd;
         }
-        const create = host.allocate(CREATESTRUCTA.SIZE);
+        // The CREATESTRUCT, and behind it the two words a CBT hook is handed
+        // that point at it.
+        const create = host.allocate(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         if (create === 0)
         {
             return record.hwnd;
         }
-        const bytes = new Uint8Array(CREATESTRUCTA.SIZE);
+        const bytes = new Uint8Array(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.SIZE);
         const view = new DataView(bytes.buffer);
         /** @param {number} at @param {number} value */
         const put = (at, value)=>view.setUint32(at, value >>> 0, true);
@@ -735,16 +788,21 @@ export function createWindowFunctions(host){
         put(CREATESTRUCTA.lpszName, windowName);
         put(CREATESTRUCTA.lpszClass, className);
         put(CREATESTRUCTA.dwExStyle, exStyle);
+        put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.lpcs, create);
+        put(CREATESTRUCTA.SIZE + CBT_CREATEWNDA.hwndInsertAfter, 0);
         host.writeMemory(create, bytes);
         void width;
         void height;
         void x;
         void y;
 
+        // Named once, before anything is awaited: a call made after the hook
+        // has answered is answering a call the bridge has already let go of.
+        const thread = host.callerThread?.();
         /** @param {number} message */
         const send = message=>host.dispatch(record.wndProc, {
             hwnd: record.hwnd, message, wParam: 0, lParam: create,
-        });
+        }, thread);
         /** @param {any} value @param {(answer: number) => any} then */
         const after = (value, then)=>(typeof value?.then === 'function'
             ? value.then(then)
@@ -755,20 +813,32 @@ export function createWindowFunctions(host){
             return handle;
         };
 
-        // Only WM_CREATE, and deliberately: sending is running guest code, and
-        // running it twice in a row from one host call means the second starts
-        // while the first is still unwinding. WM_NCCREATE is the message a
-        // procedure is least likely to need -- its default answer is TRUE and
-        // the structure it carries arrives again a moment later with
-        // WM_CREATE -- so it is the one to leave out until a program is seen to
-        // want it and the bridge can send two.
-        return after(send(WM_CREATE), created=>{
-            if ((created | 0) === -1)
+        // The CBT hook first, before the window's own procedure has run: a
+        // framework attaches its object to the window here and subclasses the
+        // procedure, so the WM_CREATE that follows reaches the framework and
+        // not the class. A hook that answers non-zero refuses the window.
+        //
+        // Only WM_CREATE after it, and deliberately: WM_NCCREATE is the
+        // message a procedure is least likely to need -- its default answer is
+        // TRUE and the structure it carries arrives again a moment later with
+        // WM_CREATE -- so it is the one to leave out until a program is seen
+        // to want it.
+        const cbt = callHook(WH_CBT, null,
+            [HCBT_CREATEWND, record.hwnd, create + CREATESTRUCTA.SIZE], thread);
+        return after(cbt, refused=>{
+            if ((refused | 0) !== 0)
             {
                 destroyWindow(record.hwnd);
                 return done(0);
             }
-            return done(record.hwnd);
+            return after(send(WM_CREATE), created=>{
+                if ((created | 0) === -1)
+                {
+                    destroyWindow(record.hwnd);
+                    return done(0);
+                }
+                return done(record.hwnd);
+            });
         });
     };
 
@@ -884,6 +954,28 @@ export function createWindowFunctions(host){
                     return 0;
                 }
                 writeWindowClassA(host, out, cls);
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL GetClassInfoExA(HINSTANCE, LPCSTR lpClassName, LPWNDCLASSEXA)
+         *
+         * The extended form: the same fields four bytes further along, behind
+         * cbSize, with the small icon after them. cbSize is the caller's and
+         * is left as it was.
+         */
+        GetClassInfoExA: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([, className, out])=>{
+                const cls = classOf(className);
+                if (!cls || (out >>> 0) === 0)
+                {
+                    return 0;
+                }
+                writeWindowClassA(host, (out >>> 0) + WNDCLASSEXA.style, cls);
+                writeU32s(host, (out >>> 0) + WNDCLASSEXA.hIconSm, [cls.iconSm ?? 0]);
                 return 1;
             },
         },
@@ -1106,6 +1198,70 @@ export function createWindowFunctions(host){
                 const previous = readLong(record, index);
                 writeLong(record, index, value);
                 return previous;
+            },
+        },
+
+        /**
+         * HHOOK SetWindowsHookExA(int idHook, HOOKPROC lpfn, HINSTANCE hmod,
+         *                         DWORD dwThreadId)
+         *
+         * Every type is accepted, because a program installs its hooks at
+         * start-up and treats a refusal as fatal; only a CBT hook is ever
+         * called, and the others say so once rather than failing silently.
+         */
+        SetWindowsHookExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([type, proc, , thread])=>{
+                if ((proc >>> 0) === 0)
+                {
+                    return 0;
+                }
+                const hook = { handle: 0, type: type | 0, proc: proc >>> 0, thread: thread >>> 0 };
+                hook.handle = host.handles.open('hook', hook);
+                hooks.push(hook);
+                if (hook.type !== WH_CBT)
+                {
+                    host.divergence?.('SetWindowsHookExA',
+                        `hook type ${hook.type} is installed but never called`);
+                }
+                return hook.handle;
+            },
+        },
+
+        /** BOOL UnhookWindowsHookEx(HHOOK hhk) */
+        UnhookWindowsHookEx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([handle])=>{
+                const at = hooks.findIndex(hook=>hook.handle === (handle >>> 0));
+                if (at < 0)
+                {
+                    return 0;
+                }
+                hooks.splice(at, 1);
+                host.handles.close(handle >>> 0);
+                return 1;
+            },
+        },
+
+        /**
+         * LRESULT CallNextHookEx(HHOOK hhk, int nCode, WPARAM wParam, LPARAM lParam)
+         *
+         * The hook older than the one calling, of the same type; the last in
+         * the chain gets zero, which is "nothing objected".
+         */
+        CallNextHookEx: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, code, wParam, lParam])=>{
+                const hook = hooks.find(each=>each.handle === (handle >>> 0));
+                if (!hook)
+                {
+                    return 0;
+                }
+                return callHook(hook.type, hook.handle, [code, wParam, lParam],
+                    host.callerThread?.());
             },
         },
 

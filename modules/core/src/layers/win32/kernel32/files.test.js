@@ -1135,3 +1135,14 @@ test('the installer file family declares the stack it pops', ()=>{
     assert.equal(fns.GetTempFileNameA.argBytes, 16);
     assert.equal(fns.MoveFileExA.argBytes, 12);
 });
+
+test('the short form of a path is the path: this volume keeps no 8.3 aliases', ()=>{
+    const { files, fns, at, memory } = setup();
+    files.put('C:\\Program Files\\Title\\title.exe', 'MZ');
+    const length = fns.GetShortPathNameA.handler(
+        [at(NAME, 'C:\\Program Files\\Title\\title.exe'), OUT_PATH, 260]);
+    assert.equal(memory.readCString(OUT_PATH, 260), 'C:\\Program Files\\Title\\title.exe');
+    assert.equal(length, 'C:\\Program Files\\Title\\title.exe'.length);
+    assert.equal(fns.GetShortPathNameA.handler([at(NAME, 'C:\\absent.exe'), OUT_PATH, 260]), 0);
+    assert.equal(fns.GetShortPathNameA.argBytes, 12);
+});

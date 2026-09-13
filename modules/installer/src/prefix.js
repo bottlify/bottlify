@@ -12,12 +12,13 @@
  * then keeping the writable layer whole. Nothing has to diff anything: by
  * construction, everything in that layer is what the installer put there.
  *
- * The one thing that is there before the installer runs is the installer
- * itself, because a distribution reads its own file (an appended archive, an
- * overlay, a resource) and so has to be somewhere the guest can open. It is
- * seeded into the writable layer and subtracted again by path when the prefix
- * is collected, which is the same answer as mounting it read-only beside the
- * prefix and one the engine can give today.
+ * The one thing that is there before the installer runs is the install media
+ * itself, because a distribution reads its own files (an appended archive, an
+ * overlay, a resource, the archives and file lists beside it on a disc) and so
+ * has to be somewhere the guest can open. It is seeded into the writable layer
+ * and subtracted again by path when the prefix is collected, which is the same
+ * answer as mounting it read-only beside the prefix and one the engine can give
+ * today.
  *
  * What comes out is a tree relative to a root, because a bundle is mounted at
  * one directory and a prefix is a whole volume. The rule that picks that root
@@ -45,9 +46,19 @@ export const REGISTRY_PATH = '.bottlify\\registry.json';
 const SYSTEM_ROOTS = ['windows', 'temp', 'tmp', 'program files\\common files'];
 
 /**
- * @typedef {Object} InstallMedia
- * @property {string} name    File name as the guest will see it.
+ * @typedef {Object} MediaFile
+ * @property {string} name    Path relative to the media root, backslash-separated.
  * @property {Uint8Array} bytes
+ */
+
+/**
+ * A directory of files, one of which is the program to start. A disc is the
+ * usual case: the entry reads its archives and lists from beside itself.
+ *
+ * @typedef {Object} InstallMedia
+ * @property {string} name          The entry, as the guest will see it, relative to the media root.
+ * @property {Uint8Array} bytes
+ * @property {MediaFile[]} [files]  The rest of the media, the entry itself included or not.
  */
 
 /**
@@ -86,14 +97,22 @@ const directoryOf = path=>{
  */
 export function prefixOptions(media){
     const path = `${MEDIA_DIRECTORY}\\${media.name}`;
+    const files = [{ path, bytes: media.bytes }];
+    for (const file of media.files ?? [])
+    {
+        if (fold(file.name) !== fold(media.name))
+        {
+            files.push({ path: `${MEDIA_DIRECTORY}\\${file.name}`, bytes: file.bytes });
+        }
+    }
     return {
         executable: media.bytes,
         imagePath: path,
         // No bundle is mounted, so the volume is the writable layer and nothing
         // else. `storage` is how something gets in there before the first
         // instruction, which is exactly when the distribution has to be there.
-        storage: { load: async()=>[{ path, bytes: media.bytes }] },
-        seeded: [path],
+        storage: { load: async()=>files },
+        seeded: files.map(file=>file.path),
     };
 }
 

@@ -393,3 +393,18 @@ test('looking at a timer without taking it leaves the tick where it is', ()=>{
     clock = 100;
     assert.equal(queue.peek(ALL)?.message, WM_TIMER);
 });
+
+test('the queue remembers the last message it handed out, and only those it removed', ()=>{
+    const queue = createMessageQueue();
+    assert.equal(queue.last(), null);
+    queue.post({ hwnd: 0x40, message: 0x400, wParam: 1, lParam: 2, time: 0x1234 });
+    queue.post({ hwnd: 0x40, message: 0x401, wParam: 3, lParam: 4 });
+
+    queue.peek({ ...ALL, remove: false });
+    assert.equal(queue.last(), null, 'a look is not a take');
+    const first = queue.peek({ ...ALL, remove: true });
+    assert.equal(queue.last(), first);
+    assert.equal(queue.last()?.time, 0x1234);
+    queue.peek({ ...ALL, remove: true });
+    assert.equal(queue.last()?.message, 0x401);
+});

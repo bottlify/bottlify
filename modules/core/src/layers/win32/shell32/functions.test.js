@@ -83,3 +83,9 @@ test('a shell file operation is refused as not implemented and marked aborted', 
     assert.deepEqual([m.shell.SHFileOperationA, m.shell.SHChangeNotify, m.shell.SHGetFileInfoA]
         .map(fn=>fn.argBytes), [4, 16, 20]);
 });
+
+test('DragFinish pops the drop it is handed', ()=>{
+    const fns = createShellFunctions({ writeMemory: ()=>{} });
+    assert.equal(fns.DragFinish.argBytes, 4);
+    assert.equal(fns.DragFinish.handler(), 0);
+});

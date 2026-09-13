@@ -643,3 +643,54 @@ test('the wide file security call is refused like the narrow one, popping what i
     assert.deepEqual(errors, [120], 'ERROR_CALL_NOT_IMPLEMENTED');
     assert.equal(fns.SetFileSecurityW.argBytes, 12);
 });
+
+test('the token, impersonation and access-check calls refuse plainly and pop their arguments', ()=>{
+    const memory = fakeMemory();
+    /** @type {number[]} */
+    const errors = [];
+    const fns = createRegistryFunctions({
+        readMemory: memory.readMemory,
+        writeMemory: memory.writeMemory,
+        readCString: (address, maxLength)=>memory.readCString(address, maxLength),
+        hive: createHive(),
+        setLastError: code=>errors.push(code),
+    });
+    const ERROR_CALL_NOT_IMPLEMENTED = 120;
+    assert.equal(fns.ImpersonateSelf.handler(), 1, 'impersonating oneself always succeeds');
+    assert.equal(fns.RevertToSelf.handler(), 1);
+    assert.equal(fns.ImpersonateSelf.argBytes, 4);
+    assert.equal(fns.RevertToSelf.argBytes, 0);
+    const expected = {
+        LookupPrivilegeValueA: 12, AdjustTokenPrivileges: 24, AccessCheck: 32,
+        GetFileSecurityA: 20, SetFileSecurityA: 12,
+        InitializeSecurityDescriptor: 8, IsValidSecurityDescriptor: 4,
+        SetSecurityDescriptorOwner: 12, SetSecurityDescriptorGroup: 12,
+        SetSecurityDescriptorDacl: 16, InitializeAcl: 12, AddAccessAllowedAce: 16,
+    };
+    const table = /** @type {Record<string, { argBytes: number, handler: (args: number[]) => number }>} */ (
+        /** @type {unknown} */ (fns));
+    for (const [name, argBytes] of Object.entries(expected))
+    {
+        assert.equal(table[name].argBytes, argBytes, name);
+        assert.equal(table[name].handler([]), 0, name);
+    }
+    assert.deepEqual(errors, Object.keys(expected).map(()=>ERROR_CALL_NOT_IMPLEMENTED));
+});
+
+test('RegEnumKeyA is the enumeration with a buffer and a size and nothing else', ()=>{
+    const { memory, fns, create } = setup();
+    create('SOFTWARE\\Vendor\\B');
+    create('SOFTWARE\\Vendor\\A');
+    memory.putString(SUBKEY, 'SOFTWARE\\Vendor');
+    assert.equal(fns.RegOpenKeyExA.handler([HKEY_LOCAL_MACHINE, SUBKEY, 0, 0, OUT_HANDLE]), 0);
+    const key = memory.dword(OUT_HANDLE);
+
+    assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 64]), ERROR_SUCCESS);
+    const first = memory.readCString(OUT_NAME, 64);
+    assert.equal(fns.RegEnumKeyA.handler([key, 1, OUT_NAME, 64]), ERROR_SUCCESS);
+    assert.deepEqual([first, memory.readCString(OUT_NAME, 64)].sort(), ['A', 'B']);
+    assert.equal(fns.RegEnumKeyA.handler([key, 2, OUT_NAME, 64]), ERROR_NO_MORE_ITEMS);
+    assert.equal(fns.RegEnumKeyA.handler([key, 0, OUT_NAME, 1]), ERROR_MORE_DATA,
+        'no room for the terminator');
+    assert.equal(fns.RegEnumKeyA.argBytes, 16);
+});

@@ -114,3 +114,13 @@ test('InitCommonControls is the export ordinal 17 names, and takes nothing', ()=
     assert.equal(m.comctl.InitCommonControls.argBytes, 0);
     assert.equal(m.comctl.InitCommonControls.handler([]), 0);
 });
+
+test('the ordinal-only entry point and the two drawing calls declare what they pop', ()=>{
+    const fns = createComctlFunctions({ readMemory: ()=>new Uint8Array(4), writeMemory: ()=>{} });
+    assert.equal(fns.InitCommonControls.argBytes, 0);
+    assert.equal(fns.InitCommonControls.handler(), 0);
+    assert.equal(fns.ImageList_Draw.argBytes, 24);
+    assert.equal(fns.ImageList_Draw.handler([0x40, 0, 0x50, 0, 0, 0]), 0);
+    assert.equal(fns.ImageList_GetImageInfo.argBytes, 12);
+    assert.equal(fns.ImageList_GetImageInfo.handler(), 0);
+});

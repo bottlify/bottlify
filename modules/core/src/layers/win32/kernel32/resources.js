@@ -46,12 +46,22 @@ const MAX_NAME = 260;
  * @typedef {Object} ResourceHost
  * @property {(address: number, maxLength: number) => string} readCString
  * @property {(code: number) => void} setLastError
- * @property {(instance: number, type: number | string, name: number | string) =>
- *            { rva: number, size: number } | null} findResource
+ * @property {(instance: number, type: number | string, name: number | string,
+ *            language?: number | null) => { rva: number, size: number } | null} findResource
  *           The loader's reader, bound to a module. An instance of zero means
  *           the running program, which is what a program passes for its own.
+ *           No language means the first there is.
+ * @property {(instance: number) => { type: number | string, name: number | string,
+ *            language: number }[]} [listResources]
+ *           Everything that module carries, for the enumerations. Absent in a
+ *           build with no loader behind it, and then a module carries nothing.
  * @property {(instance: number) => number} moduleBase
  *           Where that module was mapped, so an RVA can become an address.
+ * @property {(entry: number, args: number[], thread?: unknown) => number | Promise<number>} [call]
+ *           Runs an enumeration callback. Absent in a build with no bridge.
+ * @property {() => unknown} [callerThread]
+ *           The thread whose call is being answered, named on every callback
+ *           after the first because the bridge has let the call go by then.
  */
 
 /**
@@ -90,7 +100,97 @@ export function createResourceFunctions(host){
         return 0;
     };
 
+    /**
+     * @param {number} instance @param {number} type @param {number} name
+     * @param {number | null} language
+     */
+    const find = (instance, type, name, language)=>{
+        const entry = host.findResource(
+            instance >>> 0, identifier(type), identifier(name), language);
+        if (!entry)
+        {
+            // Windows distinguishes a type nothing has from a name missing
+            // within a type that exists. We cannot tell the two apart from
+            // here, and the one a caller acts on is the general "not found",
+            // so that is what is reported.
+            return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+        }
+        const handle = nextHandle;
+        nextHandle += 4;
+        found.set(handle, { ...entry, base: host.moduleBase(instance >>> 0) });
+        return handle;
+    };
+
+    /** @param {number | string} key @param {number | string} asked */
+    const sameKey = (key, asked)=>typeof key === 'string' && typeof asked === 'string'
+        ? key.toLowerCase() === asked.toLowerCase()
+        : key === asked;
+
     return {
+        /**
+         * HRSRC FindResourceExA(HMODULE hModule, LPCSTR lpType, LPCSTR lpName,
+         *                       WORD wLanguage)
+         *
+         * The type before the name here, the other way round from
+         * FindResourceA -- the one place in the API where the two orders sit
+         * side by side. A language of zero, MAKELANGID(LANG_NEUTRAL, ...), is
+         * "whatever is there"; any other is looked for as asked, which is how
+         * a program with a string table per language picks its user's.
+         */
+        FindResourceExA: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([instance, type, name, language])=>
+                find(instance, type, name, (language & 0xffff) === 0 ? null : language & 0xffff),
+        },
+
+        /**
+         * BOOL EnumResourceLanguagesA(HMODULE hModule, LPCSTR lpType, LPCSTR lpName,
+         *                             ENUMRESLANGPROCA lpEnumFunc, LONG_PTR lParam)
+         *
+         * The callback is handed the type and name exactly as the caller
+         * passed them -- a pointer stays a pointer -- and each language in
+         * turn until one of them answers FALSE. A program picks the string
+         * table for its user's language this way, and a table it is never
+         * shown is one it cannot pick.
+         */
+        EnumResourceLanguagesA: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([instance, type, name, callback, lParam])=>{
+                if (!host.call || (callback >>> 0) === 0)
+                {
+                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+                }
+                const wantedType = identifier(type);
+                const wantedName = identifier(name);
+                const languages = (host.listResources?.(instance >>> 0) ?? [])
+                    .filter(entry=>sameKey(entry.type, wantedType)
+                        && sameKey(entry.name, wantedName))
+                    .map(entry=>entry.language);
+                if (languages.length === 0)
+                {
+                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
+                }
+                const thread = host.callerThread?.();
+                const call = /** @type {NonNullable<typeof host.call>} */ (host.call);
+                /** @param {number} at @returns {number | Promise<number>} */
+                const next = at=>{
+                    if (at === languages.length)
+                    {
+                        return 1;
+                    }
+                    const answer = call(callback >>> 0,
+                        [instance >>> 0, type >>> 0, name >>> 0, languages[at], lParam >>> 0],
+                        thread);
+                    /** @param {number} went */
+                    const then = went=>((went | 0) === 0 ? 1 : next(at + 1));
+                    return typeof answer === 'number' ? then(answer) : answer.then(then);
+                };
+                return next(0);
+            },
+        },
+
         /**
          * HRSRC FindResourceA(HMODULE hModule, LPCSTR lpName, LPCSTR lpType)
          *
@@ -101,49 +201,7 @@ export function createResourceFunctions(host){
         FindResourceA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([instance, name, type])=>{
-                const entry = host.findResource(
-                    instance >>> 0, identifier(type), identifier(name));
-                if (!entry)
-                {
-                    // Windows distinguishes a type nothing has from a name
-                    // missing within a type that exists. We cannot tell the two
-                    // apart from here, and the one a caller acts on is the
-                    // general "not found", so that is what is reported.
-                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
-                }
-                const handle = nextHandle;
-                nextHandle += 4;
-                found.set(handle, { ...entry, base: host.moduleBase(instance >>> 0) });
-                return handle;
-            },
-        },
-
-        /**
-         * HRSRC FindResourceExA(HMODULE hModule, LPCSTR lpType, LPCSTR lpName,
-         *   WORD wLanguage)
-         *
-         * The same lookup as FindResourceA with a language selector added --
-         * and note the argument order swaps type before name, the opposite of
-         * FindResourceA. A wLanguage of zero (MAKELANGID(LANG_NEUTRAL, ...))
-         * means "whatever language is there", which is how the two spellings
-         * agree on a module whose resources carry one language.
-         */
-        FindResourceExA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([instance, type, name])=>{
-                const entry = host.findResource(
-                    instance >>> 0, identifier(type), identifier(name));
-                if (!entry)
-                {
-                    return fail(ERROR_RESOURCE_TYPE_NOT_FOUND);
-                }
-                const handle = nextHandle;
-                nextHandle += 4;
-                found.set(handle, { ...entry, base: host.moduleBase(instance >>> 0) });
-                return handle;
-            },
+            handler: ([instance, name, type])=>find(instance, type, name, null),
         },
 
         /** DWORD SizeofResource(HMODULE hModule, HRSRC hResInfo) */

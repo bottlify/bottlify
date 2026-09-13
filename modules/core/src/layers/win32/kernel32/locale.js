@@ -736,6 +736,23 @@ export function createLocaleFunctions(host){
          * one way and format it another.
          */
         GetUserDefaultLCID: { argBytes: 0, handler: ()=>LCID_EN_US },
+        GetThreadLocale: { argBytes: 0, handler: ()=>LCID_EN_US },
+
+        /**
+         * LCID ConvertDefaultLocale(LCID Locale)
+         *
+         * The two placeholders for "the default" become the one locale there
+         * is; any other locale is already itself.
+         */
+        ConvertDefaultLocale: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([locale])=>{
+                const asked = locale >>> 0;
+                return asked === LOCALE_SYSTEM_DEFAULT || asked === LOCALE_USER_DEFAULT
+                    || asked === 0 ? LCID_EN_US : asked;
+            },
+        },
 
         /** LANGID GetUserDefaultLangID(VOID) */
         GetUserDefaultLangID: { argBytes: 0, handler: ()=>LANGID_EN_US },
