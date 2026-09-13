@@ -284,6 +284,26 @@ test('the processor features answered are the ones a 32-bit x86 with SSE2 has', 
 });
 
 
+test('a thread reports STILL_ACTIVE until it has exited, then the code it left with', ()=>{
+    const host = fakeHost();
+    const fns = createSystemFunctions(host);
+    /** @type {{ kind: string, priority: number, exitCode: number | null }} */
+    const worker = { kind: 'thread', priority: 0, exitCode: null };
+    host.handles.set(0x40, worker);
+
+    assert.equal(fns.GetExitCodeThread.argBytes, 8);
+    assert.equal(fns.GetExitCodeThread.handler([0x40, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), STILL_ACTIVE);
+
+    worker.exitCode = 0;
+    assert.equal(fns.GetExitCodeThread.handler([0x40, 0x200]), 1);
+    assert.equal(host.view.getUint32(0x200, true), 0,
+        'an exit code of zero is not "still running"');
+
+    assert.equal(fns.GetExitCodeThread.handler([0x10, 0x200]), 0, 'no such thread');
+    assert.deepEqual(host.errors, [ERROR_INVALID_HANDLE]);
+});
+
 test('a thread priority set is the one read back, for every value a normal process may set', ()=>{
     const host = fakeHost();
     const fns = createSystemFunctions(host);

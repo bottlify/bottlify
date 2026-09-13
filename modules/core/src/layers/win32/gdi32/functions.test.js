@@ -1113,3 +1113,28 @@ test('a palette-relative colour table is resolved through the palette the DC has
     assert.deepEqual([memory.u32(QUADS), memory.u32(QUADS + 4)], [0x00040506, 0x00010203],
         'as RGBQUADs, blue first, in the order the indices named');
 });
+
+test('every DC of a window is one drawable, and any other DC is its own', ()=>{
+    // The pixel format belongs to the window: a program sets it on one DC,
+    // releases that DC, and creates its context on the next one.
+    const { fns, gdi } = setup();
+    /** @param {number} hdc */
+    const keyOf = hdc=>gdi.describeDrawable(hdc)?.key ?? null;
+    const first = fns.GetDC.handler([HWND]);
+    const second = fns.GetDC.handler([HWND]);
+    const other = fns.GetDC.handler([HWND + 1]);
+    const screen = fns.GetDC.handler([0]);
+    const memoryDc = fns.CreateCompatibleDC.handler([screen]);
+
+    assert.notEqual(first, second);
+    assert.ok(keyOf(first));
+    assert.equal(keyOf(first), keyOf(second));
+    assert.notEqual(keyOf(first), keyOf(other));
+    assert.notEqual(keyOf(screen), keyOf(memoryDc), 'contexts on no window are each their own');
+    assert.equal(gdi.describeDrawable(0x7777), null, 'and a stranger is not a drawable at all');
+
+    const bounded = gdi.windowContext(HWND, { left: 10, top: 20, right: 650, bottom: 500 });
+    assert.deepEqual(gdi.describeDrawable(bounded),
+        { key: keyOf(first), width: 640, height: 480 },
+        'a window context is the size of the area it was given');
+});

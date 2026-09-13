@@ -1895,5 +1895,34 @@ export function createGdiFunctions(host){
         deleteSurfaceDc(handle){
             return table.DeleteDC.handler([handle]) === 1;
         },
+
+        /**
+         * What a device context draws on, for the pixel-format negotiation
+         * that OPENGL32 keeps. A window's contexts all name the window, so a
+         * format set on one DC is found by the next DC of the same window --
+         * which is where Windows keeps it, and how a program that releases
+         * and reacquires its DC still has its format. Any other context is
+         * its own drawable.
+         *
+         * @param {number} hdc
+         * @returns {{ key: string, width: number, height: number } | null}
+         */
+        describeDrawable(hdc){
+            const dc = contexts.get(hdc >>> 0);
+            if (!dc)
+            {
+                return null;
+            }
+            const bounds = dc.bounds;
+            const size = bounds
+                ? { width: bounds.right - bounds.left, height: bounds.bottom - bounds.top }
+                : surfaceOf(dc);
+            const own = dc.kind === 'window' && dc.window !== 0;
+            return {
+                key: own ? `window:${dc.window}` : `dc:${dc.hdc}`,
+                width: size.width,
+                height: size.height,
+            };
+        },
     };
 }

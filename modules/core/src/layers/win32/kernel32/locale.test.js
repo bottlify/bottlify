@@ -278,6 +278,7 @@ test('the wide form of GetStringType has no locale argument', ()=>{
     const fns = createLocaleFunctions(host);
 
     assert.equal(fns.GetStringTypeA.argBytes, 20);
+    assert.equal(fns.GetStringTypeExA, fns.GetStringTypeA, 'the Ex form is the A form');
     assert.equal(fns.GetStringTypeW.argBytes, 16);
 
     host.plantWide(0x100, 'Q');

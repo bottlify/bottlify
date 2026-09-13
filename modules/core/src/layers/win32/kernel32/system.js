@@ -564,6 +564,31 @@ export function createSystemFunctions(host){
         },
 
         /**
+         * BOOL GetExitCodeThread(HANDLE hThread, LPDWORD lpExitCode)
+         *
+         * A thread that has not finished is STILL_ACTIVE, and one that has
+         * reports the code it left with -- which is why the handle has to stay
+         * valid after the thread is gone.
+         */
+        GetExitCodeThread: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([handle, code])=>{
+                const target = thread(handle);
+                if (!target)
+                {
+                    host.setLastError(ERROR_INVALID_HANDLE);
+                    return 0;
+                }
+                const bytes = new Uint8Array(4);
+                new DataView(bytes.buffer).setUint32(
+                    0, target.exitCode ?? STILL_ACTIVE, true);
+                host.writeMemory(code >>> 0, bytes);
+                return 1;
+            },
+        },
+
+        /**
          * BOOL TerminateProcess(HANDLE hProcess, UINT uExitCode)
          *
          * Only the running process can be terminated, and terminating it does

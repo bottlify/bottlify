@@ -1073,6 +1073,8 @@ export const win32Module = {
                 createSurfaceDc: attributes=>gdi.createSurfaceDc(attributes),
                 /** @param {number} handle */
                 deleteSurfaceDc: handle=>gdi.deleteSurfaceDc(handle),
+                /** @param {number} hdc */
+                describeDrawable: hdc=>gdi.describeDrawable(hdc),
             }),
 
             /**

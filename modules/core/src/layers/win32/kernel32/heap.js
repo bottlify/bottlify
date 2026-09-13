@@ -109,6 +109,24 @@ const MEMORYSTATUS = Object.freeze({
     SIZE: 32,
 });
 
+/**
+ * MEMORYSTATUSEX. The same eight figures widened to 64 bits, plus one that is
+ * always zero; the caller fills in dwLength before asking, and a size that is
+ * not this one is refused, as Windows refuses it.
+ */
+const MEMORYSTATUSEX = Object.freeze({
+    dwLength: 0,
+    dwMemoryLoad: 4,
+    ullTotalPhys: 8,
+    ullAvailPhys: 16,
+    ullTotalPageFile: 24,
+    ullAvailPageFile: 32,
+    ullTotalVirtual: 40,
+    ullAvailVirtual: 48,
+    ullAvailExtendedVirtual: 56,
+    SIZE: 64,
+});
+
 /** Marks the blocks VirtualAlloc handed out, so HeapFree cannot reach them. */
 const VIRTUAL = Symbol('virtual');
 
@@ -1130,6 +1148,38 @@ export function createHeapFunctions(host){
                 view.setUint32(MEMORYSTATUS.dwAvailVirtual, free, true);
                 host.writeMemory(buffer >>> 0, data);
                 return 0;
+            },
+        },
+
+        /** BOOL GlobalMemoryStatusEx(LPMEMORYSTATUSEX lpBuffer) */
+        GlobalMemoryStatusEx: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([buffer])=>{
+                const header = buffer === 0 ? null : host.readMemory(buffer >>> 0, 4);
+                const length = header === null
+                    ? 0
+                    : new DataView(header.buffer, header.byteOffset, 4).getUint32(0, true);
+                if (length !== MEMORYSTATUSEX.SIZE)
+                {
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const free = allocator.diagnostics().free;
+                const total = host.arena.size;
+                const data = new Uint8Array(MEMORYSTATUSEX.SIZE);
+                const view = new DataView(data.buffer);
+                view.setUint32(MEMORYSTATUSEX.dwLength, MEMORYSTATUSEX.SIZE, true);
+                view.setUint32(MEMORYSTATUSEX.dwMemoryLoad,
+                    total === 0 ? 0 : Math.round((total - free) / total * 100), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullTotalPhys, BigInt(total), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailPhys, BigInt(free), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullTotalPageFile, BigInt(total), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailPageFile, BigInt(free), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullTotalVirtual, BigInt(total), true);
+                view.setBigUint64(MEMORYSTATUSEX.ullAvailVirtual, BigInt(free), true);
+                host.writeMemory(buffer >>> 0, data);
+                return 1;
             },
         },
     };

@@ -110,6 +110,8 @@ function fakeSurfaces(){
 function fakeDrawing(){
     /** @type {any[]} */
     const calls = [];
+    /** @type {Map<number, number>} the formats, kept where OPENGL32 keeps them */
+    const formats = new Map();
     const surface = { width: 640, height: 480 };
     const drawing = {
         calls,
@@ -187,6 +189,18 @@ function fakeDrawing(){
                 choose: ()=>2,
                 /** @param {number} index */
                 describe: index=>index >= 1 && index <= 3 ? new Uint8Array(40).fill(index) : null,
+                /** @param {number} hdc @param {number} index */
+                set(hdc, index){
+                    calls.push(['setPixelFormat', hdc, index]);
+                    if (index < 1 || index > 3 || (formats.has(hdc) && formats.get(hdc) !== index))
+                    {
+                        return false;
+                    }
+                    formats.set(hdc, index);
+                    return true;
+                },
+                /** @param {number} hdc */
+                get: hdc=>formats.get(hdc) ?? 0,
             },
             /** @param {number} hdc */
             swapBuffers(hdc){
@@ -430,9 +444,9 @@ test('a palette is real, selectable, and realizes no entries', ()=>{
 
 // --- pixel formats ---
 
-test('a pixel format is set once', ()=>{
-    // A program probes formats by setting one and checking. Letting a second,
-    // different format through would make every probe succeed.
+test('a pixel format is set through the service that OPENGL32 reads, never on the DC', ()=>{
+    // A program sets the format through GDI32 and creates its context through
+    // OPENGL32; a format kept here would be one the context never sees.
     const graphics = fakeDrawing();
     const { fns, hdc } = setup(graphics.services);
 
@@ -442,6 +456,10 @@ test('a pixel format is set once', ()=>{
     assert.equal(fns.SetPixelFormat.handler([hdc, 2, 0]), 1, 'the same one again succeeds');
     assert.equal(fns.SetPixelFormat.handler([hdc, 1, 0]), 0, 'a different one does not');
     assert.equal(fns.SetPixelFormat.handler([hdc, 99, 0]), 0, 'nor does one that does not exist');
+    assert.deepEqual(graphics.calls.filter(call=>call[0] === 'setPixelFormat').map(call=>call[2]),
+        [2, 2, 1, 99], 'every request reached the service, which is where the rule lives');
+    assert.equal(fns.SetPixelFormat.handler([0x7777, 2, 0]), 0,
+        'a handle that is not a DC is refused here');
 });
 
 test('DescribePixelFormat answers with the count whether or not it describes', ()=>{

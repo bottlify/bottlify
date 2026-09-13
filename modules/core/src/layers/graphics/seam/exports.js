@@ -79,7 +79,9 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *             opengl: { pixelFormat: { size: () => number, count: () => number,
  *                                      choose: (bytes: Uint8Array) => number,
  *                                      describe: (index: number, bytes: number) =>
- *                                          Uint8Array | null },
+ *                                          Uint8Array | null,
+ *                                      set: (hdc: number, index: number) => boolean,
+ *                                      get: (hdc: number) => number },
  *                       swapBuffers: (hdc: number) => boolean },
  *             diagnostics: () => any,
  *             shadow: () => any }}
@@ -319,6 +321,10 @@ export function createGraphicsLibraries(
                 choose: bytes=>openglRuntime().pixelFormat.choose(bytes),
                 /** @param {number} index @param {number} bytes */
                 describe: (index, bytes)=>openglRuntime().pixelFormat.describe(index, bytes),
+                /** @param {number} hdc @param {number} index */
+                set: (hdc, index)=>openglRuntime().pixelFormat.set(hdc, index),
+                /** @param {number} hdc */
+                get: hdc=>openglRuntime().pixelFormat.get(hdc),
             },
             /** @param {number} hdc */
             swapBuffers: hdc=>openglRuntime().swapBuffers(hdc),

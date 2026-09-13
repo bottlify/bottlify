@@ -787,6 +787,18 @@ export function createProcessFunctions(host){
             handler: ()=>1,
         },
 
+        /**
+         * BOOL SetProcessWorkingSetSize(HANDLE hProcess, SIZE_T dwMinimumWorkingSetSize,
+         *                               SIZE_T dwMaximumWorkingSetSize)
+         *
+         * There is no paging here, so there is no working set to bound; the
+         * request is accepted the way it is on a machine with room for it.
+         */
+        SetProcessWorkingSetSize: {
+            argBytes: 12,
+            handler: ()=>1,
+        },
+
         /** DWORD TlsAlloc(VOID) */
         TlsAlloc: {
             argBytes: 0,

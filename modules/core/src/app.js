@@ -2243,6 +2243,10 @@ async function buildApp(options){
                     /** @param {number} index @param {number} bytes */
                     describe: (index, bytes)=>
                         core.api('graphics').opengl().pixelFormat.describe(index, bytes),
+                    /** @param {number} hdc @param {number} index */
+                    set: (hdc, index)=>core.api('graphics').opengl().pixelFormat.set(hdc, index),
+                    /** @param {number} hdc */
+                    get: hdc=>core.api('graphics').opengl().pixelFormat.get(hdc),
                 },
                 /** @param {number} hdc */
                 swapBuffers: hdc=>core.api('graphics').opengl().swapBuffers(hdc),

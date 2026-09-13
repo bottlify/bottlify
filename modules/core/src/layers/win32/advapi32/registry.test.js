@@ -80,6 +80,14 @@ test('the keys every machine carries are there before any program writes', ()=>{
     const dxVersion = directX && hive.getValue(directX, 'Version');
     assert.equal(dxVersion && String.fromCharCode(...dxVersion.data.subarray(0, 12)),
         '4.09.00.0904');
+    // A program reads the processor's speed here to scale its own clock
+    // readings, and one that finds nothing calls this a 0 MHz machine.
+    const processor = hive.open(local, 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0');
+    const mhz = processor && hive.getValue(processor, '~MHz');
+    assert.equal(mhz?.type, REG_DWORD, 'as a DWORD, which is how the kernel writes it');
+    assert.deepEqual(mhz && [...mhz.data], [0xe8, 0x03, 0, 0],
+        '1000 MHz, the rate rdtsc advances at');
+    assert.ok(processor && hive.getValue(processor, 'VendorIdentifier'));
 
     // A restore keeps what a program wrote and puts back what it deleted.
     hive.remove(local, 'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\SharedDLLs');
@@ -237,7 +245,7 @@ test('restoring a partial save leaves the other roots usable', ()=>{
 
     assert.ok(hive.root(HKEY_LOCAL_MACHINE), 'a root nobody saved is there, not absent');
     assert.deepEqual(hive.subkeys(/** @type {any} */ (hive.root(HKEY_LOCAL_MACHINE))),
-        ['SOFTWARE', 'SYSTEM'], 'holding only what every machine holds');
+        ['SOFTWARE', 'SYSTEM', 'HARDWARE'], 'holding only what every machine holds');
     assert.equal(hive.root(HKEY_UNKNOWN_ROOT), null);
 });
 

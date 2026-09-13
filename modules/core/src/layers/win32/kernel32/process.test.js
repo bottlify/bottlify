@@ -464,6 +464,12 @@ test('SleepEx and the priority and affinity calls pop their own stdcall bytes', 
     assert.equal(fns.SetProcessAffinityMask.argBytes, 8);
 });
 
+test('a working-set request is accepted and pops its three arguments', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.SetProcessWorkingSetSize.handler([0xffffffff, 0x100000, 0x800000]), 1);
+    assert.equal(fns.SetProcessWorkingSetSize.argBytes, 12);
+});
+
 test('the clock routines read one block, and what they read is what a trap would answer', ()=>{
     const at = 0x20000;
     const trap = 0x7f000010;

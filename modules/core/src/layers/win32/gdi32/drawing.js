@@ -98,8 +98,12 @@ const GAMMA_RAMP_BYTES = 3 * GAMMA_CHANNEL_ENTRIES * 2;
  *           How wide the engine draws a string in a font; null, or absent,
  *           without an engine.
  * @property {any} [pixelFormat]
- *           The pixel-format service: `choose(descriptor)`, `describe(index)`
- *           and `count()`. Absent in a build with no rendering surface.
+ *           The pixel-format service: `choose(descriptor)`, `describe(index)`,
+ *           `count()`, and `set(hdc, index)` / `get(hdc)` for the format a
+ *           drawable carries. The format lives there and not on the DC: a
+ *           program sets it through this library and creates its context
+ *           through OPENGL32, and the two must be reading one record. Absent
+ *           in a build with no rendering surface.
  * @property {(hdc: number) => boolean} [swapBuffers]
  *           Presents the frame an OpenGL context drew into a device context.
  *           Absent in a build that cannot draw, where SwapBuffers fails rather
@@ -1140,40 +1144,23 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         GetPixelFormat: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([handle])=>{
-                const dc = dcOf(handle);
-                return dc ? dc.pixelFormat ?? 0 : 0;
-            },
+            handler: ([handle])=>(dcOf(handle) && services.pixelFormat
+                ? services.pixelFormat.get(handle >>> 0) | 0
+                : 0),
         },
 
         /**
          * BOOL SetPixelFormat(HDC hdc, int format, const PIXELFORMATDESCRIPTOR *ppfd)
          *
-         * Set once. Setting the format already in effect succeeds and changes
-         * nothing; setting a different one fails, which is what a program that
-         * probes formats depends on.
+         * Set once, on the window rather than the DC -- the service keeps that
+         * rule, so that a context made through OPENGL32 on a later DC of the
+         * same window finds the format this call set.
          */
         SetPixelFormat: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([handle, format])=>{
-                const dc = dcOf(handle);
-                if (!dc || !services.pixelFormat)
-                {
-                    return 0;
-                }
-                const wanted = format | 0;
-                if (wanted < 1 || wanted > services.pixelFormat.count())
-                {
-                    return 0;
-                }
-                if ((dc.pixelFormat ?? 0) !== 0)
-                {
-                    return dc.pixelFormat === wanted ? 1 : 0;
-                }
-                dc.pixelFormat = wanted;
-                return 1;
-            },
+            handler: ([handle, format])=>(dcOf(handle) && services.pixelFormat
+                && services.pixelFormat.set(handle >>> 0, format | 0) ? 1 : 0),
         },
 
         /**

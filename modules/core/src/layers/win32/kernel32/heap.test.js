@@ -522,6 +522,27 @@ test('the global functions declare the stack they pop', ()=>{
     assert.equal(fns.LocalFree.argBytes, 4);
 });
 
+test('GlobalMemoryStatusEx reports the arena in 64-bit fields and insists on its own size', ()=>{
+    const { host, fns } = setup();
+    const view = new DataView(host.bytes.buffer);
+    const at = 0x100;
+    assert.equal(fns.GlobalMemoryStatusEx.argBytes, 4);
+
+    view.setUint32(at, 32, true);
+    assert.equal(fns.GlobalMemoryStatusEx.handler([at]), 0,
+        'a MEMORYSTATUS-sized buffer is refused');
+    assert.equal(fns.GlobalMemoryStatusEx.handler([0]), 0);
+
+    view.setUint32(at, 64, true);
+    assert.equal(fns.GlobalMemoryStatusEx.handler([at]), 1);
+    assert.equal(view.getUint32(at, true), 64);
+    assert.equal(view.getBigUint64(at + 8, true), BigInt(ARENA.size), 'total physical');
+    const free = view.getBigUint64(at + 16, true);
+    assert.ok(free > 0n && free <= BigInt(ARENA.size), 'available physical is what the arena has');
+    assert.equal(view.getBigUint64(at + 40, true), BigInt(ARENA.size), 'total virtual');
+    assert.equal(view.getBigUint64(at + 56, true), 0n, 'no extended virtual');
+});
+
 test('a refused allocation says what was asked and what was left', ()=>{
     // A program told it has run out of memory says so in its own words and
     // exits; the report is the only account of how much it asked for.

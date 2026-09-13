@@ -1429,6 +1429,13 @@ export function createOpengl(services){
                 return encodePixelFormat(PIXEL_FORMATS[index - 1])
                     .subarray(0, Math.min(bytes, PIXELFORMATDESCRIPTOR.SIZE));
             },
+            // The format a drawable carries is WGL's record: SetPixelFormat
+            // through GDI32 and wglCreateContext through OPENGL32 read one
+            // entry, so a format set through the first is found by the second.
+            /** @param {number} hdc @param {number} index */
+            set: (hdc, index)=>wgl.SetPixelFormat(hdc, index),
+            /** @param {number} hdc */
+            get: hdc=>wgl.GetPixelFormat(hdc),
         },
 
         diagnostics: ()=>({

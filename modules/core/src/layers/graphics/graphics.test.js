@@ -22,7 +22,9 @@ function hostWith(/** @type {any} */ memory){
         // Only the part this layer reaches for: a device context over a surface
         // it owns rather than gdi32 does.
         win32: {
-            gdi: ()=>({ createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false }),
+            gdi: ()=>({
+                createSurfaceDc: ()=>0, deleteSurfaceDc: ()=>false, describeDrawable: ()=>null,
+            }),
             heap: ()=>({ allocate: ()=>0 }),
         },
         bridge: { callGuest: ()=>Promise.resolve(0) },

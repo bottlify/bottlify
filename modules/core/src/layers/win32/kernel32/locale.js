@@ -724,7 +724,7 @@ export function createLocaleFunctions(host){
         return out;
     };
 
-    return {
+    const table = {
         /** UINT GetACP(VOID) */
         GetACP: { argBytes: 0, handler: ()=>ANSI_CODE_PAGE },
 
@@ -1184,4 +1184,8 @@ export function createLocaleFunctions(host){
             },
         },
     };
+
+    // GetStringTypeExA is GetStringTypeA with the locale made explicit in the
+    // name: same five arguments, same answer.
+    return { ...table, GetStringTypeExA: table.GetStringTypeA };
 }

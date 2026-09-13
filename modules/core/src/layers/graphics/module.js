@@ -168,6 +168,12 @@ export const graphicsModule = {
                 readMemory: services.readMemory,
                 writeMemory: services.writeMemory,
                 screen: ()=>services.screen,
+                // Which window a DC belongs to is GDI's knowledge, and the
+                // pixel format belongs to the window: without this every DC
+                // would be a drawable of its own and a format set on one
+                // would be lost to the next.
+                /** @param {number} hdc */
+                describeDrawable: hdc=>win32.gdi().describeDrawable(hdc),
                 ...options,
             }),
             // Direct3D 10's seam makes the device itself from what a program

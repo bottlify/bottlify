@@ -158,8 +158,18 @@ function keyFromJSON(stored){
  * @typedef {Object} MachineKey
  * @property {number} root
  * @property {string} path
- * @property {Record<string, string>} [values]
+ * @property {Record<string, string | number>} [values]  Text is REG_SZ, a number REG_DWORD.
  */
+
+/**
+ * The rate the time-stamp counter advances at, in MHz, which is what Windows
+ * measures at boot and writes as the processor's speed. It is the emulated
+ * counter's rate -- one tick per host nanosecond, which is also what the
+ * emulated CPUID reports as the base frequency -- not the host's: a program
+ * reads this to turn rdtsc deltas into seconds, and any other figure would
+ * put its clocks out by that ratio.
+ */
+const PROCESSOR_MHZ = 1000;
 
 /**
  * Where the shell keeps its folders, by the names the registry lists them
@@ -235,6 +245,16 @@ const MACHINE_KEYS = Object.freeze(/** @type {MachineKey[]} */ ([
         PathName: 'C:\\WINDOWS',
     } },
     { root: HKEY_LOCAL_MACHINE, path: 'SYSTEM\\CurrentControlSet\\Control\\Session Manager' },
+    // What the kernel wrote about the processor it found: the identifier is
+    // the emulated CPUID's family, model and stepping, and the speed the
+    // emulated counter's rate. A program reads the speed from here before it
+    // measures anything, and one that finds no key reports a 0 MHz machine.
+    { root: HKEY_LOCAL_MACHINE, path: 'HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0',
+        values: {
+            Identifier: 'x86 Family 6 Model 7 Stepping 3',
+            VendorIdentifier: 'GenuineIntel',
+            '~MHz': PROCESSOR_MHZ,
+        } },
     // The DirectX this machine has, in the form its own setup library reads
     // back: 9.0c, the newest of the interfaces the drawing layer answers for.
     // An installer that finds no version here offers to install one, and the
@@ -257,6 +277,13 @@ const sz = text=>{
     {
         bytes[at] = text.charCodeAt(at) & 0xff;
     }
+    return bytes;
+};
+
+/** @param {number} value @returns {Uint8Array} a little-endian DWORD */
+const dword = value=>{
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setUint32(0, value >>> 0, true);
     return bytes;
 };
 
@@ -317,11 +344,13 @@ export function createHive(){
                 }
                 node = next;
             }
-            for (const [name, text] of Object.entries(entry.values ?? {}))
+            for (const [name, value] of Object.entries(entry.values ?? {}))
             {
                 if (!node.values.has(fold(name)))
                 {
-                    node.values.set(fold(name), { name, type: REG_SZ, data: sz(text) });
+                    node.values.set(fold(name), typeof value === 'number'
+                        ? { name, type: REG_DWORD, data: dword(value) }
+                        : { name, type: REG_SZ, data: sz(value) });
                 }
             }
         }
