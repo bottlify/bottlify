@@ -353,6 +353,136 @@ test('destroying a menu takes its submenus with it', ()=>{
     assert.equal(fns.GetMenuItemCount.handler([inner]), -1, 'the submenu went too');
 });
 
+/**
+ * A menu template in the resource compiler's own layout: items end to end with
+ * no padding, a popup's items right after its text, MF_END closing a level.
+ *
+ * @param {number[]} words The template as little-endian WORDs.
+ * @returns {Uint8Array}
+ */
+function menuResource(words){
+    const bytes = new Uint8Array(words.length * 2);
+    words.forEach((word, index)=>{
+        bytes[index * 2] = word & 0xff;
+        bytes[index * 2 + 1] = (word >>> 8) & 0xff;
+    });
+    return bytes;
+}
+
+/** "File" holding New, a separator and Exit; then "Help" holding About. */
+const TWO_MENUS = menuResource([
+    0x0000, 0x0000,                          // version 0, no extra header
+    0x0010, ...[...'File'].map(c=>c.charCodeAt(0)), 0x0000,  // popup "File"
+    0x0000, 0x0001, ...[...'New'].map(c=>c.charCodeAt(0)), 0x0000,
+    0x0800, 0x0000, 0x0000,                  // separator
+    0x0080, 0x0002, ...[...'Exit'].map(c=>c.charCodeAt(0)), 0x0000,  // MF_END
+    0x0090, ...[...'Help'].map(c=>c.charCodeAt(0)), 0x0000,  // popup, MF_END
+    0x0080, 0x0003, ...[...'About'].map(c=>c.charCodeAt(0)), 0x0000, // MF_END
+]);
+
+/**
+ * A host whose module holds one menu resource, at a base the reads add to.
+ *
+ * @param {Uint8Array} template @param {number | string} [name]
+ */
+function menuHost(template, name = 128){
+    const BASE = 0x400;
+    const RVA = 0x10;
+    return {
+        base: BASE,
+        host: {
+            /** @param {number} instance @param {number} type @param {number | string} asked */
+            findResource: (instance, type, asked)=>(type === 4 && asked === name
+                && instance === BASE ? { rva: RVA, size: template.length } : null),
+            moduleBase: ()=>BASE,
+        },
+        /** @param {any} memory */
+        plant(memory){
+            memory.writeMemory(BASE + RVA, template);
+        },
+    };
+}
+
+test('a menu resource loads into the tree its template holds', ()=>{
+    const source = menuHost(TWO_MENUS);
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+
+    const menu = fns.LoadMenuA.handler([source.base, 128]);
+    assert.notEqual(menu, 0, 'the module carries the resource, so the menu loads');
+    // The top level is the two bars; each opens a popup of its own.
+    assert.equal(fns.GetMenuItemCount.handler([menu]), 2);
+    const file = fns.GetSubMenu.handler([menu, 0]);
+    assert.notEqual(file, 0, 'the first bar opens a submenu');
+    assert.equal(fns.GetMenuItemCount.handler([file]), 3, 'New, a separator and Exit');
+    assert.equal(fns.GetMenuItemID.handler([file, 0]), 1, 'New keeps its id');
+    assert.equal(fns.GetMenuItemID.handler([file, 2]), 2, 'and so does Exit');
+    assert.equal(fns.GetMenuItemID.handler([file, 1]), 0, 'a separator has no command');
+    const help = fns.GetSubMenu.handler([menu, 1]);
+    assert.equal(fns.GetMenuItemCount.handler([help]), 1);
+    assert.equal(fns.GetMenuItemID.handler([help, 0]), 3, 'About under Help');
+});
+
+test('a loaded menu reads back its text, and a separator says it is one', ()=>{
+    const source = menuHost(TWO_MENUS);
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+
+    const menu = fns.LoadMenuA.handler([source.base, 128]);
+    const file = fns.GetSubMenu.handler([menu, 0]);
+    putItemInfo(memory, { mask: MIIM_STRING, text: '........', cch: 16 });
+    assert.equal(fns.GetMenuItemInfoA.handler([file, 0, 1, INFO]), 1);
+    // GetMenuItemInfoA writes the text into the caller's buffer and its length
+    // back into cch; read both to see the item was named "New".
+    assert.equal(memory.readCString(TEXT, 16), 'New');
+    assert.equal(memory.u32(INFO + 40), 3, 'and cch came back the text\'s length');
+
+    putItemInfo(memory, { mask: 0x0010, text: '........' });   // MIIM_TYPE
+    fns.GetMenuItemInfoA.handler([file, 1, 1, INFO]);
+    assert.equal(memory.u32(INFO + 8) & 0x0800, 0x0800, 'the middle item is a separator');
+});
+
+test('a menu named by a string is found, and one the module lacks is not', ()=>{
+    const source = menuHost(TWO_MENUS, 'MAINMENU');
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+    memory.putString(NAME_A, 'MAINMENU');
+
+    assert.notEqual(fns.LoadMenuA.handler([source.base, NAME_A]), 0,
+        'the name the resource is filed under loads it');
+    memory.putString(NAME_B, 'OTHER');
+    assert.equal(fns.LoadMenuA.handler([source.base, NAME_B]), 0, 'a name it lacks does not');
+    assert.equal(fns.LoadMenuA.handler([source.base, 999]), 0, 'nor does an id it lacks');
+});
+
+test('a menu with no module behind it, or a cut template, loads nothing', ()=>{
+    const source = menuHost(TWO_MENUS);
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+
+    // A module the loader never mapped has no base, so there is nothing to read.
+    assert.equal(fns.LoadMenuA.handler([0x999, 128]), 0);
+
+    // A template whose last popup never says MF_END was cut mid-menu; loading
+    // it would invent the items the bytes ran out before spelling.
+    const cut = menuHost(TWO_MENUS.subarray(0, TWO_MENUS.length - 6), 7);
+    const partial = setup(cut.host);
+    cut.plant(partial.memory);
+    assert.equal(partial.fns.LoadMenuA.handler([cut.base, 7]), 0);
+});
+
+test('loading a menu twice makes two menus, each its owner can destroy alone', ()=>{
+    const source = menuHost(TWO_MENUS);
+    const { memory, fns } = setup(source.host);
+    source.plant(memory);
+
+    const first = fns.LoadMenuA.handler([source.base, 128]);
+    const second = fns.LoadMenuA.handler([source.base, 128]);
+    assert.notEqual(first, second, 'each load is the caller\'s own copy');
+    assert.equal(fns.DestroyMenu.handler([first]), 1);
+    assert.equal(fns.GetMenuItemCount.handler([second]), 2, 'and the other is untouched');
+});
+
 // --- accelerators ---
 
 test('an accelerator table is six bytes to an entry, not eight', ()=>{

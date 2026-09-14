@@ -1362,13 +1362,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
 
         /**
          * The entry points a windowing framework imports and this build has
-         * nothing behind: menus and accelerators out of resources, help, DDE
-         * packing, the drawing of text this build does not draw, a session
-         * end. Each pops what it was pushed and answers as the call does when
-         * the thing asked for is not there; a stub popping nothing would walk
-         * the caller's stack off by the width of its arguments.
+         * nothing behind: accelerators out of resources, help, DDE packing,
+         * the drawing of text this build does not draw, a session end. Each
+         * pops what it was pushed and answers as the call does when the thing
+         * asked for is not there; a stub popping nothing would walk the
+         * caller's stack off by the width of its arguments.
          *
-         * HMENU LoadMenuA(HINSTANCE, LPCSTR)
          * HACCEL LoadAcceleratorsA(HINSTANCE, LPCSTR)
          * BOOL UnpackDDElParam(UINT, LPARAM, PUINT_PTR, PUINT_PTR)
          * LPARAM ReuseDDElParam(LPARAM, UINT, UINT, UINT_PTR, UINT_PTR)
@@ -1378,7 +1377,6 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * HWND GetNextDlgTabItem(HWND, HWND, BOOL)
          * BOOL ExitWindowsEx(UINT, DWORD)
          */
-        LoadMenuA: { argBytes: 8, handler: ()=>0 },
         LoadAcceleratorsA: { argBytes: 8, handler: ()=>0 },
         UnpackDDElParam: { argBytes: 16, handler: ()=>0 },
         ReuseDDElParam: { argBytes: 20, handler: ()=>0 },

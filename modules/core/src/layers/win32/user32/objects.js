@@ -33,6 +33,9 @@
 export const RT_GROUP_CURSOR = 12;
 export const RT_GROUP_ICON = 14;
 
+/** The resource directory a menu template is filed under. */
+const RT_MENU = 4;
+
 /** A resource name is an integer below this and a pointer to a string above. */
 const MAX_INTEGER_RESOURCE = 0x10000;
 const MAX_RESOURCE_NAME = 256;
@@ -81,6 +84,7 @@ const MF_CHECKED = 0x0008;
 const MFT_SEPARATOR = 0x0800;
 const MF_BITMAP = 0x0004;
 const MF_POPUP = 0x0010;
+const MF_END = 0x0080;
 const MF_OWNERDRAW = 0x0100;
 const MF_SEPARATOR = 0x0800;
 /** The check mark of the default menu font, in pixels each way. */
@@ -212,6 +216,148 @@ function destroyObjectHandle(host, handle){
         return false;
     }
 }
+
+/**
+ * A parsed menu template: items end to end, a popup's own items nested in it.
+ *
+ * @typedef {Object} ParsedMenuItem
+ * @property {number} id
+ * @property {number} type
+ * @property {number} state
+ * @property {ParsedMenuItem[] | null} popup  The items a popup holds, else null.
+ * @property {string} text
+ */
+
+/** How deep a menu resource may nest before it is read as damaged. */
+const MAX_MENU_DEPTH = 16;
+
+/**
+ * The text a menu item carries: UTF-16 up to its terminator, read out of the
+ * template's own bytes. Null when the bytes end first, which is a template
+ * that was cut rather than a menu with an empty string in it.
+ *
+ * @param {Uint8Array} bytes @param {number} at
+ * @returns {{ text: string, end: number } | null}
+ */
+const wideText = (bytes, at)=>{
+    let text = '';
+    for (let index = at; ; index += 2)
+    {
+        if (index + 1 >= bytes.length)
+        {
+            return null;
+        }
+        const unit = bytes[index] | bytes[index + 1] << 8;
+        if (unit === 0)
+        {
+            return { text, end: index + 2 };
+        }
+        text += String.fromCharCode(unit);
+    }
+};
+
+/**
+ * One menu level of an RT_MENU template, and where the level after it starts.
+ *
+ * The layout is the resource compiler's own: a WORD of option flags, a WORD id
+ * that a popup does not carry, then the item's text. Items sit end to end with
+ * no padding between them; a popup's items follow its own text at once, and
+ * MF_END closes the level they are in -- which for the last popup on a level
+ * closes both, its own flags carrying MF_POPUP and MF_END together. The top
+ * level ends at the resource's end whether or not the last item said MF_END,
+ * because a bar menu is not required to.
+ *
+ * @param {Uint8Array} bytes @param {number} start @param {number} depth
+ * @param {boolean} topLevel
+ * @returns {{ items: ParsedMenuItem[], end: number } | null}
+ *     Null when the bytes run out mid-item, or the nesting goes too deep.
+ */
+const parseMenuLevel = (bytes, start, depth, topLevel)=>{
+    if (depth > MAX_MENU_DEPTH)
+    {
+        return null;
+    }
+    /** @type {ParsedMenuItem[]} */
+    const items = [];
+    let at = start;
+    for (;;)
+    {
+        if (at + 2 > bytes.length)
+        {
+            // Out of bytes. The top level may simply have ended; a popup that
+            // ends without MF_END was cut, and guessing where it stopped would
+            // invent items.
+            return topLevel ? { items, end: at } : null;
+        }
+        const option = bytes[at] | bytes[at + 1] << 8;
+        at += 2;
+        const popup = (option & MF_POPUP) !== 0;
+        let id = 0;
+        if (!popup)
+        {
+            if (at + 2 > bytes.length)
+            {
+                return null;
+            }
+            id = bytes[at] | bytes[at + 1] << 8;
+            at += 2;
+        }
+        const named = wideText(bytes, at);
+        if (named === null)
+        {
+            return null;
+        }
+        at = named.end;
+        // A separator is an item with no id and no text; the compiler spells
+        // it with the separator flag or with nothing at all, and either reads
+        // the same.
+        const separator = (option & MF_SEPARATOR) !== 0
+            || (!popup && id === 0 && named.text === '');
+        /** @type {ParsedMenuItem} */
+        const item = {
+            id: popup ? 0 : id,
+            type: (separator ? MFT_SEPARATOR : 0) | (option & MF_OWNERDRAW),
+            state: option & (MF_GRAYED | MF_DISABLED | MF_CHECKED),
+            popup: null,
+            text: separator || (option & (MF_BITMAP | MF_OWNERDRAW)) !== 0 ? '' : named.text,
+        };
+        if (popup)
+        {
+            const inner = parseMenuLevel(bytes, at, depth + 1, false);
+            if (inner === null)
+            {
+                return null;
+            }
+            item.popup = inner.items;
+            at = inner.end;
+        }
+        items.push(item);
+        if ((option & MF_END) !== 0)
+        {
+            return { items, end: at };
+        }
+    }
+};
+
+/**
+ * A whole RT_MENU resource: the two-word header, then the top level.
+ *
+ * The header is a version that is always zero and a count of the bytes that
+ * come after it before the first item, which is how a resource says where its
+ * items start rather than assuming they follow at once.
+ *
+ * @param {Uint8Array} bytes
+ * @returns {ParsedMenuItem[] | null}
+ */
+const parseMenuTemplate = bytes=>{
+    if (bytes.length < 4 || (bytes[0] | bytes[1] << 8) !== 0)
+    {
+        return null;
+    }
+    const parsed = parseMenuLevel(bytes, 4 + (bytes[2] | bytes[3] << 8), 0, true);
+    return parsed?.items ?? null;
+};
+
 
 /**
  * @param {Object} options
@@ -380,6 +526,57 @@ export function createObjectFunctions({ host, live }){
         };
     };
 
+    /**
+     * Parsed items made into a live menu, its popups made into live menus of
+     * their own first so an item's `submenu` is the handle a program then
+     * addresses them by. Every menu is registered as it is made, so a popup
+     * this walks past is one GetSubMenu and DestroyMenu already know.
+     *
+     * @param {ParsedMenuItem[]} parsed @param {boolean} popup
+     * @returns {number} the new menu's handle
+     */
+    const materializeMenu = (parsed, popup)=>{
+        /** @type {{ handle: number, popup: boolean, items: any[] }} */
+        const record = { handle: 0, popup, items: [] };
+        record.handle = host.handles.open('menu', record);
+        menus.set(record.handle, record);
+        for (const item of parsed)
+        {
+            record.items.push({
+                id: item.id, type: item.type, state: item.state, data: 0, text: item.text,
+                submenu: item.popup === null ? 0 : materializeMenu(item.popup, true),
+            });
+        }
+        return record.handle;
+    };
+
+    /**
+     * A menu out of a module's resources: the template is found where the
+     * loader mapped it, read in place, and built into the same records
+     * CreateMenu keeps. Null answers zero rather than guessing at a menu a
+     * program would then act on commands from.
+     *
+     * @param {number} instance @param {number} name @param {boolean} wide
+     * @returns {number} the loaded menu's handle, or zero
+     */
+    const loadMenu = (instance, name, wide)=>{
+        const module = instance >>> 0;
+        const raw = name >>> 0;
+        const key = raw < MAX_INTEGER_RESOURCE
+            ? raw
+            : (wide ? readTerminated(raw, 2) : host.readCString(raw, MAX_RESOURCE_NAME));
+        const found = /** @type {{ rva: number, size: number } | null} */ (
+            host.findResource?.(module, RT_MENU, key) ?? null);
+        const base = host.moduleBase?.(module) ?? 0;
+        if (found === null || base === 0)
+        {
+            return 0;
+        }
+        const items = parseMenuTemplate(
+            host.readMemory((base + found.rva) >>> 0, found.size));
+        return items === null ? 0 : materializeMenu(items, false);
+    };
+
     /** @param {any} record @param {number} bar */
     const scrollOf = (record, bar)=>{
         record.scroll ??= new Map();
@@ -472,6 +669,26 @@ export function createObjectFunctions({ host, live }){
                 menus.set(record.handle, record);
                 return record.handle;
             },
+        },
+
+        /**
+         * HMENU LoadMenuA(HINSTANCE hInstance, LPCSTR lpMenuName)
+         *
+         * A menu the program's own resources carry, built into the records the
+         * menu calls above already read. Zero when there is no such resource,
+         * which is what a program checks before it puts the menu on a window.
+         */
+        LoadMenuA: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>loadMenu(instance, name, false),
+        },
+
+        /** HMENU LoadMenuW(HINSTANCE, LPCWSTR) -- the same menu, named in wide text. */
+        LoadMenuW: {
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([instance, name])=>loadMenu(instance, name, true),
         },
 
         /**
