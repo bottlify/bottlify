@@ -43,6 +43,9 @@ const VA_LIST_SLOTS = 64;
  */
 const MAX_STRING = 1 << 20;
 
+/** A scan table marking nothing: a walk only the terminator ends. */
+const NO_BYTES = new Uint8Array(256);
+
 const INT_MAX = 0x7fffffff;
 const INT_MIN = -0x80000000;
 
@@ -61,6 +64,11 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *     the pattern: the lengths are the program's, and a clear of a megabyte
  *     through writeMemory costs an allocation and two extra passes.
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, limit: number, wanted: Uint8Array) =>
+ *            { index: number, byte: number }} scanCString
+ *     Walks a guest string's bytes in chunks and answers with the first one a
+ *     table marks -- or the terminator -- without materialising the string:
+ *     the scan under the C functions whose answer is a position or a length.
  * @property {(handle: number, text: string) => void} write   Where stdout goes.
  * @property {(entry: number, args: number[], thread?: any) => Promise<number>} callGuest
  * @property {() => any} [currentThread]
@@ -124,6 +132,13 @@ export function createMsvcrtFunctions(host){
 
     /** @param {number} pointer */
     const readString = pointer=>host.readCString(pointer, MAX_STRING);
+
+    /**
+     * The scratch a single-byte search marks in. Handlers answer one call at a
+     * time and never await inside a scan, so one table per runtime is safe and
+     * saves allocating and clearing a fresh one per strchr.
+     */
+    const charTable = new Uint8Array(256);
 
     /** @param {Uint8Array} bytes @param {string} text */
     const packInto = (bytes, text)=>{
@@ -236,12 +251,18 @@ export function createMsvcrtFunctions(host){
             },
         },
 
-        /** size_t strlen(const char *str) */
+        /**
+         * size_t strlen(const char *str)
+         *
+         * The count wants the terminator's position and nothing else, so the
+         * scan finds it in the guest's own bytes; building the string to ask
+         * its length copies every character first.
+         */
         strlen: {
             convention: 'cdecl',
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([string])=>readString(string).length,
+            handler: ([string])=>host.scanCString(string, MAX_STRING, NO_BYTES).index,
         },
 
         /** int strcmp(const char *left, const char *right) */
@@ -318,16 +339,17 @@ export function createMsvcrtFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, ch])=>{
-                const text = readString(string);
-                const byte = ch & 0xff;
-                if (byte === 0)
-                {
-                    // Searching for the terminator finds it: it is part of the
-                    // string, and code uses this to find the end.
-                    return string + text.length;
-                }
-                const index = text.indexOf(String.fromCharCode(byte));
-                return index === -1 ? 0 : string + index;
+                const wanted = ch & 0xff;
+                charTable.fill(0);
+                charTable[wanted] = 1;
+                // The terminator ends the scan like any marked byte, and which
+                // of the two stopped it decides the answer: the byte asked for
+                // is a pointer into the caller's string, the terminator is a
+                // miss. Searching for the terminator finds it -- it is part of
+                // the string, and code uses that to find the end -- because
+                // then the byte and the stop are the same one.
+                const found = host.scanCString(string, MAX_STRING, charTable);
+                return found.byte === wanted ? string + found.index : 0;
             },
         },
 
@@ -676,6 +698,7 @@ export function createMsvcrtFunctions(host){
             readMemory: host.readMemory,
             writeMemory: host.writeMemory,
             readCString: host.readCString,
+            scanCString: host.scanCString,
             allocate,
         }),
     };

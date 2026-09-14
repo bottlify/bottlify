@@ -158,6 +158,11 @@ export const memoryModule = {
             writeU32: accessors.writeU32,
             /** @param {number} address @param {number} [limit] */
             readCString: (address, limit)=>accessors.readCString(address, limit),
+            /**
+             * @param {number} address @param {number} [limit]
+             * @param {Uint8Array} [wanted]  Byte values that end the scan.
+             */
+            scanCString: (address, limit, wanted)=>accessors.scanCString(address, limit, wanted),
             /** @param {number} address @param {number} [limit] */
             readWideString: (address, limit)=>accessors.readWideString(address, limit),
         };

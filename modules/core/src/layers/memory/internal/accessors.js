@@ -43,6 +43,9 @@
  */
 const SCAN_CHUNK = 256;
 
+/** The scan table that marks nothing: only a terminator ends the walk. */
+const NO_BYTES = new Uint8Array(256);
+
 /**
  * @param {Object} options
  * @param {RawMemory} options.raw            Physical memory, normally the cpu layer.
@@ -264,6 +267,41 @@ export function createAccessors({ raw, regions, charge = null }){
                     `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
             }
             return new TextDecoder('latin1').decode(read(address, length));
+        },
+
+        /**
+         * The scan form of the same walk: the first byte a table marks, or the
+         * terminator, whichever comes first, as an index and the byte itself.
+         *
+         * For the C functions whose answer sits near the front of a string that
+         * is not near -- a span, a search -- and for the ones that want the
+         * string's length rather than its text. readCString answers those too,
+         * but only by materialising the whole string as a JS string first: a
+         * copy, a decode and a byte of garbage collection per character, for a
+         * caller that was only ever going to look at the first few.
+         *
+         * @param {number} address
+         * @param {number} limit    Refuses to scan past this many bytes.
+         * @param {Uint8Array} wanted  Byte values that end the scan, nonzero at
+         *     the ones that do. The terminator ends it whether marked or not.
+         * @returns {{ index: number, byte: number }}
+         */
+        scanCString(address, limit = 4096, wanted = NO_BYTES){
+            const span = scannable(address, limit);
+            for (let at = 0; at < span; at += SCAN_CHUNK)
+            {
+                const bytes = read(address + at, Math.min(SCAN_CHUNK, span - at));
+                for (let i = 0; i < bytes.length; i++)
+                {
+                    const byte = bytes[i];
+                    if (byte === 0 || wanted[byte] !== 0)
+                    {
+                        return { index: at + i, byte };
+                    }
+                }
+            }
+            throw new Error(
+                `No NUL within ${limit} bytes of 0x${address.toString(16)}`);
         },
 
         /**

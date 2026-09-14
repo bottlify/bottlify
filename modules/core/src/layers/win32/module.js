@@ -162,6 +162,11 @@ export const win32Module = {
             /** @type {number} */ length)=>memory.fillBytes(address, value, length);
         const readCString = (/** @type {number} */ address, /** @type {number} */ maxLength)=>
             memory.readCString(address, maxLength);
+        // The scan under the C string functions whose answer is a position
+        // rather than a text: it walks the same chunks readCString does and
+        // never materialises the string.
+        const scanCString = (/** @type {number} */ address, /** @type {number} */ limit,
+            /** @type {Uint8Array} */ wanted)=>memory.scanCString(address, limit, wanted);
 
         // Registers, reached through configuration rather than by requiring the
         // cpu layer: win32 does not depend on it and should not start to. What
@@ -785,6 +790,7 @@ export const win32Module = {
                     writeMemory,
                     fillMemory,
                     readCString,
+                    scanCString,
                     write: (handle, text)=>sink(handle, text),
                     /**
                       * @param {number} entry @param {number[]} args @param {any} [thread]

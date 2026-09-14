@@ -22,12 +22,24 @@ function fakeHost(size = 0x1000){
     const guests = new Map();
     /** @type {{ handle: number, text: string }[]} */
     const output = [];
+    /** Bytes the handlers asked memory for, reads only; tests reset it. */
+    let asked = 0;
 
     return {
         bytes,
         output,
+        guests,
+        get asked(){
+            return asked;
+        },
+        set asked(value){
+            asked = value;
+        },
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        readMemory: (address, length)=>{
+            asked += length;
+            return bytes.slice(address, address + length);
+        },
         /**
          * Written a byte at a time, ascending, which is what a store into guest
          * memory amounts to: a caller that hands over a view of the range it is
@@ -50,6 +62,7 @@ function fakeHost(size = 0x1000){
             let text = '';
             for (let i = 0; i < maxLength && address + i < bytes.length; i++)
             {
+                asked++;
                 if (bytes[address + i] === 0)
                 {
                     break;
@@ -57,6 +70,27 @@ function fakeHost(size = 0x1000){
                 text += String.fromCharCode(bytes[address + i]);
             }
             return text;
+        },
+        /**
+         * @param {number} address @param {number} limit
+         * @param {Uint8Array} [wanted]
+         */
+        scanCString: (address, limit, wanted = new Uint8Array(256))=>{
+            for (let at = 0; at < limit; at += 256)
+            {
+                const length = Math.max(0, Math.min(256, limit - at, size - address - at));
+                asked += length;
+                const chunk = bytes.subarray(address + at, address + at + length);
+                for (let i = 0; i < chunk.length; i++)
+                {
+                    const byte = chunk[i];
+                    if (byte === 0 || wanted[byte] !== 0)
+                    {
+                        return { index: at + i, byte };
+                    }
+                }
+            }
+            throw new Error(`No NUL within ${limit} bytes of 0x${address.toString(16)}`);
         },
         /** @param {number} handle @param {string} text */
         write: (handle, text)=>output.push({ handle, text }),
@@ -68,7 +102,6 @@ function fakeHost(size = 0x1000){
          * @param {number} entry @param {number[]} args
          */
         callGuest: (entry, args)=>Promise.resolve(guests.get(entry)?.(args) ?? 0),
-        guests,
     };
 }
 
@@ -180,6 +213,29 @@ test('strchr finds a byte, the terminator, or nothing at all', ()=>{
     assert.equal(fns.strchr.handler([s, 0x7a]), 0);
     assert.equal(fns.strchr.handler([s, 0]), 0x105, 'the terminator is part of the string');
     assert.equal(fns.strchr.handler([s, 0x16c]), 0x102, 'the byte is what is compared');
+});
+
+test('strchr reads the chunk its answer is in, not the megabyte behind it', ()=>{
+    const host = fakeHost(0x120000);
+    const fns = createMsvcrtFunctions(host);
+    // A byte under the scan limit, or the terminator is outside what a string
+    // of this runtime may reach and the walk is right to refuse it.
+    const size = (1 << 20) - 1;
+    const string = 0x1000;
+    host.bytes.fill(0x61, string, string + size);
+    host.bytes[string + 3] = 0x78; // the byte asked for, at byte 3
+    host.bytes[string + size] = 0;
+
+    host.asked = 0;
+    assert.equal(fns.strchr.handler([string, 0x78]), string + 3);
+    assert.ok(host.asked < 4096,
+        `the answer at byte 3 costs what the walk read: ${host.asked} bytes`);
+
+    // A miss still walks to the terminator, and a search for the terminator
+    // finds the end of a string longer than any chunk.
+    assert.equal(fns.strchr.handler([string, 0x7a]), 0);
+    assert.equal(fns.strchr.handler([string, 0]), string + size);
+    assert.equal(fns.strlen.handler([string]), size, 'a length counted across chunks');
 });
 
 test('strstr finds a substring, and an empty needle matches immediately', ()=>{

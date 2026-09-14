@@ -23,6 +23,13 @@
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, limit: number, wanted: Uint8Array) =>
+ *            { index: number, byte: number }} scanCString
+ *     Walks a guest string's bytes in chunks and answers with the first one a
+ *     table marks -- or the terminator -- without materialising the string.
+ *     The span and search functions below answer from a position near the
+ *     front of buffers that reach megabytes; reading the text to find it was
+ *     the largest host cost in an install that scans while it copies.
  * @property {(bytes: number) => number} allocate  Guest memory that outlives a call.
  */
 
@@ -41,6 +48,26 @@ const compare = (/** @type {string} */ a, /** @type {string} */ b)=>{
 /** msvcrt's case folding under the C locale is ASCII and nothing else. */
 const foldCase = (/** @type {string} */ text)=>
     text.replace(/[A-Z]/g, letter=>letter.toLowerCase());
+
+/**
+ * Marks the bytes of a set string in a scan table, every other byte taking the
+ * opposite mark: one helper builds both the strspn table (stop at a byte the
+ * set does not cover) and the strcspn/strpbrk one (stop at a byte it does).
+ * Membership is by byte value rather than by one-character string, because a
+ * scan asks once per byte of strings that reach megabytes.
+ *
+ * @param {string} text    The set string, as the caller passed it.
+ * @param {Uint8Array} table  Scratch, 256 entries; answered with, marked.
+ * @param {number} mark   What the set's own bytes get.
+ */
+function markBytes(text, table, mark){
+    table.fill(mark === 0 ? 1 : 0);
+    for (let at = 0; at < text.length; at++)
+    {
+        table[text.charCodeAt(at) & 0xff] = mark;
+    }
+    return table;
+}
 
 /**
  * @param {StringHost} host
@@ -69,6 +96,13 @@ export function createStringFunctions(host){
      * would give.
      */
     let tokenAt = 0;
+
+    /**
+     * The scan table's scratch. Handlers answer one call at a time and never
+     * await inside a scan, so one table per runtime is safe and saves clearing
+     * a fresh one per call.
+     */
+    const scanTable = new Uint8Array(256);
 
     /**
      * @param {(text: string) => string} transform
@@ -108,16 +142,12 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, accept])=>{
-                const text = readString(string);
-                const wanted = new Set(readString(accept));
-                for (let at = 0; at < text.length; at++)
-                {
-                    if (wanted.has(text[at]))
-                    {
-                        return string + at;
-                    }
-                }
-                return 0;
+                const wanted = markBytes(readString(accept), scanTable, 1);
+                // The terminator is a stop like any marked byte, and which of
+                // the two ended the scan is the answer: a marked byte is a
+                // pointer into the caller's string, the terminator is a miss.
+                const found = host.scanCString(string, MAX_STRING, wanted);
+                return found.byte === 0 ? 0 : string + found.index;
             },
         },
 
@@ -127,14 +157,11 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, accept])=>{
-                const text = readString(string);
-                const wanted = new Set(readString(accept));
-                let at = 0;
-                while (at < text.length && wanted.has(text[at]))
-                {
-                    at++;
-                }
-                return at;
+                // The span ends at the first byte the set does not cover, so
+                // the set's complement is what the scan stops at; a terminator
+                // is never covered and ends the span as it always did.
+                const wanted = markBytes(readString(accept), scanTable, 0);
+                return host.scanCString(string, MAX_STRING, wanted).index;
             },
         },
 
@@ -144,14 +171,8 @@ export function createStringFunctions(host){
             argBytes: 8,
             /** @param {number[]} args */
             handler: ([string, reject])=>{
-                const text = readString(string);
-                const unwanted = new Set(readString(reject));
-                let at = 0;
-                while (at < text.length && !unwanted.has(text[at]))
-                {
-                    at++;
-                }
-                return at;
+                const wanted = markBytes(readString(reject), scanTable, 1);
+                return host.scanCString(string, MAX_STRING, wanted).index;
             },
         },
 

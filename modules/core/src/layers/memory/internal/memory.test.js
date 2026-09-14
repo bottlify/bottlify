@@ -245,6 +245,58 @@ test('a string read copies the string, not the region it sits in', ()=>{
     assert.throws(()=>accessors.readCString(0x2000, 8), /No NUL within 8 bytes/);
 });
 
+test('a scan answers from the chunks it walked, not the string behind them', ()=>{
+    // The C functions whose answer is a position -- a span, a search -- ask
+    // where the first byte they care about is. Counting what the scan asks
+    // memory for is the only way to see from outside that the megabyte behind
+    // the answer was never copied.
+    const size = 0x100000;
+    const bytes = new Uint8Array(size);
+    let asked = 0;
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>{
+            asked += length;
+            return bytes.subarray(address, address + length);
+        },
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    };
+    const regions = createRegionMap();
+    regions.register({
+        name: 'heap', base: 0x1000, size: size - 0x1000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    const accessors = createAccessors({ raw, regions });
+
+    // A megabyte of 'a' whose first interesting byte is the fourth.
+    bytes.fill(0x61, 0x1000);
+    bytes.set([0x20, 0x20, 0x20, 0x78], 0x1000); // "   x"
+    const wanted = new Uint8Array(256);
+    wanted[0x78] = 1;
+
+    asked = 0;
+    const found = accessors.scanCString(0x1000, size, wanted);
+    assert.deepEqual(found, { index: 3, byte: 0x78 });
+    assert.ok(asked < 0x1000,
+        `the answer at byte 3 is found without reading the megabyte: ${asked} bytes`);
+
+    // Without a table only the terminator stops the walk, and the index it
+    // stops at is the string's length; a terminator missing within the limit
+    // is the error a read of the same string would have been.
+    bytes[0x1000 + 600] = 0;
+    assert.equal(accessors.scanCString(0x1000, size).index, 600);
+    bytes[0x1000 + 600] = 0x61;
+    assert.throws(()=>accessors.scanCString(0x1000, 8), /No NUL within 8 bytes/);
+
+    // A string whose terminator is the region's last byte is found: the walk
+    // is clamped to the region, so the chunk holding the end never reads past
+    // it, exactly as the string read's walk is.
+    const end = 0x1000 + (size - 0x1000) - 1;
+    bytes[end] = 0;
+    assert.equal(accessors.scanCString(end - 3, size).index, 3);
+});
+
 test('a dword read remembers its region and forgets it when the map changes', ()=>{
     // Nearly every dword a host call reads falls in the region the last one
     // did, so the region is remembered -- but a region added or re-protected

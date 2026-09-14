@@ -126,3 +126,57 @@ test('a value outside unsigned char classifies as nothing at all', ()=>{
     assert.equal(table.isdigit.handler([-1]), 0, 'EOF is not a digit');
     assert.equal(table.isspace.handler([0x120]), 0);
 });
+
+/**
+ * A megabyte whose answer sits at byte 3, laid down once for the scans below:
+ * three spaces, an 'x', then filler to the terminator.
+ *
+ * @param {ReturnType<typeof fakeMemory>} memory
+ */
+function megabyte(memory){
+    const size = 1 << 20;
+    const string = memory.allocate(size + 8);
+    memory.writeMemory(string, new Uint8Array([0x20, 0x20, 0x20, 0x78]));
+    memory.fillMemory(string + 4, 0x61, size - 5);
+    memory.writeMemory(string + size - 1, new Uint8Array(1));
+    return string;
+}
+
+test('a span counts to its answer without reading the string behind it', ()=>{
+    const memory = fakeMemory(0x10000, 0x130000);
+    const table = createStringFunctions(memory);
+    const string = megabyte(memory);
+
+    memory.asked = 0;
+    assert.equal(table.strspn.handler([string, memory.put(' \t')]), 3,
+        'the first byte the set does not cover ends the span');
+    assert.ok(memory.asked < 4096,
+        `the answer at byte 3 costs what the walk read: ${memory.asked} bytes`);
+
+    memory.asked = 0;
+    assert.equal(table.strcspn.handler([string, memory.put('x')]), 3,
+        'the first byte the set covers ends the span');
+    assert.ok(memory.asked < 4096, `${memory.asked} bytes`);
+});
+
+test('strpbrk stops at its answer without reading the string behind it', ()=>{
+    const memory = fakeMemory(0x10000, 0x130000);
+    const table = createStringFunctions(memory);
+    const string = megabyte(memory);
+
+    memory.asked = 0;
+    assert.equal(table.strpbrk.handler([string, memory.put('x')]), string + 3);
+    assert.ok(memory.asked < 4096, `${memory.asked} bytes`);
+});
+
+test('the scans still answer from the whole string when the answer is late', ()=>{
+    const { memory, table } = build();
+    const string = memory.put('aaaaaaaaab');
+    assert.equal(table.strspn.handler([string, memory.put('a')]), 9);
+    assert.equal(table.strcspn.handler([string, memory.put('b')]), 9);
+    assert.equal(table.strpbrk.handler([string, memory.put('b')]), string + 9);
+    assert.equal(table.strspn.handler([string, memory.put('')]), 0, 'an empty set spans nothing');
+    assert.equal(table.strcspn.handler([string, memory.put('')]), 10,
+        'an empty set rejects nothing, so the terminator ends the span');
+    assert.equal(table.strpbrk.handler([string, memory.put('')]), 0, 'and finds nothing');
+});

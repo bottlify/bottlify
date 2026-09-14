@@ -16,16 +16,33 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-/** @param {number} [base] */
-export function fakeMemory(base = 0x10000){
-    const bytes = new Uint8Array(1 << 20);
+/** How much the fake's scan reads at a time, as the real memory layer does. */
+const SCAN_CHUNK = 256;
+
+/**
+ * @param {number} [base]
+ * @param {number} [size]  Larger than the default for the tests that lay a
+ *        megabyte down and ask what a scan of its front cost.
+ */
+export function fakeMemory(base = 0x10000, size = 1 << 20){
+    const bytes = new Uint8Array(size);
     let next = base;
 
     const memory = {
         bytes,
 
+        /**
+         * Bytes the handlers asked memory for, reads only. The real layer
+         * counts what its scan hands the emulator; counting what the fake is
+         * asked is the same measurement from this side of the seam.
+         */
+        asked: 0,
+
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.subarray(address, address + length),
+        readMemory: (address, length)=>{
+            memory.asked += length;
+            return bytes.subarray(address, address + length);
+        },
 
         /** @param {number} address @param {Uint8Array} source */
         writeMemory: (address, source)=>bytes.set(source, address),
@@ -38,15 +55,37 @@ export function fakeMemory(base = 0x10000){
             let text = '';
             for (let at = 0; at < max && bytes[address + at] !== 0; at++)
             {
+                memory.asked++;
                 text += String.fromCharCode(bytes[address + at]);
             }
             return text;
         },
 
-        /** @param {number} size */
-        allocate: size=>{
+        /**
+         * @param {number} address @param {number} limit
+         * @param {Uint8Array} [wanted]
+         */
+        scanCString: (address, limit, wanted = new Uint8Array(256))=>{
+            for (let at = 0; at < limit; at += SCAN_CHUNK)
+            {
+                const chunk = memory.readMemory(address + at,
+                    Math.min(SCAN_CHUNK, limit - at, size - address - at));
+                for (let i = 0; i < chunk.length; i++)
+                {
+                    const byte = chunk[i];
+                    if (byte === 0 || wanted[byte] !== 0)
+                    {
+                        return { index: at + i, byte };
+                    }
+                }
+            }
+            throw new Error(`No NUL within ${limit} bytes of 0x${address.toString(16)}`);
+        },
+
+        /** @param {number} count */
+        allocate: count=>{
             const at = next;
-            next += (size + 7) & ~7;
+            next += (count + 7) & ~7;
             return at;
         },
 
