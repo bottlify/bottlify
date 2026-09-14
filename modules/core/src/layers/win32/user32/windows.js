@@ -324,6 +324,14 @@ function characterFor(key){
  *           An address a program can call a host-side window procedure
  *           through. Absent in a build with no bridge, and then the address
  *           is one nothing in the guest can reach.
+ * @property {(controlHost: any, toolkit: any,
+ *     register: (definition: { name: string, procedure: any,
+ *         windowExtra?: number, background?: number }) => void) => void} [registerControls]
+ *           Where the common controls put their classes, as built-in as the
+ *           ones here: handed the host and the drawing helpers the system
+ *           classes paint with, and the function that files a class under its
+ *           name. Absent in a build with no common controls, and then a
+ *           program that makes one gets no window for it.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
@@ -485,7 +493,7 @@ export function createWindowFunctions(host){
                 ? host.registerProcedure(`<${system.name}>`,
                     message=>callProcedure(system.wndProc, message, host.callerThread?.()))
                 : HOST_PROCEDURE_BASE + system.atom * 16;
-            procedures.set(system.wndProc, controls.procedures[system.name]);
+            procedures.set(system.wndProc, controlProcedures[system.name]);
         }
         return system ?? null;
     };
@@ -500,6 +508,16 @@ export function createWindowFunctions(host){
     const procedures = new Map();
     /** @type {Map<string, any>} lower-case name or atom spelling -> class */
     const systemClasses = new Map();
+    /**
+     * The procedure of each built-in class by name: the seven user32 ones and
+     * whatever the common controls file beside them. Kept apart from the
+     * address map because a class is looked up by name long before it has an
+     * address, and registering a class only adds a name.
+     *
+     * @type {Record<string, (record: any, message: DispatchedMessage,
+     *     thread?: unknown) => number | Promise<number>>}
+     */
+    const controlProcedures = {};
 
     /**
      * Runs a window procedure by address: a host one directly, a guest one
@@ -1940,7 +1958,11 @@ export function createWindowFunctions(host){
         }
     };
 
-    const controls = createControlProcedures({
+    // The host the system classes and the common controls share: what a
+    // procedure needs of the window manager around it, in one object, so a
+    // control in comctl32 paints and tells its parent exactly as one here does.
+    /** @type {import('./controls.js').ControlHost} */
+    const controlHost = {
         readCString: host.readCString,
         writeMemory: host.writeMemory,
         readMemory: host.readMemory,
@@ -1980,8 +2002,42 @@ export function createWindowFunctions(host){
         releaseCapture,
         sysColor,
         keyDown: key=>((host.keyState?.(key) ?? 0) & 0x8000) !== 0,
+        allocate: host.allocate,
+        release: host.release,
         divergence: host.divergence,
-    });
+    };
+    const controls = createControlProcedures(controlHost);
+    Object.assign(controlProcedures, controls.procedures);
+
+    /**
+     * Files a common-control class beside the user32 ones: a name a program
+     * creates it by, a procedure on this side, and what a window of it
+     * carries. The atom is only spacing for the address a build without a
+     * bridge hands out; a program names these classes by string, never by
+     * `#number`, so it is not registered as a spelling of the name.
+     *
+     * @param {{ name: string, procedure: any, atom?: number, windowExtra?: number,
+     *     background?: number }} definition
+     */
+    const registerSystemClass = definition=>{
+        systemClasses.set(definition.name.toLowerCase(), {
+            name: definition.name,
+            atom: definition.atom ?? 0,
+            style: 0,
+            wndProc: 0,
+            classExtra: 0,
+            windowExtra: definition.windowExtra ?? 0,
+            instance: 0,
+            icon: 0,
+            cursor: 0,
+            background: definition.background ?? 0,
+            menuName: 0,
+            className: 0,
+            iconSm: 0,
+        });
+        controlProcedures[definition.name] = definition.procedure;
+    };
+    host.registerControls?.(controlHost, controls.toolkit, registerSystemClass);
 
     // The system classes: known under their names and their atoms, each
     // with a procedure on this side and, once wanted, an address a program

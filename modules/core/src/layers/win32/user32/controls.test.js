@@ -13,6 +13,8 @@ import { MSG } from './structs.js';
 import { createGdiFunctions } from '../gdi32/functions.js';
 import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
+import { createCommonControls } from '../comctl32/controls.js';
+import { PBM_SETRANGE, PBM_SETPOS } from '../comctl32/progress.js';
 import { decodePng, encodePng } from './png.fixture.js';
 
 /**
@@ -35,7 +37,7 @@ const DIALOGPROC = 0x401000;
 const GUEST_PROC = 0x402000;
 const THREAD = { name: 'main' };
 
-const SCREEN = { width: 240, height: 160, bitsPerPixel: 32 };
+const SCREEN = { width: 240, height: 320, bitsPerPixel: 32 };
 
 const WM_CREATE = 0x0001;
 const WM_PAINT = 0x000f;
@@ -345,6 +347,12 @@ function setup({ reply = ()=>0, engine = false } = {}){
             return at;
         },
         release: ()=>{},
+        registerControls: (controlHost, toolkit, register)=>{
+            for (const definition of createCommonControls(controlHost, toolkit))
+            {
+                register(definition);
+            }
+        },
     });
     const table = /** @type {Record<string, { argBytes: number,
         handler: (args: number[]) => any }>} */ (/** @type {unknown} */ (fns));
@@ -444,6 +452,18 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
         context.fns.SendDlgItemMessageA.handler([dialog, 101, BM_SETCHECK, 1, 0]);
         await context.pump(dialog);
 
+        // The common controls, in the band the dialog leaves empty below it:
+        // a progress bar three fifths of the way along its range. Its region
+        // of the reference is new; everything above it is the dialog's and
+        // must come out exactly as it did before the bar existed.
+        context.memory.putString(TEXT, 'msctls_progress32');
+        const progress = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_POPUP | WS_VISIBLE, 8, 164, 200, 22, 0, 0, HINSTANCE, 0]);
+        assert.notEqual(progress, 0);
+        context.fns.SendMessageA.handler([progress, PBM_SETRANGE, 0, (100 << 16) | 0]);
+        context.fns.SendMessageA.handler([progress, PBM_SETPOS, 60, 0]);
+        await context.pump(dialog);
+
         if (process.env.WRITE_REFERENCE)
         {
             writeFileSync(REFERENCE, encodePng(context.desktop));
@@ -463,7 +483,7 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
             }
         }
         assert.equal(differing, 0, 'every pixel is as stored');
-        assert.equal(context.presents(), 2, 'one presentation per paint pass, two pumps');
+        assert.equal(context.presents(), 3, 'one presentation per paint pass, three pumps');
     });
 
 test('a click at the button\'s screen coordinates reaches the dialog as BN_CLICKED', async()=>{

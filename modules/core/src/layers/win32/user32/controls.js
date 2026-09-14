@@ -481,6 +481,12 @@ const RADIO_DOT = [
  * @property {() => void} releaseCapture
  * @property {(index: number) => number} sysColor
  * @property {(key: number) => boolean} keyDown
+ * @property {(bytes: number) => number} [allocate]
+ *           Guest memory for a structure a notification hands the parent,
+ *           which lives only as long as the message carrying it. Absent in a
+ *           build with no heap behind it, and then a notification that needs
+ *           a structure cannot be sent.
+ * @property {(address: number) => void} [release]
  * @property {(api: string, detail: string) => void} [divergence]
  */
 
@@ -525,6 +531,15 @@ export const pointOf = lParam=>({
  */
 
 /**
+ * The drawing and messaging the system classes share, handed to the common
+ * controls so a control in comctl32 paints and tells its parent with the same
+ * helpers the ones here use. Deliberately loose: it is a bag of the closures
+ * below, and naming every one of them here would only restate them.
+ *
+ * @typedef {Record<string, any>} ControlToolkit
+ */
+
+/**
  * Builds the procedures, one per class name, and the pieces the frame
  * shares with them.
  *
@@ -534,7 +549,8 @@ export const pointOf = lParam=>({
  *         paintScrollBar: (hdc: number, rect: Rect, vertical: boolean,
  *             held: ScrollBarState) => void,
  *         scrollHit: (rect: Rect, vertical: boolean, held: ScrollBarState,
- *             x: number, y: number) => number } }}
+ *             x: number, y: number) => number },
+ *     toolkit: ControlToolkit }}
  */
 export function createControlProcedures(host){
     /** @param {number} index */
@@ -2730,5 +2746,14 @@ export function createControlProcedures(host){
             '#32770': dialogProc,
         },
         helpers: { defDlgProc, paintScrollBar, scrollHit },
+        // The drawing and messaging the classes above share, handed out whole
+        // so the common controls paint and tell their parent with the same
+        // helpers: one look, and a change to it is one change.
+        toolkit: {
+            color, glyph, edge, buttonEdge, sunkenEdge, etchedFrame, drawText,
+            clientRect, stateOf, notify, controlColor, background, painting,
+            common, disabled, writeU32, writeString, scrollOf, itemHeight,
+            paintScrollBar, scrollHit, shrink, contains,
+        },
     };
 }

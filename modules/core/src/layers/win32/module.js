@@ -47,6 +47,7 @@ import { createMmioFunctions } from './winmm/mmio.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
+import { createCommonControls } from './comctl32/controls.js';
 import { createShellFunctions } from './shell32/functions.js';
 import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
@@ -1030,6 +1031,16 @@ export const win32Module = {
                         wParam: wParam >>> 0, lParam: lParam >>> 0,
                     }),
                 }),
+                // The common controls are built-in classes of the window
+                // manager, built from the same host and drawing helpers its
+                // own system classes use: comctl32 owns their behaviour, not
+                // their registration.
+                registerControls: (controlHost, toolkit, register)=>{
+                    for (const definition of createCommonControls(controlHost, toolkit))
+                    {
+                        register(definition);
+                    }
+                },
                 // A program's own explanation of why it is stopping, handed up
                 // whole rather than as a line of log, so whoever is embedding
                 // this engine can show it the way a person would have seen it.
