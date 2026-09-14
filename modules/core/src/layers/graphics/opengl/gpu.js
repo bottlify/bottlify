@@ -165,17 +165,22 @@ const PROBE_LIMIT = 4;
 
 /**
  * Where a snapshot of the target is read: a spread of points across the
- * picture, and a coarse grid for how much variety the whole holds. A draw
- * that painted nothing has the same points before and after and one colour
- * across the grid; one that painted a lit surface has neither.
+ * rectangle the draw was scissored to, and a coarse grid over it for how
+ * much variety the whole holds -- a draw's own region, because most draws
+ * touch a corner of the frame and fixed screen points would read pixels
+ * they never had. A draw that painted nothing has the same points before
+ * and after and one colour across the grid; one that painted a lit surface
+ * has neither.
  *
  * @param {{ width: number, height: number, data: Uint8Array }} shot
+ * @param {{ x: number, y: number, width: number, height: number }} rect
  */
-function describeSnapshot(shot){
+function describeSnapshot(shot, rect){
     /** @param {number} x @param {number} y */
     const at = (x, y)=>{
-        const index = (Math.min(shot.height - 1, Math.floor(y * shot.height)) * shot.width
-            + Math.min(shot.width - 1, Math.floor(x * shot.width))) * 4;
+        const px = Math.min(shot.width - 1, rect.x + Math.floor(x * Math.max(1, rect.width)));
+        const py = Math.min(shot.height - 1, rect.y + Math.floor(y * Math.max(1, rect.height)));
+        const index = (py * shot.width + px) * 4;
         return `${shot.data[index + 2]}/${shot.data[index + 1]}/${shot.data[index]}`;
     };
     const points = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
@@ -1467,7 +1472,7 @@ export function createGpuRenderer(services){
                 {
                     // A snapshot closes the pass, so the drawing pass is
                     // reopened over what the target holds.
-                    probes.push({ dump: command.probe,
+                    probes.push({ dump: command.probe, rect: command.scissor,
                         before: frame.snapshot(target.colour), after: null });
                     pass = null;
                 }
@@ -1558,8 +1563,8 @@ export function createGpuRenderer(services){
         {
             const before = await probe.before();
             const after = probe.after ? await probe.after() : null;
-            recording.dump[probe.dump] += ` before=${describeSnapshot(before)}`
-                + (after ? ` after=${describeSnapshot(after)}` : '');
+            recording.dump[probe.dump] += ` before=${describeSnapshot(before, probe.rect)}`
+                + (after ? ` after=${describeSnapshot(after, probe.rect)}` : '');
         }
     };
 
