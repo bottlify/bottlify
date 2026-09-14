@@ -90,7 +90,7 @@ test('the path spellings answer the same folder', ()=>{
     assert.equal(m.string(0x300), 'C:\\Program Files');
 });
 
-test('launching something is refused, not quietly succeeded', ()=>{
+test('launching nothing is refused, not quietly succeeded', ()=>{
     // Success for something that did not happen is the failure that costs most:
     // the caller carries on believing a program started.
     const m = machine();
@@ -100,14 +100,159 @@ test('launching something is refused, not quietly succeeded', ()=>{
 });
 
 /**
+ * The machine above with a launcher standing in for kernel32's spawner, which
+ * is what a launch goes through: the shell resolves an image and composes a
+ * command line, and the test reads back both.
+ *
+ * @param {string[]} files  The images the launcher finds, by full or bare name.
+ */
+function machineWithLauncher(files){
+    /** @type {{ named: string, line: string, flags: number }[]} */
+    const launched = [];
+    /** @type {string[]} */
+    const diverged = [];
+    const known = new Map();
+    for (const path of files)
+    {
+        known.set(path.toLowerCase(), path);
+        known.set(path.slice(path.lastIndexOf('\\') + 1).toLowerCase(), path);
+    }
+    const m = machineWithPaths('C:\\App', {
+        launcher: {
+            /**
+             * @param {string} named @param {string} line @param {number} flags
+             */
+            launch(named, line, flags){
+                launched.push({ named, line, flags });
+                return { id: 0x2000, handle: 0x40, threadHandle: 0x44 };
+            },
+            imageOf: (/** @type {string} */ name)=>
+                known.get(name.trim().toLowerCase()) ?? null,
+        },
+        /** @param {string} api @param {string} detail */
+        divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
+    });
+    return { ...m, launched, diverged };
+}
+
+test('the shell starts an executable, with its arguments and a quoted image', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x100);
+    m.put('/s', 0x140);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0x1c, 0, 0x100, 0x140, 0, 1]), 33,
+        'success is a value above 32');
+    assert.deepEqual(m.launched,
+        [{ named: 'C:\\App\\setup.exe', line: '"C:\\App\\setup.exe" /s', flags: 0 }]);
+    assert.deepEqual(m.diverged, [], 'starting the program named is what Windows does');
+    assert.equal(m.shell.ShellExecuteA.argBytes, 24);
+});
+
+test('a path with a space in it travels quoted, so its tail is not an argument', ()=>{
+    const m = machineWithLauncher(['C:\\Program Files\\Game\\setup.exe']);
+    m.put('C:\\Program Files\\Game\\setup.exe', 0x100);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 33);
+    assert.equal(m.launched[0].line, '"C:\\Program Files\\Game\\setup.exe"');
+});
+
+test('a launch with no arguments hands the child its own name and nothing else', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x100);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 5]), 33);
+    assert.equal(m.launched[0].line, '"C:\\App\\setup.exe"');
+});
+
+test('a document, and a verb that needs one, are refused as having no handler', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe', 'C:\\App\\readme.txt']);
+    m.put('readme.txt', 0x100);
+    m.put('setup.exe', 0x140);
+    m.put('print', 0x180);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 31,
+        'a readme belongs to a handler registry this build does not have');
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0x180, 0x140, 0, 0, 1]), 31,
+        'and "print" names a handler rather than the file itself');
+    assert.deepEqual(m.launched, [], 'nothing was started for either');
+});
+
+test('a program that is not on the volume is reported missing, not started', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('other.exe', 0x100);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 2);
+    assert.deepEqual(m.launched, []);
+});
+
+test('a verb that asks for a prompt runs anyway, and says that it did not ask', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x100);
+    m.put('runas', 0x140);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0x140, 0x100, 0, 0, 1]), 33);
+    assert.equal(m.launched.length, 1);
+    assert.equal(m.diverged.length, 1, 'one user and one volume: there is nothing to ask');
+});
+
+test('a directory for the child is reported, because it is not carried', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x100);
+    m.put('D:\\Elsewhere', 0x140);
+
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0x140, 1]), 33);
+    assert.equal(m.launched[0].named, 'C:\\App\\setup.exe',
+        'the file is still resolved where the caller is, not where the child goes');
+    assert.equal(m.diverged.length, 1);
+});
+
+test('a build with nothing that can start a program says no rather than nothing', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('setup.exe', 0x100);
+    assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0x100, 0, 0, 1]), 5);
+});
+
+test('the extended launch answers in the record, and hands over the child', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x200);
+    const view = new DataView(m.memory.buffer);
+    const SEE_MASK_NOCLOSEPROCESS = 0x40;
+    m.memory.fill(0, 0x100, 0x140);
+    view.setUint32(0x104, SEE_MASK_NOCLOSEPROCESS, true);   // fMask
+    view.setUint32(0x110, 0x200, true);                     // lpFile
+    view.setUint32(0x11c, 1, true);                         // nShow
+
+    assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 1);
+    assert.equal(view.getUint32(0x120, true), 33, 'hInstApp is what ShellExecute returns');
+    assert.equal(view.getUint32(0x138, true), 0x40,
+        'hProcess is a handle on the child, which is what a caller waits on');
+    assert.equal(m.launched[0].line, '"C:\\App\\setup.exe"');
+});
+
+test('the extended launch refuses a record that names a list rather than a file', ()=>{
+    const m = machineWithLauncher(['C:\\App\\setup.exe']);
+    m.put('setup.exe', 0x200);
+    const view = new DataView(m.memory.buffer);
+    const SEE_MASK_IDLIST = 0x4;
+    m.memory.fill(0, 0x100, 0x140);
+    view.setUint32(0x104, SEE_MASK_IDLIST, true);
+    view.setUint32(0x110, 0x200, true);
+
+    assert.equal(m.shell.ShellExecuteExA.handler([0x100]), 0);
+    assert.equal(view.getUint32(0x120, true), 31);
+    assert.deepEqual(m.launched, []);
+});
+
+/**
  * The machine above with an ANSI string reader and a path resolver, which is
  * what FindExecutable needs to read a file name and qualify it. The resolver
  * mirrors the filesystem's: a qualified path is normalised, a relative one is
  * taken against the current directory.
  *
  * @param {string} cwd  The current directory the resolver qualifies against.
+ * @param {Object} [extra]  More of the host, laid over the four above.
  */
-function machineWithPaths(cwd){
+function machineWithPaths(cwd, extra){
     const memory = new Uint8Array(0x1000).fill(0xaa);
     /** @param {string} text @param {number} at */
     const put = (text, at)=>{
@@ -120,9 +265,9 @@ function machineWithPaths(cwd){
     const host = {
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
-        readCString: (/** @type {number} */ address)=>{
+        readCString: (/** @type {number} */ address, /** @type {number} */ max)=>{
             let end = address;
-            while (memory[end] !== 0)
+            while (end < memory.length && end - address < max && memory[end] !== 0)
             {
                 end++;
             }
@@ -131,6 +276,7 @@ function machineWithPaths(cwd){
         resolve: (/** @type {string} */ path)=>{
             return /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}\\${path}`;
         },
+        ...extra,
     };
     /** @param {number} at */
     const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));

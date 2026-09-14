@@ -7,19 +7,25 @@
 /**
  * shell32 — the calls that reach outside the process, and the ones that do not.
  *
- * Almost everything here is a refusal, and the refusals are the point. This
- * engine runs one program: it does not start others, it does not open a
- * document in whatever is registered for it, and there is nobody to pick a
- * folder out of a tree. Returning success for any of those is the failure that
- * costs most later, because the caller carries on believing something happened
- * and fails somewhere with nothing to connect it back.
+ * Most of this is a refusal, and the refusals are the point. The shell's job is
+ * to consult registries this build does not have -- which handler a document
+ * belongs to, which verb a file offers, what a shortcut resolves to -- and to
+ * put a person in front of a folder tree. Returning success for any of those is
+ * the failure that costs most later, because the caller carries on believing
+ * something happened and fails somewhere with nothing to connect it back.
  *
  * The refusals are the documented ones rather than a generic error, because a
  * caller distinguishes them: "no application is associated with this" is a
  * thing a program handles, and a program that gets it stops asking.
  *
- * Drag and drop is the exception, and it is not a refusal but a truth: files
- * are never dropped on a window here, so a window may accept drops and a query
+ * Launching is not a refusal. A program the shell is asked to run is run, the
+ * same way kernel32's CreateProcess runs one, because the file is its own
+ * handler and there is nothing to look up; that is how an installer starts the
+ * installer it just unpacked. What still cannot be done is a document, whose
+ * handler would come from an association registry.
+ *
+ * Drag and drop is neither, and it is not a refusal but a truth: files are
+ * never dropped on a window here, so a window may accept drops and a query
  * against a drop that never arrived reports no files. Both are what a real
  * system answers when nobody has dragged anything.
  */
@@ -27,11 +33,19 @@
 import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './namespace.js';
 
 /** ShellExecute reports failure as a value of 32 or less, not as zero. */
+const SE_ERR_FNF = 2;
 const SE_ERR_ACCESSDENIED = 5;
 const SE_ERR_NOASSOC = 31;
 
-/** FindExecutable, like WinExec, reports success as a value above 32. */
-const FIND_EXECUTABLE_SUCCESS = 33;
+/** FindExecutable and ShellExecute, like WinExec, report success above 32. */
+const LAUNCH_SUCCESS = 33;
+
+/**
+ * The verbs that amount to running the file. An empty verb is `open`, as the
+ * call documents; `runas` is `open` with a prompt this machine has no reason to
+ * show, there being one user and one volume it already owns.
+ */
+const RUNNABLE_VERBS = Object.freeze(new Set(['', 'open', 'runas']));
 
 /**
  * The extensions the shell runs directly: the file is its own associated
@@ -48,8 +62,23 @@ const S_OK = 0;
 /** What SHFileOperation answers when it will not operate. */
 const ERROR_CALL_NOT_IMPLEMENTED = 120;
 
-/** SHELLEXECUTEINFOA: where hInstApp lives, which a caller reads on failure. */
+/** SHELLEXECUTEINFOA: the fields a launch reads, and the two it writes back. */
+const SEI_MASK = 4;
+const SEI_VERB = 12;
+const SEI_FILE = 16;
+const SEI_PARAMETERS = 20;
+const SEI_DIRECTORY = 24;
 const SHELLEXECUTEINFO_HINSTAPP = 32;
+const SHELLEXECUTEINFO_PROCESS = 56;
+
+/**
+ * The mask bits that change what the record means rather than what is done:
+ * an item id list or a class name in place of a file, neither of which is a
+ * path this shell can resolve, and the ask for a handle to wait on.
+ */
+const SEE_MASK_IDLIST = 0x00000004;
+const SEE_MASK_NOCLOSEPROCESS = 0x00000040;
+const SEE_MASK_CLASSNAME = 0x00000400;
 
 /** SHFILEOPSTRUCTA: where fAnyOperationsAborted lives. */
 const SHFILEOPSTRUCT_ABORTED = 20;
@@ -108,12 +137,19 @@ const CSIDL_FOLDERS = Object.freeze({
  *           is refused.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
  * @property {(address: number, limit: number) => string} [readCString]
- *           Reads an ANSI argument string. Without it FindExecutable cannot
- *           read the file it is asked about and refuses.
+ *           Reads an ANSI argument string. Without it neither FindExecutable nor
+ *           a launch can read the file it is asked about, and both refuse.
  * @property {(path: string) => string} [resolve]
  *           Qualifies a path against the process's current directory and
  *           normalises it; what FindExecutable writes back as the executable.
  *           Without it there is no full path to answer with, so it refuses.
+ * @property {import('../kernel32/spawn.js').Spawner} [launcher]
+ *           Finds the image a name points at and records a child for it --
+ *           kernel32's own machinery, because a program started through the
+ *           shell has to be started the same way as one started through
+ *           CreateProcess or it is a different program. Without it a launch is
+ *           refused, and a record's handle is what ShellExecuteEx hands a caller
+ *           that asked to wait on the child.
  * @property {(bytes: number) => number} [allocate]
  *           The task allocator's memory, which is what a caller frees an item
  *           id list with. Without it no list can be made and the folder calls
@@ -255,18 +291,118 @@ export function createShellFunctions(host){
         }
     };
 
+    /**
+     * A name without the quotes a caller may have put round it: the shell takes
+     * a file, and a program that already composed a command line hands it over
+     * quoted.
+     *
+     * @param {string} name
+     * @returns {string}
+     */
+    const unquote = name=>name.length > 1 && name.startsWith('"') && name.endsWith('"')
+        ? name.slice(1, -1).trim() : name;
+
+    /**
+     * The dword a record holds at an offset, or zero with no memory to read.
+     *
+     * @param {number} record @param {number} offset
+     * @returns {number}
+     */
+    const dwordAt = (record, offset)=>{
+        if (!host.readMemory)
+        {
+            return 0;
+        }
+        const bytes = host.readMemory((record + offset) >>> 0, 4);
+        return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /**
+     * Runs what the shell was asked to open, answering the way ShellExecute
+     * does: above 32 when a child was recorded, and one of its own codes below
+     * it when it could not be.
+     *
+     * The child's command line is composed here rather than passed through, so
+     * that the image travels quoted however the caller spelled it: an image
+     * found under a name with a space in it hands the tail of its own path to
+     * the program as an argument otherwise.
+     *
+     * @param {string | null} verb       The operation; null is `open`.
+     * @param {string | null} file       The file to open.
+     * @param {string | null} parameters The arguments the child is given.
+     * @param {string | null} directory  The directory the child is to start in.
+     * @returns {{ answer: number, record: any }}
+     */
+    const start = (verb, file, parameters, directory)=>{
+        const name = unquote((file ?? '').trim());
+        if (name === '')
+        {
+            // Nothing was named, which is also what a build with no string
+            // reader can tell about any name.
+            return { answer: SE_ERR_ACCESSDENIED, record: null };
+        }
+        const wanted = (verb ?? 'open').trim().toLowerCase();
+        if (!RUNNABLE_VERBS.has(wanted) || !SELF_EXECUTABLE.has(extensionOf(name)))
+        {
+            // A verb is a handler, and a document is a handler: both come from
+            // registries this build does not have, so the ask is refused rather
+            // than answered with a launch that did not happen.
+            return { answer: SE_ERR_NOASSOC, record: null };
+        }
+        if (!host.launcher)
+        {
+            // A build with nothing behind it that can start a program. Told no
+            // rather than told there was nothing to open it with, because the
+            // file is exactly the kind the shell runs itself.
+            return { answer: SE_ERR_ACCESSDENIED, record: null };
+        }
+        const image = host.launcher.imageOf(name);
+        if (image === null)
+        {
+            return { answer: SE_ERR_FNF, record: null };
+        }
+        if (wanted === 'runas')
+        {
+            host.divergence?.('ShellExecute',
+                `"runas" starts ${image} without asking: one user, one volume it owns`);
+        }
+        const asked = (directory ?? '').trim();
+        if (asked !== '')
+        {
+            host.divergence?.('ShellExecute',
+                `the child starts in its own image's directory, not in ${asked}`);
+        }
+        const tail = (parameters ?? '').trim();
+        const record = host.launcher.launch(
+            image, tail === '' ? `"${image}"` : `"${image}" ${tail}`, 0);
+        return record
+            ? { answer: LAUNCH_SUCCESS, record }
+            : { answer: SE_ERR_FNF, record: null };
+    };
+
     const table = {
         /**
          * HINSTANCE ShellExecuteA(HWND, LPCSTR lpOperation, LPCSTR lpFile,
          *                         LPCSTR lpParameters, LPCSTR lpDirectory,
          *                         INT nShowCmd)
          *
-         * Refused. This is how a program opens a web page, a readme or an
-         * installer, and none of those exist to open from in here.
+         * An executable is started, through the same machinery CreateProcess
+         * uses: the file is its own handler, so the launch needs none of the
+         * registry the shell would otherwise consult. A document is refused as
+         * having no association, and so is a verb that is not one of the
+         * runnable ones -- `edit`, `print` and `explore` each name a handler
+         * that would have to be looked up.
+         *
+         * The window is not made the child's owner and nShowCmd is not carried:
+         * how a program first shows its window is its own business once it runs,
+         * which is what kernel32's WinExec does with the same argument.
          */
         ShellExecuteA: {
             argBytes: 24,
-            handler: ()=>SE_ERR_ACCESSDENIED,
+            /** @param {number[]} args */
+            handler: ([, operation, file, parameters, directory])=>start(
+                stringOf(operation), stringOf(file),
+                stringOf(parameters), stringOf(directory)).answer,
         },
 
         /**
@@ -294,7 +430,7 @@ export function createShellFunctions(host){
                     return SE_ERR_NOASSOC;
                 }
                 writePath(result >>> 0, fullPath(name, stringOf(directory) ?? ''));
-                return FIND_EXECUTABLE_SUCCESS;
+                return LAUNCH_SUCCESS;
             },
         },
 
@@ -428,19 +564,38 @@ export function createShellFunctions(host){
         /**
          * BOOL ShellExecuteExA(SHELLEXECUTEINFOA *pExecInfo)
          *
-         * The same refusal as ShellExecuteA, in the form a caller of this one
-         * reads: a FALSE, and the same error in the record's hInstApp.
+         * The same launch, read out of a record and answered into it: hInstApp
+         * carries what ShellExecute would have returned, and the BOOL says only
+         * whether that was a success. A caller that asked to keep the process
+         * open gets the handle on the child, which is what it then waits on.
+         *
+         * A record naming something other than a file -- an item id list, a
+         * class -- is refused, because neither is a path, and it is refused
+         * rather than read as one. A record that cannot be read at all names no
+         * file, which is the access refusal a caller of this one already reads.
          */
         ShellExecuteExA: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([info])=>{
-                if ((info >>> 0) !== 0)
+                const at = info >>> 0;
+                if (at === 0)
                 {
-                    host.writeMemory(
-                        (info >>> 0) + SHELLEXECUTEINFO_HINSTAPP, dword(SE_ERR_ACCESSDENIED));
+                    return 0;
                 }
-                return 0;
+                const mask = dwordAt(at, SEI_MASK);
+                const started = (mask & (SEE_MASK_IDLIST | SEE_MASK_CLASSNAME)) !== 0
+                    ? { answer: SE_ERR_NOASSOC, record: null }
+                    : start(stringOf(dwordAt(at, SEI_VERB)), stringOf(dwordAt(at, SEI_FILE)),
+                        stringOf(dwordAt(at, SEI_PARAMETERS)),
+                        stringOf(dwordAt(at, SEI_DIRECTORY)));
+                host.writeMemory(at + SHELLEXECUTEINFO_HINSTAPP, dword(started.answer));
+                if ((mask & SEE_MASK_NOCLOSEPROCESS) !== 0)
+                {
+                    host.writeMemory(at + SHELLEXECUTEINFO_PROCESS,
+                        dword(started.record?.handle ?? 0));
+                }
+                return started.answer === LAUNCH_SUCCESS ? 1 : 0;
             },
         },
 

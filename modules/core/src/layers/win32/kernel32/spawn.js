@@ -69,13 +69,8 @@ const directoryOf = path=>path.slice(0, Math.max(
     path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
 
 /**
- * @typedef {Object} SpawnHost
+ * @typedef {Object} SpawnerHost
  * @property {any} kernel                        The kernel layer's API.
- * @property {(address: number, length: number) => Uint8Array} readMemory
- * @property {(address: number, bytes: Uint8Array) => void} writeMemory
- * @property {(address: number, maxLength: number) => string} readCString
- * @property {(address: number, maxLength: number) => string} readWideString
- * @property {(code: number) => void} setLastError
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
  *           Whether a path names a file on the volume. Case is folded there.
  * @property {() => string} imagePath
@@ -84,21 +79,35 @@ const directoryOf = path=>path.slice(0, Math.max(
  *           Told about every request as it is recorded, while the caller's
  *           stack is still standing. A replacement erases the logs of the run
  *           that asked for it, so this is where the evidence has to be taken.
- * @property {number} [processId]  The running program's own identifier.
  */
 
 /**
- * @param {SpawnHost} host
+ * @typedef {Object} Spawner
+ * @property {(named: string, line: string, flags: number) => any} launch
+ *           Records a child and opens the handles on it, or answers null when
+ *           the image is not there. `named` is the image when the caller
+ *           already knows it and '' when only the command line is there to find
+ *           it in.
+ * @property {(name: string) => string | null} imageOf
+ *           The image a name -- or a command line whose first token is one --
+ *           points at, or null.
  */
-export function createSpawnFunctions(host){
-    const { kernel } = host;
 
-    /** @param {number} address @param {number} value */
-    const writeDword = (address, value)=>{
-        host.writeMemory(address, new Uint8Array([
-            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
-        ]));
-    };
+/**
+ * Finding an image and recording a child for it, apart from the calls that
+ * spell the request.
+ *
+ * kernel32's CreateProcess and WinExec are two spellings of one thing, and the
+ * shell's launch is a third: all three resolve the image the same way and all
+ * three hand the same record to whoever replaces this process. Which is why
+ * this is here rather than inside the table below -- a shell that resolved a
+ * file differently would start a different program than the one it named.
+ *
+ * @param {SpawnerHost} host
+ * @returns {Spawner}
+ */
+export function createSpawner(host){
+    const { kernel } = host;
 
     /** @param {string} path @returns {boolean} */
     const isFile = path=>{
@@ -121,6 +130,10 @@ export function createSpawnFunctions(host){
      * before anything else. `.exe` is appended when the name carries no
      * extension, because CreateProcess does that too and a program that omits
      * it is not naming a different file.
+     *
+     * The search path is not consulted: a program that relies on one is rare,
+     * and inventing an order here that Windows does not use would be worse than
+     * not finding the image at all.
      *
      * @param {string} name
      * @returns {string | null}
@@ -179,30 +192,69 @@ export function createSpawnFunctions(host){
         return null;
     };
 
-    /**
-     * Records a request for a child process.
-     *
-     * @param {string} named        lpApplicationName, or '' when there was none.
-     * @param {string} line         lpCommandLine, or '' when there was none.
-     * @param {number} flags        dwCreationFlags.
-     * @returns {any} the record, or null when the image is not there.
-     */
-    const record = (named, line, flags)=>{
-        const path = named === '' ? imageFromCommandLine(line) : resolveImage(named);
-        if (path === null)
-        {
-            return null;
-        }
-        const made = kernel.processes.create({
-            imagePath: path,
-            // The caller's own line when it gave one, because that is what the
-            // child is entitled to see; ours only when it did not -- and then
-            // quoted, for the reason in this file's header.
-            commandLine: line.trim() === '' ? `"${path}"` : line,
-            suspended: (flags & CREATE_SUSPENDED) !== 0,
-        });
-        host.spawned?.(made);
-        return made;
+    return {
+        launch(named, line, flags){
+            const path = named === '' ? imageFromCommandLine(line) : resolveImage(named);
+            if (path === null)
+            {
+                return null;
+            }
+            const made = kernel.processes.create({
+                imagePath: path,
+                // The caller's own line when it gave one, because that is what the
+                // child is entitled to see; ours only when it did not -- and then
+                // quoted, for the reason in this file's header.
+                commandLine: line.trim() === '' ? `"${path}"` : line,
+                suspended: (flags & CREATE_SUSPENDED) !== 0,
+            });
+            // Both handles name the same record, and every spelling of "start a
+            // program" hands one out: a parent waits on the first and resumes
+            // the second, and neither is a different object here because the
+            // child has exactly one thread until it is really running.
+            made.handle = kernel.handles.open('process', made);
+            made.threadHandle = kernel.handles.open('process-thread', made);
+            host.spawned?.(made);
+            return made;
+        },
+
+        imageOf: name=>resolveImage(name) ?? imageFromCommandLine(name),
+    };
+}
+
+/**
+ * @typedef {Object} SpawnHost
+ * @property {any} kernel                        The kernel layer's API.
+ * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
+ * @property {(code: number) => void} setLastError
+ * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
+ *           Whether a path names a file on the volume. Case is folded there.
+ * @property {() => string} imagePath
+ *           The running program, whose directory a bare name is looked for in.
+ * @property {(record: any) => void} [spawned]
+ *           Told about every request as it is recorded, while the caller's
+ *           stack is still standing. A replacement erases the logs of the run
+ *           that asked for it, so this is where the evidence has to be taken.
+ * @property {Spawner} [spawner]
+ *           The one every library in this process launches through, when the
+ *           caller assembled it. Built here otherwise, from the same fields.
+ * @property {number} [processId]  The running program's own identifier.
+ */
+
+/**
+ * @param {SpawnHost} host
+ */
+export function createSpawnFunctions(host){
+    const { kernel } = host;
+    const record = (host.spawner ?? createSpawner(host)).launch;
+
+    /** @param {number} address @param {number} value */
+    const writeDword = (address, value)=>{
+        host.writeMemory(address, new Uint8Array([
+            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+        ]));
     };
 
     /** @param {number} handle @returns {any} */
@@ -228,12 +280,6 @@ export function createSpawnFunctions(host){
             host.setLastError(ERROR_FILE_NOT_FOUND);
             return 0;
         }
-        // Both handles name the same record. A parent waits on the first and
-        // resumes the second, and neither is a different object here because
-        // the child has exactly one thread until it is really running.
-        made.handle = kernel.handles.open('process', made);
-        made.threadHandle = kernel.handles.open('process-thread', made);
-
         if ((information >>> 0) !== 0)
         {
             const bytes = new Uint8Array(PROCESS_INFORMATION_SIZE);

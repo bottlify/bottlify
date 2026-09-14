@@ -17,7 +17,7 @@ import { createCriticalSections } from './kernel32/critical.js';
 import { createLocaleFunctions } from './kernel32/locale.js';
 import { createEnvironmentFunctions } from './kernel32/environment.js';
 import { createSystemFunctions } from './kernel32/system.js';
-import { createSpawnFunctions } from './kernel32/spawn.js';
+import { createSpawner, createSpawnFunctions } from './kernel32/spawn.js';
 import { createAtomFunctions } from './kernel32/atoms.js';
 import { createExceptionFunctions } from './kernel32/exceptions.js';
 import { createSeh } from './kernel32/seh.js';
@@ -522,6 +522,22 @@ export const win32Module = {
             divergence: config?.divergence,
         });
 
+        // One way of starting a program, behind three spellings of asking for
+        // one: kernel32's CreateProcess and WinExec, and the shell's launch. A
+        // program a self-extractor starts through ShellExecute has to be the one
+        // it named, which needs the image found the same way in both.
+        const spawner = createSpawner({
+            kernel,
+            /** @param {string} path */
+            stat: path=>volume.stat(path),
+            imagePath: ()=>modules.imagePath(),
+            // Where the record of a replacement request goes. It has to leave
+            // this process, because honouring one erases every log and ring the
+            // run that asked for it produced.
+            /** @param {any} request */
+            spawned: request=>config?.spawned?.(request),
+        });
+
         libraries = {
             'KERNEL32.dll': {
                 ...createConsoleFunctions({
@@ -732,11 +748,8 @@ export const win32Module = {
                     /** @param {string} path */
                     stat: path=>volume.stat(path),
                     imagePath: ()=>modules.imagePath(),
-                    // Where the record of a replacement request goes. It has to
-                    // leave this process, because honouring one erases every
-                    // log and ring the run that asked for it produced.
-                    /** @param {any} request */
                     spawned: request=>config?.spawned?.(request),
+                    spawner,
                 }),
                 // Placed after the throwing pair it replaces: RaiseException and
                 // RtlUnwind are defined by not returning, and now there is a
@@ -881,6 +894,8 @@ export const win32Module = {
                 // FindExecutable resolves an executable against the current
                 // directory the file calls use, which is the filesystem's.
                 resolve: path=>filesystem.resolve(path).path,
+                // And a launch starts the program kernel32 would have started.
+                launcher: spawner,
                 divergence: config?.divergence,
                 taskAllocator,
                 // The task allocator's memory: a caller frees an item id list

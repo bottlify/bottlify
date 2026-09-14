@@ -119,7 +119,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `ole32.dll` | `ole32/` | 13 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 9 | "There is no input method" — which is the state a game asks for. |
-| `SHELL32.dll` | `shell32/` | 7 | Documented refusals (`ShellExecute`, folder browse), the drag-and-drop truths, and the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume). |
+| `SHELL32.dll` | `shell32/` | 7 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, and the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume). |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
 | `VERSION.dll` | `version/` | 3 | The version block read out of a file's own image. |
 | `COMDLG32.dll` | `comdlg32/` | 3 | File dialogs, answered as cancelled. |
@@ -300,9 +300,17 @@ Stated as the code states them.
   settings follow, the refresh rate is accepted as asked, `CDS_TEST` answers without switching, and
   a null mode returns to the display's own size -- and answer `DISP_CHANGE_BADMODE` for a size or
   depth the list does not carry. `EnumDisplayDevicesA` reports no devices.
-- **One process, no children.** `CreateProcess`/`WinExec` record the request and succeed; the child
-  replaces the parent once the parent has nothing left to do. `ShellExecute` answers
-  `SE_ERR_NOASSOC`/`SE_ERR_ACCESSDENIED`; `SHBrowseForFolder` and the common dialogs are cancelled.
+- **One process, no children.** `CreateProcess`/`WinExec`/`ShellExecute` record the request and
+  succeed; the child replaces the parent once the parent has nothing left to do. All three resolve
+  the image the same way (`kernel32/spawn.js`), so a program started through the shell is the one
+  that was named. A child's working directory is its own image's: `lpCurrentDirectory` and
+  `lpDirectory` are accepted, reported as a divergence, and not carried. `ShellExecute` runs a file
+  whose extension is its own handler (`exe`, `com`, `bat`, `cmd`, `pif`, `scr`) under the `open` and
+  `runas` verbs -- `runas` without a prompt, there being one user -- and answers `SE_ERR_NOASSOC` for
+  a document or any other verb, since the handler for one would come from a registry this build does
+  not have; a file that is not on the volume is `SE_ERR_FNF`. `ShellExecuteEx` fills `hInstApp` and,
+  for `SEE_MASK_NOCLOSEPROCESS`, `hProcess`; a record naming an item id list or a class is refused.
+  `SHBrowseForFolder` and the common dialogs are cancelled.
 - **The shell namespace is the volume.** `SHGetDesktopFolder` answers an `IShellFolder` whose one
   child is the computer (`CSIDL_DRIVES`), under which the drives and their directories are
   enumerated (`IEnumIDList`), bound to, compared, named and parsed; every item id carries the full

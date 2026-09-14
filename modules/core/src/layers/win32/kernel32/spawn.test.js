@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSpawnFunctions } from './spawn.js';
+import { createSpawner, createSpawnFunctions } from './spawn.js';
 import { createProcessTable } from '../../kernel/internal/processes.js';
 
 const ERROR_SUCCESS = 0;
@@ -355,4 +355,29 @@ test('argument sizes match what the guest compiled against', ()=>{
     assert.equal(fns.CreateProcessW.argBytes, 40);
     assert.equal(fns.WinExec.argBytes, 8);
     assert.equal(fns.WriteProcessMemory.argBytes, 20);
+});
+
+test('the launcher every spelling shares finds one image and opens the handles', ()=>{
+    // CreateProcess, WinExec and the shell's launch all resolve an image the same
+    // way, because a program started through the shell has to be the one that was
+    // named. A caller that asked to wait on the child needs a handle on it
+    // whichever spelling started it, so the record carries one from the start.
+    const host = fakeHost({
+        files: ['C:\\App\\child.exe'], imagePath: 'C:\\App\\launcher.exe',
+    });
+    const spawner = createSpawner(host);
+
+    assert.equal(spawner.imageOf('child.exe'), 'C:\\App\\child.exe',
+        'a bare name is the one beside the program that asked');
+    assert.equal(spawner.imageOf('C:\\App\\child.exe'), 'C:\\App\\child.exe');
+    assert.equal(spawner.imageOf('missing.exe'), null);
+
+    const made = spawner.launch('C:\\App\\child.exe', '"C:\\App\\child.exe" /s', 0);
+    assert.equal(pending(host), made);
+    assert.equal(made.commandLine, '"C:\\App\\child.exe" /s');
+    assert.notEqual(made.handle, 0);
+    assert.equal(host.kernel.handles.resolve(made.handle, 'process'), made);
+    assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread'), made);
+    assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
+        ['C:\\App\\child.exe'], 'and the request left the process as it was recorded');
 });
