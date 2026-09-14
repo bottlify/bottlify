@@ -758,6 +758,18 @@ test('the current directory is read and set through the same two-call protocol',
     files.mkdir('C:\\GAME\\DATA');
     assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'DATA')]), 1);
     assert.equal(files.currentDirectory(), 'C:\\GAME\\DATA');
+
+    // A drive named without a separator is that drive's own current
+    // directory, not a path under it: the walk an installer does up a
+    // directory it means to create ends at "C:", and a refusal there is
+    // read as the whole path being invalid.
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:')]), 1);
+    assert.equal(files.currentDirectory(), 'C:\\GAME\\DATA');
+
+    files.mkdir('C:\\GAME\\DATA\\SUB');
+    assert.equal(fns.SetCurrentDirectoryA.handler([at(NAME, 'C:SUB')]), 1,
+        'and a drive-relative path starts from there, not from the root');
+    assert.equal(files.currentDirectory(), 'C:\\GAME\\DATA\\SUB');
 });
 
 test('GetTempPathA ends in a separator, because callers concatenate onto it', ()=>{

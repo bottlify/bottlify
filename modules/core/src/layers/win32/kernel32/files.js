@@ -358,7 +358,7 @@ export function createFileFunctions(host){
         {
             return '';
         }
-        const written = name.replace(/\//g, '\\');
+        const written = driveRelative(name.replace(/\//g, '\\'));
         const rooted = isAbsolute(written) ? written : underCurrentDirectory(written);
         // A UNC path's root is its leading pair of separators; anything else
         // rooted here is a drive letter, colon, separator.
@@ -383,6 +383,35 @@ export function createFileFunctions(host){
 
     /** @param {string} path */
     const isAbsolute = path=>/^[A-Za-z]:\\/.test(path) || path.startsWith('\\\\');
+
+    /**
+     * A path that names a drive without a separator -- "C:" or "C:WINDOWS" --
+     * is relative to that drive's own current directory, which Windows keeps
+     * per drive. A drive the process has never been on has its root for one;
+     * the drive it is on has the directory it is in, so "C:" alone is where
+     * the process already stands. A caller walking up a path it means to
+     * create ends that walk here, and a refusal of it reads as "the whole
+     * path is invalid" rather than "the last piece is not there yet".
+     *
+     * @param {string} path
+     */
+    const driveRelative = path=>{
+        const drive = /^([A-Za-z]:)(?!\\)/.exec(path);
+        if (drive === null)
+        {
+            return path;
+        }
+        const rest = path.slice(2);
+        const current = files.currentDirectory();
+        const base = current.slice(0, 2).toLowerCase() === drive[1].toLowerCase()
+            ? current
+            : drive[1] + '\\';
+        if (rest === '')
+        {
+            return base;
+        }
+        return base.endsWith('\\') ? base + rest : base + '\\' + rest;
+    };
 
     /** @param {string} path */
     const underCurrentDirectory = path=>{
