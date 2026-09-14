@@ -257,7 +257,8 @@ export function buildExe({ imports, data = {}, exports = [], codeSize = 0x40, co
         const dllName = exportNameOffsets[exportNameOffsets.length - 1]
             + exports[exports.length - 1].name.length + 1;
         text.pad(exportOffset);
-        text.u32(0).u32(0).u16(0).u16(0).u32(rva(dllName)).u32(1) // flags, stamp, version, name, base
+        // Flags, stamp, version, name, ordinal base, then the counts and tables.
+        text.u32(0).u32(0).u16(0).u16(0).u32(rva(dllName)).u32(1)
             .u32(exports.length).u32(exports.length)
             .u32(rva(addresses)).u32(rva(names)).u32(rva(ordinals));
         for (const entry of exports)
