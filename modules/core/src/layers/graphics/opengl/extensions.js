@@ -218,6 +218,21 @@ export const EXTENSION_WORDS = Object.freeze({
 });
 
 /** Every extension function name, for telling one from a core entry point. */
+/**
+ * GL extensions that are implemented, sized and obtainable but left out of
+ * the string a program reads: a program that finds them takes a path this
+ * renderer has not yet drawn right, and one that does not find them takes
+ * its slower path, which is drawn right. Every name here is also in
+ * `GL_EXTENSIONS`; the pointer stays obtainable, as a driver's would, and a
+ * program that reads the string first never asks. Advertising one again is
+ * removing its name from here.
+ */
+export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([
+    // The per-light interaction pass of a program that finds these draws
+    // nothing on the device yet; its diffuse and emissive passes draw.
+    'GL_ARB_vertex_program', 'GL_ARB_fragment_program',
+]));
+
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),
     ...Object.values(WGL_EXTENSIONS).flat(),

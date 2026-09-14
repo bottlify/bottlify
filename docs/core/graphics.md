@@ -346,9 +346,10 @@ and the varyings widened to the eight coordinate sets a program may address -- b
 extensions are not advertised**: a title that takes its own per-light path through them drew the
 level black for a cause the draw dump, the probe and a texture census localised to the light
 arithmetic's inputs without naming it, while the fixed-function path is proven lit, so the
-promise is withdrawn until the cause is found (the advertised-eq-sized-eq-implemented invariant
-took the entry points and the export wiring with the names; the translator, its tests, the
-program state and the device path stay, and re-advertising is one commit). The context holds
+promise is withdrawn until the cause is found. The two names sit in `HIDDEN_GL_EXTENSIONS`: their
+entry points stay sized, implemented and obtainable through `wglGetProcAddress`, as a driver's
+unannounced entry points would be, and only the string omits them, so re-advertising is removing
+a name from that set. The context holds
 eight texture units -- the image units and coordinate sets a program addresses -- of which the
 conventional pipeline combines the first four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path
 cannot answer (a non-matrix state parameter, a 3D texture target) refuses the stage by name as a

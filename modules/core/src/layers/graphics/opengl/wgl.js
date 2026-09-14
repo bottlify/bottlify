@@ -50,6 +50,7 @@
 
 import { PFD, WIN32_ERROR } from './constants.js';
 import { CORE_FUNCTIONS, createGlContext } from './context.js';
+import { HIDDEN_GL_EXTENSIONS } from './extensions.js';
 import { PIXEL_FORMATS, choosePixelFormat, writePixelFormatDescriptor } from './pixelformat.js';
 
 /**
@@ -276,9 +277,11 @@ export function createWgl(options){
             }
             const format = PIXEL_FORMATS[index - 1];
             // The WGL extensions are looked up here and reported through
-            // their own string; the GL string names only GL extensions.
+            // their own string; the GL string names only GL extensions, and
+            // not the hidden ones, which stay obtainable but unannounced.
             const context = createGlContext({
-                extensions: Object.keys(extensions).filter(name=>!name.startsWith('WGL_')),
+                extensions: Object.keys(extensions).filter(name=>!name.startsWith('WGL_')
+                    && !HIDDEN_GL_EXTENSIONS.has(name)),
                 memory: contextMemory,
                 divergence: options.divergence,
                 gpu: options.gpu,

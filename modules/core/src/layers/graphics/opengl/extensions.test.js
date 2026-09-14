@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    EXTENSION_FUNCTIONS, EXTENSION_WORDS, GL_EXTENSIONS, WGL_EXTENSIONS,
+    EXTENSION_FUNCTIONS, EXTENSION_WORDS, GL_EXTENSIONS, HIDDEN_GL_EXTENSIONS, WGL_EXTENSIONS,
 } from './extensions.js';
 import { ARGUMENT_WORDS, createOpengl } from './exports.js';
 import { CORE_FUNCTIONS } from './context.js';
@@ -85,7 +85,8 @@ test('every extension function is declared, sized and implemented', ()=>{
 test('the extension string reports exactly what wglGetProcAddress can hand out', ()=>{
     const { table, cstring, readString } = library();
     const extensions = readString(table.glGetString.handler([GL.EXTENSIONS])).split(' ');
-    assert.deepEqual(extensions, Object.keys(GL_EXTENSIONS));
+    assert.deepEqual(extensions,
+        Object.keys(GL_EXTENSIONS).filter(name=>!HIDDEN_GL_EXTENSIONS.has(name)));
 
     for (const [extension, functions] of Object.entries(GL_EXTENSIONS))
     {
@@ -94,6 +95,13 @@ test('the extension string reports exactly what wglGetProcAddress can hand out',
             assert.notEqual(table.wglGetProcAddress.handler([cstring(name)]), 0,
                 `${extension}: ${name} is reported and not obtainable`);
         }
+    }
+    // A hidden extension is one a program is not told about, not one that is
+    // missing: its pointers are handed out and every one of them is real.
+    for (const name of HIDDEN_GL_EXTENSIONS)
+    {
+        assert.ok(name in GL_EXTENSIONS, `${name} is hidden but not an extension`);
+        assert.ok(!extensions.includes(name), `${name} is hidden and yet reported`);
     }
     assert.equal(table.wglGetProcAddress.handler([cstring('glEnable')]), 0, 'core is null');
     assert.equal(table.wglGetProcAddress.handler([cstring('glActiveTexture')]), 0,
