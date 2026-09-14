@@ -34,6 +34,8 @@ import { GL } from './constants.js';
  * @property {number} pointer   guest address, or the offset into `buffer`
  * @property {number} buffer    the buffer object bound when the pointer was
  *                              set; zero means client memory
+ * @property {number} [normalised]  whether what it reads is normalised on
+ *                                  read; absent reads as no
  */
 
 /** @type {Map<number, number>} */

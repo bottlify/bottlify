@@ -135,7 +135,10 @@ export function installProgramCalls(context, kernel){
                  *           pointer: import('./arrays.js').ArrayPointer }[]} */
                 const out = [];
                 attribArrays.forEach((array, index)=>{
-                    if (array.enabled === 0)
+                    // An index the aliasing table gives a conventional array
+                    // is that array: the draw reads it through the
+                    // conventional name, last pointer write wins.
+                    if (array.enabled === 0 || kernel.side.arrayAlias?.record(index))
                     {
                         return;
                     }
@@ -633,7 +636,11 @@ export function installProgramCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            const array = attribArrays[index];
+            // An aliased index is the conventional array: the generic write
+            // is another way of writing the same pointer record.
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
             array.size = size;
             array.type = type;
             array.normalised = normalised ? 1 : 0;
@@ -667,11 +674,16 @@ export function installProgramCalls(context, kernel){
                 setError(GL.INVALID_VALUE);
                 return null;
             }
-            const array = attribArrays[index];
+            const alias = kernel.side.arrayAlias?.record(index) ?? null;
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (alias ?? attribArrays[index]);
             switch (pname)
             {
                 case GL.VERTEX_ATTRIB_ARRAY_ENABLED_ARB:
-                    return [array.enabled];
+                    return [alias
+                        ? kernel.side.arrayAlias.enabled(index)
+                        : attribArrays[index].enabled];
                 case GL.VERTEX_ATTRIB_ARRAY_SIZE_ARB:
                     return [array.size];
                 case GL.VERTEX_ATTRIB_ARRAY_STRIDE_ARB:
@@ -679,7 +691,7 @@ export function installProgramCalls(context, kernel){
                 case GL.VERTEX_ATTRIB_ARRAY_TYPE_ARB:
                     return [array.type];
                 case GL.VERTEX_ATTRIB_ARRAY_NORMALIZED_ARB:
-                    return [array.normalised];
+                    return [array.normalised ?? 0];
                 case GL.CURRENT_VERTEX_ATTRIB_ARB:
                     return [...attribValues[index]];
                 default:
@@ -708,7 +720,10 @@ export function installProgramCalls(context, kernel){
                 setError(GL.INVALID_ENUM);
                 return null;
             }
-            return [attribArrays[index].pointer];
+            const array = /**
+             * @type {import('./arrays.js').ArrayPointer | GenericAttribArray}
+             */ (kernel.side.arrayAlias?.record(index) ?? attribArrays[index]);
+            return [array.pointer];
         },
     });
 
@@ -725,6 +740,11 @@ export function installProgramCalls(context, kernel){
         if (!(index >= 0) || index >= GENERIC_ATTRIBS)
         {
             setError(GL.INVALID_VALUE);
+            return;
+        }
+        if (kernel.side.arrayAlias?.record(index))
+        {
+            kernel.side.arrayAlias.setEnable(index, value);
             return;
         }
         attribArrays[index].enabled = value;

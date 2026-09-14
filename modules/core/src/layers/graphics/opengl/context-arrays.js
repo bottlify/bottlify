@@ -115,7 +115,7 @@ const POINTER_QUERIES = Object.freeze({
  * @returns {import('./arrays.js').ArrayPointer}
  */
 function createPointer(size, type){
-    return { size, type, stride: 0, pointer: 0, buffer: 0 };
+    return { size, type, stride: 0, pointer: 0, buffer: 0, normalised: 0 };
 }
 
 /**
@@ -137,6 +137,11 @@ export function installArrayCalls(context, kernel){
     };
     const texCoordPointers = Array.from({ length: TEXTURE_UNITS }, ()=>createPointer(4, GL.FLOAT));
     const texCoordEnabled = new Array(TEXTURE_UNITS).fill(0);
+    // The kinds whose conventional pointer normalises what it reads; a generic
+    // write through the aliasing table overwrites the flag either way.
+    pointers.normal.normalised = 1;
+    pointers.color.normalised = 1;
+    pointers.secondary.normalised = 1;
     let clientActive = 0;
     /** @type {{ first: number, count: number } | null} */
     let locked = null;
@@ -222,6 +227,7 @@ export function installArrayCalls(context, kernel){
         pointer.stride = stride;
         pointer.pointer = address;
         pointer.buffer = record(GL.ARRAY_BUFFER_BINDING).values[0];
+        pointer.normalised = spec.normalised ? 1 : 0;
         mirror(name);
     }
 
@@ -276,7 +282,7 @@ export function installArrayCalls(context, kernel){
         const fetch = (/** @type {string} */ name, /** @type {number} */ unit)=>{
             const pointer = name === 'texCoord' ? texCoordPointers[unit] : pointers[name];
             const read = readerFor(pointer);
-            return read ? readElement(read, pointer, index, ARRAYS[name].normalised) : null;
+            return read ? readElement(read, pointer, index, pointer.normalised !== 0) : null;
         };
         if (enabled('vertex'))
         {
@@ -382,7 +388,7 @@ export function installArrayCalls(context, kernel){
         {
             if (enabled(name))
             {
-                push(as, pointers[name], ARRAYS[name].normalised);
+                push(as, pointers[name], pointers[name].normalised !== 0);
                 continue;
             }
             const entry = genericByName.get(as);
@@ -396,7 +402,7 @@ export function installArrayCalls(context, kernel){
             const as = `texCoord${unit}`;
             if (texCoordEnabled[unit] !== 0)
             {
-                push(as, texCoordPointers[unit], false);
+                push(as, texCoordPointers[unit], texCoordPointers[unit].normalised !== 0);
                 continue;
             }
             const entry = genericByName.get(as);
@@ -418,12 +424,9 @@ export function installArrayCalls(context, kernel){
      * aliasing table makes the same attribute.
      */
     function hasVertexSource(){
-        if (record(GL.VERTEX_ARRAY).values[0] !== 0)
-        {
-            return true;
-        }
-        return record(GL.VERTEX_PROGRAM_ARB).values[0] !== 0
-            && kernel.side.programs?.attribArrays[0].enabled === 1;
+        // Attribute 0's enable is the vertex array's enable: the aliasing
+        // table's pairs are one array, whichever entry point enabled it.
+        return record(GL.VERTEX_ARRAY).values[0] !== 0;
     }
 
     /**
@@ -558,9 +561,63 @@ export function installArrayCalls(context, kernel){
         return buffer;
     }
 
+    /**
+     * The conventional array name a generic attribute index aliases, or null
+     * for the indices the aliasing table leaves generic of their own.
+     *
+     * @param {number} index
+     * @returns {string | null}
+     */
+    const conventionalName = index=>index === 0 ? 'vertex'
+        : index === 2 ? 'normal'
+            : index === 3 ? 'color'
+                : index === 4 ? 'secondary'
+                    : index === 5 ? 'fogCoord'
+                        : null;
+
+    /**
+     * The conventional pointer record a generic attribute index aliases: the
+     * pair is one array, so a generic pointer or enable write lands here and
+     * a conventional write lands where the generic queries read.
+     *
+     * @param {number} index
+     * @returns {import('./arrays.js').ArrayPointer | null}
+     */
+    const aliasRecord = index=>{
+        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        {
+            return texCoordPointers[index - 8];
+        }
+        const name = conventionalName(index);
+        return name === null ? null : pointers[name];
+    };
+
+    /** @param {number} index @param {number} value */
+    const aliasSetEnable = (index, value)=>{
+        if (index >= 8 && index < 8 + TEXTURE_UNITS)
+        {
+            const unit = index - 8;
+            texCoordEnabled[unit] = value;
+            if (unit === clientActive)
+            {
+                setState(GL.TEXTURE_COORD_ARRAY, [value]);
+            }
+            return;
+        }
+        setState(ARRAYS[/** @type {string} */ (conventionalName(index))].enable, [value]);
+    };
+
+    /** @param {number} index @returns {number} */
+    const aliasEnabled = index=>index >= 8 && index < 8 + TEXTURE_UNITS
+        ? texCoordEnabled[index - 8]
+        : record(ARRAYS[/** @type {string} */ (conventionalName(index))].enable).values[0];
+
     Object.assign(kernel.side, {
         pointers,
         texCoordPointers,
+        arrayAlias: {
+            record: aliasRecord, setEnable: aliasSetEnable, enabled: aliasEnabled,
+        },
         clientActiveUnit: ()=>clientActive,
 
         /** @param {number} mask @returns {any} */

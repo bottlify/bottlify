@@ -216,20 +216,24 @@ test('generic attribute current values, arrays and their queries', ()=>{
         context.glGetVertexAttribPointervARB(3, GL.VERTEX_ATTRIB_ARRAY_POINTER_ARB), [0x100]);
     context.glEnableVertexAttribArrayARB(3);
     assert.deepEqual(context.glGetVertexAttribfvARB(3, GL.VERTEX_ATTRIB_ARRAY_ENABLED_ARB), [1]);
-    assert.deepEqual(
-        context.side.programs.genericArrays()
-            .map((/** @type {{ name: string }} */ a)=>a.name), ['color'],
-        'attribute 3 is the primary colour, by the aliasing table');
+    assert.deepEqual(context.glGetIntegerv(GL.COLOR_ARRAY), [1],
+        'attribute 3 enables the primary colour array it aliases');
+    assert.deepEqual(context.side.programs.genericArrays(), [],
+        'an aliased index draws as the conventional array, not as a generic one');
     context.glDisableVertexAttribArrayARB(3);
+    assert.deepEqual(context.glGetIntegerv(GL.COLOR_ARRAY), [0]);
     assert.deepEqual(context.side.programs.genericArrays(), []);
 
-    // A pointer set while a buffer object is bound reads from the buffer.
+    // A pointer set while a buffer object is bound reads from the buffer,
+    // through the conventional record the aliasing table shares.
     context.glGenBuffersARB(1);
     context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
     context.glVertexAttribPointerARB(9, 2, GL.FLOAT, 0, 0, 12);
-    const nine = context.side.programs.attribArrays[9];
-    assert.equal(nine.buffer, 1);
+    const nine = context.side.texCoordPointers[1];
+    assert.equal(nine.buffer, 1, 'attribute 9 is the coordinate array of unit 1');
     assert.equal(nine.pointer, 12);
+    assert.deepEqual(
+        context.glGetVertexAttribPointervARB(9, GL.VERTEX_ATTRIB_ARRAY_POINTER_ARB), [12]);
 
     context.glEnableVertexAttribArrayARB(16);
     assert.equal(context.glGetError(), GL.INVALID_VALUE);
