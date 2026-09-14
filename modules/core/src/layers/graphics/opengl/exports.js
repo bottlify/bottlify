@@ -683,44 +683,6 @@ export function createOpengl(services){
         }
     }
 
-    // GL_ARB_vertex_program generic attributes: the index comes first, and a
-    // form short of four components fills the rest with (0, 0, 1). The N
-    // variants map their integers onto 0..1; the plain ones pass them through
-    // as the values they are.
-    for (const count of [1, 2, 3, 4])
-    {
-        for (const type of ['s', 'f', 'd'])
-        {
-            const spec = TYPES[type];
-            implemented[`glVertexAttrib${count}${type}ARB`] = args=>call(context=>{
-                const v = Array.from({ length: count }, (unused, i)=>
-                    immediate(type, args, 1 + i * spec.words));
-                context.glVertexAttrib4fARB(args[0] >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
-            implemented[`glVertexAttrib${count}${type}vARB`] = ([index, address])=>call(context=>{
-                const v = readTyped(type, address, count);
-                context.glVertexAttrib4fARB(index >>> 0, v[0], v[1] ?? 0, v[2] ?? 0, v[3] ?? 1);
-            });
-        }
-    }
-    /** @type {[string, string, boolean][]} the four-component vector forms */
-    const attribVectors = [
-        ['4bv', 'b', false], ['4sv', 's', false], ['4iv', 'i', false],
-        ['4ubv', 'ub', false], ['4usv', 'us', false], ['4uiv', 'ui', false],
-        ['4fv', 'f', false], ['4dv', 'd', false],
-        ['4Nbv', 'b', true], ['4Nsv', 's', true], ['4Niv', 'i', true],
-        ['4Nubv', 'ub', true], ['4Nusv', 'us', true], ['4Nuiv', 'ui', true],
-    ];
-    for (const [suffix, type, normalised] of attribVectors)
-    {
-        const spec = TYPES[type];
-        const convert = normalised ? spec.normalise : (/** @type {number} */ x)=>x;
-        implemented[`glVertexAttrib${suffix}ARB`] = ([index, address])=>call(context=>{
-            const v = readTyped(type, address, 4).map(convert);
-            context.glVertexAttrib4fARB(index >>> 0, v[0], v[1], v[2], v[3]);
-        });
-    }
-
     /**
      * A parameter-setting family: `glLightf`, `glLightfv`, `glLighti`,
      * `glLightiv` and their like, where the integer forms normalise only the
@@ -1446,85 +1408,6 @@ export function createOpengl(services){
             out, context.glGetBufferParameterivARB(target >>> 0, parameter >>> 0), 'word')),
         glGetBufferPointervARB: ([target, parameter, out])=>call(context=>writeQuery(
             out, context.glGetBufferPointervARB(target >>> 0, parameter >>> 0), 'word')),
-
-        // --- GL_ARB_vertex_program and GL_ARB_fragment_program ---
-
-        glGenProgramsARB: ([count, out])=>call(context=>{
-            const names = context.glGenProgramsARB(count | 0);
-            if (names.length > 0 && (out >>> 0) !== 0)
-            {
-                writeU32s(out, names);
-            }
-        }),
-        glDeleteProgramsARB: ([count, list])=>call(context=>context.glDeleteProgramsARB(
-            (count | 0) > 0 && (list >>> 0) !== 0 ? readU32s(list, count | 0) : [])),
-        glIsProgramARB: ([name])=>current()?.glIsProgramARB(name >>> 0) ?? GL.FALSE,
-        glBindProgramARB: ([target, name])=>
-            call(context=>context.glBindProgramARB(target >>> 0, name >>> 0)),
-        glProgramStringARB: ([target, format, length, string])=>call(context=>
-            context.glProgramStringARB(target >>> 0, format >>> 0, length | 0, string >>> 0)),
-
-        glProgramEnvParameter4fARB: ([target, index, x, y, z, w])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
-                [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
-        glProgramEnvParameter4fvARB: ([target, index, address])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
-                readF32s(address, 4))),
-        glProgramEnvParameter4dARB: a=>call(context=>context.glProgramEnvParameter4fARB(
-            a[0] >>> 0, a[1] >>> 0,
-            [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),
-                asDouble(a[8], a[9])])),
-        glProgramEnvParameter4dvARB: ([target, index, address])=>call(context=>
-            context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0, readF64s(address, 4))),
-        glProgramLocalParameter4fARB: ([target, index, x, y, z, w])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
-                [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
-        glProgramLocalParameter4fvARB: ([target, index, address])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
-                readF32s(address, 4))),
-        glProgramLocalParameter4dARB: a=>call(context=>context.glProgramLocalParameter4fARB(
-            a[0] >>> 0, a[1] >>> 0,
-            [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),
-                asDouble(a[8], a[9])])),
-        glProgramLocalParameter4dvARB: ([target, index, address])=>call(context=>
-            context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0, readF64s(address, 4))),
-
-        glGetProgramEnvParameterfvARB: ([target, index, out])=>call(context=>writeQuery(
-            out, context.glGetProgramEnvParameterfvARB(target >>> 0, index >>> 0), 'float')),
-        glGetProgramEnvParameterdvARB: ([target, index, out])=>call(context=>writeQuery(
-            out, context.glGetProgramEnvParameterfvARB(target >>> 0, index >>> 0), 'double')),
-        glGetProgramLocalParameterfvARB: ([target, index, out])=>call(context=>writeQuery(
-            out, context.glGetProgramLocalParameterfvARB(target >>> 0, index >>> 0), 'float')),
-        glGetProgramLocalParameterdvARB: ([target, index, out])=>call(context=>writeQuery(
-            out, context.glGetProgramLocalParameterfvARB(target >>> 0, index >>> 0), 'double')),
-        glGetProgramivARB: ([target, pname, out])=>call(context=>writeQuery(
-            out, context.glGetProgramivARB(target >>> 0, pname >>> 0), 'word')),
-        glGetProgramStringARB: ([target, pname, out])=>call(context=>{
-            const bytes = context.glGetProgramStringARB(target >>> 0, pname >>> 0);
-            if (bytes && (out >>> 0) !== 0)
-            {
-                services.writeMemory(out >>> 0, bytes);
-            }
-        }),
-
-        glVertexAttrib4NubARB: ([index, x, y, z, w])=>call(context=>
-            context.glVertexAttrib4fARB(index >>> 0, (x & 0xff) / 255, (y & 0xff) / 255,
-                (z & 0xff) / 255, (w & 0xff) / 255)),
-        glVertexAttribPointerARB: ([index, size, type, normalised, stride, pointer])=>
-            call(context=>context.glVertexAttribPointerARB(index >>> 0, size | 0, type >>> 0,
-                asBoolean(normalised), stride | 0, pointer >>> 0)),
-        glEnableVertexAttribArrayARB: ([index])=>
-            call(context=>context.glEnableVertexAttribArrayARB(index >>> 0)),
-        glDisableVertexAttribArrayARB: ([index])=>
-            call(context=>context.glDisableVertexAttribArrayARB(index >>> 0)),
-        glGetVertexAttribfvARB: ([index, pname, out])=>call(context=>writeQuery(
-            out, context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'float')),
-        glGetVertexAttribdvARB: ([index, pname, out])=>call(context=>writeQuery(
-            out, context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'double')),
-        glGetVertexAttribivARB: ([index, pname, out])=>call(context=>writeQuery(
-            out, context.glGetVertexAttribfvARB(index >>> 0, pname >>> 0), 'word')),
-        glGetVertexAttribPointervARB: ([index, pname, out])=>call(context=>writeQuery(
-            out, context.glGetVertexAttribPointervARB(index >>> 0, pname >>> 0), 'word')),
 
         // --- the attribute stacks ---
 

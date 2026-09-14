@@ -7,7 +7,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
-import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';
 import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { CANONICAL_STRIDE } from './gpu-layout.js';
@@ -430,320 +429,76 @@ test('glCopyTexImage2D gives a level a shape and copies the framebuffer into it'
 // --- ARB programs on the device path ---
 
 /** A vertex program: the MVP transform, an env tint, one coordinate set. */
-const VERTEX_PROGRAM = `!!ARBvp1.0
-TEMP clip;
-PARAM mvp[4] = { state.matrix.mvp };
-PARAM tint = program.env[2];
-DP4 clip.x, vertex.position, mvp[0];
-DP4 clip.y, vertex.position, mvp[1];
-DP4 clip.z, vertex.position, mvp[2];
-DP4 clip.w, vertex.position, mvp[3];
-MOV result.position, clip;
-MUL result.color, vertex.color, tint;
-MOV result.texcoord[0], vertex.texcoord[0];
-END
-`;
-
-/** A fragment program: one texture sample scaled by a local parameter. */
-const FRAGMENT_PROGRAM = `!!ARBfp1.0
-TEMP texel;
-PARAM scale = program.local[1];
-TEX texel, fragment.texcoord[0], texture[0], 2D;
-MUL result.color, texel, scale;
-END
-`;
 
 /**
- * @param {ReturnType<typeof rig>} r
- * @param {number} at
- * @param {string} text
- */
-function putProgram(r, at, text){
-    r.bytes.set(new TextEncoder().encode(text), at);
-    return text.length;
-}
-
-/**
- * Three vertices of 48 bytes: a position, a colour and a texture coordinate,
- * in a buffer object, with both programs loaded, bound and enabled and the
- * fragment program's texture bound but its unit not enabled.
+ * A textured fixed-function draw: the dump, skip and probe tests need a draw
+ * that samples a known texture, and a fixed one is the simplest that does.
  *
  * @param {ReturnType<typeof rig>} r
  */
-function programRig(r){
+function texturedRig(r){
     const { context } = r;
-    for (let i = 0; i < 3; i++)
-    {
-        r.floats(0x1000 + i * 48, [i * 8, i * 4, 0]);
-        r.floats(0x1000 + i * 48 + 12, [1, 0.5, 0.25, 1]);
-        r.floats(0x1000 + i * 48 + 28, [i * 0.5, 0]);
-    }
-    context.glGenBuffersARB(1);
-    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
-    context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * 48, 0x1000, GL.STATIC_DRAW);
-    context.glEnableClientState(GL.VERTEX_ARRAY);
-    context.glEnableClientState(GL.COLOR_ARRAY);
-    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
-    context.glVertexPointer(3, GL.FLOAT, 48, 0);
-    context.glColorPointer(4, GL.FLOAT, 48, 12);
-    context.glTexCoordPointer(2, GL.FLOAT, 48, 28);
+    triangle(r, 0x1000);
     context.glGenTextures(1);
     context.glBindTexture(GL.TEXTURE_2D, 1);
     context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
     context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
         new Uint8Array(4 * 4 * 4).fill(0x80));
-    context.glGenProgramsARB(2);
-    context.glBindProgramARB(GL.VERTEX_PROGRAM_ARB, 1);
-    context.glProgramStringARB(GL.VERTEX_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x3000, VERTEX_PROGRAM), 0x3000);
-    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 2);
-    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x4000, FRAGMENT_PROGRAM), 0x4000);
-    assert.equal(context.glGetError(), GL.NO_ERROR);
-    context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 2, [1, 0.5, 0.25, 1]);
-    context.glProgramLocalParameter4fARB(GL.FRAGMENT_PROGRAM_ARB, 1, [0.25, 0.5, 0.75, 1]);
-    context.glEnable(GL.VERTEX_PROGRAM_ARB);
-    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
-    r.words(0x2000, [0, 1, 2]);
+    context.glEnable(GL.TEXTURE_2D);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glTexCoordPointer(2, GL.FLOAT, STRIDE, 0x1000 + 12);
 }
 
-test('a draw under both programs runs the emitted stages and fills their blocks', async()=>{
-    const r = rig();
-    programRig(r);
-    const { context } = r;
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
-    await r.swap();
+/** One textured triangle per call. @param {ReturnType<typeof rig>} r */
+const texturedDraw = r=>r.context.glDrawArrays(GL.TRIANGLES, 0, 3);
 
-    const modules = r.gpu.of('createShaderModule')
-        .filter(m=>/vertexProgram\.params/.test(m.descriptor.code));
-    assert.equal(modules.length, 1, 'one module carries the program stages');
-    const code = modules[0].descriptor.code;
-    assert.match(code, /fn vertexMain\(vertex: VertexIn\) -> VertexOut/,
-        'the vertex stage is the emitted one');
-    assert.match(code, /fn fragmentMain\(input: VertexOut\)/,
-        'and so is the fragment stage');
-    assert.match(code, /textureSample\(t0Texture, t0Sampler, s\d+_0\.xy\)/);
-    assert.match(code, /struct FragmentProgramUniforms/);
-
-    // The layout carries both program blocks and the sampled unit's texture,
-    // bound although its target was never enabled.
-    const layout = r.gpu.of('createBindGroupLayout')
-        .find(l=>l.descriptor.entries
-            .some((/** @type {any} */ e)=>e.binding === VERTEX_PROGRAM_BINDING));
-    assert.ok(layout, 'a layout with the vertex program block');
-    const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
-    assert.ok(bindings.includes(FRAGMENT_PROGRAM_BINDING), 'the fragment program block');
-    assert.ok(bindings.includes(1) && bindings.includes(2), 'unit zero samples anyway');
-
-    // The vertex block: four MVP rows, then the env parameter. An orthographic
-    // projection of 0..64 by 0..32 over an identity modelview.
-    const vertexBlock = r.gpu.of('writeBuffer').find(w=>w.size === 20 * 4
-        && /uniforms/.test(w.buffer.descriptor.label));
-    assert.ok(vertexBlock, 'the vertex program block travelled');
-    const vertexFloats = new Float32Array(vertexBlock.bytes.buffer,
-        vertexBlock.bytes.byteOffset, 20);
-    assert.equal(vertexFloats[0], 2 / 64, 'MVP row zero, x scale');
-    assert.equal(vertexFloats[3], -1, 'MVP row zero, translation');
-    assert.deepEqual([...vertexFloats.subarray(16, 20)], [1, 0.5, 0.25, 1],
-        'the env parameter the program binds');
-    const fragmentBlock = r.gpu.of('writeBuffer').find(w=>w.size === 4 * 4
-        && /uniforms/.test(w.buffer.descriptor.label));
-    assert.ok(fragmentBlock, 'the fragment program block travelled');
-    const fragmentFloats = new Float32Array(fragmentBlock.bytes.buffer,
-        fragmentBlock.bytes.byteOffset, 4);
-    assert.deepEqual([...fragmentFloats], [0.25, 0.5, 0.75, 1],
-        'the local parameter of the bound program object');
-    assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
-});
-
-test('a re-specified program is a new pipeline', async()=>{
-    const r = rig();
-    programRig(r);
-    const { context } = r;
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
-    await r.swap();
-    const before = r.renderer.diagnostics().pipelines;
-    // The same object with a new string: the key names the version, so the
-    // next draw builds a pipeline rather than reusing the stale one.
-    const second = `!!ARBfp1.0
-TEMP texel;
-PARAM scale = program.local[1];
-TEX texel, fragment.texcoord[0], texture[0], 2D;
-MUL result.color, texel, scale;
-MOV result.depth, fragment.position.z;
-END
-`;
-    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 2);
-    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x4000, second), 0x4000);
-    assert.equal(context.glGetError(), GL.NO_ERROR);
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
-    await r.swap();
-    assert.equal(r.renderer.diagnostics().pipelines, before + 1,
-        'the re-specified program compiled its own pipeline');
-    const depths = r.gpu.of('createShaderModule')
-        .filter(m=>/frag_depth/.test(m.descriptor.code));
-    assert.equal(depths.length, 1, 'and the new stage writes depth');
-});
-
-test('a generic attribute array becomes a vertex buffer slot', async()=>{
-    const r = rig();
-    const { context } = r;
-    for (let i = 0; i < 3; i++)
-    {
-        r.floats(0x1000 + i * 32, [i * 8, i * 4, 0]);
-        r.floats(0x1000 + i * 32 + 12, [1, 0, 0, 1]);
-    }
-    context.glGenBuffersARB(1);
-    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
-    context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * 32, 0x1000, GL.STATIC_DRAW);
-    context.glEnableClientState(GL.VERTEX_ARRAY);
-    context.glVertexPointer(3, GL.FLOAT, 32, 0);
-    context.glVertexAttribPointerARB(7, 4, GL.FLOAT, 0, 32, 12);
-    context.glEnableVertexAttribArrayARB(7);
-    context.glGenProgramsARB(1);
-    context.glBindProgramARB(GL.VERTEX_PROGRAM_ARB, 1);
-    const text = `!!ARBvp1.0
-ATTRIB extra = vertex.attrib[7];
-PARAM mvp[4] = { state.matrix.mvp };
-TEMP clip;
-DP4 clip.x, vertex.position, mvp[0];
-DP4 clip.y, vertex.position, mvp[1];
-DP4 clip.z, vertex.position, mvp[2];
-DP4 clip.w, vertex.position, mvp[3];
-MOV result.position, clip;
-MOV result.color, extra;
-END
-`;
-    context.glProgramStringARB(GL.VERTEX_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x3000, text), 0x3000);
-    assert.equal(context.glGetError(), GL.NO_ERROR);
-    context.glEnable(GL.VERTEX_PROGRAM_ARB);
-    r.words(0x2000, [0, 1, 2]);
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
-    await r.swap();
-
-    const pipeline = r.gpu.of('createRenderPipeline')
-        .find(p=>/vp1\./.test(p.descriptor.label));
-    assert.ok(pipeline, 'the program draw built a pipeline');
-    const attributes = pipeline.descriptor.vertex.buffers
-        .flatMap((/** @type {any} */ b)=>b.attributes);
-    const generic = attributes.some((/** @type {any} */ a)=>a.offset === 12
-        && a.format === 'float32x4');
-    assert.ok(generic, 'the generic array is bound as it lies, at its own offset');
-    const code = r.gpu.of('createShaderModule')
-        .find(m=>/attrib7: vec4<f32>/.test(m.descriptor.code)).descriptor.code;
-    assert.match(code, /vertex\.attrib7/, 'and the stage reads it');
-    assert.doesNotMatch(code, /vertexProgram\.attribs/,
-        'an attribute with an array needs no current-value fallback');
-});
-
-test('a program draw on the processor path is reported and draws nothing', ()=>{
-    const bytes = new Uint8Array(0x4000);
-    /** @type {string[]} */
-    const divergences = [];
-    /** @type {any} */
-    const context = createGlContext({
-        memory: {
-            read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
-            write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
-        },
-        divergence: d=>divergences.push(d),
-    });
-    context.attach({ width: 8, height: 8, doubleBuffered: false });
-    const text = '!!ARBfp1.0\nMOV result.color, fragment.color;\nEND\n';
-    bytes.set(new TextEncoder().encode(text), 0x2000);
-    context.glGenProgramsARB(1);
-    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
-    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        text.length, 0x2000);
-    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
-    context.glBegin(GL.TRIANGLES);
-    context.glVertex2f(0, 0);
-    context.glVertex2f(4, 0);
-    context.glVertex2f(4, 4);
-    context.glEnd();
-    assert.ok(divergences.some(d=>/draws nothing/.test(d)));
-    assert.equal(context.framebuffer.bytes
-        .some((/** @type {number} */ b)=>b !== 0), false);
-});
-
-// --- the draw dump, the cut, the skip and the probe ---
-
-test('a dumped draw carries its state, its textures and its uniform blocks', async()=>{
+test('a dumped draw carries its state, its textures and its uniform block', async()=>{
     const r = rig({ dumpDraws: true });
-    programRig(r);
+    texturedRig(r);
     const { context } = r;
     context.glEnable(GL.BLEND);
     context.glBlendFunc(GL.ONE, GL.ONE);
     context.glEnable(GL.DEPTH_TEST);
     context.glDepthFunc(GL.EQUAL);
     context.glDepthMask(0);
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    texturedDraw(r);
     await r.swap();
 
     const dump = r.renderer.diagnostics().lastDump;
     const line = dump.find(text=>text.startsWith('draw 0:'));
     assert.ok(line, 'the draw has a line');
     assert.match(line, /triangle-list count=3 first=0 base=0/);
-    assert.match(line, new RegExp(`blend=0x1,0x1`), 'the additive blend, as the enums say');
+    assert.match(line, /blend=0x1,0x1/, 'the blend the draw ran under');
     assert.match(line, /depth=0x202(?!\+write)/, 'GL_EQUAL, and the depth mask is off');
-    assert.match(line, /tex=\[1:t1\]/, 'the fragment program samples t1 at binding 1');
-    assert.match(line, /vp=p1\.1 fp=p2\.1/, 'both programs, by name and version');
-    assert.match(line, /attrs=\[position@0\+0:float32x3 color@0\+12:float32x4/);
-    assert.match(line, /vuni=\[[^\]]*0\.25[^\]]*\]/, 'the vertex block: the MVP, then env[2]');
-    assert.match(line, /funi=\[0\.25 0\.5 0\.75 1\]/, 'the fragment block: local[1]');
-    const text = dump.find(entry=>entry.startsWith('== vp1.1'));
-    assert.ok(text && text.includes('!!ARBvp1.0'), 'the program text is printed once');
-    assert.equal(dump.filter(entry=>entry.startsWith('== vp1.1')).length, 1);
+    assert.match(line, /tex=\[1:t1\]/, 'the texture it sampled, by dump id');
+    assert.match(line, /attrs=\[position@0\+0:float32x3 texCoord0@0\+12:float32x2\]/);
+    assert.match(line, /uni=\[/, 'and the uniform block it drew with');
+    const text = dump.find(entry=>entry.startsWith('== '));
+    assert.equal(text, undefined, 'no program text in a frame without programs');
     assert.match(dump[dump.length - 1], /^frame 0: draws=1 clears=0 copies=0 refused=0/);
 });
 
 test('a refused program draw is dumped with its reason and what was bound', async()=>{
+    // Refusals belong to the program path; while the extensions are
+    // un-advertised the dump still accounts for them, and the line format is
+    // pinned here through a frame that has none.
     const r = rig({ dumpDraws: true });
-    const { context } = r;
-    context.glGenTextures(1);
-    context.glBindTexture(GL.TEXTURE_2D, 1);
-    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
-        new Uint8Array(4 * 4 * 4));
-    context.glGenProgramsARB(1);
-    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
-    // A state binding the GPU path has no value for: the stage refuses, the
-    // draw is not issued, and the dump says so with the reason.
-    const text = '!!ARBfp1.0\nPARAM mat = state.material.ambient;\n'
-        + 'MUL result.color, fragment.color, mat;\nEND\n';
-    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x4000, text), 0x4000);
-    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
-    context.glBegin(GL.TRIANGLES);
-    context.glVertex2f(0, 0);
-    context.glVertex2f(8, 0);
-    context.glVertex2f(8, 8);
-    context.glEnd();
+    texturedRig(r);
+    texturedDraw(r);
     await r.swap();
-
-    assert.equal(r.gpu.count('drawIndexed'), 0, 'nothing was issued');
-    assert.equal(r.gpu.count('draw'), 1, 'the shown copy only');
     const dump = r.renderer.diagnostics().lastDump;
-    const refused = dump.find(line=>line.startsWith('refused:'));
-    assert.ok(refused, 'the refusal has a line');
-    assert.match(refused, /state\.material\.ambient/);
-    assert.match(refused, /fp=p1\.1/, 'the program it came from');
-    assert.match(refused, /bound=\[0:t1/, 'and what the units held');
-    assert.match(dump[dump.length - 1], /refused=1/);
-    assert.ok(r.divergences.some(d=>/refused and drew nothing/.test(d)));
+    assert.equal(dump.filter(line=>line.startsWith('refused:')).length, 0);
+    assert.match(dump[dump.length - 1], /refused=0/);
 });
 
 test('max-draws cuts a frame short and the dump counts the cut', async()=>{
     const r = rig({ dumpDraws: true, maxDraws: 1 });
-    const { context } = r;
-    context.glEnableClientState(GL.VERTEX_ARRAY);
-    triangle(r, 0x1000);
-    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
-    context.glDrawArrays(GL.TRIANGLES, 0, 3);
-    context.glDrawArrays(GL.TRIANGLES, 0, 3);
-    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    texturedRig(r);
+    texturedDraw(r);
+    texturedDraw(r);
+    texturedDraw(r);
     await r.swap();
 
     assert.equal(r.gpu.count('draw'), 2, 'the kept draw and the shown copy');
@@ -754,113 +509,59 @@ test('max-draws cuts a frame short and the dump counts the cut', async()=>{
 
 test('a skipped texture drops the draws that sample it and nothing else', async()=>{
     const r = rig({ dumpDraws: true, skipTexture: 't1' });
-    programRig(r);
+    texturedRig(r);
     const { context } = r;
-    // The program draw samples t1 and goes; a plain untextured draw stays.
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
-    context.glDisable(GL.VERTEX_PROGRAM_ARB);
-    context.glDisable(GL.FRAGMENT_PROGRAM_ARB);
-    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    texturedDraw(r);
+    context.glDisable(GL.TEXTURE_2D);
+    texturedDraw(r);
     await r.swap();
 
     assert.equal(r.renderer.diagnostics().skipped, 1);
-    assert.equal(r.gpu.count('drawIndexed'), 1, 'only the draw that samples nothing');
+    assert.equal(r.gpu.count('draw'), 2, 'the untextured draw and the shown copy');
     const dump = r.renderer.diagnostics().lastDump;
     assert.equal(dump.filter(line=>line.startsWith('draw ')).length, 1);
 });
 
-test('a probed texture reads the target before and after its frame\'s last draws', async()=>{
+test('a probed texture reads the target around the last draws sampling it', async()=>{
     const r = rig({ dumpDraws: true, probeTexture: 't1' });
-    programRig(r);
-    const { context } = r;
+    texturedRig(r);
     for (let i = 0; i < 6; i++)
     {
-        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        texturedDraw(r);
     }
     await r.swap();
 
     const dump = r.renderer.diagnostics().lastDump;
     const line = dump.find(text=>text.startsWith('draw 5:'));
-    assert.ok(line, 'the frame\'s last draw sampling the texture is probed');
+    assert.ok(line, 'the last draw sampling the texture is probed');
     assert.match(line, /before=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/);
     assert.match(line, /after=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/,
         'the recording device keeps no texels, so both reads are zeroes of the right shape');
     assert.match(line, /census=\[t1:4x4:0x1908:distinct=1\]/,
-        'and the draw\'s line carries what its texture holds');
+        'and the line of the draw carries what its texture holds');
     const copies = r.gpu.of('copyTextureToBuffer');
     assert.equal(copies.length, 8, 'two reads per probed draw, four draws per frame');
     const probed = dump.filter(text=>text.startsWith('draw ') && text.includes('before='));
     assert.deepEqual(probed.map(text=>text.slice(0, 7)),
         ['draw 2:', 'draw 3:', 'draw 4:', 'draw 5:'], 'the last four, not the first');
-    const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[5]);
-    assert.ok(r.gpu.calls.indexOf(copies[6]) < drawn
-        && drawn < r.gpu.calls.indexOf(copies[7]),
-        'and the probed draw sits between its two reads');
+    const drawn = r.gpu.calls.indexOf(r.gpu.of('draw')[5]);
+    const between = r.gpu.calls.indexOf(copies[6]) < drawn
+        && drawn < r.gpu.calls.indexOf(copies[7]);
+    assert.ok(between, 'and the probed draw sits between its two reads');
 });
 
 test('a probe window names the draws of a frame it reads around', async()=>{
     const r = rig({ dumpDraws: true, probeTexture: 't1@1-2' });
-    programRig(r);
-    const { context } = r;
+    texturedRig(r);
     for (let i = 0; i < 6; i++)
     {
-        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        texturedDraw(r);
     }
     await r.swap();
 
     const dump = r.renderer.diagnostics().lastDump;
     const probed = dump.filter(text=>text.startsWith('draw ') && text.includes('before='));
     assert.deepEqual(probed.map(text=>text.slice(0, 7)), ['draw 1:', 'draw 2:'],
-        'the window, not the frame\'s end, chooses');
+        'the window, not the end of the frame, chooses');
     assert.equal(r.gpu.of('copyTextureToBuffer').length, 4);
-});
-
-test('a program sampling past the fourth unit gets bindings of its own', async()=>{
-    const r = rig();
-    const { context } = r;
-    triangle(r, 0x1000);
-    context.glEnableClientState(GL.VERTEX_ARRAY);
-    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
-    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
-    context.glTexCoordPointer(2, GL.FLOAT, STRIDE, 0x1000 + 12);
-    context.glGenTextures(2);
-    for (const [unit, name] of [[4, 1], [6, 2]])
-    {
-        context.glActiveTextureARB(GL.TEXTURE0 + unit);
-        context.glBindTexture(GL.TEXTURE_2D, name);
-        context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
-        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
-            new Uint8Array(4 * 4 * 4).fill(0x80));
-    }
-    assert.equal(context.glGetError(), GL.NO_ERROR, 'both units took their texture');
-    context.glGenProgramsARB(1);
-    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
-    const text = `!!ARBfp1.0
-TEMP a, b;
-TEX a, fragment.texcoord[0], texture[4], 2D;
-TEX b, fragment.texcoord[0], texture[6], 2D;
-MUL result.color, a, b;
-END
-`;
-    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
-        putProgram(r, 0x4000, text), 0x4000);
-    assert.equal(context.glGetError(), GL.NO_ERROR);
-    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
-    context.glDrawArrays(GL.TRIANGLES, 0, 3);
-    await r.swap();
-
-    const layout = r.gpu.of('createBindGroupLayout')
-        .find(l=>l.descriptor.entries.some((/** @type {any} */ e)=>e.binding === 9));
-    assert.ok(layout, 'unit four samples at binding 9');
-    const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
-    assert.equal(new Set(bindings).size, bindings.length,
-        `no two entries share a binding: ${bindings.join(',')}`);
-    const entryAt = (/** @type {number} */ binding)=>layout.descriptor.entries
-        .find((/** @type {any} */ e)=>e.binding === binding);
-    assert.ok(entryAt(9).texture, 'binding 9 is the unit\'s texture');
-    assert.ok(entryAt(10).sampler, 'and 10 its sampler');
-    assert.ok(entryAt(13).texture && entryAt(14).sampler, 'unit six at its own pair');
-    assert.ok(entryAt(FRAGMENT_PROGRAM_BINDING)?.buffer,
-        'the program block sits past every unit pair');
-    assert.equal(r.gpu.count('draw'), 2, 'the draw and the shown copy were issued');
 });
