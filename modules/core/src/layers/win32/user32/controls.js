@@ -280,6 +280,18 @@ const CB_ERR = -1;
 const CBN_SELCHANGE = 1;
 const CBN_SETFOCUS = 3;
 const CBN_KILLFOCUS = 4;
+const CBN_EDITUPDATE = 5;
+const CBN_EDITCHANGE = 6;
+
+/**
+ * The notices an editing field gives its parent as text changes: an edit
+ * reports the EN_* pair, the field of an editable combo box the CBN_* one.
+ * A combo box has no code for a limit reached, so its overflow is null.
+ */
+const EDIT_NOTICES = Object.freeze({ update: EN_UPDATE, change: EN_CHANGE,
+    overflow: EN_MAXTEXT });
+const COMBO_NOTICES = Object.freeze({ update: CBN_EDITUPDATE, change: CBN_EDITCHANGE,
+    overflow: null });
 /** The drop button at the right of a combo box, as wide as a scroll bar. */
 const COMBO_BUTTON = 16;
 
@@ -1295,11 +1307,15 @@ export function createControlProcedures(host){
 
     /**
      * Replaces the selection with text, keeps within the limit, moves the
-     * caret past what was inserted, and tells the parent.
+     * caret past what was inserted, and tells the parent. Which pair of
+     * notices the parent gets is the control's own: an edit reports EN_*,
+     * the field of an editable combo box the CBN_* pair -- and a combo has
+     * no code for a limit reached, so its overflow notice is null.
      *
      * @param {any} record @param {string} text @param {unknown} [thread]
+     * @param {{ update: number, change: number, overflow: number | null }} [codes]
      */
-    const replaceSelection = (record, text, thread)=>{
+    const replaceSelection = (record, text, thread, codes = EDIT_NOTICES)=>{
         const state = editState(record);
         const from = Math.min(state.selStart, state.selEnd);
         const to = Math.max(state.selStart, state.selEnd);
@@ -1309,9 +1325,10 @@ export function createControlProcedures(host){
         state.selStart = state.selEnd = from + inserted.length;
         state.modified = true;
         host.invalidate(record);
-        return after(notify(record, EN_UPDATE, thread), ()=>after(
-            notify(record, EN_CHANGE, thread),
-            ()=>(inserted.length < text.length ? notify(record, EN_MAXTEXT, thread) : 0)));
+        return after(notify(record, codes.update, thread), ()=>after(
+            notify(record, codes.change, thread),
+            ()=>(inserted.length < text.length && codes.overflow !== null
+                ? notify(record, codes.overflow, thread) : 0)));
     };
 
     /**
@@ -1326,6 +1343,66 @@ export function createControlProcedures(host){
         if (!host.keyDown(VK_SHIFT))
         {
             state.selStart = clamped;
+        }
+        host.invalidate(record);
+    };
+
+    /**
+     * A character arriving at an editing field: an edit's, or the field of an
+     * editable combo box. Backspace narrows or deletes the selection, a return
+     * belongs to a multi-line edit that asked for one, control characters are
+     * not text, and anything else replaces the selection.
+     *
+     * @param {any} record @param {number} character @param {unknown} thread
+     * @param {{ update: number, change: number, overflow: number | null }} codes
+     * @param {boolean} readOnly
+     */
+    const editCharacter = (record, character, thread, codes, readOnly)=>{
+        if (readOnly || disabled(record))
+        {
+            return 0;
+        }
+        const state = editState(record);
+        if (character === VK_BACK)
+        {
+            if (state.selStart === state.selEnd && state.selEnd > 0)
+            {
+                state.selStart = state.selEnd - 1;
+            }
+            return replaceSelection(record, '', thread, codes);
+        }
+        if (character === VK_RETURN)
+        {
+            return multiline(record) && (record.style & ES_WANTRETURN) !== 0
+                ? replaceSelection(record, '\r\n', thread, codes)
+                : 0;
+        }
+        if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
+        {
+            return 0;
+        }
+        return replaceSelection(record, String.fromCharCode(character), thread, codes);
+    };
+
+    /**
+     * The selection both spellings set: EM_SETSEL for an edit, CB_SETEDITSEL
+     * for the field of an editable combo box. A start of -1 deselects; an end
+     * of -1 means to the end of the text.
+     *
+     * @param {any} record @param {number} start @param {number} end
+     */
+    const setSelection = (record, start, end)=>{
+        const state = editState(record);
+        if (start === -1)
+        {
+            state.selStart = state.selEnd;
+        }
+        else
+        {
+            state.selStart = Math.min(record.title.length, Math.max(0, start));
+            state.selEnd = end === -1
+                ? record.title.length
+                : Math.min(record.title.length, Math.max(0, end));
         }
         host.invalidate(record);
     };
@@ -1450,32 +1527,9 @@ export function createControlProcedures(host){
                 host.invalidate(record);
                 return after(host.setFocus(record.hwnd, thread), ()=>0);
             }
-            case WM_CHAR: {
-                const character = message.wParam & 0xffff;
-                if (readOnly() || disabled(record))
-                {
-                    return 0;
-                }
-                if (character === VK_BACK)
-                {
-                    if (state.selStart === state.selEnd && state.selEnd > 0)
-                    {
-                        state.selStart = state.selEnd - 1;
-                    }
-                    return replaceSelection(record, '', thread);
-                }
-                if (character === VK_RETURN)
-                {
-                    return multiline(record) && (record.style & ES_WANTRETURN) !== 0
-                        ? replaceSelection(record, '\r\n', thread)
-                        : 0;
-                }
-                if (character < VK_SPACE || character === VK_TAB || character === VK_ESCAPE)
-                {
-                    return 0;
-                }
-                return replaceSelection(record, String.fromCharCode(character), thread);
-            }
+            case WM_CHAR:
+                return editCharacter(record, message.wParam & 0xffff, thread,
+                    EDIT_NOTICES, readOnly());
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
                 const rows = editGridRows(record);
@@ -1565,25 +1619,9 @@ export function createControlProcedures(host){
                 }
                 return ((to & 0xffff) << 16 | from & 0xffff) >>> 0;
             }
-            case EM_SETSEL: {
-                // -1 for the start means "deselect"; -1 for the end means
-                // "to the end of the text".
-                const start = message.wParam | 0;
-                const end = message.lParam | 0;
-                if (start === -1)
-                {
-                    state.selStart = state.selEnd;
-                }
-                else
-                {
-                    state.selStart = Math.min(record.title.length, Math.max(0, start));
-                    state.selEnd = end === -1
-                        ? record.title.length
-                        : Math.min(record.title.length, Math.max(0, end));
-                }
-                host.invalidate(record);
+            case EM_SETSEL:
+                setSelection(record, message.wParam | 0, message.lParam | 0);
                 return 0;
-            }
             case EM_REPLACESEL: {
                 const address = message.lParam >>> 0;
                 return replaceSelection(record,
@@ -2114,8 +2152,7 @@ export function createControlProcedures(host){
                 bottom: arrowY + row + 1 }, color(COLOR_BTNTEXT));
         }
         const current = state.items[state.current];
-        const editable = (record.style & CBS_TYPEMASK) === CBS_DROPDOWN
-            || (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+        const editable = comboEditable(record);
         const text = editable ? record.title : current?.text ?? '';
         const field = { left: rect.left + 3, top: rect.top + 2, right: button.left - 1,
             bottom: rect.bottom - 2 };
@@ -2152,11 +2189,21 @@ export function createControlProcedures(host){
     };
 
     /**
+     * Whether a combo box has an editing field: every kind but the dropdown
+     * list, whose field shows the selection and takes no text of its own.
+     *
+     * @param {any} record
+     */
+    const comboEditable = record=>(record.style & CBS_TYPEMASK) === CBS_DROPDOWN
+        || (record.style & CBS_TYPEMASK) === CBS_SIMPLE;
+
+    /**
      * @param {any} record @param {ControlMessage} message @param {unknown} [thread]
      */
     const comboBoxProc = (record, message, thread)=>{
         const state = listState(record);
         const sorted = (record.style & CBS_SORT) !== 0;
+        const editable = comboEditable(record);
         const asList = comboAsList(message.message);
         if (asList !== null)
         {
@@ -2185,16 +2232,68 @@ export function createControlProcedures(host){
                 host.invalidate(record);
                 return notify(record, CBN_KILLFOCUS, thread);
             case WM_LBUTTONDOWN:
-            case WM_LBUTTONDBLCLK:
+            case WM_LBUTTONDBLCLK: {
                 if (!state.dropDivergenceSaid)
                 {
                     state.dropDivergenceSaid = true;
                     host.divergence?.('ComboBox',
                         'the list does not drop down; the arrow keys change the selection');
                 }
+                // A click in the field of an editable combo puts the caret
+                // where it landed, as a click in an edit does; one on the
+                // drop button is the drop that does not drop down.
+                const point = pointOf(message.lParam);
+                if (editable && point.x < host.clientSize(record).width - COMBO_BUTTON - 2)
+                {
+                    const { hdc } = host.contextOn(record);
+                    if (hdc !== 0)
+                    {
+                        const at = charFromPoint(record, hdc, point.x, point.y);
+                        const field = editState(record);
+                        field.selStart = at;
+                        field.selEnd = at;
+                    }
+                    host.endPaint(record, hdc);
+                    host.invalidate(record);
+                }
                 return after(host.setFocus(record.hwnd, thread), ()=>0);
+            }
+            case WM_CHAR:
+                return editable
+                    ? editCharacter(record, message.wParam & 0xffff, thread,
+                        COMBO_NOTICES, false)
+                    : 0;
             case WM_KEYDOWN: {
                 const key = message.wParam & 0xff;
+                // In the field of an editable combo the caret keys edit the
+                // text; up and down still walk the list, as they do in every
+                // kind of combo.
+                if (editable && !disabled(record))
+                {
+                    const field = editState(record);
+                    switch (key){
+                        case VK_LEFT:
+                            moveCaret(record, field.selEnd - 1);
+                            return 0;
+                        case VK_RIGHT:
+                            moveCaret(record, field.selEnd + 1);
+                            return 0;
+                        case VK_HOME:
+                            moveCaret(record, 0);
+                            return 0;
+                        case VK_END:
+                            moveCaret(record, record.title.length);
+                            return 0;
+                        case VK_DELETE:
+                            if (field.selStart === field.selEnd)
+                            {
+                                field.selEnd = Math.min(record.title.length, field.selEnd + 1);
+                            }
+                            return replaceSelection(record, '', thread, COMBO_NOTICES);
+                        default:
+                            break;
+                    }
+                }
                 const step = key === VK_UP ? -1 : key === VK_DOWN ? 1 : 0;
                 if (step === 0 || state.items.length === 0)
                 {
@@ -2208,6 +2307,17 @@ export function createControlProcedures(host){
                 record.title = state.items[index].text;
                 return chooseItem(record, index, CBN_SELCHANGE, true, thread);
             }
+            case WM_SETTEXT:
+                // A text the program puts in the field leaves nothing of what
+                // was selected before, as a program setting an edit's text
+                // does.
+                if (editable)
+                {
+                    const field = editState(record);
+                    field.selStart = 0;
+                    field.selEnd = 0;
+                }
+                return common(record, message, thread);
             case CB_SHOWDROPDOWN:
                 return 1;
             case CB_GETDROPPEDSTATE:
@@ -2216,9 +2326,38 @@ export function createControlProcedures(host){
                 return 0;
             case CB_GETEXTENDEDUI:
                 return 0;
-            case CB_GETEDITSEL:
+            case CB_GETEDITSEL: {
+                if (!editable)
+                {
+                    return 0;
+                }
+                const field = editState(record);
+                const from = Math.min(field.selStart, field.selEnd);
+                const to = Math.max(field.selStart, field.selEnd);
+                if ((message.wParam >>> 0) !== 0)
+                {
+                    writeU32(message.wParam, from);
+                }
+                if ((message.lParam >>> 0) !== 0)
+                {
+                    writeU32(message.lParam, to);
+                }
+                return 1;
+            }
             case CB_SETEDITSEL:
+                if (!editable)
+                {
+                    return 0;
+                }
+                setSelection(record, message.wParam | 0, message.lParam | 0);
+                return 1;
             case CB_LIMITTEXT:
+                if (editable)
+                {
+                    editState(record).limit = (message.wParam >>> 0) === 0
+                        ? DEFAULT_EDIT_LIMIT : message.wParam >>> 0;
+                }
+                return 0;
             case CB_SETDROPPEDWIDTH:
             case CB_GETDROPPEDCONTROLRECT:
                 return 0;

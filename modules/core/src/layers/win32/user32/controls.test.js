@@ -75,7 +75,12 @@ const CB_GETCOUNT = 0x0146;
 const CB_GETCURSEL = 0x0147;
 const CB_SETCURSEL = 0x014e;
 const CB_GETLBTEXT = 0x0148;
+const CB_GETEDITSEL = 0x0140;
+const CB_SETEDITSEL = 0x0142;
+const CB_LIMITTEXT = 0x0141;
 const CBN_SELCHANGE = 1;
+const CBN_EDITUPDATE = 5;
+const CBN_EDITCHANGE = 6;
 const SBM_SETRANGE = 0x00e2;
 const SBM_SETPOS = 0x00e0;
 const SBM_GETPOS = 0x00e1;
@@ -821,6 +826,69 @@ test('a combo box shows its selection and the arrow keys change it with CBN_SELC
         assert.deepEqual(context.commands().filter(([id, code])=>id === 500
             && code === CBN_SELCHANGE), [[500, CBN_SELCHANGE, combo]]);
     });
+
+test('an editable combo box field takes typing and answers the edit selection', async()=>{
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ComboBox');
+    const CBS_DROPDOWN = 0x0002;
+    const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWN, 8, 60, 100, 60, dialog, 500, HINSTANCE, 0]);
+    context.memory.putString(TEXT, 'C:\\Program Files\\Game');
+    context.fns.SetWindowTextA.handler([combo, TEXT]);
+    await context.fns.SetFocus.handler([combo]);
+    await context.pump(dialog);
+
+    // The field is what a program reads back: select it whole and type the
+    // replacement, as a person driving the dialog would.
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_SETEDITSEL, 0, -1]), 1);
+    for (const character of 'C:\\App')
+    {
+        context.key(WM_CHAR, character.charCodeAt(0));
+    }
+    await context.pump(dialog);
+    assert.equal(context.fns.GetWindowTextA.handler([combo, OUT, 16]), 6);
+    assert.equal(context.memory.readCString(OUT, 16), 'C:\\App');
+    const notices = context.commands().filter(([id])=>id === 500).map(([, code])=>code);
+    assert.ok(notices.includes(CBN_EDITUPDATE) && notices.includes(CBN_EDITCHANGE),
+        'the parent hears the field edited, with the combo box codes');
+
+    // The caret sits past what was typed, a backspace deletes behind it, and
+    // the selection reads back through the pointers a program hands over.
+    context.key(WM_CHAR, 0x08);
+    await context.pump(dialog);
+    context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+    assert.equal(context.memory.readCString(OUT, 16), 'C:\\Ap');
+    assert.equal(context.fns.SendMessageA.handler([combo, CB_GETEDITSEL, OUT, OUT + 4]), 1);
+    assert.deepEqual([context.memory.u32(OUT), context.memory.u32(OUT + 4)], [5, 5]);
+
+    // A limit the program sets holds, as an edit's does, and a character the
+    // limit refuses makes no change at all.
+    context.fns.SendMessageA.handler([combo, CB_LIMITTEXT, 6, 0]);
+    context.key(WM_CHAR, 'p'.charCodeAt(0));
+    context.key(WM_CHAR, '!'.charCodeAt(0));
+    await context.pump(dialog);
+    context.fns.GetWindowTextA.handler([combo, OUT, 16]);
+    assert.equal(context.memory.readCString(OUT, 16), 'C:\\App', 'the limit holds');
+});
+
+test('a dropdown list takes no typed text', async()=>{
+    const context = setup();
+    const dialog = await openDialog(context);
+    context.memory.putString(TEXT, 'ComboBox');
+    const CBS_DROPDOWNLIST = 0x0003;
+    const combo = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST, 8, 60, 100, 60, dialog, 500, HINSTANCE, 0]);
+    context.memory.putString(TEXT, 'One');
+    context.fns.SendMessageA.handler([combo, CB_ADDSTRING, 0, TEXT]);
+    context.fns.SendMessageA.handler([combo, CB_SETCURSEL, 0, 0]);
+    await context.fns.SetFocus.handler([combo]);
+    await context.pump(dialog);
+    context.key(WM_CHAR, 'X'.charCodeAt(0));
+    await context.pump(dialog);
+    assert.equal(context.fns.GetWindowTextA.handler([combo, OUT, 16]), 3);
+    assert.equal(context.memory.readCString(OUT, 16), 'One', 'the field shows the selection');
+});
 
 test('a scroll bar keeps its range and position, and a click on an arrow asks its parent',
     async()=>{
