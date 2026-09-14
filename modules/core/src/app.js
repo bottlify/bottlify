@@ -3246,6 +3246,12 @@ async function buildApp(options){
         path: options.imagePath ?? 'C:\\app.exe',
     };
     byBase.set(image.base, mainModule);
+    // Known by its file name as well: a program that loads or asks for a
+    // handle to its own image by name -- the way it reaches its own resources
+    // -- is handed the mapping it is running from, as Windows hands back a
+    // module already loaded, rather than a second copy at the one base an
+    // image without relocations can take.
+    byName.set(moduleKeyOf(mainModule.path), mainModule);
 
     // What the process that asked for this one wrote into it before it existed.
     // This is the first moment at which the addresses those writes name mean
