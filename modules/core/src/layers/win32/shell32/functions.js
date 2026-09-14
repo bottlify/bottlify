@@ -30,6 +30,16 @@ import { MY_COMPUTER, createShellNamespace, listBytes, pathOfList } from './name
 const SE_ERR_ACCESSDENIED = 5;
 const SE_ERR_NOASSOC = 31;
 
+/** FindExecutable, like WinExec, reports success as a value above 32. */
+const FIND_EXECUTABLE_SUCCESS = 33;
+
+/**
+ * The extensions the shell runs directly: the file is its own associated
+ * executable, needing no handler registry. Anything else is a document whose
+ * handler would come from an association registry this build does not have.
+ */
+const SELF_EXECUTABLE = Object.freeze(new Set(['exe', 'com', 'bat', 'cmd', 'pif', 'scr']));
+
 /** E_NOTIMPL, for the allocator this build does not hand out. */
 const E_NOTIMPL = 0x80004001 | 0;
 const E_INVALIDARG = 0x80070057 | 0;
@@ -97,6 +107,13 @@ const CSIDL_FOLDERS = Object.freeze({
  *           Absent in a build without ole32 behind it, and then SHGetMalloc
  *           is refused.
  * @property {(address: number, length: number) => Uint8Array} [readMemory]
+ * @property {(address: number, limit: number) => string} [readCString]
+ *           Reads an ANSI argument string. Without it FindExecutable cannot
+ *           read the file it is asked about and refuses.
+ * @property {(path: string) => string} [resolve]
+ *           Qualifies a path against the process's current directory and
+ *           normalises it; what FindExecutable writes back as the executable.
+ *           Without it there is no full path to answer with, so it refuses.
  * @property {(bytes: number) => number} [allocate]
  *           The task allocator's memory, which is what a caller frees an item
  *           id list with. Without it no list can be made and the folder calls
@@ -179,6 +196,65 @@ export function createShellFunctions(host){
     /** @param {number} list @returns {string | null} */
     const pathOf = list=>(list === 0 || !memory ? null : pathOfList(memory, list));
 
+    /**
+     * The ANSI string an argument points at, or null when there is none to
+     * read: a null pointer, no reader, or a pointer to unterminated data.
+     *
+     * @param {number} address
+     * @returns {string | null}
+     */
+    const stringOf = address=>{
+        if ((address >>> 0) === 0 || !host.readCString)
+        {
+            return null;
+        }
+        try
+        {
+            return host.readCString(address >>> 0, MAX_PATH);
+        }
+        catch (e){
+            void e;
+            return null;
+        }
+    };
+
+    /**
+     * The extension of a path: the text after the last dot in its final name,
+     * lower-cased, or empty when it has none.
+     *
+     * @param {string} path
+     * @returns {string}
+     */
+    const extensionOf = path=>{
+        const name = path.slice(Math.max(path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
+        const dot = name.lastIndexOf('.');
+        return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+    };
+
+    /** @param {string} path @returns {boolean} whether it already names a place */
+    const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
+
+    /**
+     * The full path FindExecutable writes back: a qualified name is normalised,
+     * a relative one is resolved against the directory when one is given and
+     * against the process's current directory otherwise.
+     *
+     * @param {string} file @param {string} directory
+     * @returns {string}
+     */
+    const fullPath = (file, directory)=>{
+        const candidate = isQualified(file) || directory === ''
+            ? file : `${/[\\/]$/.test(directory) ? directory : `${directory}\\`}${file}`;
+        try
+        {
+            return host.resolve?.(candidate) ?? candidate;
+        }
+        catch (e){
+            void e;
+            return candidate;
+        }
+    };
+
     const table = {
         /**
          * HINSTANCE ShellExecuteA(HWND, LPCSTR lpOperation, LPCSTR lpFile,
@@ -197,22 +273,28 @@ export function createShellFunctions(host){
          * HINSTANCE FindExecutableA(LPCSTR lpFile, LPCSTR lpDirectory,
          *                           LPSTR lpResult)
          *
-         * Refused with the association error rather than the access one: there
-         * is no registry of file associations here at all, which is a different
-         * thing from being told no.
+         * An executable is associated with itself -- the shell runs it directly
+         * and needs no handler registry for it -- so a file whose extension is
+         * one of those resolves to its qualified path and succeeds. Anything
+         * else is a document whose handler would come from an association
+         * registry this build does not have; that is reported as no association
+         * rather than guessed at. Either way the buffer is written, because a
+         * caller reads it whatever the return says and its own stack left there
+         * would be read as a path.
          */
         FindExecutableA: {
             argBytes: 12,
             /** @param {number[]} args */
-            handler: ([, , result])=>{
-                if ((result >>> 0) !== 0)
+            handler: ([file, directory, result])=>{
+                const name = stringOf(file);
+                if (name === null || !host.resolve
+                    || !SELF_EXECUTABLE.has(extensionOf(name)))
                 {
-                    // The caller passes a buffer and reads it whatever the
-                    // return value says; leaving it holding its own stack would
-                    // be read as a path.
-                    host.writeMemory(result >>> 0, new Uint8Array(1));
+                    writePath(result >>> 0, '');
+                    return SE_ERR_NOASSOC;
                 }
-                return SE_ERR_NOASSOC;
+                writePath(result >>> 0, fullPath(name, stringOf(directory) ?? ''));
+                return FIND_EXECUTABLE_SUCCESS;
             },
         },
 

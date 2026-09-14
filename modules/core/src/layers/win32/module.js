@@ -876,7 +876,10 @@ export const win32Module = {
             }),
 
             'SHELL32.dll': createShellFunctions({
-                writeMemory, readMemory,
+                writeMemory, readMemory, readCString,
+                // FindExecutable resolves an executable against the current
+                // directory the file calls use, which is the filesystem's.
+                resolve: path=>filesystem.resolve(path).path,
                 divergence: config?.divergence,
                 taskAllocator,
                 // The task allocator's memory: a caller frees an item id list

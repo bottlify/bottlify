@@ -99,11 +99,80 @@ test('launching something is refused, not quietly succeeded', ()=>{
     assert.equal(m.shell.ShellExecuteA.handler([0, 0, 0, 0, 0, 0]), 5);
 });
 
-test('finding an executable reports no association, and clears the buffer', ()=>{
+/**
+ * The machine above with an ANSI string reader and a path resolver, which is
+ * what FindExecutable needs to read a file name and qualify it. The resolver
+ * mirrors the filesystem's: a qualified path is normalised, a relative one is
+ * taken against the current directory.
+ *
+ * @param {string} cwd  The current directory the resolver qualifies against.
+ */
+function machineWithPaths(cwd){
+    const memory = new Uint8Array(0x1000).fill(0xaa);
+    /** @param {string} text @param {number} at */
+    const put = (text, at)=>{
+        for (let i = 0; i < text.length; i++)
+        {
+            memory[at + i] = text.charCodeAt(i) & 0xff;
+        }
+        memory[at + text.length] = 0;
+    };
+    const host = {
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        readCString: (/** @type {number} */ address)=>{
+            let end = address;
+            while (memory[end] !== 0)
+            {
+                end++;
+            }
+            return new TextDecoder('latin1').decode(memory.subarray(address, end));
+        },
+        resolve: (/** @type {string} */ path)=>{
+            return /^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}\\${path}`;
+        },
+    };
+    /** @param {number} at */
+    const string = at=>new TextDecoder('latin1').decode(memory.subarray(at, memory.indexOf(0, at)));
+    return { memory, put, string, shell: /** @type {any} */ (createShellFunctions(host)) };
+}
+
+test('finding an executable that cannot be read reports no association', ()=>{
     const m = machine();
     assert.equal(m.shell.FindExecutableA.handler([0, 0, 0x100]), 31);
     assert.equal(m.memory[0x100], 0,
         'a caller reads the buffer whatever the return says');
+});
+
+test('an executable is associated with itself, qualified against the directory', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('setup.exe', 0x100);
+    const answer = m.shell.FindExecutableA.handler([0x100, 0, 0x200]);
+    assert.ok(answer > 32, 'success is a value above 32');
+    assert.equal(m.string(0x200), 'C:\\App\\setup.exe',
+        'the relative name is qualified against the current directory');
+    assert.equal(m.shell.FindExecutableA.argBytes, 12);
+});
+
+test('a qualified executable is answered as itself, and a directory overrides', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('C:\\Games\\doom.exe', 0x100);
+    assert.ok(m.shell.FindExecutableA.handler([0x100, 0, 0x200]) > 32);
+    assert.equal(m.string(0x200), 'C:\\Games\\doom.exe');
+
+    m.put('setup.exe', 0x100);
+    m.put('D:\\Other', 0x140);
+    assert.ok(m.shell.FindExecutableA.handler([0x100, 0x140, 0x200]) > 32);
+    assert.equal(m.string(0x200), 'D:\\Other\\setup.exe',
+        'a relative name resolves against the directory it was given');
+});
+
+test('a document still reports no association, and clears the buffer', ()=>{
+    const m = machineWithPaths('C:\\App');
+    m.put('readme.txt', 0x100);
+    assert.equal(m.shell.FindExecutableA.handler([0x100, 0, 0x200]), 31,
+        'this build has no document-handler registry to consult');
+    assert.equal(m.memory[0x200], 0);
 });
 
 test('a window may accept drops, and no files are ever dropped on it', ()=>{
