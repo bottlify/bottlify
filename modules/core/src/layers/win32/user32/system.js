@@ -163,6 +163,28 @@ const ERROR_HOTKEY_NOT_REGISTERED = 1410;
 const DEFER_TOKEN = 0x4d50;
 
 /**
+ * The button a message box answers with when nobody is there to press one:
+ * the default of the set its type asks for, which is the first button of the
+ * set unless MB_DEFBUTTON2 or MB_DEFBUTTON3 moves it along.
+ *
+ * The answer has to be a button the box shows. A value outside the set is one
+ * the caller's own switch has no arm for, and a program that falls through
+ * every case then waits for a click the answer said had already happened.
+ *
+ * @param {number} type  The uType of MessageBoxA.
+ */
+const messageBoxDefault = type=>{
+    const IDOK = 1, IDCANCEL = 2, IDABORT = 3, IDRETRY = 4, IDIGNORE = 5;
+    const IDYES = 6, IDNO = 7;
+    const sets = [
+        [IDOK], [IDOK, IDCANCEL], [IDABORT, IDRETRY, IDIGNORE],
+        [IDYES, IDNO, IDCANCEL], [IDYES, IDNO], [IDRETRY, IDCANCEL],
+    ];
+    const buttons = sets[type & 0xf] ?? [IDOK];
+    return buttons[Math.min((type & 0x300) >> 8, buttons.length - 1)];
+};
+
+/**
  * Builds the system-query half of user32, over the window records the
  * bookkeeping half keeps.
  *
@@ -1452,16 +1474,15 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * int MessageBoxA(HWND hWnd, LPCSTR lpText, LPCSTR lpCaption, UINT uType)
          *
-         * There is nobody to press a button, so this reports what a dialog does
-         * when it is dismissed without a choice, and hands the text to whoever is
-         * listening -- a message box is usually a program explaining why it is
-         * about to stop, which is the most useful thing it will say.
+         * There is nobody to press a button, so this answers as the box's own
+         * default button would and hands the text to whoever is listening -- a
+         * message box is usually a program explaining why it is about to stop,
+         * which is the most useful thing it will say.
          */
         MessageBoxA: {
             argBytes: 16,
             /** @param {number[]} args */
             handler: ([, text, caption, type])=>{
-                const IDOK = 1;
                 const body = (text >>> 0) === 0 ? '' : host.readCString(text, 0x10000);
                 const title = (caption >>> 0) === 0 ? '' : host.readCString(caption, 0x1000);
                 // Reported as its own thing as well as written to the log. A
@@ -1472,7 +1493,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 // put it in front of a person.
                 host.messageBox?.({ text: body, caption: title, type: type >>> 0 });
                 host.say?.(title.length > 0 ? `${title}: ${body}` : body);
-                return IDOK;
+                return messageBoxDefault(type >>> 0);
             },
         },
 

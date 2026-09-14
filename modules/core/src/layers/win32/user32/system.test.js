@@ -1122,6 +1122,25 @@ test('a hot key is waiting news, in the class GetQueueStatus asks about', ()=>{
     assert.equal(queue.status().changed & QS_HOTKEY, 0, 'one look spends the news');
 });
 
+test('a message box answers a button it actually shows', ()=>{
+    // A box answered outside its own set hands the caller a value its switch
+    // has no arm for: a yes-or-no question answered "OK" is a program waiting
+    // for a click the answer said had already happened.
+    const { fns } = setup();
+    const MB_OKCANCEL = 0x1, MB_ABORTRETRYIGNORE = 0x2, MB_YESNOCANCEL = 0x3;
+    const MB_YESNO = 0x4, MB_RETRYCANCEL = 0x5;
+    const MB_DEFBUTTON2 = 0x100, MB_DEFBUTTON3 = 0x200;
+
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNO]), 6, 'IDYES: the first button');
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNO | MB_DEFBUTTON2]), 7, 'IDNO');
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_YESNOCANCEL | MB_DEFBUTTON3]), 2,
+        'IDCANCEL: the default rank walks the set');
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_RETRYCANCEL]), 4, 'IDRETRY');
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_ABORTRETRYIGNORE]), 3, 'IDABORT');
+    assert.equal(fns.MessageBoxA.handler([0, 0, 0, MB_OKCANCEL | MB_DEFBUTTON3]), 2,
+        'a rank past the last button is the last button');
+});
+
 // --- rectangles and the small string helpers ---
 
 test('the rectangle helpers work over the caller\'s memory and refuse a null pointer', ()=>{
