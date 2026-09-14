@@ -404,6 +404,11 @@ function characterFor(key){
  *           the input layer so it can scale pointer motion into it. Null
  *           releases the cursor to the whole viewport. Absent in a build with
  *           no input, and then the declaration is simply not acted on.
+ * @property {(x: number, y: number) => void} [placeCursor]
+ *           Where a program puts the cursor with SetCursorPos, in the same
+ *           space, forwarded to the input layer so the cursor it reports and
+ *           the motion it derives start from there. Absent in a build with no
+ *           input, and then the cursor stays where the pointer is.
  * @property {(picture: { shown: boolean }) => void} [reportCursor]
  *           The page's cursor, as user32's own state changed it: shown while
  *           ShowCursor's count is not below zero and SetCursor has not named the

@@ -276,6 +276,35 @@ test('the cursor stays inside the client area when one is known', ()=>{
     assert.deepEqual(h.router.cursor(), { x: 639, y: 0 });
 });
 
+test('a cursor the program places is where it said, and motion goes on from there', ()=>{
+    const h = harness({ bounds: ()=>({ width: 640, height: 480 }) });
+    h.send({ kind: 'pointerMove', x: 600, y: 400 });
+    h.drain();
+    h.mouse.mouseState();
+
+    // The mouse-look step: the program puts the cursor back to the centre.
+    h.router.place(320, 240);
+    assert.deepEqual(h.router.cursor(), { x: 320, y: 240 });
+    const [warp] = h.drain();
+    assert.equal(warp.message, WM.MOUSEMOVE, 'a warp is a move to the program');
+    assert.equal(warp.lParam, 240 << 16 | 320);
+    assert.deepEqual(h.mouse.mouseState().x, 0, 'but no motion to the relative device');
+
+    // The pointer is still at (600, 400) on the page; its next position is
+    // taken as the motion from the last one, not as where the cursor is --
+    // the program owns the position now, as it does on a machine whose
+    // cursor was really warped.
+    h.send({ kind: 'pointerMove', x: 610, y: 396 });
+    assert.deepEqual(h.router.cursor(), { x: 330, y: 236 },
+        'ten right and four up from the centre the program chose');
+    const moved = h.mouse.mouseState();
+    assert.deepEqual([moved.x, moved.y], [10, -4], 'and that is what the relative device sees');
+
+    // A placement outside the space the cursor is confined to lands on its edge.
+    h.router.place(-50, 900);
+    assert.deepEqual(h.router.cursor(), { x: 0, y: 479 });
+});
+
 test('a declared cursor space scales motion, so a viewport sweep spans the space', ()=>{
     const h = harness({ bounds: ()=>({ width: 1024, height: 768 }) });
     // A menu built for 640x480, shown in a 1024x768 backbuffer, clips the

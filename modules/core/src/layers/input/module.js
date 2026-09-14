@@ -179,6 +179,14 @@ export const inputModule = {
             clip: rect=>router.clip(rect),
 
             /**
+             * Where the program put the cursor with SetCursorPos, in that same
+             * space. From then on pointer motion is relative to it.
+             *
+             * @param {number} x @param {number} y
+             */
+            place: (x, y)=>router.place(x, y),
+
+            /**
              * Says a window has appeared, which is when a program can be told
              * it is the active application at all. Called on every window
              * rather than guessed at: activation is owed to a window, and until

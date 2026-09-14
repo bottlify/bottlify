@@ -174,6 +174,9 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
     /** The cursor pictures user32 handed up, oldest first. */
     /** @type {{ shown: boolean }[]} */
     const cursors = [];
+    /** Where user32 put the cursor, oldest first. */
+    /** @type {{ x: number, y: number }[]} */
+    const placed = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -200,13 +203,15 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
         setLastError: code=>errors.push(code),
         /** @param {{ shown: boolean }} picture */
         reportCursor: picture=>cursors.push(picture),
+        /** @param {number} x @param {number} y */
+        placeCursor: (x, y)=>placed.push({ x, y }),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
     return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors,
-        screen, cursors };
+        screen, cursors, placed };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -948,6 +953,18 @@ test('GetCursorPos answers from the host rather than inventing a position', ()=>
     assert.deepEqual([memory.u32(OUT_BUFFER), memory.u32(OUT_BUFFER + 4)], [320, 240]);
 
     assert.equal(fns.GetCursorPos.handler([0]), 0, 'and a null point is a failure');
+});
+
+test('SetCursorPos puts the cursor where the program says, and says so', ()=>{
+    // A mouse-look program reads the cursor, takes its distance from the
+    // centre as the frame's motion and puts it back to the centre; the
+    // placement has to reach the layer that reports the cursor, or the
+    // distance is the whole way to the edge every frame.
+    const { fns, placed } = setup({ cursor: { x: 0, y: 0 } });
+    assert.equal(fns.SetCursorPos.handler([320, 240]), 1);
+    assert.equal(fns.SetCursorPos.handler([0xfffffffe, 5]), 1);
+    assert.deepEqual(placed, [{ x: 320, y: 240 }, { x: -2, y: 5 }],
+        'each placement, as signed integers');
 });
 
 test('a build with nothing feeding it reports nothing pressed', ()=>{

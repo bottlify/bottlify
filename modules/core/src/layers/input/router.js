@@ -184,6 +184,11 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
     // relative motion from when the host gives a position but no delta.
     let rawX = 0;
     let rawY = 0;
+    // Whether the program has placed the cursor itself. From then on the
+    // pointer's absolute position means nothing to it -- the cursor it reckons
+    // with is the one it put down plus what has moved since -- so a position
+    // the host reports is taken as the motion from the last one instead.
+    let placed = false;
     /** @type {number[]} */
     const padAxes = [];
     /** @type {number[]} */
@@ -371,10 +376,10 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         // position when the host gives one, else advanced by the scaled step.
         const px = cursor.x;
         const py = cursor.y;
-        let nx = event.x === undefined
+        let nx = event.x === undefined || placed
             ? cursor.x + stepX
             : (clip ? clip.left : 0) + Math.round((event.x | 0) * scaleX);
-        let ny = event.y === undefined
+        let ny = event.y === undefined || placed
             ? cursor.y + stepY
             : (clip ? clip.top : 0) + Math.round((event.y | 0) * scaleY);
         if (clip)
@@ -549,6 +554,36 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
                 : null;
             residualX = 0;
             residualY = 0;
+        },
+
+        /**
+         * Puts the cursor where the program says, in the space it reckons the
+         * cursor in, as SetCursorPos does. A game of the mouse-look kind reads
+         * the cursor, takes its distance from the centre as the frame's motion
+         * and puts it back to the centre; left where it was, that distance is
+         * the whole way to the edge every frame. Placing is not motion: the
+         * relative device sees nothing, and the message a real cursor warp
+         * produces is the only word of it.
+         *
+         * @param {number} x @param {number} y
+         */
+        place(x, y){
+            const clip = clipRect;
+            const box = confinedTo?.() ?? null;
+            const px = cursor.x;
+            const py = cursor.y;
+            cursor.x = clip ? confineRange(x | 0, clip.left, clip.right)
+                : box ? confine(x | 0, box.width) : x | 0;
+            cursor.y = clip ? confineRange(y | 0, clip.top, clip.bottom)
+                : box ? confine(y | 0, box.height) : y | 0;
+            placed = true;
+            residualX = 0;
+            residualY = 0;
+            if (cursor.x !== px || cursor.y !== py)
+            {
+                announceCursor(WM.MOUSEMOVE);
+                emit(WM.MOUSEMOVE, mask(), point());
+            }
         },
 
         /**

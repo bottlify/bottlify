@@ -1011,6 +1011,7 @@ export const win32Module = {
                 // down the same way and for the same reason: the input layer
                 // that scales pointer motion into it sits above this one.
                 clipCursor: config?.clipCursor,
+                placeCursor: config?.placeCursor,
                 // The picture the page shows as the program's cursor, handed up
                 // whenever user32's own state (ShowCursor's count, a null
                 // SetCursor) changes it. The same event the Direct3D device

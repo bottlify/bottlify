@@ -1808,10 +1808,20 @@ export function createSystemFunctions({ host, live, windows, classes }){
             },
         },
 
-        /** BOOL SetCursorPos(int X, int Y) */
+        /**
+         * BOOL SetCursorPos(int X, int Y)
+         *
+         * The cursor GetCursorPos then reports, and the point pointer motion
+         * continues from: a mouse-look program reads the cursor, takes its
+         * distance from the centre as the frame's motion and puts it back.
+         */
         SetCursorPos: {
             argBytes: 8,
-            handler: ()=>1,
+            /** @param {number[]} args */
+            handler: ([x, y])=>{
+                host.placeCursor?.(x | 0, y | 0);
+                return 1;
+            },
         },
 
         /**
