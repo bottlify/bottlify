@@ -210,8 +210,8 @@ END
         'TXP divides a cube coordinate by w');
     assert.match(code, /textureSampleBias\(t0Texture, t0Sampler, s\d+_0\.xy, s\d+_0\.w\)/,
         'TXB biases with the source w');
-    assert.match(code, /textureSample\(t3Texture, t3Sampler, vec2f\(s\d+_0\.x \/ s\d+_0\.w, 0\.5\)\)/,
-        'a 1D target samples a 2D texture\'s only row');
+    assert.match(code, /textureSample\(t3Texture, t3Sampler, vec2f\(select\(0\.0, s\d+_0\.x \/ s\d+_0\.w, s\d+_0\.w != 0\.0\), 0\.5\)\)/,
+        'a 1D target samples a 2D texture\'s only row, a zero q at the origin');
     assert.deepEqual(needs.textures.map(t=>t.unit), [1, 2, 0, 3]);
     assert.deepEqual(needs.textures.find(t=>t.unit === 2)?.target, 'CUBE');
 });
@@ -634,8 +634,8 @@ test('the interaction pair carries seven coordinate sets and seven image units',
     assert.match(fragmentStage.code, /textureSample\(t6Texture, t6Sampler, /,
         'the dependent specular lookup samples with the computed coordinate');
     assert.match(fragmentStage.code,
-        /textureSample\(t3Texture, t3Sampler, s\d+_0\.xy \/ s\d+_0\.w\)/,
-        'the projection is projective');
+        /textureSample\(t3Texture, t3Sampler, select\(vec2f\(0\.0\), s\d+_0\.xy \/ s\d+_0\.w, s\d+_0\.w != 0\.0\)\)/,
+        'the projection is projective, and a zero q samples at the origin');
     // The program's own uniform blocks sit past the last unit's pair, so no
     // sampled texture and no block share a binding number.
     assert.ok(VERTEX_PROGRAM_BINDING > 16,
@@ -643,6 +643,140 @@ test('the interaction pair carries seven coordinate sets and seven image units',
     assert.ok(FRAGMENT_PROGRAM_BINDING > 16);
     assert.deepEqual(fragmentStage.needs.textures.map(texture=>texture.unit),
         [0, 1, 3, 2, 4, 6, 5], 'every unit the instructions sample, in first-use order');
+});
+
+test('a two-component attribute array widens to (s, t, 0, 1), the specification\'s fill', ()=>{
+    // GL_ARB_vertex_program 2.14.3: an attribute array of fewer than four
+    // components is read with the missing z as 0 and the missing w as 1, so a
+    // DP4 against it applies the parameter's translation column.
+    // Derived from Wine d3d9 tests/visual.c test_texture_transform_flags: its
+    // vertex-shader branch seeds z = 0 and w = 1 around the declared
+    // components before the texture matrix reads them.
+    const { code } = vertex(`!!ARBvp1.0
+TEMP r0;
+DP4 r0.x, vertex.attrib[8], program.env[10];
+DP4 r0.y, vertex.attrib[8], program.env[11];
+MOV result.texcoord[1].x, r0.x;
+MOV result.texcoord[1].y, r0.y;
+MOV result.position, r0;
+END
+`, { inputs: [
+        { name: 'position', components: 3, scalar: 'f32' },
+        { name: 'texCoord0', components: 2, scalar: 'f32' },
+    ] });
+    assert.match(code, /vec4f\(vertex\.texCoord0, 0\.0, 1\.0\)/,
+        'the widened coordinate carries w = 1');
+    assert.doesNotMatch(code, /vec4f\(vertex\.texCoord0, 0\.0, 0\.0\)/,
+        'a w of 0 would drop the translation column');
+});
+
+test('components of a result the program never writes keep the default (0, 0, 0, 1)', ()=>{
+    // GL_ARB_vertex_program 2.14.4.5: a result attribute starts at
+    // (0, 0, 0, 1), so a write of .x alone leaves w = 1 -- not the current
+    // value of a conventional coordinate, and not 0, which a TXP on the set
+    // would divide by.
+    // Derived from Wine wined3d/arb_program_shader.c (wine-5.0) at the vertex
+    // prologue: "GL_NV_vertex_program defines that all output values are
+    // initialized to {0.0, 0.0, 0.0, 1.0}. This assertion is in effect even
+    // when using GL_ARB_vertex_program", and its WINED3D_QUIRK_SET_TEXCOORD_W
+    // "MOV result.texcoord[i].w, 1" for a partly written set.
+    const { code } = vertex(`!!ARBvp1.0
+TEMP r0;
+DP4 r0.x, vertex.position, program.env[0];
+MOV result.texcoord[2].x, r0.x;
+END
+`);
+    assert.match(code, /out\.tc2 = vec4f\(0\.0, 0\.0, 0\.0, 1\.0\);/,
+        'the varying starts at the specification\'s default');
+    assert.match(code, /out\.tc2\.x = v\d+\.x;/, 'and the write lands on top of it');
+});
+
+test('TXP divides by the w the vertex stage carries, and an unwritten w is 1', ()=>{
+    // GL_ARB_fragment_program 3.11.5.32: the projective sample divides the
+    // coordinate by its w before the lookup, so the w a vertex stage leaves
+    // unwritten is the 1 of the default, never a 0 the sampler would see.
+    // Derived from Wine d3d9 tests/visual.c test_texture_transform_flags: the
+    // projected branch expects the sample at (0, 0) when q is 0, so a zero q
+    // must not reach the sampler as a divide; and from wined3d's TXP emission
+    // in arb_program_shader.c for the divide itself.
+    const { code } = fragment(`!!ARBfp1.0
+TEMP r0;
+TXP r0, fragment.texcoord[2], texture[2], 2D;
+MOV result.color, r0;
+END
+`);
+    assert.match(code,
+        /textureSample\(t2Texture, t2Sampler, select\(vec2f\(0\.0\), s\d+_0\.xy \/ s\d+_0\.w, s\d+_0\.w != 0\.0\)\)/,
+        'the fragment divides by the varying\'s w, and a zero w samples at 0');
+    const written = vertex(`!!ARBvp1.0
+TEMP r0;
+DP4 r0.x, vertex.position, program.env[0];
+MOV result.texcoord[2].x, r0.x;
+END
+`, { varyings: { texcoords: [2], fogCoord: false } });
+    assert.match(written.code, /out\.tc2 = vec4f\(0\.0, 0\.0, 0\.0, 1\.0\);/,
+        'a coordinate only .x is written to carries w = 1 into that divide');
+});
+
+test('the fragment stage reads the same varying fields the vertex stage writes', ()=>{
+    // GL_ARB_fragment_program 3.11.4.5: fragment.texcoord[n] is the
+    // interpolated result.texcoord[n], all four components, in the same
+    // order -- one struct, named alike at both ends.
+    // Derived from Wine wined3d/arb_program_shader.c (wine-5.0): its vertex
+    // stage's result.texcoord[0..7] table and the fragment stage's
+    // fragment.texcoord[0..7] table are the same eight names, one per set.
+    const sets = [0, 1, 2, 3, 4, 5, 6, 7];
+    const writes = sets.map(set=>`MOV result.texcoord[${set}], vertex.position;`).join('\n');
+    const written = vertex(`!!ARBvp1.0
+${writes}
+END
+`, { inputs: [{ name: 'position', components: 4, scalar: 'f32' }],
+        varyings: { texcoords: sets, fogCoord: false } });
+    const reads = sets.map(set=>`fragment.texcoord[${set}]`).join(', ');
+    const read = fragment(`!!ARBfp1.0
+TEMP acc;
+MUL acc, ${reads.split(', ').slice(0, 2).join(', ')};
+MOV result.color, acc;
+END
+`);
+    for (const set of sets)
+    {
+        assert.match(written.code, new RegExp(`@location\\(${3 + set}\\) tc${set}: vec4f,`),
+            `the vertex stage declares set ${set}`);
+    }
+    assert.match(read.code, /input\.tc0/);
+    assert.match(read.code, /input\.tc1/);
+});
+
+test('env parameters materialise in the order the program text names them', ()=>{
+    // Derived from Wine wined3d/arb_program_shader.c (wine-5.0): a shader's
+    // constants are declared as one contiguous run, "PARAM C[%d] =
+    // { program.env[0..%d] }", so a slot's index is its place in the
+    // declaration, and the draw path fills the run in that same order.
+    const { code, needs } = vertex(`!!ARBvp1.0
+TEMP r0, r1;
+DP4 r0.x, vertex.attrib[8], program.env[10];
+DP4 r0.y, vertex.attrib[8], program.env[11];
+SUB r1, program.env[4], vertex.position;
+MOV result.texcoord[1].x, r0.x;
+MOV result.texcoord[1].y, r0.y;
+MOV result.position, r1;
+END
+`, { inputs: [
+        { name: 'position', components: 3, scalar: 'f32' },
+        { name: 'texCoord0', components: 2, scalar: 'f32' },
+    ] });
+    assert.deepEqual(needs.params, [
+        { source: 'env', index: 10 },
+        { source: 'env', index: 11 },
+        { source: 'env', index: 4 },
+    ], 'the block lists the slots in the order the instructions reach them');
+    assert.match(code, /let s\d+_1 = vertexProgram\.params\[0\];/,
+        'the first-named env parameter is slot zero');
+    assert.match(code, /let s\d+_1 = vertexProgram\.params\[1\];/,
+        'the second is slot one, consecutive with it');
+    assert.match(code, /let s\d+_0 = vertexProgram\.params\[2\];/,
+        'and the later-named one follows both');
 });
 
 test('coordinate sets up to the seventh are carried, and generic attributes'

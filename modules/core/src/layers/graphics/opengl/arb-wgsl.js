@@ -959,11 +959,19 @@ function sampleCall(instruction, source){
     }
     else if (texture.target === '1D')
     {
-        coords = projective ? `vec2f(${source}.x / ${source}.w, 0.5)` : `vec2f(${source}.x, 0.5)`;
+        coords = projective
+            ? `vec2f(select(0.0, ${source}.x / ${source}.w, ${source}.w != 0.0), 0.5)`
+            : `vec2f(${source}.x, 0.5)`;
     }
     else
     {
-        coords = projective ? `${source}.xy / ${source}.w` : `${source}.xy`;
+        // A zero q samples at the origin rather than dividing: what a real
+        // device's projected sample of a zero q draws, as Wine's d3d visual
+        // test expects it. A cube's zero q stays the specification's divide,
+        // which no test of theirs pins.
+        coords = projective
+            ? `select(vec2f(0.0), ${source}.xy / ${source}.w, ${source}.w != 0.0)`
+            : `${source}.xy`;
     }
     const sample = `t${texture.unit}Texture, t${texture.unit}Sampler, ${coords}`;
     return instruction.op === 'TXB'
@@ -1057,11 +1065,12 @@ export function emitVertex(ir, inputs, varyings){
     body.push('    out.color = uniforms.color;');
     body.push('    out.secondary = uniforms.secondary;');
     body.push('    out.fog = 1.0;');
+    // A result attribute starts at (0, 0, 0, 1), not at a current value: a
+    // set the program writes only partly then carries w = 1 into a TXP, and
+    // a set it never writes is not the fixed pipeline's coordinate.
     for (const set of varyings.texcoords)
     {
-        body.push(set < VARYING_TEXCOORDS
-            ? `    out.tc${set} = uniforms.texCoord[${set}];`
-            : `    out.tc${set} = vec4f(0.0, 0.0, 0.0, 1.0);`);
+        body.push(`    out.tc${set} = vec4f(0.0, 0.0, 0.0, 1.0);`);
     }
     if (varyings.fogCoord)
     {

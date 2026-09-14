@@ -556,6 +556,55 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
 });
 
+test('the draw path fills a program block in the order the stage declares', async()=>{
+    // Derived from Wine wined3d/arb_program_shader.c (wine-5.0): the declared
+    // "PARAM C[%d] = { program.env[0..%d] }" run is filled positionally, so
+    // the block a draw uploads holds each env parameter at the slot the
+    // stage's declaration gave it, not at its env index.
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * STRIDE, 0x1000, GL.STATIC_DRAW);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+    context.glGenProgramsARB(1);
+    context.glBindProgramARB(GL.VERTEX_PROGRAM_ARB, 1);
+    // The three env parameters named in the order the instructions reach
+    // them, not in the order of their indices.
+    const text = `!!ARBvp1.0
+TEMP r0, r1;
+DP4 r0.x, vertex.position, program.env[10];
+DP4 r0.y, vertex.position, program.env[11];
+SUB r1, program.env[4], vertex.position;
+MOV result.texcoord[1].x, r0.x;
+MOV result.texcoord[1].y, r0.y;
+MOV result.position, r1;
+END
+`;
+    context.glProgramStringARB(GL.VERTEX_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x3000, text), 0x3000);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 4, [4, 4, 4, 4]);
+    context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 10, [10, 10, 10, 10]);
+    context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 11, [11, 11, 11, 11]);
+    context.glEnable(GL.VERTEX_PROGRAM_ARB);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+
+    const block = r.gpu.of('writeBuffer').find(w=>w.size === 12 * 4
+        && /uniforms/.test(w.buffer.descriptor.label));
+    assert.ok(block, 'the vertex program block travelled');
+    const floats = new Float32Array(block.bytes.buffer, block.bytes.byteOffset, 12);
+    assert.deepEqual([...floats.subarray(0, 4)], [10, 10, 10, 10],
+        'slot zero holds the first-named parameter, env[10]');
+    assert.deepEqual([...floats.subarray(4, 8)], [11, 11, 11, 11],
+        'slot one the second, env[11]');
+    assert.deepEqual([...floats.subarray(8, 12)], [4, 4, 4, 4],
+        'and slot two the one named last, env[4]');
+});
+
 test('a re-specified program is a new pipeline', async()=>{
     const r = rig();
     programRig(r);
@@ -795,7 +844,7 @@ test('a probed texture reads the target before and after its frame\'s last draws
     const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[5]);
     assert.ok(r.gpu.calls.indexOf(copies[6]) < drawn
         && drawn < r.gpu.calls.indexOf(copies[7]),
-        'and the probed draw sits between its two reads');
+    'and the probed draw sits between its two reads');
 });
 
 test('a probe window names the draws of a frame it reads around', async()=>{
