@@ -3230,15 +3230,28 @@ async function buildApp(options){
 
     const image = loader.load(options.executable, { resolveImport, missing: missingImport });
 
+    // An executable exports too: a library a program ships imports from the
+    // program that loads it, by name or by ordinal, and is bound to those
+    // addresses the way it is bound to any other module's.
+    const ownImage = parsePe(options.executable);
+    const ownExports = readExports(options.executable, ownImage).exports;
+    const ownByName = new Map(ownExports
+        .filter(entry=>entry.name !== null && entry.forwards === null)
+        .map(entry=>[String(entry.name), image.base + entry.rva]));
+    const ownByOrdinal = new Map(ownExports
+        .filter(entry=>entry.forwards === null)
+        .map(entry=>[entry.ordinal, image.base + entry.rva]));
     mainModule = {
         name: 'app.exe',
         base: image.base,
-        addressOf: ()=>null,
-        addressOfOrdinal: ()=>null,
+        /** @param {string} exported */
+        addressOf: exported=>ownByName.get(exported) ?? null,
+        /** @param {number} ordinal */
+        addressOfOrdinal: ordinal=>ownByOrdinal.get(ordinal) ?? null,
         // Kept because a program reads its own resources, and a resource
         // directory is read out of the file rather than out of the mapping.
         file: options.executable,
-        image: parsePe(options.executable),
+        image: ownImage,
         // The same answer whether a program asks by null handle or by its own
         // image base, which are the two ways of asking the same question. A
         // program that asks the second way and is told a system directory goes

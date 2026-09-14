@@ -86,6 +86,9 @@ const f32 = value=>{
  * @param {Object} options
  * @param {Record<string, string[]>} options.imports  Functions called, by DLL.
  * @param {Record<string, number[]>} [options.data]  Named blobs placed after the code.
+ * @param {{ name: string, offset: number }[]} [options.exports]
+ *        Routines the image exports, by name and in order; ordinals count from 1.
+ *        Each offset is into the code.
  * @param {number} [options.codeSize]  Bytes reserved for the code.
  * @param {(ctx: {
  *   iat: (name: string) => number,
@@ -94,7 +97,7 @@ const f32 = value=>{
  * }) => number[]} options.code
  * @returns {Uint8Array}
  */
-export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
+export function buildExe({ imports, data = {}, exports = [], codeSize = 0x40, code }){
     const text = new Buf();
     const rva = (/** @type {number} */ offset)=>SECTION_RVA + offset;
     const va = (/** @type {number} */ offset)=>IMAGE_BASE + rva(offset);
@@ -157,6 +160,25 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     cursor = (cursor + 3) & ~3;
     const descriptorOffset = cursor;
     cursor += (modules.length + 1) * 20; // one per DLL plus the null terminator
+
+    // Export directory, then its three tables and the name strings, laid out
+    // the way the loader reads them: the directory names the tables by RVA.
+    cursor = (cursor + 3) & ~3;
+    const exportOffset = cursor;
+    const exportTablesOffset = exportOffset + 40;
+    /** @type {number[]} */
+    const exportNameOffsets = [];
+    if (exports.length > 0)
+    {
+        cursor = exportTablesOffset + exports.length * (4 + 4 + 2);
+        for (const entry of exports)
+        {
+            exportNameOffsets.push(cursor);
+            cursor += entry.name.length + 1;
+        }
+        cursor += 'self.exe'.length + 1;
+    }
+    const exportSize = cursor - exportOffset;
     const sectionSize = cursor;
 
     /** @param {string} name */
@@ -226,6 +248,36 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
             .u32(rva(module.dllNameOffset)).u32(rva(module.iatOffset));
     }
     text.u32(0).u32(0).u32(0).u32(0).u32(0);
+
+    if (exports.length > 0)
+    {
+        const addresses = exportTablesOffset;
+        const names = addresses + exports.length * 4;
+        const ordinals = names + exports.length * 4;
+        const dllName = exportNameOffsets[exportNameOffsets.length - 1]
+            + exports[exports.length - 1].name.length + 1;
+        text.pad(exportOffset);
+        text.u32(0).u32(0).u16(0).u16(0).u32(rva(dllName)).u32(1) // flags, stamp, version, name, base
+            .u32(exports.length).u32(exports.length)
+            .u32(rva(addresses)).u32(rva(names)).u32(rva(ordinals));
+        for (const entry of exports)
+        {
+            text.u32(rva(entry.offset));
+        }
+        for (const offset of exportNameOffsets)
+        {
+            text.u32(rva(offset));
+        }
+        for (let index = 0; index < exports.length; index++)
+        {
+            text.u16(index);
+        }
+        for (const entry of exports)
+        {
+            text.ascii(entry.name).u8(0);
+        }
+        text.ascii('self.exe').u8(0);
+    }
     text.pad(sectionSize);
 
     const rawSize = Math.ceil(sectionSize / FILE_ALIGNMENT) * FILE_ALIGNMENT;
@@ -266,6 +318,7 @@ export function buildExe({ imports, data = {}, codeSize = 0x40, code }){
     head.u32(0).u32(16); // loader flags, number of data directories
 
     const directories = new Array(16).fill(null).map(()=>[0, 0]);
+    directories[0] = exports.length > 0 ? [rva(exportOffset), exportSize] : [0, 0];
     directories[1] = [rva(descriptorOffset), (modules.length + 1) * 20]; // import table
     // The IAT directory spans every module's address table; they were laid out
     // consecutively, so the first one's start and the last one's end bound it.
