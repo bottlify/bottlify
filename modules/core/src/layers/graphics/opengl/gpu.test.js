@@ -769,7 +769,7 @@ test('a skipped texture drops the draws that sample it and nothing else', async(
     assert.equal(dump.filter(line=>line.startsWith('draw ')).length, 1);
 });
 
-test('a probed texture reads the target before and after each of its draws', async()=>{
+test('a probed texture reads the target before and after its frame\'s last draws', async()=>{
     const r = rig({ dumpDraws: true, probeTexture: 't1' });
     programRig(r);
     const { context } = r;
@@ -780,20 +780,39 @@ test('a probed texture reads the target before and after each of its draws', asy
     await r.swap();
 
     const dump = r.renderer.diagnostics().lastDump;
-    const line = dump.find(text=>text.startsWith('draw 0:'));
-    assert.ok(line, 'the probed draw has a line');
+    const line = dump.find(text=>text.startsWith('draw 5:'));
+    assert.ok(line, 'the frame\'s last draw sampling the texture is probed');
     assert.match(line, /before=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/);
     assert.match(line, /after=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/,
         'the recording device keeps no texels, so both reads are zeroes of the right shape');
+    assert.match(line, /census=\[t1:4x4:0x1908:distinct=1\]/,
+        'and the draw\'s line carries what its texture holds');
     const copies = r.gpu.of('copyTextureToBuffer');
-    assert.equal(copies.length, 8,
-        'two reads per probed draw, and a frame probes its first four and no more');
+    assert.equal(copies.length, 8, 'two reads per probed draw, four draws per frame');
     const probed = dump.filter(text=>text.startsWith('draw ') && text.includes('before='));
     assert.deepEqual(probed.map(text=>text.slice(0, 7)),
-        ['draw 0:', 'draw 1:', 'draw 2:', 'draw 3:']);
-    const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[0]);
-    assert.ok(r.gpu.calls.indexOf(copies[0]) < drawn && drawn < r.gpu.calls.indexOf(copies[1]),
-        'and the first draw sits between the first two reads');
+        ['draw 2:', 'draw 3:', 'draw 4:', 'draw 5:'], 'the last four, not the first');
+    const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[5]);
+    assert.ok(r.gpu.calls.indexOf(copies[6]) < drawn
+        && drawn < r.gpu.calls.indexOf(copies[7]),
+        'and the probed draw sits between its two reads');
+});
+
+test('a probe window names the draws of a frame it reads around', async()=>{
+    const r = rig({ dumpDraws: true, probeTexture: 't1@1-2' });
+    programRig(r);
+    const { context } = r;
+    for (let i = 0; i < 6; i++)
+    {
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    }
+    await r.swap();
+
+    const dump = r.renderer.diagnostics().lastDump;
+    const probed = dump.filter(text=>text.startsWith('draw ') && text.includes('before='));
+    assert.deepEqual(probed.map(text=>text.slice(0, 7)), ['draw 1:', 'draw 2:'],
+        'the window, not the frame\'s end, chooses');
+    assert.equal(r.gpu.of('copyTextureToBuffer').length, 4);
 });
 
 test('a program sampling past the fourth unit gets bindings of its own', async()=>{

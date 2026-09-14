@@ -198,6 +198,53 @@ function describeSnapshot(shot, rect){
 }
 
 /**
+ * What a texture a probed draw samples actually holds: target, size, format
+ * and the count of distinct texels of level 0, per face for a cube. A light
+ * whose normalisation cube or falloff image arrived empty multiplies every
+ * fragment by zero, and only the texels themselves can say so; a census on
+ * the draw's own line says it without another run.
+ *
+ * @param {import('./objects.js').TextureObject} texture
+ */
+function describeCensus(texture){
+    const cube = texture.target === GL.TEXTURE_CUBE_MAP;
+    const faces = cube ? 6 : 1;
+    const base = texture.levels.get(levelKey(0));
+    const shape = base ? `${base.width}x${base.height}` : '?';
+    const format = base ? hex(base.internalFormat) : '-';
+    /** @type {string[]} */
+    const distinct = [];
+    for (let face = 0; face < faces; face++)
+    {
+        const level = texture.levels.get(levelKey(0, face));
+        if (!level)
+        {
+            distinct.push('missing');
+            continue;
+        }
+        if (!level.texels)
+        {
+            distinct.push('gpu-only');
+            continue;
+        }
+        const words = new Uint32Array(level.texels.buffer, level.texels.byteOffset,
+            level.texels.byteLength >> 2);
+        // A census is a diagnostic, not a second upload path: past a megapixel
+        // it samples every fourth texel and says so with a tilde.
+        const step = words.length > (1 << 20) ? 4 : 1;
+        /** @type {Set<number>} */
+        const seen = new Set();
+        for (let i = 0; i < words.length; i += step)
+        {
+            seen.add(words[i]);
+        }
+        distinct.push(`${seen.size}${step > 1 ? '~' : ''}`);
+    }
+    return `t${texture.name}${cube ? 'c' : ''}:${shape}:${format}:`
+        + `distinct=${distinct.join('/')}`;
+}
+
+/**
  * @typedef {Object} DrawRequest
  *     A draw by arrays, as the context holds it.
  * @property {number} mode
@@ -232,7 +279,29 @@ export function createGpuRenderer(services){
     const maxDraws = services.maxDraws === undefined ? -1 : services.maxDraws;
     /** @type {Set<string>} */
     const skipTextures = new Set((services.skipTexture ?? '').split(',').filter(Boolean));
-    const probeTexture = services.probeTexture ?? null;
+    /**
+     * Which draws a probe reads around: a texture id, optionally followed by
+     * `@N` or `@A-B` naming the draw numbers of the frame to read -- a light's
+     * draws that no depth or stencil test can kill are a handful of a frame's
+     * hundreds, and only reaching those says whether the tests or the
+     * arithmetic contribute nothing. Without a window the last four draws
+     * sampling the texture are read.
+     */
+    const probeSpec = (()=>{
+        const text = services.probeTexture ?? '';
+        if (text === '')
+        {
+            return null;
+        }
+        const [id, window] = text.split('@');
+        if (window === undefined)
+        {
+            return { id, from: null, to: null };
+        }
+        const [a, b] = window.split('-');
+        const from = Number(a);
+        return { id, from, to: b === undefined ? from : Number(b) };
+    })();
     /** The last presented frame's dump; empty unless the build asked for one. */
     /** @type {string[]} */
     let lastDump = [];
@@ -267,7 +336,7 @@ export function createGpuRenderer(services){
      * @property {string[]} dump     the frame's lines, when one was asked for
      * @property {Set<string>} dumped  the program texts the dump already holds
      * @property {{ draws: number, clears: number, copies: number, refused: number,
-     *               skipped: number, cut: number, probes: number }} counts
+     *               skipped: number, cut: number }} counts
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -682,7 +751,7 @@ export function createGpuRenderer(services){
             recording = {
                 commands: [], pipelines: [], id: nextFrame++, dump: [], dumped: new Set(),
                 counts: {
-                    draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, probes: 0,
+                    draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0,
                 },
             };
             unflushed.add(recording.id);
@@ -962,6 +1031,7 @@ export function createGpuRenderer(services){
      * @property {number} binding   the texture's binding; the sampler is the next
      * @property {any} view
      * @property {any} sampler
+     * @property {import('./objects.js').TextureObject} texture
      */
 
     /**
@@ -1032,6 +1102,7 @@ export function createGpuRenderer(services){
             binding: entry.binding,
             view: textureFor(texture).gpu.view,
             sampler: samplerFor(texture),
+            texture,
         }));
         const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
         const uniforms = uniformsOf(scene);
@@ -1084,14 +1155,11 @@ export function createGpuRenderer(services){
                 + ` vuni=${describeBlock(vertexUniforms)}`
                 + ` funi=${describeBlock(fragmentUniforms)}`);
             // After the push: the program texts a first sight of a program
-            // adds are entries of their own, ahead of this line. A probe is
-            // two full-target read-backs, and a light's falloff image is
-            // sampled by every interaction draw of a frame: past a handful
-            // the replays fall behind the recording and the page stops
-            // answering, so only the first draws of a frame are read.
-            probe = probeTexture !== null && ids.includes(probeTexture)
-                && recording.counts.probes < PROBE_LIMIT
-                ? (recording.counts.probes++, recording.dump.length - 1) : -1;
+            // adds are entries of their own, ahead of this line. Every draw
+            // sampling the probed texture is a candidate; which of them the
+            // replay reads around is decided there, where the frame is whole.
+            probe = probeSpec !== null && ids.includes(probeSpec.id)
+                ? recording.dump.length - 1 : -1;
         }
         recording.pipelines.push(pipeline);
         recording.commands.push({
@@ -1109,6 +1177,7 @@ export function createGpuRenderer(services){
             ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
             probe,
+            probeDraw: recording.counts.draws - 1,
         });
     };
 
@@ -1400,11 +1469,39 @@ export function createGpuRenderer(services){
         const built = await Promise.allSettled([...recording.pipelines, show]);
         const frame = backend.beginFrame();
         const probing = recording === newest;
+        // Which candidates the read-backs go to: the window the probe named,
+        // or the frame's last draws sampling the texture. Chosen here, where
+        // the frame is whole, rather than at record time, where its end is
+        // not known yet.
+        /** @type {Set<number>} */
+        const probeAt = new Set();
+        if (probing && probeSpec !== null)
+        {
+            /** @type {number[]} */
+            const candidates = [];
+            recording.commands.forEach((command, at)=>{
+                if (command.probe >= 0 && (probeSpec.from === null
+                    || (command.probeDraw >= probeSpec.from
+                        && command.probeDraw <= probeSpec.to)))
+                {
+                    candidates.push(at);
+                }
+            });
+            const chosen = probeSpec.from === null
+                ? candidates.slice(-PROBE_LIMIT)
+                : candidates.slice(0, PROBE_LIMIT);
+            for (const at of chosen)
+            {
+                probeAt.add(at);
+            }
+        }
         /**
          * The probed draws' read-backs: what the target held before the draw
          * and after it, resolved once the frame has been submitted.
          *
          * @type {{ dump: number,
+         *           rect: { x: number, y: number, width: number, height: number },
+         *           command: any,
          *           before: () => Promise<any>,
          *           after: (() => Promise<any>) | null }[]}
          */
@@ -1439,8 +1536,9 @@ export function createGpuRenderer(services){
                 stencilReference = -1;
                 return pass;
             };
-            for (const command of recording.commands)
+            for (let at = 0; at < recording.commands.length; at++)
             {
+                const command = recording.commands[at];
                 const outcome = built[command.pipeline];
                 if (outcome.status === 'rejected')
                 {
@@ -1468,11 +1566,11 @@ export function createGpuRenderer(services){
                     pass = null;
                     continue;
                 }
-                if (command.probe >= 0 && probing)
+                if (probeAt.has(at))
                 {
                     // A snapshot closes the pass, so the drawing pass is
                     // reopened over what the target holds.
-                    probes.push({ dump: command.probe, rect: command.scissor,
+                    probes.push({ dump: command.probe, rect: command.scissor, command,
                         before: frame.snapshot(target.colour), after: null });
                     pass = null;
                 }
@@ -1527,7 +1625,7 @@ export function createGpuRenderer(services){
                 {
                     pass.draw(command.count, 1, command.first);
                 }
-                if (command.probe >= 0 && probing)
+                if (probeAt.has(at))
                 {
                     probes[probes.length - 1].after = frame.snapshot(target.colour);
                     pass = null;
@@ -1564,7 +1662,10 @@ export function createGpuRenderer(services){
             const before = await probe.before();
             const after = probe.after ? await probe.after() : null;
             recording.dump[probe.dump] += ` before=${describeSnapshot(before, probe.rect)}`
-                + (after ? ` after=${describeSnapshot(after, probe.rect)}` : '');
+                + (after ? ` after=${describeSnapshot(after, probe.rect)}` : '')
+                + ` census=[${probe.command.bindings
+                    .map((/** @type {RecordedBinding} */ b)=>describeCensus(b.texture))
+                    .join(' ')}]`;
         }
     };
 
