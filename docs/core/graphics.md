@@ -55,7 +55,7 @@ The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
 | `dumpDraws` | `false` | Records where every draw of the last frame landed and under what state -- on the Direct3D 8 renderer transforming every vertex a second time on the processor, on the OpenGL one printing the draw's state, its sampled textures, its programs' texts and its uniform blocks. `diagnostics().seam.device.lastDump` holds the result. |
 | `maxDraws` | `-1` (all) | Keeps only this many draws per frame and drops the rest, so a region's painter can be found by bisection. |
 | `skipTexture` | `null` | Comma-separated dump ids; every draw sampling one of those textures is dropped and counted under `skipped.texture`. |
-| `probeTexture` | `null` | Copies the colour target out around each dumped draw that samples this texture -- after it on the Direct3D 8 renderer, before and after on the OpenGL one -- and puts a few of its pixels on the draw's dump line. |
+| `probeTexture` | `null` | Copies the colour target out around each dumped draw that samples this texture -- after it on the Direct3D 8 renderer, before and after on the OpenGL one, which reads the first four such draws of a frame and no more -- and puts a few of its pixels on the draw's dump line. |
 | `fog` | `true` | `false` runs every draw as if `D3DRS_FOGENABLE` were clear. Direct3D 8 only. |
 | `mips` | `true` | `false` samples every texture at its top level. Direct3D 8 only. |
 
