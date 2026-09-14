@@ -131,6 +131,7 @@ const GCL_HICONSM = -34;
 
 /** The style bit EnableWindow sets, and the only one it touches. */
 const WS_DISABLED = 0x08000000;
+const WS_MINIMIZE = 0x20000000;
 
 /** A class or window name is at most this long. */
 const MAX_NAME = 256;
@@ -1110,7 +1111,11 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /** BOOL IsIconic(HWND hWnd) */
         IsIconic: {
             argBytes: 4,
-            handler: ()=>0,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                return record && (record.style & WS_MINIMIZE) !== 0 ? 1 : 0;
+            },
         },
 
         /** BOOL IsZoomed(HWND hWnd) */

@@ -538,6 +538,18 @@ test('MoveWindow changes both rectangles', ()=>{
     assert.equal(memory.u32(RECT_BUFFER + RECT.right), 120);
 });
 
+test('CloseWindow minimises rather than closing, and a show restores', ()=>{
+    const { fns, hwnd } = withWindow();
+    fns.ShowWindow.handler([hwnd, SW_SHOW]);
+
+    assert.equal(fns.CloseWindow.handler([hwnd]), 1);
+    assert.equal(fns.IsWindow.handler([hwnd]), 1, 'the window is still there');
+    assert.equal(fns.IsIconic.handler([hwnd]), 1, 'minimised');
+    assert.equal(fns.ShowWindow.handler([hwnd, SW_SHOW]), 1);
+    assert.equal(fns.IsIconic.handler([hwnd]), 0, 'and a show restores it');
+    assert.equal(fns.CloseWindow.handler([0x9999]), 0, 'no window, nothing to minimise');
+});
+
 test('ShowWindow answers with the visibility it found, not the one it set', ()=>{
     const { fns, hwnd } = withWindow();
 

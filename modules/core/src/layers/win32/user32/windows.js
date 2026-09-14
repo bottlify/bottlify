@@ -209,6 +209,10 @@ const WS_VISIBLE = 0x10000000;
 /** Every ShowWindow command shows the window; this one alone hides it. */
 const SW_HIDE = 0;
 const SW_SHOW = 5;
+const SW_MINIMIZE = 6;
+/** The show commands that leave the window minimised. */
+const MINIMISING = new Set([2, SW_MINIMIZE, 7]);
+const WS_MINIMIZE = 0x20000000;
 /** The ShowWindow commands that leave activation where it is. */
 const SHOW_WITHOUT_ACTIVATING = new Set([SW_HIDE, 4, 6, 7, 8]);
 
@@ -2162,6 +2166,17 @@ export function createWindowFunctions(host){
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
             : (record.style | WS_VISIBLE) >>> 0;
+        // Minimised is a state IsIconic reads back and a restore clears; the
+        // window keeps its place in the picture, there being no taskbar to
+        // shrink to.
+        if (MINIMISING.has(cmdShow))
+        {
+            record.style = (record.style | WS_MINIMIZE) >>> 0;
+        }
+        else if (!hide)
+        {
+            record.style = (record.style & ~WS_MINIMIZE) >>> 0;
+        }
         if (!hide && !SHOW_WITHOUT_ACTIVATING.has(cmdShow) && !isChild(record))
         {
             activate(record.hwnd);
@@ -2376,6 +2391,26 @@ export function createWindowFunctions(host){
             handler: ([hwnd, cmdShow])=>{
                 const record = live(hwnd);
                 return record ? showWindow(record, cmdShow | 0) : 0;
+            },
+        },
+
+        /**
+         * BOOL CloseWindow(HWND hWnd)
+         *
+         * Minimises, despite its name; a program that means to be rid of a
+         * window destroys it.
+         */
+        CloseWindow: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([hwnd])=>{
+                const record = live(hwnd);
+                if (!record)
+                {
+                    return 0;
+                }
+                showWindow(record, SW_MINIMIZE);
+                return 1;
             },
         },
 
