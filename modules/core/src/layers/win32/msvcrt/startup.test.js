@@ -249,6 +249,22 @@ test('_controlfp changes only the bits the mask names, and reports the word', ()
     assert.equal(fns._controlfp.handler([0, 0x00000300]), 0x0009001f, 'and it clears back');
 });
 
+test('_control87 is _controlfp under its older name, reading and writing one word', ()=>{
+    // The two names reach one control word: a program of either vintage may
+    // set through one and read back through the other, and a runtime whose
+    // two names answered from two words would make every read-back a coin
+    // toss. The demo-era link libraries import `_control87` while the newer
+    // CRTs import `_controlfp`; the state cannot be per-name.
+    const { fns } = fakeMachine();
+
+    assert.equal(fns._control87.handler([0, 0]), fns._controlfp.handler([0, 0]));
+    assert.equal(fns._control87.handler([0x00000200, 0x00000300]), 0x0009021f);
+    assert.equal(fns._controlfp.handler([0, 0]), 0x0009021f,
+        'the word the old name set is the word the new name reports');
+    assert.equal(fns._control87.handler([0, 0x00000300]), 0x0009001f);
+    assert.equal(fns._control87.argBytes, 8);
+});
+
 test('the runtime\'s globals are reachable and stay at one address', ()=>{
     // A program linked against the DLL cannot name these, so it reaches them
     // through an accessor -- and it writes through what it gets back, so the

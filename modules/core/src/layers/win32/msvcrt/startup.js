@@ -246,6 +246,33 @@ export function createStartupFunctions(host){
         return address;
     };
 
+    /**
+     * unsigned int _controlfp(unsigned int newControl, unsigned int mask)
+     *
+     * The floating-point control word, remembered rather than applied. A
+     * program sets it to make its own arithmetic reproducible and then reads
+     * it back to check; answering with what it asked for is what keeps that
+     * check from failing. Applying it is the emulator's business and it
+     * already runs at the precision the guest selected.
+     *
+     * `_control87` is the same entry point under the older name: the same
+     * word, the same mask arithmetic, one state -- a program can set through
+     * one and read back through the other, and a runtime whose two names
+     * answered from two words would make every read-back a coin toss. The
+     * older link libraries import the older name as a matter of their vintage
+     * rather than of their intent.
+     */
+    const controlfp = {
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([wanted, mask])=>{
+            const bits = mask >>> 0 & CONTROL_MASK;
+            controlWord = (controlWord & ~bits | wanted >>> 0 & bits) >>> 0;
+            return controlWord;
+        },
+    };
+
     return {
         /**
          * int __getmainargs(int *argc, char ***argv, char ***env,
@@ -346,25 +373,11 @@ export function createStartupFunctions(host){
             },
         },
 
-        /**
-         * unsigned int _controlfp(unsigned int newControl, unsigned int mask)
-         *
-         * The floating-point control word, remembered rather than applied. A
-         * program sets it to make its own arithmetic reproducible and then reads
-         * it back to check; answering with what it asked for is what keeps that
-         * check from failing. Applying it is the emulator's business and it
-         * already runs at the precision the guest selected.
-         */
-        _controlfp: {
-            convention: 'cdecl',
-            argBytes: 8,
-            /** @param {number[]} args */
-            handler: ([wanted, mask])=>{
-                const bits = mask >>> 0 & CONTROL_MASK;
-                controlWord = (controlWord & ~bits | wanted >>> 0 & bits) >>> 0;
-                return controlWord;
-            },
-        },
+        /** unsigned int _controlfp(unsigned int newControl, unsigned int mask) */
+        _controlfp: controlfp,
+
+        /** unsigned int _control87(unsigned int newControl, unsigned int mask) */
+        _control87: controlfp,
 
         /** unsigned int _clearfp(void) -- no exception is ever pending here. */
         _clearfp: { convention: 'cdecl', argBytes: 0, handler: ()=>0 },
