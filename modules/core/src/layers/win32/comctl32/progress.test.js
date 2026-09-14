@@ -23,7 +23,6 @@ import {
  * own hook, so a progress bar here is the same class a program meets.
  */
 
-const TEMPLATE = 0x12000;
 const MSG_BUFFER = 0x13000;
 const TEXT = 0x13100;
 const OUT = 0x13200;
@@ -34,13 +33,10 @@ const THREAD = { name: 'main' };
 
 const SCREEN = { width: 240, height: 160, bitsPerPixel: 32 };
 
-const WM_INITDIALOG = 0x0110;
-const WM_PAINT = 0x000f;
 const WS_POPUP = 0x80000000;
 const WS_CHILD = 0x40000000;
 const WS_VISIBLE = 0x10000000;
 const WS_CAPTION = 0x00c00000;
-const DS_MODALFRAME = 0x0080;
 const PM_REMOVE = 1;
 
 const COLOR_3DFACE = 0x00c0c0c0;

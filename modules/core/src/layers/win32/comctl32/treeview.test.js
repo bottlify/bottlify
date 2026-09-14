@@ -137,6 +137,14 @@ function setup(){
     const desktop = createSurface({ width: SCREEN.width, height: SCREEN.height });
     /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
     const dispatched = [];
+    /**
+     * The notification codes, read as each WM_NOTIFY arrives: the control
+     * reuses one structure for every notification, so a code is only true
+     * while its notification is being delivered.
+     *
+     * @type {number[]}
+     */
+    const notifyCodes = [];
     /** What a TVN_GETDISPINFO answers for each item handle. @type {Map<number,string>} */
     const callbackText = new Map();
     let heapNext = HEAP;
@@ -180,6 +188,7 @@ function setup(){
             if (message.message === WM_NOTIFY)
             {
                 const code = memory.i32(message.lParam + 8);
+                notifyCodes.push(code);
                 if (code === TVN_GETDISPINFOA)
                 {
                     const handle = memory.u32(message.lParam + 12 + TVITEM.hItem);
@@ -286,9 +295,7 @@ function setup(){
     };
 
     /** The notification codes the parent was handed, in order. */
-    const notifications = ()=>dispatched
-        .filter(one=>one.message === WM_NOTIFY)
-        .map(one=>memory.i32(one.lParam + 8));
+    const notifications = ()=>[...notifyCodes];
 
     /** The client area of the tree on the screen (a borderless child: itself).
      * @param {number} hwnd */

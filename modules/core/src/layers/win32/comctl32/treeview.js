@@ -108,8 +108,7 @@ const TVGN_NEXTVISIBLE = 6;
 const TVGN_PREVIOUSVISIBLE = 7;
 const TVGN_CARET = 9;
 
-/** TVM_SETIMAGELIST / TVM_GETIMAGELIST kinds. */
-const TVSIL_NORMAL = 0;
+/** TVM_SETIMAGELIST / TVM_GETIMAGELIST kinds; normal is the default branch. */
 const TVSIL_STATE = 2;
 
 /** Notifications to the parent. */
@@ -133,7 +132,12 @@ export const TVINSERTSTRUCT = Object.freeze({
 });
 export const NMHDR = Object.freeze({ hwndFrom: 0, idFrom: 4, code: 8, SIZE: 12 });
 const NMTVDISPINFO = Object.freeze({ hdr: 0, item: 12, SIZE: 52 });
-const NMTREEVIEW = Object.freeze({ hdr: 0, itemOld: 12, itemNew: 52, ptDrag: 92, SIZE: 100 });
+// NMTREEVIEW carries an `action` word between the header and the two items;
+// leaving it out puts both items four bytes early, and a parent reading a
+// handle or a text pointer from there reads garbage.
+const NMTREEVIEW = Object.freeze({
+    hdr: 0, action: 12, itemOld: 16, itemNew: 56, ptDrag: 96, SIZE: 104,
+});
 const TVHT = Object.freeze({ x: 0, y: 4, flags: 8, hItem: 12, SIZE: 16 });
 
 /** Virtual keys the tree acts on. */
@@ -337,8 +341,13 @@ export function createTreeViewProcedure(host, tk){
     };
 
     /**
-     * Tells the parent something happened, handing it a structure in its own
+     * Tells the parent something happened, handing it a structure in guest
      * memory for the length of the message.
+     *
+     * The buffer is kept per control and reused, not freed when the parent
+     * returns: a parent is entitled to hold the NMHDR it was handed for as
+     * long as it is still inside the notification, and a block handed back to
+     * the allocator can be given to someone else and rewritten under it.
      *
      * @param {any} record @param {number} code @param {Uint8Array} bytes
      * @param {unknown} [thread]
@@ -350,17 +359,23 @@ export function createTreeViewProcedure(host, tk){
             return 0;
         }
         header(bytes, record, code);
-        const address = host.allocate(bytes.length);
-        if (address === 0)
+        const held = state(record);
+        if ((held.notifySize ?? 0) < bytes.length)
+        {
+            if (held.notifyAddress)
+            {
+                host.release?.(held.notifyAddress);
+            }
+            held.notifyAddress = host.allocate(bytes.length);
+            held.notifySize = bytes.length;
+        }
+        const address = held.notifyAddress;
+        if (!address)
         {
             return 0;
         }
         host.writeMemory(address, bytes);
-        return after(host.send(record.parent, WM_NOTIFY, record.id & 0xffff,
-            address, thread), answer=>{
-            host.release?.(address);
-            return answer;
-        });
+        return host.send(record.parent, WM_NOTIFY, record.id & 0xffff, address, thread);
     };
 
     /**
@@ -592,6 +607,8 @@ export function createTreeViewProcedure(host, tk){
         }
         const bytes = new Uint8Array(NMTREEVIEW.SIZE);
         writeItem(bytes, NMTREEVIEW.itemNew, item, 0, 0);
+        new DataView(bytes.buffer).setUint32(NMTREEVIEW.action,
+            open ? TVE_EXPAND : TVE_COLLAPSE, true);
         return after(notify(record, TVN_ITEMEXPANDINGA, bytes, thread), refused=>{
             if ((refused | 0) !== 0)
             {
@@ -825,7 +842,6 @@ export function createTreeViewProcedure(host, tk){
                     { min: 0, max: rows(record).length - 1, page: fitting(record),
                         pos: held.top }, point.x, point.y);
                     const fit = fitting(record);
-                    const total = rows(record).length;
                     const by = code === SB_LINEUP ? -1 : code === SB_LINEDOWN ? 1
                         : code === SB_PAGEUP ? -fit : code === SB_PAGEDOWN ? fit : 0;
                     setTop(record, held.top + by);
@@ -1037,7 +1053,7 @@ export function createTreeViewProcedure(host, tk){
                 // the buffer, which is what makes this case asynchronous.
                 const asked = (mask & TVIF_TEXT) !== 0 && item.textCallback
                     ? askDispInfo(record, item, thread) : null;
-                return after(asked ?? 0, ()=>{
+                return after(/** @type {any} */ (asked ?? 0), ()=>{
                     if ((mask & TVIF_TEXT) !== 0)
                     {
                         const buffer = readI32(at + TVITEM.pszText) >>> 0;
