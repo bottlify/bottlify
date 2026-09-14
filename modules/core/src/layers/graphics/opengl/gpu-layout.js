@@ -38,11 +38,13 @@ export const MAX_SLOTS = 8;
 
 /**
  * The attribute names a draw can carry, in the order the canonical layout
- * packs them, and the coordinate set each texture attribute is.
+ * packs the named ones, then the generic vertex attributes a program reads
+ * that alias to no named array (`attribN`, by their generic index).
  */
 export const ATTRIBUTE_NAMES = Object.freeze([
     'position', 'color', 'secondary', 'normal', 'fogCoord',
     'texCoord0', 'texCoord1', 'texCoord2', 'texCoord3',
+    'attrib1', 'attrib6', 'attrib7', 'attrib12', 'attrib13', 'attrib14', 'attrib15',
 ]);
 
 /**

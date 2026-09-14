@@ -8,8 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import {
-    CANONICAL_LAYOUT, CANONICAL_STRIDE, expandIndices, expandMode, packVertices, planLayout,
-    scanIndices, topologyOf, vertexFormatOf,
+    ATTRIBUTE_NAMES, CANONICAL_LAYOUT, CANONICAL_STRIDE, expandIndices, expandMode, packVertices,
+    planLayout, scanIndices, topologyOf, vertexFormatOf,
 } from './gpu-layout.js';
 
 /** @param {Partial<import('./arrays.js').ArrayPointer>} fields */
@@ -45,6 +45,27 @@ test('arrays in different buffers, or at different strides, take slots of their 
     assert.equal(layout.slots.length, 3);
     assert.equal(layout.attributes[1].format, 'unorm8x4');
     assert.equal(layout.slots[2].stride, 12, 'a stride of zero is the element\'s own size');
+});
+
+test('a generic attribute array a program reads is laid out like a named one', ()=>{
+    // vertex.attrib[6] aliases no conventional array, so it arrives under its
+    // own canonical name attrib6 (enabled through glVertexAttribPointerARB).
+    // The layout must give it a slot, interleaved with the rest of the vertex.
+    assert.ok(ATTRIBUTE_NAMES.includes('attrib6'),
+        'the generic attribute name is one the layout recognises');
+    const layout = planLayout([
+        { name: 'position', pointer: pointer({ stride: 60, pointer: 0, buffer: 3 }),
+            normalised: false },
+        { name: 'attrib6', pointer: pointer({ size: 4, stride: 60, pointer: 12, buffer: 3 }),
+            normalised: false },
+    ]);
+    assert.ok(layout);
+    assert.equal(layout.slots.length, 1, 'an interleaved generic shares the vertex slot');
+    const attrib6 = layout.attributes.find(a=>a.name === 'attrib6');
+    assert.ok(attrib6, 'a program reading vertex.attrib[6] gets its slot');
+    assert.equal(attrib6.slot, 0);
+    assert.equal(attrib6.offset, 12);
+    assert.equal(attrib6.format, 'float32x4');
 });
 
 test('a pointer off a word boundary opens its slot at the word below it', ()=>{
