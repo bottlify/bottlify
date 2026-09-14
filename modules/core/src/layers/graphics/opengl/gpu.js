@@ -1372,6 +1372,15 @@ export function createGpuRenderer(services){
 
     /** @type {Promise<void>} replays run one after another, in swap order */
     let chain = Promise.resolve();
+    /**
+     * The recording most recently presented. A probe is two read-backs a
+     * replay waits for, and a replay that has fallen behind the recording
+     * must not queue more waiting per frame than the guest -- so probes run
+     * only while the frame being replayed is still the newest one, which is
+     * also the frame whose dump the report reads.
+     */
+    /** @type {Recording | null} */
+    let newest = null;
     /** @type {string[]} */
     const failures = [];
 
@@ -1385,6 +1394,7 @@ export function createGpuRenderer(services){
             showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
         const built = await Promise.allSettled([...recording.pipelines, show]);
         const frame = backend.beginFrame();
+        const probing = recording === newest;
         /**
          * The probed draws' read-backs: what the target held before the draw
          * and after it, resolved once the frame has been submitted.
@@ -1453,7 +1463,7 @@ export function createGpuRenderer(services){
                     pass = null;
                     continue;
                 }
-                if (command.probe >= 0)
+                if (command.probe >= 0 && probing)
                 {
                     // A snapshot closes the pass, so the drawing pass is
                     // reopened over what the target holds.
@@ -1512,7 +1522,7 @@ export function createGpuRenderer(services){
                 {
                     pass.draw(command.count, 1, command.first);
                 }
-                if (command.probe >= 0)
+                if (command.probe >= 0 && probing)
                 {
                     probes[probes.length - 1].after = frame.snapshot(target.colour);
                     pass = null;
@@ -1610,6 +1620,7 @@ export function createGpuRenderer(services){
             }
             const recording = recordings.get(context) ?? recordingOf(context);
             recordings.delete(context);
+            newest = recording;
             stats.frames++;
             if (dumpDraws)
             {
