@@ -195,6 +195,39 @@ export const VERTEX_ATTRIB_OF = Object.freeze({
     matrixindex: 6,
 });
 
+/** The generic attribute number each canonical array name arrives through. */
+const CANONICAL_ATTRIB = Object.freeze({
+    position: 0,
+    normal: 2,
+    color: 3,
+    secondary: 4,
+    fogCoord: 5,
+    texCoord0: 8,
+    texCoord1: 9,
+    texCoord2: 10,
+    texCoord3: 11,
+});
+
+/**
+ * The canonical name a generic attribute number arrives through, where the
+ * aliasing table gives one: attribute 0 is the position array, 8+n the
+ * texture coordinate array of unit n, and the rest have names of their own
+ * (`attribN`).
+ *
+ * @param {number} attrib
+ * @returns {string}
+ */
+export function canonicalAttribName(attrib){
+    for (const [name, number] of Object.entries(CANONICAL_ATTRIB))
+    {
+        if (number === attrib)
+        {
+            return name;
+        }
+    }
+    return `attrib${attrib}`;
+}
+
 /**
  * The limits this implementation reports and enforces, per program kind. The
  * specification's minima are the floor (vertex: 128 instructions, 12

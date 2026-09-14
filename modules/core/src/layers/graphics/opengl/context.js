@@ -46,6 +46,7 @@ import { installTextureCalls } from './context-textures.js';
 import { installLightingCalls } from './context-lighting.js';
 import { installArrayCalls } from './context-arrays.js';
 import { installPixelCalls } from './context-pixels.js';
+import { installProgramCalls } from './context-programs.js';
 import { createSceneBuilder } from './context-scene.js';
 
 /** What this implementation answers glGetString with. */
@@ -67,7 +68,7 @@ const ALLOWED_IN_BEGIN = new Set([
     'glVertex2f', 'glVertex3f', 'glVertex4f', 'glColor3f', 'glColor4f', 'glColor3ub',
     'glColor4ub', 'glNormal3f', 'glTexCoord2f', 'glTexCoord3f', 'glTexCoord4f', 'glEdgeFlag',
     'glIndexi', 'glMultiTexCoord4fARB', 'glSecondaryColor3fEXT', 'glFogCoordfEXT',
-    'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
+    'glVertexAttrib4fARB', 'glMaterialfv', 'glMaterialf', 'glCallList', 'glCallLists', 'glEnd',
 ]);
 
 /** The bits glClear takes. Anything else in the mask is GL_INVALID_VALUE. */
@@ -95,6 +96,11 @@ const NOT_COMPILABLE = new Set([
     'glMapBufferARB', 'glUnmapBufferARB', 'glGetBufferParameterivARB',
     'glGetBufferPointervARB', 'glLockArraysEXT', 'glUnlockArraysEXT',
     'glGetCompressedTexImageARB',
+    'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
+    'glProgramStringARB', 'glGetProgramivARB', 'glGetProgramStringARB',
+    'glGetProgramEnvParameterfvARB', 'glGetProgramLocalParameterfvARB',
+    'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
+    'glDisableVertexAttribArrayARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribPointervARB',
 ]);
 
 /** @type {Set<number>} */
@@ -481,6 +487,10 @@ export function createGlContext(options = {}){
             if (name === GL.EXTENSIONS)
             {
                 return extensions.join(' ');
+            }
+            if (name === GL.PROGRAM_ERROR_STRING_ARB)
+            {
+                return kernel.side.programErrorString();
             }
             const value = /** @type {any} */ (STRINGS)[name];
             if (value === undefined)
@@ -1329,6 +1339,7 @@ export function createGlContext(options = {}){
                 values: snapshot(queriesSavedBy(SERVER_BITS, mask)),
                 textures: kernel.side.saveServerTextures(mask),
                 lighting: kernel.side.saveServerLighting(mask),
+                programs: kernel.side.saveServerPrograms(mask),
             });
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
@@ -1347,6 +1358,7 @@ export function createGlContext(options = {}){
             restore(saved.values);
             kernel.side.restoreServerTextures(saved.mask, saved.textures);
             kernel.side.restoreServerLighting(saved.lighting);
+            kernel.side.restoreServerPrograms(saved.programs);
             setState(GL.ATTRIB_STACK_DEPTH, [attribStack.length]);
         },
 
@@ -1365,6 +1377,7 @@ export function createGlContext(options = {}){
                 mask,
                 values: snapshot(queriesSavedBy(CLIENT_BITS, mask)),
                 arrays: kernel.side.saveClient(mask),
+                programs: kernel.side.saveClientPrograms(mask),
             });
             setState(GL.CLIENT_ATTRIB_STACK_DEPTH, [clientAttribStack.length]);
         },
@@ -1382,6 +1395,7 @@ export function createGlContext(options = {}){
             }
             restore(saved.values);
             kernel.side.restoreClient(saved.mask, saved.arrays);
+            kernel.side.restoreClientPrograms(saved.programs);
             setState(GL.CLIENT_ATTRIB_STACK_DEPTH, [clientAttribStack.length]);
         },
 
@@ -1394,6 +1408,7 @@ export function createGlContext(options = {}){
     installLightingCalls(context, kernel);
     installArrayCalls(context, kernel);
     installPixelCalls(context, kernel);
+    installProgramCalls(context, kernel);
     const scenes = createSceneBuilder(kernel);
     kernel.side.scene = ()=>scenes.scene();
 

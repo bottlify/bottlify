@@ -103,6 +103,36 @@ export function levelKey(level, face = 0){
 }
 
 /**
+ * @typedef {Object} ProgramObject
+ * @property {number} name
+ * @property {number} target   the target it belongs to; zero until first bound
+ * @property {number} format   the format its string was given in; zero unloaded
+ * @property {string} text     the program string as it was given
+ * @property {import('./arb-program.js').ParsedProgram | null} parsed
+ * @property {Float32Array} local   the local parameters, four floats each
+ */
+
+/**
+ * A program object: empty and targetless until it is bound, its string the
+ * last one that loaded -- a failed load leaves what was there before.
+ *
+ * @param {number} name
+ * @param {number} target
+ * @param {number} localParameters
+ * @returns {ProgramObject}
+ */
+export function createProgramObject(name, target, localParameters){
+    return {
+        name,
+        target,
+        format: 0,
+        text: '',
+        parsed: null,
+        local: new Float32Array(localParameters * 4),
+    };
+}
+
+/**
  * @typedef {Object} DisplayList
  * @property {number} name
  * @property {{ call: string, args: any[] }[]} commands
@@ -289,6 +319,7 @@ function createNamespace(){
  * @returns {{ textures: ReturnType<typeof createNamespace>,
  *             lists: ReturnType<typeof createNamespace>,
  *             buffers: ReturnType<typeof createNamespace>,
+ *             programs: ReturnType<typeof createNamespace>,
  *             contexts: number, used: boolean }}
  */
 export function createShareGroup(){
@@ -296,6 +327,7 @@ export function createShareGroup(){
         textures: createNamespace(),
         lists: createNamespace(),
         buffers: createNamespace(),
+        programs: createNamespace(),
         /** How many contexts name this group. The objects outlive all but the last. */
         contexts: 0,
         /**

@@ -34,6 +34,7 @@
 
 import { GL } from './constants.js';
 import { STACK_LIMITS } from './matrix.js';
+import { PROGRAM_LIMITS } from './arb-program.js';
 
 /**
  * @typedef {Object} StateDefault
@@ -110,6 +111,16 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.RESCALE_NORMAL, name: 'GL_RESCALE_NORMAL', kind: 'bool', value: [0] },
     { query: GL.COLOR_SUM, name: 'GL_COLOR_SUM', kind: 'bool', value: [0] },
     { query: GL.AUTO_NORMAL, name: 'GL_AUTO_NORMAL', kind: 'bool', value: [0] },
+    { query: GL.VERTEX_PROGRAM_ARB, name: 'GL_VERTEX_PROGRAM_ARB', kind: 'bool', value: [0] },
+    { query: GL.FRAGMENT_PROGRAM_ARB, name: 'GL_FRAGMENT_PROGRAM_ARB', kind: 'bool', value: [0] },
+    {
+        query: GL.VERTEX_PROGRAM_POINT_SIZE_ARB, name: 'GL_VERTEX_PROGRAM_POINT_SIZE_ARB',
+        kind: 'bool', value: [0],
+    },
+    {
+        query: GL.VERTEX_PROGRAM_TWO_SIDE_ARB, name: 'GL_VERTEX_PROGRAM_TWO_SIDE_ARB',
+        kind: 'bool', value: [0],
+    },
 ]);
 
 /**
@@ -539,6 +550,106 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.MAX_TEXTURE_STACK_DEPTH, name: 'GL_MAX_TEXTURE_STACK_DEPTH', kind: 'int',
         value: [STACK_LIMITS.texture],
+    },
+
+    // --- ARB program limits ---
+    // One flat value per enum, derived from the parser's own limits so the
+    // number a program is refused at and the number glGetIntegerv reports are
+    // the same specification seen twice. The per-target counts a program
+    // actually uses are GetProgramivARB's, answered in context-programs.js.
+    {
+        query: GL.MAX_VERTEX_ATTRIBS_ARB, name: 'GL_MAX_VERTEX_ATTRIBS_ARB', kind: 'int',
+        value: [16],
+    },
+    {
+        query: GL.MAX_PROGRAM_MATRICES_ARB, name: 'GL_MAX_PROGRAM_MATRICES_ARB', kind: 'int',
+        value: [8],
+    },
+    {
+        query: GL.MAX_PROGRAM_MATRIX_STACK_DEPTH_ARB, name: 'GL_MAX_PROGRAM_MATRIX_STACK_DEPTH_ARB',
+        kind: 'int', value: [1],
+    },
+    {
+        query: GL.MAX_PROGRAM_ENV_PARAMETERS_ARB, name: 'GL_MAX_PROGRAM_ENV_PARAMETERS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.envParameters],
+    },
+    {
+        query: GL.MAX_PROGRAM_LOCAL_PARAMETERS_ARB, name: 'GL_MAX_PROGRAM_LOCAL_PARAMETERS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.localParameters],
+    },
+    {
+        query: GL.MAX_PROGRAM_INSTRUCTIONS_ARB, name: 'GL_MAX_PROGRAM_INSTRUCTIONS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.instructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_INSTRUCTIONS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.vertex.nativeInstructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_TEMPORARIES_ARB, name: 'GL_MAX_PROGRAM_TEMPORARIES_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.temporaries],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_TEMPORARIES_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_TEMPORARIES_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.vertex.nativeTemporaries],
+    },
+    {
+        query: GL.MAX_PROGRAM_PARAMETERS_ARB, name: 'GL_MAX_PROGRAM_PARAMETERS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.vertex.parameters],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_PARAMETERS_ARB, name: 'GL_MAX_PROGRAM_NATIVE_PARAMETERS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.nativeParameters],
+    },
+    {
+        query: GL.MAX_PROGRAM_ATTRIBS_ARB, name: 'GL_MAX_PROGRAM_ATTRIBS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.vertex.attribs],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_ATTRIBS_ARB, name: 'GL_MAX_PROGRAM_NATIVE_ATTRIBS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.nativeAttribs],
+    },
+    {
+        query: GL.MAX_PROGRAM_ADDRESS_REGISTERS_ARB, name: 'GL_MAX_PROGRAM_ADDRESS_REGISTERS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.vertex.addressRegisters],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_ADDRESS_REGISTERS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.vertex.nativeAddressRegisters],
+    },
+    {
+        query: GL.MAX_PROGRAM_ALU_INSTRUCTIONS_ARB, name: 'GL_MAX_PROGRAM_ALU_INSTRUCTIONS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.fragment.aluInstructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_ALU_INSTRUCTIONS_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_ALU_INSTRUCTIONS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.fragment.nativeAluInstructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_TEX_INSTRUCTIONS_ARB, name: 'GL_MAX_PROGRAM_TEX_INSTRUCTIONS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.fragment.texInstructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_TEX_INSTRUCTIONS_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_TEX_INSTRUCTIONS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.fragment.nativeTexInstructions],
+    },
+    {
+        query: GL.MAX_PROGRAM_TEX_INDIRECTIONS_ARB, name: 'GL_MAX_PROGRAM_TEX_INDIRECTIONS_ARB',
+        kind: 'int', value: [PROGRAM_LIMITS.fragment.texIndirections],
+    },
+    {
+        query: GL.MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB,
+        name: 'GL_MAX_PROGRAM_NATIVE_TEX_INDIRECTIONS_ARB', kind: 'int',
+        value: [PROGRAM_LIMITS.fragment.nativeTexIndirections],
+    },
+    {
+        query: GL.PROGRAM_ERROR_POSITION_ARB, name: 'GL_PROGRAM_ERROR_POSITION_ARB', kind: 'int',
+        value: [-1],
     },
 ]);
 

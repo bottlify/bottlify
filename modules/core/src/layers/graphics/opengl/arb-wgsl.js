@@ -60,6 +60,10 @@
 /** @typedef {import('./arb-program.js').ConstantBinding} ConstantBinding */
 /** @typedef {import('./arb-program.js').FragmentBinding} FragmentBinding */
 
+import { canonicalAttribName } from './arb-program.js';
+
+export { canonicalAttribName };
+
 /** Where the two program uniform blocks sit in the draw's bind group. */
 export const VERTEX_PROGRAM_BINDING = 9;
 export const FRAGMENT_PROGRAM_BINDING = 10;
@@ -132,38 +136,6 @@ export const VARYING_TEXCOORDS = 4;
 /**
  * @typedef {{ error: string } | EmittedStage} EmitResult
  */
-
-/** The generic attribute number each canonical input name arrives through. */
-const CANONICAL_ATTRIB = Object.freeze({
-    position: 0,
-    normal: 2,
-    color: 3,
-    secondary: 4,
-    fogCoord: 5,
-    texCoord0: 8,
-    texCoord1: 9,
-    texCoord2: 10,
-    texCoord3: 11,
-});
-
-/**
- * The canonical input name a generic attribute number arrives through, where
- * one exists: attribute 0 is the position array, 8+n the texture coordinate
- * array of unit n, and the rest have names of their own (`attribN`).
- *
- * @param {number} attrib
- * @returns {string}
- */
-export function canonicalAttribName(attrib){
-    for (const [name, number] of Object.entries(CANONICAL_ATTRIB))
-    {
-        if (number === attrib)
-        {
-            return name;
-        }
-    }
-    return `attrib${attrib}`;
-}
 
 /**
  * The analysis both emitters run first: the parameter slots in block order
