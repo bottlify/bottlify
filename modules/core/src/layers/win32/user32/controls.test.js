@@ -15,6 +15,11 @@ import { createGdiDrawing } from '../../graphics/gdi/context.js';
 import { createSurface, surfaceForDibSection, viewOf } from '../../graphics/gdi/surface.js';
 import { createCommonControls } from '../comctl32/controls.js';
 import { PBM_SETRANGE, PBM_SETPOS } from '../comctl32/progress.js';
+import {
+    TVM_INSERTITEMA, TVM_EXPAND, TVM_SELECTITEM, TVS_HASBUTTONS, TVS_HASLINES,
+    TVS_LINESATROOT, TVS_CHECKBOXES, TVS_SHOWSELALWAYS, TVITEM, TVINSERTSTRUCT,
+    TVIF_TEXT, TVIF_STATE, TVIF_CHILDREN, TVIS_STATEIMAGEMASK,
+} from '../comctl32/treeview.js';
 import { decodePng, encodePng } from './png.fixture.js';
 
 /**
@@ -464,6 +469,50 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
         context.fns.SendMessageA.handler([progress, PBM_SETPOS, 60, 0]);
         await context.pump(dialog);
 
+        // A tree view under the bar: a two-level component list with lines,
+        // [+] buttons and check boxes, one item checked and one selected, so
+        // the whole of the classic look is in the picture. Its region is new
+        // too; the dialog's and the bar's are not.
+        const INS2 = 0x15000;
+        /** @param {number} at @param {number} value */
+        const put32 = (at, value)=>context.memory.writeMemory(at, new Uint8Array([
+            value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff,
+        ]));
+        context.memory.putString(TEXT, 'SysTreeView32');
+        const tree = context.fns.CreateWindowExA.handler([0, TEXT, 0,
+            WS_POPUP | WS_VISIBLE | TVS_HASBUTTONS | TVS_HASLINES | TVS_LINESATROOT
+            | TVS_CHECKBOXES | TVS_SHOWSELALWAYS, 8, 200, 200, 110, 0, 0, HINSTANCE, 0]);
+        assert.notEqual(tree, 0);
+        /** @param {number} parent @param {string} text @param {any} [opts] */
+        const insertTree = (parent, text, opts = {})=>{
+            put32(INS2 + TVINSERTSTRUCT.hParent, parent);
+            put32(INS2 + TVINSERTSTRUCT.hInsertAfter, 0xffff0002);
+            const item = INS2 + TVINSERTSTRUCT.item;
+            put32(item + TVITEM.mask, TVIF_TEXT
+                | (opts.state !== undefined ? TVIF_STATE : 0)
+                | (opts.children ? TVIF_CHILDREN : 0));
+            context.memory.putString(TEXT + 0x200, text);
+            put32(item + TVITEM.pszText, TEXT + 0x200);
+            if (opts.state !== undefined)
+            {
+                put32(item + TVITEM.state, opts.state);
+                put32(item + TVITEM.stateMask, TVIS_STATEIMAGEMASK);
+            }
+            if (opts.children)
+            {
+                put32(item + TVITEM.cChildren, 1);
+            }
+            return context.fns.SendMessageA.handler([tree, TVM_INSERTITEMA, 0, INS2]);
+        };
+        const root = insertTree(0xffff0000, 'Components',
+            { children: true, state: 2 << 12 });
+        const child = insertTree(root, 'Game files');
+        insertTree(root, 'Movies');
+        insertTree(0xffff0000, 'Shortcuts');
+        context.fns.SendMessageA.handler([tree, TVM_EXPAND, 2, root]);
+        context.fns.SendMessageA.handler([tree, TVM_SELECTITEM, 9, child]);
+        await context.pump(dialog);
+
         if (process.env.WRITE_REFERENCE)
         {
             writeFileSync(REFERENCE, encodePng(context.desktop));
@@ -483,7 +532,7 @@ test('byte-exact: a dialog with a push button, a static and a check box paints a
             }
         }
         assert.equal(differing, 0, 'every pixel is as stored');
-        assert.equal(context.presents(), 3, 'one presentation per paint pass, three pumps');
+        assert.equal(context.presents(), 4, 'one presentation per paint pass, four pumps');
     });
 
 test('a click at the button\'s screen coordinates reaches the dialog as BN_CLICKED', async()=>{

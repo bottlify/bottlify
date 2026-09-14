@@ -20,6 +20,7 @@
  */
 
 import { PROGRESS_CLASS, PROGRESS_ATOM, createProgressProcedure } from './progress.js';
+import { TREEVIEW_CLASS, TREEVIEW_ATOM, createTreeViewProcedure } from './treeview.js';
 
 /**
  * The classes, in the order a program is likeliest to meet them.
@@ -35,6 +36,11 @@ export function createCommonControls(host, toolkit){
             name: PROGRESS_CLASS,
             atom: PROGRESS_ATOM,
             procedure: createProgressProcedure(host, toolkit),
+        },
+        {
+            name: TREEVIEW_CLASS,
+            atom: TREEVIEW_ATOM,
+            procedure: createTreeViewProcedure(host, toolkit),
         },
     ];
 }
