@@ -83,6 +83,47 @@ export const GL_EXTENSIONS = Object.freeze({
     GL_ARB_texture_mirrored_repeat: [],
     GL_EXT_rescale_normal: [],
     GL_EXT_separate_specular_color: [],
+    // The program-object entry points are defined by both program extensions,
+    // and a program that finds either name must find every one of them.
+    GL_ARB_vertex_program: [
+        'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
+        'glProgramStringARB',
+        'glProgramEnvParameter4dARB', 'glProgramEnvParameter4dvARB',
+        'glProgramEnvParameter4fARB', 'glProgramEnvParameter4fvARB',
+        'glProgramLocalParameter4dARB', 'glProgramLocalParameter4dvARB',
+        'glProgramLocalParameter4fARB', 'glProgramLocalParameter4fvARB',
+        'glGetProgramEnvParameterdvARB', 'glGetProgramEnvParameterfvARB',
+        'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
+        'glGetProgramivARB', 'glGetProgramStringARB',
+        'glVertexAttrib1sARB', 'glVertexAttrib1fARB', 'glVertexAttrib1dARB',
+        'glVertexAttrib2sARB', 'glVertexAttrib2fARB', 'glVertexAttrib2dARB',
+        'glVertexAttrib3sARB', 'glVertexAttrib3fARB', 'glVertexAttrib3dARB',
+        'glVertexAttrib4sARB', 'glVertexAttrib4fARB', 'glVertexAttrib4dARB',
+        'glVertexAttrib4NubARB',
+        'glVertexAttrib1svARB', 'glVertexAttrib1fvARB', 'glVertexAttrib1dvARB',
+        'glVertexAttrib2svARB', 'glVertexAttrib2fvARB', 'glVertexAttrib2dvARB',
+        'glVertexAttrib3svARB', 'glVertexAttrib3fvARB', 'glVertexAttrib3dvARB',
+        'glVertexAttrib4bvARB', 'glVertexAttrib4svARB', 'glVertexAttrib4ivARB',
+        'glVertexAttrib4ubvARB', 'glVertexAttrib4usvARB', 'glVertexAttrib4uivARB',
+        'glVertexAttrib4fvARB', 'glVertexAttrib4dvARB',
+        'glVertexAttrib4NbvARB', 'glVertexAttrib4NsvARB', 'glVertexAttrib4NivARB',
+        'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
+        'glVertexAttribPointerARB', 'glEnableVertexAttribArrayARB',
+        'glDisableVertexAttribArrayARB',
+        'glGetVertexAttribdvARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribivARB',
+        'glGetVertexAttribPointervARB',
+    ],
+    GL_ARB_fragment_program: [
+        'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
+        'glProgramStringARB',
+        'glProgramEnvParameter4dARB', 'glProgramEnvParameter4dvARB',
+        'glProgramEnvParameter4fARB', 'glProgramEnvParameter4fvARB',
+        'glProgramLocalParameter4dARB', 'glProgramLocalParameter4dvARB',
+        'glProgramLocalParameter4fARB', 'glProgramLocalParameter4fvARB',
+        'glGetProgramEnvParameterdvARB', 'glGetProgramEnvParameterfvARB',
+        'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
+        'glGetProgramivARB', 'glGetProgramStringARB',
+    ],
 });
 
 /** WGL extensions: name -> the functions it defines. */
@@ -108,7 +149,8 @@ export const EXTENSION_WORDS = Object.freeze({
         'glSecondaryColor3bvEXT', 'glSecondaryColor3dvEXT', 'glSecondaryColor3fvEXT',
         'glSecondaryColor3ivEXT', 'glSecondaryColor3svEXT', 'glSecondaryColor3ubvEXT',
         'glSecondaryColor3uivEXT', 'glSecondaryColor3usvEXT', 'glFogCoordfEXT',
-        'glFogCoordfvEXT', 'glFogCoorddvEXT', 'wglGetExtensionsStringARB', 'wglSwapIntervalEXT'
+        'glFogCoordfvEXT', 'glFogCoorddvEXT', 'wglGetExtensionsStringARB', 'wglSwapIntervalEXT',
+        'glIsProgramARB', 'glEnableVertexAttribArrayARB', 'glDisableVertexAttribArrayARB',
     ],
     2: [
         'glMultiTexCoord1fARB', 'glMultiTexCoord1iARB', 'glMultiTexCoord1sARB',
@@ -118,36 +160,60 @@ export const EXTENSION_WORDS = Object.freeze({
         'glMultiTexCoord3fvARB', 'glMultiTexCoord3ivARB', 'glMultiTexCoord3svARB',
         'glMultiTexCoord4dvARB', 'glMultiTexCoord4fvARB', 'glMultiTexCoord4ivARB',
         'glMultiTexCoord4svARB', 'glBindBufferARB', 'glDeleteBuffersARB', 'glGenBuffersARB',
-        'glMapBufferARB', 'glLockArraysEXT', 'glFogCoorddEXT'
+        'glMapBufferARB', 'glLockArraysEXT', 'glFogCoorddEXT',
+        'glGenProgramsARB', 'glDeleteProgramsARB', 'glBindProgramARB',
+        'glVertexAttrib1sARB', 'glVertexAttrib1fARB',
+        'glVertexAttrib1svARB', 'glVertexAttrib1fvARB', 'glVertexAttrib1dvARB',
+        'glVertexAttrib2svARB', 'glVertexAttrib2fvARB', 'glVertexAttrib2dvARB',
+        'glVertexAttrib3svARB', 'glVertexAttrib3fvARB', 'glVertexAttrib3dvARB',
+        'glVertexAttrib4bvARB', 'glVertexAttrib4svARB', 'glVertexAttrib4ivARB',
+        'glVertexAttrib4ubvARB', 'glVertexAttrib4usvARB', 'glVertexAttrib4uivARB',
+        'glVertexAttrib4fvARB', 'glVertexAttrib4dvARB',
+        'glVertexAttrib4NbvARB', 'glVertexAttrib4NsvARB', 'glVertexAttrib4NivARB',
+        'glVertexAttrib4NubvARB', 'glVertexAttrib4NusvARB', 'glVertexAttrib4NuivARB',
     ],
     3: [
         'glMultiTexCoord1dARB', 'glMultiTexCoord2fARB', 'glMultiTexCoord2iARB',
         'glMultiTexCoord2sARB', 'glGetCompressedTexImageARB', 'glGetBufferParameterivARB',
         'glGetBufferPointervARB', 'glSecondaryColor3bEXT', 'glSecondaryColor3fEXT',
         'glSecondaryColor3iEXT', 'glSecondaryColor3sEXT', 'glSecondaryColor3ubEXT',
-        'glSecondaryColor3uiEXT', 'glSecondaryColor3usEXT', 'glFogCoordPointerEXT'
+        'glSecondaryColor3uiEXT', 'glSecondaryColor3usEXT', 'glFogCoordPointerEXT',
+        'glProgramEnvParameter4dvARB', 'glProgramEnvParameter4fvARB',
+        'glProgramLocalParameter4dvARB', 'glProgramLocalParameter4fvARB',
+        'glGetProgramEnvParameterdvARB', 'glGetProgramEnvParameterfvARB',
+        'glGetProgramLocalParameterdvARB', 'glGetProgramLocalParameterfvARB',
+        'glGetProgramivARB', 'glGetProgramStringARB',
+        'glVertexAttrib1dARB', 'glVertexAttrib2sARB', 'glVertexAttrib2fARB',
+        'glGetVertexAttribdvARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribivARB',
+        'glGetVertexAttribPointervARB',
     ],
     4: [
         'glMultiTexCoord3fARB', 'glMultiTexCoord3iARB', 'glMultiTexCoord3sARB',
         'glBufferDataARB', 'glBufferSubDataARB', 'glGetBufferSubDataARB',
-        'glSecondaryColorPointerEXT'
+        'glSecondaryColorPointerEXT',
+        'glProgramStringARB', 'glVertexAttrib3sARB', 'glVertexAttrib3fARB',
     ],
     5: [
         'glMultiTexCoord2dARB', 'glMultiTexCoord4fARB', 'glMultiTexCoord4iARB',
-        'glMultiTexCoord4sARB'
+        'glMultiTexCoord4sARB',
+        'glVertexAttrib2dARB', 'glVertexAttrib4sARB', 'glVertexAttrib4fARB',
+        'glVertexAttrib4NubARB',
     ],
     6: [
         'glSecondaryColor3dEXT', 'glDrawRangeElementsEXT', 'wglGetPixelFormatAttribivARB',
-        'wglGetPixelFormatAttribfvARB', 'wglChoosePixelFormatARB'
+        'wglGetPixelFormatAttribfvARB', 'wglChoosePixelFormatARB',
+        'glProgramEnvParameter4fARB', 'glProgramLocalParameter4fARB', 'glVertexAttribPointerARB',
     ],
     7: [
-        'glMultiTexCoord3dARB', 'glCompressedTexImage1DARB', 'glCompressedTexSubImage1DARB'
+        'glMultiTexCoord3dARB', 'glCompressedTexImage1DARB', 'glCompressedTexSubImage1DARB',
+        'glVertexAttrib3dARB',
     ],
     8: ['glCompressedTexImage2DARB'],
     9: [
-        'glMultiTexCoord4dARB', 'glCompressedTexImage3DARB', 'glCompressedTexSubImage2DARB'
+        'glMultiTexCoord4dARB', 'glCompressedTexImage3DARB', 'glCompressedTexSubImage2DARB',
+        'glVertexAttrib4dARB',
     ],
-    10: [],
+    10: ['glProgramEnvParameter4dARB', 'glProgramLocalParameter4dARB'],
     11: ['glCompressedTexSubImage3DARB'],
 });
 
