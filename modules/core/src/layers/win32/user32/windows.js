@@ -64,6 +64,9 @@ const WM_SYSCHAR = 0x0106;
 /** The rest of what DefWindowProc and the frame answer. */
 const WM_ACTIVATE = 0x0006;
 const WM_MOUSEACTIVATE = 0x0021;
+/** WM_ACTIVATE's wParam: who is being told, and why. */
+const WA_INACTIVE = 0;
+const WA_ACTIVE = 1;
 const WM_NCCALCSIZE = 0x0083;
 const WM_NCPAINT = 0x0085;
 const WM_NCMOUSEMOVE = 0x00a0;
@@ -711,6 +714,7 @@ export function createWindowFunctions(host){
     /** @param {number} hwnd */
     const activate = hwnd=>{
         const record = live(hwnd);
+        const previous = active;
         active = record ? topLevelOf(record).hwnd : 0;
         // The keyboard follows activation: a focus outside the window that
         // became active is moved to it, as Windows moves it.
@@ -718,6 +722,27 @@ export function createWindowFunctions(host){
         if (active !== 0 && (current === 0 || topLevelOf(windows.get(current)).hwnd !== active))
         {
             focus = active;
+        }
+        // Which of the program's own windows holds the activation is a
+        // window-level fact, and a window is told it holds it -- and the one it
+        // took it from is told it no longer does -- every time it changes, not
+        // only the first time. The application is told it is foreground once,
+        // when its first window appears; that first WM_ACTIVATE travels with it,
+        // in the order Windows sends the set. What has no other source is the
+        // switch to a later window: a program that shows one window and then
+        // another -- a title that recreates its render window for a mode change
+        // is the ordinary case -- activates its mouse, captures and clips only in
+        // the window it believes active, and without this message that window is
+        // never told it is.
+        if (previous !== 0 && active !== previous)
+        {
+            host.queue.post({ hwnd: previous, message: WM_ACTIVATE,
+                wParam: WA_INACTIVE, lParam: active });
+            if (active !== 0)
+            {
+                host.queue.post({ hwnd: active, message: WM_ACTIVATE,
+                    wParam: WA_ACTIVE, lParam: previous });
+            }
         }
     };
 

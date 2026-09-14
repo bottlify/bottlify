@@ -655,6 +655,54 @@ test('a class that asked for no extra bytes has none', ()=>{
     assert.equal(fns.GetWindowLongA.handler([hwnd, 0]), 0);
 });
 
+test('a window that takes the activation is told, and the one it replaced is told it lost it', ()=>{
+    const WM_ACTIVATE = 0x0006;
+    const WA_ACTIVE = 1;
+    const WA_INACTIVE = 0;
+    // The application is told it is foreground once, when its first window
+    // appears. Which of its own windows holds that activation afterwards is a
+    // window-level fact, and a program that shows a second window -- or destroys
+    // its render window and makes another for a mode change -- activates its
+    // mouse, captures and clips only in the window it believes active, so that
+    // window has to be told it is. The first activation is left alone (the
+    // input layer sends that one, with WM_ACTIVATEAPP, in order); this is the
+    // switch to a later window.
+    const context = setup();
+    putClass(context.memory);
+    context.fns.RegisterClassA.handler([CLASS_STRUCT]);
+    const first = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+    const second = createWindow(context.fns, context.memory, { style: WS_VISIBLE });
+
+    /** @type {any[]} */
+    const told = [];
+    // Only what was actually posted: a visible window's paint is made up on
+    // every look and never leaves by looking, so draining to "nothing" would
+    // never stop -- the pending count is the queue's own, and reaches zero.
+    while (context.queue.depth() > 0)
+    {
+        const message = context.queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+        if (!message)
+        {
+            break;
+        }
+        told.push(message);
+    }
+
+    const gained = told.find(entry=>entry.hwnd === second && entry.message === WM_ACTIVATE);
+    const yielded = told.find(entry=>entry.hwnd === first && entry.message === WM_ACTIVATE);
+    assert.ok(gained, 'the new window is told it became the active one');
+    assert.equal(gained.wParam, WA_ACTIVE);
+    assert.equal(gained.lParam >>> 0, first, 'and names the window it took the activation from');
+    assert.ok(yielded, 'the window that gave it up is told it no longer has it');
+    assert.equal(yielded.wParam, WA_INACTIVE);
+    assert.equal(told.indexOf(yielded) < told.indexOf(gained), true,
+        'the one that loses hears it before the one that gains');
+    const activations = told.filter(entry=>entry.message === WM_ACTIVATE
+        && entry.hwnd === second && entry.wParam === WA_ACTIVE).length;
+    assert.equal(activations, 1,
+        'exactly once: the switch does not re-send the first activation');
+});
+
 // --- the message queue ---
 
 test('PostMessageA refuses a window that has been destroyed', ()=>{
