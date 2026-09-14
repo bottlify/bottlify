@@ -48,6 +48,7 @@ import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createShellFunctions } from './shell32/functions.js';
+import { registerShellLinkClasses } from './shell32/shelllink.js';
 import { createRpcFunctions } from './rpcrt4/functions.js';
 import { createVersionFunctions } from './version/functions.js';
 import { createLzFunctions } from './lz32/functions.js';
@@ -503,6 +504,21 @@ export const win32Module = {
         };
         const taskAllocator = createTaskAllocator({
             heap, registry: com, vtables: comVtables, readMemory, writeMemory,
+        });
+
+        // shell32's COM class, registered beside the shell's own table because
+        // an installer reaches it through CoCreateInstance rather than an
+        // export. It saves onto the same volume every file call uses and hands
+        // back strings from the same task heap CoTaskMemAlloc does.
+        registerShellLinkClasses(com, {
+            readMemory,
+            writeMemory,
+            readCString,
+            readWideString,
+            /** @param {number} bytes */
+            allocate: bytes=>heap.allocate(bytes),
+            files: volume,
+            divergence: config?.divergence,
         });
 
         libraries = {
