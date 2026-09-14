@@ -670,6 +670,7 @@ export async function game(options){
             profileCalls: options.profileCalls,
             maxDraws: options.maxDraws,
             skipTexture: options.skipTexture,
+            probeTexture: options.probeTexture,
             fog: options.fog,
             pointer: options.pointer,
             clicks: options.clicks,

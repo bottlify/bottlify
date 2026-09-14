@@ -290,7 +290,8 @@ function program(text, version = 1){
     const parsed = parseProgram(text);
     assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
     return {
-        name: 1, version, ir: parsed, local: new Float32Array(4), env: new Float32Array(4),
+        name: 1, version, text, ir: parsed, local: new Float32Array(4),
+        env: new Float32Array(4),
     };
 }
 

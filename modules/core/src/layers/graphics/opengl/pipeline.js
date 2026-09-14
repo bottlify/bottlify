@@ -111,6 +111,7 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {number} name
  * @property {number} version  raised on every load, so a re-specified program
  *           is a different pipeline
+ * @property {string} text  the program string, for a dump to print once
  * @property {import('./arb-program.js').ParsedProgram} ir
  * @property {Float32Array} local   the object's local parameters
  * @property {Float32Array} env     the target's environment parameters

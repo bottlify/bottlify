@@ -106,7 +106,83 @@ const alignUp = value=>(value + 3) & ~3;
  * @property {any} backend
  * @property {(descriptor: any) => any} createSampler
  * @property {(detail: string) => void} [divergence]
+ * @property {boolean} [dumpDraws]  describe every draw of the last frame
+ * @property {number} [maxDraws]    stop a frame after this many draws
+ * @property {string | null} [skipTexture]  drop draws sampling these ids
+ * @property {string | null} [probeTexture]  read the target around its draws
  */
+
+/**
+ * One draw's line in a dump: the state it ran under, what it sampled and
+ * what its uniform blocks carried. Hex for the GL enumerants, so a line can
+ * be read against a call log; decimal for everything a picture depends on
+ * the value of.
+ */
+
+/** @param {number} value */
+const hex = value=>`0x${(value >>> 0).toString(16)}`;
+
+/**
+ * @param {{ x: number, y: number, width: number, height: number,
+ *           minDepth?: number, maxDepth?: number }} rect
+ */
+const describeRect = rect=>`[${rect.x},${rect.y} ${rect.width}x${rect.height}`
+    + `${rect.minDepth === undefined ? '' : ` d${rect.minDepth}..${rect.maxDepth}`}]`;
+
+/**
+ * A uniform block as floats, rounded, with the run of zeroes it ends in
+ * dropped: what a program bound is at the front of its block, and the tail
+ * of a fixed one is fog and padding nobody reads.
+ *
+ * @param {ArrayBufferView | null} block
+ */
+function describeBlock(block){
+    if (!block)
+    {
+        return '-';
+    }
+    /** @type {number[]} */
+    const values = [];
+    const floats = /** @type {Float32Array} */ (block);
+    for (let i = 0; i < floats.length; i++)
+    {
+        values.push(Number.isFinite(floats[i]) ? Number(floats[i].toFixed(4)) : floats[i]);
+    }
+    while (values.length > 0 && values[values.length - 1] === 0)
+    {
+        values.pop();
+    }
+    return `[${values.join(' ')}]`;
+}
+
+/**
+ * Where a snapshot of the target is read: a spread of points across the
+ * picture, and a coarse grid for how much variety the whole holds. A draw
+ * that painted nothing has the same points before and after and one colour
+ * across the grid; one that painted a lit surface has neither.
+ *
+ * @param {{ width: number, height: number, data: Uint8Array }} shot
+ */
+function describeSnapshot(shot){
+    /** @param {number} x @param {number} y */
+    const at = (x, y)=>{
+        const index = (Math.min(shot.height - 1, Math.floor(y * shot.height)) * shot.width
+            + Math.min(shot.width - 1, Math.floor(x * shot.width))) * 4;
+        return `${shot.data[index + 2]}/${shot.data[index + 1]}/${shot.data[index]}`;
+    };
+    const points = [[0.5, 0.5], [0.25, 0.25], [0.75, 0.25], [0.25, 0.75], [0.75, 0.75],
+        [0.5, 0.125], [0.125, 0.5]];
+    /** @type {Set<string>} */
+    const seen = new Set();
+    for (let y = 0.05; y < 0.95; y += 0.06)
+    {
+        for (let x = 0.05; x < 0.95; x += 0.06)
+        {
+            seen.add(at(x, y));
+        }
+    }
+    return `${points.map(([x, y])=>at(x, y)).join(',')} distinct=${seen.size}`;
+}
 
 /**
  * @typedef {Object} DrawRequest
@@ -139,6 +215,14 @@ export function createGpuRenderer(services){
     const { backend, createSampler } = services;
     const BufferUsage = backend.BufferUsage;
     const TextureUsage = backend.TextureUsage;
+    const dumpDraws = services.dumpDraws === true;
+    const maxDraws = services.maxDraws === undefined ? -1 : services.maxDraws;
+    /** @type {Set<string>} */
+    const skipTextures = new Set((services.skipTexture ?? '').split(',').filter(Boolean));
+    const probeTexture = services.probeTexture ?? null;
+    /** The last presented frame's dump; empty unless the build asked for one. */
+    /** @type {string[]} */
+    let lastDump = [];
     /** @type {Set<string>} */
     const diverged = new Set();
     /** @param {string} detail */
@@ -167,6 +251,10 @@ export function createGpuRenderer(services){
      * @property {any[]} commands
      * @property {Promise<any>[]} pipelines
      * @property {number} id
+     * @property {string[]} dump     the frame's lines, when one was asked for
+     * @property {Set<string>} dumped  the program texts the dump already holds
+     * @property {{ draws: number, clears: number, copies: number, refused: number,
+     *               skipped: number, cut: number }} counts
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -179,7 +267,10 @@ export function createGpuRenderer(services){
     const pipelines = new Map();
     /** @type {Map<string, any>} */
     const samplers = new Map();
-    const stats = { pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0 };
+    const stats = {
+        frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
+        refused: 0, skipped: 0, cut: 0,
+    };
 
     /**
      * @typedef {Object} BindPlan
@@ -575,12 +666,57 @@ export function createGpuRenderer(services){
         let recording = recordings.get(context);
         if (!recording)
         {
-            recording = { commands: [], pipelines: [], id: nextFrame++ };
+            recording = {
+                commands: [], pipelines: [], id: nextFrame++, dump: [], dumped: new Set(),
+                counts: { draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0 },
+            };
             unflushed.add(recording.id);
             recordings.set(context, recording);
         }
         return recording;
     };
+
+    /**
+     * The programs a draw runs, as the dump names them, with the text of each
+     * one the frame has not already printed: a line says which program drew
+     * what, and the text is what identifies it against the program's own.
+     *
+     * @param {Recording} recording
+     * @param {import('./wgsl.js').DrawState} state
+     * @returns {string}
+     */
+    const dumpPrograms = (recording, state)=>{
+        /** @type {string[]} */
+        const names = [];
+        for (const [kind, program] of /** @type {[string, any][]} */ ([
+            ['vp', state.vertexProgram], ['fp', state.fragmentProgram]]))
+        {
+            if (!program)
+            {
+                continue;
+            }
+            names.push(`${kind}=p${program.name}.${program.version}`);
+            const key = `${kind}${program.name}.${program.version}`;
+            if (!recording.dumped.has(key))
+            {
+                recording.dumped.add(key);
+                recording.dump.push(`== ${key} ${program.ir.kind} program ==\n${program.text}`);
+            }
+        }
+        return names.length > 0 ? ` ${names.join(' ')}` : '';
+    };
+
+    /**
+     * What every unit has bound, whether or not it is enabled: the textures a
+     * fragment program would sample, which is what a refused draw has to be
+     * recognised by.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     */
+    const dumpBound = scene=>scene.boundTextures.length === 0 ? '' : ` bound=[${
+        scene.boundTextures.map((bound, unit)=>
+            `${unit}:${bound?.twoD ? `t${bound.twoD.name}` : '-'}`
+            + `${bound?.cube ? `c t${bound.cube.name}` : ''}`).join(' ')}]`;
 
     /**
      * The scene's viewport and scissor as target rectangles: GL measures both
@@ -844,45 +980,115 @@ export function createGpuRenderer(services){
         const state = drawStateOf(scene, layout, topology);
         const key = drawKey(state);
         const generated = generateDraw(state);
+        const recording = recordingOf(context);
         if (generated.programs?.error)
         {
             diverge(`a program draw was refused and drew nothing: ${generated.programs.error}`);
+            stats.refused++;
+            if (dumpDraws)
+            {
+                recording.counts.refused++;
+                recording.dump.push(`refused: ${generated.programs.error}`
+                    + `${dumpPrograms(recording, state)}${dumpBound(scene)}`);
+            }
             return;
         }
         const plan = bindPlanOf(state, generated.programs);
-        const recording = recordingOf(context);
-        const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
-        /** @type {RecordedBinding[]} */
-        const bindings = [];
-        for (const entry of plan.textures)
+        const sampled = plan.textures.map(entry=>({
+            entry,
+            texture: textureForBinding(scene, entry, plan.fragmentBlock),
+        }));
+        const ids = sampled.map(({ entry, texture })=>
+            `t${texture.name}${entry.cube ? 'c' : ''}`);
+        if (skipTextures.size > 0 && ids.some(id=>skipTextures.has(id)))
         {
-            const texture = textureForBinding(scene, entry, plan.fragmentBlock);
-            bindings.push({
-                binding: entry.binding,
-                view: textureFor(texture).gpu.view,
-                sampler: samplerFor(texture),
-            });
+            stats.skipped++;
+            recording.counts.skipped++;
+            return;
         }
+        if (maxDraws >= 0 && recording.counts.draws >= maxDraws)
+        {
+            stats.cut++;
+            recording.counts.cut++;
+            return;
+        }
+        /** @type {RecordedBinding[]} */
+        const bindings = sampled.map(({ entry, texture })=>({
+            binding: entry.binding,
+            view: textureFor(texture).gpu.view,
+            sampler: samplerFor(texture),
+        }));
+        const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
+        const uniforms = uniformsOf(scene);
+        const vertexUniforms = generated.programs?.vertex && state.vertexProgram
+            ? programUniforms(generated.programs.vertex, state.vertexProgram, scene)
+            : null;
+        const fragmentUniforms = generated.programs?.fragment && state.fragmentProgram
+            ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene)
+            : null;
         stats.draws++;
+        recording.counts.draws++;
+        const rects = rectangles(scene, target);
+        let probe = -1;
+        if (dumpDraws)
+        {
+            recording.dump.push(`draw ${recording.counts.draws - 1}: ${topology}`
+                + ` count=${count} first=${first} base=${baseVertex}`
+                + ` blend=${state.blend
+                    ? `${hex(state.blend.src)},${hex(state.blend.dst)}` : 'off'}`
+                + ` depth=${state.depth.test ? hex(state.depth.func) : 'off'}`
+                + `${state.depth.write ? '+write' : ''}`
+                + ` stencil=${state.stencil
+                    ? `${hex(state.stencil.func)},ref${scene.stencil?.reference ?? 0},`
+                        + `rm${hex(state.stencil.readMask)},wm${hex(state.stencil.writeMask)},`
+                        + `${hex(state.stencil.fail)},${hex(state.stencil.zfail)},`
+                        + `${hex(state.stencil.zpass)}`
+                    : 'off'}`
+                + ` cull=${state.cull}${state.frontIsCcw ? '/ccw' : '/cw'}`
+                + ` mask=${hex(state.colourMask)}`
+                + ` offset=${state.polygonOffset
+                    ? `${state.polygonOffset.factor},${state.polygonOffset.units}` : '-'}`
+                + ` fog=${state.fog ? hex(state.fog.mode) : 'off'}`
+                + ` alpha=${state.alphaFunc === null ? 'off' : hex(state.alphaFunc)}`
+                + ` vp=${describeRect(rects.viewport)} sc=${describeRect(rects.scissor)}`
+                + ` attrs=[${state.attributes.map(a=>`${a.name}@${a.slot}+${a.offset}:${a.format}`)
+                    .join(' ')}]`
+                + ` units=[${state.units.map(unit=>`${unit.index}${unit.cube ? 'c' : ''}`
+                    + `:env${hex(unit.mode)}`
+                    + `${unit.mode === GL.COMBINE
+                        ? `:c${hex(unit.combine.rgb)}/${hex(unit.combine.alpha)}`
+                            + `(${unit.combine.sourceRgb.join('.')}`
+                            + `${unit.combine.operandRgb.join('.')})`
+                        : ''}`
+                    + `:gen[${unit.generation
+                        .map(g=>(g === null ? '-' : hex(g))).join('.')}]`).join(' ')}]`
+                + ` tex=[${sampled.map(({ entry }, i)=>`${entry.binding}:${ids[i]}`).join(' ')}]`
+                + dumpPrograms(recording, state)
+                + dumpBound(scene)
+                + ` uni=${describeBlock(uniforms)}`
+                + ` vuni=${describeBlock(vertexUniforms)}`
+                + ` funi=${describeBlock(fragmentUniforms)}`);
+            // After the push: the program texts a first sight of a program
+            // adds are entries of their own, ahead of this line.
+            probe = probeTexture !== null && ids.includes(probeTexture)
+                ? recording.dump.length - 1 : -1;
+        }
         recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'draw',
             pipeline: recording.pipelines.length - 1,
-            uniforms: uniformsOf(scene),
-            vertexUniforms: generated.programs?.vertex && state.vertexProgram
-                ? programUniforms(generated.programs.vertex, state.vertexProgram, scene)
-                : null,
-            fragmentUniforms: generated.programs?.fragment && state.fragmentProgram
-                ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene)
-                : null,
+            uniforms,
+            vertexUniforms,
+            fragmentUniforms,
             slots,
             indices,
             count,
             first,
             baseVertex,
             bindings,
-            ...rectangles(scene, target),
+            ...rects,
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
+            probe,
         });
     };
 
@@ -1069,6 +1275,13 @@ export function createGpuRenderer(services){
             showDescriptor(TEXTURE_FORMAT), SINGLE_TEXTURE_PLAN);
         const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
         uniforms.set([x, y, xoffset, yoffset, target.width, target.height], 0);
+        recording.counts.copies++;
+        if (dumpDraws)
+        {
+            recording.dump.push(`copy ${recording.counts.copies - 1}:`
+                + ` framebuffer[${x},${y} ${width}x${height}]`
+                + ` -> t${texture.name} level ${level} face ${face} at [${xoffset},${yoffset}]`);
+        }
         recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'copy',
@@ -1110,6 +1323,18 @@ export function createGpuRenderer(services){
         uniforms[4] = Math.min(1, Math.max(0, request.depth));
         const box = request.scissor;
         stats.clears++;
+        recording.counts.clears++;
+        if (dumpDraws)
+        {
+            recording.dump.push(`clear ${recording.counts.clears - 1}:`
+                + ` colour=[${request.colour.map(v=>Number(v.toFixed(4))).join(' ')}]`
+                + ` depth=${request.depth} stencil=${request.stencil}`
+                + ` mask=${hex(colourMask)}${depth ? '+depth' : ''}`
+                + ` smask=${hex(stencilMask)}`
+                + ` sc=${describeRect(clampRect(
+                    { x: box.x0, y: box.y0, width: box.x1 - box.x0, height: box.y1 - box.y0 },
+                    target))}`);
+        }
         recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'draw',
@@ -1145,6 +1370,15 @@ export function createGpuRenderer(services){
             showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
         const built = await Promise.allSettled([...recording.pipelines, show]);
         const frame = backend.beginFrame();
+        /**
+         * The probed draws' read-backs: what the target held before the draw
+         * and after it, resolved once the frame has been submitted.
+         *
+         * @type {{ dump: number,
+         *           before: () => Promise<any>,
+         *           after: (() => Promise<any>) | null }[]}
+         */
+        const probes = [];
         try
         {
             /** @type {any} */
@@ -1204,6 +1438,14 @@ export function createGpuRenderer(services){
                     pass = null;
                     continue;
                 }
+                if (command.probe >= 0)
+                {
+                    // A snapshot closes the pass, so the drawing pass is
+                    // reopened over what the target holds.
+                    probes.push({ dump: command.probe,
+                        before: frame.snapshot(target.colour), after: null });
+                    pass = null;
+                }
                 drawing();
                 pass.setPipeline(pipeline.gpu);
                 if (!sameRect(viewport, command.viewport))
@@ -1255,6 +1497,11 @@ export function createGpuRenderer(services){
                 {
                     pass.draw(command.count, 1, command.first);
                 }
+                if (command.probe >= 0)
+                {
+                    probes[probes.length - 1].after = frame.snapshot(target.colour);
+                    pass = null;
+                }
             }
             const shownBy = built[built.length - 1];
             if (shownBy.status === 'fulfilled')
@@ -1279,6 +1526,15 @@ export function createGpuRenderer(services){
             // Ended whatever happened, or every later frame fails at beginFrame.
             frame.end();
             unflushed.delete(recording.id);
+        }
+        // The frame is submitted, so the probe read-backs resolve; each one
+        // lands on its own dump line, which the report reads long after.
+        for (const probe of probes)
+        {
+            const before = await probe.before();
+            const after = probe.after ? await probe.after() : null;
+            recording.dump[probe.dump] += ` before=${describeSnapshot(before)}`
+                + (after ? ` after=${describeSnapshot(after)}` : '');
         }
     };
 
@@ -1339,6 +1595,16 @@ export function createGpuRenderer(services){
             }
             const recording = recordings.get(context) ?? recordingOf(context);
             recordings.delete(context);
+            stats.frames++;
+            if (dumpDraws)
+            {
+                const c = recording.counts;
+                recording.dump.push(`frame ${stats.frames - 1}: draws=${c.draws}`
+                    + ` clears=${c.clears} copies=${c.copies} refused=${c.refused}`
+                    + ` skipped=${c.skipped} cut=${c.cut}`
+                    + (maxDraws >= 0 ? ` (max-draws ${maxDraws})` : ''));
+                lastDump = recording.dump;
+            }
             const shown = target.shown[target.current];
             target.current ^= 1;
             backend.markPresent();
@@ -1363,6 +1629,9 @@ export function createGpuRenderer(services){
             samplers: samplers.size,
             unflushed: unflushed.size,
             failures: [...failures],
+            // Empty unless the build asked for a dump; the probe texts of the
+            // frame's draws land on its lines as the replay resolves them.
+            lastDump,
         }),
     };
 }

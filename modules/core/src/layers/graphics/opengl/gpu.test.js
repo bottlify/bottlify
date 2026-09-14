@@ -18,8 +18,10 @@ import { createFakeDevice } from '../webgpu/internal/fake-device.js';
  * A context on a renderer on a backend on a recording device: what the
  * assembled layer builds when it has a GPU, with every call to the device
  * on record.
+ *
+ * @param {object} [services]  extra renderer services (the dump options)
  */
-function rig(){
+function rig(services = {}){
     const gpu = createFakeDevice();
     /** @type {any[]} */
     const presented = [];
@@ -32,6 +34,7 @@ function rig(){
         backend,
         createSampler: descriptor=>({ kind: 'sampler', descriptor }),
         divergence: detail=>divergences.push(detail),
+        ...services,
     });
     const bytes = new Uint8Array(0x10000);
     const memory = {
@@ -661,4 +664,124 @@ test('a program draw on the processor path is reported and draws nothing', ()=>{
     assert.ok(divergences.some(d=>/draws nothing/.test(d)));
     assert.equal(context.framebuffer.bytes
         .some((/** @type {number} */ b)=>b !== 0), false);
+});
+
+// --- the draw dump, the cut, the skip and the probe ---
+
+test('a dumped draw carries its state, its textures and its uniform blocks', async()=>{
+    const r = rig({ dumpDraws: true });
+    programRig(r);
+    const { context } = r;
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.ONE, GL.ONE);
+    context.glEnable(GL.DEPTH_TEST);
+    context.glDepthFunc(GL.EQUAL);
+    context.glDepthMask(0);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const dump = r.renderer.diagnostics().lastDump;
+    const line = dump.find(text=>text.startsWith('draw 0:'));
+    assert.ok(line, 'the draw has a line');
+    assert.match(line, /triangle-list count=3 first=0 base=0/);
+    assert.match(line, new RegExp(`blend=0x1,0x1`), 'the additive blend, as the enums say');
+    assert.match(line, /depth=0x202(?!\+write)/, 'GL_EQUAL, and the depth mask is off');
+    assert.match(line, /tex=\[1:t1\]/, 'the fragment program samples t1 at binding 1');
+    assert.match(line, /vp=p1\.1 fp=p2\.1/, 'both programs, by name and version');
+    assert.match(line, /attrs=\[position@0\+0:float32x3 color@0\+12:float32x4/);
+    assert.match(line, /vuni=\[[^\]]*0\.25[^\]]*\]/, 'the vertex block: the MVP, then env[2]');
+    assert.match(line, /funi=\[0\.25 0\.5 0\.75 1\]/, 'the fragment block: local[1]');
+    const text = dump.find(entry=>entry.startsWith('== vp1.1'));
+    assert.ok(text && text.includes('!!ARBvp1.0'), 'the program text is printed once');
+    assert.equal(dump.filter(entry=>entry.startsWith('== vp1.1')).length, 1);
+    assert.match(dump[dump.length - 1], /^frame 0: draws=1 clears=0 copies=0 refused=0/);
+});
+
+test('a refused program draw is dumped with its reason and what was bound', async()=>{
+    const r = rig({ dumpDraws: true });
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4 * 4 * 4));
+    context.glGenProgramsARB(1);
+    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
+    // A state binding the GPU path has no value for: the stage refuses, the
+    // draw is not issued, and the dump says so with the reason.
+    const text = '!!ARBfp1.0\nPARAM mat = state.material.ambient;\n'
+        + 'MUL result.color, fragment.color, mat;\nEND\n';
+    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x4000, text), 0x4000);
+    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+
+    assert.equal(r.gpu.count('drawIndexed'), 0, 'nothing was issued');
+    assert.equal(r.gpu.count('draw'), 1, 'the shown copy only');
+    const dump = r.renderer.diagnostics().lastDump;
+    const refused = dump.find(line=>line.startsWith('refused:'));
+    assert.ok(refused, 'the refusal has a line');
+    assert.match(refused, /state\.material\.ambient/);
+    assert.match(refused, /fp=p1\.1/, 'the program it came from');
+    assert.match(refused, /bound=\[0:t1/, 'and what the units held');
+    assert.match(dump[dump.length - 1], /refused=1/);
+    assert.ok(r.divergences.some(d=>/refused and drew nothing/.test(d)));
+});
+
+test('max-draws cuts a frame short and the dump counts the cut', async()=>{
+    const r = rig({ dumpDraws: true, maxDraws: 1 });
+    const { context } = r;
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    triangle(r, 0x1000);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+
+    assert.equal(r.gpu.count('draw'), 2, 'the kept draw and the shown copy');
+    assert.equal(r.renderer.diagnostics().cut, 2);
+    const dump = r.renderer.diagnostics().lastDump;
+    assert.match(dump[dump.length - 1], /draws=1.*cut=2/);
+});
+
+test('a skipped texture drops the draws that sample it and nothing else', async()=>{
+    const r = rig({ dumpDraws: true, skipTexture: 't1' });
+    programRig(r);
+    const { context } = r;
+    // The program draw samples t1 and goes; a plain untextured draw stays.
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    context.glDisable(GL.VERTEX_PROGRAM_ARB);
+    context.glDisable(GL.FRAGMENT_PROGRAM_ARB);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    assert.equal(r.renderer.diagnostics().skipped, 1);
+    assert.equal(r.gpu.count('drawIndexed'), 1, 'only the draw that samples nothing');
+    const dump = r.renderer.diagnostics().lastDump;
+    assert.equal(dump.filter(line=>line.startsWith('draw ')).length, 1);
+});
+
+test('a probed texture reads the target before and after each of its draws', async()=>{
+    const r = rig({ dumpDraws: true, probeTexture: 't1' });
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const line = r.renderer.diagnostics().lastDump.find(text=>text.startsWith('draw 0:'));
+    assert.ok(line, 'the probed draw has a line');
+    assert.match(line, /before=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/);
+    assert.match(line, /after=\d+\/\d+\/\d+(,\d+\/\d+\/\d+){6} distinct=\d+/,
+        'the recording device keeps no texels, so both reads are zeroes of the right shape');
+    const copies = r.gpu.of('copyTextureToBuffer');
+    assert.equal(copies.length, 2, 'one read before the draw, one after');
+    const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[0]);
+    assert.ok(r.gpu.calls.indexOf(copies[0]) < drawn && drawn < r.gpu.calls.indexOf(copies[1]),
+        'and the draw sits between the two reads');
 });

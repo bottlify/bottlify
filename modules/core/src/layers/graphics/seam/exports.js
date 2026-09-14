@@ -336,8 +336,11 @@ export function createGraphicsLibraries(
             interfaces: publisher.count(),
             // The device's own counters. Nothing else reaches the renderer, so
             // without this a run says which libraries a program opened and
-            // nothing at all about what it drew through them.
-            device: d3d8.diagnostics() ?? d3d9.diagnostics(),
+            // nothing at all about what it drew through them. The OpenGL
+            // runtime joins the answer when it is the one that drew: its
+            // renderer is made lazily, so it is asked only if it exists.
+            device: d3d8.diagnostics() ?? d3d9.diagnostics()
+                ?? (opengl ? opengl.diagnostics().gpu : null),
             vulkan: vulkan.diagnostics(),
         }),
 

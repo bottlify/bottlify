@@ -218,6 +218,7 @@ export function createSceneBuilder(kernel){
             return {
                 name: program.name,
                 version: program.version,
+                text: program.text,
                 ir: program.parsed,
                 local: program.local,
                 env: /** @type {Float32Array} */ (programsSide.env.get(target)),

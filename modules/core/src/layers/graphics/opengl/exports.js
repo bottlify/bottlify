@@ -302,6 +302,19 @@ const LIST_TYPES = new Map([
  * @property {() => { claim: (buffer: number, show: () => void) => void } | null} [presenter]
  *           Where a picture the device drew is claimed by its address, so a
  *           present of that address shows the texture and reads no memory.
+ * @property {boolean} [dumpDraws]
+ *           Describe every draw of the last frame in the diagnostics: a
+ *           per-draw account is a thing only the assembling caller decides it
+ *           wants, and it costs a line and a uniform print per draw.
+ * @property {number} [maxDraws]
+ *           Stop each frame after this many draws, for bisecting which one
+ *           painted a region.
+ * @property {string | null} [skipTexture]
+ *           Comma-separated texture ids whose draws are dropped, so two runs
+ *           differ by those draws and nothing else.
+ * @property {string | null} [probeTexture]
+ *           A texture id whose draws are read around: the colour target
+ *           before and after each one, on that draw's dump line.
  */
 
 /**
@@ -364,6 +377,10 @@ export function createOpengl(services){
                 backend: services.backend(),
                 createSampler: services.createSampler,
                 divergence: detail=>services.divergence?.('OpenGL', detail),
+                dumpDraws: services.dumpDraws,
+                maxDraws: services.maxDraws,
+                skipTexture: services.skipTexture,
+                probeTexture: services.probeTexture,
             });
         }
         return gpu ?? undefined;
