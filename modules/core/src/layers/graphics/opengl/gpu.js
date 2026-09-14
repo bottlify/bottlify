@@ -158,6 +158,12 @@ function describeBlock(block){
 }
 
 /**
+ * How many draws of one frame a probe reads around: each is two full-target
+ * read-backs, and a texture every light samples is in hundreds of draws.
+ */
+const PROBE_LIMIT = 4;
+
+/**
  * Where a snapshot of the target is read: a spread of points across the
  * picture, and a coarse grid for how much variety the whole holds. A draw
  * that painted nothing has the same points before and after and one colour
@@ -256,7 +262,7 @@ export function createGpuRenderer(services){
      * @property {string[]} dump     the frame's lines, when one was asked for
      * @property {Set<string>} dumped  the program texts the dump already holds
      * @property {{ draws: number, clears: number, copies: number, refused: number,
-     *               skipped: number, cut: number }} counts
+     *               skipped: number, cut: number, probes: number }} counts
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -670,7 +676,9 @@ export function createGpuRenderer(services){
         {
             recording = {
                 commands: [], pipelines: [], id: nextFrame++, dump: [], dumped: new Set(),
-                counts: { draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0 },
+                counts: {
+                    draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, probes: 0,
+                },
             };
             unflushed.add(recording.id);
             recordings.set(context, recording);
@@ -1071,9 +1079,14 @@ export function createGpuRenderer(services){
                 + ` vuni=${describeBlock(vertexUniforms)}`
                 + ` funi=${describeBlock(fragmentUniforms)}`);
             // After the push: the program texts a first sight of a program
-            // adds are entries of their own, ahead of this line.
+            // adds are entries of their own, ahead of this line. A probe is
+            // two full-target read-backs, and a light's falloff image is
+            // sampled by every interaction draw of a frame: past a handful
+            // the replays fall behind the recording and the page stops
+            // answering, so only the first draws of a frame are read.
             probe = probeTexture !== null && ids.includes(probeTexture)
-                ? recording.dump.length - 1 : -1;
+                && recording.counts.probes < PROBE_LIMIT
+                ? (recording.counts.probes++, recording.dump.length - 1) : -1;
         }
         recording.pipelines.push(pipeline);
         recording.commands.push({
