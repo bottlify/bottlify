@@ -404,6 +404,12 @@ function characterFor(key){
  *           the input layer so it can scale pointer motion into it. Null
  *           releases the cursor to the whole viewport. Absent in a build with
  *           no input, and then the declaration is simply not acted on.
+ * @property {(picture: { shown: boolean }) => void} [reportCursor]
+ *           The page's cursor, as user32's own state changed it: shown while
+ *           ShowCursor's count is not below zero and SetCursor has not named the
+ *           null cursor. Handed up only on a change, through the same event the
+ *           Direct3D device methods use. Absent in a build with nothing showing
+ *           a cursor, and then the derived picture is kept to ourselves.
  * @property {(notice: { text: string, caption: string, type: number }) => void} [messageBox]
  *           A message box the program put up, handed up whole. It is a program
  *           explaining in its own words why it is about to stop, which is the

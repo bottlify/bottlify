@@ -2242,6 +2242,12 @@ async function buildApp(options){
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
+            // The cursor the program asks the page to show, from user32's own
+            // state -- ShowCursor's count and a null SetCursor -- the same event
+            // the Direct3D device methods emit above. Two producers, one
+            // consumer, and the last report wins.
+            /** @param {any} cursor */
+            reportCursor: cursor=>events.emit('cursor', cursor),
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build

@@ -171,6 +171,9 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
     const diverged = [];
     /** @type {number[]} */
     const errors = [];
+    /** The cursor pictures user32 handed up, oldest first. */
+    /** @type {{ shown: boolean }[]} */
+    const cursors = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -195,12 +198,15 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
         divergence: (api, detail)=>diverged.push(`${api}: ${detail}`),
         /** @param {number} code */
         setLastError: code=>errors.push(code),
+        /** @param {{ shown: boolean }} picture */
+        reportCursor: picture=>cursors.push(picture),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
-    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors, screen };
+    return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors,
+        screen, cursors };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -267,6 +273,57 @@ test('SetCursor answers with the cursor it replaced, and GetCursor with the curr
     assert.equal(fns.SetCursor.handler([0x400]), 0x300);
     assert.equal(fns.SetCursor.handler([0]), 0x400);
     assert.equal(fns.GetCursor.handler([]), 0);
+});
+
+test('hiding the cursor through ShowCursor is reported once, not on every call', ()=>{
+    // The whole reason the event exists: a shooter hides its cursor by dropping
+    // the display count below zero, and the launcher arms the pointer lock on
+    // that report. It happens once; a report per call buries it.
+    const { fns, cursors } = setup();
+
+    assert.equal(fns.ShowCursor.handler([0]), -1);
+    assert.deepEqual(cursors, [{ shown: false }], 'the first FALSE reports hidden');
+    assert.equal(fns.ShowCursor.handler([0]), -2);
+    assert.equal(cursors.length, 1, 'a second FALSE hides it again but reports nothing');
+});
+
+test('showing the cursor again is reported on the crossing, and only there', ()=>{
+    const { fns, cursors } = setup();
+
+    fns.ShowCursor.handler([0]);
+    fns.ShowCursor.handler([0]);
+    cursors.length = 0;
+    assert.equal(fns.ShowCursor.handler([1]), -1);
+    assert.equal(cursors.length, 0, 'still below zero: nothing has crossed');
+    assert.equal(fns.ShowCursor.handler([1]), 0);
+    assert.deepEqual(cursors, [{ shown: true }], 'crossing back to zero reports shown, once');
+    assert.equal(fns.ShowCursor.handler([1]), 1);
+    assert.equal(cursors.length, 1, 'a positive count is no further change');
+});
+
+test('a null cursor hides even while the count says shown, and setting one shows again', ()=>{
+    const { fns, cursors } = setup();
+
+    // A non-negative count and a null cursor: the cursor is NULL, so it is gone.
+    assert.equal(fns.SetCursor.handler([0]), 0);
+    assert.deepEqual(cursors, [{ shown: false }], 'SetCursor(NULL) reports hidden');
+    assert.equal(fns.SetCursor.handler([0x32512]), 0);
+    assert.deepEqual(cursors, [{ shown: false }, { shown: true }],
+        'a real cursor back reports shown');
+});
+
+test('a per-frame ShowCursor(FALSE) under a negative count never reports', ()=>{
+    // The frame loop of the title that hides its cursor: it drives the count
+    // further and further negative every frame, and the page is told once.
+    const { fns, cursors } = setup();
+    fns.ShowCursor.handler([0]);
+    cursors.length = 0;
+
+    for (let frame = 0; frame < 100; frame++)
+    {
+        assert.equal(fns.ShowCursor.handler([0]), -2 - frame);
+    }
+    assert.equal(cursors.length, 0, 'a hundred more FALSE calls report nothing');
 });
 
 test('SendMessageTimeoutA is a send whose answer goes out through the pointer', async()=>{

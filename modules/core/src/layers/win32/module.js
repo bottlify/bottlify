@@ -991,6 +991,13 @@ export const win32Module = {
                 // down the same way and for the same reason: the input layer
                 // that scales pointer motion into it sits above this one.
                 clipCursor: config?.clipCursor,
+                // The picture the page shows as the program's cursor, handed up
+                // whenever user32's own state (ShowCursor's count, a null
+                // SetCursor) changes it. The same event the Direct3D device
+                // methods already emit through the graphics layer's cursor
+                // callback, so the page sees one cursor from two producers and
+                // the last report wins.
+                reportCursor: config?.reportCursor,
                 // Where a window's device context comes from. GDI owns the
                 // contexts and lives in this same module, so user32's GetDC is
                 // GDI's under the window's name: a program that takes a DC on

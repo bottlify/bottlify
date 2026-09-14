@@ -200,6 +200,32 @@ export function createSystemFunctions({ host, live, windows, classes }){
     let nextTimerId = 0x1000;
     /** The cursor SetCursor last set; nothing draws it, but it is read back. */
     let currentCursor = 0;
+    /** ShowCursor's display count: the cursor is shown while it is not below zero. */
+    let cursorShowCount = 0;
+    /** Whether SetCursor named the null cursor, which hides it whatever the count says. */
+    let cursorIsNull = false;
+    /** The last picture handed up, so only a change is ever reported. */
+    let cursorShown = true;
+
+    /**
+     * The cursor as the page should show it, derived from the two facts Windows
+     * keeps it from: the display count and the current cursor. Reported only on
+     * a change of that picture -- a program hides the cursor inside its frame
+     * loop, and a per-call report buries the one event that arms the pointer
+     * lock. The bitmap is not decoded, so a report carries no image: this is
+     * what the Direct3D path sends when a device cursor was never given one.
+     * Where both producers speak -- a title that draws a device cursor and also
+     * calls ShowCursor -- the last report wins.
+     */
+    const reportCursor = ()=>{
+        const shown = cursorShowCount >= 0 && !cursorIsNull;
+        if (shown === cursorShown)
+        {
+            return;
+        }
+        cursorShown = shown;
+        host.reportCursor?.({ shown });
+    };
 
     /**
      * What SendMessage does, shared with the timed form.
@@ -1728,7 +1754,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * HCURSOR SetCursor(HCURSOR hCursor)
          *
          * The cursor set is the cursor GetCursor reports and the one the call
-         * answers with next time: a program restores what it found.
+         * answers with next time: a program restores what it found. The null
+         * cursor is the other half of the hide -- a title that sets it shows no
+         * cursor at all, whatever the display count says -- so the picture the
+         * page is shown is re-derived here as well as in ShowCursor.
          */
         SetCursor: {
             argBytes: 4,
@@ -1736,6 +1765,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([cursor])=>{
                 const previous = currentCursor;
                 currentCursor = cursor >>> 0;
+                cursorIsNull = currentCursor === 0;
+                reportCursor();
                 return previous;
             },
         },
@@ -1750,19 +1781,19 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * int ShowCursor(BOOL bShow)
          *
          * A counter, not a flag: a program hides the cursor several times and
-         * shows it as many, and reads the count to know where it stands.
+         * shows it as many, and reads the count to know where it stands. The
+         * count is one of the two facts the page's cursor is derived from, so
+         * every move of it re-derives the picture and reports it if it changed.
          */
-        ShowCursor: (()=>{
-            let count = 0;
-            return {
-                argBytes: 4,
-                /** @param {number[]} args */
-                handler: ([show])=>{
-                    count += (show >>> 0) !== 0 ? 1 : -1;
-                    return count;
-                },
-            };
-        })(),
+        ShowCursor: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([show])=>{
+                cursorShowCount += (show >>> 0) !== 0 ? 1 : -1;
+                reportCursor();
+                return cursorShowCount;
+            },
+        },
 
         /** BOOL GetCursorPos(LPPOINT lpPoint) */
         GetCursorPos: {
