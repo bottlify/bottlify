@@ -206,6 +206,10 @@ const CANONICAL_ATTRIB = Object.freeze({
     texCoord1: 9,
     texCoord2: 10,
     texCoord3: 11,
+    texCoord4: 12,
+    texCoord5: 13,
+    texCoord6: 14,
+    texCoord7: 15,
 });
 
 /**

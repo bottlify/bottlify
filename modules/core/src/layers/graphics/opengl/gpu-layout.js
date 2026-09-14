@@ -39,12 +39,15 @@ export const MAX_SLOTS = 8;
 /**
  * The attribute names a draw can carry, in the order the canonical layout
  * packs the named ones, then the generic vertex attributes a program reads
- * that alias to no named array (`attribN`, by their generic index).
+ * that alias to no named array (`attribN`, by their generic index). The
+ * aliasing table's coordinate sets run to the seventh, so generic attributes
+ * 12 to 15 arrive as texCoord4 to texCoord7 and never as names of their own.
  */
 export const ATTRIBUTE_NAMES = Object.freeze([
     'position', 'color', 'secondary', 'normal', 'fogCoord',
     'texCoord0', 'texCoord1', 'texCoord2', 'texCoord3',
-    'attrib1', 'attrib6', 'attrib7', 'attrib12', 'attrib13', 'attrib14', 'attrib15',
+    'texCoord4', 'texCoord5', 'texCoord6', 'texCoord7',
+    'attrib1', 'attrib6', 'attrib7',
 ]);
 
 /**
@@ -199,7 +202,7 @@ export function planLayout(arrays){
  * One vertex of the canonical layout: what a vertex assembled on the
  * processor is packed as. Every attribute is present, in floats.
  */
-export const CANONICAL_STRIDE = 4 * (4 + 4 + 4 + 3 + 1 + 4 * 4);
+export const CANONICAL_STRIDE = 4 * (4 + 4 + 4 + 3 + 1 + 4 * 8);
 
 /** @type {DrawLayout} */
 export const CANONICAL_LAYOUT = Object.freeze({
@@ -218,6 +221,14 @@ export const CANONICAL_LAYOUT = Object.freeze({
         { name: 'texCoord2', slot: 0, offset: 96, format: 'float32x4', components: 4,
             scalar: 'f32' },
         { name: 'texCoord3', slot: 0, offset: 112, format: 'float32x4', components: 4,
+            scalar: 'f32' },
+        { name: 'texCoord4', slot: 0, offset: 128, format: 'float32x4', components: 4,
+            scalar: 'f32' },
+        { name: 'texCoord5', slot: 0, offset: 144, format: 'float32x4', components: 4,
+            scalar: 'f32' },
+        { name: 'texCoord6', slot: 0, offset: 160, format: 'float32x4', components: 4,
+            scalar: 'f32' },
+        { name: 'texCoord7', slot: 0, offset: 176, format: 'float32x4', components: 4,
             scalar: 'f32' },
     ],
 });
@@ -254,7 +265,7 @@ export function packVertices(vertices){
         out[at + 13] = n[1];
         out[at + 14] = n[2];
         out[at + 15] = vertex.fogCoord;
-        for (let unit = 0; unit < 4; unit++)
+        for (let unit = 0; unit < 8; unit++)
         {
             const t = vertex.texCoords[unit] ?? [0, 0, 0, 1];
             out[at + 16 + unit * 4] = t[0];

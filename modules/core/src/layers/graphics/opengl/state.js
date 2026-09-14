@@ -37,6 +37,21 @@ import { STACK_LIMITS } from './matrix.js';
 import { PROGRAM_LIMITS } from './arb-program.js';
 
 /**
+ * How many texture units a context has: the larger of the coordinate sets
+ * and the image units the specification's minimum requires, which is what
+ * the unit selector ranges over.
+ */
+export const TEXTURE_UNITS = 8;
+
+/**
+ * How many units the conventional pipeline combines (GL_MAX_TEXTURE_UNITS):
+ * the fixed rasterisation applies texture environments to the first four,
+ * while the rest exist for the coordinates, matrices and image units a
+ * program reads.
+ */
+export const CONVENTIONAL_UNITS = 4;
+
+/**
  * @typedef {Object} StateDefault
  * @property {number} query
  * @property {string} name
@@ -481,7 +496,10 @@ export const DEFAULT_STATE = Object.freeze([
         query: GL.MAX_CUBE_MAP_TEXTURE_SIZE, name: 'GL_MAX_CUBE_MAP_TEXTURE_SIZE', kind: 'int',
         value: [2048],
     },
-    { query: GL.MAX_TEXTURE_UNITS, name: 'GL_MAX_TEXTURE_UNITS', kind: 'int', value: [4] },
+    {
+        query: GL.MAX_TEXTURE_UNITS, name: 'GL_MAX_TEXTURE_UNITS', kind: 'int',
+        value: [CONVENTIONAL_UNITS],
+    },
     { query: GL.MAX_LIGHTS, name: 'GL_MAX_LIGHTS', kind: 'int', value: [8] },
     { query: GL.MAX_CLIP_PLANES, name: 'GL_MAX_CLIP_PLANES', kind: 'int', value: [6] },
     { query: GL.MAX_VIEWPORT_DIMS, name: 'GL_MAX_VIEWPORT_DIMS', kind: 'int', value: [4096, 4096] },
@@ -560,6 +578,17 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.MAX_VERTEX_ATTRIBS_ARB, name: 'GL_MAX_VERTEX_ATTRIBS_ARB', kind: 'int',
         value: [16],
+    },
+    // The selector's own range: a program's coordinate sets and image units
+    // are the units the context holds, which the conventional count below
+    // is the compatible subset of.
+    {
+        query: GL.MAX_TEXTURE_COORDS_ARB, name: 'GL_MAX_TEXTURE_COORDS_ARB', kind: 'int',
+        value: [TEXTURE_UNITS],
+    },
+    {
+        query: GL.MAX_TEXTURE_IMAGE_UNITS_ARB, name: 'GL_MAX_TEXTURE_IMAGE_UNITS_ARB',
+        kind: 'int', value: [TEXTURE_UNITS],
     },
     {
         query: GL.MAX_PROGRAM_MATRICES_ARB, name: 'GL_MAX_PROGRAM_MATRICES_ARB', kind: 'int',

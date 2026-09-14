@@ -24,13 +24,11 @@
 import { GL } from './constants.js';
 import { createTextureObject, isTextureComplete, levelKey } from './objects.js';
 import { createMatrixStacks } from './matrix.js';
+import { CONVENTIONAL_UNITS, TEXTURE_UNITS } from './state.js';
 import {
     baseFormatOf, compressedBytes, conformTexels, createTextureEnvironment, decodeS3tc,
     imageBytes, unpackImage,
 } from './texture.js';
-
-/** How many texture units a context has. */
-export const TEXTURE_UNITS = 4;
 
 /** The targets a unit can have textures bound to, lowest priority first. */
 const TARGETS = [GL.TEXTURE_1D, GL.TEXTURE_2D, GL.TEXTURE_CUBE_MAP];
@@ -228,7 +226,9 @@ export function installTextureCalls(context, kernel){
 
         /**
          * The units a draw samples: each enabled unit whose highest enabled
-         * target has a complete texture bound. An incomplete one is skipped,
+         * target has a complete texture bound, of the conventional four --
+         * the fixed pipeline combines no more, and a program samples by unit
+         * number from the bindings instead. An incomplete one is skipped,
          * which is the specification's "as if disabled".
          *
          * @returns {{ index: number, texture: import('./objects.js').TextureObject,
@@ -239,6 +239,10 @@ export function installTextureCalls(context, kernel){
              *           unit: TextureUnit }[]} */
             const out = [];
             units.forEach((unit, index)=>{
+                if (index >= CONVENTIONAL_UNITS)
+                {
+                    return;
+                }
                 for (const target of [...TARGETS].reverse())
                 {
                     if (unit.enabled.get(target) !== 1)

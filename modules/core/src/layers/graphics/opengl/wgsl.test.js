@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createTextureEnvironment } from './texture.js';
 import { parseProgram } from './arb-program.js';
+import { VARYING_TEXCOORDS } from './arb-wgsl.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
     UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
@@ -195,7 +196,8 @@ test('the uniform block layout the shader declares is the one the renderer fills
     assert.equal(UNIFORM.planes, UNIFORM.textureMatrix + 4 * 16);
     assert.equal(UNIFORM.color, UNIFORM.planes + 16 * 4);
     assert.equal(UNIFORM.texCoord, UNIFORM.normal + 4);
-    assert.equal(UNIFORM.envColor, UNIFORM.texCoord + 4 * 4);
+    assert.equal(UNIFORM.envColor, UNIFORM.texCoord + VARYING_TEXCOORDS * 4,
+        'the current values run to every coordinate set the varyings carry');
     assert.equal(UNIFORM.fogColor, UNIFORM.envColor + 4 * 4);
     assert.equal(UNIFORM.floats, UNIFORM.misc + 4);
     assert.equal(UNIFORM.floats % 4, 0);
@@ -320,8 +322,8 @@ test('a program stage replaces the fixed stage it is bound for', ()=>{
     const reverse = generateDraw(state({ fragmentProgram: both.fragmentProgram }));
     assert.equal(reverse.programs?.vertex, null);
     assert.match(reverse.code, /out\.fog = 1\.0;/, 'the fixed vertex still runs');
-    assert.match(reverse.code, /@location\(7\) fogCoord: f32,/,
-        'and carries the raw fog coordinate the program may read');
+    assert.match(reverse.code, /@location\(11\) fogCoord: f32,/,
+        'and carries the raw fog coordinate the program may read, past the eight sets');
 
     // The key names the programs, and a new version is a new key.
     assert.notEqual(drawKey(both), drawKey(state()));

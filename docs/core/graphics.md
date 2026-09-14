@@ -47,16 +47,17 @@ allows because `win32` is declared.
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
 
 The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
-(`src/layers/graphics/d3d8/render.js`) and are read only there:
+(`src/layers/graphics/d3d8/render.js`); the first four also reach the OpenGL device renderer
+(`src/layers/graphics/opengl/gpu.js`), which reads them the same way:
 
 | knob | default | effect |
 |---|---|---|
-| `dumpDraws` | `false` | Records where every draw of the last frame landed and under what state, transforming every vertex a second time on the processor. `diagnostics().seam.device.lastDump` holds the result. |
+| `dumpDraws` | `false` | Records where every draw of the last frame landed and under what state -- on the Direct3D 8 renderer transforming every vertex a second time on the processor, on the OpenGL one printing the draw's state, its sampled textures, its programs' texts and its uniform blocks. `diagnostics().seam.device.lastDump` holds the result. |
 | `maxDraws` | `-1` (all) | Keeps only this many draws per frame and drops the rest, so a region's painter can be found by bisection. |
 | `skipTexture` | `null` | Comma-separated dump ids; every draw sampling one of those textures is dropped and counted under `skipped.texture`. |
-| `probeTexture` | `null` | Copies the colour target out after each dumped draw that samples this texture and puts a few of its pixels on the draw's dump line. |
-| `fog` | `true` | `false` runs every draw as if `D3DRS_FOGENABLE` were clear. |
-| `mips` | `true` | `false` samples every texture at its top level. |
+| `probeTexture` | `null` | Copies the colour target out around each dumped draw that samples this texture -- after it on the Direct3D 8 renderer, before and after on the OpenGL one -- and puts a few of its pixels on the draw's dump line. |
+| `fog` | `true` | `false` runs every draw as if `D3DRS_FOGENABLE` were clear. Direct3D 8 only. |
+| `mips` | `true` | `false` samples every texture at its top level. Direct3D 8 only. |
 
 ### Provided API
 
@@ -103,7 +104,7 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `libraries` | The library names published. |
 | `created` | Which APIs a program actually asked for, in order. |
 | `seam.created`, `seam.interfaces` | Objects made through the entry points; interfaces published. |
-| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. |
+| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. When neither made a device and the OpenGL runtime drew, its renderer's counters instead: `frames`, `pipelines`, `draws`, `clears`, `fallbacks`, `uploads`, `renames`, `refused`, `skipped`, `cut`, `resident`, `samplers`, `unflushed`, `failures`, `lastDump`. |
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
@@ -318,7 +319,7 @@ held and leaves the description untouched). `render.js` keeps a host copy of eve
 and replays a record onto one backend frame at present.
 
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
-renderer `Bottlify OpenGL`, 22 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
+renderer `Bottlify OpenGL`, 24 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
 string is a promise that every function it defines is obtainable, and the test checks the list,
 the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
 and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
@@ -336,7 +337,20 @@ a type the GPU has no format for -- is packed into one canonical layout. `wgsl.j
 fixed-function formula as a shader per draw state (texture environment per base format, combine
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
-colour mask, polygon offset); every field either reads is in the cache key. A clear is a triangle
+colour mask, polygon offset); every field either reads is in the cache key. `GL_ARB_vertex_program`
+and `GL_ARB_fragment_program` replace a stage with the program's own arithmetic: `arb-program.js`
+parses the program text into an IR with byte-exact error positions (the position and string
+`GL_PROGRAM_ERROR_POSITION_ARB` / `GL_PROGRAM_ERROR_STRING_ARB` report), `arb-wgsl.js` emits one
+literal WGSL stage per program, and `context-programs.js` keeps the objects, the per-target
+environment and per-object local parameters and the sixteen generic vertex attributes. A stage's
+parameters are materialised into one uniform block per draw at a binding past the last texture
+unit's pair; state matrices are computed from the stacks at draw time; the varyings between the
+stages are the fixed path's set widened to the eight coordinate sets `GL_MAX_TEXTURE_COORDS_ARB`
+promises, so a program stage and a fixed stage mix in either pairing. The context holds eight
+texture units -- the image units and coordinate sets a program addresses -- of which the
+conventional pipeline combines the first four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path
+cannot answer (a non-matrix state parameter, a 3D texture target) refuses the stage by name as a
+divergence rather than drawing something wrong. A clear is a triangle
 over the viewport under the scissor and the masks, which a pass's load operation would ignore.
 The frame is shown through an opaque copy that alternates between two surfaces, because a
 program's destination alpha is its own scratch and a page composites a presented texture by its
@@ -351,7 +365,8 @@ near, far and user-plane clipping in clip space; division and viewport; assembly
 polygon mode; rasterisation with texture environment, colour sum, fog and alpha test),
 `raster.js` owns the fill rule (pixel centres, top-left tie-break, perspective-correct
 interpolation) and the framebuffer operations, `texture.js` keeps every image as RGBA and honours
-the pixel-store state. That path is the formula the byte-exact tests hold to, the way
+the pixel-store state. An enabled, loaded program is beyond this path: the draw reports a
+divergence and draws nothing. That path is the formula the byte-exact tests hold to, the way
 `reference.js` is for Direct3D; what the compiled shader computes only a device can show.
 
 `wgl.js` is the seam with GDI, every rule of it measured: a pixel format belongs to the drawable,
@@ -476,7 +491,8 @@ Accepted and reported through `divergence`:
   framebuffer (the whole attachment is cleared), a viewport or scissor other than the first, a
   present of more than one swapchain, and every unimplemented command on first call.
 - OpenGL: selection and feedback modes record nothing; on the processor the stencil test is
-  enabled with no stencil buffer; two-sided lighting lights back faces as front; `glDrawPixels`,
+  enabled with no stencil buffer; two-sided lighting lights back faces as front; an enabled,
+  loaded program draws nothing; `glDrawPixels`,
   `glBitmap` and `glCopyPixels` of depth or stencil are accepted and draw nothing; the accumulation
   buffer is empty; a `glTexImage2D` format or type outside the supported set is accepted and
   uploads nothing; `glReadPixels` with an unsupported type and `glGetCompressedTexImage` are
@@ -485,7 +501,10 @@ Accepted and reported through `divergence`:
   brought back to the processor: `glReadPixels` answers black, `glDrawPixels`, `glBitmap` and
   `glCopyPixels` draw nothing; a colour logic operation writes the fragment as it is; a border
   clamp clamps to the edge; flat shading takes a primitive's first vertex rather than its last;
-  points and lines are one pixel wide; a fifth texture unit is not drawn; a texture rewritten
+  points and lines are one pixel wide; the fixed pipeline combines the first four texture units,
+  and a fifth is only what a program samples it as; a program stage binding a value the GPU path
+  cannot answer (a non-matrix state parameter, a 3D texture target) is refused by name and its
+  draw does not run; a texture rewritten
   between two draws of one frame is seen by both as rewritten.
 
 Counted rather than reported (`seam.device.skipped`): Direct3D 8 draws skipped for `vertexShader`,
@@ -502,7 +521,7 @@ predication, subroutines or vertex-shader texture reads.
 
 ## Tests
 
-1,098 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
+1,240 `test()` cases across the layer's `*.test.js` files, all run by `npm test` from
 `modules/core` (`node --test "src/**/*.test.js"`); one integration file runs under
 `npm run test:integration`. By kind:
 
@@ -510,10 +529,10 @@ predication, subroutines or vertex-shader texture reads.
 |---|---|
 | Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
-| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies). |
-| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
+| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
+| Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
-| Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
+| Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |
 | Seam and ABI | `seam/*.test.js` drive the bridge's real vtable publisher over a flat buffer and read the same words a guest would; `seam/shadow.test.js` pins the guest-side code's bytes and layout; `seam/shadow.itest.js` runs that code on the real emulated processor. |
 
 Real-GPU acceptance lives outside the unit suite in `tools/cdp_test/`: `triangle.mjs` (a

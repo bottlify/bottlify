@@ -21,8 +21,9 @@
  *   fixed path fills is bound in a program draw whether or not a fixed stage
  *   runs.
  * - **Program parameters live in one materialised array per stage**, at
- *   `vertexProgram` (binding 9) and `fragmentProgram` (binding 10). Every
- *   `PARAM` slot -- a program parameter, a constant, a state matrix row -- is
+ *   `vertexProgram` and `fragmentProgram`, bound past the last texture
+ *   unit's pair. Every `PARAM` slot -- a program parameter, a constant, a
+ *   state matrix row -- is
  *   one entry of it, listed in `needs.params` in block order, and the draw
  *   path fills exactly that list; relative addressing is then an index into
  *   one contiguous run, clamped to its declaration as the specification
@@ -64,12 +65,20 @@ import { canonicalAttribName } from './arb-program.js';
 
 export { canonicalAttribName };
 
-/** Where the two program uniform blocks sit in the draw's bind group. */
-export const VERTEX_PROGRAM_BINDING = 9;
-export const FRAGMENT_PROGRAM_BINDING = 10;
+/**
+ * Where the two program uniform blocks sit in the draw's bind group: past
+ * the pair of the last texture unit a program can sample, so no sampled
+ * texture and no block ever share a binding number.
+ */
+export const VERTEX_PROGRAM_BINDING = 17;
+export const FRAGMENT_PROGRAM_BINDING = 18;
 
-/** The texture coordinate sets a stage can pass through the varyings. */
-export const VARYING_TEXCOORDS = 4;
+/**
+ * The texture coordinate sets a stage can pass through the varyings: the
+ * specification's minimum for MAX_TEXTURE_COORDS_ARB, which is also the
+ * number of texture units the context holds.
+ */
+export const VARYING_TEXCOORDS = 8;
 
 /**
  * @typedef {Object} ParamSlot
@@ -596,6 +605,10 @@ function fragmentInputExpression(binding){
  * @param {string} name
  */
 function canonicalFallback(name){
+    if (/^texCoord[0-7]$/.test(name))
+    {
+        return `uniforms.texCoord[${Number(name.slice('texCoord'.length))}]`;
+    }
     switch (name)
     {
         case 'color':
@@ -606,11 +619,6 @@ function canonicalFallback(name){
             return 'uniforms.normal';
         case 'fogCoord':
             return 'vec4f(uniforms.fogParams.w)';
-        case 'texCoord0':
-        case 'texCoord1':
-        case 'texCoord2':
-        case 'texCoord3':
-            return `uniforms.texCoord[${Number(name.slice('texCoord'.length))}]`;
         default:
             return 'vec4f(0.0, 0.0, 0.0, 1.0)';
     }
@@ -1147,8 +1155,10 @@ export function emitFragment(ir){
             }
         }
     }
-    const ctx = createContext(ir, [], { texcoords: [0, 1, 2, 3], fogCoord: true }, analysed,
-        'fragmentProgram');
+    const ctx = createContext(ir, [], {
+        texcoords: Array.from({ length: VARYING_TEXCOORDS }, (unused, set)=>set),
+        fogCoord: true,
+    }, analysed, 'fragmentProgram');
     /** @type {string[]} */
     const lines = [];
     for (const instruction of ir.instructions)

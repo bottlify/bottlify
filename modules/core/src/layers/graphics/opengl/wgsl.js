@@ -32,7 +32,7 @@
  */
 
 import { GL } from './constants.js';
-import { emitFragment, emitVertex } from './arb-wgsl.js';
+import { VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf } from './arb-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -80,6 +80,9 @@ export const UNITS = 4;
 /**
  * The uniform block's layout, in floats, shared with the renderer that fills
  * it. One block per draw, so what is here is only what changes per draw.
+ * The current coordinate values run to every set the varyings carry, not
+ * only the conventional units: a program stage reads the sets the fixed
+ * pipeline never combines.
  */
 export const UNIFORM = Object.freeze({
     modelViewProjection: 0,
@@ -90,12 +93,12 @@ export const UNIFORM = Object.freeze({
     color: 48 + UNITS * 32,
     secondary: 48 + UNITS * 32 + 4,
     normal: 48 + UNITS * 32 + 8,
-    texCoord: 48 + UNITS * 32 + 12,      // UNITS vec4f
-    envColor: 48 + UNITS * 36 + 12,      // UNITS vec4f
-    fogColor: 48 + UNITS * 40 + 12,
-    fogParams: 48 + UNITS * 40 + 16,     // density, start, end, fog coordinate
-    misc: 48 + UNITS * 40 + 20,          // alpha reference
-    floats: 48 + UNITS * 40 + 24,
+    texCoord: 48 + UNITS * 32 + 12,      // VARYING_TEXCOORDS vec4f
+    envColor: 48 + UNITS * 32 + 12 + VARYING_TEXCOORDS * 4,   // UNITS vec4f
+    fogColor: 48 + UNITS * 36 + 12 + VARYING_TEXCOORDS * 4,
+    fogParams: 48 + UNITS * 36 + 16 + VARYING_TEXCOORDS * 4,  // density, start, end, coordinate
+    misc: 48 + UNITS * 36 + 20 + VARYING_TEXCOORDS * 4,       // alpha reference
+    floats: 48 + UNITS * 36 + 24 + VARYING_TEXCOORDS * 4,
 });
 
 const UNIFORM_STRUCT = `struct Uniforms {
@@ -107,7 +110,7 @@ const UNIFORM_STRUCT = `struct Uniforms {
     color: vec4f,
     secondary: vec4f,
     normal: vec4f,
-    texCoord: array<vec4f, ${UNITS}>,
+    texCoord: array<vec4f, ${VARYING_TEXCOORDS}>,
     envColor: array<vec4f, ${UNITS}>,
     fogColor: vec4f,
     fogParams: vec4f,
@@ -727,10 +730,21 @@ function generateProgramDraw(state){
     {
         return refused(fragmentStage.error);
     }
-    // A fragment program reads any coordinate set and the raw fog
-    // coordinate; a fixed fragment reads only what its enabled units use.
-    const varyings = state.fragmentProgram
-        ? { texcoords: [0, 1, 2, 3].slice(0, UNITS), fogCoord: true }
+    // A program stage reads and writes any coordinate set up to what the
+    // varyings carry, and a fragment program reads the raw fog coordinate;
+    // a fixed fragment reads only what its enabled units use. A vertex
+    // program that writes result.fogcoord needs the raw coordinate's varying
+    // even when the fragment stage is the fixed one.
+    const vertexOnly = state.vertexProgram && !state.fragmentProgram
+        ? needsOf(state.vertexProgram.ir)
+        : null;
+    const varyings = state.fragmentProgram || state.vertexProgram
+        ? {
+            texcoords: Array.from({ length: VARYING_TEXCOORDS }, (unused, set)=>set),
+            fogCoord: state.fragmentProgram !== null
+                || (vertexOnly !== null && 'needs' in vertexOnly
+                    && vertexOnly.needs.writesFogCoord),
+        }
         : { texcoords: state.units.map(unit=>unit.index), fogCoord: false };
     const inputs = state.attributes.map(attribute=>({
         name: attribute.name, components: attribute.components, scalar: attribute.scalar,

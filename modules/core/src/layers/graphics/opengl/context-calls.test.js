@@ -248,8 +248,11 @@ test('each texture unit keeps its own enables, bindings, environment and matrix'
     context.glMatrixMode(GL.MODELVIEW);
 
     context.glActiveTextureARB(GL.TEXTURE0 + 4);
-    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'four units');
-    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_UNITS), [4]);
+    assert.equal(context.glGetError(), GL.NO_ERROR,
+        'the selector takes the units a program samples, past the four');
+    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_UNITS), [4],
+        'the conventional pipeline still combines four');
+    context.glActiveTextureARB(GL.TEXTURE0);
 
     // Deleting a texture unbinds it from every unit.
     context.glDeleteTextures([b]);
@@ -608,4 +611,29 @@ test('a call that is accepted and not honoured reports a divergence, once', ()=>
     assert.match(reported[0], /stencil/);
     assert.match(reported[1], /accumulation/);
     assert.match(reported[2], /selection/);
+});
+
+test('a program\'s texture units reach the eighth, and the limits say so', ()=>{
+    const { context } = drawing();
+    // The selector takes every unit a program can sample or write coordinates
+    // for, past the four the conventional pipeline combines.
+    context.glActiveTextureARB(GL.TEXTURE0 + 5);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    const [name] = context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, name);
+    assert.deepEqual(context.glGetIntegerv(GL.TEXTURE_BINDING_2D), [name],
+        'the binding landed on unit five');
+    context.glActiveTextureARB(GL.TEXTURE0);
+    assert.deepEqual(context.glGetIntegerv(GL.TEXTURE_BINDING_2D), [0]);
+    context.glActiveTextureARB(GL.TEXTURE0 + 8);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'and stops at eight');
+    // The queries a program decides its own limits by.
+    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_COORDS_ARB), [8]);
+    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_IMAGE_UNITS_ARB), [8]);
+    assert.deepEqual(context.glGetIntegerv(GL.MAX_TEXTURE_UNITS), [4],
+        'the conventional pipeline still combines four');
+    // A fifth unit's coordinates are a current value of their own.
+    context.glMultiTexCoord4fARB(GL.TEXTURE0 + 5, 0.5, 0.25, 0.125, 1);
+    context.glActiveTextureARB(GL.TEXTURE0 + 5);
+    assert.deepEqual(context.glGetFloatv(GL.CURRENT_TEXTURE_COORDS), [0.5, 0.25, 0.125, 1]);
 });

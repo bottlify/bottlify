@@ -20,7 +20,7 @@
 import { GL } from './constants.js';
 import { INTERLEAVED_LAYOUTS, componentBytes, readElement, readIndex } from './arrays.js';
 import { createBufferObject } from './objects.js';
-import { TEXTURE_UNITS } from './context-textures.js';
+import { TEXTURE_UNITS } from './state.js';
 
 /** @type {Set<number>} */
 const PRIMITIVE_MODES = new Set([

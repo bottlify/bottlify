@@ -50,7 +50,9 @@ import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
 import {
     CANONICAL_LAYOUT, expandIndices, isList, packVertices, planLayout, scanIndices, topologyOf,
 } from './gpu-layout.js';
-import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';
+import {
+    FRAGMENT_PROGRAM_BINDING, VARYING_TEXCOORDS, VERTEX_PROGRAM_BINDING,
+} from './arb-wgsl.js';
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
@@ -846,7 +848,7 @@ export function createGpuRenderer(services){
         block.set(current.color, UNIFORM.color);
         block.set(current.secondary, UNIFORM.secondary);
         block.set([current.normal[0], current.normal[1], current.normal[2], 0], UNIFORM.normal);
-        current.texCoords.slice(0, UNITS).forEach((coords, unit)=>{
+        current.texCoords.slice(0, VARYING_TEXCOORDS).forEach((coords, unit)=>{
             block.set([coords[0], coords[1] ?? 0, coords[2] ?? 0, coords[3] ?? 1],
                 UNIFORM.texCoord + unit * 4);
         });

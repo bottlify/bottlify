@@ -299,18 +299,20 @@ END
     assert.match(refused.error, /no value on the GPU path/);
 });
 
-test('a 3D texture target and a far coordinate set refuse the fragment stage', ()=>{
+test('a 3D texture target refuses the fragment stage; a far coordinate set is carried', ()=>{
     const three = parseProgram('!!ARBfp1.0\nTEMP r0;\nTEX r0, r0, texture[0], 3D;\n'
         + 'MOV result.color, r0;\nEND\n');
     assert.ok(!('error' in three));
     const refused = emitFragment(three);
     assert.ok('error' in refused);
     assert.match(refused.error, /3D/);
+    // The parser caps a coordinate set at the seventh and the varyings carry
+    // eight, so every set a program can name reaches the fragment stage.
     const far = parseProgram('!!ARBfp1.0\nMOV result.color, fragment.texcoord[5];\nEND\n');
     assert.ok(!('error' in far));
-    const refusedFar = emitFragment(far);
-    assert.ok('error' in refusedFar);
-    assert.match(refusedFar.error, /fragment\.texcoord\[5\]/);
+    const carried = emitFragment(far);
+    assert.ok(!('error' in carried), 'error' in carried ? carried.error : '');
+    assert.match(carried.code, /input\.tc5/);
 });
 
 test('attributes read their inputs, and absent ones their current values', ()=>{
@@ -448,4 +450,211 @@ END
     assert.match(code, /let s\d+_0 = vertexProgram\.params\[0\];/);
     assert.match(code, /tmp0 = v\d+;/);
     assert.match(code, /out\.position = vec4f\(v\d+\.x/);
+});
+
+/**
+ * A real title's per-light interaction pair, verbatim: the vertex half
+ * computes seven coordinate sets from the light and view origins and the
+ * projection and falloff planes it is given as env parameters; the fragment
+ * half samples seven image units -- a normalisation cube map, a bump map,
+ * the light's projection and falloff, and the surface's diffuse, specular
+ * and specular-lookup maps. A level lit by these draws is dark when either
+ * stage refuses or when the sampled units and the program's own blocks
+ * collide in the bind layout.
+ */
+const INTERACTION_VERTEX = `!!ARBvp1.0 OPTION ARB_position_invariant ;
+
+TEMP	R0, R1, R2;
+
+PARAM	defaultTexCoord = { 0, 0.5, 0, 1 };
+
+# calculate vector to light in R0
+SUB		R0, program.env[4], vertex.position;
+
+# put into texture space for TEX0
+DP3		result.texcoord[0].x, vertex.attrib[9], R0;
+DP3		result.texcoord[0].y, vertex.attrib[10], R0;
+DP3		result.texcoord[0].z, vertex.attrib[11], R0;
+
+# textures 1 takes the base coordinates by the texture matrix
+MOV		result.texcoord[1], defaultTexCoord;
+DP4		result.texcoord[1].x, vertex.attrib[8], program.env[10];
+DP4		result.texcoord[1].y, vertex.attrib[8], program.env[11];
+
+# texture 2 has one texgen
+MOV		result.texcoord[2], defaultTexCoord;
+DP4		result.texcoord[2].x, vertex.position, program.env[9];
+
+# texture 3 has three texgens
+DP4		result.texcoord[3].x, vertex.position, program.env[6];
+DP4		result.texcoord[3].y, vertex.position, program.env[7];
+DP4		result.texcoord[3].w, vertex.position, program.env[8];
+
+# textures 4 takes the base coordinates by the texture matrix
+MOV		result.texcoord[4], defaultTexCoord;
+DP4		result.texcoord[4].x, vertex.attrib[8], program.env[12];
+DP4		result.texcoord[4].y, vertex.attrib[8], program.env[13];
+
+# textures 5 takes the base coordinates by the texture matrix
+MOV		result.texcoord[5], defaultTexCoord;
+DP4		result.texcoord[5].x, vertex.attrib[8], program.env[14];
+DP4		result.texcoord[5].y, vertex.attrib[8], program.env[15];
+
+# calculate normalized vector to light in R0
+SUB		R0, program.env[4], vertex.position;
+DP3		R1, R0, R0;
+RSQ		R1, R1.x;
+MUL		R0, R0, R1.x;
+
+# calculate normalized vector to viewer in R1
+SUB		R1, program.env[5], vertex.position;
+DP3		R2, R1, R1;
+RSQ		R2, R2.x;
+MUL		R1, R1, R2.x;
+
+# add together to become the half angle vector in object space
+ADD		R0, R0, R1;
+
+# put into texture space
+DP3		result.texcoord[6].x, vertex.attrib[9], R0;
+DP3		result.texcoord[6].y, vertex.attrib[10], R0;
+DP3		result.texcoord[6].z, vertex.attrib[11], R0;
+
+# generate the vertex color
+MAD		result.color, vertex.color, program.env[16], program.env[17];
+
+END
+`;
+
+const INTERACTION_FRAGMENT = `!!ARBfp1.0 
+OPTION ARB_precision_hint_fastest;
+
+TEMP	light, color, R1, R2, localNormal, specular;
+
+PARAM	subOne = { -1, -1, -1, -1 };
+PARAM	scaleTwo = { 2, 2, 2, 2 };
+
+DP3		specular, fragment.texcoord[6],fragment.texcoord[6];
+RSQ		specular, specular.x;
+MUL		specular, specular.x, fragment.texcoord[6];
+
+TEX	light, fragment.texcoord[0], texture[0], CUBE;
+MAD	light, light, scaleTwo, subOne;
+
+TEX	localNormal, fragment.texcoord[1], texture[1], 2D;
+MOV localNormal.x, localNormal.a;
+MAD	localNormal, localNormal, scaleTwo, subOne;
+DP3	light, light, localNormal;
+
+# modulate by the light projection
+TXP	R1, fragment.texcoord[3], texture[3], 2D;
+MUL	light, light, R1;
+
+# modulate by the light falloff
+TXP	R1, fragment.texcoord[2], texture[2], 2D;
+MUL	light, light, R1;
+
+# modulate by the diffuse map and constant diffuse factor
+TEX	R1, fragment.texcoord[4], texture[4], 2D;
+MUL	color, R1, program.env[0];
+
+# perform the specular bump mapping
+DP3	specular, specular, localNormal;
+
+# perform a dependent table read for the specular falloff
+TEX	R1, specular, texture[6], 2D;
+
+# modulate by the constant specular factor
+MUL	R1, R1, program.env[1];
+
+# modulate by the specular map * 2
+TEX	R2, fragment.texcoord[5], texture[5], 2D;
+ADD	R2, R2, R2;
+MAD	color, R1, R2, color;
+
+MUL	color, light, color;
+
+# modify by the vertex color
+MUL result.color, color, fragment.color;
+
+END
+`;
+
+test('the interaction pair carries seven coordinate sets and seven image units', ()=>{
+    /** @type {import('./arb-wgsl.js').StageInput[]} */
+    const inputs = [
+        { name: 'position', components: 3, scalar: 'f32' },
+        { name: 'texCoord0', components: 2, scalar: 'f32' },
+        { name: 'texCoord1', components: 3, scalar: 'f32' },
+        { name: 'texCoord2', components: 3, scalar: 'f32' },
+        { name: 'texCoord3', components: 3, scalar: 'f32' },
+    ];
+    const parsedVertex = parseProgram(INTERACTION_VERTEX);
+    assert.ok(!('error' in parsedVertex));
+    const vertexStage = emitVertex(parsedVertex, inputs,
+        { texcoords: [0, 1, 2, 3, 4, 5, 6, 7], fogCoord: false });
+    assert.ok(!('error' in vertexStage), 'error' in vertexStage ? vertexStage.error : '');
+    // The sets past the fourth reach the varyings instead of being dropped.
+    assert.match(vertexStage.code, /out\.tc4\.x = /);
+    assert.match(vertexStage.code, /out\.tc5\.y = /);
+    assert.match(vertexStage.code, /out\.tc6\.z = /);
+    // attrib[8..11] are the coordinate arrays of units 0..3, all fed here.
+    assert.match(vertexStage.code, /vec4f\(vertex\.texCoord1, 1\.0\)/);
+    assert.match(vertexStage.code, /vec4f\(vertex\.texCoord0, 0\.0, 1\.0\)/);
+    assert.deepEqual(vertexStage.needs.genericFallbacks, []);
+    // The light's origins and planes arrive as env parameters, in block order.
+    const env = vertexStage.needs.params.filter(slot=>slot.source === 'env')
+        .map(slot=>slot.index);
+    for (const index of [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17])
+    {
+        assert.ok(env.includes(index), `env[${index}] is a parameter slot`);
+    }
+    assert.match(vertexStage.code, /uniforms\.modelViewProjection/,
+        'the position-invariance option computes the fixed position');
+
+    const parsedFragment = parseProgram(INTERACTION_FRAGMENT);
+    assert.ok(!('error' in parsedFragment));
+    const fragmentStage = emitFragment(parsedFragment);
+    assert.ok(!('error' in fragmentStage),
+        'error' in fragmentStage ? fragmentStage.error : '');
+    // The coordinate sets past the fourth are read, not refused.
+    assert.match(fragmentStage.code, /input\.tc4/);
+    assert.match(fragmentStage.code, /input\.tc5/);
+    assert.match(fragmentStage.code, /input\.tc6/);
+    // Unit 0 samples as the cube map it is; units 1..6 as 2D, each at its
+    // own pair of bindings.
+    assert.match(fragmentStage.code,
+        /@group\(0\) @binding\(1\) var t0Texture: texture_cube<f32>/);
+    assert.match(fragmentStage.code,
+        /@group\(0\) @binding\(3\) var t1Texture: texture_2d<f32>/);
+    assert.match(fragmentStage.code,
+        /@group\(0\) @binding\(9\) var t4Texture: texture_2d<f32>/);
+    assert.match(fragmentStage.code,
+        /@group\(0\) @binding\(13\) var t6Texture: texture_2d<f32>/);
+    assert.match(fragmentStage.code, /textureSample\(t6Texture, t6Sampler, /,
+        'the dependent specular lookup samples with the computed coordinate');
+    assert.match(fragmentStage.code,
+        /textureSample\(t3Texture, t3Sampler, s\d+_0\.xy \/ s\d+_0\.w\)/,
+        'the projection is projective');
+    // The program's own uniform blocks sit past the last unit's pair, so no
+    // sampled texture and no block share a binding number.
+    assert.ok(VERTEX_PROGRAM_BINDING > 16,
+        'the vertex block is past the eighth unit\'s sampler');
+    assert.ok(FRAGMENT_PROGRAM_BINDING > 16);
+    assert.deepEqual(fragmentStage.needs.textures.map(texture=>texture.unit),
+        [0, 1, 3, 2, 4, 6, 5], 'every unit the instructions sample, in first-use order');
+});
+
+test('coordinate sets up to the seventh are carried, and generic attributes'
+    + ' 12 to 15 are the sets 4 to 7', ()=>{
+    const { code } = fragment(`!!ARBfp1.0
+TEMP acc;
+ADD acc, fragment.texcoord[4], fragment.texcoord[7];
+MOV result.color, acc;
+END
+`);
+    assert.match(code, /input\.tc4/);
+    assert.match(code, /input\.tc7/);
+    assert.equal(canonicalAttribName(12), 'texCoord4');
+    assert.equal(canonicalAttribName(15), 'texCoord7');
 });

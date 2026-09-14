@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
+import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';
 import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { CANONICAL_STRIDE } from './gpu-layout.js';
@@ -527,10 +528,11 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     // The layout carries both program blocks and the sampled unit's texture,
     // bound although its target was never enabled.
     const layout = r.gpu.of('createBindGroupLayout')
-        .find(l=>l.descriptor.entries.some((/** @type {any} */ e)=>e.binding === 9));
+        .find(l=>l.descriptor.entries
+            .some((/** @type {any} */ e)=>e.binding === VERTEX_PROGRAM_BINDING));
     assert.ok(layout, 'a layout with the vertex program block');
     const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
-    assert.ok(bindings.includes(10), 'the fragment program block');
+    assert.ok(bindings.includes(FRAGMENT_PROGRAM_BINDING), 'the fragment program block');
     assert.ok(bindings.includes(1) && bindings.includes(2), 'unit zero samples anyway');
 
     // The vertex block: four MVP rows, then the env parameter. An orthographic
@@ -784,4 +786,54 @@ test('a probed texture reads the target before and after each of its draws', asy
     const drawn = r.gpu.calls.indexOf(r.gpu.of('drawIndexed')[0]);
     assert.ok(r.gpu.calls.indexOf(copies[0]) < drawn && drawn < r.gpu.calls.indexOf(copies[1]),
         'and the draw sits between the two reads');
+});
+
+test('a program sampling past the fourth unit gets bindings of its own', async()=>{
+    const r = rig();
+    const { context } = r;
+    triangle(r, 0x1000);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, STRIDE, 0x1000);
+    context.glTexCoordPointer(2, GL.FLOAT, STRIDE, 0x1000 + 12);
+    context.glGenTextures(2);
+    for (const [unit, name] of [[4, 1], [6, 2]])
+    {
+        context.glActiveTextureARB(GL.TEXTURE0 + unit);
+        context.glBindTexture(GL.TEXTURE_2D, name);
+        context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+            new Uint8Array(4 * 4 * 4).fill(0x80));
+    }
+    assert.equal(context.glGetError(), GL.NO_ERROR, 'both units took their texture');
+    context.glGenProgramsARB(1);
+    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
+    const text = `!!ARBfp1.0
+TEMP a, b;
+TEX a, fragment.texcoord[0], texture[4], 2D;
+TEX b, fragment.texcoord[0], texture[6], 2D;
+MUL result.color, a, b;
+END
+`;
+    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x4000, text), 0x4000);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
+    context.glDrawArrays(GL.TRIANGLES, 0, 3);
+    await r.swap();
+
+    const layout = r.gpu.of('createBindGroupLayout')
+        .find(l=>l.descriptor.entries.some((/** @type {any} */ e)=>e.binding === 9));
+    assert.ok(layout, 'unit four samples at binding 9');
+    const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
+    assert.equal(new Set(bindings).size, bindings.length,
+        `no two entries share a binding: ${bindings.join(',')}`);
+    const entryAt = (/** @type {number} */ binding)=>layout.descriptor.entries
+        .find((/** @type {any} */ e)=>e.binding === binding);
+    assert.ok(entryAt(9).texture, 'binding 9 is the unit\'s texture');
+    assert.ok(entryAt(10).sampler, 'and 10 its sampler');
+    assert.ok(entryAt(13).texture && entryAt(14).sampler, 'unit six at its own pair');
+    assert.ok(entryAt(FRAGMENT_PROGRAM_BINDING)?.buffer,
+        'the program block sits past every unit pair');
+    assert.equal(r.gpu.count('draw'), 2, 'the draw and the shown copy were issued');
 });

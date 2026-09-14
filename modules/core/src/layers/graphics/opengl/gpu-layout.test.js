@@ -157,3 +157,28 @@ test('indices are scanned for their range and widened to a GPU format', ()=>{
     const half = scanIndices(shorts, GL.UNSIGNED_SHORT, 2);
     assert.deepEqual([...half.indices], [9, 4]);
 });
+
+test('coordinate sets to the seventh are named and packed canonically', ()=>{
+    for (const name of ['texCoord4', 'texCoord5', 'texCoord6', 'texCoord7'])
+    {
+        assert.ok(ATTRIBUTE_NAMES.includes(name), `${name} is a name the layout recognises`);
+        assert.ok(CANONICAL_LAYOUT.attributes.some(a=>a.name === name),
+            `${name} has a place in the canonical vertex`);
+    }
+    assert.ok(!ATTRIBUTE_NAMES.includes('attrib12'),
+        'generic attribute 12 is coordinate set 4 by the aliasing table, not a name of its own');
+    const packed = packVertices([{
+        position: [0, 0, 0],
+        color: [1, 1, 1, 1],
+        secondary: [0, 0, 0, 1],
+        normal: [0, 0, 1],
+        fogCoord: 0,
+        texCoords: [[0, 0, 0, 1], [0, 0, 0, 1], [0, 0, 0, 1], [0, 0, 0, 1],
+            [0.25, 0.75, 0, 1]],
+    }]);
+    const attribute = CANONICAL_LAYOUT.attributes.find(a=>a.name === 'texCoord4');
+    assert.ok(attribute);
+    const at = attribute.offset / 4;
+    assert.deepEqual([...packed.subarray(at, at + 4)], [0.25, 0.75, 0, 1],
+        'the fifth set travels in the packed vertex');
+});
