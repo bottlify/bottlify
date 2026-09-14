@@ -21,8 +21,10 @@ const WINEXEC_SUCCESS = 33;
  * @param {string[]} [options.files]  Paths on the volume. Matched by fold, the
  *        way the real volume matches them.
  * @param {string} [options.imagePath]
+ * @param {string} [options.cwd]  The current directory a relative name is taken
+ *        against, as the volume takes it.
  */
-function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe' } = {}){
+function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe', cwd = 'C:\\' } = {}){
     const bytes = new Uint8Array(0x2000);
     /** @type {number[]} */
     const errors = [];
@@ -33,11 +35,15 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe' } = {}){
     let nextHandle = 0x40;
     const present = new Set(files.map(path=>path.toLowerCase()));
 
+    /** @param {string} path */
+    const qualify = path=>(/^[A-Za-z]:[\\/]/.test(path) ? path : `${cwd}${path}`);
+
     return {
         bytes,
         errors,
         requests,
         handles,
+        cwd,
         view: new DataView(bytes.buffer),
         kernel: {
             processes: createProcessTable(),
@@ -90,9 +96,10 @@ function fakeHost({ files = [], imagePath = 'C:\\App\\launcher.exe' } = {}){
         /** @param {number} code */
         setLastError: code=>errors.push(code),
         /** @param {string} path */
-        stat: path=>(present.has(path.toLowerCase())
+        stat: path=>(present.has(qualify(path).toLowerCase())
             ? { exists: true, isDirectory: false }
             : null),
+        resolve: qualify,
         imagePath: ()=>imagePath,
         /** @param {any} request */
         spawned: (/** @type {any} */ request)=>requests.push(request),
@@ -161,6 +168,23 @@ test('a bare name is looked for beside the program that asked for it', ()=>{
     assert.equal(fns.CreateProcessA.handler(
         [putAnsi(host, 0x100, 'child.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
     assert.equal(pending(host).imagePath, 'C:\\App\\child.exe');
+});
+
+test('a child is recorded with a full path, however the caller spelled it', ()=>{
+    // Everything downstream reads a location off the child's image -- the
+    // directory it starts in, first of all -- and reads it against the child. A
+    // bare name left relative puts the child wherever the next program happens
+    // to look, which is not where the file is.
+    const host = fakeHost({
+        files: ['C:\\App\\setup.exe'], imagePath: 'C:\\Other\\sfx.exe', cwd: 'C:\\App\\',
+    });
+    const fns = createSpawnFunctions(host);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'setup.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    assert.equal(pending(host).imagePath, 'C:\\App\\setup.exe');
+    assert.equal(pending(host).commandLine, '"C:\\App\\setup.exe"',
+        'and the line composed for it names the same full path');
 });
 
 test('a name with no extension gets .exe, as CreateProcess gives it', ()=>{

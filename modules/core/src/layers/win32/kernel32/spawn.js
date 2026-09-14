@@ -75,6 +75,12 @@ const directoryOf = path=>path.slice(0, Math.max(
  *           Whether a path names a file on the volume. Case is folded there.
  * @property {() => string} imagePath
  *           The running program, whose directory a bare name is looked for in.
+ * @property {(path: string) => string} [resolve]
+ *           Qualifies a path against the process's current directory, which is
+ *           what makes the image a child is recorded with a full path. Without
+ *           it the name the caller spelled travels on, and anything that reads a
+ *           location off it -- the directory a child starts in, first of all --
+ *           reads it against whoever happens to be running.
  * @property {(record: any) => void} [spawned]
  *           Told about every request as it is recorded, while the caller's
  *           stack is still standing. A replacement erases the logs of the run
@@ -123,6 +129,28 @@ export function createSpawner(host){
     };
 
     /**
+     * The same path as a full one, or itself when there is nothing to qualify
+     * it with -- no resolver, or a name the resolver refuses.
+     *
+     * @param {string} path
+     * @returns {string}
+     */
+    const qualify = path=>{
+        if (isQualified(path) || !host.resolve)
+        {
+            return path;
+        }
+        try
+        {
+            return host.resolve(path);
+        }
+        catch (e){
+            void e;
+            return path;
+        }
+    };
+
+    /**
      * Where an image a program named actually lives, or null.
      *
      * A bare name is looked for beside the running program first, which is
@@ -134,6 +162,12 @@ export function createSpawner(host){
      * The search path is not consulted: a program that relies on one is rare,
      * and inventing an order here that Windows does not use would be worse than
      * not finding the image at all.
+     *
+     * The answer is a full path. A bare name is found through the current
+     * directory, and a child recorded as `setup.exe` is a child whose location
+     * depends on whatever directory the next program happens to start in -- its
+     * own, since that is read off the image path -- which is not where the file
+     * is.
      *
      * @param {string} name
      * @returns {string | null}
@@ -154,7 +188,7 @@ export function createSpawner(host){
             {
                 if (isFile(candidate))
                 {
-                    return candidate;
+                    return qualify(candidate);
                 }
             }
         }
@@ -231,6 +265,9 @@ export function createSpawner(host){
  * @property {(code: number) => void} setLastError
  * @property {(path: string) => ({ exists: boolean, isDirectory: boolean } | null)} stat
  *           Whether a path names a file on the volume. Case is folded there.
+ * @property {(path: string) => string} [resolve]
+ *           Qualifies a path against the process's current directory, for the
+ *           spawner this builds when it was not handed one.
  * @property {() => string} imagePath
  *           The running program, whose directory a bare name is looked for in.
  * @property {(record: any) => void} [spawned]

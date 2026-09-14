@@ -530,6 +530,11 @@ export const win32Module = {
             kernel,
             /** @param {string} path */
             stat: path=>volume.stat(path),
+            // A child is recorded with a full path, because everything that
+            // reads a location off its image -- the directory it starts in,
+            // first of all -- reads it against the child, not against us.
+            /** @param {string} path */
+            resolve: path=>filesystem.resolve(path).path,
             imagePath: ()=>modules.imagePath(),
             // Where the record of a replacement request goes. It has to leave
             // this process, because honouring one erases every log and ring the
