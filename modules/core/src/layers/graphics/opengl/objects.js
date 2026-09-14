@@ -109,6 +109,8 @@ export function levelKey(level, face = 0){
  * @property {number} format   the format its string was given in; zero unloaded
  * @property {string} text     the program string as it was given
  * @property {import('./arb-program.js').ParsedProgram | null} parsed
+ * @property {number} version  raised on every successful load, so a pipeline
+ *           keyed on the object is rebuilt when its string is replaced
  * @property {Float32Array} local   the local parameters, four floats each
  */
 
@@ -128,6 +130,7 @@ export function createProgramObject(name, target, localParameters){
         format: 0,
         text: '',
         parsed: null,
+        version: 0,
         local: new Float32Array(localParameters * 4),
     };
 }

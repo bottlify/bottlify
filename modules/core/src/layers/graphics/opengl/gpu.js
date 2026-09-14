@@ -44,12 +44,13 @@
  */
 
 import { GL } from './constants.js';
-import { multiply } from './matrix.js';
+import { identity, invert, multiply, transpose } from './matrix.js';
 import { normalMatrix } from './lighting.js';
-import { FACE_STRIDE, levelKey } from './objects.js';
+import { FACE_STRIDE, createTextureObject, levelKey } from './objects.js';
 import {
     CANONICAL_LAYOUT, expandIndices, isList, packVertices, planLayout, scanIndices, topologyOf,
 } from './gpu-layout.js';
+import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
     copyKey, drawDescriptor, drawKey, generateClear, generateCopy, generateDraw, generateShow,
@@ -60,6 +61,10 @@ import {
 const COLOUR_FORMAT = 'bgra8unorm';
 const DEPTH_FORMAT = 'depth24plus-stencil8';
 const TEXTURE_FORMAT = 'rgba8unorm';
+
+/** What a state matrix binding reads when there is no matrix behind it. */
+const IDENTITY = identity();
+const ZERO_MATRIX = new Float64Array(16);
 
 /** GPUShaderStage bits. */
 const VERTEX_STAGE = 1;
@@ -170,13 +175,147 @@ export function createGpuRenderer(services){
     /** @type {Set<number>} */
     const unflushed = new Set();
 
-    /** @type {Map<string, { group: any, pipeline: any }>} by the units' cube flags */
-    const layouts = new Map();
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
     /** @type {Map<string, any>} */
     const samplers = new Map();
     const stats = { pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0 };
+
+    /**
+     * @typedef {Object} BindPlan
+     *     The bind group layout a generated module declares: the fixed
+     *     uniform block, a texture pair per unit the fragment stage samples,
+     *     and a uniform block per program stage.
+     * @property {string} key
+     * @property {{ binding: number, cube: boolean, unit: number }[]} textures
+     * @property {boolean} vertexBlock
+     * @property {boolean} fragmentBlock
+     */
+    /** @type {BindPlan} */
+    const NO_TEXTURE_PLAN = { key: '|', textures: [], vertexBlock: false, fragmentBlock: false };
+    /** @type {BindPlan} */
+    const SINGLE_TEXTURE_PLAN = {
+        key: '12|', textures: [{ binding: 1, cube: false, unit: 0 }],
+        vertexBlock: false, fragmentBlock: false,
+    };
+
+    /**
+     * @param {import('./wgsl.js').DrawState} state
+     * @param {import('./wgsl.js').ProgramStages | null} programs
+     * @returns {BindPlan}
+     */
+    const bindPlanOf = (state, programs)=>{
+        /** @type {{ binding: number, cube: boolean, unit: number }[]} */
+        const textures = [];
+        if (programs?.fragment)
+        {
+            // A fragment program samples by unit number, and a unit's enable
+            // state does not enter into it.
+            for (const texture of programs.fragment.textures)
+            {
+                textures.push({
+                    binding: 1 + texture.unit * 2, cube: texture.target === 'CUBE',
+                    unit: texture.unit,
+                });
+            }
+        }
+        else
+        {
+            state.units.forEach((unit, position)=>textures.push(
+                { binding: 1 + position * 2, cube: unit.cube, unit: unit.index }));
+        }
+        textures.sort((a, b)=>a.binding - b.binding);
+        const vertexBlock = programs?.vertex != null;
+        const fragmentBlock = programs?.fragment != null;
+        const key = `${textures.map(t=>`${t.binding}${t.cube ? 'c' : '2'}`).join(',')}|`
+            + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
+        return { key, textures, vertexBlock, fragmentBlock };
+    };
+
+    /** @type {Map<string, { group: any, pipeline: any }>} */
+    const layouts = new Map();
+    /** @param {BindPlan} plan */
+    const layoutFor = plan=>{
+        const existing = layouts.get(plan.key);
+        if (existing)
+        {
+            return existing;
+        }
+        /** @type {any[]} */
+        const entries = [{
+            binding: 0,
+            visibility: VERTEX_STAGE | FRAGMENT_STAGE,
+            buffer: { type: 'uniform', hasDynamicOffset: true },
+        }];
+        for (const texture of plan.textures)
+        {
+            entries.push({
+                binding: texture.binding,
+                visibility: FRAGMENT_STAGE,
+                texture: texture.cube ? { viewDimension: 'cube' } : {},
+            });
+            entries.push({
+                binding: texture.binding + 1, visibility: FRAGMENT_STAGE, sampler: {},
+            });
+        }
+        if (plan.vertexBlock)
+        {
+            entries.push({
+                binding: VERTEX_PROGRAM_BINDING,
+                visibility: VERTEX_STAGE,
+                buffer: { type: 'uniform', hasDynamicOffset: true },
+            });
+        }
+        if (plan.fragmentBlock)
+        {
+            entries.push({
+                binding: FRAGMENT_PROGRAM_BINDING,
+                visibility: FRAGMENT_STAGE,
+                buffer: { type: 'uniform', hasDynamicOffset: true },
+            });
+        }
+        const group = backend.createBindGroupLayout({ label: `gl:${plan.key}`, entries });
+        const made = {
+            group,
+            pipeline: backend.createPipelineLayout(
+                { label: `gl:${plan.key}`, bindGroupLayouts: [group] }),
+        };
+        layouts.set(plan.key, made);
+        return made;
+    };
+
+    /**
+     * @param {string} key
+     * @param {{ code: string, label: string }} source
+     * @param {any} descriptor
+     * @param {BindPlan} plan
+     */
+    const pipelineFor = (key, source, descriptor, plan)=>{
+        const existing = pipelines.get(key);
+        if (existing)
+        {
+            return existing;
+        }
+        stats.pipelines++;
+        const layout = layoutFor(plan);
+        const building = (async()=>{
+            const module = await backend.createShaderModule(source);
+            return {
+                layout: layout.group,
+                gpu: backend.createRenderPipeline({
+                    label: source.label,
+                    layout: layout.pipeline,
+                    vertex: { module, entryPoint: 'vertexMain', buffers: descriptor.vertexBuffers },
+                    fragment: { module, entryPoint: 'fragmentMain', targets: [descriptor.target] },
+                    primitive: descriptor.primitive,
+                    depthStencil: descriptor.depthStencil,
+                    multisample: descriptor.multisample,
+                }),
+            };
+        })();
+        pipelines.set(key, building);
+        return building;
+    };
 
     /**
      * @typedef {Object} BufferRecord
@@ -241,70 +380,6 @@ export function createGpuRenderer(services){
     const scratchIndices = ring('gl-scratch-indices',
         BufferUsage.INDEX | BufferUsage.COPY_DST, 1 << 18);
 
-    /** @param {string} cubes one character per unit: 'c' for a cube, '2' otherwise */
-    const layoutFor = cubes=>{
-        const existing = layouts.get(cubes);
-        if (existing)
-        {
-            return existing;
-        }
-        /** @type {any[]} */
-        const entries = [{
-            binding: 0,
-            visibility: VERTEX_STAGE | FRAGMENT_STAGE,
-            buffer: { type: 'uniform', hasDynamicOffset: true },
-        }];
-        [...cubes].forEach((kind, index)=>{
-            entries.push({
-                binding: 1 + index * 2,
-                visibility: FRAGMENT_STAGE,
-                texture: kind === 'c' ? { viewDimension: 'cube' } : {},
-            });
-            entries.push({ binding: 2 + index * 2, visibility: FRAGMENT_STAGE, sampler: {} });
-        });
-        const group = backend.createBindGroupLayout({ label: `gl:${cubes}`, entries });
-        const made = {
-            group,
-            pipeline: backend.createPipelineLayout(
-                { label: `gl:${cubes}`, bindGroupLayouts: [group] }),
-        };
-        layouts.set(cubes, made);
-        return made;
-    };
-
-    /**
-     * @param {string} key
-     * @param {{ code: string, label: string }} source
-     * @param {any} descriptor
-     * @param {string} cubes
-     */
-    const pipelineFor = (key, source, descriptor, cubes)=>{
-        const existing = pipelines.get(key);
-        if (existing)
-        {
-            return existing;
-        }
-        stats.pipelines++;
-        const layout = layoutFor(cubes);
-        const building = (async()=>{
-            const module = await backend.createShaderModule(source);
-            return {
-                layout: layout.group,
-                gpu: backend.createRenderPipeline({
-                    label: source.label,
-                    layout: layout.pipeline,
-                    vertex: { module, entryPoint: 'vertexMain', buffers: descriptor.vertexBuffers },
-                    fragment: { module, entryPoint: 'fragmentMain', targets: [descriptor.target] },
-                    primitive: descriptor.primitive,
-                    depthStencil: descriptor.depthStencil,
-                    multisample: descriptor.multisample,
-                }),
-            };
-        })();
-        pipelines.set(key, building);
-        return building;
-    };
-
     /** The sampler the shown copy is read through: one texel to one pixel. */
     let showSampler = /** @type {any} */ (null);
     const showSamplerFor = ()=>{
@@ -345,6 +420,31 @@ export function createGpuRenderer(services){
         const made = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
         samplers.set(key, made);
         return made;
+    };
+
+    /**
+     * The texture a sampled unit reads with nothing complete bound: the
+     * incomplete texture's value, one black opaque texel.
+     *
+     * @type {Map<boolean, import('./objects.js').TextureObject>}
+     */
+    const incompleteTextures = new Map();
+    /** @param {boolean} cube */
+    const incompleteTexture = cube=>{
+        let texture = incompleteTextures.get(cube);
+        if (!texture)
+        {
+            texture = createTextureObject(0, cube ? GL.TEXTURE_CUBE_MAP : GL.TEXTURE_2D);
+            for (let face = 0; face < (cube ? 6 : 1); face++)
+            {
+                texture.levels.set(levelKey(0, face), {
+                    width: 1, height: 1, internalFormat: GL.RGBA8, border: 0,
+                    baseFormat: GL.RGBA, texels: new Uint8Array([0, 0, 0, 255]),
+                });
+            }
+            incompleteTextures.set(cube, texture);
+        }
+        return texture;
     };
 
     /**
@@ -566,6 +666,8 @@ export function createGpuRenderer(services){
             colourMask: (mask[0] ? 1 : 0) | (mask[1] ? 2 : 0) | (mask[2] ? 4 : 0)
                 | (mask[3] ? 8 : 0),
             polygonOffset: scene.polygonOffset,
+            vertexProgram: scene.programs.vertex,
+            fragmentProgram: scene.programs.fragment,
         };
     };
 
@@ -623,6 +725,95 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * One row of one state matrix, at draw time: the base matrix from the
+     * scene's stacks, through the binding's modifier, down to the row it
+     * names. A singular inverse reads as zeros, which is as good an undefined
+     * as the specification offers.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @param {import('./arb-wgsl.js').ParamSlot} slot
+     * @returns {number[]}
+     */
+    const stateMatrixRow = (scene, slot)=>{
+        let m;
+        switch (slot.matrix)
+        {
+            case 'modelview':
+                m = slot.number === 0 ? scene.modelview : IDENTITY;
+                break;
+            case 'projection':
+                m = scene.projection;
+                break;
+            case 'mvp':
+                m = multiply(scene.projection, scene.modelview);
+                break;
+            default:
+                m = scene.textureMatrices[slot.number ?? 0] ?? IDENTITY;
+                break;
+        }
+        if (slot.modifier === 'inverse' || slot.modifier === 'invtrans')
+        {
+            m = invert(m) ?? ZERO_MATRIX;
+        }
+        if (slot.modifier === 'transpose' || slot.modifier === 'invtrans')
+        {
+            m = transpose(m);
+        }
+        const row = slot.row ?? 0;
+        return [m[row], m[4 + row], m[8 + row], m[12 + row]];
+    };
+
+    /**
+     * A program stage's uniform block: its materialised parameters in slot
+     * order, then the current values of the generic attributes that have no
+     * array behind them.
+     *
+     * @param {import('./arb-wgsl.js').StageNeeds} needs
+     * @param {import('./pipeline.js').SceneProgram} program
+     * @param {import('./pipeline.js').Scene} scene
+     * @returns {Float32Array}
+     */
+    const programUniforms = (needs, program, scene)=>{
+        const parameterCount = Math.max(1, needs.params.length);
+        const block = new Float32Array((parameterCount + needs.genericFallbacks.length) * 4);
+        needs.params.forEach((slot, index)=>{
+            const at = (/** @type {number} */ (slot.index)) * 4;
+            switch (slot.source)
+            {
+                case 'local':
+                    block.set(program.local.subarray(at, at + 4), index * 4);
+                    break;
+                case 'env':
+                    block.set(program.env.subarray(at, at + 4), index * 4);
+                    break;
+                case 'constant':
+                    block.set(/** @type {readonly number[]} */ (slot.values), index * 4);
+                    break;
+                case 'matrix':
+                    block.set(stateMatrixRow(scene, slot), index * 4);
+                    break;
+                default:
+                    break;
+            }
+        });
+        needs.genericFallbacks.forEach((attrib, k)=>{
+            const value = scene.genericAttribs[attrib];
+            if (value)
+            {
+                block.set(value, (parameterCount + k) * 4);
+            }
+        });
+        return block;
+    };
+
+    /**
+     * @typedef {Object} RecordedBinding
+     * @property {number} binding   the texture's binding; the sampler is the next
+     * @property {any} view
+     * @property {any} sampler
+     */
+
+    /**
      * Records one draw of a laid-out vertex stream.
      *
      * @param {object} context
@@ -651,20 +842,39 @@ export function createGpuRenderer(services){
                 + ' they are: the GPU path has no logic operations');
         }
         const state = drawStateOf(scene, layout, topology);
-        const cubes = state.units.map(unit=>(unit.cube ? 'c' : '2')).join('');
         const key = drawKey(state);
+        const generated = generateDraw(state);
+        if (generated.programs?.error)
+        {
+            diverge(`a program draw was refused and drew nothing: ${generated.programs.error}`);
+            return;
+        }
+        const plan = bindPlanOf(state, generated.programs);
         const recording = recordingOf(context);
-        const pipeline = pipelineFor(key, generateDraw(state), drawDescriptor(state), cubes);
-        const bindings = state.units.map((unit, index)=>{
-            const texture = scene.units[index].texture;
-            return { view: textureFor(texture).gpu.view, sampler: samplerFor(texture) };
-        });
+        const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
+        /** @type {RecordedBinding[]} */
+        const bindings = [];
+        for (const entry of plan.textures)
+        {
+            const texture = textureForBinding(scene, entry, plan.fragmentBlock);
+            bindings.push({
+                binding: entry.binding,
+                view: textureFor(texture).gpu.view,
+                sampler: samplerFor(texture),
+            });
+        }
         stats.draws++;
         recording.pipelines.push(pipeline);
         recording.commands.push({
             kind: 'draw',
             pipeline: recording.pipelines.length - 1,
             uniforms: uniformsOf(scene),
+            vertexUniforms: generated.programs?.vertex && state.vertexProgram
+                ? programUniforms(generated.programs.vertex, state.vertexProgram, scene)
+                : null,
+            fragmentUniforms: generated.programs?.fragment && state.fragmentProgram
+                ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene)
+                : null,
             slots,
             indices,
             count,
@@ -674,6 +884,29 @@ export function createGpuRenderer(services){
             ...rectangles(scene, target),
             stencilReference: scene.stencil ? scene.stencil.reference : 0,
         });
+    };
+
+    /**
+     * The texture one binding samples: under a fragment program, what the
+     * unit has bound for the target the instruction named, complete or not,
+     * because a program's sample of a unit with nothing there reads the
+     * incomplete texture's value; on the fixed path, the unit the scene
+     * enabled at that position.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @param {{ binding: number, cube: boolean, unit: number }} entry
+     * @param {boolean} programFragment
+     * @returns {import('./objects.js').TextureObject}
+     */
+    const textureForBinding = (scene, entry, programFragment)=>{
+        if (programFragment)
+        {
+            const bound = scene.boundTextures[entry.unit];
+            const texture = entry.cube ? bound?.cube : bound?.twoD;
+            return texture ?? incompleteTexture(entry.cube);
+        }
+        const position = (entry.binding - 1) / 2;
+        return scene.units[position]?.texture ?? incompleteTexture(entry.cube);
     };
 
     /**
@@ -705,7 +938,10 @@ export function createGpuRenderer(services){
      * @param {import('./pipeline.js').Scene} scene
      */
     const drawArrays = (context, request, scene)=>{
-        if (scene.lighting || !drawables.has(context))
+        // A vertex program replaces the fixed lighting, so a lit scene only
+        // takes the processor path when the position comes from the fixed
+        // pipeline.
+        if ((scene.lighting && !scene.programs.vertex) || !drawables.has(context))
         {
             return false;
         }
@@ -830,7 +1066,7 @@ export function createGpuRenderer(services){
         }
         const recording = recordingOf(context);
         const pipeline = pipelineFor(copyKey(TEXTURE_FORMAT), generateCopy(),
-            showDescriptor(TEXTURE_FORMAT), '2');
+            showDescriptor(TEXTURE_FORMAT), SINGLE_TEXTURE_PLAN);
         const uniforms = new Float32Array(COPY_UNIFORM_FLOATS);
         uniforms.set([x, y, xoffset, yoffset, target.width, target.height], 0);
         recording.pipelines.push(pipeline);
@@ -867,7 +1103,8 @@ export function createGpuRenderer(services){
         const state = { targetFormat: COLOUR_FORMAT, depthFormat: DEPTH_FORMAT, colourMask, depth,
             stencilMask };
         const recording = recordingOf(context);
-        const pipeline = pipelineFor(clearKey(state), generateClear(), clearDescriptor(state), '');
+        const pipeline = pipelineFor(clearKey(state), generateClear(), clearDescriptor(state),
+            NO_TEXTURE_PLAN);
         const uniforms = new Float32Array(CLEAR_UNIFORM_FLOATS);
         uniforms.set(request.colour.slice(0, 4), 0);
         uniforms[4] = Math.min(1, Math.max(0, request.depth));
@@ -905,7 +1142,7 @@ export function createGpuRenderer(services){
      */
     const replay = async(recording, target, shown)=>{
         const show = pipelineFor(showKey(COLOUR_FORMAT), generateShow(),
-            showDescriptor(COLOUR_FORMAT), '2');
+            showDescriptor(COLOUR_FORMAT), SINGLE_TEXTURE_PLAN);
         const built = await Promise.allSettled([...recording.pipelines, show]);
         const frame = backend.beginFrame();
         try
@@ -986,10 +1223,24 @@ export function createGpuRenderer(services){
                     pass.setStencilReference(stencilReference);
                 }
                 const entries = [{ binding: 0, resource: pass.uniforms(command.uniforms) }];
-                command.bindings.forEach((/** @type {any} */ bound, /** @type {number} */ i)=>{
-                    entries.push({ binding: 1 + i * 2, resource: bound.view },
-                        { binding: 2 + i * 2, resource: bound.sampler });
+                command.bindings.forEach((/** @type {any} */ bound)=>{
+                    entries.push({ binding: bound.binding, resource: bound.view },
+                        { binding: bound.binding + 1, resource: bound.sampler });
                 });
+                if (command.vertexUniforms)
+                {
+                    entries.push({
+                        binding: VERTEX_PROGRAM_BINDING,
+                        resource: pass.uniforms(command.vertexUniforms),
+                    });
+                }
+                if (command.fragmentUniforms)
+                {
+                    entries.push({
+                        binding: FRAGMENT_PROGRAM_BINDING,
+                        resource: pass.uniforms(command.fragmentUniforms),
+                    });
+                }
                 pass.setBindings(0, pipeline.layout, entries);
                 command.slots.forEach((/** @type {any} */ slot, /** @type {number} */ index)=>{
                     pass.setVertexBuffer(index, slot.gpu, slot.offset);

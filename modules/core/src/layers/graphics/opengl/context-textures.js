@@ -256,6 +256,25 @@ export function installTextureCalls(context, kernel){
             return out;
         },
 
+        /**
+         * The texture actually bound to a unit's target, or null. Unlike the
+         * internal reader this never falls back to the unit's default: a
+         * fragment program sampling a unit with nothing bound has to be told
+         * so, and answers the incomplete-texture value.
+         *
+         * @param {number} unitIndex
+         * @param {number} target
+         */
+        textureBoundAt(unitIndex, target){
+            const unit = units[unitIndex];
+            if (!unit || !unit.bindings.has(target))
+            {
+                return null;
+            }
+            const name = unit.bindings.get(target) ?? 0;
+            return name === 0 ? null : kernel.shareGroup().textures.objects.get(name) ?? null;
+        },
+
         /** @param {number} mask @returns {any} */
         saveServerTextures(mask){
             if ((mask & (GL.TEXTURE_BIT | GL.ENABLE_BIT)) === 0)

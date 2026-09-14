@@ -337,32 +337,93 @@ export function installArrayCalls(context, kernel){
 
     /**
      * The enabled arrays as a renderer takes them, the vertex array first.
+     * Under a vertex program the generic attribute arrays join them: an
+     * index whose canonical name a conventional array already feeds stays
+     * out, because the conventional array is the one the aliasing table
+     * resolves, and the rest arrive under their `attribN` names.
      *
      * @returns {import('./gpu-layout.js').ArrayRequest[]}
      */
     function enabledArrays(){
         const enabled = (/** @type {string} */ name)=>record(ARRAYS[name].enable).values[0] !== 0;
+        /** @type {{ name: string, normalised: boolean,
+         *           pointer: import('./arrays.js').ArrayPointer }[]} */
+        const generic = record(GL.VERTEX_PROGRAM_ARB).values[0] !== 0
+            ? kernel.side.programs?.genericArrays() ?? []
+            : [];
+        const genericByName = new Map(generic.map(entry=>[entry.name, entry]));
+        /**
+         * @param {string} name
+         * @param {import('./arrays.js').ArrayPointer} pointer
+         * @param {boolean} normalised
+         */
+        const push = (name, pointer, normalised)=>arrays.push({ name, pointer, normalised });
         /** @type {import('./gpu-layout.js').ArrayRequest[]} */
-        const arrays = [{ name: 'position', pointer: pointers.vertex, normalised: false }];
+        const arrays = [];
+        /** @param {string} name @param {import('./arrays.js').ArrayPointer} pointer
+         *  @param {boolean} normalised */
+        const named = (name, pointer, normalised)=>{
+            if (!arrays.some(entry=>entry.name === name))
+            {
+                push(name, pointer, normalised);
+            }
+        };
+        const fromGeneric = genericByName.get('position');
+        if (enabled('vertex') || !fromGeneric)
+        {
+            push('position', pointers.vertex, false);
+        }
+        else
+        {
+            push('position', fromGeneric.pointer, fromGeneric.normalised);
+        }
         for (const [name, as] of [['color', 'color'], ['secondary', 'secondary'],
             ['normal', 'normal'], ['fogCoord', 'fogCoord']])
         {
             if (enabled(name))
             {
-                arrays.push({
-                    name: as, pointer: pointers[name], normalised: ARRAYS[name].normalised,
-                });
+                push(as, pointers[name], ARRAYS[name].normalised);
+                continue;
+            }
+            const entry = genericByName.get(as);
+            if (entry)
+            {
+                push(as, entry.pointer, entry.normalised);
             }
         }
         for (let unit = 0; unit < TEXTURE_UNITS; unit++)
         {
+            const as = `texCoord${unit}`;
             if (texCoordEnabled[unit] !== 0)
             {
-                arrays.push({ name: `texCoord${unit}`, pointer: texCoordPointers[unit],
-                    normalised: false });
+                push(as, texCoordPointers[unit], false);
+                continue;
+            }
+            const entry = genericByName.get(as);
+            if (entry)
+            {
+                push(as, entry.pointer, entry.normalised);
             }
         }
+        for (const entry of generic)
+        {
+            named(entry.name, entry.pointer, entry.normalised);
+        }
         return arrays;
+    }
+
+    /**
+     * Whether a draw has a position to read: the conventional vertex array,
+     * or the generic attribute zero array under a vertex program, which the
+     * aliasing table makes the same attribute.
+     */
+    function hasVertexSource(){
+        if (record(GL.VERTEX_ARRAY).values[0] !== 0)
+        {
+            return true;
+        }
+        return record(GL.VERTEX_PROGRAM_ARB).values[0] !== 0
+            && kernel.side.programs?.attribArrays[0].enabled === 1;
     }
 
     /**
@@ -376,7 +437,14 @@ export function installArrayCalls(context, kernel){
      * @returns {boolean}
      */
     function drawFromArrays(mode, first, count, indexed){
-        if (!kernel.drawArrays || !readerFor(pointers.vertex))
+        if (!kernel.drawArrays)
+        {
+            return false;
+        }
+        const arrays = enabledArrays();
+        // The position array, conventional or generic, is the one a draw
+        // cannot be read without.
+        if (!readerFor(arrays[0].pointer))
         {
             return false;
         }
@@ -403,7 +471,7 @@ export function installArrayCalls(context, kernel){
             first,
             count,
             indices,
-            arrays: enabledArrays(),
+            arrays,
             read: memory ? (at, n)=>memory.read(at, n) : ()=>new Uint8Array(0),
             bufferObject: name=>kernel.shareGroup().buffers.objects.get(name),
         });
@@ -760,8 +828,7 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            if (record(GL.VERTEX_ARRAY).values[0] === 0
-                || drawFromArrays(mode, first, count, null))
+            if (!hasVertexSource() || drawFromArrays(mode, first, count, null))
             {
                 return;
             }
@@ -797,8 +864,7 @@ export function installArrayCalls(context, kernel){
                 setError(GL.INVALID_OPERATION);
                 return;
             }
-            if (record(GL.VERTEX_ARRAY).values[0] === 0
-                || drawFromArrays(mode, 0, count, { type, indices }))
+            if (!hasVertexSource() || drawFromArrays(mode, 0, count, { type, indices }))
             {
                 return;
             }

@@ -32,6 +32,7 @@
  */
 
 import { GL } from './constants.js';
+import { emitFragment, emitVertex } from './arb-wgsl.js';
 
 /**
  * @typedef {Object} UnitState
@@ -68,6 +69,9 @@ import { GL } from './constants.js';
  * @property {boolean} frontIsCcw
  * @property {number} colourMask     bits: red 1, green 2, blue 4, alpha 8
  * @property {{ factor: number, units: number } | null} polygonOffset
+ * @property {import('./pipeline.js').SceneProgram | null} vertexProgram
+ *           the enabled, loaded vertex program; null draws the fixed stage
+ * @property {import('./pipeline.js').SceneProgram | null} fragmentProgram
  */
 
 /** How many texture units the uniform block and the layouts allow for. */
@@ -204,6 +208,12 @@ export function drawKey(state){
         state.frontIsCcw ? 'ccw' : 'cw',
         state.colourMask,
         state.polygonOffset ? `${state.polygonOffset.factor},${state.polygonOffset.units}` : '-',
+        state.vertexProgram
+            ? `vp${state.vertexProgram.name}.${state.vertexProgram.version}`
+            : '-',
+        state.fragmentProgram
+            ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}`
+            : '-',
     ].join('|');
 }
 
@@ -481,30 +491,56 @@ function environment(unit){
 }
 
 /**
- * The shader pair for a draw state, as one module with both entry points.
+ * The varying struct both stages share: the vertex side declares it, the
+ * fragment side reads it, and a program stage and a fixed stage agree on it
+ * because both are generated against the same set.
  *
- * @param {DrawState} state
- * @returns {{ code: string, label: string }}
+ * @param {import('./arb-wgsl.js').StageVaryings} varyings
+ * @param {boolean} flat
  */
-export function generateDraw(state){
-    const has = (/** @type {string} */ name)=>state.attributes.find(a=>a.name === name);
+function vertexOutStruct(varyings, flat){
+    const interpolation = flat ? '@interpolate(flat) ' : '';
+    const fields = [
+        '    @builtin(position) position: vec4f,',
+        `    @location(0) ${interpolation}color: vec4f,`,
+        `    @location(1) ${interpolation}secondary: vec4f,`,
+        '    @location(2) fog: f32,',
+        ...varyings.texcoords.map((set, i)=>`    @location(${3 + i}) tc${set}: vec4f,`),
+        ...(varyings.fogCoord
+            ? [`    @location(${3 + varyings.texcoords.length}) fogCoord: f32,`]
+            : []),
+    ];
+    return `struct VertexOut {
+${fields.join('\n')}
+};`;
+}
+
+/** @param {DrawState} state */
+function fixedVertexIn(state){
     const inputs = state.attributes
         .map((attribute, location)=>
             `    @location(${location}) ${attribute.name}: ${attributeType(attribute)},`)
         .join('\n');
-    const flat = state.flat ? '@interpolate(flat) ' : '';
-    const varyings = [
-        `    @location(0) ${flat}color: vec4f,`,
-        `    @location(1) ${flat}secondary: vec4f,`,
-        '    @location(2) fog: f32,',
-        ...state.units.map((unit, i)=>`    @location(${3 + i}) tc${unit.index}: vec4f,`),
-    ].join('\n');
+    return `struct VertexIn {
+${inputs}
+};`;
+}
 
+/**
+ * The fixed-function vertex stage, generating the varyings it was told to:
+ * the enabled units' sets on the fixed path, and every set plus the raw fog
+ * coordinate when a fragment program is the one reading them.
+ *
+ * @param {DrawState} state
+ * @param {import('./arb-wgsl.js').StageVaryings} varyings
+ */
+function fixedVertexMain(state, varyings){
+    const has = (/** @type {string} */ name)=>state.attributes.find(a=>a.name === name);
     const position = has('position');
     const colour = has('color');
     const secondary = has('secondary');
     const normal = has('normal');
-    const fogCoord = has('fogCoord');
+    const fogCoordAttribute = has('fogCoord');
     const needsNormal = state.units.some(unit=>unit.generation.some(mode=>
         mode === GL.SPHERE_MAP || mode === GL.REFLECTION_MAP || mode === GL.NORMAL_MAP));
 
@@ -522,31 +558,70 @@ export function generateDraw(state){
     if (needsNormal)
     {
         vertexBody.push(
-            `    let objectNormal = ${normal ? widen(normal, [0, 0, 1, 0]) : 'uniforms.normal'};`,
+            `    let objectNormal = ${normal
+                ? widen(normal, [0, 0, 1, 0])
+                : 'uniforms.normal'};`,
             '    let eyeNormal = normalize('
                 + '(uniforms.normalMatrix * vec4f(objectNormal.xyz, 0.0)).xyz);',
             '    let eyeDirection = normalize('
                 + 'eyePosition.xyz / select(eyePosition.w, 1.0, eyePosition.w == 0.0));');
     }
-    if (state.fog)
+    if (state.fog || varyings.fogCoord)
     {
-        const c = state.fog.fromCoordinate
-            ? (fogCoord ? 'vertex.fogCoord' : 'uniforms.fogParams.w')
+        const fromCoordinate = state.fog ? state.fog.fromCoordinate : false;
+        const c = fromCoordinate
+            ? (fogCoordAttribute ? 'vertex.fogCoord' : 'uniforms.fogParams.w')
             : 'abs(eyePosition.z / select(eyePosition.w, 1.0, eyePosition.w == 0.0))';
-        vertexBody.push(`    let c = ${c};`,
-            `    out.fog = clamp(${fogFactorOf(state.fog)}, 0.0, 1.0);`);
+        vertexBody.push(`    let c = ${c};`);
+        vertexBody.push(state.fog
+            ? `    out.fog = clamp(${fogFactorOf(state.fog)}, 0.0, 1.0);`
+            : '    out.fog = 1.0;');
+        if (varyings.fogCoord)
+        {
+            vertexBody.push('    out.fogCoord = c;');
+        }
     }
     else
     {
         vertexBody.push('    out.fog = 1.0;');
     }
-    for (const unit of state.units)
+    for (const set of varyings.texcoords)
     {
-        const attribute = has(`texCoord${unit.index}`);
-        vertexBody.push(textureCoordinates(unit,
-            attribute ? widen(attribute, [0, 0, 0, 1]) : `uniforms.texCoord[${unit.index}]`));
+        const attribute = has(`texCoord${set}`);
+        const given = attribute
+            ? widen(attribute, [0, 0, 0, 1])
+            : `uniforms.texCoord[${set}]`;
+        const unit = state.units.find(candidate=>candidate.index === set);
+        if (unit)
+        {
+            vertexBody.push(textureCoordinates(unit, given));
+        }
+        else
+        {
+            // A set the fixed pipeline is not running carries its coordinate
+            // through as it is, for the program stage that reads it.
+            vertexBody.push(`    out.tc${set} = ${given};`);
+        }
     }
+    return `@vertex
+fn vertexMain(vertex: VertexIn) -> VertexOut {
+    var out: VertexOut;
+${vertexBody.join('\n')}
+    return out;
+}`;
+}
 
+/** The fixed-function fragment stage: its texture bindings and its entry. */
+const SPHERE_MAP_FN = `fn sphereMap(r: vec3f) -> vec2f {
+    let m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
+    return select(r.xy / m + vec2f(0.5), vec2f(0.5), m == 0.0);
+}`;
+
+/**
+ * @param {DrawState} state
+ * @returns {{ bindings: string, main: string }}
+ */
+function fixedFragment(state){
     const bindings = state.units.map((unit, i)=>
         `@group(0) @binding(${1 + i * 2}) var t${unit.index}Texture: `
         + `${unit.cube ? 'texture_cube<f32>' : 'texture_2d<f32>'};\n`
@@ -585,36 +660,117 @@ export function generateDraw(state){
             '    {', '        discard;', '    }');
     }
     fragmentBody.push('    return current;');
-
-    const code = `${UNIFORM_STRUCT}${bindings}
-
-struct VertexIn {
-${inputs}
-};
-
-struct VertexOut {
-    @builtin(position) position: vec4f,
-${varyings}
-};
-
-fn sphereMap(r: vec3f) -> vec2f {
-    let m = 2.0 * sqrt(r.x * r.x + r.y * r.y + (r.z + 1.0) * (r.z + 1.0));
-    return select(r.xy / m + vec2f(0.5), vec2f(0.5), m == 0.0);
-}
-
-@vertex
-fn vertexMain(vertex: VertexIn) -> VertexOut {
-    var out: VertexOut;
-${vertexBody.join('\n')}
-    return out;
-}
-
-@fragment
+    const main = `@fragment
 fn fragmentMain(input: VertexOut) -> @location(0) vec4f {
 ${fragmentBody.join('\n')}
+}`;
+    return { bindings, main };
 }
+
+/**
+ * The shader pair for a draw state, as one module with both entry points,
+ * and -- when a program stage runs -- what its uniform block has to carry.
+ *
+ * @param {DrawState} state
+ * @returns {{ code: string, label: string,
+ *             programs: ProgramStages | null }}
+ */
+export function generateDraw(state){
+    if (state.vertexProgram || state.fragmentProgram)
+    {
+        return generateProgramDraw(state);
+    }
+    const varyings = { texcoords: state.units.map(unit=>unit.index), fogCoord: false };
+    const fragment = fixedFragment(state);
+    const code = `${UNIFORM_STRUCT}${fragment.bindings}
+
+${fixedVertexIn(state)}
+
+${vertexOutStruct(varyings, state.flat)}
+
+${SPHERE_MAP_FN}
+
+${fixedVertexMain(state, varyings)}
+
+${fragment.main}
 `;
-    return { code, label: `gl:${drawKey(state)}` };
+    return { code, label: `gl:${drawKey(state)}`, programs: null };
+}
+
+/**
+ * @typedef {Object} ProgramStages
+ *     What the two program uniform blocks carry, per stage.
+ * @property {import('./arb-wgsl.js').StageNeeds | null} vertex
+ * @property {import('./arb-wgsl.js').StageNeeds | null} fragment
+ * @property {string | null} error  why no module could be generated
+ */
+
+/**
+ * A draw under a program: each stage is the emitted one where a program is
+ * enabled and bound, the fixed one where it is not, and both share the fixed
+ * uniform block and one varying struct.
+ *
+ * @param {DrawState} state
+ * @returns {{ code: string, label: string, programs: ProgramStages }}
+ */
+function generateProgramDraw(state){
+    const label = `gl:${drawKey(state)}`;
+    /** @param {string} error */
+    const refused = error=>({
+        code: '', label, programs: { vertex: null, fragment: null, error },
+    });
+
+    const fragmentStage = state.fragmentProgram
+        ? emitFragment(state.fragmentProgram.ir)
+        : null;
+    if (fragmentStage && 'error' in fragmentStage)
+    {
+        return refused(fragmentStage.error);
+    }
+    // A fragment program reads any coordinate set and the raw fog
+    // coordinate; a fixed fragment reads only what its enabled units use.
+    const varyings = state.fragmentProgram
+        ? { texcoords: [0, 1, 2, 3].slice(0, UNITS), fogCoord: true }
+        : { texcoords: state.units.map(unit=>unit.index), fogCoord: false };
+    const inputs = state.attributes.map(attribute=>({
+        name: attribute.name, components: attribute.components, scalar: attribute.scalar,
+    }));
+    const vertexStage = state.vertexProgram
+        ? emitVertex(state.vertexProgram.ir, inputs, varyings)
+        : null;
+    if (vertexStage && 'error' in vertexStage)
+    {
+        return refused(vertexStage.error);
+    }
+
+    const vertexCode = vertexStage
+        ? vertexStage.code
+        : `${fixedVertexIn(state)}
+
+${vertexOutStruct(varyings, state.flat)}
+
+${SPHERE_MAP_FN}
+
+${fixedVertexMain(state, varyings)}
+`;
+    const fragmentCode = fragmentStage
+        ? fragmentStage.code
+        : `${fixedFragment(state).bindings}
+
+${fixedFragment(state).main}
+`;
+    const code = `${UNIFORM_STRUCT}
+${vertexCode}
+${fragmentCode}`;
+    return {
+        code,
+        label,
+        programs: {
+            vertex: vertexStage ? vertexStage.needs : null,
+            fragment: fragmentStage ? fragmentStage.needs : null,
+            error: null,
+        },
+    };
 }
 
 /**

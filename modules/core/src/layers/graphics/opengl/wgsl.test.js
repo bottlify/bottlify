@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createTextureEnvironment } from './texture.js';
+import { parseProgram } from './arb-program.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
     UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
@@ -53,6 +54,8 @@ const state = (fields = {})=>({
     frontIsCcw: true,
     colourMask: 0xf,
     polygonOffset: null,
+    vertexProgram: null,
+    fragmentProgram: null,
     ...fields,
 });
 
@@ -275,4 +278,61 @@ test('the copy key folds its target format, and the shader reads the source flip
     assert.match(code, /let u = \(uniforms\.rect\.x \+ k\.x\) \/ uniforms\.size\.x/);
     assert.match(code,
         /let v = \(uniforms\.size\.y - uniforms\.rect\.y - k\.y\) \/ uniforms\.size\.y/);
+});
+
+/**
+ * A bound, loaded program, as the scene hands it to the draw state.
+ *
+ * @param {string} text
+ * @param {number} [version]
+ */
+function program(text, version = 1){
+    const parsed = parseProgram(text);
+    assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
+    return {
+        name: 1, version, ir: parsed, local: new Float32Array(4), env: new Float32Array(4),
+    };
+}
+
+test('a program stage replaces the fixed stage it is bound for', ()=>{
+    const vertex = program('!!ARBvp1.0\nMOV result.position, vertex.position;\n'
+        + 'MOV result.color, vertex.color;\nEND\n');
+    const both = state({ vertexProgram: vertex, fragmentProgram: program(
+        '!!ARBfp1.0\nMOV result.color, fragment.color;\nEND\n') });
+    const generated = generateDraw(both);
+    assert.equal(generated.programs?.error, null);
+    assert.match(generated.code, /fn vertexMain\(vertex: VertexIn\) -> VertexOut/);
+    assert.match(generated.code, /struct VertexProgramUniforms/);
+    assert.match(generated.code, /struct FragmentProgramUniforms/);
+    assert.match(generated.code, /var finalColor = clamp\(resultColor/,
+        'the fragment stage is the emitted one');
+    assert.ok(generated.programs?.vertex && generated.programs?.fragment);
+
+    // The mixed pair: the emitted vertex feeds the fixed fragment through the
+    // shared varyings, and the fixed fragment is the one the key already ran.
+    const mixed = generateDraw(state({ vertexProgram: vertex }));
+    assert.equal(mixed.programs?.fragment, null);
+    assert.match(mixed.code, /let primary = clamp\(input\.color/,
+        'the fixed fragment still runs');
+    assert.match(mixed.code, /fn vertexMain\(vertex: VertexIn\) -> VertexOut/);
+
+    const reverse = generateDraw(state({ fragmentProgram: both.fragmentProgram }));
+    assert.equal(reverse.programs?.vertex, null);
+    assert.match(reverse.code, /out\.fog = 1\.0;/, 'the fixed vertex still runs');
+    assert.match(reverse.code, /@location\(7\) fogCoord: f32,/,
+        'and carries the raw fog coordinate the program may read');
+
+    // The key names the programs, and a new version is a new key.
+    assert.notEqual(drawKey(both), drawKey(state()));
+    assert.notEqual(drawKey(both), drawKey(state({ vertexProgram: vertex })));
+    assert.notEqual(drawKey(both),
+        drawKey({ ...both, vertexProgram: { ...vertex, version: 2 } }),
+    );
+});
+
+test('a binding the GPU path cannot answer refuses the module by name', ()=>{
+    const generated = generateDraw(state({ vertexProgram: program(
+        '!!ARBvp1.0\nPARAM m = state.material.ambient;\nMOV result.position, m;\nEND\n') }));
+    assert.equal(generated.code, '');
+    assert.match(/** @type {string} */ (generated.programs?.error), /state\.material\.ambient/);
 });

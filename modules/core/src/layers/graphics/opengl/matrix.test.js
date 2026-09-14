@@ -6,7 +6,8 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { STACK_LIMITS, frustum, identity, multiply, ortho, rotation, scaling, translation }
+import { STACK_LIMITS, frustum, identity, invert, multiply, ortho, rotation, scaling,
+    translation, transpose }
     from './matrix.js';
 
 /**
@@ -134,4 +135,27 @@ test('the stacks are the depths the specification requires and no deeper', ()=>{
     assert.equal(STACK_LIMITS.modelview, 32);
     assert.equal(STACK_LIMITS.projection, 2);
     assert.equal(STACK_LIMITS.texture, 2);
+});
+
+test('a transpose swaps rows and columns of a column-major matrix', ()=>{
+    const m = translation(1, 2, 3);
+    const t = transpose(m);
+    // The translation lives in elements 12..14 of a column-major matrix, so
+    // the transpose moves it into elements 3, 7 and 11.
+    assertClose([t[3], t[7], t[11]], [1, 2, 3], 'the translation moved to the last column');
+    assertClose([t[12], t[13], t[14]], [0, 0, 0], 'and left the last row');
+    assertClose(transpose(t), [...m], 'transposing twice is the identity');
+});
+
+test('an inverse multiplies back to the identity, and a singular matrix has none', ()=>{
+    const m = multiply(multiply(translation(4, -2, 7), rotation(35, 1, 2, 3)), scaling(2, 3, 4));
+    const inv = invert(m);
+    assert.ok(inv, 'a rigid transform is invertible');
+    assertClose(multiply(m, inv), [...identity()], 'M * M^-1 = I');
+    assertClose(multiply(inv, m), [...identity()], 'M^-1 * M = I');
+    assertClose(/** @type {Float64Array} */ (invert(inv)), [...m], 'the inverse round-trips');
+    assert.equal(invert(new Float64Array(16)), null, 'a singular matrix has no inverse');
+    const projection = /** @type {Float64Array} */ (frustum(-1, 1, -1, 1, 1, 100));
+    const back = /** @type {Float64Array} */ (invert(projection));
+    assertClose(multiply(projection, back), [...identity()], 'a frustum is invertible');
 });

@@ -106,6 +106,17 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  */
 
 /**
+ * @typedef {Object} SceneProgram
+ *     One stage's bound, loaded program, as the renderer reads it.
+ * @property {number} name
+ * @property {number} version  raised on every load, so a re-specified program
+ *           is a different pipeline
+ * @property {import('./arb-program.js').ParsedProgram} ir
+ * @property {Float32Array} local   the object's local parameters
+ * @property {Float32Array} env     the target's environment parameters
+ */
+
+/**
  * @typedef {Object} Scene
  * @property {ArrayLike<number>} modelview
  * @property {ArrayLike<number>} projection
@@ -130,6 +141,16 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {number} pointSize
  * @property {{ func: number, reference: number } | null} alphaTest
  * @property {import('./raster.js').FragmentOperations} operations
+ * @property {{ vertex: SceneProgram | null, fragment: SceneProgram | null }} programs
+ *           the enabled, loaded programs; null per stage when that stage is fixed
+ * @property {readonly (readonly number[])[]} genericAttribs  the current
+ *           generic vertex attribute values, by attribute number
+ * @property {readonly (ArrayLike<number> | null)[]} textureMatrices  the texture
+ *           matrix of each unit, whether or not it is enabled
+ * @property {readonly { twoD: import('./objects.js').TextureObject | null,
+ *             cube: import('./objects.js').TextureObject | null }[]} boundTextures
+ *           what each unit has bound per target, whether or not it is enabled,
+ *           which is what a fragment program samples
  */
 
 /** Where each attribute sits in the interpolated vector. */

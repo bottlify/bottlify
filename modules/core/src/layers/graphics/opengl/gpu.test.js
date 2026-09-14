@@ -247,7 +247,9 @@ test('a texture is uploaded once per version, a cube map face by face', async()=
     assert.deepEqual(faces.map(f=>f.destination.origin.z), [0, 1, 2, 3, 4, 5]);
     const cube = r.gpu.of('createTexture').find(t=>/gl-texture:2/.test(t.descriptor.label));
     assert.equal(cube.descriptor.size.depthOrArrayLayers, 6);
-    const layout = r.gpu.of('createBindGroupLayout').find(l=>l.descriptor.label === 'gl:c');
+    const layout = r.gpu.of('createBindGroupLayout')
+        .find(l=>l.descriptor.entries
+            .some((/** @type {any} */ e)=>e.texture?.viewDimension === 'cube'));
     assert.equal(layout.descriptor.entries[1].texture.viewDimension, 'cube');
 });
 
@@ -419,4 +421,244 @@ test('glCopyTexImage2D gives a level a shape and copies the framebuffer into it'
     const stored = context.shareGroup.textures.objects.get(1).levels.get(0);
     assert.equal(stored.texels, null);
     assert.equal(context.glGetError(), GL.NO_ERROR);
+});
+
+// --- ARB programs on the device path ---
+
+/** A vertex program: the MVP transform, an env tint, one coordinate set. */
+const VERTEX_PROGRAM = `!!ARBvp1.0
+TEMP clip;
+PARAM mvp[4] = { state.matrix.mvp };
+PARAM tint = program.env[2];
+DP4 clip.x, vertex.position, mvp[0];
+DP4 clip.y, vertex.position, mvp[1];
+DP4 clip.z, vertex.position, mvp[2];
+DP4 clip.w, vertex.position, mvp[3];
+MOV result.position, clip;
+MUL result.color, vertex.color, tint;
+MOV result.texcoord[0], vertex.texcoord[0];
+END
+`;
+
+/** A fragment program: one texture sample scaled by a local parameter. */
+const FRAGMENT_PROGRAM = `!!ARBfp1.0
+TEMP texel;
+PARAM scale = program.local[1];
+TEX texel, fragment.texcoord[0], texture[0], 2D;
+MUL result.color, texel, scale;
+END
+`;
+
+/**
+ * @param {ReturnType<typeof rig>} r
+ * @param {number} at
+ * @param {string} text
+ */
+function putProgram(r, at, text){
+    r.bytes.set(new TextEncoder().encode(text), at);
+    return text.length;
+}
+
+/**
+ * Three vertices of 48 bytes: a position, a colour and a texture coordinate,
+ * in a buffer object, with both programs loaded, bound and enabled and the
+ * fragment program's texture bound but its unit not enabled.
+ *
+ * @param {ReturnType<typeof rig>} r
+ */
+function programRig(r){
+    const { context } = r;
+    for (let i = 0; i < 3; i++)
+    {
+        r.floats(0x1000 + i * 48, [i * 8, i * 4, 0]);
+        r.floats(0x1000 + i * 48 + 12, [1, 0.5, 0.25, 1]);
+        r.floats(0x1000 + i * 48 + 28, [i * 0.5, 0]);
+    }
+    context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * 48, 0x1000, GL.STATIC_DRAW);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glEnableClientState(GL.COLOR_ARRAY);
+    context.glEnableClientState(GL.TEXTURE_COORD_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, 48, 0);
+    context.glColorPointer(4, GL.FLOAT, 48, 12);
+    context.glTexCoordPointer(2, GL.FLOAT, 48, 28);
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4 * 4 * 4).fill(0x80));
+    context.glGenProgramsARB(2);
+    context.glBindProgramARB(GL.VERTEX_PROGRAM_ARB, 1);
+    context.glProgramStringARB(GL.VERTEX_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x3000, VERTEX_PROGRAM), 0x3000);
+    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 2);
+    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x4000, FRAGMENT_PROGRAM), 0x4000);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 2, [1, 0.5, 0.25, 1]);
+    context.glProgramLocalParameter4fARB(GL.FRAGMENT_PROGRAM_ARB, 1, [0.25, 0.5, 0.75, 1]);
+    context.glEnable(GL.VERTEX_PROGRAM_ARB);
+    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
+    r.words(0x2000, [0, 1, 2]);
+}
+
+test('a draw under both programs runs the emitted stages and fills their blocks', async()=>{
+    const r = rig();
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const modules = r.gpu.of('createShaderModule')
+        .filter(m=>/vertexProgram\.params/.test(m.descriptor.code));
+    assert.equal(modules.length, 1, 'one module carries the program stages');
+    const code = modules[0].descriptor.code;
+    assert.match(code, /fn vertexMain\(vertex: VertexIn\) -> VertexOut/,
+        'the vertex stage is the emitted one');
+    assert.match(code, /fn fragmentMain\(input: VertexOut\)/,
+        'and so is the fragment stage');
+    assert.match(code, /textureSample\(t0Texture, t0Sampler, s\d+_0\.xy\)/);
+    assert.match(code, /struct FragmentProgramUniforms/);
+
+    // The layout carries both program blocks and the sampled unit's texture,
+    // bound although its target was never enabled.
+    const layout = r.gpu.of('createBindGroupLayout')
+        .find(l=>l.descriptor.entries.some((/** @type {any} */ e)=>e.binding === 9));
+    assert.ok(layout, 'a layout with the vertex program block');
+    const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
+    assert.ok(bindings.includes(10), 'the fragment program block');
+    assert.ok(bindings.includes(1) && bindings.includes(2), 'unit zero samples anyway');
+
+    // The vertex block: four MVP rows, then the env parameter. An orthographic
+    // projection of 0..64 by 0..32 over an identity modelview.
+    const vertexBlock = r.gpu.of('writeBuffer').find(w=>w.size === 20 * 4
+        && /uniforms/.test(w.buffer.descriptor.label));
+    assert.ok(vertexBlock, 'the vertex program block travelled');
+    const vertexFloats = new Float32Array(vertexBlock.bytes.buffer,
+        vertexBlock.bytes.byteOffset, 20);
+    assert.equal(vertexFloats[0], 2 / 64, 'MVP row zero, x scale');
+    assert.equal(vertexFloats[3], -1, 'MVP row zero, translation');
+    assert.deepEqual([...vertexFloats.subarray(16, 20)], [1, 0.5, 0.25, 1],
+        'the env parameter the program binds');
+    const fragmentBlock = r.gpu.of('writeBuffer').find(w=>w.size === 4 * 4
+        && /uniforms/.test(w.buffer.descriptor.label));
+    assert.ok(fragmentBlock, 'the fragment program block travelled');
+    const fragmentFloats = new Float32Array(fragmentBlock.bytes.buffer,
+        fragmentBlock.bytes.byteOffset, 4);
+    assert.deepEqual([...fragmentFloats], [0.25, 0.5, 0.75, 1],
+        'the local parameter of the bound program object');
+    assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
+});
+
+test('a re-specified program is a new pipeline', async()=>{
+    const r = rig();
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+    const before = r.renderer.diagnostics().pipelines;
+    // The same object with a new string: the key names the version, so the
+    // next draw builds a pipeline rather than reusing the stale one.
+    const second = `!!ARBfp1.0
+TEMP texel;
+PARAM scale = program.local[1];
+TEX texel, fragment.texcoord[0], texture[0], 2D;
+MUL result.color, texel, scale;
+MOV result.depth, fragment.position.z;
+END
+`;
+    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 2);
+    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x4000, second), 0x4000);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+    assert.equal(r.renderer.diagnostics().pipelines, before + 1,
+        'the re-specified program compiled its own pipeline');
+    const depths = r.gpu.of('createShaderModule')
+        .filter(m=>/frag_depth/.test(m.descriptor.code));
+    assert.equal(depths.length, 1, 'and the new stage writes depth');
+});
+
+test('a generic attribute array becomes a vertex buffer slot', async()=>{
+    const r = rig();
+    const { context } = r;
+    for (let i = 0; i < 3; i++)
+    {
+        r.floats(0x1000 + i * 32, [i * 8, i * 4, 0]);
+        r.floats(0x1000 + i * 32 + 12, [1, 0, 0, 1]);
+    }
+    context.glGenBuffersARB(1);
+    context.glBindBufferARB(GL.ARRAY_BUFFER, 1);
+    context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * 32, 0x1000, GL.STATIC_DRAW);
+    context.glEnableClientState(GL.VERTEX_ARRAY);
+    context.glVertexPointer(3, GL.FLOAT, 32, 0);
+    context.glVertexAttribPointerARB(7, 4, GL.FLOAT, 0, 32, 12);
+    context.glEnableVertexAttribArrayARB(7);
+    context.glGenProgramsARB(1);
+    context.glBindProgramARB(GL.VERTEX_PROGRAM_ARB, 1);
+    const text = `!!ARBvp1.0
+ATTRIB extra = vertex.attrib[7];
+PARAM mvp[4] = { state.matrix.mvp };
+TEMP clip;
+DP4 clip.x, vertex.position, mvp[0];
+DP4 clip.y, vertex.position, mvp[1];
+DP4 clip.z, vertex.position, mvp[2];
+DP4 clip.w, vertex.position, mvp[3];
+MOV result.position, clip;
+MOV result.color, extra;
+END
+`;
+    context.glProgramStringARB(GL.VERTEX_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        putProgram(r, 0x3000, text), 0x3000);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    context.glEnable(GL.VERTEX_PROGRAM_ARB);
+    r.words(0x2000, [0, 1, 2]);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const pipeline = r.gpu.of('createRenderPipeline')
+        .find(p=>/vp1\./.test(p.descriptor.label));
+    assert.ok(pipeline, 'the program draw built a pipeline');
+    const attributes = pipeline.descriptor.vertex.buffers
+        .flatMap((/** @type {any} */ b)=>b.attributes);
+    const generic = attributes.some((/** @type {any} */ a)=>a.offset === 12
+        && a.format === 'float32x4');
+    assert.ok(generic, 'the generic array is bound as it lies, at its own offset');
+    const code = r.gpu.of('createShaderModule')
+        .find(m=>/attrib7: vec4<f32>/.test(m.descriptor.code)).descriptor.code;
+    assert.match(code, /vertex\.attrib7/, 'and the stage reads it');
+    assert.doesNotMatch(code, /vertexProgram\.attribs/,
+        'an attribute with an array needs no current-value fallback');
+});
+
+test('a program draw on the processor path is reported and draws nothing', ()=>{
+    const bytes = new Uint8Array(0x4000);
+    /** @type {string[]} */
+    const divergences = [];
+    /** @type {any} */
+    const context = createGlContext({
+        memory: {
+            read: (/** @type {number} */ at, /** @type {number} */ n)=>bytes.subarray(at, at + n),
+            write: (/** @type {number} */ at, /** @type {Uint8Array} */ v)=>bytes.set(v, at),
+        },
+        divergence: d=>divergences.push(d),
+    });
+    context.attach({ width: 8, height: 8, doubleBuffered: false });
+    const text = '!!ARBfp1.0\nMOV result.color, fragment.color;\nEND\n';
+    bytes.set(new TextEncoder().encode(text), 0x2000);
+    context.glGenProgramsARB(1);
+    context.glBindProgramARB(GL.FRAGMENT_PROGRAM_ARB, 1);
+    context.glProgramStringARB(GL.FRAGMENT_PROGRAM_ARB, GL.PROGRAM_FORMAT_ASCII_ARB,
+        text.length, 0x2000);
+    context.glEnable(GL.FRAGMENT_PROGRAM_ARB);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(4, 0);
+    context.glVertex2f(4, 4);
+    context.glEnd();
+    assert.ok(divergences.some(d=>/draws nothing/.test(d)));
+    assert.equal(context.framebuffer.bytes
+        .some((/** @type {number} */ b)=>b !== 0), false);
 });

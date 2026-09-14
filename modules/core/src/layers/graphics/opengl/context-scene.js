@@ -195,6 +195,56 @@ export function createSceneBuilder(kernel){
             }
         }
 
+        // A program stage is what the renderer draws with only when its cap
+        // is on, its target has a program bound, and that program loaded: an
+        // enabled cap with nothing valid bound draws the fixed pipeline, as
+        // it does on hardware.
+        const programsSide = side.programs;
+        /**
+         * @param {number} target
+         * @param {'vertex' | 'fragment'} kind
+         * @returns {import('./pipeline.js').SceneProgram | null}
+         */
+        const stage = (target, kind)=>{
+            if (!programsSide || record(target).values[0] === 0)
+            {
+                return null;
+            }
+            const program = programsSide.boundProgram(target);
+            if (!program || !program.parsed || program.parsed.kind !== kind)
+            {
+                return null;
+            }
+            return {
+                name: program.name,
+                version: program.version,
+                ir: program.parsed,
+                local: program.local,
+                env: /** @type {Float32Array} */ (programsSide.env.get(target)),
+            };
+        };
+        const programs = {
+            vertex: stage(GL.VERTEX_PROGRAM_ARB, 'vertex'),
+            fragment: stage(GL.FRAGMENT_PROGRAM_ARB, 'fragment'),
+        };
+        const programmed = programs.vertex !== null || programs.fragment !== null;
+        // The state a program reads that the fixed path reads only per
+        // enabled unit: the matrices and bindings of every unit, and the
+        // current generic attribute values. A fragment program samples what
+        // is bound whether or not the unit is enabled, per the specification.
+        const textureMatrices = programmed
+            ? side.units.map((/** @type {any} */ unit)=>unit.stack.current)
+            : [];
+        const boundTextures = programmed
+            ? side.units.map((/** @type {any} */ unused, /** @type {number} */ index)=>({
+                twoD: side.textureBoundAt(index, GL.TEXTURE_2D),
+                cube: side.textureBoundAt(index, GL.TEXTURE_CUBE_MAP),
+            }))
+            : [];
+        const genericAttribs = programmed && programsSide
+            ? programsSide.attribValues.map((/** @type {number[]} */ value)=>[...value])
+            : [];
+
         const blendOn = on(GL.BLEND);
         const src = record(GL.BLEND_SRC).values[0];
         const dst = record(GL.BLEND_DST).values[0];
@@ -263,6 +313,10 @@ export function createSceneBuilder(kernel){
                     : null,
                 colourMask: record(GL.COLOR_WRITEMASK).values.map(v=>v !== 0),
             },
+            programs,
+            genericAttribs,
+            textureMatrices,
+            boundTextures,
 
             /**
              * The colour a vertex ends up with: lit, or its own.

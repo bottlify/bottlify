@@ -1634,7 +1634,30 @@ export function createGlContext(options = {}){
         {
             return;
         }
+        if (programActive())
+        {
+            // The processor rasteriser is the fixed pipeline; a program stage
+            // exists only as a shader, so there is nothing here to run it.
+            diverge('a program was enabled and bound, and the processor path draws nothing'
+                + ' under it: the program stages run only on a device');
+            return;
+        }
         scenes.draw(mode, vertices);
+    }
+
+    /**
+     * Whether a loaded program is enabled and bound, which is when a draw
+     * belongs to the program pipeline rather than the fixed one.
+     */
+    function programActive(){
+        const programs = kernel.side.programs;
+        if (!programs)
+        {
+            return false;
+        }
+        const active = (/** @type {number} */ target)=>
+            record(target).values[0] !== 0 && programs.boundProgram(target)?.parsed != null;
+        return active(GL.VERTEX_PROGRAM_ARB) || active(GL.FRAGMENT_PROGRAM_ARB);
     }
 
     /** @returns {import('./matrix.js').MatrixStack} */

@@ -127,11 +127,11 @@ export function installProgramCalls(context, kernel){
              * are read: enabled ones only, each under the canonical attribute
              * name its index aliases to.
              *
-             * @returns {{ index: number, name: string,
+             * @returns {{ index: number, name: string, normalised: boolean,
              *             pointer: import('./arrays.js').ArrayPointer }[]}
              */
             genericArrays(){
-                /** @type {{ index: number, name: string,
+                /** @type {{ index: number, name: string, normalised: boolean,
                  *           pointer: import('./arrays.js').ArrayPointer }[]} */
                 const out = [];
                 attribArrays.forEach((array, index)=>{
@@ -142,6 +142,7 @@ export function installProgramCalls(context, kernel){
                     out.push({
                         index,
                         name: canonicalAttribName(index),
+                        normalised: array.normalised !== 0,
                         pointer: {
                             size: array.size, type: array.type, stride: array.stride,
                             pointer: array.pointer, buffer: array.buffer,
@@ -391,6 +392,7 @@ export function installProgramCalls(context, kernel){
             program.text = text;
             program.parsed = parsed;
             program.format = format;
+            program.version++;
         },
 
         // --- the parameters ---

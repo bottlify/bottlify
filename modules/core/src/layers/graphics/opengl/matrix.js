@@ -92,6 +92,84 @@ export function transform(m, v){
 }
 
 /**
+ * The transpose of a column-major matrix.
+ *
+ * @param {ArrayLike<number>} m
+ * @returns {Float64Array}
+ */
+export function transpose(m){
+    const out = new Float64Array(16);
+    for (let column = 0; column < 4; column++)
+    {
+        for (let row = 0; row < 4; row++)
+        {
+            out[column * 4 + row] = m[row * 4 + column];
+        }
+    }
+    return out;
+}
+
+/**
+ * The inverse of a column-major matrix by its cofactors, or null when the
+ * determinant is zero and there is no inverse to give. A program that binds
+ * `state.matrix.*.inverse` of a singular matrix reads undefined values, and
+ * zeros are as good an undefined as any.
+ *
+ * @param {ArrayLike<number>} m
+ * @returns {Float64Array | null}
+ */
+export function invert(m){
+    /** @param {number} i @param {number} j */
+    const at = (i, j)=>m[j * 4 + i];
+    /**
+     * The 3x3 determinant of the rows and columns named, in order.
+     *
+     * @param {number[]} rows @param {number[]} cols
+     */
+    const minor = (rows, cols)=>{
+        const [r0, r1, r2] = rows;
+        const [c0, c1, c2] = cols;
+        return at(r0, c0) * (at(r1, c1) * at(r2, c2) - at(r1, c2) * at(r2, c1))
+            - at(r0, c1) * (at(r1, c0) * at(r2, c2) - at(r1, c2) * at(r2, c0))
+            + at(r0, c2) * (at(r1, c0) * at(r2, c1) - at(r1, c1) * at(r2, c0));
+    };
+    /** @type {number[]} */
+    const cofactors = [];
+    for (let column = 0; column < 4; column++)
+    {
+        for (let row = 0; row < 4; row++)
+        {
+            const rows = [0, 1, 2, 3].filter(i=>i !== row);
+            const cols = [0, 1, 2, 3].filter(j=>j !== column);
+            const sign = (row + column) % 2 === 0 ? 1 : -1;
+            cofactors.push(sign * minor(rows, cols));
+        }
+    }
+    let determinant = 0;
+    for (let row = 0; row < 4; row++)
+    {
+        // Expansion along the first column: cofactors[row] is C(row, 0),
+        // which is where the build loop put column zero's cofactors.
+        determinant += at(row, 0) * cofactors[row];
+    }
+    if (determinant === 0 || !Number.isFinite(determinant))
+    {
+        return null;
+    }
+    // The inverse is the cofactor matrix transposed over the determinant, and
+    // the cofactors were built row-major in a column-major file.
+    const out = new Float64Array(16);
+    for (let column = 0; column < 4; column++)
+    {
+        for (let row = 0; row < 4; row++)
+        {
+            out[column * 4 + row] = cofactors[row * 4 + column] / determinant;
+        }
+    }
+    return out;
+}
+
+/**
  * @param {number} x
  * @param {number} y
  * @param {number} z
