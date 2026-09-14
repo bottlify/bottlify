@@ -215,6 +215,55 @@ test('the link answers both spellings and IPersistFile from one object', ()=>{
     assert.ok(object.interfaceFor(IID_IPERSIST_FILE), 'and IPersistFile');
 });
 
+test('the vtables hold the published method order, offsets included', ()=>{
+    const fx = setup();
+    const object = createLink(fx);
+    /** @param {string} iid */
+    const names = iid=>object.interfaceFor(iid).methods.map(/** @param {any} m */ m=>m.name);
+
+    // The order is the ABI: a program compiled against the published header
+    // calls SetPath at offset 0x50, and a table that paired the getters with
+    // their setters would answer that call with Resolve -- a different method
+    // with a different argument width, which takes the guest's stack with it.
+    assert.deepEqual(names(IID_ISHELL_LINK_A), [
+        'QueryInterface', 'AddRef', 'Release',
+        'GetPath', 'GetIDList', 'SetIDList',
+        'GetDescription', 'SetDescription',
+        'GetWorkingDirectory', 'SetWorkingDirectory',
+        'GetArguments', 'SetArguments',
+        'GetHotkey', 'SetHotkey',
+        'GetShowCmd', 'SetShowCmd',
+        'GetIconLocation', 'SetIconLocation',
+        'SetRelativePath', 'Resolve', 'SetPath',
+    ]);
+    assert.equal(names(IID_ISHELL_LINK_A).indexOf('SetPath') * 4, 0x50);
+    assert.deepEqual(names(IID_ISHELL_LINK_W), names(IID_ISHELL_LINK_A),
+        'the wide spelling is the same table over wide strings');
+    assert.deepEqual(names(IID_IPERSIST_FILE), [
+        'QueryInterface', 'AddRef', 'Release',
+        'GetClassID', 'IsDirty', 'Load', 'Save', 'SaveCompleted', 'GetCurFile',
+    ]);
+    assert.equal(names(IID_IPERSIST_FILE).indexOf('Save') * 4, 0x18,
+        'where the installer\'s own code calls Save');
+});
+
+test('a relative path is kept and answers for the target until one is set', ()=>{
+    const fx = setup();
+    const object = createLink(fx);
+    fx.putAnsi(STR, 'game.exe');
+    assert.equal(call(object, IID_ISHELL_LINK_A, 'SetRelativePath', [STR, 0]), S_OK);
+
+    fx.bytes.fill(0, BUF, BUF + 64);
+    call(object, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, 0, 0]);
+    assert.equal(fx.ansiAt(BUF), 'game.exe', 'the relative form, kept as it was given');
+
+    fx.putAnsi(STR, 'C:\\App\\game.exe');
+    call(object, IID_ISHELL_LINK_A, 'SetPath', [STR]);
+    fx.bytes.fill(0, BUF, BUF + 64);
+    call(object, IID_ISHELL_LINK_A, 'GetPath', [BUF, 260, 0, 0]);
+    assert.equal(fx.ansiAt(BUF), 'C:\\App\\game.exe', 'the absolute one answers once set');
+});
+
 test('SetPath and GetPath round-trip the string a program set', ()=>{
     const fx = setup();
     const object = createLink(fx);

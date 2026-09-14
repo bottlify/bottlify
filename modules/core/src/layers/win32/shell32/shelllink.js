@@ -51,26 +51,36 @@ const FIND_DATA_NAME = 44;
 const FIND_DATA_A_SIZE = 318;
 const FIND_DATA_W_SIZE = 592;
 
-/** IShellLink's slots after IUnknown's three, as `[name, dwords]`. @type {[string, number][]} */
+/**
+ * IShellLink's slots after IUnknown's three, as `[name, dwords]`, in the
+ * published order the binaries were compiled against -- which is not the
+ * Get/Set pairing a reader expects: SetPath is the *last* slot, at vtable
+ * offset 0x50, and the pair of a relative path is a setter with no getter.
+ * A slot in the wrong place does not fail the call it belongs to; it answers
+ * a different method's call with a different argument width, and the guest's
+ * stack is wrong from there on.
+ *
+ * @type {[string, number][]}
+ */
 const ISHELL_LINK_SLOTS = [
     ['GetPath', 4],
-    ['SetPath', 1],
-    ['GetArguments', 2],
-    ['SetArguments', 1],
+    ['GetIDList', 1],
+    ['SetIDList', 1],
     ['GetDescription', 2],
     ['SetDescription', 1],
     ['GetWorkingDirectory', 2],
     ['SetWorkingDirectory', 1],
-    ['GetRelativePath', 3],
+    ['GetArguments', 2],
+    ['SetArguments', 1],
+    ['GetHotkey', 1],
+    ['SetHotkey', 1],
+    ['GetShowCmd', 1],
+    ['SetShowCmd', 1],
     ['GetIconLocation', 3],
     ['SetIconLocation', 2],
-    ['SetShowCmd', 1],
-    ['GetShowCmd', 1],
-    ['SetHotkey', 1],
-    ['GetHotkey', 1],
-    ['SetIDList', 1],
-    ['GetIDList', 1],
+    ['SetRelativePath', 2],
     ['Resolve', 2],
+    ['SetPath', 1],
 ];
 
 /** IPersistFile's slots after IUnknown's three; GetClassID is IPersist's. @type {[string, number][]} */
@@ -86,6 +96,7 @@ const IPERSIST_FILE_SLOTS = [
 /**
  * @typedef {Object} ShellLinkState
  * @property {string} path
+ * @property {string} relativePath
  * @property {string} arguments
  * @property {string} description
  * @property {string} workingDirectory
@@ -100,15 +111,15 @@ const IPERSIST_FILE_SLOTS = [
 /** @returns {ShellLinkState} */
 function newLinkState(){
     return {
-        path: '', arguments: '', description: '', workingDirectory: '',
+        path: '', relativePath: '', arguments: '', description: '', workingDirectory: '',
         iconLocation: '', iconIndex: 0, showCmd: SW_SHOWNORMAL, hotkey: 0,
         curFile: null, dirty: false,
     };
 }
 
 /** The string-valued fields a Set/Get pair keeps and returns.
- * @typedef {'path' | 'arguments' | 'description' | 'workingDirectory'
- *          | 'iconLocation'} StringKey
+ * @typedef {'path' | 'relativePath' | 'arguments' | 'description'
+ *          | 'workingDirectory' | 'iconLocation'} StringKey
  */
 
 /**
@@ -293,13 +304,16 @@ export function createShellLink(host){
              *
              * The target string back, and the find data filled as far as this
              * build can -- the name, with no sizes or times, which is the
-             * divergence named here.
+             * divergence named here. A link that was only given a relative
+             * path answers with it as it was set: nothing here resolves one
+             * against the link's own directory.
              */
             GetPath: (state, [buffer, cch, findData])=>{
-                writeStringBuffer(host, buffer >>> 0, cch | 0, state.path, wide);
+                const path = state.path !== '' ? state.path : state.relativePath;
+                writeStringBuffer(host, buffer >>> 0, cch | 0, path, wide);
                 if ((findData >>> 0) !== 0)
                 {
-                    writeFindData(host, findData >>> 0, state.path, wide);
+                    writeFindData(host, findData >>> 0, path, wide);
                     diverge('IShellLink::GetPath',
                         'the find data carries the name only, not the target\'s sizes or times');
                 }
@@ -307,16 +321,18 @@ export function createShellLink(host){
             },
 
             /**
-             * HRESULT GetRelativePath(LPSTR pszPath, int cch, DWORD dwFlags)
+             * HRESULT SetRelativePath(LPCSTR pszPathRel, DWORD dwFlags)
              *
-             * Answered with the full path: this object keeps no separate
-             * relative form, and a caller that asked for one still gets a path
-             * it can use rather than a failure it has to handle.
+             * Kept like any other string the object is given, and said to be
+             * kept as it is: Windows resolves the relative form against the
+             * link's directory when the path is read back, and here it comes
+             * back verbatim.
              */
-            GetRelativePath: (state, [buffer, cch])=>{
-                writeStringBuffer(host, buffer >>> 0, cch | 0, state.path, wide);
-                diverge('IShellLink::GetRelativePath',
-                    'the full path answers for the relative one');
+            SetRelativePath: (state, [address])=>{
+                state.relativePath = reader.read(address >>> 0);
+                state.dirty = true;
+                diverge('IShellLink::SetRelativePath',
+                    'the relative path is kept unresolved against the link\'s directory');
                 return S_OK;
             },
 
