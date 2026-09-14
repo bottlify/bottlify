@@ -1136,6 +1136,40 @@ test('a palette-relative colour table is resolved through the palette the DC has
         'as RGBQUADs, blue first, in the order the indices named');
 });
 
+test('a palette-relative bitmap follows the palette filled in after it was made', ()=>{
+    // The order a program of this era really uses: create the palette, select
+    // it, make the bitmap whose colour table is palette indices, and only then
+    // fill the palette. A bitmap frozen at creation would show the palette as
+    // it was before it had any colours -- a screen of black.
+    const { fns, memory, hdc } = withDC();
+    memory.putU16(STRUCT + 0x800, 0x300);
+    memory.putU16(STRUCT + 0x802, 2);
+    memory.putU32s(STRUCT + 0x804, [0x00030201, 0x00060504]);
+    const palette = fns.CreatePalette.handler([STRUCT + 0x800]);
+    assert.ok(fns.SelectPalette.handler([hdc, palette, 0]) > 0);
+
+    putBitmapInfo(memory, { width: 4, height: 1, bitCount: 8 });
+    memory.putU32s(STRUCT + BITMAPINFOHEADER.biClrUsed, [2]);
+    memory.putU16(STRUCT + BITMAPINFOHEADER.SIZE, 1);
+    memory.putU16(STRUCT + BITMAPINFOHEADER.SIZE + 2, 0);
+    const bitmap = fns.CreateDIBSection.handler([hdc, STRUCT, 1, BITS_POINTER, 0, 0]);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    fns.SelectObject.handler([memoryDc, bitmap]);
+
+    const QUADS = STRUCT + 0x400;
+    fns.GetDIBColorTable.handler([memoryDc, 0, 2, QUADS]);
+    assert.deepEqual([memory.u32(QUADS), memory.u32(QUADS + 4)], [0x00040506, 0x00010203]);
+
+    // SetPaletteEntries replaces the colours; the bitmap's indices now mean
+    // those colours, so its colour table has to read back through them.
+    memory.putU32s(STRUCT + 0x900, [0x00090807, 0x000c0b0a]);
+    assert.equal(fns.SetPaletteEntries.handler([palette, 0, 2, STRUCT + 0x900]), 2);
+    memory.fill(QUADS, 2);
+    assert.equal(fns.GetDIBColorTable.handler([memoryDc, 0, 2, QUADS]), 2);
+    assert.deepEqual([memory.u32(QUADS), memory.u32(QUADS + 4)], [0x000a0b0c, 0x00070809],
+        'the same indices, resolved through the palette as it is now');
+});
+
 test('every DC of a window is one drawable, and any other DC is its own', ()=>{
     // The pixel format belongs to the window: a program sets it on one DC,
     // releases that DC, and creates its context on the next one.

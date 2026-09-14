@@ -29,6 +29,7 @@ import {
     readLogFont,
     readLogPalette,
     readLogPen,
+    paletteEntryToPixel,
     writePoint,
     writeSize,
     writeTextMetrics,
@@ -252,13 +253,26 @@ export function createGdiFunctions(host){
         const colors = [];
         if (usage === DIB_PAL_COLORS)
         {
-            const palette = objects.get(dc?.palette ?? 0)?.attributes.entries ?? [];
-            const indices = host.readMemory(at, count * 2);
+            const record = objects.get(dc?.palette ?? 0);
+            const entries = record?.attributes.entries ?? [];
+            const raw = host.readMemory(at, count * 2);
+            /** @type {number[]} */
+            const indices = [];
             for (let index = 0; index < count; index++)
             {
-                // A PALETTEENTRY is red first; the surface wants red on top.
-                const entry = palette[indices[index * 2] | indices[index * 2 + 1] << 8] ?? 0;
-                colors.push(((entry & 0xff) << 16 | entry & 0xff00 | (entry >>> 16) & 0xff) >>> 0);
+                const entry = raw[index * 2] | (raw[index * 2 + 1] << 8);
+                indices.push(entry);
+                colors.push(paletteEntryToPixel(entries[entry] ?? 0));
+            }
+            // A palette-relative table holds indices, not colours: the program
+            // fills the palette after the bitmap exists (CreatePalette, then
+            // SetPaletteEntries), and the bitmap has to show the palette as it
+            // is now, not as it was when the bitmap was made. So the resolved
+            // array is kept alive on the palette and refreshed in place -- the
+            // same array the surface already holds a reference to.
+            if (record && record.type === 'palette')
+            {
+                (record.attributes.dependents ??= []).push({ indices, table: colors });
             }
             return colors;
         }

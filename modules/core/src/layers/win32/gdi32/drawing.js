@@ -36,7 +36,7 @@
  */
 
 import { readRect, writeU16, writeU32s } from '../user32/structs.js';
-import { BITMAPINFOHEADER, PALETTEENTRY_SIZE, readBitmapInfoHeader }
+import { BITMAPINFOHEADER, PALETTEENTRY_SIZE, paletteEntryToPixel, readBitmapInfoHeader }
     from './structs.js';
 
 /** iUsage of the DIB functions: a colour table of RGBQUADs, not palette indices. */
@@ -972,8 +972,9 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
          *
          * Bookkeeping, and honest as such: the entries are kept on the palette
          * object where GetPaletteEntries and a future realisation can read them
-         * back. What they do not do is change any pixel, because every surface
-         * here is 32-bit and has no palette to change.
+         * back. They change no pixel of a 32-bit surface, which has no palette
+         * to change -- but a bitmap made with DIB_PAL_COLORS draws through this
+         * palette, so re-filling it re-colours that bitmap.
          */
         SetPaletteEntries: {
             argBytes: 16,
@@ -1000,6 +1001,19 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
                     held[first + index] = (bytes[0] | bytes[1] << 8
                         | bytes[2] << 16 | bytes[3] << 24) >>> 0;
                     written++;
+                }
+                // A bitmap whose colour table was made palette-relative holds
+                // indices into this palette, so changing the entries changes
+                // what the bitmap's pixels mean. The resolved arrays are kept
+                // alive on the palette and refreshed here in place -- the
+                // surfaces that already hold a reference to them see it.
+                for (const dependent of record.attributes.dependents ?? [])
+                {
+                    for (let index = 0; index < dependent.indices.length; index++)
+                    {
+                        dependent.table[index]
+                            = paletteEntryToPixel(held[dependent.indices[index]] ?? 0);
+                    }
                 }
                 return written;
             },

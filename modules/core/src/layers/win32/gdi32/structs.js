@@ -122,6 +122,22 @@ export const LOGPALETTE = Object.freeze({
 export const PALETTEENTRY_SIZE = 4;
 
 /**
+ * A PALETTEENTRY read as a little-endian DWORD, as the drawing layer indexes it.
+ *
+ * The entry is red first in memory, so the DWORD is flags-blue-green-red; the
+ * surface wants red on top, so the two ends swap. The flags byte is dropped:
+ * PC_RESERVED entries still have a colour, and nothing here draws through the
+ * dither or reserved flags.
+ *
+ * @param {number} entry  The PALETTEENTRY as one u32.
+ * @returns {number} 0x00RRGGBB
+ */
+export function paletteEntryToPixel(entry){
+    const value = entry >>> 0;
+    return ((value & 0xff) << 16 | value & 0xff00 | (value >>> 16) & 0xff) >>> 0;
+}
+
+/**
  * @typedef {Object} StructMemory
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
