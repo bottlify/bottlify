@@ -29,6 +29,8 @@ function fakeHost(size = 0x1000){
         bytes,
         output,
         guests,
+        /** @type {(address: number) => { base: number, size: number } | null} */
+        regionAt: ()=>null,
         get asked(){
             return asked;
         },
@@ -387,6 +389,32 @@ test('_vsnprintf formats from a list in memory and truncates the way _snprintf d
     assert.deepEqual([...host.bytes.subarray(0x300, 0x304)], [0x78, 0x3d, 0x34, 0],
         'and the buffer holds what fit, with nothing written past it');
     assert.equal(fns._vsnprintf.argBytes, 16);
+});
+
+test('_vsnprintf stops the va_list window at the end of its region', ()=>{
+    // The stop that faulted a whole run: a thread formats from just below the
+    // top of its stack, every argument it reads is there, and the fixed
+    // window reaches past the end of the region into memory that does not
+    // exist. The host must clamp the window to its region -- reading what is
+    // not there for a slot the format never consults is the host's fault, not
+    // the guest's.
+    const { host, fns, put, at } = setup();
+    host.regionAt = ()=>({ base: 0, size: 0x1000 });
+    const read = host.readMemory;
+    host.readMemory = (address, length)=>{
+        const region = host.regionAt?.(address);
+        if (!region || address + length > region.base + region.size)
+        {
+            throw new Error(
+                `read of ${length} bytes at 0x${address.toString(16)} runs past the end`);
+        }
+        return read(address, length);
+    };
+    host.writeMemory(0xff8, new Uint8Array([42, 0, 0, 0]));
+    const format = put(0x100, 'Engine %x');
+
+    assert.equal(fns._vsnprintf.handler([0x200, 16, format, 0xff8]), 9);
+    assert.equal(at(0x200), 'Engine 2a');
 });
 
 test('every function is cdecl and declares the stack its arguments occupy', ()=>{

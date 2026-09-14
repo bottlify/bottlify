@@ -19,7 +19,7 @@
  */
 
 import { HANDLE_STDOUT } from '../kernel32/console.js';
-import { formatToString } from './format.js';
+import { formatToString, varargsSlots } from './format.js';
 import { createStringFunctions } from './strings.js';
 import { createConversionFunctions } from './convert.js';
 import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
@@ -59,6 +59,9 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  * @typedef {Object} MsvcrtHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number) => { base: number, size: number } | null} [regionAt]
+ *           The region an address sits in, from the memory layer's map: the
+ *           `va_list` window stops at its end rather than faulting the run.
  * @property {(address: number, value: number, length: number) => void} fillMemory
  *     Sets a range to one byte value in place, with no host buffer holding
  *     the pattern: the lengths are the program's, and a clear of a megabyte
@@ -208,15 +211,15 @@ export function createMsvcrtFunctions(host){
      * A `va_list` is a pointer into the caller's stack and carries no count, so
      * a fixed window is read and the format string decides how much of it is
      * meaningful. Reading past the arguments is harmless -- the extra slots are
-     * never consulted -- while reading too few would silently print zeros.
+     * never consulted -- while reading too few would silently print zeros. The
+     * window stops at the end of its region for the reason `varargsSlots`
+     * gives: a thread formatting from just below its stack's top is a real
+     * thing a program does, and reaching past it is ours to avoid.
      *
      * @param {number} list
      */
-    const varargsAt = list=>{
-        const bytes = copyOf(list, VA_LIST_SLOTS * 4);
-        const view = new DataView(bytes.buffer);
-        return Array.from({ length: VA_LIST_SLOTS }, (unused, slot)=>view.getInt32(slot * 4, true));
-    };
+    const varargsAt = list=>varargsSlots(
+        host.readMemory, address=>host.regionAt?.(address) ?? null, list, VA_LIST_SLOTS);
 
     /**
      * Where the runtime would report a fatal error. Nothing here reports one,

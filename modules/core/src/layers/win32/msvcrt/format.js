@@ -432,6 +432,38 @@ function pad(spec, { prefix, body, numeric }){
 }
 
 /**
+ * The argument slots behind a `va_list`, read as one block.
+ *
+ * A `va_list` carries no count, so a fixed window is read and the format
+ * decides how much of it is meaningful; the slots past the last argument are
+ * never consulted. The window must not run past the end of the region it sits
+ * in: a thread's stack has a top, a program formatting from just below it is
+ * within its rights -- every argument it reads is there -- and the real
+ * runtime touches a slot only when a conversion asks for it. A snapshot that
+ * walked off the region turned such a call into a host-side fault. Unreadable
+ * slots join the zeros this engine already answers for a format that outran
+ * its arguments.
+ *
+ * @param {(address: number, length: number) => Uint8Array} read
+ * @param {(address: number) => { base: number, size: number } | null} locate
+ *         The region containing an address; null when nothing does, and then
+ *         the whole window is read and a genuinely unmapped list faults there.
+ * @param {number} list @param {number} slots
+ * @returns {number[]}
+ */
+export function varargsSlots(read, locate, list, slots){
+    const width = slots * 4;
+    const at = list >>> 0;
+    const region = locate(at);
+    const bytes = new Uint8Array(width);
+    bytes.set(read(at, region
+        ? Math.max(0, Math.min(width, region.base + region.size - at))
+        : width));
+    const view = new DataView(bytes.buffer);
+    return Array.from({ length: slots }, (unused, slot)=>view.getInt32(slot * 4, true));
+}
+
+/**
  * Renders one printf-style format string.
  *
  * @param {string} format

@@ -53,10 +53,22 @@ const UNTOUCHED = 0xa5a5a5a5;
 
 function fakeMemory(size = 0x14000){
     const bytes = new Uint8Array(size);
-    return {
+    const memory = {
         bytes,
+        /** @type {((address: number) => { base: number, size: number } | null) | null} */
+        regionAt: null,
         /** @param {number} address @param {number} length */
-        readMemory: (address, length)=>bytes.slice(address, address + length),
+        readMemory: (address, length)=>{
+            // A test that names a region gets the memory layer's real refusal:
+            // a read that crosses its end throws rather than shorting.
+            const region = memory.regionAt?.(address) ?? null;
+            if (region && address + length > region.base + region.size)
+            {
+                throw new Error(`read of ${length} bytes at 0x${address.toString(16)}`
+                    + ' runs past the end of region');
+            }
+            return bytes.slice(address, address + length);
+        },
         /** @param {number} address @param {Uint8Array} data */
         writeMemory: (address, data)=>bytes.set(data, address),
         /** @param {number} address @param {number} maxLength */
@@ -95,6 +107,7 @@ function fakeMemory(size = 0x14000){
             this.putU32s(address, new Array(count).fill(UNTOUCHED));
         },
     };
+    return memory;
 }
 
 function fakeHandles(){
@@ -182,6 +195,7 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
             memory.writeMemory(a, d),
         readCString: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readCString(a, n),
+        regionAt: address=>memory.regionAt?.(address) ?? null,
         handles: fakeHandles(),
         queue,
         screen,
@@ -580,6 +594,22 @@ test('wvsprintfA reads its arguments through the list it was handed', ()=>{
     assert.equal(memory.readCString(OUT_BUFFER, 64), 'Player scored 42 of 100');
     assert.equal(written, 'Player scored 42 of 100'.length);
     assert.equal(fns.wvsprintfA.argBytes, 12, 'stdcall: three pointers, and the callee pops them');
+});
+
+test('wvsprintfA stops its va_list window at the end of its region', ()=>{
+    // The list sits 8 bytes below the top of the region: the two slots the
+    // format reads are there, the fixed 64-slot window reaches off the end,
+    // and memory that does not exist must throw only for the part nobody
+    // asked for -- which is to say, for none of it.
+    const { memory, fns } = setup();
+    memory.regionAt = address=>address >= 0x10000 && address < 0x14000
+        ? { base: 0x10000, size: 0x4000 } : null;
+    memory.putString(FORMAT_BUFFER, '%s=%d');
+    memory.putString(TEXT_BUFFER, 'x');
+    memory.putU32s(0x13ff8, [TEXT_BUFFER, 42]);
+
+    assert.equal(fns.wvsprintfA.handler([OUT_BUFFER, FORMAT_BUFFER, 0x13ff8]), 4);
+    assert.equal(memory.readCString(OUT_BUFFER, 64), 'x=42');
 });
 
 test('CopyRect copies the four fields and refuses a null on either side', ()=>{

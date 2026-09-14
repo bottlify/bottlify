@@ -339,6 +339,9 @@ function characterFor(key){
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number) => { base: number, size: number } | null} [regionAt]
+ *           The region an address sits in, from the memory layer's map: the
+ *           `va_list` window wvsprintfA reads stops at its end.
  * @property {{ open: (type: string, object: any) => number,
  *              close: (handle: number) => any }} handles
  * @property {ReturnType<typeof import('./messages.js').createMessageQueue>} queue

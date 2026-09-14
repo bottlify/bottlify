@@ -826,6 +826,10 @@ export const win32Module = {
                     fillMemory,
                     readCString,
                     scanCString,
+                    // The `va_list` window stops at the end of its region: a
+                    // thread formatting from just below its stack's top is
+                    // entitled to, and reading off the end is the host's bug.
+                    regionAt: address=>memory.find(address) ?? null,
                     write: (handle, text)=>sink(handle, text),
                     /**
                       * @param {number} entry @param {number[]} args @param {any} [thread]
@@ -961,6 +965,8 @@ export const win32Module = {
                 readMemory,
                 writeMemory,
                 readCString,
+                // wvsprintfA reads a `va_list` window too, clamped the same way.
+                regionAt: address=>memory.find(address) ?? null,
                 handles,
                 queue,
                 windowService: (/** @type {typeof windowService} */ service)=>{

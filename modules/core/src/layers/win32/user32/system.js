@@ -18,7 +18,7 @@
  * input layer is a stub in this build, and saying "no key is down" is true.
  */
 
-import { formatToString } from '../msvcrt/format.js';
+import { formatToString, varargsSlots } from '../msvcrt/format.js';
 import { ANSI_PAGE, OEM_PAGE, mapCaseAnsi, transcodeSingleByte } from '../kernel32/locale.js';
 import { RT_GROUP_CURSOR, RT_GROUP_ICON, loadResourceObject } from './objects.js';
 import { REFRESH_HZ, displayModes } from './display.js';
@@ -1335,7 +1335,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * wsprintfA with its arguments already on the caller's stack and a
          * pointer to them: stdcall, because the count is fixed. The list
          * carries no length, so a window of it is read and the format decides
-         * how much of that is meaningful.
+         * how much of that is meaningful -- and the window stops at the end of
+         * its region, as `varargsSlots` explains.
          */
         wvsprintfA: {
             argBytes: 12,
@@ -1343,10 +1344,8 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([out, format, list])=>{
                 const readString = (/** @type {number} */ address)=>
                     (address >>> 0) === 0 ? '(null)' : host.readCString(address, 0x10000);
-                const view = new DataView(
-                    host.readMemory(list >>> 0, VA_LIST_SLOTS * 4).slice().buffer);
-                const varargs = Array.from({ length: VA_LIST_SLOTS },
-                    (unused, slot)=>view.getInt32(slot * 4, true));
+                const varargs = varargsSlots(host.readMemory,
+                    address=>host.regionAt?.(address) ?? null, list >>> 0, VA_LIST_SLOTS);
                 const text = formatToString(readString(format), varargs, readString);
                 return writeString(out, text, text.length + 1);
             },
