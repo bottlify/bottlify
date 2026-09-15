@@ -51,7 +51,8 @@ import {
     CANONICAL_LAYOUT, expandIndices, isList, packVertices, planLayout, scanIndices, topologyOf,
 } from './gpu-layout.js';
 import {
-    FRAGMENT_PROGRAM_BINDING, VARYING_TEXCOORDS, VERTEX_PROGRAM_BINDING,
+    FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS,
+    VERTEX_PROGRAM_BINDING, VERTEX_PROGRAM_GROUP,
 } from './arb-wgsl.js';
 import {
     CLEAR_UNIFORM_FLOATS, COPY_UNIFORM_FLOATS, UNIFORM, UNITS, clearDescriptor, clearKey,
@@ -405,7 +406,7 @@ export function createGpuRenderer(services){
         return { key, textures, vertexBlock, fragmentBlock };
     };
 
-    /** @type {Map<string, { group: any, pipeline: any }>} */
+    /** @type {Map<string, { groups: any[], pipeline: any }>} */
     const layouts = new Map();
     /** @param {BindPlan} plan */
     const layoutFor = plan=>{
@@ -414,44 +415,56 @@ export function createGpuRenderer(services){
         {
             return existing;
         }
+        // The fixed block and the sampled textures share group 0. Each program
+        // block gets a group of its own: a stage that reads only some of a
+        // group's dynamic uniform bindings is handed the wrong dynamic offsets
+        // by the device, so no group holds a block a stage reads only part of.
         /** @type {any[]} */
-        const entries = [{
+        const fixedEntries = [{
             binding: 0,
             visibility: VERTEX_STAGE | FRAGMENT_STAGE,
             buffer: { type: 'uniform', hasDynamicOffset: true },
         }];
         for (const texture of plan.textures)
         {
-            entries.push({
+            fixedEntries.push({
                 binding: texture.binding,
                 visibility: FRAGMENT_STAGE,
                 texture: texture.cube ? { viewDimension: 'cube' } : {},
             });
-            entries.push({
+            fixedEntries.push({
                 binding: texture.binding + 1, visibility: FRAGMENT_STAGE, sampler: {},
             });
         }
+        /** @type {any[]} */
+        const groups = [backend.createBindGroupLayout(
+            { label: `gl:${plan.key}#fixed`, entries: fixedEntries })];
         if (plan.vertexBlock)
         {
-            entries.push({
-                binding: VERTEX_PROGRAM_BINDING,
-                visibility: VERTEX_STAGE,
-                buffer: { type: 'uniform', hasDynamicOffset: true },
-            });
+            groups.push(backend.createBindGroupLayout({
+                label: `gl:${plan.key}#vertex`,
+                entries: [{
+                    binding: VERTEX_PROGRAM_BINDING,
+                    visibility: VERTEX_STAGE,
+                    buffer: { type: 'uniform', hasDynamicOffset: true },
+                }],
+            }));
         }
         if (plan.fragmentBlock)
         {
-            entries.push({
-                binding: FRAGMENT_PROGRAM_BINDING,
-                visibility: FRAGMENT_STAGE,
-                buffer: { type: 'uniform', hasDynamicOffset: true },
-            });
+            groups.push(backend.createBindGroupLayout({
+                label: `gl:${plan.key}#fragment`,
+                entries: [{
+                    binding: FRAGMENT_PROGRAM_BINDING,
+                    visibility: FRAGMENT_STAGE,
+                    buffer: { type: 'uniform', hasDynamicOffset: true },
+                }],
+            }));
         }
-        const group = backend.createBindGroupLayout({ label: `gl:${plan.key}`, entries });
         const made = {
-            group,
+            groups,
             pipeline: backend.createPipelineLayout(
-                { label: `gl:${plan.key}`, bindGroupLayouts: [group] }),
+                { label: `gl:${plan.key}`, bindGroupLayouts: groups }),
         };
         layouts.set(plan.key, made);
         return made;
@@ -474,7 +487,8 @@ export function createGpuRenderer(services){
         const building = (async()=>{
             const module = await backend.createShaderModule(source);
             return {
-                layout: layout.group,
+                layout: layout.groups[0],
+                groups: layout.groups,
                 gpu: backend.createRenderPipeline({
                     label: source.label,
                     layout: layout.pipeline,
@@ -1597,21 +1611,25 @@ export function createGpuRenderer(services){
                     entries.push({ binding: bound.binding, resource: bound.view },
                         { binding: bound.binding + 1, resource: bound.sampler });
                 });
+                pass.setBindings(0, pipeline.groups[0], entries);
                 if (command.vertexUniforms)
                 {
-                    entries.push({
-                        binding: VERTEX_PROGRAM_BINDING,
-                        resource: pass.uniforms(command.vertexUniforms),
-                    });
+                    pass.setBindings(VERTEX_PROGRAM_GROUP, pipeline.groups[VERTEX_PROGRAM_GROUP],
+                        [{
+                            binding: VERTEX_PROGRAM_BINDING,
+                            resource: pass.uniforms(command.vertexUniforms),
+                        }]);
                 }
                 if (command.fragmentUniforms)
                 {
-                    entries.push({
-                        binding: FRAGMENT_PROGRAM_BINDING,
-                        resource: pass.uniforms(command.fragmentUniforms),
-                    });
+                    const groupAt = command.vertexUniforms
+                        ? FRAGMENT_PROGRAM_GROUP : VERTEX_PROGRAM_GROUP;
+                    pass.setBindings(groupAt, pipeline.groups[groupAt],
+                        [{
+                            binding: FRAGMENT_PROGRAM_BINDING,
+                            resource: pass.uniforms(command.fragmentUniforms),
+                        }]);
                 }
-                pass.setBindings(0, pipeline.layout, entries);
                 command.slots.forEach((/** @type {any} */ slot, /** @type {number} */ index)=>{
                     pass.setVertexBuffer(index, slot.gpu, slot.offset);
                 });

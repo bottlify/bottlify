@@ -8,8 +8,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { parseProgram } from './arb-program.js';
 import {
-    FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING, canonicalAttribName, emitFragment,
-    emitVertex, needsOf,
+    FRAGMENT_PROGRAM_BINDING, FRAGMENT_PROGRAM_GROUP, VERTEX_PROGRAM_BINDING,
+    VERTEX_PROGRAM_GROUP, canonicalAttribName, emitFragment, emitVertex, needsOf,
 } from './arb-wgsl.js';
 
 /**
@@ -250,7 +250,8 @@ END
     assert.match(code, /vertexProgram\.params\[0\]/, 'the first matrix row is slot zero');
     assert.match(code, /vertexProgram\.params\[5\]/);
     assert.match(code, /vertexProgram\.params\[9\]/);
-    assert.match(code, new RegExp(`@group\\(0\\) @binding\\(${VERTEX_PROGRAM_BINDING}\\)`));
+    assert.match(code,
+        new RegExp(`@group\\(${VERTEX_PROGRAM_GROUP}\\) @binding\\(${VERTEX_PROGRAM_BINDING}\\)`));
 });
 
 test('relative addressing clamps into the declaration\'s own run', ()=>{
@@ -281,8 +282,8 @@ END
     assert.deepEqual(emitted.needs.matrices,
         [{ matrix: 'texture', number: 2, modifier: 'invtrans' }]);
     assert.match(emitted.code, /fragmentProgram\.params\[0\]/);
-    assert.match(emitted.code,
-        new RegExp(`@group\\(0\\) @binding\\(${FRAGMENT_PROGRAM_BINDING}\\)`));
+    assert.match(emitted.code, new RegExp(
+        `@group\\(${FRAGMENT_PROGRAM_GROUP}\\) @binding\\(${FRAGMENT_PROGRAM_BINDING}\\)`));
 });
 
 test('an unsupported state binding refuses the stage with the binding named', ()=>{

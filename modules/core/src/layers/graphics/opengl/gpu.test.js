@@ -7,8 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GL } from './constants.js';
-import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';
-import { createGlContext } from './context.js';
+import { FRAGMENT_PROGRAM_BINDING, VERTEX_PROGRAM_BINDING } from './arb-wgsl.js';import { createGlContext } from './context.js';
 import { createGpuRenderer } from './gpu.js';
 import { CANONICAL_STRIDE } from './gpu-layout.js';
 import { COPY_UNIFORM_FLOATS, UNIFORM } from './wgsl.js';
@@ -581,13 +580,21 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
 
     // The layout carries both program blocks and the sampled unit's texture,
     // bound although its target was never enabled.
-    const layout = r.gpu.of('createBindGroupLayout')
-        .find(l=>l.descriptor.entries
-            .some((/** @type {any} */ e)=>e.binding === VERTEX_PROGRAM_BINDING));
-    assert.ok(layout, 'a layout with the vertex program block');
-    const bindings = layout.descriptor.entries.map((/** @type {any} */ e)=>e.binding);
-    assert.ok(bindings.includes(FRAGMENT_PROGRAM_BINDING), 'the fragment program block');
-    assert.ok(bindings.includes(1) && bindings.includes(2), 'unit zero samples anyway');
+    const bindGroupLayouts = r.gpu.of('createBindGroupLayout');
+    /** @param {number} binding */
+    const withBinding = binding=>bindGroupLayouts.find(l=>l.descriptor.entries
+        .some((/** @type {any} */ e)=>e.binding === binding));
+    const vertexLayout = withBinding(VERTEX_PROGRAM_BINDING);
+    const fragmentLayout = withBinding(FRAGMENT_PROGRAM_BINDING);
+    assert.ok(vertexLayout, 'a layout with the vertex program block');
+    assert.ok(fragmentLayout, 'a layout with the fragment program block');
+    assert.notEqual(vertexLayout, fragmentLayout,
+        'each program block gets its own group, so no stage reads part of a group');
+    const fixedLayout = withBinding(0);
+    const fixedBindings = fixedLayout.descriptor.entries
+        .map((/** @type {any} */ e)=>e.binding);
+    assert.ok(fixedBindings.includes(1) && fixedBindings.includes(2),
+        'unit zero samples out of the fixed group');
 
     // The vertex block: four MVP rows, then the env parameter. An orthographic
     // projection of 0..64 by 0..32 over an identity modelview.
@@ -608,6 +615,41 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.deepEqual([...fragmentFloats], [0.25, 0.5, 0.75, 1],
         'the local parameter of the bound program object');
     assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
+});
+
+test('each program block binds in a group of its own, at the offset of its own block', async()=>{
+    // A stage that reads only some of a group's dynamic uniform bindings is
+    // handed the wrong dynamic offsets by the device, so the draw splits the
+    // blocks across groups and binds each at the block its draw wrote. The
+    // device double records, per bind, the buffer, offset and size a dynamic
+    // binding resolves to, and that range holds the block the draw was given.
+    const r = rig();
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const binds = r.gpu.of('setBindGroup');
+    const vertex = binds.find(b=>b.resolved?.some(
+        (/** @type {any} */ x)=>x.binding === VERTEX_PROGRAM_BINDING));
+    const fragment = binds.find(b=>b.resolved?.some(
+        (/** @type {any} */ x)=>x.binding === FRAGMENT_PROGRAM_BINDING));
+    assert.ok(vertex, 'the vertex program block was bound');
+    assert.ok(fragment, 'the fragment program block was bound');
+    assert.notEqual(vertex.group, fragment.group,
+        'the two blocks never share a group a stage reads only part of');
+
+    const vertexRange = vertex.resolved.find(
+        (/** @type {any} */ x)=>x.binding === VERTEX_PROGRAM_BINDING).range;
+    const vertexFloats = new Float32Array(vertexRange.buffer, vertexRange.byteOffset, 4);
+    assert.deepEqual([...vertexFloats], [2 / 64, 0, 0, -1],
+        'the bytes at the vertex block\'s offset are the vertex block');
+
+    const fragmentRange = fragment.resolved.find(
+        (/** @type {any} */ x)=>x.binding === FRAGMENT_PROGRAM_BINDING).range;
+    const fragmentFloats = new Float32Array(fragmentRange.buffer, fragmentRange.byteOffset, 4);
+    assert.deepEqual([...fragmentFloats], [0.25, 0.5, 0.75, 1],
+        'and the bytes at the fragment block\'s offset are the fragment block');
 });
 
 test('the draw path fills a program block in the order the stage declares', async()=>{
@@ -963,7 +1005,9 @@ END
     assert.ok(entryAt(9).texture, 'binding 9 is the unit\'s texture');
     assert.ok(entryAt(10).sampler, 'and 10 its sampler');
     assert.ok(entryAt(13).texture && entryAt(14).sampler, 'unit six at its own pair');
-    assert.ok(entryAt(FRAGMENT_PROGRAM_BINDING)?.buffer,
-        'the program block sits past every unit pair');
+    const fragmentLayout = r.gpu.of('createBindGroupLayout')
+        .find(l=>l.descriptor.entries
+            .some((/** @type {any} */ e)=>e.binding === FRAGMENT_PROGRAM_BINDING));
+    assert.ok(fragmentLayout, 'the program block keeps a group of its own, past the units');
     assert.equal(r.gpu.count('draw'), 2, 'the draw and the shown copy were issued');
 });

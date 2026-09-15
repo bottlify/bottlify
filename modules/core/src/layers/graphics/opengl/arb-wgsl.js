@@ -66,12 +66,16 @@ import { canonicalAttribName } from './arb-program.js';
 export { canonicalAttribName };
 
 /**
- * Where the two program uniform blocks sit in the draw's bind group: past
- * the pair of the last texture unit a program can sample, so no sampled
- * texture and no block ever share a binding number.
+ * Where the two program uniform blocks sit. Each block gets a bind group of
+ * its own, because a pipeline stage that reads only some of a group's dynamic
+ * uniform bindings is handed the wrong dynamic offsets by the device; a group
+ * whose single dynamic binding the stage reads, or does not touch at all, is
+ * bound correctly. The fixed block and the sampled textures stay in group 0.
  */
 export const VERTEX_PROGRAM_BINDING = 17;
 export const FRAGMENT_PROGRAM_BINDING = 18;
+export const VERTEX_PROGRAM_GROUP = 1;
+export const FRAGMENT_PROGRAM_GROUP = 2;
 
 /**
  * The texture coordinate sets a stage can pass through the varyings: the
@@ -1022,9 +1026,10 @@ function createContext(ir, inputs, varyings, analysed, block){
  * @param {StageInput[]} inputs  the attributes the pipeline binds, in location order
  * @param {StageVaryings} varyings  the coordinate sets and the fog coordinate
  *        the assembler gives the pair of stages
+ * @param {number} [group]  the bind group the block sits in
  * @returns {EmitResult}
  */
-export function emitVertex(ir, inputs, varyings){
+export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
     const analysed = analyse(ir);
     const resolve = aliasResolver(ir);
     const needs = collectNeeds(ir, analysed, resolve);
@@ -1109,7 +1114,8 @@ export function emitVertex(ir, inputs, varyings){
     const code = `struct VertexProgramUniforms {
 ${uniformFields}
 };
-@group(0) @binding(${VERTEX_PROGRAM_BINDING}) var<uniform> vertexProgram: VertexProgramUniforms;
+@group(${group}) @binding(${VERTEX_PROGRAM_BINDING}) var<uniform>`
+        + ` vertexProgram: VertexProgramUniforms;
 
 struct VertexIn {
 ${inputFields}
@@ -1131,9 +1137,10 @@ ${body.join('\n')}
  * The fragment stage of one program.
  *
  * @param {ParsedProgram} ir
+ * @param {number} [group]  the bind group the block sits in
  * @returns {EmitResult}
  */
-export function emitFragment(ir){
+export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP){
     const analysed = analyse(ir);
     const resolve = aliasResolver(ir);
     const needs = collectNeeds(ir, analysed, resolve);
@@ -1235,7 +1242,7 @@ export function emitFragment(ir){
     const code = `struct FragmentProgramUniforms {
     params: array<vec4f, ${paramCount}>,
 };
-@group(0) @binding(${FRAGMENT_PROGRAM_BINDING}) var<uniform> fragmentProgram:`
+@group(${group}) @binding(${FRAGMENT_PROGRAM_BINDING}) var<uniform> fragmentProgram:`
     + ` FragmentProgramUniforms;
 
 ${textures}${depthStruct}${signature}

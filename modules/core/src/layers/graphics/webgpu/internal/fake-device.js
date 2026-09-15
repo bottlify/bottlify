@@ -48,9 +48,30 @@ export function createFakeDevice(options = {}){
         pass.setStencilReference = (/** @type {number} */ reference)=>
             record('setStencilReference', { reference });
         pass.setPipeline = (/** @type {any} */ pipeline)=>record('setPipeline', { pipeline });
-        pass.setBindGroup = (/** @type {number} */ index, /** @type {any} */ group,
-            /** @type {number[] | undefined} */ offsets)=>
-            record('setBindGroup', { index, group, offsets });
+        // A dynamic binding resolves to the byte range the shader would read:
+        // the offsets arrive in binding order, and the resource names the
+        // buffer and the block's declared size. Recording that, not only the
+        // call, is what lets a test check the bytes a draw was given.
+        /**
+         * @param {number} index
+         * @param {any} group
+         * @param {number[] | undefined} offsets
+         */
+        pass.setBindGroup = (index, group, offsets)=>{
+            const dynamic = /** @type {any[]} */ (group?.entries ?? [])
+                .filter(entry=>entry.resource && entry.resource.buffer)
+                .sort((left, right)=>left.binding - right.binding);
+            const resolved = dynamic.map((entry, k)=>{
+                const resource = entry.resource;
+                const at = (offsets === undefined ? 0 : offsets[k]) + (resource.offset ?? 0);
+                const size = resource.size === undefined
+                    ? resource.buffer.descriptor.size : resource.size;
+                const range = resource.buffer.bytes
+                    ? resource.buffer.bytes.slice(at, at + size) : null;
+                return { binding: entry.binding, buffer: resource.buffer, offset: at, size, range };
+            });
+            record('setBindGroup', { index, group, offsets, resolved });
+        };
         pass.setVertexBuffer = (/** @type {number} */ slot, /** @type {any} */ buffer,
             /** @type {number} */ offset)=>record('setVertexBuffer', { slot, buffer, offset });
         pass.setIndexBuffer = (/** @type {any} */ buffer, /** @type {string} */ format,
@@ -146,7 +167,14 @@ export function createFakeDevice(options = {}){
         createBuffer,
         createBindGroupLayout: recorder('createBindGroupLayout'),
         createPipelineLayout: recorder('createPipelineLayout'),
-        createBindGroup: recorder('createBindGroup'),
+        /** @param {any} descriptor */
+        createBindGroup: descriptor=>{
+            const group = object('createBindGroup', {
+                descriptor, entries: descriptor.entries,
+            });
+            calls.push({ op: 'createBindGroup', createBindGroup: group, descriptor });
+            return group;
+        },
         createRenderPipeline: recorder('createRenderPipeline'),
     };
 
