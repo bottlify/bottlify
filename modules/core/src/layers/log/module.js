@@ -90,6 +90,7 @@ export const logModule = {
             shared: config?.shared,
             level: config?.level === undefined ? undefined : toLevel(config.level),
             categories,
+            sequenceBase: config?.sequenceBase,
         });
         const registry = createMetrics({ shared: config?.shared });
         const own = registry.counters('log', ['rejected', 'unbalancedPhases']);

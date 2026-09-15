@@ -43,6 +43,7 @@ const HEAD = 5;
 const DICT_COUNT = 6;
 const DICT_HEAD = 7;
 const DICT_REFUSED = 8;
+const SEQUENCE_BASE = 9;
 const CONTROL_WORDS = 16;
 const CONTROL_BYTES = CONTROL_WORDS * 4;
 
@@ -69,6 +70,7 @@ const RECORD_HEADER = 24;
  * @property {number} ringOffset
  * @property {number} dictOffset
  * @property {number} dictBytes
+ * @property {number} sequenceBase
  */
 
 /**
@@ -108,6 +110,7 @@ export function openJournalMemory(buffer){
         ringOffset,
         dictOffset,
         dictBytes,
+        sequenceBase: control[SEQUENCE_BASE] >>> 0,
     };
 }
 
@@ -117,6 +120,10 @@ export function openJournalMemory(buffer){
  * @param {number} [options.bytes]        Bytes of the record ring.
  * @param {number} [options.dictionary]   Bytes of the string dictionary.
  * @param {boolean} [options.shared]      Whether to ask for shared memory when there is any.
+ * @param {number} [options.sequenceBase]
+ *        The sequence the first record gets. A machine rebuilt on a child's
+ *        image starts a fresh block, and a reader holding a cursor from the one
+ *        it replaced resumes here rather than at zero.
  * @returns {JournalViews}
  */
 export function createJournalMemory(options = {}){
@@ -132,6 +139,7 @@ export function createJournalMemory(options = {}){
     control[RECORDS] = records;
     control[RING_BYTES] = ringBytes;
     control[DICT_BYTES] = dictBytes;
+    control[SEQUENCE_BASE] = (options.sequenceBase ?? 0) >>> 0;
     return openJournalMemory(buffer);
 }
 
@@ -145,6 +153,7 @@ const align = (value, to)=>Math.ceil(value / to) * to;
  */
 export function createJournalWriter(memory){
     const { control, view, index, records, ringBytes, ringOffset, dictOffset, dictBytes } = memory;
+    const sequenceBase = memory.sequenceBase ?? 0;
     /** @type {Map<string, number>} */
     const interned = new Map();
     let written = 0;
@@ -254,7 +263,7 @@ export function createJournalWriter(memory){
             // already covers bytes being overwritten.
             Atomics.store(control, HEAD, head >>> 0);
 
-            const sequence = written++;
+            const sequence = (sequenceBase + written++) >>> 0;
             let at = ringOffset + (start % ringBytes);
             view.setUint32(at, length, true);
             view.setUint32(at + 4, sequence >>> 0, true);
@@ -289,7 +298,7 @@ export function createJournalWriter(memory){
             return sequence;
         },
 
-        written: ()=>written,
+        written: ()=>(sequenceBase + written) >>> 0,
         oversized: ()=>oversized,
         refused: ()=>Atomics.load(control, DICT_REFUSED),
     };
@@ -331,6 +340,7 @@ function asValue(value){
  */
 export function createJournalCursor(memory){
     const { control, view, index, records, ringBytes, ringOffset, dictOffset } = memory;
+    const sequenceBase = memory.sequenceBase ?? 0;
     /** @type {string[]} */
     const words = [];
     let dictRead = 0;
@@ -374,7 +384,7 @@ export function createJournalCursor(memory){
         const word = Atomics.load(control, WRITTEN) >>> 0;
         written += (word - lastWord) >>> 0;
         lastWord = word;
-        return written;
+        return (sequenceBase + written) >>> 0;
     };
 
     return {
@@ -384,10 +394,13 @@ export function createJournalCursor(memory){
             return id >= 0 && id < known.length ? known[id] : `#${id}`;
         },
 
+        /** The sequence this block starts from; 0 unless it took over from one. */
+        base: ()=>sequenceBase,
+
         written: count,
 
         /** The oldest sequence the index still points at. */
-        oldest: ()=>Math.max(0, count() - records),
+        oldest: ()=>Math.max(sequenceBase, count() - records),
 
         /**
          * One record by sequence, or null if it has been written over --

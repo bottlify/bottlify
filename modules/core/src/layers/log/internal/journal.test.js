@@ -202,6 +202,24 @@ test('a drain reads forward and says where to resume', ()=>{
     assert.equal(second.next, 3);
 });
 
+test('a journal that took over continues the sequence a reader is holding', ()=>{
+    // A machine rebuilt on a child's image gets a fresh block. A page draining
+    // it with the cursor it held from the one before keeps reading, rather than
+    // falling past the end of a block that restarted at zero.
+    const journal = createJournal({ now: ()=>0, sequenceBase: 100 });
+    journal.write(Level.INFO, 'boot', 'child');
+
+    const read = journal.drain(100);
+    assert.equal(read.from, 100, 'the block begins where the reader stopped');
+    assert.equal(read.next, 101);
+    assert.equal(read.lost, 0, 'and none of it is reported as a gap');
+    assert.deepEqual(read.records.map((/** @type {any} */ record)=>record.message), ['child']);
+
+    journal.flush();
+    assert.equal(journal.diagnostics().lost, 0,
+        'the sequences before the block are not records the sink missed');
+});
+
 test('a reader that falls behind the ring is told where it actually resumes', ()=>{
     // A gap reported rather than papered over: a terminal that stopped reading
     // for a second must not be shown the wrong hundred lines as though they

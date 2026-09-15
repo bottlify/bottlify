@@ -148,6 +148,7 @@ export function formatText(message, args){
  * @param {boolean} [options.shared]    Shared memory when the platform has it.
  * @param {number} [options.level]      The level of a category nobody set.
  * @param {Record<string, number>} [options.categories]  Per-category levels.
+ * @param {number} [options.sequenceBase]  The sequence the first record gets.
  * @returns {any}
  */
 export function createJournal(options){
@@ -157,6 +158,7 @@ export function createJournal(options){
         bytes: options.bytes,
         dictionary: options.dictionary,
         shared: options.shared,
+        sequenceBase: options.sequenceBase,
     });
     const writer = createJournalWriter(memory);
     // This thread's own reader, for the sinks and the calls that still ask
@@ -172,7 +174,9 @@ export function createJournal(options){
     const templates = new Map();
     /** @type {((records: FormattedRecord[]) => void)[]} */
     const sinks = [];
-    let delivered = 0;
+    // The first flush delivers from where this block begins, which is not zero
+    // when it continued a journal whose reader is still holding a cursor.
+    let delivered = memory.sequenceBase ?? 0;
     let lost = 0;
     let rejected = 0;
     /**

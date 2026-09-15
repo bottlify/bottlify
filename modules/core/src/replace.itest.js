@@ -1,0 +1,188 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * A replacement is invisible to whoever is reading the log.
+ *
+ * A parent that starts a child and then exits hands its process over: the
+ * machine is torn down and rebuilt on the child's image. Everything the reader
+ * holds -- the level it raised at run time, the cursor it drains from, the sink
+ * it attached -- has to survive that, or the call log simply stops at the
+ * handover and the child runs unobserved.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { createApp } from './app.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
+
+const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
+
+/** @param {number} value @returns {number[]} */
+const u32 = value=>[
+    value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff,
+];
+
+/**
+ * Calls GetSystemMetrics once, then writes two bytes to stdout and exits.
+ *
+ * The second write is what tells a sink that detached after the first one
+ * whether the detach held.
+ */
+function buildChildExe(){
+    return buildExe({
+        imports: {
+            'USER32.dll': ['GetSystemMetrics'],
+            'KERNEL32.dll': ['GetStdHandle', 'WriteFile', 'ExitProcess'],
+        },
+        codeSize: 0x100,
+        data: {
+            first: [0x41],
+            second: [0x42],
+            written: [0, 0, 0, 0],
+        },
+        code: ({ iat, at })=>[
+            0x6a, 0x00, //                                        push SM_CXSCREEN
+            0xff, 0x15, ...u32(iat('GetSystemMetrics')),
+
+            0x6a, 0xf5, //                                        push STD_OUTPUT_HANDLE
+            0xff, 0x15, ...u32(iat('GetStdHandle')),
+            0x6a, 0x00,
+            0x68, ...u32(at('written')),
+            0x6a, 0x01,
+            0x68, ...u32(at('first')),
+            0x50,
+            0xff, 0x15, ...u32(iat('WriteFile')),
+
+            0x6a, 0xf5,
+            0xff, 0x15, ...u32(iat('GetStdHandle')),
+            0x6a, 0x00,
+            0x68, ...u32(at('written')),
+            0x6a, 0x01,
+            0x68, ...u32(at('second')),
+            0x50,
+            0xff, 0x15, ...u32(iat('WriteFile')),
+
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+/** Starts C:\App\Child.exe and exits, so the child takes its place. */
+function buildParentExe(){
+    // A parent that has done some work of its own before handing over: a run
+    // that made no calls leaves the reader's cursor below the child's own
+    // sequence numbers, where a fresh journal looks continuous by accident.
+    const CALLS = 100;
+    const body = [
+        0x6a, 0x00, //                             push SM_CXSCREEN
+        0xff, 0x15, ...u32(0), //                  call [GetSystemMetrics], patched below
+        0xff, 0x0d, ...u32(0), //                  dec [calls], patched below
+        0x75, 0x00, //                             jnz loop, patched below
+    ];
+
+    return buildExe({
+        imports: {
+            'USER32.dll': ['GetSystemMetrics'],
+            'KERNEL32.dll': ['CreateProcessA', 'ExitProcess'],
+        },
+        codeSize: 0x200,
+        data: {
+            calls: u32(CALLS),
+            child: [...'C:\\App\\Child.exe'].map(c=>c.charCodeAt(0)).concat(0),
+            // STARTUPINFOA with cb = 68, and the PROCESS_INFORMATION it fills.
+            startup: [68, ...new Array(67).fill(0)],
+            information: new Array(16).fill(0),
+        },
+        code: ({ iat, at })=>{
+            const loop = [...body];
+            loop.splice(4, 4, ...u32(iat('GetSystemMetrics')));
+            loop.splice(10, 4, ...u32(at('calls')));
+            loop[15] = (-loop.length) & 0xff;
+
+            return [
+                ...loop,
+                0x68, ...u32(at('information')), //  push &pi        (lpProcessInformation)
+                0x68, ...u32(at('startup')), //      push &si        (lpStartupInfo)
+                0x6a, 0x00, //                       lpCurrentDirectory
+                0x6a, 0x00, //                       lpEnvironment
+                0x6a, 0x00, //                       dwCreationFlags
+                0x6a, 0x00, //                       bInheritHandles
+                0x6a, 0x00, //                       lpThreadAttributes
+                0x6a, 0x00, //                       lpProcessAttributes
+                0x6a, 0x00, //                       lpCommandLine
+                0x68, ...u32(at('child')), //        lpApplicationName
+                0xff, 0x15, ...u32(iat('CreateProcessA')),
+
+                0x6a, 0x00,
+                0xff, 0x15, ...u32(iat('ExitProcess')),
+            ];
+        },
+    });
+}
+
+test('the reader keeps its level, its cursor and its sink across a replacement', async t=>{
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const child = buildChildExe();
+
+    const app = await createApp({
+        executable: buildParentExe(),
+        imagePath: 'C:\\App\\Parent.exe',
+        // A call area on from the first instruction is what a `?log=` asks for.
+        log: { categories: { 'call.cpu': 'trace' } },
+        // The child the parent hands over to has to be on the volume.
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+    });
+    t.after(()=>app.dispose());
+
+    // Switched on and raised after the machine exists, the way the launcher's
+    // session does. Neither survives a rebuild today.
+    app.log.setLevel('call.input', 'trace');
+    app.log.setDefaultLevel('debug');
+
+    // A reader holds a cursor taken from the parent. Nothing is written before
+    // its first call, so take it again at the handover -- the parent's last
+    // lines then -- which is the cursor a live view would be holding.
+    let cursor = app.log.drain(0, 1000).next;
+    app.on('process-replace', ()=>{
+        cursor = app.log.drain(0, 1000).next;
+    });
+
+    /** @type {string[]} */
+    const output = [];
+    /** @param {number} _handle @param {string} text */
+    const sink = (_handle, text)=>{
+        output.push(text);
+        app.detachLog(sink);
+    };
+    app.attachLog(sink);
+
+    const code = await app.run({ timeoutMs: 20000 });
+    assert.equal(code, 0, 'the child exited cleanly');
+
+    // The child's own GetSystemMetrics reached the journal at the level the
+    // page raised. Its category was never set in the `log` option.
+    const after = app.log.drain(cursor, 1000);
+    const call = after.records.find((/** @type {any} */ record)=>
+        record.category === 'call.input' && record.text.includes('GetSystemMetrics'));
+    assert.ok(call, `the child's call was logged after the handover: ${
+        after.records.map((/** @type {any} */ record)=>record.text).join(' | ')}`);
+
+    // And it arrived through the cursor taken before the parent ran: the new
+    // journal's sequence numbers continue the old one's rather than restart.
+    assert.ok(after.records.length > 0,
+        'draining from the parent\'s cursor returned the child\'s lines');
+
+    // The sink attached before the handover was still the one detachLog knew.
+    assert.deepEqual(output, ['A'],
+        'detaching after the replacement stopped the sink receiving');
+});

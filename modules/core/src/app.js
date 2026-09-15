@@ -76,11 +76,13 @@ import { createBlockCache, resolveBlockStore }
  *     otherwise; zero delivers at whatever rate the caller's scheduler offers.
  *     A frame shown faster than a display can show it is a read of the surface
  *     and an upload that nobody sees.
- * @property {{ categories?: Record<string, string>, capacity?: number }} [log]
+ * @property {{ categories?: Record<string, string>, capacity?: number,
+ *     sequenceBase?: number }} [log]
  *     Which call areas are recorded from the first instruction, and how much of
  *     the journal is kept. Everything a program decides about a device it
  *     decides while starting up, so a category switched on once the engine
- *     exists is switched on too late to see any of it.
+ *     exists is switched on too late to see any of it. `sequenceBase` is set by
+ *     `createApp` on a rebuilt machine and is not something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean }} [audio]
  *     Sound leaves through a ring in shared memory. `drained` says that
  *     something on the other side of it is really reading -- a WebAudio
@@ -1724,6 +1726,7 @@ async function mountBundle({ options, cpu, filesystem, events }){
  *     seed?: { path: string, bytes?: Uint8Array, delete?: boolean }[],
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
+ *     logSinks?: Map<Function, (payload: any) => void>,
  * }} options
  * @returns {Promise<any>} an AppController
  */
@@ -2043,6 +2046,11 @@ async function buildApp(options){
             // second needs it no bigger, and one that has to hold a whole
             // startup needs it much bigger.
             capacity: options.log?.capacity,
+            // A machine rebuilt on a child's image continues the sequence
+            // numbering of the one it replaced, so a reader holding a cursor
+            // from that journal keeps reading rather than falling behind a
+            // block that started over.
+            sequenceBase: options.log?.sequenceBase,
             // The guest's clock, for the same reason the sound buffers use it:
             // a phase timed against the host and a phase timed against the
             // guest cannot be added together, and the number this layer exists
@@ -3645,8 +3653,10 @@ async function buildApp(options){
 
     // attachLog is sugar over the registry: the same subscription, remembered
     // by the sink the caller gave, so detaching still takes what it was given.
+    // The map is handed in across a replacement: a subscription made before the
+    // handover has to be removable after it, and a fresh map would forget it.
     /** @type {Map<Function, (payload: any) => void>} */
-    const logSinks = new Map();
+    const logSinks = options.logSinks ?? new Map();
 
     /**
      * Announces a failure the program itself cannot see, and hands back what to
@@ -4542,11 +4552,65 @@ export async function createApp(options){
         }
     };
 
+    // The log's reader surface outlives the process it was made against, for
+    // the same reason `events` does. A page that raised a level, attached a
+    // sink or holds a drain cursor did so before the handover and must not have
+    // to notice it: the machine is rebuilt, the log is not.
+    const logSinks = new Map();
+    /** @type {Map<string, string | number>} */
+    const logLevels = new Map();
+    /** @type {string | number | null} */
+    let logDefaultLevel = null;
+    let logSequence = 0;
+
+    /** @param {any} [extra] */
+    const machine = extra=>({
+        ...options,
+        events,
+        spawned: remember,
+        logSinks,
+        log: { ...options.log, sequenceBase: logSequence },
+        ...extra,
+    });
+
     /** @type {any} */
-    let current = await buildApp({ ...options, events, spawned: remember });
+    let current = await buildApp(machine());
 
     /** What a caller holds. Rebound to the live process on every replacement. */
     const facade = /** @type {any} */ ({});
+
+    /** Puts the levels the page set at run time back onto a rebuilt journal. */
+    const replayLogLevels = ()=>{
+        if (logDefaultLevel !== null)
+        {
+            current.log.setDefaultLevel(logDefaultLevel);
+        }
+        for (const [category, level] of logLevels)
+        {
+            current.log.setLevel(category, level);
+        }
+    };
+
+    /**
+     * Remembers a level set through the facade before passing it to the live
+     * journal, so a replacement can be given it again.
+     */
+    const bindLogLevels = ()=>{
+        const live = facade.log;
+        facade.log = {
+            ...live,
+            /** @param {string} category @param {string | number} level */
+            setLevel(category, level){
+                logLevels.set(category, level);
+                return live.setLevel(category, level);
+            },
+            /** @param {string | number} level */
+            setDefaultLevel(level){
+                logDefaultLevel = level;
+                return live.setDefaultLevel(level);
+            },
+        };
+    };
 
     const own = {
         /**
@@ -4573,6 +4637,17 @@ export async function createApp(options){
                 // child is launched against files that no longer exist.
                 const child = await current.readImage(request.imagePath);
                 const carried = current.session.export();
+                // The sequence the journal reached, read while the machine that
+                // wrote it still stands. The child's journal continues from
+                // here, so the cursor a reader is holding points into it rather
+                // than past the end of a block that started over.
+                const written = current.diagnostics()
+                    .find((/** @type {any} */ layer)=>layer.name === 'log')
+                    ?.metrics?.journal?.written;
+                if (typeof written === 'number')
+                {
+                    logSequence = written;
+                }
                 await current.dispose();
 
                 if (!child)
@@ -4581,17 +4656,16 @@ export async function createApp(options){
                         `cannot start ${request.imagePath}: it is not on the volume`);
                 }
 
-                current = await buildApp({
-                    ...options,
-                    events,
-                    spawned: remember,
+                current = await buildApp(machine({
                     executable: child,
                     imagePath: request.imagePath,
                     commandLine: request.commandLine,
                     patches: request.patches,
                     seed: carried,
-                });
+                }));
+                replayLogLevels();
                 Object.assign(facade, current, own);
+                bindLogLevels();
             }
         },
 
@@ -4606,5 +4680,6 @@ export async function createApp(options){
     };
 
     Object.assign(facade, current, own);
+    bindLogLevels();
     return facade;
 }

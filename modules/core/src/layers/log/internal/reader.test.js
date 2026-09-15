@@ -73,6 +73,19 @@ test('a subscriber removed is not called again, and a poll with nothing new call
     assert.equal(calls, 1);
 });
 
+test('a reader built over a block that took over starts where it begins', ()=>{
+    // The block a rebuilt machine writes into continues the sequence numbering
+    // of the one it replaced. Those sequences are its history, not records this
+    // reader was lapped past.
+    const { journal, reader } = setup({ sequenceBase: 100 });
+    journal.write(Level.INFO, 'boot', 'child');
+
+    const poll = reader.poll();
+    assert.equal(poll.delivered, 1);
+    assert.equal(poll.lost, 0, 'the sequences before the block are not a gap');
+    assert.equal(reader.drain(100).from, 100);
+});
+
 test('the reader answers recent and drain the way the engine used to', ()=>{
     const { journal, reader } = setup({ capacity: 4 });
     for (let at = 0; at < 10; at++)

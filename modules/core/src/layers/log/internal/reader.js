@@ -95,7 +95,9 @@ export function createLogReader({ memory }){
     const tables = memory.tables ?? {};
     /** @type {Subscriber[]} */
     const subscribers = [];
-    let next = 0;
+    // A block that took over from another starts above zero; those sequences
+    // are this reader's history, not records it was lapped past.
+    let next = cursor.base();
     let lost = 0;
 
     /**
