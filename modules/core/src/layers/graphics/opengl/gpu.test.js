@@ -588,9 +588,11 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     const fragmentLayout = withBinding(FRAGMENT_PROGRAM_BINDING);
     assert.ok(vertexLayout, 'a layout with the vertex program block');
     assert.ok(fragmentLayout, 'a layout with the fragment program block');
-    assert.notEqual(vertexLayout, fragmentLayout,
-        'each program block gets its own group, so no stage reads part of a group');
     const fixedLayout = withBinding(0);
+    assert.equal(vertexLayout, fixedLayout,
+        'the vertex block shares the fixed group, the only group its stage reads');
+    assert.notEqual(fragmentLayout, fixedLayout,
+        'the fragment block gets a group the fragment stage reads alone');
     const fixedBindings = fixedLayout.descriptor.entries
         .map((/** @type {any} */ e)=>e.binding);
     assert.ok(fixedBindings.includes(1) && fixedBindings.includes(2),
@@ -617,12 +619,14 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
 });
 
-test('each program block binds in a group of its own, at the offset of its own block', async()=>{
-    // A stage that reads only some of a group's dynamic uniform bindings is
-    // handed the wrong dynamic offsets by the device, so the draw splits the
-    // blocks across groups and binds each at the block its draw wrote. The
-    // device double records, per bind, the buffer, offset and size a dynamic
-    // binding resolves to, and that range holds the block the draw was given.
+test('the vertex block binds in the fixed group, the fragment block in its own', async()=>{
+    // The device hands a stage zero for a dynamic uniform block outside the
+    // first group the stage reads, and the fixed block is that first group's.
+    // So the vertex block binds beside the fixed block, whose binding the
+    // vertex stage also reads, and the fragment block binds in a group of its
+    // own. The device double records, per bind, the buffer, offset and size a
+    // dynamic binding resolves to, and that range holds the block the draw
+    // wrote.
     const r = rig();
     programRig(r);
     const { context } = r;
@@ -634,10 +638,15 @@ test('each program block binds in a group of its own, at the offset of its own b
         (/** @type {any} */ x)=>x.binding === VERTEX_PROGRAM_BINDING));
     const fragment = binds.find(b=>b.resolved?.some(
         (/** @type {any} */ x)=>x.binding === FRAGMENT_PROGRAM_BINDING));
+    const fixed = binds.find(b=>b.resolved?.some(
+        (/** @type {any} */ x)=>x.binding === 0));
     assert.ok(vertex, 'the vertex program block was bound');
     assert.ok(fragment, 'the fragment program block was bound');
-    assert.notEqual(vertex.group, fragment.group,
-        'the two blocks never share a group a stage reads only part of');
+    assert.ok(fixed, 'the fixed block was bound');
+    assert.equal(vertex.group, fixed.group,
+        'the vertex block shares the group the vertex stage already reads');
+    assert.notEqual(fragment.group, fixed.group,
+        'the fragment block gets a group of its own');
 
     const vertexRange = vertex.resolved.find(
         (/** @type {any} */ x)=>x.binding === VERTEX_PROGRAM_BINDING).range;

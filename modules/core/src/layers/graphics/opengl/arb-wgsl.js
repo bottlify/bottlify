@@ -66,16 +66,17 @@ import { canonicalAttribName } from './arb-program.js';
 export { canonicalAttribName };
 
 /**
- * Where the two program uniform blocks sit. Each block gets a bind group of
- * its own, because a pipeline stage that reads only some of a group's dynamic
- * uniform bindings is handed the wrong dynamic offsets by the device; a group
- * whose single dynamic binding the stage reads, or does not touch at all, is
- * bound correctly. The fixed block and the sampled textures stay in group 0.
+ * Where the two program uniform blocks sit, as the device answers them: a
+ * pipeline stage that reads only some of a group's dynamic uniform bindings is
+ * handed zero for its own, and the vertex stage reads no dynamic uniform block
+ * outside group 0 at all. So the vertex block shares group 0 with the fixed
+ * block, whose binding the vertex stage also reads, and the fragment block
+ * gets a group of its own, which the fragment stage reads alone.
  */
 export const VERTEX_PROGRAM_BINDING = 17;
 export const FRAGMENT_PROGRAM_BINDING = 18;
-export const VERTEX_PROGRAM_GROUP = 1;
-export const FRAGMENT_PROGRAM_GROUP = 2;
+export const VERTEX_PROGRAM_GROUP = 0;
+export const FRAGMENT_PROGRAM_GROUP = 1;
 
 /**
  * The texture coordinate sets a stage can pass through the varyings: the

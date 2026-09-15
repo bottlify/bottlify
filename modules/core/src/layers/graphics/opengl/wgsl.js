@@ -32,7 +32,7 @@
  */
 
 import { GL } from './constants.js';
-import { VARYING_TEXCOORDS, VERTEX_PROGRAM_GROUP, emitFragment, emitVertex, needsOf }
+import { VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf }
     from './arb-wgsl.js';
 
 /**
@@ -725,8 +725,7 @@ function generateProgramDraw(state){
     });
 
     const fragmentStage = state.fragmentProgram
-        ? emitFragment(state.fragmentProgram.ir,
-            state.vertexProgram ? undefined : VERTEX_PROGRAM_GROUP)
+        ? emitFragment(state.fragmentProgram.ir)
         : null;
     if (fragmentStage && 'error' in fragmentStage)
     {
