@@ -53,6 +53,7 @@ const state = (fields = {})=>({
     stencil: null,
     cull: 'none',
     frontIsCcw: true,
+    viewportHeight: 0,
     colourMask: 0xf,
     polygonOffset: null,
     vertexProgram: null,
@@ -415,6 +416,21 @@ test('a program stage replaces the fixed stage it is bound for', ()=>{
     assert.notEqual(drawKey(both),
         drawKey({ ...both, vertexProgram: { ...vertex, version: 2 } }),
     );
+});
+
+test('a program reading fragment.position is emitted against the target height', ()=>{
+    // GL's fragment.position runs from the window's lower-left corner and
+    // WGSL's @builtin(position) from the upper-left, so the emitted stage
+    // needs the render target's rows, and a new height is a new pipeline.
+    const positional = program('!!ARBfp1.0\nTEMP R0;\n'
+        + 'MUL R0, fragment.position, program.env[1];\nMOV result.color, R0;\nEND\n');
+    const tall = generateDraw(state({ fragmentProgram: positional, viewportHeight: 720 }));
+    const short = generateDraw(state({ fragmentProgram: positional, viewportHeight: 480 }));
+    assert.match(tall.code, /input\.position\.x, 720\.0 - input\.position\.y/);
+    assert.match(short.code, /input\.position\.x, 480\.0 - input\.position\.y/);
+    assert.notEqual(drawKey(state({ fragmentProgram: positional, viewportHeight: 720 })),
+        drawKey(state({ fragmentProgram: positional, viewportHeight: 480 })),
+        'a different target height is a different pipeline');
 });
 
 test('a binding the GPU path cannot answer refuses the module by name', ()=>{

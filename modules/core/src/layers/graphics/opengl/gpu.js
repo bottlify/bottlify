@@ -897,6 +897,7 @@ export function createGpuRenderer(services){
             stencil: scene.stencil,
             cull: cullMode === undefined ? 'none' : cullMode === GL.FRONT ? 'front' : 'back',
             frontIsCcw: scene.frontIsCcw,
+            viewportHeight: scene.framebuffer.height,
             colourMask: (mask[0] ? 1 : 0) | (mask[1] ? 2 : 0) | (mask[2] ? 4 : 0)
                 | (mask[3] ? 8 : 0),
             polygonOffset: scene.polygonOffset,

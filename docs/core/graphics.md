@@ -358,7 +358,10 @@ because the device hands a stage zero for a dynamic uniform block outside the fi
 stage reads; the fragment program's block gets a bind group of its own, which the fragment stage
 reads alone. `HIDDEN_GL_EXTENSIONS` is empty: a name added back there stays sized, implemented and
 obtainable through `wglGetProcAddress`, as a driver's unannounced entry points would be, and only
-the string omits it. The context holds
+the string omits it. One window onto a program needs a translation of its own: `fragment.position`
+is emitted against the render target's height, because GL measures it from the window's
+lower-left corner and WGSL's `@builtin(position)` from the upper-left. The
+context holds
 eight texture units -- the image units and coordinate sets a program addresses -- of which the
 conventional pipeline combines the first four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path
 cannot answer (a non-matrix state parameter, a 3D texture target) refuses the stage by name as a

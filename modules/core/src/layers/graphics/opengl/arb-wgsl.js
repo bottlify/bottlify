@@ -490,6 +490,7 @@ function floatLiteral(value){
  * @property {Map<number, number>} genericFallbacks  attrib number -> uniform index
  * @property {StageInput[]} inputs
  * @property {StageVaryings} varyings
+ * @property {number} viewportHeight  the render target's rows, for fragment.position
  * @property {() => number} next
  * @property {(operand: Operand) => string} source
  */
@@ -582,15 +583,20 @@ function fragmentAttribExpression(ctx, operand){
     {
         return 'vec4f(0.0)';
     }
-    return fragmentInputExpression(binding);
+    return fragmentInputExpression(ctx, binding);
 }
 
-/** @param {FragmentBinding} binding */
-function fragmentInputExpression(binding){
+/** @param {StageContext} ctx @param {FragmentBinding} binding */
+function fragmentInputExpression(ctx, binding){
     switch (binding.name)
     {
         case 'position':
-            return 'input.position';
+            // GL's fragment.position is measured from the lower-left corner of
+            // the window; WGSL's @builtin(position) from the upper-left. The
+            // correction needs the target's height, which is baked here and so
+            // folded into the pipeline key.
+            return `vec4f(input.position.x, ${ctx.viewportHeight}.0 - input.position.y,`
+                + ' input.position.z, input.position.w)';
         case 'color-primary':
             return 'input.color';
         case 'color-secondary':
@@ -992,9 +998,10 @@ function sampleCall(instruction, source){
  * @param {StageVaryings} varyings
  * @param {ReturnType<typeof analyse>} analysed
  * @param {string} block
+ * @param {number} [viewportHeight]  the render target's rows, for fragment.position
  * @returns {StageContext}
  */
-function createContext(ir, inputs, varyings, analysed, block){
+function createContext(ir, inputs, varyings, analysed, block, viewportHeight = 0){
     const resolve = aliasResolver(ir);
     /** @type {Map<string, string>} */
     const temps = new Map();
@@ -1014,6 +1021,7 @@ function createContext(ir, inputs, varyings, analysed, block){
         genericFallbacks,
         inputs,
         varyings,
+        viewportHeight,
         next: ()=>next++,
         source: operand=>sourceExpression(ctx, operand),
     };
@@ -1139,9 +1147,10 @@ ${body.join('\n')}
  *
  * @param {ParsedProgram} ir
  * @param {number} [group]  the bind group the block sits in
+ * @param {number} [viewportHeight]  the render target's rows, for fragment.position
  * @returns {EmitResult}
  */
-export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP){
+export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP, viewportHeight = 0){
     const analysed = analyse(ir);
     const resolve = aliasResolver(ir);
     const needs = collectNeeds(ir, analysed, resolve);
@@ -1177,7 +1186,7 @@ export function emitFragment(ir, group = FRAGMENT_PROGRAM_GROUP){
     const ctx = createContext(ir, [], {
         texcoords: Array.from({ length: VARYING_TEXCOORDS }, (unused, set)=>set),
         fogCoord: true,
-    }, analysed, 'fragmentProgram');
+    }, analysed, 'fragmentProgram', viewportHeight);
     /** @type {string[]} */
     const lines = [];
     for (const instruction of ir.instructions)

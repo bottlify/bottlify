@@ -32,7 +32,7 @@
  */
 
 import { GL } from './constants.js';
-import { VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf }
+import { FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf }
     from './arb-wgsl.js';
 
 /**
@@ -68,6 +68,7 @@ import { VARYING_TEXCOORDS, emitFragment, emitVertex, needsOf }
  *              readMask: number, writeMask: number } | null} stencil
  * @property {'none' | 'front' | 'back'} cull
  * @property {boolean} frontIsCcw
+ * @property {number} viewportHeight  the render target's rows; fragment.position reads it
  * @property {number} colourMask     bits: red 1, green 2, blue 4, alpha 8
  * @property {{ factor: number, units: number } | null} polygonOffset
  * @property {import('./pipeline.js').SceneProgram | null} vertexProgram
@@ -216,7 +217,8 @@ export function drawKey(state){
             ? `vp${state.vertexProgram.name}.${state.vertexProgram.version}`
             : '-',
         state.fragmentProgram
-            ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}`
+            ? `fp${state.fragmentProgram.name}.${state.fragmentProgram.version}.`
+                + `${state.viewportHeight ?? 0}`
             : '-',
     ].join('|');
 }
@@ -725,7 +727,8 @@ function generateProgramDraw(state){
     });
 
     const fragmentStage = state.fragmentProgram
-        ? emitFragment(state.fragmentProgram.ir)
+        ? emitFragment(state.fragmentProgram.ir, FRAGMENT_PROGRAM_GROUP,
+            state.viewportHeight ?? 0)
         : null;
     if (fragmentStage && 'error' in fragmentStage)
     {

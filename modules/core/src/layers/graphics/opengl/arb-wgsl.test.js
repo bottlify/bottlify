@@ -29,11 +29,11 @@ function vertex(text, options = {}){
     return emitted;
 }
 
-/** @param {string} text */
-function fragment(text){
+/** @param {string} text @param {number} [viewportHeight] */
+function fragment(text, viewportHeight = 0){
     const parsed = parseProgram(text);
     assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
-    const emitted = emitFragment(parsed);
+    const emitted = emitFragment(parsed, FRAGMENT_PROGRAM_GROUP, viewportHeight);
     assert.ok(!('error' in emitted), 'error' in emitted ? emitted.error : '');
     return emitted;
 }
@@ -160,6 +160,19 @@ END
 `);
     assert.match(code,
         /out\.position = vec4f\(v\d+\.x, v\d+\.y, \(v\d+\.z \+ v\d+\.w\) \* 0\.5, v\d+\.w\);/);
+});
+
+test('fragment.position is a lower-left window coordinate', ()=>{
+    // GL_ARB_fragment_program: fragment.position is the fragment centre from
+    // the window's lower-left corner; WGSL's @builtin(position) is measured
+    // from the upper-left, so the y is flipped by the target's height.
+    const { code } = fragment(`!!ARBfp1.0
+TEMP R0;
+MUL R0, fragment.position, program.env[1];
+MOV result.color, R0;
+END
+`, 480);
+    assert.match(code, /input\.position\.x, 480\.0 - input\.position\.y,/);
 });
 
 test('position invariance emits the modelview-projection multiply', ()=>{
@@ -365,7 +378,7 @@ END
     assert.match(code, /let s\d+_1 = input\.tc2;/);
     assert.match(code, /let s\d+_1 = input\.secondary;/);
     assert.match(code, /let s\d+_1 = vec4f\(input\.fogCoord\);/);
-    assert.match(code, /let s\d+_1 = input\.position;/);
+    assert.match(code, /let s\d+_1 = vec4f\(input\.position\.x, 0\.0 - input\.position\.y,/);
     assert.equal(needs.readsFogCoord, true);
 });
 
