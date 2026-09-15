@@ -140,3 +140,51 @@ test('the phase table is long enough to hold the loop and the calls together', a
     assert.equal((logModule.diagnostics().metrics?.topPhases ?? []).length, 16);
     await logModule.dispose();
 });
+
+test('a second instance in one realm does not take the first one\'s journal', async()=>{
+    // A process replacement runs `create()` again in the same realm, and the
+    // plan for two machines in one worker needs two instances live at once.
+    // The journal belongs to the instance, so the first one's api keeps
+    // writing to the first one's ring however many times create() runs after.
+    const first = await open({});
+    first.api.info('boot', 'the first instance');
+    const second = await open({});
+    second.api.info('boot', 'the second instance');
+    first.api.info('boot', 'the first instance still');
+
+    assert.deepEqual(first.api.recent().map((/** @type {any} */ record)=>record.text),
+        ['the first instance', 'the first instance still']);
+    assert.deepEqual(second.api.recent().map((/** @type {any} */ record)=>record.text),
+        ['the second instance']);
+
+    await logModule.dispose();
+});
+
+test('a disposed log accepts a write and does nothing', async()=>{
+    // A host call that was in flight when the machine was disposed retires
+    // afterwards and journals itself. The writer never waits and never throws,
+    // and that has to hold once the instance is closed as well: a null
+    // dereference here would take down the run the report was being written
+    // about.
+    const { api } = await open({});
+    api.info('boot', 'before dispose');
+
+    await logModule.dispose();
+
+    assert.equal(api.enabled('boot', api.Level.INFO), false);
+    assert.doesNotThrow(()=>api.write('info', 'boot', 'after dispose'));
+    assert.deepEqual(api.recent(), []);
+    assert.deepEqual(api.drain(0).records, []);
+    assert.equal(logModule.diagnostics().status, 'created');
+});
+
+test('diagnostics still answers for the live instance', async()=>{
+    const { api } = await open({});
+    api.info('boot', 'one record');
+
+    const diagnostics = logModule.diagnostics();
+    assert.equal(diagnostics.status, 'ready');
+    assert.equal(diagnostics.metrics?.journal.written, 1);
+
+    await logModule.dispose();
+});

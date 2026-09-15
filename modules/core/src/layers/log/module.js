@@ -43,12 +43,20 @@ import { createMetrics } from './internal/metrics.js';
  */
 const TOP_PHASES = 16;
 
-/** @type {any} */
-let journal = null;
-/** @type {any} */
-let profiler = null;
-/** @type {string[]} */
-let issues = [];
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That is
+ * the only reason this exists, and it holds a reference rather than the state
+ * itself -- the journal belongs to the closure `create()` returns, so a second
+ * instance in one realm cannot take the first one's ring. Disposing marks the
+ * instance closed, so a call still in flight when the machine went away answers
+ * nothing instead of dereferencing what is gone.
+ *
+ * @type {any}
+ */
+let current = null;
 
 /** The layer's own counters, in the order they are published. */
 const REJECTED = 0;
@@ -64,7 +72,23 @@ export const logModule = {
      * @returns {Promise<any>}
      */
     async create(config){
-        issues = [];
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own ring.
+         *
+         * @type {{ journal: any, profiler: any, issues: string[], disposed: boolean }}
+         */
+        const state = {
+            journal: null,
+            profiler: null,
+            issues: [],
+            disposed: false,
+        };
         let now = config?.now;
         if (typeof now !== 'function')
         {
@@ -72,7 +96,7 @@ export const logModule = {
             // know about. Every duration then reads as zero, which is visible
             // and reported, instead of plausible and wrong.
             now = ()=>0;
-            issues.push('No clock was configured: timestamps and durations are all zero.');
+            state.issues.push('No clock was configured: timestamps and durations are all zero.');
         }
 
         /** @type {Record<string, number>} */
@@ -82,7 +106,7 @@ export const logModule = {
             categories[name] = toLevel(level);
         }
 
-        journal = createJournal({
+        const journal = createJournal({
             now,
             capacity: config?.capacity,
             bytes: config?.bytes,
@@ -92,6 +116,7 @@ export const logModule = {
             categories,
             sequenceBase: config?.sequenceBase,
         });
+        state.journal = journal;
         const registry = createMetrics({ shared: config?.shared });
         const own = registry.counters('log', ['rejected', 'unbalancedPhases']);
         const tables = {
@@ -111,7 +136,7 @@ export const logModule = {
         // whole milliseconds: a phase entered tens of thousands of times reads
         // as a column of zeroes and ones, which is a distribution rather than a
         // measurement, and the short phases are exactly the ones it ruins.
-        profiler = createProfiler({
+        const profiler = createProfiler({
             now: config?.wallClock ?? (typeof performance === 'undefined'
                 ? ()=>Date.now()
                 : ()=>performance.now()),
@@ -119,6 +144,7 @@ export const logModule = {
             tables,
             intern: journal.intern,
         });
+        state.profiler = profiler;
         registry.onFrame(()=>{
             own[REJECTED] = journal.rejected();
             own[UNBALANCED] = profiler.unbalanced();
@@ -146,7 +172,7 @@ export const logModule = {
                 indices.push(index >= 0 ? index : 0);
                 if (index < 0)
                 {
-                    issues.push(`No ${entry.layer} counter named "${entry.counter}":`
+                    state.issues.push(`No ${entry.layer} counter named "${entry.counter}":`
                         + ` every frame reports ${entry.column} as zero.`);
                 }
             }
@@ -159,13 +185,28 @@ export const logModule = {
         }
 
         /**
+         * Whether this instance is still open. A call that was in flight when
+         * the machine was disposed must not find the journal gone: the contract
+         * of a writer that never waits and never throws holds after disposal
+         * too, so every call answers empty rather than dereferencing what is
+         * gone.
+         */
+        const live = ()=>!state.disposed;
+
+        /**
          * @param {number} level
          * @returns {(category: string, message: string,
          *            a?: any, b?: any, c?: any, d?: any) => void}
          */
-        const at = level=>(category, message, a, b, c, d)=>
+        const at = level=>(category, message, a, b, c, d)=>{
+            if (!live())
+            {
+                return;
+            }
             journal.write(level, category, message, a, b, c, d);
+        };
 
+        current = state;
         return {
             Level,
             PhaseKind,
@@ -180,25 +221,40 @@ export const logModule = {
              * @param {number} level @param {string} category @param {string} message
              * @param {any} [a] @param {any} [b] @param {any} [c] @param {any} [d]
              */
-            write: (level, category, message, a, b, c, d)=>
-                journal.write(level, category, message, a, b, c, d),
+            write: (level, category, message, a, b, c, d)=>{
+                if (!live())
+                {
+                    return;
+                }
+                journal.write(level, category, message, a, b, c, d);
+            },
 
             /** @param {string} category @param {number} level */
-            enabled: (category, level)=>journal.enabled(category, level),
+            enabled: (category, level)=>live() && journal.enabled(category, level),
             /** @param {string} category @param {unknown} level */
-            setLevel: (category, level)=>journal.setLevel(category, toLevel(level)),
+            setLevel: (category, level)=>{
+                if (live())
+                {
+                    journal.setLevel(category, toLevel(level));
+                }
+            },
             /** @param {unknown} level */
-            setDefaultLevel: level=>journal.setDefaultLevel(toLevel(level)),
+            setDefaultLevel: level=>{
+                if (live())
+                {
+                    journal.setDefaultLevel(toLevel(level));
+                }
+            },
             /** @param {string} category */
-            levelOf: category=>journal.levelOf(category),
+            levelOf: category=>live() ? journal.levelOf(category) : Level.OFF,
 
             /** @param {(records: any[]) => void} sink @returns {() => void} removes it */
-            addSink: sink=>journal.addSink(sink),
-            flush: ()=>journal.flush(),
+            addSink: sink=>live() ? journal.addSink(sink) : (()=>{}),
+            flush: ()=>live() ? journal.flush() : 0,
             /** @param {number} [count] */
-            recent: count=>journal.recent(count),
+            recent: count=>live() ? journal.recent(count) : [],
             /** @param {string} text @returns {number} its id in the journal's dictionary */
-            intern: text=>journal.intern(text),
+            intern: text=>live() ? journal.intern(text) : -1,
 
             /**
              * Where the layers publish their figures, and what a reader
@@ -219,26 +275,52 @@ export const logModule = {
              * @param {number} [since] @param {number} [limit]
              * @returns {any}
              */
-            drain: (since, limit)=>journal.drain(since, limit),
-            templates: ()=>journal.templates(),
+            drain: (since, limit)=>live()
+                ? journal.drain(since, limit)
+                : { records: [], from: 0, next: 0, lost: 0 },
+            templates: ()=>live() ? journal.templates() : [],
 
             /** @param {string} name @param {string} [kind] */
-            begin: (name, kind)=>profiler.begin(name, kind),
+            begin: (name, kind)=>{
+                if (live())
+                {
+                    profiler.begin(name, kind);
+                }
+            },
             /**
              * @param {string} [name] @param {{ instructions?: number }} [detail]
              * @returns {number} the phase's duration
              */
-            end: (name, detail)=>profiler.end(name, detail),
+            end: (name, detail)=>live() ? profiler.end(name, detail) : 0,
             /** @param {number} [count] */
-            compiled: count=>profiler.compiled(count),
+            compiled: count=>{
+                if (live())
+                {
+                    profiler.compiled(count);
+                }
+            },
             /** @param {string} name @param {number} amount */
-            note: (name, amount)=>profiler.note(name, amount),
-            beginFrame: ()=>profiler.beginFrame(),
+            note: (name, amount)=>{
+                if (live())
+                {
+                    profiler.note(name, amount);
+                }
+            },
+            beginFrame: ()=>{
+                if (live())
+                {
+                    profiler.beginFrame();
+                }
+            },
             // The one moment on the engine thread when figures nobody keeps
             // as they run are copied into their tables -- before the frame's
             // own row is written, so that the row carries the counters as they
             // stand at its close rather than as they stood at the one before.
             endFrame: ()=>{
+                if (!live())
+                {
+                    return null;
+                }
                 registry.sample();
                 if (!mirrored)
                 {
@@ -247,25 +329,36 @@ export const logModule = {
                 return profiler.endFrame();
             },
             /** @param {number} [count] */
-            frames: count=>profiler.frames(count),
+            frames: count=>live() ? profiler.frames(count) : [],
             /** @param {number} [worst] */
-            profile: worst=>profiler.snapshot(worst),
+            profile: worst=>live() ? profiler.snapshot(worst) : {
+                frames: 0,
+                unbalanced: 0,
+                imbalances: [],
+                openPhases: 0,
+                hostShare: 0,
+                averageFrameMs: 0,
+                phases: [],
+                worstFrames: [],
+                recentFrames: [],
+            },
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
-        if (!journal)
+        const instance = current;
+        if (!instance || instance.disposed)
         {
             return { name: 'log', version: '0.1.0', status: 'created', metrics: {} };
         }
-        const profile = profiler.snapshot(3);
+        const profile = instance.profiler.snapshot(3);
         return {
             name: 'log',
             version: '0.1.0',
             status: 'ready',
             metrics: {
-                journal: journal.diagnostics(),
+                journal: instance.journal.diagnostics(),
                 // The share the thresholds watch, kept where a snapshot will
                 // find it without anyone having to ask for a profile.
                 hostShare: profile.hostShare,
@@ -279,13 +372,15 @@ export const logModule = {
                     `${row.name} ${row.kind} x${row.count} self=${row.selfMs.toFixed(3)}`
                     + ` worst=${row.worstMs.toFixed(3)}`),
             },
-            issues: [...issues],
+            issues: [...instance.issues],
         };
     },
 
     async dispose(){
-        journal = null;
-        profiler = null;
-        issues = [];
+        if (current)
+        {
+            current.disposed = true;
+        }
+        current = null;
     },
 };

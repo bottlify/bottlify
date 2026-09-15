@@ -69,6 +69,14 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 | `metrics` | The registry: `counters(layer, names) → Float64Array`, `table(layer, name, { rows, columns }) → TableWriter`, `onFrame(sampler) → remove`, `sample()`, `describe()`. A layer registers at `create` and writes in place from then on. |
 | `memory()` | `{ journal, tables }` — the journal's block and every table's descriptor, for a reader on another thread. Made once per machine, after every layer has registered. A machine rebuilt on a child's image makes a fresh block, and the host hands that block to the keeper following the swap rather than rebuilding the reader. |
 
+An instance owns its journal. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so each api
+closes over its own instance and a second `create()` cannot take the first's ring; `diagnostics()`
+answers for the most recently created instance. After `dispose()`, a call that was in flight is
+accepted and does nothing: `enabled()` answers false, `write()` returns, `recent()` and `drain()`
+answer empty, and nothing throws, because the contract of a writer that never waits and never
+throws holds after disposal too.
+
 `recent`, `drain`, `frames` and `profile` still answer from this thread, for the thread that owns
 the engine and for the transition; each is a read of the same memory a reader elsewhere has, not a
 walk of anything else. `endFrame()` also runs every registered sampler, which is the one moment
