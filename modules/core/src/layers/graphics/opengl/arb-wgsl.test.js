@@ -142,24 +142,47 @@ END
     assert.match(code, /let s\d+_0 = vec4f\(0\.25, 0\.5, 0\.0, 1\.0\);/,
         'a constant literal pads to a vec4f');
     assert.match(code, /resultColor = v\d+;/);
-    // A partial write of the clip position still remaps its depth.
+    // A partial write of the clip position is remapped once, after the whole
+    // program: its own instruction's value is not the clip w.
     const masked = vertex(`!!ARBvp1.0
 TEMP r0;
 MOV result.position.zw, r0;
 END
 `);
-    assert.match(masked.code, /out\.position\.z = \(v\d+\.z \+ v\d+\.w\) \* 0\.5;/);
+    assert.match(masked.code, /out\.position\.z = v\d+\.z;/);
     assert.match(masked.code, /out\.position\.w = v\d+\.w;/);
+    assert.match(masked.code, /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+    const writes = masked.code.indexOf('out.position.w =');
+    const remap = masked.code.indexOf('out.position.z = (out.position.z + out.position.w)');
+    assert.ok(remap > writes, 'the remap runs after the program wrote the position');
 });
 
-test('the clip position is depth-remapped, the way the fixed path remaps it', ()=>{
-    const { code } = vertex(`!!ARBvp1.0
+test('the clip position is depth-remapped once, after the program writes it', ()=>{
+    const full = vertex(`!!ARBvp1.0
 TEMP r0;
 MOV result.position, r0;
 END
 `);
-    assert.match(code,
-        /out\.position = vec4f\(v\d+\.x, v\d+\.y, \(v\d+\.z \+ v\d+\.w\) \* 0\.5, v\d+\.w\);/);
+    assert.match(full.code, /out\.position = v\d+;/);
+    assert.match(full.code,
+        /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+    // A DP4 per matrix row writes one component at a time. The remap must use
+    // the w that the program wrote, not the z instruction's own value: the
+    // scalar DP4 broadcasts into every component, so a per-write remap would
+    // fold to the identity and leave GL's -w..w depth on the device.
+    const componentWise = vertex(`!!ARBvp1.0
+TEMP r0;
+DP4 result.position.x, r0, state.matrix.mvp.row[0];
+DP4 result.position.y, r0, state.matrix.mvp.row[1];
+DP4 result.position.z, r0, state.matrix.mvp.row[2];
+DP4 result.position.w, r0, state.matrix.mvp.row[3];
+END
+`);
+    assert.match(componentWise.code, /out\.position\.z = v\d+\.z;/);
+    assert.match(componentWise.code,
+        /out\.position\.z = \(out\.position\.z \+ out\.position\.w\) \* 0\.5;/);
+    assert.doesNotMatch(componentWise.code, /out\.position\.z = \(v\d+\.z \+ v\d+\.w\)/,
+        'the z instruction\'s broadcast w is not the clip w');
 });
 
 test('fragment.position is a lower-left window coordinate', ()=>{
@@ -464,7 +487,7 @@ END
 `);
     assert.match(code, /let s\d+_0 = vertexProgram\.params\[0\];/);
     assert.match(code, /tmp0 = v\d+;/);
-    assert.match(code, /out\.position = vec4f\(v\d+\.x/);
+    assert.match(code, /out\.position = v\d+;/);
 });
 
 /**

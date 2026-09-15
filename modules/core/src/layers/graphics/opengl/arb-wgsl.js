@@ -747,10 +747,9 @@ function destinationOf(ctx, operand){
 }
 
 /**
- * The write of an instruction's value through its destination mask. A mask
- * of all four is one assignment; less writes the members one by one, and the
- * clip position's z is remapped from GL's -w..w to WebGPU's 0..w whichever
- * way it is written.
+ * The write of an instruction's value through its destination mask. The clip
+ * position's depth is not remapped here: z and w may be written by different
+ * instructions, so `emitVertex` remaps once after the whole program.
  *
  * @param {Operand} dst
  * @param {{ text: string, position: boolean }} destination
@@ -758,22 +757,6 @@ function destinationOf(ctx, operand){
  * @param {string[]} lines
  */
 function writeDestination(dst, destination, value, lines){
-    if (destination.position)
-    {
-        if (dst.mask === 'xyzw')
-        {
-            lines.push(`    ${destination.text} = vec4f(${value}.x, ${value}.y,`
-                + ` (${value}.z + ${value}.w) * 0.5, ${value}.w);`);
-            return;
-        }
-        for (const c of /** @type {string} */ (dst.mask))
-        {
-            lines.push(c === 'z'
-                ? `    out.position.z = (${value}.z + ${value}.w) * 0.5;`
-                : `    out.position.${c} = ${value}.${c};`);
-        }
-        return;
-    }
     if (dst.mask === 'xyzw')
     {
         lines.push(`    ${destination.text} = ${value};`);
@@ -1049,8 +1032,14 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
     const ctx = createContext(ir, inputs, varyings, analysed, 'vertexProgram');
     /** @type {string[]} */
     const lines = [];
+    let writesPosition = false;
     for (const instruction of ir.instructions)
     {
+        const destination = instruction.dst ? destinationOf(ctx, instruction.dst) : null;
+        if (destination?.position)
+        {
+            writesPosition = true;
+        }
         emitInstruction(ctx, instruction, lines);
     }
 
@@ -1112,6 +1101,13 @@ export function emitVertex(ir, inputs, varyings, group = VERTEX_PROGRAM_GROUP){
         body.push('    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);');
     }
     body.push(...lines);
+    if (!ir.positionInvariant && writesPosition)
+    {
+        // GL's clip z runs -w..w and WebGPU's 0..w. The program may write the
+        // position one component at a time (a DP4 per matrix row), so the
+        // remap runs once here, against the w the program actually wrote.
+        body.push('    out.position.z = (out.position.z + out.position.w) * 0.5;');
+    }
     body.push('    return out;');
 
     const paramCount = Math.max(1, analysed.params.length);
