@@ -32,6 +32,33 @@ const MAX_WIDE = 1 << 16;
  * @property {(address: number, maxLength: number) => string} readCString
  */
 
+/** WEOF: the value no code unit is, and the one every classifier answers nothing for. */
+const WEOF = 0xffff;
+
+/** The classes of the wide table below. They mark membership, and nothing else. */
+const W_ALPHA = 0x001;
+const W_DIGIT = 0x002;
+const W_UPPER = 0x004;
+const W_LOWER = 0x008;
+const W_SPACE = 0x010;
+const W_PUNCT = 0x020;
+const W_CNTRL = 0x040;
+const W_PRINT = 0x080;
+const W_GRAPH = 0x100;
+const W_XDIGIT = 0x200;
+
+/**
+ * Which byte classifier answers which class: the wide table is read from the
+ * narrow answers, not from a second copy of them.
+ *
+ * @type {Record<string, number>}
+ */
+const CLASSES = {
+    isalpha: W_ALPHA, isdigit: W_DIGIT, isupper: W_UPPER, islower: W_LOWER,
+    isspace: W_SPACE, ispunct: W_PUNCT, iscntrl: W_CNTRL, isprint: W_PRINT,
+    isxdigit: W_XDIGIT,
+};
+
 /**
  * @param {WideHost} host
  */
@@ -273,6 +300,101 @@ export function createWideFunctions(host){
                 return byte === 0 ? 0 : 1;
             },
         },
+    };
+}
+
+/**
+ * The wide classifiers, bound to the byte ones so the two cannot drift: a
+ * program may ask either family about the same character and is entitled to
+ * the same answer for every code unit below 0x80. Above it the C locale is not
+ * empty, which is what a real Windows answers through iswctype: the Latin-1
+ * letters are alpha -- both signs except the multiplication and division signs
+ * that sit among them and are not letters -- and there are two spaces the
+ * ASCII list does not carry, NEL at 0x85 and the no-break space at 0xa0. Case
+ * folding stays ASCII with the rest of the locale, so those letters are alpha
+ * with no upper or lower answer of their own, and every code unit above 0xff
+ * that is neither of those things -- a CJK unit, WEOF -- is nothing at all.
+ *
+ * @param {Record<string, any>} narrow  The byte table, classifiers included.
+ */
+export function createWideClassificationFunctions(narrow){
+    const table = new Uint16Array(0x100);
+    for (let code = 0; code < table.length; code++)
+    {
+        let classes = 0;
+        for (const [name, klass] of Object.entries(CLASSES))
+        {
+            if (narrow[name].handler([code]) !== 0)
+            {
+                classes |= klass;
+            }
+        }
+        if ((classes & W_PRINT) !== 0 && (classes & W_SPACE) === 0)
+        {
+            classes |= W_GRAPH;
+        }
+        if (code >= 0xc0 && code <= 0xff && code !== 0xd7 && code !== 0xf7)
+        {
+            classes |= W_ALPHA;
+        }
+        if (code === 0x85 || code === 0xa0)
+        {
+            classes |= W_SPACE;
+        }
+        table[code] = classes;
+    }
+
+    /**
+     * @param {number} klass  The classes that answer this one.
+     */
+    const classifyWide = klass=>({
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>{
+            const unit = code & 0xffff;
+            return unit < table.length && (table[unit] & klass) !== 0 ? 1 : 0;
+        },
+    });
+
+    /** @param {(unit: number) => number} fold */
+    const toCase = fold=>({
+        convention: 'cdecl',
+        argBytes: 4,
+        /** @param {number[]} args */
+        handler: ([code])=>{
+            const unit = code & 0xffff;
+            return unit === WEOF ? 0 : fold(unit);
+        },
+    });
+
+    return {
+        /** int iswalpha/isdigit/... (wint_t) — the classifiers, under the C locale */
+        iswalpha: classifyWide(W_ALPHA),
+        iswdigit: classifyWide(W_DIGIT),
+        iswalnum: classifyWide(W_ALPHA | W_DIGIT),
+        iswspace: classifyWide(W_SPACE),
+        iswupper: classifyWide(W_UPPER),
+        iswlower: classifyWide(W_LOWER),
+        iswpunct: classifyWide(W_PUNCT),
+        iswxdigit: classifyWide(W_XDIGIT),
+        iswcntrl: classifyWide(W_CNTRL),
+        iswprint: classifyWide(W_PRINT),
+        iswgraph: classifyWide(W_GRAPH),
+
+        /** int iswascii(wint_t) -- the range, not a class the table carries */
+        iswascii: {
+            convention: 'cdecl',
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([code])=>((code & 0xffff) < 0x80 ? 1 : 0),
+        },
+
+        /** wint_t towupper(wint_t) */
+        towupper: toCase(unit=>unit >= 0x61 && unit <= 0x7a ? unit - 0x20 : unit),
+
+        /** wint_t towlower(wint_t) */
+        towlower: toCase(unit=>unit >= 0x41 && unit <= 0x5a ? unit + 0x20 : unit),
     };
 }
 

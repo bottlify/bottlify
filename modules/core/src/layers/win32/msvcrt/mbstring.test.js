@@ -116,3 +116,93 @@ test('under a single-byte locale a character is one byte and nothing leads', ()=
     assert.equal(multi._mbsdec.handler([0x1000, 0x1004]), 0x1003);
     assert.equal(multi._mbsdec.handler([0x1000, 0x1000]), 0, 'nothing before the start');
 });
+
+/**
+ * The whole runtime's table, because the wide classifiers are bound to the
+ * answers of the byte ones.
+ */
+const runtime = ()=>{
+    const memory = fakeMemory();
+    return /** @type {Record<string, any>} */ (createMsvcrtFunctions({
+        ...memory,
+        write: ()=>{},
+        callGuest: async()=>0,
+    }));
+};
+
+test('iswspace classifies the spaces the C locale has, and a code unit it has not got', ()=>{
+    const fns = runtime();
+    assert.equal(fns.iswspace.handler([0x20]), 1);
+    assert.equal(fns.iswspace.handler([0x09]), 1);
+    assert.equal(fns.iswspace.handler(['x'.charCodeAt(0)]), 0);
+    assert.equal(fns.iswspace.handler([0x85]), 1, 'NEL is a space');
+    assert.equal(fns.iswspace.handler([0xa0]), 1, 'the no-break space is a space');
+    assert.equal(fns.iswspace.handler([0x4e2d]), 0, 'a CJK unit is nothing');
+    assert.equal(fns.iswspace.handler([0xffff]), 0, 'and WEOF is nothing at all');
+});
+
+test('the Latin-1 letters are alpha, the two signs among them are not', ()=>{
+    const fns = runtime();
+    assert.equal(fns.iswalpha.handler([0xc0]), 1);
+    assert.equal(fns.iswalpha.handler([0xff]), 1);
+    assert.equal(fns.iswalnum.handler([0xc0]), 1, 'alpha carries alnum');
+    assert.equal(fns.iswalpha.handler([0xd7]), 0, 'multiplication is not a letter');
+    assert.equal(fns.iswalpha.handler([0xf7]), 0, 'and neither is division');
+    assert.equal(fns.iswupper.handler([0xc0]), 0, 'the C locale gives them no case');
+    assert.equal(fns.iswlower.handler([0xc0]), 0);
+    assert.equal(fns.iswalpha.handler([0x4e2d]), 0, 'a CJK unit is not alpha here');
+    assert.equal(fns.iswalpha.handler([0xffff]), 0);
+});
+
+test('the wide classifiers answer every ASCII code unit what the byte ones answer', ()=>{
+    const fns = runtime();
+    for (const [wide, byte] of Object.entries({
+        iswalpha: 'isalpha', iswdigit: 'isdigit', iswalnum: 'isalnum',
+        iswspace: 'isspace', iswupper: 'isupper', iswlower: 'islower',
+        iswxdigit: 'isxdigit', iswpunct: 'ispunct', iswcntrl: 'iscntrl',
+        iswprint: 'isprint',
+    }))
+    {
+        for (let code = 0; code < 0x80; code++)
+        {
+            assert.equal(fns[wide].handler([code]), fns[byte].handler([code]),
+                `${wide}(0x${code.toString(16)})`);
+        }
+    }
+});
+
+test('the wide classifiers that have no byte twin still answer the C locale', ()=>{
+    const fns = runtime();
+    assert.equal(fns.iswdigit.handler(['7'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswdigit.handler(['a'.charCodeAt(0)]), 0);
+    assert.equal(fns.iswxdigit.handler(['F'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswxdigit.handler(['G'.charCodeAt(0)]), 0);
+    assert.equal(fns.iswupper.handler(['Z'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswlower.handler(['z'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswpunct.handler(['!'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswpunct.handler([0xa0]), 0, 'the no-break space is not punctuation');
+    assert.equal(fns.iswcntrl.handler([0x01]), 1);
+    assert.equal(fns.iswcntrl.handler([0x85]), 0, 'NEL is a space here, not a control');
+    assert.equal(fns.iswprint.handler([0x20]), 1);
+    assert.equal(fns.iswprint.handler([0xa0]), 0, 'print stops with the ASCII page');
+    assert.equal(fns.iswgraph.handler(['!'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswgraph.handler([0x20]), 0, 'graph is print without the space');
+    assert.equal(fns.iswgraph.handler([0xa0]), 0);
+    assert.equal(fns.iswascii.handler(['a'.charCodeAt(0)]), 1);
+    assert.equal(fns.iswascii.handler([0x7f]), 1);
+    assert.equal(fns.iswascii.handler([0x80]), 0, 'iswascii answers the range, not a class');
+    assert.equal(fns.iswascii.handler([0xffff]), 0);
+});
+
+test('towupper and towlower fold the ASCII letters and pass the rest through', ()=>{
+    const fns = runtime();
+    assert.equal(fns.towupper.handler(['a'.charCodeAt(0)]), 0x41);
+    assert.equal(fns.towupper.handler(['Z'.charCodeAt(0)]), 0x5a);
+    assert.equal(fns.towupper.handler(['0'.charCodeAt(0)]), 0x30);
+    assert.equal(fns.towupper.handler([0xe9]), 0xe9, 'the C locale folds no accent');
+    assert.equal(fns.towupper.handler([0xffff]), 0, 'WEOF answers zero, as everywhere');
+    assert.equal(fns.towlower.handler(['Z'.charCodeAt(0)]), 0x7a);
+    assert.equal(fns.towlower.handler(['a'.charCodeAt(0)]), 0x61);
+    assert.equal(fns.towlower.handler([0xc0]), 0xc0);
+    assert.equal(fns.towlower.handler([0xffff]), 0);
+});

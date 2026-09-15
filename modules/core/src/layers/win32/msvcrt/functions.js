@@ -26,7 +26,9 @@ import { createScanFunctions, VARIADIC_SLOTS } from './scan.js';
 import { createHeapFunctions } from './heap.js';
 import { createTimeFunctions } from './time.js';
 import { createPathFunctions } from './paths.js';
-import { createWideFunctions, createMultiByteFunctions } from './mbstring.js';
+import {
+    createWideFunctions, createWideClassificationFunctions, createMultiByteFunctions,
+} from './mbstring.js';
 import { createCxxFunctions } from './cxx.js';
 import { createMathFunctions } from './math.js';
 import { createStartupFunctions } from './startup.js';
@@ -710,6 +712,7 @@ export function createMsvcrtFunctions(host){
         ...narrow,
         // Bound to the byte functions above, so the two families cannot drift.
         ...createMultiByteFunctions(narrow),
+        ...createWideClassificationFunctions(narrow),
         ...createWideFunctions(host),
         ...createConversionFunctions({
             readCString: host.readCString,
