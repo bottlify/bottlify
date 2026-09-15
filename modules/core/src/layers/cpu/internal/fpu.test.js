@@ -116,6 +116,40 @@ test('the view is taken again each time, because the memory can be replaced', ()
     assert.equal(new DataView(grown).getUint8(1032), 6, 'and it wrote to the new memory');
 });
 
+test('a register the compiler tagged as a double reads back as that double', ()=>{
+    // Most x87 registers are left in the double's own bits with a tag in the
+    // exponent word rather than in extended form, which is cheaper to produce
+    // and what the emulator's own readers expect. Read as an extended value the
+    // same bits are an astronomically large number that truncates to zero, so
+    // every runtime maths call taking its argument off the stack would answer
+    // for zero -- and a program would go on to divide by it.
+    const { view, cpu } = machine();
+    const fpu = createFpu(cpu);
+    const bits = new DataView(new ArrayBuffer(8));
+
+    /** Leaves ST(index) holding `value` the way the compiler's inline path does.
+     * @param {number} index @param {number} value */
+    const tagged = (index, value)=>{
+        bits.setFloat64(0, value, true);
+        view.setUint32(1152 + index * 16, bits.getUint32(0, true), true);
+        view.setUint32(1152 + index * 16 + 4, bits.getUint32(4, true), true);
+        view.setUint16(1152 + index * 16 + 8, 0x7ffe, true);
+        view.setUint8(816, view.getUint8(816) & ~(1 << index));
+    };
+
+    for (const value of [0, 1, 640, 480, -2.5, 3.14159265358979, 1e300, 5e-324])
+    {
+        tagged(7, value);
+        view.setUint8(1032, 7);
+        assert.equal(fpu.get(0), value, `${value}`);
+    }
+
+    tagged(6, 4.25);
+    view.setUint8(1032, 6);
+    assert.equal(fpu.get(0), 4.25, 'the top, wherever it is');
+    assert.equal(fpu.get(1), 5e-324, 'and a tagged register below it, as another operand');
+});
+
 test('the control word is readable, because rounding is part of an answer', ()=>{
     const { cpu } = machine();
     assert.equal(createFpu(cpu).controlWord(), 0x37f);

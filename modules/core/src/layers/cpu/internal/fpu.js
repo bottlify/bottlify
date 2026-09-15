@@ -19,10 +19,11 @@
  * stack rather than on the caller's.
  *
  * The layout below is the emulator's, not the processor's: it keeps the stack
- * as eight extended-precision registers plus a top index and a bitmap of which
- * are empty, rather than as the tag word a real x87 has. The addresses come
- * from its own table of global offsets and are the one thing here that a
- * change in the vendored emulator could invalidate.
+ * as eight registers plus a top index and a bitmap of which are empty, rather
+ * than as the tag word a real x87 has, and a register holds either an
+ * extended-precision value or the double the compiler tagged as one. The
+ * addresses come from its own table of global offsets and are the one thing
+ * here that a change in the vendored emulator could invalidate.
  */
 
 /** Byte offsets into the emulator's linear memory, from its `global_pointers`. */
@@ -37,6 +38,20 @@ const REGISTER_SIZE = 16;
 /** The exponent of an extended value equal to one, and of a double equal to one. */
 const F80_BIAS = 16383;
 const F64_BIAS = 1023;
+
+/**
+ * What the emulator's exponent word says when the register is not an extended
+ * value at all, but a whole double sitting in the mantissa word.
+ *
+ * Its compiler keeps every x87 register it can in that form -- one load and one
+ * store instead of a software 80-bit operation -- and its own readers canonicalise
+ * it back before use. A register read raw, from outside, sees the double's bits as
+ * a mantissa with a huge exponent, which is a number no program ever meant: an
+ * enormous value or an infinity, and truncating either to an integer is zero. The
+ * value is unrecoverable any other way, so every read through this door has to
+ * know the tag.
+ */
+const RELAXED_TAG = 0x7ffe;
 
 /**
  * A double as the two halves of an extended-precision register.
@@ -147,6 +162,24 @@ export function decodeExtended(low, high, signExponent){
 }
 
 /**
+ * A register as the number it holds, in whichever of the emulator's two forms
+ * it was left: the extended one described above, or the tagged double.
+ *
+ * @param {number} low @param {number} high @param {number} signExponent
+ * @returns {number}
+ */
+export function decodeRegister(low, high, signExponent){
+    if (signExponent === RELAXED_TAG)
+    {
+        const bits = new DataView(new ArrayBuffer(8));
+        bits.setUint32(0, low, true);
+        bits.setUint32(4, high, true);
+        return bits.getFloat64(0, true);
+    }
+    return decodeExtended(low, high, signExponent);
+}
+
+/**
  * @param {any} cpu  The emulator's CPU object, which owns the linear memory.
  * @returns {{ setResult: (value: number) => void, get: (index: number) => number,
  *             pop: () => void, depth: () => number, controlWord: () => number }}
@@ -156,7 +189,7 @@ export function createFpu(cpu){
     const view = ()=>new DataView(cpu.wasm_memory.buffer);
 
     /** @param {DataView} memory @param {number} index Absolute register, not ST(n). */
-    const readRegister = (memory, index)=>decodeExtended(
+    const readRegister = (memory, index)=>decodeRegister(
         memory.getUint32(ST + index * REGISTER_SIZE, true),
         memory.getUint32(ST + index * REGISTER_SIZE + 4, true),
         memory.getUint16(ST + index * REGISTER_SIZE + 8, true));
