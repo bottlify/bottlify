@@ -260,6 +260,13 @@ export const graphicsModule = {
             /** @returns {any} */
             d3d9: (/** @type {any} */ caps)=>createDirect3D9({
                 ...caps,
+                // The same adapter-derived answer Direct3D 8 gets: Direct3D 9
+                // put the question in CheckDeviceFormat rather than a cap bit,
+                // and a title that never asks still expects its DXT art to
+                // load. A device told no decompresses on its own CPU, in
+                // emulated x86, and hands over surfaces four times the size.
+                compressedTextures: caps?.compressedTextures
+                    ?? device?.device?.features?.has('texture-compression-bc') === true,
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
                 createSampler: device

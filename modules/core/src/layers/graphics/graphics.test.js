@@ -15,6 +15,7 @@ import assert from 'node:assert/strict';
 import { graphicsModule } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
+import { D3DERR_NOTAVAILABLE, D3DFMT, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -82,6 +83,40 @@ test('the backend is built once, on first use', async()=>{
     assert.equal(api.backend(), first, 'a second ask gets the same backend');
     assert.equal(built, 0, 'and nothing was presented merely by asking');
 
+    await graphicsModule.dispose();
+});
+
+test('the adapter\'s block-compression capability reaches a Direct3D 9 device', async()=>{
+    // The launcher asks its adapter for block compression, because the art of
+    // this era is DXT (host/serve.js). Direct3D 9 put the question in
+    // CheckDeviceFormat rather than in a capability bit, and a title that
+    // assumes DXT creates it without asking -- so a device told no loads none
+    // of its art. A factory that reads the adapter answers the same way
+    // Direct3D 8's already does.
+    /** @param {boolean} blocks */
+    const makeDevice = blocks=>({
+        device: {
+            features: new Set(blocks ? ['texture-compression-bc'] : []),
+            createBuffer: ()=>({ destroy(){} }),
+            createBindGroupLayout: ()=>({}),
+            createCommandEncoder: ()=>({ finish: ()=>({}) }),
+        },
+        queue: { submit(){}, writeBuffer(){} },
+        presentTo: ()=>{},
+    });
+
+    const withBlocks = await graphicsModule.create({ device: makeDevice(true) },
+        hostWith(fakeMemory()));
+    const accepted = withBlocks.create('d3d9');
+    assert.equal(accepted.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
+        'a device whose adapter samples blocks offers DXT');
+    await graphicsModule.dispose();
+
+    const without = await graphicsModule.create({ device: makeDevice(false) },
+        hostWith(fakeMemory()));
+    const refused = without.create('d3d9');
+    assert.equal(refused.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
+        D3DERR_NOTAVAILABLE, 'and one whose adapter does not, does not');
     await graphicsModule.dispose();
 });
 
