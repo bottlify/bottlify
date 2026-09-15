@@ -170,3 +170,26 @@ test('the C runtime family is cdecl and every other library is stdcall', async()
 
     await win32Module.dispose();
 });
+
+test('the KnownDLLs are the ones Windows never searches beside the program', async()=>{
+    // The set decides which of our tables a program's own file may replace.
+    // The system libraries are in it; every library a title is likely to have
+    // brought -- the D3DX runtimes, Direct3D, DirectInput, common controls,
+    // version -- is not, so a file of that name beside the program wins.
+    const api = await win32Module.create({}, stubHost());
+    const known = new Set(api.knownDlls().map(name=>name.toLowerCase()));
+
+    for (const library of ['KERNEL32.dll', 'USER32.dll', 'GDI32.dll', 'ADVAPI32.dll',
+        'ole32.dll', 'OLEAUT32.dll', 'SHELL32.dll', 'COMDLG32.dll', 'RPCRT4.dll',
+        'WS2_32.dll', 'SHLWAPI.dll', 'msvcrt.dll'])
+    {
+        assert.ok(known.has(library.toLowerCase()), library);
+    }
+    for (const library of ['d3dx9_26.dll', 'D3D9.dll', 'DDRAW.dll', 'DINPUT8.dll',
+        'COMCTL32.dll', 'VERSION.dll', 'WINMM.dll', 'WSOCK32.dll'])
+    {
+        assert.ok(!known.has(library.toLowerCase()), library);
+    }
+
+    await win32Module.dispose();
+});

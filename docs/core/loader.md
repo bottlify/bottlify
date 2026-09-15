@@ -141,8 +141,12 @@ run time is the one its import was bound to, and the two compare equal as they d
 The assembler places system modules at `0x02000000 + index * 0x00100000` (a megabyte apart) in
 the order the layers list their libraries, then maps the libraries a program ships above them
 (in dependency order from `planDependencies`, `internal/dependencies.js`: depth-first, a
-dependency before what depends on it, cycles visited once, system names skipped), then places
-a `process-startup` arena. The name/base module table (`byName`, `byBase`, `addressOf`,
+dependency before what depends on it, cycles visited once, KnownDLL names skipped). A name that
+is not a KnownDLL is looked for beside the program even when the engine has a table for it —
+that file is what a Windows loader maps, and the table is only the fallback when the program did
+not bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry defaults). The
+run-time `LoadLibrary` path makes the same choice in `src/app.js`. Then the assembler places a
+`process-startup` arena. The name/base module table (`byName`, `byBase`, `addressOf`,
 `addressOfOrdinal`, `attached`) lives in `src/app.js`, not in this layer; `list()` here is the
 flat record of what was placed.
 
@@ -209,7 +213,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |
 | `internal/resources.test.js` | contract | Lookup by type and id, the leaf offset being an RVA, counted names, string bundles, absent slots and types, language selection, listing. |
-| `internal/dependencies.test.js` | unit | System libraries skipped, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
+| `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
 | `internal/init.test.js` | unit | Attach order, the final jump into the program, libraries without an entry point skipped, `DllMain`'s three arguments. |
 
 Integration (`npm run test:integration`): every `src/*.itest.js` maps a real fixture

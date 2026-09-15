@@ -94,6 +94,31 @@ import { registerQuartzClasses } from './quartz/graph.js';
 const CDECL_LIBRARIES = /^(msvcrt|msvcr\d+d?|msvcp\d+d?|crtdll|ucrtbase)\.dll$/i;
 
 /**
+ * The libraries Windows keeps under
+ * `HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\KnownDLLs`.
+ *
+ * A name in this set is mapped out of the system directory and the
+ * application's own directory is never consulted for it: a program that ships
+ * its own `kernel32.dll` beside itself gets the system one, which is a fact
+ * about the loader rather than about any library's exports. Everything not
+ * listed here -- `d3dx9_26`, `d3d9`, `dinput8`, `comctl32` and the rest -- is
+ * the other way round: the program's own file, when there is one, is what
+ * loads, and our table is only the fallback for a name it did not bring.
+ *
+ * The list is Wine's own default (`loader/wine.inf.in`, the `[KnownDLLs]`
+ * registry entries), which is the same set Windows installs.
+ */
+const KNOWN_DLLS = new Set([
+    'advapi32.dll', 'clbcatq.dll', 'combase.dll', 'comdlg32.dll', 'coml2.dll',
+    'difxapi.dll', 'gdi32.dll', 'gdiplus.dll', 'imagehlp.dll', 'imm32.dll',
+    'kernel32.dll', 'msctf.dll', 'msvcrt.dll', 'normaliz.dll', 'nsi.dll',
+    'ole32.dll', 'oleaut32.dll', 'psapi.dll', 'rpcrt4.dll', 'sechost.dll',
+    'setupapi.dll', 'shcore.dll', 'shell32.dll', 'shlwapi.dll', 'user32.dll',
+    'wldap32.dll', 'wow64.dll', 'wow64cpu.dll', 'wow64win.dll', 'wowarmhw.dll',
+    'ws2_32.dll', 'xtajit.dll', 'xtajit64.dll',
+]);
+
+/**
  * The most recently created instance, for `diagnostics()` alone.
  *
  * The module contract puts `diagnostics()` on the module rather than on the
@@ -1198,6 +1223,17 @@ export const win32Module = {
         const api = {
             /** @returns {Record<string, Record<string, any>>} library name -> its exports */
             libraries: ()=>libraries,
+
+            /**
+             * The names Windows always maps out of the system directory.
+             *
+             * Whoever assembles the process needs this to decide whether a
+             * file beside the program wins over the table we synthesised: it
+             * does for everything except these, and never for these.
+             *
+             * @returns {string[]}
+             */
+            knownDlls: ()=>[...KNOWN_DLLS],
 
             /**
              * What an undecorated export of a library is, when nothing else

@@ -40,6 +40,25 @@ const ERROR_PROC_NOT_FOUND = 127;
 const isOrdinal = value=>(value >>> 16) === 0;
 
 /**
+ * Whether a run-time load has to look beside the program before it answers
+ * from the engine's own table.
+ *
+ * Windows maps a KnownDLL out of the system directory and never searches the
+ * application's own directory for it, so for one of those the table entry is
+ * the only answer and a file of the same name beside the program is ignored.
+ * For every other name the application's directory is searched first: a file
+ * the program brought is what loads, and our table is the fallback for when
+ * there is none. A library already mapped out of a file is that file's answer
+ * already -- a second LoadLibrary gets the handle it already has.
+ *
+ * @param {boolean} knownDll       The name is one Windows keeps under KnownDLLs.
+ * @param {boolean} mappedFromFile It is already mapped out of a volume file.
+ */
+export function searchesBesideProgram(knownDll, mappedFromFile){
+    return !knownDll && !mappedFromFile;
+}
+
+/**
  * @typedef {Object} ModuleRecord
  * @property {string} name
  * @property {number} base

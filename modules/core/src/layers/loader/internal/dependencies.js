@@ -8,15 +8,19 @@
  * Which libraries a program needs, and the order to load them in.
  *
  * A program's imports name two completely different kinds of library, and
- * treating them alike is the mistake this file exists to prevent. A system
- * library is one this engine provides: its exports are ours, synthesised into
- * guest memory as a real module. A library the program ships with -- a sound
- * engine, a video decoder, a vendor's own runtime -- is not ours to provide at
- * all. It is real x86 code sitting in the volume beside the executable, and the
- * only correct thing to do with it is load it and let it run.
+ * treating them alike is the mistake this file exists to prevent. A KnownDLL
+ * is one Windows maps out of the system directory and never looks for beside
+ * the program: kernel32, user32, gdi32, ole32 and the rest, and its exports are
+ * ours -- synthesised into guest memory as a real module. Everything else the
+ * program may have brought with it -- a sound engine, a video decoder, a
+ * vendor's own runtime, a `d3dx9_*` -- is real x86 code sitting in the volume
+ * beside the executable, and the only correct thing to do with it is load it
+ * and let it run. Our own table for such a name is the fallback for when the
+ * program did not bring a file, not the first answer.
  *
- * So this walks the import graph, and every name it meets that is not a system
- * library is a file to find and read.
+ * So this walks the import graph, and every name it meets that is not a
+ * KnownDLL is a file to look for; when it is not there and we have a table for
+ * it, that table is the answer, and otherwise the name is recorded missing.
  *
  * Order matters and is not merely tidiness. A library's own imports have to
  * resolve against libraries that are already mapped, so the graph is emitted
@@ -47,14 +51,20 @@ import { parsePe, readImports } from './pe.js';
  *        there is no such file. Asynchronous because the volume may have to
  *        fetch it; this runs before the first guest instruction, so it may wait.
  * @param {(name: string) => boolean} options.isSystem
- *        Whether this engine provides the library itself.
+ *        Whether this engine provides the library itself. Only a fallback:
+ *        a name the program brought is planned from its file even when this
+ *        says yes, because that is the file the loader maps on Windows.
+ * @param {(name: string) => boolean} options.isKnownDll
+ *        Whether the name is one Windows maps out of the system directory and
+ *        never looks for beside the program. These are ours whatever is on the
+ *        volume: the file, if any, is ignored.
  * @returns {Promise<{ order: Dependency[], missing: string[] }>}
  *        `order` is dependency-first and excludes the executable. `missing`
  *        names libraries that are neither ours nor present in the volume --
  *        recorded rather than thrown, because a program that never calls into
  *        one still runs, and one that does fails where it called.
  */
-export async function planDependencies({ entry, readLibrary, isSystem }){
+export async function planDependencies({ entry, readLibrary, isSystem, isKnownDll }){
     /** @type {Dependency[]} */
     const order = [];
     /** @type {string[]} */
@@ -76,7 +86,7 @@ export async function planDependencies({ entry, readLibrary, isSystem }){
         for (const name of importsOf(file))
         {
             const key = name.toLowerCase();
-            if (seen.has(key) || isSystem(name))
+            if (seen.has(key) || isKnownDll(name))
             {
                 continue;
             }
@@ -88,7 +98,12 @@ export async function planDependencies({ entry, readLibrary, isSystem }){
             const bytes = await readLibrary(name);
             if (!bytes)
             {
-                missing.push(name);
+                // Ours only when no such file exists: the table is the
+                // fallback, not the first answer.
+                if (!isSystem(name))
+                {
+                    missing.push(name);
+                }
                 continue;
             }
             await visit(bytes);

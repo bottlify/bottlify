@@ -17,6 +17,7 @@ import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
+import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
@@ -1262,12 +1263,13 @@ async function readWholeFile(filesystem, blocks, path){
  */
 async function mapShippedLibraries(options){
     const { executable, imagePath, filesystem, loader, blocks, events, isSystem,
-        byName, byBase } = options;
+        isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
 
     const { order, missing } = await planDependencies({
         entry: executable,
         isSystem,
+        isKnownDll,
         readLibrary: name=>readWholeFile(filesystem, blocks, `${directory}${name}`),
     });
 
@@ -2748,6 +2750,20 @@ async function buildApp(options){
         ...input.libraries?.() ?? {},
         ...core.api('media').libraries?.() ?? {},
     };
+    /**
+     * The names Windows maps out of the system directory and never looks for
+     * beside the program.
+     *
+     * Everything else this engine provides -- `d3dx9_*`, `d3d9`, `ddraw`,
+     * `dinput8`, `comctl32`, `version` -- is put aside when the program brought
+     * its own file of that name, because that file is what a real loader maps.
+     * Both the import walk and the run-time LoadLibrary path ask this question,
+     * so they cannot disagree about which of the two wins.
+     */
+    const knownDlls = new Set(
+        (/** @type {() => string[]} */ (win32.knownDlls)?.() ?? []).map(moduleKeyOf));
+    /** @param {string} name */
+    const isKnownDll = name=>knownDlls.has(moduleKeyOf(name));
     Object.entries(allLibraries).forEach(([name, table], index)=>{
         // A library imported by number has to be synthesised with the numbers
         // the program compiled against; one we assigned ourselves would bind to
@@ -3098,6 +3114,12 @@ async function buildApp(options){
         {
             return 0;
         }
+        // A KnownDLL is always ours, and a file of that name beside the
+        // program is ignored; for every other name the program's own file wins
+        // and our table is only the fallback. So the file is looked for before
+        // the table is consulted, save for a library already mapped out of one,
+        // which is what a second LoadLibrary must get back.
+        //
         // A library already here is handed back rather than loaded again, which
         // is what Windows does: LoadLibrary on a loaded module raises its
         // reference count and returns the handle it already has.
@@ -3111,6 +3133,130 @@ async function buildApp(options){
         // re-mapping and re-binding a megabyte of library is most of what the
         // machine then does with its time.
         const loaded = findModule(name);
+        const candidates = searchesBesideProgram(isKnownDll(name), Boolean(loaded?.file))
+            ? libraryCandidates(name, options.imagePath ?? 'C:\\app.exe')
+            : [];
+        if (candidates.length > 0)
+        {
+            // Looked for before anything is awaited: a title probes for
+            // hardware support once a frame by asking for a library that does
+            // not exist, and a probe that has to wait is a stall per frame. The
+            // volume's index answers at once, and answers afresh each time, so a
+            // library put in place since the last ask is found.
+            const wanted = candidates.find(candidate=>{
+                try
+                {
+                    const entry = filesystem.stat(candidate);
+                    return entry && !entry.directory;
+                }
+                catch {
+                    return false;
+                }
+            });
+            if (wanted !== undefined)
+            {
+                return (async()=>{
+                    const file = await readWholeFile(filesystem, blocks, wanted);
+                    if (!file)
+                    {
+                        events.emit('library-missing', { name, path: wanted });
+                        return 0;
+                    }
+
+                    let image;
+                    try
+                    {
+                        image = parsePe(file);
+                    }
+                    catch (e){
+                        // A file that is not an image -- a program does load
+                        // one, by mistake or to find out -- is a library it
+                        // cannot have, not a fault in the machine: the load
+                        // fails and the program is told, as Windows tells it.
+                        events.emit('library-missing', {
+                            name, path: wanted, reason: /** @type {Error} */ (e).message,
+                        });
+                        return 0;
+                    }
+                    if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
+                    {
+                        absentLibraries.add(key);
+                        events.emit('libraries-missing', { names: [name], reason: 'no room' });
+                        return 0;
+                    }
+
+                    const base = nextLibraryBase;
+                    const mapped = loader.map(file, { base, name });
+                    const { exports } = readExports(file, image);
+                    const addresses = new Map(exports
+                        .filter(entry=>entry.name !== null && entry.forwards === null)
+                        .map(entry=>[String(entry.name), base + entry.rva]));
+                    const ordinals = new Map(exports
+                        .filter(entry=>entry.forwards === null)
+                        .map(entry=>[entry.ordinal, base + entry.rva]));
+
+                    const held = {
+                        name, base, size: image.sizeOfImage,
+                        /** @param {string} exported */
+                        addressOf: exported=>addresses.get(exported) ?? null,
+                        /** @param {number} ordinal */
+                        addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
+                        entryPoint: mapped.record.entryPoint,
+                        // As above: resources come from the file, so a library
+                        // loaded at run time has to keep its own.
+                        file,
+                        image,
+                        path: wanted,
+                    };
+                    // Registered before its own imports are bound, so a library
+                    // that imports back into itself -- or into one still being
+                    // loaded -- finds an address rather than nothing.
+                    byName.set(moduleKeyOf(name), held);
+                    byBase.set(base, held);
+                    nextLibraryBase = base
+                        + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
+
+                    // Its own libraries first, then binding.
+                    //
+                    // The order is the whole of it. A library brought in by
+                    // this one is where half of this one's imports come from, so
+                    // binding before they are loaded leaves every one of those
+                    // slots unclaimed -- and a program that calls through such a
+                    // slot does not fail at the call, it runs whatever bytes the
+                    // slot happened to name. What is seen is an invalid opcode
+                    // at an address belonging to nothing.
+                    for (const dependency of readImports(file, image))
+                    {
+                        if (findModule(dependency.dll) === null)
+                        {
+                            await loadLibraryAtRuntime(dependency.dll);
+                        }
+                    }
+
+                    loader.bind(mapped, resolveImport, missingImport);
+                    // Both tables, and in this order: the delay-load pass adds
+                    // to what the first one recorded rather than replacing it.
+                    loader.bindDelayed(mapped, resolveImport, missingImport);
+
+                    if (held.entryPoint && held.entryPoint !== base)
+                    {
+                        // On the thread that asked for the library, which by
+                        // now is not the one on the processor: mapping it
+                        // awaited a file and a range request, and the loop gave
+                        // every other thread its turns while that was
+                        // outstanding. Running a DllMain on whoever happens to
+                        // be current builds its frame on a stranger's stack.
+                        await bridge.callGuest({
+                            entry: held.entryPoint,
+                            args: [base, DLL_PROCESS_ATTACH, 0],
+                            thread: asked,
+                        });
+                    }
+                    events.emit('library-loaded', { name, base });
+                    return base;
+                })();
+            }
+        }
         if (loaded)
         {
             if (loaded.attached !== false || !loaded.entryPoint)
@@ -3119,7 +3265,7 @@ async function buildApp(options){
             }
             // Its first LoadLibrary: the entry point runs now, on the thread
             // that asked, exactly as a library read off the volume gets its
-            // DllMain below. Marked first, so a load the entry point itself
+            // DllMain above. Marked first, so a load the entry point itself
             // provokes does not run it twice.
             loaded.attached = true;
             return bridge.callGuest({
@@ -3128,129 +3274,15 @@ async function buildApp(options){
                 thread: asked,
             }).then(()=>loaded.base);
         }
-        const candidates = libraryCandidates(name, options.imagePath ?? 'C:\\app.exe');
-        // Looked for before anything is awaited: a title probes for hardware
-        // support once a frame by asking for a library that does not exist,
-        // and a probe that has to wait is a stall per frame. The volume's
-        // index answers at once, and answers afresh each time, so a library
-        // put in place since the last ask is found.
-        const wanted = candidates.find(candidate=>{
-            try
-            {
-                const entry = filesystem.stat(candidate);
-                return entry && !entry.directory;
-            }
-            catch {
-                return false;
-            }
+        // Said out loud, because this is the failure a program reports as
+        // "could not open" and then exits on. Without it the only trace is a
+        // zero, and a zero says nothing about which path was tried -- which is
+        // the whole question.
+        events.emit('library-missing', {
+            name,
+            path: isKnownDll(name) ? 'KnownDLLs' : candidates.join(';'),
         });
-        if (wanted === undefined)
-        {
-            // Said out loud, because this is the failure a program reports
-            // as "could not open" and then exits on. Without it the only
-            // trace is a zero, and a zero says nothing about which path was
-            // tried -- which is the whole question.
-            events.emit('library-missing', { name, path: candidates.join(';') });
-            return 0;
-        }
-        return (async()=>{
-            const file = await readWholeFile(filesystem, blocks, wanted);
-            if (!file)
-            {
-                events.emit('library-missing', { name, path: wanted });
-                return 0;
-            }
-
-            let image;
-            try
-            {
-                image = parsePe(file);
-            }
-            catch (e){
-                // A file that is not an image -- a program does load one, by
-                // mistake or to find out -- is a library it cannot have, not a
-                // fault in the machine: the load fails and the program is
-                // told, as Windows tells it.
-                events.emit('library-missing', {
-                    name, path: wanted, reason: /** @type {Error} */ (e).message,
-                });
-                return 0;
-            }
-            if (nextLibraryBase + image.sizeOfImage > HEAP_BASE)
-            {
-                absentLibraries.add(key);
-                events.emit('libraries-missing', { names: [name], reason: 'no room' });
-                return 0;
-            }
-
-            const base = nextLibraryBase;
-            const mapped = loader.map(file, { base, name });
-            const { exports } = readExports(file, image);
-            const addresses = new Map(exports
-                .filter(entry=>entry.name !== null && entry.forwards === null)
-                .map(entry=>[String(entry.name), base + entry.rva]));
-            const ordinals = new Map(exports
-                .filter(entry=>entry.forwards === null)
-                .map(entry=>[entry.ordinal, base + entry.rva]));
-
-            const held = {
-                name, base, size: image.sizeOfImage,
-                /** @param {string} exported */
-                addressOf: exported=>addresses.get(exported) ?? null,
-                /** @param {number} ordinal */
-                addressOfOrdinal: ordinal=>ordinals.get(ordinal) ?? null,
-                entryPoint: mapped.record.entryPoint,
-                // As above: resources come from the file, so a library loaded
-                // at run time has to keep its own.
-                file,
-                image,
-                path: wanted,
-            };
-            // Registered before its own imports are bound, so a library that
-            // imports back into itself -- or into one still being loaded --
-            // finds an address rather than nothing.
-            byName.set(moduleKeyOf(name), held);
-            byBase.set(base, held);
-            nextLibraryBase = base
-                + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
-
-            // Its own libraries first, then binding.
-            //
-            // The order is the whole of it. A library brought in by this one is
-            // where half of this one's imports come from, so binding before
-            // they are loaded leaves every one of those slots unclaimed -- and
-            // a program that calls through such a slot does not fail at the
-            // call, it runs whatever bytes the slot happened to name. What is
-            // seen is an invalid opcode at an address belonging to nothing.
-            for (const dependency of readImports(file, image))
-            {
-                if (findModule(dependency.dll) === null)
-                {
-                    await loadLibraryAtRuntime(dependency.dll);
-                }
-            }
-
-            loader.bind(mapped, resolveImport, missingImport);
-            // Both tables, and in this order: the delay-load pass adds to what
-            // the first one recorded rather than replacing it.
-            loader.bindDelayed(mapped, resolveImport, missingImport);
-
-            if (held.entryPoint && held.entryPoint !== base)
-            {
-                // On the thread that asked for the library, which by now is not
-                // the one on the processor: mapping it awaited a file and a
-                // range request, and the loop gave every other thread its turns
-                // while that was outstanding. Running a DllMain on whoever
-                // happens to be current builds its frame on a stranger's stack.
-                await bridge.callGuest({
-                    entry: held.entryPoint,
-                    args: [base, DLL_PROCESS_ATTACH, 0],
-                    thread: asked,
-                });
-            }
-            events.emit('library-loaded', { name, base });
-            return base;
-        })();
+        return 0;
     };
 
     // The libraries the program brought with it, before the program itself.
@@ -3264,6 +3296,7 @@ async function buildApp(options){
         imagePath: options.imagePath ?? 'C:\\app.exe',
         filesystem, loader, blocks, events,
         isSystem: (/** @type {string} */ name)=>findModule(name) !== null,
+        isKnownDll,
         byName, byBase,
         // Straight after the system modules, which is the first address nothing
         // else has claimed.

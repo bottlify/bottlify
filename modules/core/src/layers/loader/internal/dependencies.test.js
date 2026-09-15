@@ -24,13 +24,17 @@ const systemOnly = (/** @type {string[]} */ names)=>{
     return (/** @type {string} */ name)=>set.has(name.toLowerCase());
 };
 
-test('a system library is not something to go and find', async()=>{
+/** Nothing is a KnownDLL unless a test says otherwise. */
+const noKnownDlls = ()=>false;
+
+test('a KnownDLL is not something to go and find, even with a file beside it', async()=>{
     const entry = importing(['KERNEL32.dll', 'USER32.dll']);
     let asked = 0;
 
     const { order, missing } = await planDependencies({
         entry,
         isSystem: systemOnly(['kernel32.dll', 'user32.dll']),
+        isKnownDll: systemOnly(['kernel32.dll', 'user32.dll']),
         readLibrary: async()=>{
             asked++;
             return null;
@@ -40,6 +44,38 @@ test('a system library is not something to go and find', async()=>{
     assert.equal(asked, 0, 'nothing was looked for on the volume');
     assert.deepEqual(order, []);
     assert.deepEqual(missing, []);
+});
+
+test('a non-KnownDLL our table provides is loaded from the file beside the program', async()=>{
+    // d3dx9_26 is one of ours -- a handful of maths functions -- and Windows
+    // is not: the real runtime the title ships, d3dx9_26.dll, is the file that
+    // loads, and only its absence lets our table answer.
+    let asked = 0;
+    const { order, missing } = await planDependencies({
+        entry: importing(['d3dx9_26.dll', 'KERNEL32.dll']),
+        isSystem: systemOnly(['d3dx9_26.dll', 'kernel32.dll']),
+        isKnownDll: systemOnly(['kernel32.dll']),
+        readLibrary: async name=>{
+            asked++;
+            return name.toLowerCase() === 'd3dx9_26.dll' ? importing([]) : null;
+        },
+    });
+
+    assert.equal(asked, 1, 'the file beside the program was looked for');
+    assert.deepEqual(order.map(entry=>entry.name), ['d3dx9_26.dll']);
+    assert.deepEqual(missing, []);
+});
+
+test('a non-KnownDLL our table provides, with no file, is not recorded missing', async()=>{
+    const { order, missing } = await planDependencies({
+        entry: importing(['d3dx9_26.dll', 'KERNEL32.dll']),
+        isSystem: systemOnly(['d3dx9_26.dll', 'kernel32.dll']),
+        isKnownDll: systemOnly(['kernel32.dll']),
+        readLibrary: async()=>null,
+    });
+
+    assert.deepEqual(order, []);
+    assert.deepEqual(missing, [], 'our table is the fallback when no file exists');
 });
 
 test('a library the program ships is found, and its own dependencies come first', async()=>{
@@ -53,6 +89,7 @@ test('a library the program ships is found, and its own dependencies come first'
     const { order, missing } = await planDependencies({
         entry: importing(['fmod.dll', 'KERNEL32.dll']),
         isSystem: systemOnly(['kernel32.dll']),
+        isKnownDll: systemOnly(['kernel32.dll']),
         readLibrary: async name=>library[/** @type {keyof typeof library} */ (name)] ?? null,
     });
 
@@ -73,6 +110,7 @@ test('two libraries that import each other terminate, and are each loaded once',
     const { order } = await planDependencies({
         entry: importing(['a.dll']),
         isSystem: systemOnly([]),
+        isKnownDll: noKnownDlls,
         readLibrary: async name=>library[name] ?? null,
     });
 
@@ -85,6 +123,7 @@ test('a library that is neither ours nor present is recorded, not thrown', async
     const { order, missing } = await planDependencies({
         entry: importing(['absent.dll', 'KERNEL32.dll']),
         isSystem: systemOnly(['kernel32.dll']),
+        isKnownDll: systemOnly(['kernel32.dll']),
         readLibrary: async()=>null,
     });
 
@@ -103,6 +142,7 @@ test('a library reached by two paths is loaded once', async()=>{
     const { order } = await planDependencies({
         entry: importing(['left.dll', 'right.dll']),
         isSystem: systemOnly([]),
+        isKnownDll: noKnownDlls,
         readLibrary: async name=>library[name] ?? null,
     });
 
@@ -118,6 +158,7 @@ test('the spelling of an import descriptor is not depended on', async()=>{
     const { order } = await planDependencies({
         entry: importing(['Thing.dll', 'THING.DLL']),
         isSystem: systemOnly([]),
+        isKnownDll: noKnownDlls,
         readLibrary: async()=>library['Thing.dll'],
     });
 
