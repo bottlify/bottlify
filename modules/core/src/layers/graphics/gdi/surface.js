@@ -190,29 +190,35 @@ export function createSurface(options){
     /**
      * The palette entry nearest a pixel, by squared distance in RGB. A fill
      * asks the same question thousands of times, so the answer is remembered
-     * per pixel value; the palette is live, so the memory is dropped when it
-     * changes length and is only as trustworthy as the caller's discipline
-     * about not rewriting entries mid-draw.
+     * per pixel value -- but only when it was an exact match, which is the
+     * one answer that stays checkable: the palette is live, and a table held
+     * by a palette-relative bitmap is refreshed *in place*, so an entry can
+     * change value without this array changing identity or length. A
+     * remembered index is therefore trusted only while its entry still holds
+     * the asked-for colour, and a nearest-but-not-exact answer is recomputed
+     * every time rather than cached against a table that may move under it.
      *
      * @type {Map<number, number>}
      */
     const nearest = new Map();
     /** @param {number} pixel @returns {number} */
     const indexOf = pixel=>{
+        const entries = /** @type {number[]} */ (palette);
         const remembered = nearest.get(pixel);
-        if (remembered !== undefined)
+        if (remembered !== undefined && (entries[remembered] >>> 0) === (pixel >>> 0))
         {
             return remembered;
         }
-        const entries = /** @type {number[]} */ (palette);
         let best = 0;
         let bestDistance = Infinity;
+        let exact = false;
         for (let index = 0; index < entries.length && index < 256; index++)
         {
             const entry = entries[index] >>> 0;
             if ((entry & 0xffffff) === (pixel & 0xffffff))
             {
                 best = index;
+                exact = true;
                 break;
             }
             const dr = ((entry >>> 16) & 0xff) - ((pixel >>> 16) & 0xff);
@@ -229,7 +235,14 @@ export function createSurface(options){
         {
             nearest.clear();
         }
-        nearest.set(pixel, best);
+        if (exact)
+        {
+            nearest.set(pixel, best);
+        }
+        else
+        {
+            nearest.delete(pixel);
+        }
         return best;
     };
 

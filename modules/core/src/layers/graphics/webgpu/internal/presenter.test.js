@@ -97,6 +97,30 @@ test('byte-exact: an 8-bit surface goes through its palette, entries read as r, 
         'index one is (0x12, 0x34, 0x56) and lands as B, G, R');
 });
 
+test('byte-exact: a palette refreshed in place after the first present shows its new colours', ()=>{
+    // The presenter coalesces and re-reads; the contract this pins is that
+    // nothing about a surface's first presentation is remembered against it.
+    // A palette-relative bitmap's table is refreshed in place -- same array,
+    // new entries -- and a program may repaint nothing at all while doing it.
+    const h = harness();
+    h.ram.set([1, 2], 0x1000);
+    // PALETTEENTRY order, as the presenter reads them: red is the low byte.
+    const palette = new Array(256).fill(0);
+    palette[1] = 0x000000ff; // red
+    palette[2] = 0x00000000; // black
+    const surface = { buffer: 0x1000, width: 2, height: 1, pitch: 2, bitCount: 8, palette };
+    h.presenter.present(surface);
+    h.settle();
+    assert.deepEqual([...h.uploaded()], [0, 0, 255, 255, 0, 0, 0, 255],
+        'the first present: red, then black');
+    palette[1] = 0x0000ff00; // entry one is now green
+    palette[2] = 0x000000ff; // and red moved to entry two
+    h.presenter.present(surface);
+    h.settle();
+    assert.deepEqual([...h.uploaded()], [0, 255, 0, 255, 0, 0, 255, 255],
+        'the same indices now mean the refreshed colours');
+});
+
 test('byte-exact: rows are read by the pitch, so padding never reaches the picture', ()=>{
     const h = harness();
     // Two rows of one 8-bit pixel each, with three bytes of padding between.

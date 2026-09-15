@@ -132,6 +132,24 @@ test('byte-exact: an eight-bit surface stores the nearest palette index', ()=>{
     assert.throws(()=>createSurface({ width: 1, height: 1, bitCount: 24 }), RangeError);
 });
 
+test('a write after the palette changed in place lands on the new entry', ()=>{
+    // A palette-relative bitmap's colour table is refreshed in place when the
+    // palette it indexes is filled or re-filled -- the array keeps its identity
+    // and length, and only its entries change. A remembered answer from the
+    // old table must not survive that.
+    const palette = [0x00000000, 0x00ff0000];
+    const surface = createSurface({ width: 2, height: 1, bitCount: 8, palette });
+    surface.write(0, 0, 0x00ff0000);
+    assert.equal(surface.bytes[0], 1, 'red is the red entry');
+    palette[1] = 0x0000ff00;
+    palette.push(0x00ff0000);
+    surface.write(1, 0, 0x00ff0000);
+    assert.equal(surface.bytes[1], 2, 'after the refresh, red is the third entry');
+    assert.equal(surface.read(1, 0), 0x00ff0000, 'and reads back red, not green');
+    assert.equal(surface.bytes[0], 1, 'the pixel written before the refresh keeps its index');
+    assert.equal(surface.read(0, 0), 0x0000ff00, 'but now means what the table says it does');
+});
+
 test('byte-exact: a sixteen-bit surface narrows and widens with the top bits replicated', ()=>{
     for (const [pixel, packed] of [[0x00ff0000, 0xf800], [0x0000ff00, 0x07e0],
         [0x000000ff, 0x001f], [0x00ffffff, 0xffff]])
