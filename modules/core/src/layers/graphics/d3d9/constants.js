@@ -247,6 +247,12 @@ export const D3DFMT = Object.freeze({
     A4R4G4B4: 26,
     A8: 28,
     X4R4G4B4: 30,
+    // The luminance formats. A program of this era keeps its interface and its
+    // fonts in one of these: four bits of alpha is what a soft edge needs, and
+    // eight bits of colour is more than a glyph does.
+    L8: 50,
+    A8L8: 51,
+    A4L4: 52,
     A2R10G10B10: 35,
     D32: 71,
     D24S8: 75,
@@ -297,6 +303,13 @@ export const FORMAT_INFO = Object.freeze({
     [D3DFMT.A4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: true }),
     [D3DFMT.X4R4G4B4]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: false }),
     [D3DFMT.A8]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: true }),
+    // Luminance is replicated into all three colour channels when sampled, so
+    // a grey glyph atlas is a grey glyph atlas; alpha is the fourth channel
+    // where the format has one. A4L4 packs both into one byte, low nibble
+    // luminance first, which is why it is one byte per texel and not two.
+    [D3DFMT.L8]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: false }),
+    [D3DFMT.A8L8]: Object.freeze({ bytesPerPixel: 2, depth: false, alpha: true }),
+    [D3DFMT.A4L4]: Object.freeze({ bytesPerPixel: 1, depth: false, alpha: true }),
     [D3DFMT.D32]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24S8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),
     [D3DFMT.D24X8]: Object.freeze({ bytesPerPixel: 4, depth: true, alpha: false }),

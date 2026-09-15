@@ -455,6 +455,39 @@ const TEXEL_EXPANSION = Object.freeze({
         }
         return out;
     },
+    // Luminance is the colour, replicated across the three channels a
+    // `bgra8unorm` texel reads from, and alpha is whatever the format carries
+    // or opaque. A font atlas in one of these draws as glyphs, not as the
+    // rectangle it is stored in, only because the grey and the coverage each
+    // land in the channel the blend and the shader read.
+    [D3DFMT.L8]: (pixels, count)=>{
+        const out = new Uint8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            const value = pixels[index];
+            out.set([value, value, value, 0xff], index * 4);
+        }
+        return out;
+    },
+    [D3DFMT.A8L8]: (pixels, count)=>{
+        const out = new Uint8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            const value = pixels[index * 2];
+            out.set([value, value, value, pixels[index * 2 + 1]], index * 4);
+        }
+        return out;
+    },
+    [D3DFMT.A4L4]: (pixels, count)=>{
+        const out = new Uint8Array(count * 4);
+        for (let index = 0; index < count; index++)
+        {
+            const packed = pixels[index];
+            const value = four(packed & 0xf);
+            out.set([value, value, value, four(packed >>> 4)], index * 4);
+        }
+        return out;
+    },
 });
 
 /** @param {number} value five bits @returns {number} eight */

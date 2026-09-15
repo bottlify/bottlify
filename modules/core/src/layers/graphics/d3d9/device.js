@@ -3422,6 +3422,14 @@ function packColour(format, colour){
             return word(((a >>> 4) << 12) | ((r >>> 4) << 8) | ((g >>> 4) << 4) | (b >>> 4));
         case D3DFMT.A8:
             return Uint8Array.from([a]);
+        // Luminance is the colour: the red byte stands in for it, the same
+        // way a sample replicates it into the channels it fills.
+        case D3DFMT.L8:
+            return Uint8Array.from([r]);
+        case D3DFMT.A8L8:
+            return Uint8Array.from([r, a]);
+        case D3DFMT.A4L4:
+            return Uint8Array.from([((a >>> 4) << 4) | (r >>> 4)]);
         default:
             return Uint8Array.from([b, g, r, a]);
     }

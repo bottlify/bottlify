@@ -595,6 +595,41 @@ test('a texture with four bits of alpha is created rather than refused', ()=>{
     }
 });
 
+test('byte-exact: a luminance texel fills the colour channels, its alpha its own', ()=>{
+    // A glyph atlas is grey; the blend reads the colour where there is no
+    // alpha and the alpha where there is, so both have to land where the
+    // format puts them and nowhere else.
+    assert.deepEqual([...expandTexels(D3DFMT.L8, Uint8Array.from([0x80]), 1)],
+        [0x80, 0x80, 0x80, 255], 'luminance is opaque and fills b, g and r');
+    assert.deepEqual([...expandTexels(D3DFMT.A8L8, Uint8Array.from([0x40, 0x20]), 1)],
+        [0x40, 0x40, 0x40, 0x20], 'luminance first, alpha second');
+    // One byte, low nibble luminance, high nibble alpha, each nibble doubled.
+    assert.deepEqual([...expandTexels(D3DFMT.A4L4, Uint8Array.from([0xab]), 1)],
+        [0xbb, 0xbb, 0xbb, 0xaa]);
+});
+
+test('a texture in a luminance format is created rather than refused', ()=>{
+    // The interface and the fonts of a program of this era are kept in one of
+    // these. Refusing them does not degrade the picture, it removes the text.
+    const { device } = harness();
+    for (const format of [D3DFMT.L8, D3DFMT.A8L8, D3DFMT.A4L4])
+    {
+        /** @type {{ texture?: any }} */
+        const out = {};
+        assert.equal(device.CreateTexture(4, 4, 1, 0, format, D3DPOOL.MANAGED, out), D3D_OK,
+            `format ${format.toString(16)} is one this engine can hold`);
+        /** @type {{ surface?: any }} */
+        const level = {};
+        out.texture.GetSurfaceLevel(0, level);
+        /** @type {{ desc?: any }} */
+        const desc = {};
+        level.surface.GetDesc(desc);
+        assert.equal(desc.desc.Format, format, 'and it is stored as the format it was asked for');
+        level.surface.release();
+        out.texture.release();
+    }
+});
+
 test('byte-exact: strips and fans expand to the lists they draw, winding kept', ()=>{
     assert.deepEqual([...listIndices(D3DPT.TRIANGLEFAN, [0, 1, 2, 3, 4])],
         [0, 1, 2, 0, 2, 3, 0, 3, 4]);
