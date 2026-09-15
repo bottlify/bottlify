@@ -206,7 +206,10 @@ async function openDevice(errors){
     {
         return { available: false, reason: 'no adapter answered requestAdapter' };
     }
-    const device = await adapter.requestDevice();
+    const features = adapter.features.has('texture-compression-bc')
+        ? ['texture-compression-bc']
+        : [];
+    const device = await adapter.requestDevice({ requiredFeatures: features });
     device.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
         errors.push(`gpu:${event.error.message}`);
     });
