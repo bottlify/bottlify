@@ -1043,6 +1043,10 @@ export const win32Module = {
                 // that scales pointer motion into it sits above this one.
                 clipCursor: config?.clipCursor,
                 placeCursor: config?.placeCursor,
+                // Where SendInput's events go. The input layer owns the router
+                // and is above this one, so the thunk is handed down like the
+                // cursor's, and a build without one injects nothing.
+                sendInput: config?.sendInput,
                 // The picture the page shows as the program's cursor, handed up
                 // whenever user32's own state (ShowCursor's count, a null
                 // SetCursor) changes it. The same event the Direct3D device

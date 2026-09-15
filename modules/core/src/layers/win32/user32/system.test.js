@@ -29,6 +29,7 @@ const TEXT_BUFFER = 0x11300;
 const FORMAT_BUFFER = 0x11500;
 const OUT_BUFFER = 0x11600;
 const DEVMODE_BUFFER = 0x11800;
+const INPUT_BUFFER = 0x11a00;
 
 const WNDPROC = 0x401000;
 const HINSTANCE = 0x400000;
@@ -190,6 +191,9 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
     /** Where user32 put the cursor, oldest first. */
     /** @type {{ x: number, y: number }[]} */
     const placed = [];
+    /** What SendInput handed to the input layer, oldest first. */
+    /** @type {any[]} */
+    const sent = [];
     const fns = createWindowFunctions({
         readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.readMemory(a, n),
         writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ d)=>
@@ -219,13 +223,15 @@ function setup({ cursor, keyState, findResource, loadString, dispatch = ()=>0, s
         reportCursor: picture=>cursors.push(picture),
         /** @param {number} x @param {number} y */
         placeCursor: (x, y)=>placed.push({ x, y }),
+        /** @param {any} event */
+        sendInput: event=>sent.push(event),
     });
     // Cast once: the table's handlers declare only the arguments they read, and
     // a guest call always arrives with the whole argument array.
     const table = /** @type {Record<string, { argBytes: number, convention?: string,
         handler: (args: number[]) => number }>} */ (/** @type {unknown} */ (fns));
     return { memory, queue, fns: table, contexts, clock, notices, said, diverged, errors,
-        screen, cursors, placed };
+        screen, cursors, placed, sent };
 }
 
 /** @param {any} memory @param {any} fns @param {number} [style] */
@@ -995,6 +1001,59 @@ test('SetCursorPos puts the cursor where the program says, and says so', ()=>{
     assert.equal(fns.SetCursorPos.handler([0xfffffffe, 5]), 1);
     assert.deepEqual(placed, [{ x: 320, y: 240 }, { x: -2, y: 5 }],
         'each placement, as signed integers');
+});
+
+test('SendInput injects a mouse move into the input layer', ()=>{
+    // A game that reads the pointer's travel and centres it depends on the
+    // move having reached the device layer, not merely on the call succeeding.
+    const { memory, fns, sent } = setup();
+    memory.putU32s(INPUT_BUFFER, [0, 10, -5, 0, 0x0001, 0, 0]);
+
+    assert.equal(fns.SendInput.argBytes, 12);
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
+    assert.deepEqual(sent, [{ kind: 'pointerMove', dx: 10, dy: -5 }]);
+});
+
+test('SendInput injects every mouse flag one INPUT carries at once', ()=>{
+    const { memory, fns, sent } = setup();
+    const MOUSEEVENTF_LEFTDOWN = 0x0002;
+    const MOUSEEVENTF_LEFTUP = 0x0004;
+    memory.putU32s(INPUT_BUFFER, [0, 0, 0, 0, MOUSEEVENTF_LEFTDOWN | MOUSEEVENTF_LEFTUP, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1, 'one INPUT, however many flags');
+    assert.deepEqual(sent, [
+        { kind: 'pointerButton', button: 'left', down: true },
+        { kind: 'pointerButton', button: 'left', down: false },
+    ]);
+});
+
+test('an absolute mouse move is scaled from the normalised display space', ()=>{
+    const { memory, fns, sent } = setup({ screen: { width: 1024, height: 768, bitsPerPixel: 32 } });
+    // 0x8000 is the centre of 0..65535, and 0 the top-left.
+    memory.putU32s(INPUT_BUFFER, [0, 0x8000, 0, 0, 0x8001, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
+    assert.deepEqual(sent, [{ kind: 'pointerMove', x: 512, y: 0 }]);
+});
+
+test('a cbSize that is not an INPUT is refused whole, with the last error set', ()=>{
+    const { memory, fns, sent, errors } = setup();
+    memory.putU32s(INPUT_BUFFER, [0, 10, -5, 0, 0x0001, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 24]), 0);
+    assert.deepEqual(errors, [87], 'ERROR_INVALID_PARAMETER');
+    assert.deepEqual(sent, [], 'and nothing was inserted');
+});
+
+test('a keyboard INPUT is reported rather than silently inserted', ()=>{
+    // This build has no keyboard injection path; returning the count would be
+    // telling the program a key it will never see went in.
+    const { memory, fns, diverged } = setup();
+    memory.putU32s(INPUT_BUFFER, [1, 0x41, 0x1e, 0, 0, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 0);
+    assert.equal(diverged.length, 1);
+    assert.match(diverged[0], /SendInput/);
 });
 
 test('a build with nothing feeding it reports nothing pressed', ()=>{

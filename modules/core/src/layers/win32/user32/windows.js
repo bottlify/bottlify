@@ -416,6 +416,12 @@ function characterFor(key){
  *           space, forwarded to the input layer so the cursor it reports and
  *           the motion it derives start from there. Absent in a build with no
  *           input, and then the cursor stays where the pointer is.
+ * @property {(event: { kind: string, dx?: number, dy?: number, x?: number,
+ *           y?: number, button?: string, down?: boolean, delta?: number }) => void} [sendInput]
+ *           Where SendInput's events go: the input layer's own stream, so a
+ *           move becomes a message and a DirectInput delta both, as a real
+ *           mouse's would. Absent in a build with no input, and then the call
+ *           injects nothing.
  * @property {(picture: { shown: boolean }) => void} [reportCursor]
  *           The page's cursor, as user32's own state changed it: shown while
  *           ShowCursor's count is not below zero and SetCursor has not named the

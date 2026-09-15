@@ -2395,6 +2395,11 @@ async function buildApp(options){
             clipCursor: rect=>core.api('input')?.clip?.(rect),
             /** @param {number} x @param {number} y */
             placeCursor: (x, y)=>core.api('input')?.place?.(x, y),
+            // What SendInput puts into the stream goes into the input layer's
+            // router, the same place a real event from the page goes: a move
+            // becomes a message and a DirectInput delta both, or neither.
+            /** @param {any} event */
+            sendInput: event=>core.api('input')?.send?.(event),
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
             // The same reporter the graphics layer gets: a Win32 function that

@@ -104,6 +104,25 @@ export const SYS_COLORS = Object.freeze({
 const PRIMARY_MONITOR = 0x00010001;
 const MONITORINFOF_PRIMARY = 1;
 
+/**
+ * SendInput's contract: one INPUT per event, 28 bytes on 32-bit Windows --
+ * a type, then the union of every event kind laid out at its widest.
+ */
+const INPUT_SIZE = 28;
+const INPUT_MOUSE = 0;
+const MOUSEEVENTF_MOVE = 0x0001;
+const MOUSEEVENTF_LEFTDOWN = 0x0002;
+const MOUSEEVENTF_LEFTUP = 0x0004;
+const MOUSEEVENTF_RIGHTDOWN = 0x0008;
+const MOUSEEVENTF_RIGHTUP = 0x0010;
+const MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+const MOUSEEVENTF_MIDDLEUP = 0x0040;
+const MOUSEEVENTF_XDOWN = 0x0080;
+const MOUSEEVENTF_XUP = 0x0100;
+const MOUSEEVENTF_WHEEL = 0x0800;
+const MOUSEEVENTF_ABSOLUTE = 0x8000;
+const ERROR_INVALID_PARAMETER = 87;
+
 /** GetWindow's relations. */
 const GW_HWNDFIRST = 0;
 const GW_HWNDLAST = 1;
@@ -514,6 +533,85 @@ export function createSystemFunctions({ host, live, windows, classes }){
     const readU32 = address=>{
         const bytes = host.readMemory(address, 4);
         return (bytes[0] | bytes[1] << 8 | bytes[2] << 16 | bytes[3] << 24) >>> 0;
+    };
+
+    /** @param {number} address */
+    const readI32 = address=>readU32(address) | 0;
+
+    /**
+     * One INPUT_MOUSE event, turned into the pointer events the input layer
+     * takes.
+     *
+     * The flags are a bitmask, not a choice: a single event may carry a move
+     * and a button at once, and every bit present is an event Windows inserts.
+     * A relative move is pixels; an absolute one is the position normalised to
+     * 0..65535 across the display, which is the only coordinate space the call
+     * has, so it is scaled onto the screen here.
+     *
+     * @param {number} at  Where the INPUT begins.
+     * @returns {boolean} whether anything was inserted.
+     */
+    const injectMouse = at=>{
+        const flags = readU32(at + 16);
+        const data = readU32(at + 12);
+        let inserted = false;
+
+        if ((flags & MOUSEEVENTF_MOVE) !== 0)
+        {
+            /** @type {{ kind: string, dx?: number, dy?: number,
+             *           x?: number, y?: number }} */
+            const move = { kind: 'pointerMove' };
+            if ((flags & MOUSEEVENTF_ABSOLUTE) !== 0)
+            {
+                move.x = Math.round(readI32(at + 4) * (screen.width - 1) / 65535);
+                move.y = Math.round(readI32(at + 8) * (screen.height - 1) / 65535);
+            }
+            else
+            {
+                move.dx = readI32(at + 4);
+                move.dy = readI32(at + 8);
+            }
+            host.sendInput?.(move);
+            inserted = true;
+        }
+
+        /** @type {[number, string, boolean][]} */
+        const presses = [
+            [MOUSEEVENTF_LEFTDOWN, 'left', true], [MOUSEEVENTF_LEFTUP, 'left', false],
+            [MOUSEEVENTF_RIGHTDOWN, 'right', true], [MOUSEEVENTF_RIGHTUP, 'right', false],
+            [MOUSEEVENTF_MIDDLEDOWN, 'middle', true], [MOUSEEVENTF_MIDDLEUP, 'middle', false],
+        ];
+        for (const [flag, button, down] of presses)
+        {
+            if ((flags & flag) !== 0)
+            {
+                host.sendInput?.({ kind: 'pointerButton', button, down });
+                inserted = true;
+            }
+        }
+        // The two extra buttons share a flag pair and name themselves in the
+        // high word of mouseData, as the real struct does.
+        const extra = data >>> 16;
+        if ((flags & MOUSEEVENTF_XDOWN) !== 0)
+        {
+            host.sendInput?.({ kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: true });
+            inserted = true;
+        }
+        if ((flags & MOUSEEVENTF_XUP) !== 0)
+        {
+            host.sendInput?.({ kind: 'pointerButton',
+                button: extra === 2 ? 'x2' : 'x1', down: false });
+            inserted = true;
+        }
+        if ((flags & MOUSEEVENTF_WHEEL) !== 0)
+        {
+            // mouseData is the wheel delta itself, in WHEEL_DELTA (120) units,
+            // which is what both the message and DirectInput carry.
+            host.sendInput?.({ kind: 'wheel', delta: readI32(at + 12) });
+            inserted = true;
+        }
+        return inserted;
     };
 
     /**
@@ -1825,6 +1923,53 @@ export function createSystemFunctions({ host, live, windows, classes }){
             handler: ([x, y])=>{
                 host.placeCursor?.(x | 0, y | 0);
                 return 1;
+            },
+        },
+
+        /**
+         * UINT SendInput(UINT cInputs, LPINPUT pInputs, int cbSize)
+         *
+         * The program puts events into the input stream itself -- most often a
+         * mouse move, because a game that reads the pointer's travel and then
+         * centres it needs the move to have happened for the next frame to see
+         * it. The struct comes straight out of guest memory and each event is
+         * handed to the input layer, which is what turns a move into a
+         * WM_MOUSEMOVE and a DirectInput delta both, exactly as it does for a
+         * real mouse.
+         *
+         * `cbSize` is checked rather than trusted: it is sizeof(INPUT) or the
+         * caller is not describing one, and Windows refuses the whole call
+         * with ERROR_INVALID_PARAMETER rather than read past what it was
+         * given. Keyboard and hardware events are a device model of their own;
+         * this build does not inject them and says so rather than pretending
+         * the insertion happened.
+         */
+        SendInput: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([count, inputs, size])=>{
+                if ((size | 0) !== INPUT_SIZE)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                const events = count >>> 0;
+                const at = inputs >>> 0;
+                let inserted = 0;
+                for (let index = 0; index < events; index++)
+                {
+                    const piece = at + index * INPUT_SIZE;
+                    if (readU32(piece) === INPUT_MOUSE)
+                    {
+                        inserted += injectMouse(piece) ? 1 : 0;
+                    }
+                    else
+                    {
+                        host.divergence?.('SendInput',
+                            `INPUT type ${readU32(piece)} is not injected`);
+                    }
+                }
+                return inserted;
             },
         },
 
