@@ -11,7 +11,6 @@ import { createDirect3D9 } from './d3d9/device.js';
 import { createGraphicsLibraries } from './seam/exports.js';
 import { createOpengl } from './opengl/exports.js';
 import { createVulkan } from './vulkan/runtime.js';
-import { createPacer } from './webgpu/internal/pacer.js';
 import { createPresenter, expandRow } from './webgpu/internal/presenter.js';
 import { createGdiDrawing } from './gdi/context.js';
 import { createFontEngine } from './gdi/fonts.js';
@@ -148,8 +147,14 @@ let created = [];
 let seam = null;
 /** @type {any} */
 let presenter = null;
-/** @type {any} */
-let pacer = null;
+/**
+ * Whether the presenter was handed in rather than made here. A presenter that
+ * belongs to the run is not this machine's to dispose: the process that
+ * replaces this one draws into the same canvas and the same texture.
+ *
+ * @type {boolean}
+ */
+let presenterGiven = false;
 
 export const graphicsModule = {
     name: 'graphics',
@@ -416,37 +421,29 @@ export const graphicsModule = {
             apis: ()=>Object.keys(factories),
         };
 
-        // Frames are paced only when the assembling caller has something to
-        // pace them against: a clock and a way to be called at display rate.
-        // A worker has no display of its own, so both arrive from whoever owns
-        // the page, and a headless build keeps delivering on a microtask.
-        //
-        // What this buys is not throughput. A guest presents whenever its own
-        // loop happens to finish, the display refreshes on its own schedule,
-        // and without pacing the result stutters visibly while the average
-        // frame rate looks healthy.
-        // The cap belongs here rather than anywhere further in: this is the one
-        // place that decides when a frame is delivered, and a frame delivered
-        // faster than a display can show it is work nobody sees. Sixty unless
-        // the caller says otherwise; zero means whatever the scheduler offers.
-        const maxFps = config?.maxFps ?? 60;
-        pacer = config?.schedule && config?.now
-            ? createPacer({
-                now: config.now,
-                schedule: config.schedule,
-                minIntervalMs: maxFps > 0 ? 1000 / maxFps : 0,
-                targetFps: maxFps > 0 ? maxFps : undefined,
-            })
-            : null;
-
+        // The presenter is a service of the run, not of this machine. The
+        // canvas, the format it was configured in, the pacer that decides when
+        // a burst is delivered and the texture the primary is copied into all
+        // outlive the process being drawn for -- so the assembling caller makes
+        // one and hands it in, and this layer attaches its own backend and
+        // address space to it rather than making a second. A build assembled
+        // without one -- a test, an inspection -- gets its own, so the layer
+        // still presents on its own.
+        presenterGiven = config?.presenter != null;
+        presenter = config?.presenter ?? createPresenter({
+            device: device?.device,
+            queue: device?.queue,
+            screen: device?.screen,
+            canvas: device?.canvas,
+            now: config?.now,
+            schedule: config?.schedule,
+            maxFps: config?.maxFps,
+        });
         // The backend is asked for on the first present rather than now, so a
         // build that never shows one of these surfaces never builds a GPU.
-        presenter = createPresenter({
+        presenter.attach({
             backend: ()=>api.backend(),
             readMemory: services.readMemory,
-            // The presenter still coalesces a burst of blits onto one flush;
-            // the pacer only decides when that flush happens.
-            schedule: pacer ? (/** @type {() => void} */ flush)=>pacer.request(flush) : undefined,
         });
 
         /**
@@ -779,8 +776,10 @@ export const graphicsModule = {
                 // through DirectDraw never enters a drawing pass, so nothing
                 // in those numbers says whether anything reached the screen.
                 presenter: presenter ? presenter.diagnostics() : null,
-                // Absent in a build with no display to pace against.
-                pacing: pacer ? pacer.diagnostics() : null,
+                // Absent in a build with no display to pace against. The pacer
+                // is the presenter's now, because the rhythm it enforces is a
+                // property of the canvas rather than of the process.
+                pacing: presenter ? presenter.pacing() : null,
             },
         };
     },
@@ -790,7 +789,17 @@ export const graphicsModule = {
         {
             backend.dispose();
         }
+        // The presenter belongs to the run, not to this machine: what replaces
+        // this process draws into the same canvas and the same texture, so it
+        // is left exactly as it is. Only a presenter this layer made itself --
+        // a build assembled without one -- is disposed here.
+        if (presenter && !presenterGiven)
+        {
+            presenter.dispose?.();
+        }
         backend = null;
+        presenter = null;
+        presenterGiven = false;
         factories = null;
         seam = null;
         created = [];

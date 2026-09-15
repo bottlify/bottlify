@@ -33,7 +33,8 @@ allows because `win32` is declared.
 
 | option | type | default | meaning |
 |---|---|---|---|
-| `device` | `{ device, queue, presentTo, adapter?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives every finished frame. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. |
+| `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. |
+| `presenter` | a presenter made by the run, or absent | made from `device` | The canvas, its configured format, the pacer and the texture the primary is copied into. It is a service of the run rather than of a machine, so the assembling caller makes one and hands the same object to every machine the run is rebuilt on; the layer attaches its own backend to it and never disposes it. The last frame one process presented stays on the canvas until the next presents. |
 | `device.adapter` | `{ vendor?, architecture?, description? }` | absent | What `GetAdapterIdentifier` and `vkGetPhysicalDeviceProperties` describe. |
 | `screen` | `{ width, height, bitsPerPixel }` | `{ 640, 480, 32 }` | The display a program is told about until `resolution` changes it. |
 | `maxFps` | number | `60` | Frame-delivery cap for the pacer; `0` means whatever the scheduler offers. |
@@ -108,8 +109,8 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
-| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `pending`, `claimed`, `failures`. |
-| `pacing` | `requests`, `delivered`, `coalesced`, `idleTicks`, `heldTicks`, `waiting`, and interval statistics (`count`, `minMs`, `maxMs`, `meanMs`, `deviationMs`, `p50Ms`, `p95Ms`, `p99Ms`, `fps`, `periods`). Null in a build with no scheduler. |
+| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `shown` (frames copied to the canvas), `lastBuffer`, `pending`, `claimed`, `failures`, `disposed`. The counters are cumulative across a process replacement, because the presenter is. |
+| `pacing` | `requests`, `delivered`, `coalesced`, `idleTicks`, `heldTicks`, `waiting`, and interval statistics (`count`, `minMs`, `maxMs`, `meanMs`, `deviationMs`, `p50Ms`, `p95Ms`, `p99Ms`, `fps`, `periods`). Null in a build with no scheduler. The pacer belongs to the presenter, so the rhythm is read from it. |
 
 The OpenGL runtime keeps its own `{ contexts, unimplemented }` (`src/layers/graphics/opengl/exports.js`)
 but the seam's `diagnostics()` does not include it; it is reachable only through the runtime
@@ -180,7 +181,16 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   upload and presents inside a backend frame. A surface a GPU drew has no bytes worth reading, so a
   Direct3D 7 device claims its target's address and the presenter shows the texture instead. The
   pacer remembers the newest request, arms one scheduler tick, delivers at most once per
-  `1000 / maxFps` ms, and never makes the caller wait.
+  `1000 / maxFps` ms, and never makes the caller wait. **The presenter is a service of the run,
+  not of a machine.** The canvas, the format it was configured in, the pacer, the `bgra8unorm`
+  texture and the upload staging are made once, above the machines, and every machine attaches its
+  own backend and address space to them; what a machine owns -- its pipelines, its buffers and
+  every texture its program created -- is the backend's and dies with it. A process replacement
+  therefore draws into the same canvas and the same texture, and the frame the parent last
+  presented stays until the child presents its first: no reconfigure, which would clear the
+  canvas, and no black frame at the swap. The presenter's third job is the canvas copy the backend
+  calls `presentTo`: every frame, whatever API produced it, is copied into the canvas in the
+  frame's own format, configured once.
 - **Profiler** (`internal/profiler.js`) keeps per-frame phase timings (`uploads`, `passes`,
   `submit`, `present`), counters, and a per-label upload breakdown rather than a top-N.
 - **Reference rasteriser** (`internal/reference.js`). The fixed-function formula written a second
@@ -530,9 +540,9 @@ predication, subroutines or vertex-shader texture reads.
 
 | kind | files |
 |---|---|
-| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`. |
+| Layer assembly | `graphics.test.js` -- a build with no GPU comes up; the backend is built once; APIs are made by name; diagnostics report what was asked for; the pacer honours `maxFps`; `dispose()` releases this machine's backend and leaves a presenter handed to the run untouched. |
 | Byte-exact against the reference rasteriser or a stored image (base64 of the raw BGRX buffer beside the code, no tolerance) | `webgpu/internal/reference.test.js`, `d3d8/render.test.js`, `d3d9/render.test.js`, `d3d9/program.test.js`, `opengl/raster.test.js`, `opengl/pipeline.test.js`, `gdi/*.test.js`, `ddraw/blit.test.js`. A triangle is asserted at named pixels rather than as a whole image, so no rasterisation rule is pinned. |
-| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js`, `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
+| Recorded commands through the fake device (what the GPU was asked to do, never what a frame looks like) | `webgpu/backend.test.js`, `webgpu/internal/*.test.js` (including `presenter.test.js`: one presenter serves two machine lifetimes, configures the canvas once, and shows the second lifetime's frame rather than a cleared target), `d3d7/device.test.js`, `d3d8/render.test.js`, `d3d10/render.test.js`, `opengl/gpu.test.js` (a context on the renderer: buffer objects bound as they lie, the rename-or-range rule, client copies by index range, the canonical packing, uniform contents, uploads per written level, the clear's masks, the opaque shown copies, program draws and their blocks, the draw dump with its cut, skip and probe). |
 | Contract, against documented behaviour and conformance expectations of the real runtime | `d3d9/contract.test.js`, `d3d9/validity.test.js`, `d3d8/validity.test.js`, `d3d10/validity.test.js`, `d3d10/device.test.js`, `d3d10/dxgi.test.js`, `d3d10/structs.test.js`, `ddraw/objects.test.js`, `ddraw/caps.test.js`, `ddraw/structs.test.js`, `opengl/wgl.test.js`, `opengl/pixelformat.test.js`, `opengl/context.test.js`, `opengl/context-calls.test.js`, `opengl/context-programs.test.js`, `vulkan/*.test.js`, `d3d7/caps.test.js`, `d3d9/caps.test.js`. |
 | Observed behaviour, pinned | `d3d9/observed.test.js` -- lock-flag traffic, matrix order, render-target alpha, viewport placement. |
 | Translators | `d3d9/shader.test.js`, `d3d9/wgsl.test.js`, `d3d10/dxbc.test.js`, `d3d10/sm4.test.js`, `d3d10/wgsl.test.js`, `vulkan/spirv.test.js`, `opengl/wgsl.test.js` (the GL formula as WGSL and the descriptor, and that every field the key must fold changes it), `opengl/arb-program.test.js` (the ARB program grammar, its error positions and limits), `opengl/arb-wgsl.test.js` (one stage at a time: every instruction, the parameters as one materialised block, the attribute aliasing, a real program's coordinate sets and image units), `opengl/gpu-layout.test.js` (array shapes to vertex formats and slots, mode expansion, index scanning). |

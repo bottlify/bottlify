@@ -325,7 +325,11 @@ test('start rebuilds on the worker what could not cross: fetch, device, watch, s
     const options = built();
     assert.equal(typeof options.bundle.fetch, 'function');
     assert.equal(options.bundle.id, 'b');
-    assert.equal(typeof options.device.presentTo, 'function');
+    // The canvas and its context cross to the presenter the app makes, and the
+    // frame account stays here; there is no ready-made copy function any more.
+    assert.equal(typeof options.device.canvas, 'object');
+    assert.equal(typeof options.device.screen.configure, 'function');
+    assert.equal(typeof options.device.onFrame, 'function');
     assert.equal(options.device.fog, false);
     assert.equal(options.device.maxDraws, 3);
     assert.deepEqual(options.device.adapter, { vendor: 'fake', architecture: '',
@@ -383,8 +387,9 @@ test('a DOM event captured on the page is scaled by the frame the worker present
     // presents at 640x480, which is the space a click lives in.
     const viewport = fakeViewport({ width: 320, height: 240 });
     remote.input.attach(viewport);
-    built().device.presentTo({ frameIndex: 0,
-        surface: { width: 640, height: 480, format: 'bgra8unorm', texture: {} } });
+    // The presenter reports a frame that reached the canvas; this is what the
+    // presenter calls when the size changed or the run's first frame arrived.
+    built().device.onFrame({ width: 640, height: 480, presented: 1, resized: true });
     await settled();
     assert.equal(remote.frames(), 1);
     viewport.fire('pointerdown', { clientX: 160, clientY: 120, button: 0, pointerId: 1 });
@@ -617,7 +622,7 @@ test('a second program starts in the same worker with the canvas it already has'
         executable: Uint8Array.of(0x4d, 0x5a),
         v86: { moduleUrl: 'v86.mjs', wasmBytes: new ArrayBuffer(4) },
     } });
-    assert.equal(typeof built().device.presentTo, 'function');
+    assert.equal(typeof built().device.onFrame, 'function');
     assert.equal(again.frames(), 0);
     await again.dispose();
     worker.terminate();

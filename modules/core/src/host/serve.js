@@ -45,9 +45,6 @@ const PRESENT_HISTORY = 600;
  */
 export const WORKER_YIELD_MS = 4;
 
-/** `GPUTextureUsage` bits, as numbers: the typecheck has no WebGPU library. */
-const TEXTURE_USAGE = { COPY_DST: 0x02, RENDER_ATTACHMENT: 0x10 };
-
 /**
  * @typedef {Object} ServeDeps
  * @property {(options: import('../app.js').AppOptions) => Promise<any>} createApp
@@ -368,79 +365,6 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     };
 
     /**
-     * Copies each frame into the canvas on the GPU, one command, and reads
-     * nothing back.
-     *
-     * @param {any} gpuDevice
-     * @param {any} canvas   An OffscreenCanvas the page transferred.
-     */
-    const presenter = (gpuDevice, canvas)=>{
-        const screen = contextOf(canvas);
-        if (!screen)
-        {
-            throw Object.assign(new Error('the canvas would not give a WebGPU context'),
-                { reason: 'gpu' });
-        }
-        let screenFormat = '';
-        /** @param {any} frame */
-        return frame=>{
-            const surface = frame.surface;
-            const startedAt = clock();
-            try
-            {
-                const resized = canvas.width !== surface.width
-                    || canvas.height !== surface.height;
-                if (resized)
-                {
-                    canvas.width = surface.width;
-                    canvas.height = surface.height;
-                }
-                if (screenFormat !== surface.format)
-                {
-                    // Configured in the frame's own format, so the copy is a
-                    // copy and not a conversion.
-                    screen.configure({
-                        device: gpuDevice,
-                        format: surface.format,
-                        usage: TEXTURE_USAGE.COPY_DST | TEXTURE_USAGE.RENDER_ATTACHMENT,
-                        alphaMode: 'opaque',
-                    });
-                    screenFormat = surface.format;
-                }
-                const encoder = gpuDevice.createCommandEncoder({ label: 'present' });
-                encoder.copyTextureToTexture(
-                    { texture: surface.texture },
-                    { texture: screen.getCurrentTexture() },
-                    { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
-                gpuDevice.queue.submit([encoder.finish()]);
-                frames++;
-                if (resized || frames === 1)
-                {
-                    /** @type {import('./messages.js').FramePayload} */
-                    const payload = {
-                        width: surface.width, height: surface.height, presented: frames,
-                    };
-                    emit('frame', payload);
-                }
-                presented.push({
-                    index: frame.frameIndex, at: startedAt, ms: clock() - startedAt,
-                    w: surface.width, h: surface.height, failed: false,
-                });
-            }
-            catch (e){
-                presented.push({
-                    index: frame.frameIndex, at: startedAt, ms: -1, w: 0, h: 0, failed: true,
-                });
-                emit('present-failed', { index: frame.frameIndex, message: describe(e).message });
-            }
-            if (presented.length > PRESENT_HISTORY)
-            {
-                presented.shift();
-            }
-        };
-    };
-
-    /**
      * Puts a watch in front of the routines the hooks name, as each module
      * they live in is loaded. A diagnostic, and a rewrite of the program's code.
      *
@@ -487,6 +411,12 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             const opened = viewport ? await openDevice() : null;
             device = opened?.device ?? null;
             const adapter = opened?.adapter ?? { vendor: '', architecture: '', description: '' };
+            const screen = viewport ? contextOf(viewport) : null;
+            if (viewport && !screen)
+            {
+                throw Object.assign(new Error('the canvas would not give a WebGPU context'),
+                    { reason: 'gpu' });
+            }
             const { bundle, storage, watch, hooks, device: knobs, signal: word, ...rest } = options;
             void word;
             app = await createApp({
@@ -515,7 +445,32 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                         device,
                         queue: device.queue,
                         adapter,
-                        presentTo: presenter(device, viewport),
+                        // The canvas and its context cross to the presenter the
+                        // app makes. The copy itself belongs to the run's
+                        // presenter -- configured once, surviving a replacement
+                        // -- while the account a page reads stays here, where
+                        // the port to that page is.
+                        canvas: viewport,
+                        screen,
+                        now: clock,
+                        /** @param {any} payload */
+                        onFrame: payload=>{
+                            frames = payload.presented;
+                            emit('frame', {
+                                width: payload.width, height: payload.height,
+                                presented: payload.presented,
+                            });
+                        },
+                        /** @param {any} record */
+                        onPresented: record=>{
+                            presented.push(record);
+                            if (presented.length > PRESENT_HISTORY)
+                            {
+                                presented.shift();
+                            }
+                        },
+                        /** @param {any} payload */
+                        onPresentFailed: payload=>emit('present-failed', payload),
                     }
                     : undefined,
             });

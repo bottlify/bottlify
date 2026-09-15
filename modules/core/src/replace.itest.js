@@ -18,6 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
+import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
@@ -132,10 +133,21 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     // exercises the replacement, and the instance sharing below is skipped.
     const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
     const child = buildChildExe();
+    // The GPU the worker would have opened, and the canvas it presents into.
+    // The run's presenter belongs to the run, not to either process: the
+    // child has to draw into the canvas the parent's frame is already on.
+    const gpu = createFakeDevice();
 
     const app = await createApp({
         executable: buildParentExe(),
         imagePath: 'C:\\App\\Parent.exe',
+        device: {
+            device: gpu.device,
+            queue: gpu.queue,
+            screen: gpu.screen,
+            canvas: gpu.canvas,
+            adapter: { vendor: 'fake', architecture: '', description: 'a stand-in' },
+        },
         // A call area on from the first instruction is what a `?log=` asks for.
         log: { categories: { 'call.cpu': 'trace' } },
         // Something is reading the far end of the sound ring, as the launcher
@@ -213,8 +225,31 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     const consumed = ring.consumed();
     assert.ok(consumed > 0, 'the reader is not at the start of the ring');
 
+    // The presenter is a service of the run: made once, above both machines,
+    // and the same object after the swap. The parent's frame is presented
+    // before it is replaced, the child's after; the canvas is configured for
+    // the first of them and never again, which is what leaves the parent's last
+    // frame on it until the child presents its own.
+    const presenter = app.presenter();
+    assert.ok(presenter, 'createApp made one presenter for the run');
+    const surface = { buffer: 0x400000, width: 1, height: 1, pitch: 4, bitCount: 32,
+        palette: null };
+    presenter.present(surface);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(gpu.count('configure'), 1, 'the parent\'s frame configured the canvas');
+    assert.equal(presenter.diagnostics().presents, 1);
+
     const code = await app.run({ timeoutMs: 20000 });
     assert.equal(code, 0, 'the child exited cleanly');
+
+    // The same presenter, now attached to the child's machine: the count
+    // continues rather than restarting, and the canvas was not configured again
+    // at the swap -- a reconfigure clears it, which is the black frame.
+    presenter.present(surface);
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(app.presenter(), presenter, 'the run kept the presenter it made');
+    assert.equal(presenter.diagnostics().presents, 2, 'the count continued across the replacement');
+    assert.equal(gpu.count('configure'), 1, 'the canvas was not reconfigured at the swap');
 
     // The child's own GetSystemMetrics reached the journal at the level the
     // page raised. Its category was never set in the `log` option.

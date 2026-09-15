@@ -13,6 +13,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { graphicsModule } from './module.js';
+import { createPresenter } from './webgpu/internal/presenter.js';
+import { createFakeDevice } from './webgpu/internal/fake-device.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -338,3 +340,46 @@ test('the desktop survives the emulator growing its memory under it', async()=>{
         'and a new one lands in the new buffer');
     await graphicsModule.dispose();
 });
+
+test('dispose releases this machine\'s backend and leaves the run\'s presenter untouched',
+    async()=>{
+        // The presenter is a service of the run: a process replacement hands
+        // the same one to the next machine. So a machine's dispose takes its
+        // backend with it and the canvas, its format and the texture the
+        // primary is copied into stay exactly as they were.
+        const gpu = createFakeDevice();
+        const ram = new Uint8Array(0x10000);
+        const presenter = createPresenter({
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            now: ()=>0,
+        });
+        const device = {
+            device: gpu.device,
+            queue: gpu.queue,
+            screen: gpu.screen,
+            canvas: gpu.canvas,
+            presentTo: (/** @type {any} */ frame)=>presenter.show(frame),
+        };
+        const host = hostWith({
+            readBytes: (/** @type {number} */ at, /** @type {number} */ n)=>ram.slice(at, at + n),
+            writeBytes: ()=>{},
+            window: (/** @type {number} */ at, /** @type {number} */ n)=>ram.subarray(at, at + n),
+        });
+        const api = await graphicsModule.create({ presenter, device }, host);
+        assert.equal(presenter.diagnostics().disposed, false);
+
+        api.present({ buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32, palette: null });
+        // The presenter coalesces onto a microtask; let it flush and build the
+        // backend, which is what the machine's dispose has to release.
+        await new Promise(resolve=>setImmediate(resolve));
+        const before = /** @type {any} */ (graphicsModule.diagnostics().metrics);
+        assert.ok(before.backend, 'the machine built its backend');
+        assert.ok(presenter.diagnostics().presents >= 1, 'the frame went through the presenter');
+
+        await graphicsModule.dispose();
+        const after = /** @type {any} */ (graphicsModule.diagnostics().metrics);
+        assert.equal(after.backend, null, 'the backend went with the machine');
+        assert.equal(presenter.diagnostics().disposed, false,
+            'and the run\'s presenter was not the machine\'s to dispose');
+        assert.ok(presenter.diagnostics().presents >= 1, 'its counters are untouched');
+    });

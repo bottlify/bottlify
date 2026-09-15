@@ -151,8 +151,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented.length, 1);
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
-        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, lastBuffer: 0x1000, pending: false,
-        claimed: 0, failures: [],
+        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, lastBuffer: 0x1000,
+        pending: false, claimed: 0, failures: [], disposed: false,
     });
 
     h.presenter.present(surface);
@@ -222,3 +222,84 @@ test('recorded: a claimed address is shown by its owner and its bytes are never 
     assert.equal(presenter.diagnostics().failures.length, 1, 'and this build has no GPU for them');
     void h;
 });
+
+test('recorded: a presenter with no canvas hands every frame to the caller\'s own sink',
+    ()=>{
+        // A build with no display -- the unit tests, a headless harness reading
+        // one frame back -- still has somewhere to put a frame. Without this the
+        // presenter would swallow it, and a run would look like one that drew
+        // nothing.
+        const gpu = createFakeDevice();
+        const ram = new Uint8Array(0x1000);
+        /** @type {any[]} */
+        const shown = [];
+        const backend = createBackend({
+            device: gpu.device, queue: gpu.queue,
+            presentTo: (/** @type {any} */ frame)=>presenter.show(frame), now: ()=>0,
+        });
+        const presenter = createPresenter({
+            backend: ()=>backend,
+            readMemory: (address, length)=>ram.slice(address, address + length),
+            presentTo: (/** @type {any} */ frame)=>shown.push(frame),
+        });
+        presenter.present({ buffer: 0, width: 1, height: 1, pitch: 4, bitCount: 32,
+            palette: null });
+        presenter.flush();
+        assert.equal(shown.length, 1, 'the frame went where the caller asked');
+        assert.equal(gpu.count('configure'), 0, 'and no canvas was configured');
+    });
+
+test('the run\'s presenter serves two machine lifetimes, configures the canvas once',
+    ()=>{
+        // A machine is a process: its backend and its address space die with it.
+        // The presenter is not: the canvas, the format it was configured in and
+        // the texture the primary is copied into belong to the run. This is the
+        // shape a process replacement has -- one presenter, a new backend and a
+        // new address space -- and the canvas must be configured for the first
+        // lifetime only, because reconfiguring it clears the frame the parent
+        // last presented.
+        const gpu = createFakeDevice();
+        const ram = new Uint8Array(0x10000);
+        const presenter = createPresenter({
+            device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+            now: ()=>0,
+        });
+        const presentFrom = ()=>{
+            const backend = createBackend({
+                device: gpu.device, queue: gpu.queue,
+                presentTo: frame=>presenter.show(frame), now: ()=>0,
+            });
+            presenter.attach({
+                backend: ()=>backend,
+                readMemory: (address, length)=>ram.slice(address, address + length),
+            });
+            return backend;
+        };
+
+        ram.set([0x56, 0x34, 0x12, 0xff], 0x100);
+        const first = presentFrom();
+        presenter.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
+            palette: null });
+        presenter.flush();
+        assert.equal(gpu.count('configure'), 1, 'the first frame configured the canvas');
+        assert.equal(presenter.diagnostics().presents, 1);
+        assert.equal(presenter.diagnostics().shown, 1);
+
+        // The replacement: the old backend's resources go, the presenter stays.
+        first.dispose();
+        ram.set([0x11, 0x22, 0x33, 0xff], 0x200);
+        presentFrom();
+        presenter.present({ buffer: 0x200, width: 1, height: 1, pitch: 4, bitCount: 32,
+            palette: null });
+        presenter.flush();
+
+        assert.equal(gpu.count('configure'), 1, 'the canvas was not reconfigured at the swap');
+        assert.equal(presenter.diagnostics().presents, 2, 'the count continued, not restarted');
+        assert.equal(presenter.diagnostics().shown, 2);
+        assert.equal(presenter.diagnostics().lastBuffer, 0x200);
+        // And what the second lifetime uploaded is what the canvas was shown,
+        // rather than the cleared target a fresh presenter would have made.
+        assert.deepEqual([...gpu.of('writeTexture').at(-1).bytes], [0x11, 0x22, 0x33, 0xff]);
+        assert.equal(gpu.of('copyTextureToTexture').length, 2,
+            'each lifetime showed its own frame');
+    });

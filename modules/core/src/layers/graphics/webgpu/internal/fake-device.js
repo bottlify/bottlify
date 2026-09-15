@@ -200,10 +200,32 @@ export function createFakeDevice(options = {}){
         },
     };
 
+    /**
+     * The canvas the presenter configures and copies into. Recorded like the
+     * device, so "the canvas was configured once" is a count and not a claim:
+     * a presenter handed to two machine lifetimes must configure it on the
+     * first frame of the run and never again.
+     */
+    const screenTexture = object('canvasTexture');
+    const canvas = { width: 0, height: 0, getContext: ()=>screen };
+    const screen = {
+        canvas,
+        /** @param {any} descriptor */
+        configure(descriptor){
+            calls.push({ op: 'configure', descriptor });
+        },
+        getCurrentTexture(){
+            calls.push({ op: 'getCurrentTexture' });
+            return screenTexture;
+        },
+    };
+
     return {
         device,
         queue,
         calls,
+        screen,
+        canvas,
         /** @param {string} op @returns {any[]} */
         of: op=>calls.filter(call=>call.op === op),
         /** @param {string} op @returns {number} */

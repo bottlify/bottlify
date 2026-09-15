@@ -10,6 +10,7 @@ import { createEvents } from './events.js';
 import { captureTrace, describeAddress, formatTrace } from './trace.js';
 import { coalescedSaver, inflateRaw, normaliseSession, resolveStorage } from './storage.js';
 import { DEFAULT_MEMORY_SIZE } from './layers/cpu/module.js';
+import { createPresenter } from './layers/graphics/webgpu/internal/presenter.js';
 import { openBundle } from './layers/filesystem/internal/bundle/format.js';
 import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loader/internal/pe.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
@@ -126,6 +127,12 @@ import { createBlockCache, resolveBlockStore }
  *           machine is made to stand still at the point of the request with the
  *           evidence still in it.
  * @property {any} [device]          The GPU to draw on, when there is one.
+ * @property {{ presenter?: any }} [graphics]     What the graphics layer draws into, when the
+ *           assembling caller has a presenter of its own. `graphics.presenter`
+ *           is the run's presenter: the canvas, its configured format, the
+ *           pacer and the texture the primary is copied into. Absent, one is
+ *           made from `device` and handed to every machine; set by `createApp`
+ *           on a rebuilt machine and not something a caller supplies.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {any} [storage]
@@ -1743,6 +1750,12 @@ async function buildApp(options){
     // process they were made against: the program has changed, the machine it
     // is running in has not.
     const events = options.events ?? createEvents();
+    // The presenter the run made. A machine is a process; the canvas, the
+    // texture the primary is copied into and the pacer are not. This machine
+    // hands the run's presenter to the graphics layer and draws through it, so
+    // the last frame of the process it replaced stays on the canvas until this
+    // one has something to show.
+    const runPresenter = options.graphics?.presenter ?? null;
 
     // The address space above the program: the system modules first, then the
     // libraries a game brought with it, and the heap above all of them with
@@ -2180,6 +2193,10 @@ async function buildApp(options){
             // any display shows -- and every one of those costs a read of the
             // surface out of guest memory and an upload.
             maxFps: options.maxFps,
+            // The run's presenter, made once above every machine. The layer
+            // draws through it without making one of its own, so a replacement
+            // does not reconfigure the canvas or clear the last frame.
+            presenter: runPresenter,
             device: options.device
                 ? {
                     ...options.device,
@@ -2204,7 +2221,17 @@ async function buildApp(options){
                             journal.note('heapDelta', heapUsed() - heapAtFrameStart);
                             journal.endFrame();
                         }
-                        options.device.presentTo?.(frame);
+                        // The run's presenter owns the canvas copy; a build
+                        // with no presenter of its own -- a direct assembly,
+                        // a test -- still has whatever the caller handed in.
+                        if (runPresenter)
+                        {
+                            runPresenter.show(frame);
+                        }
+                        else
+                        {
+                            options.device.presentTo?.(frame);
+                        }
                         journal.beginFrame();
                         retiredAtFrameStart = cpu.instructionCount();
                         interpretedAtFrameStart = cpu.interpretedSteps();
@@ -4604,6 +4631,31 @@ export async function createApp(options){
     // a swap does not wait for another instantiation.
     /** @type {any} */
     let mediaInstance = null;
+    // The presenter is a service of the run too, and for the same reason: a
+    // machine is a process, but the canvas it draws into is not. Made once
+    // here -- from the GPU the worker opened and the canvas the device carries
+    // -- and handed to every machine, so a replacement does not reconfigure
+    // the canvas or clear the frame the parent last presented.
+    /** @type {any} */
+    const presenter = options.graphics?.presenter ?? (options.device
+        ? createPresenter({
+            device: options.device.device,
+            queue: options.device.queue,
+            screen: options.device.screen,
+            canvas: options.device.canvas,
+            now: options.device.now,
+            maxFps: options.maxFps,
+            // A build with no canvas but with a sink of its own -- a test
+            // harness reading the frame back -- still gets its frames.
+            presentTo: options.device.presentTo,
+            // The host's own record of the frames: it owns the canvas and the
+            // counts a page reads, and a frame reaching the canvas is the one
+            // thing it cannot compute for itself.
+            onFrame: options.device.onFrame,
+            onPresented: options.device.onPresented,
+            onPresentFailed: options.device.onPresentFailed,
+        })
+        : null);
 
     /** @param {any} [extra] */
     const machine = extra=>({
@@ -4614,6 +4666,7 @@ export async function createApp(options){
         log: { ...options.log, sequenceBase: logSequence },
         audio: { ...options.audio, memory: ringMemory },
         media: { ...options.media, instance: mediaInstance },
+        graphics: { ...options.graphics, presenter },
         ...extra,
     });
 
@@ -4738,7 +4791,21 @@ export async function createApp(options){
             }
         },
 
-        dispose: ()=>current.dispose(),
+        /**
+         * Ends this program, and with it the run's presenter: the canvas and
+         * the texture a replacement draws into are released here and nowhere
+         * earlier, because the process that takes this one's place still needs
+         * them.
+         */
+        dispose: ()=>Promise.resolve(current.dispose()).finally(()=>presenter?.dispose?.()),
+
+        /**
+         * The presenter this run draws through: the canvas, the format it was
+         * configured in, the pacer and the texture the primary is copied into.
+         * Shared by every machine the run is rebuilt on, which is what keeps
+         * the last frame of one process on the canvas until the next presents.
+         */
+        presenter: ()=>presenter,
 
         /**
          * The last few replacement requests, each with the guest's stack at the
