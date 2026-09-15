@@ -637,6 +637,13 @@ test('the interaction pair carries seven coordinate sets and seven image units',
     assert.match(fragmentStage.code,
         /textureSample\(t3Texture, t3Sampler, select\(vec2f\(0\.0\), s\d+_0\.xy \/ s\d+_0\.w, s\d+_0\.w != 0\.0\)\)/,
         'the projection is projective, and a zero q samples at the origin');
+    // The cube sample takes the direction as it is, all three components and
+    // no divide: a TEX on a cube is not projective, and a face selected from a
+    // mirrored t would flip the sign of the light the program dots the bump
+    // normal with.
+    assert.match(fragmentStage.code,
+        /textureSample\(t0Texture, t0Sampler, s\d+_0\.xyz\)/,
+        'the cube map is sampled with the direction itself');
     // The program's own uniform blocks sit past the last unit's pair, so no
     // sampled texture and no block share a binding number.
     assert.ok(VERTEX_PROGRAM_BINDING > 16,
@@ -644,6 +651,37 @@ test('the interaction pair carries seven coordinate sets and seven image units',
     assert.ok(FRAGMENT_PROGRAM_BINDING > 16);
     assert.deepEqual(fragmentStage.needs.textures.map(texture=>texture.unit),
         [0, 1, 3, 2, 4, 6, 5], 'every unit the instructions sample, in first-use order');
+});
+
+test('a MOV of a sampled alpha into x carries the sample\'s w and leaves yzw alone', ()=>{
+    // The bump map of the interaction program is rxgb: the sampled alpha is
+    // the normal's x, so "MOV localNormal.x, localNormal.a" must read the
+    // sample's w and write only the x component; the signed MAD that follows
+    // then makes it 2 * a - 1. A swizzle mapped a -> x, or a whole-vector
+    // write, would drop the stored x and flatten every lit normal.
+    const text = `!!ARBfp1.0
+TEMP localNormal;
+TEX localNormal, fragment.texcoord[1], texture[1], 2D;
+MOV localNormal.x, localNormal.a;
+MAD localNormal, localNormal, {2, 2, 2, 2}, {-1, -1, -1, -1};
+MOV result.color, localNormal;
+END
+`;
+    const parsed = parseProgram(text);
+    assert.ok(!('error' in parsed));
+    assert.deepEqual(parsed.instructions[1].src[0].components, ['w', 'w', 'w', 'w'],
+        'the rgba letter a is the xyzw w, replicated');
+    const { code } = fragment(text);
+    assert.match(code, /let s\d+_0 = vec4f\(tmp0\.w\);/,
+        'the sample\'s stored alpha, w, comes out of the texel');
+    assert.match(code, /tmp0\.x = v\d+\.x;/,
+        'and only the x component is written: y and z keep the sampled normal');
+    assert.match(code, /let s\d+_1 = vec4f\(2\.0, 2\.0, 2\.0, 2\.0\);/,
+        'the scale of the signed range is two');
+    assert.match(code, /let s\d+_2 = vec4f\(-1\.0, -1\.0, -1\.0, -1\.0\);/,
+        'and its offset is minus one');
+    assert.match(code, /let v\d+ = s\d+_0 \* s\d+_1 \+ s\d+_2;/,
+        'so the result is 2 * value - 1');
 });
 
 test('a two-component attribute array widens to (s, t, 0, 1), the specification\'s fill', ()=>{

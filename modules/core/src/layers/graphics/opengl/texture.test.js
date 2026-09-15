@@ -179,6 +179,63 @@ test('DXT3 carries explicit alpha nibbles and DXT5 interpolates eight', ()=>{
     assert.equal(dxt5[11], 255, 'index zero is alpha0');
 });
 
+/**
+ * A DXT5 alpha block: two endpoints and sixteen 3-bit indices, the bits packed
+ * low bits first as the S3TC specification writes them, so a field straddles a
+ * byte wherever 3i crosses a multiple of eight.
+ *
+ * @param {number} a0
+ * @param {number} a1
+ * @param {number[]} indices
+ * @returns {Uint8Array}
+ */
+function dxt5Block(a0, a1, indices){
+    const block = new Uint8Array(16);
+    block[0] = a0;
+    block[1] = a1;
+    for (let i = 0; i < 16; i++)
+    {
+        const bit = i * 3;
+        block[2 + (bit >> 3)] |= (indices[i] & 7) << (bit & 7);
+        if ((bit & 7) > 5)
+        {
+            block[3 + (bit >> 3)] |= (indices[i] & 7) >> (8 - (bit & 7));
+        }
+    }
+    const view = new DataView(block.buffer);
+    view.setUint16(8, 0xf800, true);
+    view.setUint16(10, 0x001f, true);
+    view.setUint32(12, 0, true);
+    return block;
+}
+
+test('every DXT5 alpha index reads its own table entry, through the byte straddles', ()=>{
+    // S3TC: alpha0 > alpha1 selects the eight-entry table (six interpolated
+    // steps); alpha0 <= alpha1 the six-entry table with 0 and 255 appended.
+    // The index pattern walks 0..7 twice, so every entry is read and the fields
+    // at texels 2, 5..7, 10 and 13..15 straddle a byte. The tables are written
+    // out as the specification's rounded values, independent of the reader.
+    const indices = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7];
+    /** @type {[number, number, number[]][]} */
+    const cases = [
+        [255, 0, [255, 0, 219, 182, 146, 109, 73, 36]],
+        [0, 255, [0, 255, 51, 102, 153, 204, 0, 255]],
+        [200, 100, [200, 100, 186, 171, 157, 143, 129, 114]],
+    ];
+    for (const [a0, a1, table] of cases)
+    {
+        const texels = some(decodeS3tc(
+            dxt5Block(a0, a1, indices), GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4));
+        for (let i = 0; i < 16; i++)
+        {
+            assert.equal(texels[i * 4 + 3], table[indices[i]],
+                `texel ${i}: index ${indices[i]} of the table for (${a0}, ${a1})`);
+            assert.deepEqual([...texels.subarray(i * 4, i * 4 + 3)], [255, 0, 0],
+                `texel ${i}: the alpha block leaves the colour alone`);
+        }
+    }
+});
+
 test('nearest sampling picks the texel under the coordinate and wraps as told', ()=>{
     const image = { width: 2, height: 1, texels: Uint8Array.from([10, 0, 0, 255, 0, 20, 0, 255]) };
     const nearest = { magFilter: GL.NEAREST, minFilter: GL.NEAREST, wrapS: GL.REPEAT,
@@ -211,6 +268,76 @@ test('a cube map direction picks the face of its major axis', ()=>{
     assert.deepEqual(cubeFaceOf(0, 2, 0.5), { face: 2, s: 0.5, t: 0.625 });
     assert.deepEqual(cubeFaceOf(0, 0, -3), { face: 5, s: 0.5, t: 0.5 });
     assert.deepEqual(cubeFaceOf(0, 0, 0).face, 0, 'no direction is not a fault');
+});
+
+test('every axis and diagonal lands on the face and in-face texel the GL table names', ()=>{
+    const SIZE = 16;
+    const faces = [];
+    for (let face = 0; face < 6; face++)
+    {
+        const texels = new Uint8Array(SIZE * SIZE * 4);
+        for (let y = 0; y < SIZE; y++)
+        {
+            for (let x = 0; x < SIZE; x++)
+            {
+                const at = (y * SIZE + x) * 4;
+                texels[at] = face * 40;
+                texels[at + 1] = x * 16;
+                texels[at + 2] = y * 16;
+                texels[at + 3] = 255;
+            }
+        }
+        faces.push({ width: SIZE, height: SIZE, texels });
+    }
+    const nearest = { magFilter: GL.NEAREST, minFilter: GL.NEAREST,
+        wrapS: GL.CLAMP_TO_EDGE, wrapT: GL.CLAMP_TO_EDGE };
+    // GL_ARB_texture_cube_map "Cube Map Texture Selection", the sc, tc and ma
+    // rows written out, with s = (sc/ma + 1)/2 and t = (tc/ma + 1)/2. Row zero
+    // of an uploaded face is t = 0, so t grows downward and a direction with +y
+    // in the +x face is above that face's centre. The diagonals are unequal so
+    // each major axis and sign is reached.
+    for (const [x, y, z, face, s, t] of [
+        [1, 0, 0, 0, 0.5, 0.5],
+        [-1, 0, 0, 1, 0.5, 0.5],
+        [0, 1, 0, 2, 0.5, 0.5],
+        [0, -1, 0, 3, 0.5, 0.5],
+        [0, 0, 1, 4, 0.5, 0.5],
+        [0, 0, -1, 5, 0.5, 0.5],
+        [1, 1, 1, 0, 0, 0],
+        [-1, 1, 1, 1, 1, 0],
+        [1, -1, 1, 0, 0, 1],
+        [-1, -1, 1, 1, 1, 1],
+        [1, 1, -1, 0, 1, 0],
+        [-1, 1, -1, 1, 0, 0],
+        [1, -1, -1, 0, 1, 1],
+        [-1, -1, -1, 1, 0, 1],
+        [1, 3, 2, 2, 2 / 3, 5 / 6],
+        [1, -3, 2, 3, 2 / 3, 1 / 6],
+        [1, 2, 3, 4, 2 / 3, 1 / 6],
+        [1, 2, -3, 5, 1 / 3, 1 / 6],
+    ])
+    {
+        const got = cubeFaceOf(x, y, z);
+        assert.equal(got.face, face, `direction (${x}, ${y}, ${z}) face`);
+        assert.ok(Math.abs(got.s - s) < 1e-9, `direction (${x}, ${y}, ${z}) s`);
+        assert.ok(Math.abs(got.t - t) < 1e-9, `direction (${x}, ${y}, ${z}) t`);
+        const texel = sample2D(faces[face], nearest, got.s, got.t);
+        assert.equal(texel[0], face * 40, `direction (${x}, ${y}, ${z}) face texel`);
+        assert.equal(texel[1], Math.min(SIZE - 1, Math.floor(got.s * SIZE)) * 16,
+            `direction (${x}, ${y}, ${z}) column`);
+        assert.equal(texel[2], Math.min(SIZE - 1, Math.floor(got.t * SIZE)) * 16,
+            `direction (${x}, ${y}, ${z}) row`);
+    }
+
+    // The two the task names: (0, 1, 0) is the +y face's centre texel, and
+    // (0.9, 0.5, 0) a texel above the +x face's centre, not below it.
+    assert.deepEqual(cubeFaceOf(0, 1, 0), { face: 2, s: 0.5, t: 0.5 });
+    const upper = cubeFaceOf(0.9, 0.5, 0);
+    assert.equal(upper.face, 0);
+    assert.ok(upper.t < 0.5, 'a +y direction is above the +x face centre');
+    const sampled = sample2D(faces[0], nearest, upper.s, upper.t);
+    assert.equal(sampled[2], Math.floor(upper.t * SIZE) * 16);
+    assert.ok(Math.floor(upper.t * SIZE) < SIZE / 2, 'the sampled row is above the centre');
 });
 
 test('the texture environment follows the base format, not the texel', ()=>{

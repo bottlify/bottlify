@@ -257,6 +257,60 @@ test('a texture is uploaded once per version, a cube map face by face', async()=
     assert.equal(layout.descriptor.entries[1].texture.viewDimension, 'cube');
 });
 
+test('a DXT5 level reaches the upload decoded, its alpha per texel intact', async()=>{
+    // The bump map of a per-light interaction program is an rxgb S3TC image:
+    // the normal's x lives in the alpha block, so a decode or an upload that
+    // conforms alpha to one turns every normal's x into +1 and flips the sign
+    // of the half whose light has a negative x. Nothing between
+    // glCompressedTexImage2DARB and backend.uploadTexture may do that.
+    const r = rig();
+    const { context } = r;
+    const indices = [0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7];
+    const block = new Uint8Array(16);
+    block[0] = 255;
+    block[1] = 0;
+    for (let i = 0; i < 16; i++)
+    {
+        const bit = i * 3;
+        block[2 + (bit >> 3)] |= (indices[i] & 7) << (bit & 7);
+        if ((bit & 7) > 5)
+        {
+            block[3 + (bit >> 3)] |= (indices[i] & 7) >> (8 - (bit & 7));
+        }
+    }
+    const view = new DataView(block.buffer);
+    view.setUint16(8, 0xf800, true);
+    view.setUint16(10, 0x001f, true);
+    view.setUint32(12, 0, true);
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+        GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
+    assert.equal(context.glGetError(), GL.NO_ERROR, 'the compressed level loaded');
+    context.glEnable(GL.TEXTURE_2D);
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+
+    const level = context.shareGroup.textures.objects.get(1).levels.get(0);
+    assert.equal(level.baseFormat, GL.RGBA, 'the level keeps the four components of DXT5');
+    assert.equal(level.compressedFormat, GL.COMPRESSED_RGBA_S3TC_DXT5_EXT);
+    assert.deepEqual([...level.texels.subarray(3, 4)], [255], 'texel 0: table index 0');
+    assert.deepEqual([...level.texels.subarray(7, 8)], [0], 'texel 1: table index 1');
+    const upload = r.gpu.of('writeTexture').find(w=>w.destination.origin.z === 0
+        && w.destination.origin.x === 0);
+    assert.ok(upload, 'the level was uploaded');
+    assert.equal(upload.bytes[3], 255, 'the uploaded alpha byte is the table value, texel 0');
+    assert.equal(upload.bytes[7], 0, 'and texel 1\'s');
+    assert.equal(upload.bytes[11], 219, 'and texel 2\'s interpolated value');
+    assert.deepEqual([...upload.bytes.subarray(0, 3)], [255, 0, 0],
+        'the colour block is untouched by the alpha decode');
+});
+
 test('a clear is a triangle under the scissor with the masks in its pipeline', async()=>{
     const r = rig();
     const { context } = r;
