@@ -202,6 +202,28 @@ export function createShellFunctions(host){
         }
     };
 
+    /**
+     * The same path into a buffer sized for wide characters: each code unit
+     * two bytes, terminated by two zero bytes.
+     *
+     * @param {number} buffer @param {string} path
+     */
+    const writeWidePath = (buffer, path)=>{
+        if (buffer === 0)
+        {
+            return;
+        }
+        const text = path.slice(0, MAX_PATH - 1);
+        const bytes = new Uint8Array((text.length + 1) * 2);
+        for (let at = 0; at < text.length; at++)
+        {
+            const code = text.charCodeAt(at);
+            bytes[at * 2] = code & 0xff;
+            bytes[at * 2 + 1] = code >> 8;
+        }
+        host.writeMemory(buffer, bytes);
+    };
+
     const memory = host.readMemory
         ? { readMemory: host.readMemory, writeMemory: host.writeMemory } : null;
     const namespace = memory && host.volume && host.publish && host.allocate
@@ -520,6 +542,17 @@ export function createShellFunctions(host){
             },
         },
 
+        /** BOOL SHGetSpecialFolderPathW(HWND, LPWSTR pszPath, int csidl, BOOL fCreate) */
+        SHGetSpecialFolderPathW: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([, path, csidl])=>{
+                const folder = folderOf(csidl | 0);
+                writeWidePath(path >>> 0, folder ?? '');
+                return folder === null ? 0 : 1;
+            },
+        },
+
         /**
          * HRESULT SHGetFolderPathA(HWND, int csidl, HANDLE hToken, DWORD dwFlags,
          *                          LPSTR pszPath)
@@ -533,6 +566,17 @@ export function createShellFunctions(host){
             handler: ([, csidl, , , path])=>{
                 const folder = folderOf(csidl | 0);
                 writePath(path >>> 0, folder ?? '');
+                return folder === null ? E_INVALIDARG : S_OK;
+            },
+        },
+
+        /** HRESULT SHGetFolderPathW(HWND, int csidl, HANDLE, DWORD, LPWSTR) */
+        SHGetFolderPathW: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([, csidl, , , path])=>{
+                const folder = folderOf(csidl | 0);
+                writeWidePath(path >>> 0, folder ?? '');
                 return folder === null ? E_INVALIDARG : S_OK;
             },
         },

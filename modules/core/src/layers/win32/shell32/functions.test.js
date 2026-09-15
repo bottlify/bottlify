@@ -90,6 +90,28 @@ test('the path spellings answer the same folder', ()=>{
     assert.equal(m.string(0x300), 'C:\\Program Files');
 });
 
+test('the wide spelling of a folder path is UTF-16 in the buffer', ()=>{
+    // shfolder and shell32 both export the W form, and a program that links
+    // against either gets the path twice as wide with a two-byte terminator.
+    const m = machineWithFolders();
+    const CSIDL_PROGRAM_FILES = 0x26;
+    const PATH = 'C:\\Program Files';
+
+    assert.equal(m.shell.SHGetFolderPathW.handler([0, CSIDL_PROGRAM_FILES, 0, 0, 0x300]), 0);
+    assert.equal(
+        new TextDecoder('utf-16le').decode(
+            m.memory.subarray(0x300, 0x300 + PATH.length * 2)),
+        PATH);
+    assert.deepEqual([...m.memory.slice(0x300 + PATH.length * 2, 0x300 + PATH.length * 2 + 2)],
+        [0, 0], 'terminated by two zero bytes');
+
+    assert.equal(m.shell.SHGetSpecialFolderPathW.handler([0, 0x340, CSIDL_PROGRAM_FILES, 1]), 1);
+    assert.equal(
+        new TextDecoder('utf-16le').decode(
+            m.memory.subarray(0x340, 0x340 + PATH.length * 2)),
+        PATH);
+});
+
 test('launching nothing is refused, not quietly succeeded', ()=>{
     // Success for something that did not happen is the failure that costs most:
     // the caller carries on believing a program started.

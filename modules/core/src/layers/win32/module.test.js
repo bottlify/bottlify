@@ -194,3 +194,19 @@ test('the KnownDLLs are the ones Windows never searches beside the program', asy
 
     await win32Module.dispose();
 });
+
+test('shfolder is the shell folder call under the name a program linked against', async()=>{
+    // The library Windows ships with exactly two exports, both forwarders.
+    // A program that imported SHGetFolderPathA from it has to get shell32's
+    // implementation, not a missing import and not a second copy.
+    const api = await win32Module.create({}, stubHost());
+    const libraries = /** @type {Record<string, any>} */ (api.libraries());
+
+    assert.ok(libraries['SHFOLDER.dll'], 'shfolder.dll is a library this build has');
+    assert.equal(libraries['SHFOLDER.dll'].SHGetFolderPathA,
+        libraries['SHELL32.dll'].SHGetFolderPathA);
+    assert.equal(libraries['SHFOLDER.dll'].SHGetFolderPathW,
+        libraries['SHELL32.dll'].SHGetFolderPathW);
+
+    await win32Module.dispose();
+});

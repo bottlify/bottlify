@@ -1203,6 +1203,15 @@ export const win32Module = {
             }),
         };
 
+        // shfolder.dll is a forwarder and nothing else: the two exports it
+        // has are shell32's folder calls under another library's name, so a
+        // program that linked against this small library gets the same answers
+        // as one that linked against shell32 directly.
+        libraries['SHFOLDER.dll'] = {
+            SHGetFolderPathA: libraries['SHELL32.dll'].SHGetFolderPathA,
+            SHGetFolderPathW: libraries['SHELL32.dll'].SHGetFolderPathW,
+        };
+
         // Added after the rest because it is built from them: nearly everything
         // ntdll exports is a second name for a function another library already
         // publishes, and it has to be the same entry rather than a second
