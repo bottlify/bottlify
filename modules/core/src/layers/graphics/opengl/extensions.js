@@ -227,11 +227,8 @@ export const EXTENSION_WORDS = Object.freeze({
  * program that reads the string first never asks. Advertising one again is
  * removing its name from here.
  */
-export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([
-    // The per-light interaction pass of a program that finds these draws
-    // nothing on the device yet; its diffuse and emissive passes draw.
-    'GL_ARB_vertex_program', 'GL_ARB_fragment_program',
-]));
+/** @type {ReadonlySet<string>} */
+export const HIDDEN_GL_EXTENSIONS = Object.freeze(new Set([]));
 
 export const EXTENSION_FUNCTIONS = Object.freeze(new Set([
     ...Object.values(GL_EXTENSIONS).flat(),

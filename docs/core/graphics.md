@@ -329,7 +329,7 @@ held and leaves the description untouched). `render.js` keeps a host copy of eve
 and replays a record onto one backend frame at present.
 
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
-renderer `Bottlify OpenGL`, 22 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
+renderer `Bottlify OpenGL`, 24 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
 string is a promise that every function it defines is obtainable, and the test checks the list,
 the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
 and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
@@ -348,18 +348,17 @@ fixed-function formula as a shader per draw state (texture environment per base 
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
 colour mask, polygon offset); every field either reads is in the cache key. A translator for
-`GL_ARB_vertex_program` and `GL_ARB_fragment_program` exists and is tested -- `arb-program.js`
-parses program text into an IR with byte-exact error positions, `arb-wgsl.js` emits one literal
-WGSL stage per program with its parameters materialised into one uniform block per draw at a
-binding past the last texture unit's pair, state matrices computed from the stacks at draw time,
-and the varyings widened to the eight coordinate sets a program may address -- but **the two
-extensions are not advertised**: a title that takes its own per-light path through them drew the
-level black for a cause the draw dump, the probe and a texture census localised to the light
-arithmetic's inputs without naming it, while the fixed-function path is proven lit, so the
-promise is withdrawn until the cause is found. The two names sit in `HIDDEN_GL_EXTENSIONS`: their
-entry points stay sized, implemented and obtainable through `wglGetProcAddress`, as a driver's
-unannounced entry points would be, and only the string omits them, so re-advertising is removing
-a name from that set. The context holds
+`GL_ARB_vertex_program` and `GL_ARB_fragment_program` exists, is tested, and both names are
+advertised -- `arb-program.js` parses program text into an IR with byte-exact error positions,
+`arb-wgsl.js` emits one literal WGSL stage per program with its parameters materialised into one
+uniform block per draw, state matrices computed from the stacks at draw time, and the varyings
+widened to the eight coordinate sets a program may address. The vertex program's block is bound
+beside the fixed block in group zero, the group whose binding the vertex stage already reads,
+because the device hands a stage zero for a dynamic uniform block outside the first group the
+stage reads; the fragment program's block gets a bind group of its own, which the fragment stage
+reads alone. `HIDDEN_GL_EXTENSIONS` is empty: a name added back there stays sized, implemented and
+obtainable through `wglGetProcAddress`, as a driver's unannounced entry points would be, and only
+the string omits it. The context holds
 eight texture units -- the image units and coordinate sets a program addresses -- of which the
 conventional pipeline combines the first four (`GL_MAX_TEXTURE_UNITS`). A binding the GPU path
 cannot answer (a non-matrix state parameter, a 3D texture target) refuses the stage by name as a
