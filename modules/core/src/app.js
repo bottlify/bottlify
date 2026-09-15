@@ -46,6 +46,11 @@ import { createBlockCache, resolveBlockStore }
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
  *           that nothing can be played, which is what a build without it is.
+ * @property {any} [media.instance]
+ *           The decoder one machine already made, so the machine that replaces
+ *           it attaches to the same compiled module and linear memory rather
+ *           than instantiate the binary again. Set by `createApp` on a rebuilt
+ *           machine and not something a caller supplies.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
@@ -2020,6 +2025,11 @@ async function buildApp(options){
             // the assembling caller's decision rather than something to fetch
             // from inside a worker. Absent, the layer comes up and says so.
             wasmBytes: options.media?.wasmBytes,
+            // The decoder a machine that replaced this one already made, so
+            // this process opens its cinematics over the same compiled module
+            // and linear memory instead of compiling the binary again. Absent
+            // on the first process, which makes its own.
+            instance: options.media?.instance,
             // The hosted JPEG library reads a program's buffers and writes its
             // pictures; handed the same thunks the sound layer's provider gets.
             readMemory: (/** @type {number} */ address, /** @type {number} */ length)=>
@@ -4436,6 +4446,18 @@ async function buildApp(options){
             },
         },
 
+        /**
+         * The decoder this machine uses, for the process that takes its place.
+         *
+         * A machine is a process; the decoder is not. Handed on, the rebuilt
+         * machine's first cinematic does not wait for a second instantiation
+         * of the same binary, and nothing outside the machine that wants one
+         * decoder for the run has to reach into a module to find it.
+         */
+        media: {
+            instance: ()=>core.api('media').instance?.() ?? null,
+        },
+
         /** The registry the program reads and writes; it outlives the process. */
         registry: ()=>win32.registry(),
 
@@ -4576,6 +4598,12 @@ export async function createApp(options){
     // mix into the ring that already exists rather than make one nobody reads.
     /** @type {{ control: ArrayBufferLike, samples: ArrayBufferLike } | null} */
     let ringMemory = null;
+    // The decoded binary's instance outlives the process too: a machine is a
+    // process, the decoder is a service of the run. The child attaches to the
+    // parent's compiled module and linear memory, so the first cinematic after
+    // a swap does not wait for another instantiation.
+    /** @type {any} */
+    let mediaInstance = null;
 
     /** @param {any} [extra] */
     const machine = extra=>({
@@ -4585,6 +4613,7 @@ export async function createApp(options){
         logSinks,
         log: { ...options.log, sequenceBase: logSequence },
         audio: { ...options.audio, memory: ringMemory },
+        media: { ...options.media, instance: mediaInstance },
         ...extra,
     });
 
@@ -4675,6 +4704,10 @@ export async function createApp(options){
                 {
                     logSequence = written;
                 }
+                // Likewise read while it stands: the decoder the parent made is
+                // handed to the child so the same compiled module and linear
+                // memory serve both, and only the parent still holds it.
+                mediaInstance = current.media.instance() ?? mediaInstance;
                 await current.dispose();
 
                 if (!child)

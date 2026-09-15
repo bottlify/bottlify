@@ -128,6 +128,9 @@ function buildParentExe(){
 
 test('the reader keeps its level, its cursor and its sink across a replacement', async t=>{
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    // The decoder binary is fetched, not tracked; without it this test still
+    // exercises the replacement, and the instance sharing below is skipped.
+    const decoder = await readFile(new URL('video-decoder.wasm', PREBUILT)).catch(()=>null);
     const child = buildChildExe();
 
     const app = await createApp({
@@ -140,6 +143,10 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         // is the machine's, not the program's: the child has to mix into the
         // output the reader was handed before the parent ran.
         audio: { drained: true },
+        media: decoder ? {
+            wasmBytes: decoder.buffer.slice(
+                decoder.byteOffset, decoder.byteOffset + decoder.byteLength),
+        } : undefined,
         // The child the parent hands over to has to be on the volume.
         storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         v86: {
@@ -148,6 +155,19 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         },
     });
     t.after(()=>app.dispose());
+
+    // The decoder is instantiated off the thread while the machine comes up.
+    // Waited for here so the parent's instance is unambiguously the one the
+    // child has to attach to.
+    for (let guard = 0; guard < 500 && app.media.instance() === null; guard++)
+    {
+        await new Promise(resolve=>setImmediate(resolve));
+    }
+    const parentDecoder = app.media.instance();
+    if (decoder)
+    {
+        assert.ok(parentDecoder, 'the parent instantiated the configured decoder');
+    }
 
     // Switched on and raised after the machine exists, the way the launcher's
     // session does. Neither survives a rebuild today.
@@ -235,4 +255,14 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     childRing.write(new Float32Array([3, 3]));
     assert.equal(childRing.read(new Float32Array(2)), 1, 'the child writes into the same ring');
     assert.equal(childRing.consumed(), consumed + 1, 'and the reader keeps counting');
+
+    // The decoder is a service of the run, not of the process: the child
+    // attaches to the instance the parent made instead of compiling the binary
+    // again and paying for it on its first cinematic.
+    if (decoder)
+    {
+        assert.ok(parentDecoder, 'the parent had made a decoder to hand over');
+        assert.equal(app.media.instance(), parentDecoder,
+            'the child uses the parent\'s decoder, not a new one');
+    }
 });

@@ -144,6 +144,11 @@ function hostImports(){
 /**
  * Instantiates the decoder.
  *
+ * The returned instance is the shared half: the compiled module, its linear
+ * memory, the codec set and the counters of everything decoded through them. It
+ * can be built once and used by one machine after another -- see
+ * `decoderSession`, which is the half that belongs to a single machine.
+ *
  * @param {BufferSource} wasmBytes The video-decoder.wasm binary.
  * @returns {Promise<any>}
  */
@@ -236,7 +241,7 @@ export async function createDecoder(wasmBytes){
         };
     };
 
-    return {
+    const decoder = {
         /**
          * Opens a container held in host memory.
          *
@@ -470,5 +475,57 @@ export async function createDecoder(wasmBytes){
                 heapBytes: wasm.memory.buffer.byteLength,
             };
         },
+    };
+    return decoder;
+}
+
+/**
+ * A view of one decoder instance for one owner.
+ *
+ * A machine is a process, and the decoder is not: the compiled module and its
+ * linear memory outlive the machine that first needed them, so the process that
+ * replaces it -- or the next game in the same session -- opens clips over the
+ * same instance instead of paying for another instantiation. What does belong
+ * to the machine is the clips it opened: closing this view closes exactly those
+ * and leaves the instance ready for whoever holds it next.
+ *
+ * The counters and the open-clip count this reports are the instance's, so a
+ * reader watching them sees one decoder's life across however many machines
+ * used it.
+ *
+ * @param {any} instance  A decoder built by `createDecoder`.
+ * @returns {any}
+ */
+export function decoderSession(instance){
+    /** @type {Set<{ close: () => void }>} */
+    const mine = new Set();
+    return {
+        /** @param {Uint8Array} bytes @returns {any} */
+        open(bytes){
+            const clip = instance.open(bytes);
+            mine.add(clip);
+            return clip;
+        },
+        /** @param {AudioStreamShape} shape @returns {AudioStream | null} */
+        openAudio(shape){
+            const stream = instance.openAudio(shape);
+            if (stream)
+            {
+                mine.add(stream);
+            }
+            return stream;
+        },
+        audioCapable: ()=>instance.audioCapable(),
+        /** Closes the clips and streams this view opened; the instance stays. */
+        closeAll(){
+            for (const clip of [...mine])
+            {
+                clip.close();
+            }
+            mine.clear();
+        },
+        diagnostics: ()=>instance.diagnostics(),
+        /** The shared instance, for handing to the machine that replaces this one. */
+        instance: ()=>instance,
     };
 }

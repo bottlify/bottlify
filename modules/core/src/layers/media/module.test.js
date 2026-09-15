@@ -74,3 +74,31 @@ test('a packet-fed stream is null until there is a decoder to answer with', asyn
     assert.match(mediaModule.diagnostics().issues?.[0] ?? '', /could not be instantiated/);
     await mediaModule.dispose();
 });
+
+test('a machine attaches to a decoder an earlier one made', async()=>{
+    let closed = 0;
+    const clip = { close(){ closed++; } };
+    const instance = {
+        open: ()=>clip,
+        openAudio: ()=>null,
+        audioCapable: ()=>true,
+        closeAll(){ closed++; },
+        diagnostics: ()=>({ opened: 1, clips: 1, audioCapable: true, heapBytes: 0 }),
+    };
+
+    // No binary, and none needed: the instance is the decoder.
+    const first = await mediaModule.create({ instance });
+    assert.equal(first.available(), true, 'a given instance is enough to decode');
+    assert.equal(first.instance(), instance);
+    assert.equal(mediaModule.diagnostics().metrics?.configured, true);
+    assert.equal(await first.open(new Uint8Array(1)), clip);
+
+    await mediaModule.dispose();
+    assert.equal(closed, 1, 'dispose closed the clip this machine opened');
+
+    // The instance outlives the machine that used it, and the next one is
+    // handed the same object rather than instantiating anything of its own.
+    const second = await mediaModule.create({ instance });
+    assert.equal(second.instance(), instance, 'the same decoder serves the next machine');
+    await mediaModule.dispose();
+});

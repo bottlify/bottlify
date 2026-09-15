@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 
-import { createDecoder } from './decoder.js';
+import { createDecoder, decoderSession } from './decoder.js';
 
 /**
  * The binary is a build artifact and is not in git, so these tests say what is
@@ -141,6 +141,36 @@ test('a decoded clip is counted, and closeAll lets go of it', async t=>{
 
     decoder.closeAll();
     assert.equal(decoder.diagnostics().clips, 0);
+});
+
+test('clips belong to the machine, the instance to the run', async t=>{
+    const instance = await loadDecoder();
+    if (!instance)
+    {
+        return t.skip(MISSING);
+    }
+    const first = decoderSession(instance);
+    const clip = first.open(wav(new Int16Array(64), 22050));
+    clip.decode();
+    assert.ok(clip.audioPending() > 0, 'the first machine decoded it');
+    assert.equal(instance.diagnostics().opened, 1, 'the instance counted the clip');
+    assert.equal(instance.diagnostics().clips, 1);
+
+    // What a machine holds is its clips: dropping them leaves the instance --
+    // its counters and its memory -- for whoever holds it next.
+    first.closeAll();
+    assert.equal(instance.diagnostics().clips, 0, 'the machine closed its clip');
+    assert.equal(instance.diagnostics().opened, 1, 'the instance kept its count');
+    assert.throws(()=>clip.decode(), /closed clip/);
+
+    const second = decoderSession(instance);
+    assert.equal(second.instance(), instance, 'both machines share one instance');
+    second.open(wav(new Int16Array(32), 22050));
+    assert.equal(instance.diagnostics().opened, 2, 'the count continues, not starts over');
+    assert.equal(instance.diagnostics().clips, 1, 'the second machine still opens');
+
+    second.closeAll();
+    assert.equal(instance.diagnostics().clips, 0);
 });
 
 /** MPEG-1 layer III, 128 kbit/s, 44.1 kHz, stereo, zeros past the header: a silent frame. */

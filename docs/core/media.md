@@ -31,6 +31,7 @@ Source: `src/layers/media/module.js`.
 | option | type | default | meaning |
 |---|---|---|---|
 | `wasmBytes` | `ArrayBuffer` | absent | The video decoder binary, `video-decoder.wasm`. Injected rather than fetched so the layer comes up under a test runner or in a worker without knowing which. Absent, `available()` is false, `open` rejects, and diagnostics carry the issue `No decoder binary was configured: nothing can be played.` |
+| `instance` | a decoder built by `createDecoder` (`internal/decoder.js`) | absent | A decoder to use instead of instantiating `wasmBytes`. Set by `src/app.js` on a machine rebuilt after a process replacement, so the run keeps one instance -- one compiled module and linear memory, one set of counters -- across processes; not something a caller supplies. With it given, `wasmBytes` may be absent and `available()` is still true. |
 | `readMemory`, `writeMemory`, `allocate` | `(address, length) => Uint8Array`, `(address, bytes) => void`, `(bytes) => address` | absent | Guest-memory thunks for the hosted JPEG library. All three present publishes `ijl15.dll`; any absent leaves `libraries()` empty. |
 | `warn` | `(text) => void` | absent | Where the JPEG library reports what it refused. `src/app.js` routes it to the `divergence` event under the api name `ijl15`. |
 
@@ -50,7 +51,8 @@ through the GitHub API; without one the script tries the plain release URL and t
 | `prepare()` | Instantiates the decoder without opening anything, so the cost lands where the caller chooses rather than on the frame a cinematic starts. |
 | `open(bytes)` | A clip from the whole file in memory; a promise, because the first call instantiates the module. |
 | `openAudio({ formatTag, sampleRate, channels })` | An elementary audio stream with no container, decoded a packet at a time inside the call: `feed(bytes)` answers with the interleaved 16-bit PCM that frame produced, `flush()` with what was still held, `close()`; `sampleRate` and `channels` say what comes out. Synchronous. Null when there is no binary, when the binary was built without the path (an issue in diagnostics says so), or when it is not instantiated yet -- asking starts it, so the next stream finds it. A tag the build cannot serve throws by name. |
-| `closeAll()` | Drops every clip, for a teardown between games. |
+| `closeAll()` | Drops every clip this machine opened, for a teardown between games, and leaves the decoder instance itself alive: the process that replaces this one opens over the same compiled module and linear memory. |
+| `instance()` | The decoder instance this machine uses, or null before one exists; `src/app.js` reads it before a replacement and hands it to the machine that follows as `config.instance`. |
 | `libraries()` | `{ 'ijl15.dll' }` when the guest-memory thunks are configured, else `{}`. |
 | `ordinals()` | `{ 'ijl15.dll': { 1..6 } }`, for a program that imports by number. |
 
@@ -157,7 +159,7 @@ in every game at once. That is the ceiling, and it is deliberate.
 
 ### When it is absent
 
-`media: null` in the module configuration, or a build with no `wasmBytes`, comes up: `available()`
+`media: null` in the module configuration, or a build with neither `wasmBytes` nor an `instance`, comes up: `available()`
 is false, `open` throws `media: this build has no decoder binary`, the filter graph refuses to
 render, and the JPEG library is still published if its thunks are present. A build with the
 thunks absent publishes no library and a program that ships `ijl15.dll` runs the copy it ships as
@@ -191,8 +193,8 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 33 
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/media/module.test.js` | Wiring | A build with no binary comes up and says so; a configured build is not instantiated until something is opened; `closeAll` is safe before anything was opened. |
-| `src/layers/media/internal/decoder.test.js` | Contract against the real binary; skips with `video-decoder.wasm is absent: run npm run fetch:video-decoder` when it has not been fetched | A file the build cannot make sense of is refused by name; an empty file is refused; a WAVE clip reports what it holds and hands back every sample; a decoded clip is counted and `closeAll` lets it go. |
+| `src/layers/media/module.test.js` | Wiring | A build with no binary comes up and says so; a configured build is not instantiated until something is opened; `closeAll` is safe before anything was opened; a machine given an `instance` decodes over it without a binary, and its `dispose` closes only the clips it opened. |
+| `src/layers/media/internal/decoder.test.js` | Contract against the real binary; skips with `video-decoder.wasm is absent: run npm run fetch:video-decoder` when it has not been fetched | A file the build cannot make sense of is refused by name; an empty file is refused; a WAVE clip reports what it holds and hands back every sample; a decoded clip is counted and `closeAll` lets it go; clips belong to a machine's session while the instance and its counters outlive it, so a second session over the same instance still opens and the count continues. |
 | `src/layers/media/internal/ijl.test.js` | Contract, over a flat guest memory | Ordinals; `ijlInit` clears the structure and sets the default quality; parameters without decoding; the whole image lands in the DIB four channels as they lie; row order, negative height and padding; refusals with the library's own codes and names. Each of the four routes from the picture's components to the DIB's channels -- converted for RGB, converted and exchanged for BGR, components dropped, channels padded opaque -- is pinned to exact bytes, because the route is chosen once per picture and one taken by mistake is a texture in the wrong colour that nothing reports. |
 | `src/layers/media/internal/jpeg.test.js` | Byte-exact, against pictures computed from the definition of the transform, and against itself | Streams built from coefficients with the file's own Huffman tables: no fixture from anywhere and nothing taken on trust from another decoder. Five blocks -- empty, DC only, one AC term, sparse, and every coefficient present -- are pinned to exact samples with no tolerance, because the transform takes a different route through each and a route that drifts by one has changed every texture in the game. |
 
