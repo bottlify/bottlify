@@ -136,6 +136,11 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     // A subscriber asks for one topic at its own level; a record is filtered
     // out at write time or at the subscriber, never sent to the wrong one.
     keeper.send({ type: 'subscribe', id: 7, topics: ['call.cpu'], level: Level.TRACE });
+    // A request travels behind the subscribe, so its answer proves the
+    // subscription is in place before anything is written for it: a poll that
+    // ran in between would otherwise take the records and leave the
+    // subscriber waiting for a batch that never comes.
+    await keeper.ask('lost');
     journal.write(Level.INFO, 'boot', 'four');
     journal.write(Level.INFO, 'call.cpu', 'five');
     const batch = await keeper.next(/** @param {any} m */ m=>
@@ -144,6 +149,7 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
 
     // Every topic at warning and above: two records are written, one arrives.
     keeper.send({ type: 'subscribe', id: 8, topics: '*', level: Level.WARN });
+    await keeper.ask('lost');
     journal.write(Level.INFO, 'boot', 'six');
     journal.write(Level.ERROR, 'boot', 'seven');
     const starred = await keeper.next(/** @param {any} m */ m=>
