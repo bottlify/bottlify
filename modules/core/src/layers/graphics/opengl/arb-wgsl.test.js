@@ -170,9 +170,10 @@ MOV r0, vertex.position;
 END
 `, { inputs: [{ name: 'position', components: 3, scalar: 'f32' }] });
     assert.match(code,
-        /let invariant = uniforms\.modelViewProjection \* vec4f\(vertex\.position, 1\.0\);/);
+        /let clip = uniforms\.modelViewProjection \* vec4f\(vertex\.position, 1\.0\);/);
     assert.match(code,
-        /out\.position = vec4f\(invariant\.x, invariant\.y, \(invariant\.z \+ invariant\.w\) \* 0\.5, invariant\.w\);/);
+        /out\.position = vec4f\(clip\.x, clip\.y, \(clip\.z \+ clip\.w\) \* 0\.5, clip\.w\);/,
+        'the remap line is the fixed stage\'s, byte for byte');
     assert.doesNotMatch(code, /out\.position = vec4f\(v\d+/);
 });
 
@@ -791,4 +792,62 @@ END
     assert.match(code, /input\.tc7/);
     assert.equal(canonicalAttribName(12), 'texCoord4');
     assert.equal(canonicalAttribName(15), 'texCoord7');
+});
+
+test('the interaction pair\'s falloff set carries its declared default and both'
+    + ' projective samples divide by the carried w', ()=>{
+    // The per-light interaction text: the falloff set is the declared constant
+    // with only its .x computed, the projection set three of four components,
+    // and the fragment samples both projectively. Wine's wined3d emits exactly
+    // this shape for a D3D projective texture argument, and its d3d9 visual
+    // tests pin the divide; the constant's .y is the sample's row.
+    const vpText = `!!ARBvp1.0
+OPTION ARB_position_invariant;
+PARAM defaultTexCoord = { 0, 0.5, 0, 1 };
+MOV result.texcoord[2], defaultTexCoord;
+DP4 result.texcoord[2].x, vertex.position, program.env[9];
+DP4 result.texcoord[3].x, vertex.position, program.env[6];
+DP4 result.texcoord[3].y, vertex.position, program.env[7];
+DP4 result.texcoord[3].w, vertex.position, program.env[8];
+MAD result.color, vertex.color, program.env[16], program.env[17];
+END
+`;
+    const fpText = `!!ARBfp1.0
+TEMP R1;
+TXP R1, fragment.texcoord[3], texture[3], 2D;
+TXP R1, fragment.texcoord[2], texture[2], 2D;
+MUL result.color, R1, fragment.color;
+END
+`;
+    /** @type {import('./arb-wgsl.js').StageInput[]} */
+    const inputs = [
+        { name: 'position', components: 3, scalar: 'f32' },
+        { name: 'color', components: 4, scalar: 'f32' },
+    ];
+    const varyings = { texcoords: [2, 3], fogCoord: false };
+    const parsedVertex = parseProgram(vpText);
+    assert.ok(!('error' in parsedVertex),
+        'error' in parsedVertex ? parsedVertex.error.message : '');
+    const emittedVertex = emitVertex(parsedVertex, inputs, varyings);
+    assert.ok(!('error' in emittedVertex),
+        'error' in emittedVertex ? emittedVertex.error : '');
+    assert.equal(emittedVertex.needs.params[0].source, 'constant');
+    assert.deepEqual(emittedVertex.needs.params[0].values, [0, 0.5, 0, 1],
+        'the falloff row the constant declares is the block\'s first slot');
+    assert.match(emittedVertex.code,
+        /let (\w+) = vertexProgram\.params\[0\];\n {4}let (\w+) = \1;\n {4}out\.tc2 = \2;/,
+        'the set takes the constant whole');
+    assert.match(emittedVertex.code, /out\.tc2\.x = \w+\.x;/, 'then its computed .x');
+    assert.ok(emittedVertex.code.includes('out.tc3 = vec4f(0.0, 0.0, 0.0, 1.0);')
+        && !/out\.tc3\.z/.test(emittedVertex.code),
+    'the projection set keeps the default w its writes leave alone');
+    const parsedFragment = parseProgram(fpText);
+    assert.ok(!('error' in parsedFragment),
+        'error' in parsedFragment ? parsedFragment.error.message : '');
+    const emittedFragment = emitFragment(parsedFragment);
+    assert.ok(!('error' in emittedFragment),
+        'error' in emittedFragment ? emittedFragment.error : '');
+    const projective = emittedFragment.code.match(
+        /select\(vec2f\(0\.0\), (\w+)\.xy \/ \1\.w, \1\.w != 0\.0\)/g) ?? [];
+    assert.equal(projective.length, 2, 'both TXPs divide by the w they were given');
 });

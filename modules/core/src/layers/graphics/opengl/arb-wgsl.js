@@ -1091,9 +1091,11 @@ export function emitVertex(ir, inputs, varyings){
         const position = inputs.find(input=>input.name === 'position');
         const source = position ? widen('vertex.position', position)
             : canonicalFallback('position');
-        body.push(`    let invariant = uniforms.modelViewProjection * ${source};`);
-        body.push('    out.position = vec4f(invariant.x, invariant.y,'
-            + ' (invariant.z + invariant.w) * 0.5, invariant.w);');
+        // The same two lines the fixed stage emits, so the option's promise --
+        // the program's position is the fixed pipeline's -- holds bit for bit
+        // on the device, not only in intent.
+        body.push(`    let clip = uniforms.modelViewProjection * ${source};`);
+        body.push('    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);');
     }
     body.push(...lines);
     body.push('    return out;');

@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { GL } from './constants.js';
 import { createTextureEnvironment } from './texture.js';
 import { parseProgram } from './arb-program.js';
-import { VARYING_TEXCOORDS } from './arb-wgsl.js';
+import { VARYING_TEXCOORDS, emitVertex } from './arb-wgsl.js';
 import { CANONICAL_LAYOUT } from './gpu-layout.js';
 import {
     UNIFORM, clearDescriptor, clearKey, copyKey, drawDescriptor, drawKey, generateClear,
@@ -230,6 +230,90 @@ test('the descriptor maps GL state onto WebGPU\'s, with the stencil on both face
     assert.equal(descriptor.depthStencil.depthBias, -600);
     assert.deepEqual(descriptor.vertexBuffers[0].attributes[1],
         { shaderLocation: 1, offset: 16, format: 'float32x4' });
+});
+
+test('a stencil-shadowed light\'s three passes get the descriptor their state names', ()=>{
+    // The states a per-light pass of a stencil-shadowed scene runs under: the
+    // volume counts with the clamped ops, one culled face set at a time, over
+    // a depth-equal test it does not write; the interaction then tests GEQUAL
+    // against the cleared reference; the light's rectangle is re-cleared by a
+    // clear that writes stencil alone.
+    const volume = state({
+        depth: { test: true, func: GL.LEQUAL, write: false },
+        stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
+            readMask: 0xff, writeMask: 0xff },
+        cull: 'front',
+        colourMask: 0x0,
+        polygonOffset: { factor: 0, units: 1 },
+    });
+    const counted = drawDescriptor(volume).depthStencil;
+    assert.equal(counted.depthCompare, 'less-equal');
+    assert.equal(counted.depthWriteEnabled, false);
+    assert.deepEqual(counted.stencilFront, {
+        compare: 'always', failOp: 'keep', depthFailOp: 'keep',
+        passOp: 'increment-clamp',
+    });
+    assert.deepEqual(counted.stencilBack, counted.stencilFront,
+        'one-sided stencil state is both of WebGPU\'s faces');
+    assert.equal(counted.stencilReadMask, 0xff);
+    assert.equal(counted.stencilWriteMask, 0xff);
+    assert.equal(counted.depthBias, 1);
+    assert.equal(counted.depthBiasSlopeScale, 0);
+    const otherFace = drawDescriptor({ ...volume, cull: 'back',
+        stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.DECR,
+            readMask: 0xff, writeMask: 0xff } });
+    assert.equal(otherFace.depthStencil.stencilFront.passOp, 'decrement-clamp');
+    assert.equal(otherFace.primitive.cullMode, 'back');
+    const interaction = drawDescriptor(state({
+        blend: { src: GL.ONE, dst: GL.ONE },
+        depth: { test: true, func: GL.EQUAL, write: false },
+        stencil: { func: GL.GEQUAL, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.KEEP,
+            readMask: 0xff, writeMask: 0xff },
+        cull: 'front',
+    })).depthStencil;
+    assert.equal(interaction.depthCompare, 'equal');
+    assert.equal(interaction.depthWriteEnabled, false);
+    assert.deepEqual(interaction.stencilFront, {
+        compare: 'greater-equal', failOp: 'keep', depthFailOp: 'keep', passOp: 'keep',
+    });
+    assert.deepEqual(interaction.stencilBack, interaction.stencilFront);
+    assert.equal(interaction.stencilWriteMask, 0xff);
+    const recleared = clearDescriptor({ targetFormat: 'bgra8unorm',
+        depthFormat: 'depth24plus-stencil8', colourMask: 0, depth: false,
+        stencilMask: 0xff }).depthStencil;
+    assert.equal(recleared.depthCompare, 'always');
+    assert.equal(recleared.depthWriteEnabled, false);
+    assert.deepEqual(recleared.stencilFront, {
+        compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'replace',
+    });
+    assert.deepEqual(recleared.stencilBack, recleared.stencilFront);
+    assert.equal(recleared.stencilWriteMask, 0xff);
+});
+
+test('a position-invariant program emits the fixed stage\'s position lines', ()=>{
+    // GL_ARB_vertex_program's OPTION ARB_position_invariant promises the fixed
+    // pipeline's position; a depth-equal pass over a fixed-function pre-pass
+    // only survives if the emitted arithmetic is the same expression.
+    const parsed = parseProgram('!!ARBvp1.0\nOPTION ARB_position_invariant;\n'
+        + 'MOV result.color, vertex.color;\nEND\n');
+    assert.ok(!('error' in parsed), 'error' in parsed ? parsed.error.message : '');
+    const emitted = emitVertex(parsed,
+        [{ name: 'position', components: 3, scalar: 'f32' }],
+        { texcoords: [], fogCoord: false });
+    assert.ok(!('error' in emitted), 'error' in emitted ? emitted.error : '');
+    const fixed = generateDraw(state({
+        attributes: [{ name: 'position', components: 3, scalar: 'f32', slot: 0,
+            offset: 0, format: 'float32x3' }],
+        strides: [12],
+    })).code;
+    const remap = '    out.position = vec4f(clip.x, clip.y, (clip.z + clip.w) * 0.5, clip.w);';
+    assert.ok(fixed.includes(remap), 'the fixed stage remaps the depth the way GL does');
+    assert.ok(emitted.code.includes(remap), 'the invariant position is the fixed one');
+    assert.ok(emitted.code.includes(
+        '    let clip = uniforms.modelViewProjection * vec4f(vertex.position, 1.0);'));
+    assert.ok(fixed.includes('let objectPosition = vec4f(vertex.position, 1.0);')
+        && fixed.includes('let clip = uniforms.modelViewProjection * objectPosition;'),
+    'the same widening and the same product, under another local\'s name');
 });
 
 test('a depth test that is off is always-passing, with the attachment kept', ()=>{
