@@ -67,7 +67,7 @@ the layer still runs, but every timestamp reads as zero and `diagnostics().issue
 | `profile(worst = 5)` | The snapshot: every phase by self time, the `worst` slowest frames, `hostShare`, imbalances. |
 | `intern(text) → id` | The id a word is known by in the journal's dictionary, written once on first sight; -1 when the dictionary is full. For names a table stores as numbers. |
 | `metrics` | The registry: `counters(layer, names) → Float64Array`, `table(layer, name, { rows, columns }) → TableWriter`, `onFrame(sampler) → remove`, `sample()`, `describe()`. A layer registers at `create` and writes in place from then on. |
-| `memory()` | `{ journal, tables }` — the journal's block and every table's descriptor, for a reader on another thread. Made once, after every layer has registered. |
+| `memory()` | `{ journal, tables }` — the journal's block and every table's descriptor, for a reader on another thread. Made once per machine, after every layer has registered. A machine rebuilt on a child's image makes a fresh block, and the host hands that block to the keeper following the swap rather than rebuilding the reader. |
 
 `recent`, `drain`, `frames` and `profile` still answer from this thread, for the thread that owns
 the engine and for the transition; each is a read of the same memory a reader elsewhere has, not a
@@ -152,6 +152,13 @@ tables; `frames(count)`, `profile(worst)`, `guestByModule()` and `threads()` are
 the diagnostics tables used to carry, computed on the reader's thread from the kernel's, the
 memory's and the profiler's tables. Nothing here schedules itself: whoever owns the thread calls
 `poll()`.
+
+In the shipping host, that owner is a worker of its own — the keeper (`src/host/keeper.js`, run by
+`src/host/log.worker.js`). It is handed a block, polls it on its own clock, keeps a history ring so
+`recent` and `drain` cross a replacement, hands subscribers their records in batches, and answers
+the page's reads. `base()` is the sequence the current block begins at; a process replacement hands
+the keeper the next block, and its poll cursor resumes there rather than counting the earlier
+sequences as lapped.
 
 `frames(count)` answers each row as the engine-side record plus what only a reader can work out:
 `instructions` and `counters` (each mirrored cumulative counter as this frame's own step, never
@@ -276,9 +283,9 @@ under the event's name as its category (`divergence`, `unimplemented`, `bundle-r
   frame; the next frame corrects it.
 - **The engine still answers `recent`/`drain`/`frames`/`profile` on its own thread** for whoever
   calls them there; those calls read the same memory and cost what the reader would have paid, on
-  the wrong thread. The host (`src/host/serve.js`) hands `memory()` across at start and the page
-  reads it itself, so in a normal run nothing calls them — except on an origin without shared
-  memory, where the block cannot cross and they are the fallback.
+  the wrong thread. In a normal run nothing calls them: the host's keeper worker reads the block
+  instead. On an origin without shared memory the block cannot cross, so the engine's own reader
+  answers the derived views and the page relays `drain` records to the keeper.
 
 ## 5. Tests
 
@@ -292,6 +299,7 @@ All are `node:test` unit tests with a hand-stepped clock; run with `npm test` fr
 | `src/layers/log/internal/table.test.js` | A store where it happens is what a reader picks up; a ring of rows reads oldest first; a reader on another thread sees a later store. |
 | `src/layers/log/internal/metrics.test.js` | Counters registered once and updated in place; a duplicate name refused; samplers run on `sample()` only. |
 | `src/layers/log/internal/reader.test.js` | Subscribers get their topics at their level; removal; `recent`/`drain` as the engine answered them; exact lost count on a lagging poll; counters and tables read from the same memory; a reader on another thread drains without the engine answering; `guestByModule` from the kernel's pages and the memory's regions; frames and the profile from the profiler's tables; a frame's mirrored counters read back as its own figures — the oldest row claiming none, a counter that went backwards reporting none, an interpret burst landing in the frame that had it, and the thread, module and worst-slice rate named. |
+| `src/host/log.worker.test.js` | The keeper on a thread that did not write the journal: reads answered by request, subscriber batches by topic and level (one batch per poll, not one message a record), and a second block attached with a continuing `sequenceBase` resolving a cursor from the first with nothing reported lost. |
 | `src/layers/log/internal/journal.test.js` | Level filtering; the message stays a template until read; unnamed arguments appended; timestamps from the clock, order from the sequence; sinks get detached copies once; lapped records counted; `recent` does not move the flush position; template summary; level names; bounded storage; `drain` semantics, resume, limit and gap reporting. |
 | `src/layers/log/internal/profiler.test.js` | Self time excludes nested phases; total/self/worst per phase; imbalances counted and named, never thrown; phases outside a frame; frame history laps; `hostShare` over the history; a frame's worst moment; notes; weighted phases scale the sums and never a single occurrence; a frame reports how long the machine was parked on us and resets it; closing a frame stores one row of fixed width whatever the frame held; mirrored columns copied from the sources given and zero for the rest. |
 | `src/layers/log/module.test.js` | The module keeps its contract; configuration by name; the no-clock issue; diagnostics carry `hostShare`; phases use the host clock, not the guest's; sub-millisecond resolution without a configured clock; the phase table holds the loop and the calls together. |

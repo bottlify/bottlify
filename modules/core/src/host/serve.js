@@ -520,6 +520,19 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                     : undefined,
             });
             started = options;
+            // A machine rebuilt on a child's image publishes a fresh block.
+            // The page's keeper is reading the parent's, so it is handed the
+            // next one the moment it exists -- the journal's sequence is
+            // continuous, so the cursors it already holds still resolve. Only a
+            // shared block is worth sending; a copy would never move again.
+            app.on('process-started',
+                (/** @type {{ image: string, sequenceBase: number }} */ payload)=>{
+                    const memory = app.log.memory();
+                    if (memory.journal instanceof SharedArrayBuffer)
+                    {
+                        post({ type: 'log-memory', memory, sequenceBase: payload.sequenceBase });
+                    }
+                });
             if (hooks && hooks.length > 0)
             {
                 installHooks(hooks);

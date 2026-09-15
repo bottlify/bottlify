@@ -207,6 +207,13 @@ export function createLogReader({ memory }){
         /** Records the poll cursor was lapped past, in total. */
         lost: ()=>lost,
 
+        /**
+         * The sequence this block's first record gets. A keeper following a
+         * replacement starts its own cursor here rather than counting the
+         * earlier sequences as lapped.
+         */
+        base: ()=>cursor.base(),
+
         /** @param {number} [count] */
         recent(count = 100){
             const written = cursor.written();

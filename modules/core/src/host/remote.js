@@ -15,32 +15,53 @@
  * the port, and answers when the worker answers -- so `diagnostics()` is a
  * promise here, and `run()` settles when the program has ended.
  *
- * The log is read here, not asked for. The engine publishes its journal and
- * its tables into shared memory and that memory crosses once, in the answer
- * that starts the program; from then on records, frames, phases, counters and
- * the kernel's tables are decoded on this thread, and nothing a reader does
- * reaches the engine's. What remains a request is what only the engine can
- * do: change the writer's gate, and describe itself cold (`diagnostics`).
+ * The log is asked for, not read here. The engine publishes its journal and
+ * its tables into shared memory; a worker of its own -- the keeper -- is
+ * handed that block, polls it before it laps, keeps the history, works out the
+ * derived views, and answers every read this page makes. Nothing a reader does
+ * reaches the engine's thread, and this thread holds no reader and no poll of
+ * its own: it is a relay between whoever calls `app.log.*` and the keeper.
  *
- * Where the origin has no shared memory the block cannot cross, and the same
- * answers come back over the port instead -- the page then keeps a mirror of
- * the ring so that `recent` and `drain` still answer without waiting. A flood
- * laps the ring between two refreshes, and a reader slower than the mirror is
- * lapped by the mirror: both leave holes in the sequence the mirror holds, and
- * a drain counts every sequence it was asked for and cannot hand over, so
- * `lost` is exact whichever side lost it. `log.reading()` says which of the
- * two a run ended up on.
+ * Where the origin has no shared memory the block cannot cross, and the page
+ * relays the engine's own `log.drain` answers to the keeper instead, so the
+ * history is still the keeper's and this thread never keeps the log either.
+ * `log.reading()` says which of the two a run ended up on.
  */
 
 import { createDomInput } from '../layers/input/dom.js';
-import { createLogReader } from '../layers/log/reader.js';
+import { serveKeeper, MIRROR_MS, MIRROR_LIMIT, MIRROR_CAPACITY } from './keeper.js';
 
-/** How often the page reads what the engine has written since its last look. */
-const MIRROR_MS = 200;
-/** How many records one look may carry. */
-const MIRROR_LIMIT = 4000;
-/** How many records the journal holds when the run named no capacity of its own. */
-const MIRROR_CAPACITY = 4096;
+/**
+ * The keeper, in a worker of its own. A test can hand in its own port instead
+ * of a real worker; without `Worker` -- a thread-hosted run, a headless one --
+ * the same keeper is served over a `MessageChannel` on this thread, which is
+ * the engine's own fallback.
+ *
+ * @param {any} [given]
+ * @returns {{ port: any, close: () => void }}
+ */
+function openKeeper(given){
+    if (given)
+    {
+        return { port: given, close(){} };
+    }
+    if (typeof Worker === 'function')
+    {
+        const worker = new Worker(new URL('./log.worker.js', import.meta.url),
+            { type: 'module' });
+        return { port: worker, close: ()=>worker.terminate() };
+    }
+    const channel = new MessageChannel();
+    const serving = serveKeeper(/** @type {any} */ (channel.port2));
+    return {
+        port: channel.port1,
+        close(){
+            serving.close();
+            channel.port1.close();
+            channel.port2.close();
+        },
+    };
+}
 
 /**
  * @typedef {Object} RemoteAppOptions
@@ -57,14 +78,18 @@ const MIRROR_CAPACITY = 4096;
  * @property {any[]} [transfer]
  *     Buffers in `options` to hand over rather than copy: the image, the
  *     emulator's binary, the decoder's.
+ * @property {any} [keeper]
+ *     The log keeper's port, when a test supplies one. Absent, a worker is
+ *     created the way the engine's is.
  */
 
 /**
- * @param {RemoteAppOptions} how
+ * @param {RemoteAppOptions} wiring
  * @returns {Promise<any>} the controller, shaped like an AppController where
  *     it can be and answering with promises where it cannot
  */
-export async function createRemoteApp({ worker, options, canvas, transfer = [] }){
+export async function createRemoteApp(wiring){
+    const { worker, options, canvas, transfer = [], keeper: givenKeeper } = wiring;
     let nextId = 1;
     /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
     const pending = new Map();
@@ -76,7 +101,7 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         ? new Int32Array(new SharedArrayBuffer(4))
         : null;
     /** What crossed the port, by kind: the cost of the page's own tooling, counted. */
-    const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0 };
+    const traffic = { input: 0, request: 0, visibility: 0, answer: 0, event: 0, 'log-memory': 0 };
     /** @param {any} message @param {any[]} [handOver] */
     const send = (message, handOver)=>{
         if (signal)
@@ -129,9 +154,78 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         }
     };
 
+    // The log keeper: a worker that owns the log, so this thread holds no
+    // reader and polls nothing. Every read below is a request to it, and the
+    // memory the engine publishes crosses to it as a share, not a copy.
+    const keeper = openKeeper(givenKeeper);
+    let keeperId = 0;
+    /** @type {Map<number, { resolve: (value: any) => void, reject: (e: Error) => void }>} */
+    const keeperPending = new Map();
+    /** Subscriptions this page has made, by id, for records as they arrive. */
+    /** @type {Map<number, (records: any[]) => void>} */
+    const subscriptions = new Map();
+    /** The block of the current process, for a consumer wanting its own reader. */
+    /** @type {any} */
+    let latestLog = null;
+
+    /**
+     * @param {string} name
+     * @param {unknown[]} [args]
+     * @returns {Promise<any>}
+     */
+    const ask = (name, args = [])=>new Promise((resolve, reject)=>{
+        if (gone)
+        {
+            reject(new Error(`${name}: the keeper is gone`));
+            return;
+        }
+        const id = ++keeperId;
+        keeperPending.set(id, { resolve, reject });
+        keeper.port.postMessage({ type: 'request', id, name, args });
+    });
+
+    keeper.port.onmessage = (/** @type {{ data: any }} */ { data })=>{
+        if (data.type === 'answer')
+        {
+            const waiting = keeperPending.get(data.id);
+            if (!waiting)
+            {
+                return;
+            }
+            keeperPending.delete(data.id);
+            if (data.error)
+            {
+                waiting.reject(rebuild(data.error));
+            }
+            else
+            {
+                waiting.resolve(data.value);
+            }
+            return;
+        }
+        if (data.type === 'records')
+        {
+            subscriptions.get(data.id)?.(data.records);
+            return;
+        }
+        // A `lost` message is information for whoever subscribed; the total is
+        // read back through a `lost` request when a caller asks for stats.
+    };
+
     worker.onmessage = (/** @type {{ data: import('./messages.js').FromEngine }} */ { data })=>{
         const message = data;
         traffic[message.type]++;
+        if (message.type === 'log-memory')
+        {
+            // The next block of a rebuilt process: hand it to the keeper, which
+            // finishes with the old one and continues from where the sequence
+            // left off. This is the only message the keeper is fed on a normal
+            // run; records themselves never cross.
+            latestLog = message.memory;
+            keeper.port.postMessage({ type: 'attach', memory: message.memory,
+                sequenceBase: message.sequenceBase });
+            return;
+        }
         if (message.type === 'answer')
         {
             const waiting = pending.get(message.id);
@@ -191,50 +285,52 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         [{ ...options, signal: signal ? signal.buffer : undefined }, offscreen],
         [...transfer, ...(offscreen && offscreen !== canvas ? [offscreen] : [])]);
 
-    // The log, read on this thread out of the memory that crossed at start.
-    // Absent -- no shared memory on this origin -- the mirror below stands in.
-    const reader = started.log ? createLogReader({ memory: started.log }) : null;
+    // The first block, handed to the keeper. On an origin without shared
+    // memory there is nothing to hand over, and the keeper is fed below by
+    // relaying the engine's own answers.
+    latestLog = started.log;
+    if (started.log)
+    {
+        keeper.port.postMessage({ type: 'attach', memory: started.log, sequenceBase: 0 });
+    }
     const capacity = options.log?.capacity || MIRROR_CAPACITY;
 
-    // The journal, kept in step. Records carry their own sequence, so the
-    // mirror's drain answers exactly as the ring's would for what it holds.
-    /** @type {any[]} */
-    let records = [];
-    let next = 0;
-    let mirrorLost = 0;
-    let refreshing = false;
-    const refresh = async()=>{
-        if (refreshing || gone)
+    // Without a block to read, the engine's own reader still holds the ring.
+    // One `log.drain` per cadence is relayed to the keeper, which keeps the
+    // history; this thread holds none of it.
+    let feedNext = 0;
+    let feeding = false;
+    const feed = async()=>{
+        if (feeding || gone)
         {
             return;
         }
-        refreshing = true;
+        feeding = true;
         try
         {
-            const answer = await request('log.drain', [next, MIRROR_LIMIT]);
-            mirrorLost += answer.lost;
-            records = records.concat(answer.records);
-            if (records.length > capacity)
+            const answer = await request('log.drain', [feedNext, MIRROR_LIMIT]);
+            feedNext = answer.next;
+            if (answer.records.length > 0 || answer.lost > 0)
             {
-                records = records.slice(records.length - capacity);
+                keeper.port.postMessage({ type: 'feed', records: answer.records,
+                    next: answer.next, lost: answer.lost });
             }
-            next = answer.next;
         }
         catch {
-            // The worker is gone or going: the mirror keeps what it has.
+            // The worker is gone or going: the keeper keeps what it has.
         }
         finally
         {
-            refreshing = false;
+            feeding = false;
         }
     };
-    // The page's own cadence either way: a poll of the reader is what counts
-    // exactly how far it was lapped and what hands records to its subscribers,
-    // and it reads memory rather than asking anybody for anything.
-    const catchUp = reader ? async()=>{
-        reader.poll(MIRROR_LIMIT);
-    } : refresh;
-    const mirror = setInterval(catchUp, MIRROR_MS);
+    const feeder = started.log ? null : setInterval(feed, MIRROR_MS);
+    if (!started.log)
+    {
+        // One look now, so a read made before the first cadence has something
+        // to answer with.
+        await feed();
+    }
 
     /** What an exit left behind, once there has been one. @type {any} */
     let left = null;
@@ -247,15 +343,18 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
     return {
         /**
          * Runs the program to completion. Resolves with its exit code once
-         * this side's last look at the journal is done, so a tail read right
-         * after is the tail.
+         * this side's last relay to the keeper is done, so the keeper holds
+         * the tail when this resolves.
          *
          * @param {{ maxTurns?: number }} [runOptions]
          * @returns {Promise<number>}
          */
         async run(runOptions){
             left = await request('run', [runOptions]);
-            await catchUp();
+            if (feeder)
+            {
+                await feed();
+            }
             return left.code;
         },
         pause: ()=>request('pause'),
@@ -356,43 +455,26 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
              *
              * @returns {'shared' | 'requests'}
              */
-            reading: ()=>reader ? 'shared' : 'requests',
+            reading: ()=>started.log ? 'shared' : 'requests',
             /**
-             * The memory a reader is built over, for a consumer that wants one
-             * of its own -- a worker of its own, a view that polls at its own
-             * rate. Null where nothing could be shared.
+             * The block of the current process, for a consumer that wants a
+             * reader of its own. It follows a replacement: the page is handed
+             * the next block and forwards it to the keeper, and this is the
+             * latest one. Null where nothing could be shared.
+             *
+             * A consumer that wants to follow the log rather than build a
+             * reader over one block asks the keeper instead.
              */
-            memory: ()=>started.log ?? null,
+            memory: ()=>latestLog,
 
             /** @param {number} [count] */
-            recent: (count = 100)=>reader
-                ? reader.recent(count)
-                : records.slice(Math.max(0, records.length - count)),
+            recent: (count = 100)=>ask('recent', [count]),
             /** @param {number} [since] @param {number} [limit] */
-            drain(since = 0, limit = 1000){
-                if (reader)
-                {
-                    return reader.drain(since, limit);
-                }
-                const taken = [];
-                for (const record of records)
-                {
-                    if (record.sequence >= since && taken.length < limit)
-                    {
-                        taken.push(record);
-                    }
-                }
-                const oldest = records.length > 0 ? records[0].sequence : next;
-                const from = taken.length > 0 ? taken[0].sequence : Math.max(since, oldest);
-                const end = taken.length > 0 ? taken[taken.length - 1].sequence + 1 : from;
-                // Every sequence from `since` up to where this read ends that
-                // is not in what it hands over was written over somewhere.
-                const lost = Math.max(0, end - since - taken.length);
-                return { records: taken, from, next: end, lost };
-            },
+            drain: (since = 0, limit = 1000)=>ask('drain', [since, limit]),
             /**
-             * A level is the writer's gate, so changing one is a request: only
-             * the thread that keeps a record can be told what to keep.
+             * A level is the writer's gate, so changing one is a request to
+             * the engine: only the thread that keeps a record can be told what
+             * to keep.
              *
              * @param {string} category @param {string | number} level
              */
@@ -408,51 +490,52 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
             ],
 
             /** @param {number} [worst] */
-            profile: worst=>reader ? reader.profile(worst) : request('log.profile', [worst]),
+            profile: worst=>started.log ? ask('profile', [worst])
+                : request('log.profile', [worst]),
             /** @param {number} [count] */
-            frames: count=>reader ? reader.frames(count) : request('log.frames', [count]),
-            /** @param {string} layer @returns {Record<string, number> | Promise<any>} */
-            counters: layer=>reader ? reader.counters(layer) : request('log.counters', [layer]),
+            frames: count=>started.log ? ask('frames', [count])
+                : request('log.frames', [count]),
+            /** @param {string} layer */
+            counters: layer=>started.log ? ask('counters', [layer])
+                : request('log.counters', [layer]),
             /**
-             * One published table, read where it lies. Shared memory only:
-             * a table is its buffer, and a copy of it is a table that has
-             * stopped moving, which is worse than no answer at all.
+             * One published table, as the keeper read it. Shared memory only:
+             * a table is its buffer, and what crosses here is a snapshot of
+             * the rows at the moment asked, not a view that keeps moving.
              *
              * @param {string} layer @param {string} name
              */
-            table: (layer, name)=>reader ? reader.table(layer, name) : null,
+            table: (layer, name)=>started.log ? ask('table', [layer, name])
+                : Promise.resolve(null),
             /**
              * What a word id in a table means. Shared memory only, for the
              * same reason as `table`.
              *
              * @param {number} id
              */
-            word: id=>reader ? reader.word(id) : `#${id}`,
-            threads: ()=>reader ? reader.threads() : request('log.threads'),
-            guestByModule: ()=>reader
-                ? reader.guestByModule()
+            word: id=>started.log ? ask('word', [id]) : Promise.resolve(`#${id}`),
+            threads: ()=>started.log ? ask('threads') : request('log.threads'),
+            guestByModule: ()=>started.log ? ask('guestByModule')
                 : request('log.guestByModule'),
             /**
              * The journal itself: how much has been written, how much it
-             * holds, how much was lapped before this reader saw it, and how
+             * holds, how much was lapped before the keeper saw it, and how
              * much a level refused.
              */
-            stats(){
-                if (!reader)
-                {
-                    return request('log.counters', ['log']).then(own=>({
-                        written: next, capacity, lost: mirrorLost, rejected: own.rejected ?? 0,
-                    }));
-                }
+            async stats(){
                 // `written` is the last record's sequence plus one rather than
                 // a counter of its own: the sequence is what the ring
                 // publishes, and one decoded record is the cost of asking.
-                const tail = reader.recent(1);
+                const [tail, lost, own] = await Promise.all([
+                    ask('recent', [1]),
+                    ask('lost'),
+                    started.log ? ask('counters', ['log']) : request('log.counters', ['log']),
+                ]);
                 return {
                     written: tail.length > 0 ? tail[0].sequence + 1 : 0,
                     capacity,
-                    lost: reader.lost(),
-                    rejected: reader.counters('log').rejected ?? 0,
+                    lost,
+                    rejected: own.rejected ?? 0,
                 };
             },
         },
@@ -542,7 +625,10 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
         }),
 
         async dispose(){
-            clearInterval(mirror);
+            if (feeder)
+            {
+                clearInterval(feeder);
+            }
             stopWatching?.();
             dom?.detach();
             dom = null;
@@ -553,6 +639,16 @@ export async function createRemoteApp({ worker, options, canvas, transfer = [] }
             finally
             {
                 abandon(new Error('the engine was disposed'));
+            }
+            // The keeper is this side's to end, whatever the engine does: its
+            // port is closed so a thread-hosted one stops polling, and every
+            // request still waiting on it is refused rather than left hanging.
+            keeper.port.onmessage = null;
+            keeper.close();
+            for (const [id, waiting] of keeperPending)
+            {
+                keeperPending.delete(id);
+                waiting.reject(new Error('the log keeper was disposed'));
             }
         },
     };

@@ -43,6 +43,6 @@ test('hello.exe runs through the package entry, headless, on this thread', async
     const layers = await app.diagnostics();
     const cpu = layers.find((/** @type {any} */ layer)=>layer.name === 'cpu');
     assert.ok(cpu.metrics.instructions > 0, 'the reads that cross the port answer as promises');
-    assert.ok(app.log.recent(10).length >= 0, 'the journal mirror answers synchronously');
+    assert.ok((await app.log.recent(10)).length >= 0, 'the keeper answers with a promise');
     await app.dispose();
 });

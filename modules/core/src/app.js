@@ -4666,6 +4666,15 @@ export async function createApp(options){
                 replayLogLevels();
                 Object.assign(facade, current, own);
                 bindLogLevels();
+                // The child's journal is a fresh block, continuing the parent's
+                // sequence. Whoever holds a reader of its own -- the page's
+                // keeper -- is told where it starts so it can be handed the
+                // block: a drain cursor taken before the swap is above zero and
+                // below the child's first record, and only this says so.
+                events.emit('process-started', {
+                    image: request.imagePath,
+                    sequenceBase: logSequence,
+                });
             }
         },
 

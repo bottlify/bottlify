@@ -147,7 +147,44 @@
  * @property {unknown} payload
  */
 
-/** @typedef {AnswerMessage | EventMessage} FromEngine */
+/**
+ * The next block of the log, posted when a process is replaced. The journal's
+ * sequence is continuous across a replacement, so the page forwards this to
+ * its keeper as an `attach` and the history it already holds resolves cursors
+ * taken before the swap. Only a shared block is worth sending: a copy would
+ * never move again, and on an origin without shared memory the page relays the
+ * engine's own answers to the keeper instead.
+ *
+ * @typedef {Object} LogMemoryMessage
+ * @property {'log-memory'} type
+ * @property {import('../layers/log/internal/reader.js').LogMemory} memory
+ * @property {number} sequenceBase
+ */
+
+/** @typedef {AnswerMessage | EventMessage | LogMemoryMessage} FromEngine */
+
+/*
+ * The keeper's own wire, spoken between the page and `log.worker.js`. Only the
+ * page's log reads cross it; the writer's gate (`setLevel`) stays a request to
+ * the engine, because only the thread keeping a record can be told what to
+ * keep.
+ *
+ * To the keeper:
+ *   { type: 'attach', memory, sequenceBase }  a block to read from now on --
+ *       the first at start, the next after every replacement.
+ *   { type: 'request', id, name, args }       one log read, answered by id.
+ *   { type: 'subscribe', id, topics, level }  records of those topics at that
+ *       level or above, as batches.
+ *   { type: 'unsubscribe', id }
+ *   { type: 'feed', records, next, lost }     records the page relayed from
+ *       the engine, only where there is no shared memory to read.
+ *
+ * From the keeper:
+ *   { type: 'answer', id, value } or { type: 'answer', id, error }
+ *   { type: 'records', id, records }          a batch per poll per subscriber,
+ *       never one message per record.
+ *   { type: 'lost', count }                   a poll found the ring lapped.
+ */
 
 /**
  * The one frame event: sent on the first frame and whenever the frame's size

@@ -92,7 +92,8 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 
 | place | what it does |
 |---|---|
-| **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, reads the log out of the shared memory the engine publishes it into, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
+| **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, relays the log between the caller and the keeper, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
+| **The log keeper** (`src/host/log.worker.js` → `src/host/keeper.js`) | Owns the log. Handed the journal's block, it polls it before the ring laps, keeps the history, works out the frames, the profile and the module attribution, and answers the page's reads. A process replacement hands it the next block rather than restarting it. The page's thread never keeps the log. |
 | **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the emulator, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
 | **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | The `bottlify-output` `AudioWorkletProcessor` reads the ring in shared memory; its read index is what a program's play cursor is built on when `audio.drained` is true. |
 
@@ -111,7 +112,8 @@ that thread cannot block.
 
 ## 4. The message protocol (`src/host/messages.js`)
 
-Three kinds go to the engine, two come back. Only requests carry an id.
+Three kinds go to the engine; answers and events come back, and — when a process is replaced —
+the journal's next block. Only requests carry an id.
 
 | direction | `type` | fields | notes |
 |---|---|---|---|
@@ -120,6 +122,7 @@ Three kinds go to the engine, two come back. Only requests carry an id.
 | to engine | `visibility` | `hidden: boolean` | Engine pacing only; the guest is never told. Unanswered. |
 | from engine | `answer` | `id`, `result?` or `error?: Failure` | `Failure` is `{ message, reason?, traceText?, stack? }` — copied by name because a cloned `Error` keeps none of its own properties. |
 | from engine | `event` | `name`, `payload` | An event the page subscribed to with `on`, or `frame`, which is always sent. |
+| from engine | `log-memory` | `memory`, `sequenceBase` | The journal's next block, posted when a process is replaced. Shared memory, so it crosses as a share; the page forwards it to the keeper as `attach`. Only sent where a block could be shared. |
 
 The method table in `serve.js`: `start`, `run`, `pause`, `resume`, `stop`, `dispose`,
 `diagnostics`, `trace`, `presented`, `guestProfile.available`, `guestProfile.start`,
@@ -133,9 +136,10 @@ been started`; a second `start` with `this worker is already running a program`.
 `start` answers with `Started`: `{ audio: { memory: { control, samples }, sampleRate, channels } |
 null, log: LogMemory | null, adapter: { vendor, architecture, description } }`. `log` is the
 journal's block and every layer's table descriptors — shared memory, so the answer shares it rather
-than copying it, and this is the only time it crosses. It is null where the origin has no
-`SharedArrayBuffer`, and the engine then answers the reading calls itself instead. `run` answers with `{ code, registry,
-files }`; `files` is empty unless `collectOnExit` was set.
+than copying it; this is where the first block crosses, and a replacement gives the page the next
+one with a `log-memory` message. The page forwards both to its keeper. It is null where the origin
+has no `SharedArrayBuffer`, and the engine then answers the reading calls itself instead. `run`
+answers with `{ code, registry, files }`; `files` is empty unless `collectOnExit` was set.
 
 The `frame` event is sent on the first presented frame and whenever the frame's size changes,
 never per frame; its payload is `{ width, height, presented }`. A frame the presenter could not
@@ -169,21 +173,22 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
 | `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |
-| `log.recent(count?)`, `log.drain(since?, limit?)` | synchronous | Decoded here, out of the journal's ring in shared memory. A drain's `lost` counts every sequence asked for that cannot be handed over. |
-| `log.frames(count?)`, `log.profile(worst?)` | synchronous | The profiler's frame and phase tables, read and sorted here. |
-| `log.counters(layer)`, `log.threads()`, `log.guestByModule()` | synchronous | A layer's counters as a record; the kernel's thread table with its names resolved; retired instructions summed by the region each page is in, heaviest first. |
-| `log.table(layer, name)`, `log.word(id)` | synchronous | Any published table as it lies, and what a name id in one means. Shared memory only — a table is its buffer, and a copy of one has stopped moving. |
-| `log.stats()` | synchronous | `{ written, capacity, lost, rejected }` of the journal. |
-| `log.reading()` | `'shared' \| 'requests'` | Which way the log is being read. |
-| `log.memory()` | `LogMemory \| null` | For a reader of the consumer's own — another worker, a view that polls at its own rate. |
+| `log.recent(count?)`, `log.drain(since?, limit?)` | `Promise` | Answered by the keeper out of its history, which spans a process replacement. A drain's `lost` counts every sequence asked for that cannot be handed over. |
+| `log.frames(count?)`, `log.profile(worst?)` | `Promise` | The keeper's derived views of the profiler's frame and phase tables. |
+| `log.counters(layer)`, `log.threads()`, `log.guestByModule()` | `Promise` | A layer's counters as a record; the kernel's thread table with its names resolved; retired instructions summed by the region each page is in, heaviest first. |
+| `log.table(layer, name)`, `log.word(id)` | `Promise` | A published table as the keeper read it — a snapshot of its rows, not a live buffer — and what a name id in one means. |
+| `log.stats()` | `Promise` | `{ written, capacity, lost, rejected }` of the journal. |
+| `log.reading()` | `'shared' \| 'requests'` | Which way the log is being read: the keeper reading the block itself, or fed by the page's relay. |
+| `log.memory()` | `LogMemory \| null` | The block of the current process, for a reader of the consumer's own. It follows a replacement; a consumer that wants to follow the log itself should ask the keeper. |
 | `log.setLevel`, `log.setDefaultLevel` | `Promise` | A level is the writer's gate: only the thread that keeps a record can be told what to keep. |
 | `log.areas()` | `string[]` | The `call.*` categories. |
 
-Without shared memory every synchronous `log` call above answers over the port instead — a promise,
-from the engine's own reader, with `recent` and `drain` served from a page-side mirror of the ring
-refreshed every 200 ms (4000 records a refresh, `log.capacity` or 4096 held) so that they stay
-synchronous; `table` and `word` and `memory` answer nothing. `log.reading()` says which it is, and
-the launcher's settings panel prints it.
+Every `log` read above is a request to the keeper, whether or not the origin has shared memory: the
+page holds no reader of its own and polls nothing. Without shared memory the keeper is fed by the
+page relaying the engine's `log.drain` answers (4000 records a look, every 200 ms) and the derived
+views — frames, profile, counters, threads, guest attribution — are answered by the engine instead;
+`table` and `word` and `memory` answer nothing. `log.reading()` says which it is, and the launcher's
+settings panel prints it.
 | `audio.ring()` | `{ memory }` | The ring's shared buffers, handed over at start. Throws `this run has no sound ring` without a mixer. Synchronous. |
 | `audio.format()` | `{ sampleRate, channels }` | Synchronous. |
 | `input.attach(viewport)` | `DomInput` | Captures keyboard and mouse on `viewport` and posts them. The canvas's own `width`/`height` are stale once transferred, so positions are scaled by the last `frame` event. |
@@ -197,22 +202,25 @@ Events an engine emits and the page may subscribe to include `frame`, `output`, 
 such import called; both carry `origin`, `'system'` or `'program'` — and a call to an
 undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box`, `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
-`process-create`, `process-replace`, `process-patched`, `debug` (the full list is what
-`events.emit` is called with in `src/app.js`).
+`process-create`, `process-replace`, `process-started`, `process-patched`, `debug` (the full list is
+what `events.emit` is called with in `src/app.js`).
 
 ### What became asynchronous, and why
 
 Everything that reads the engine's state by asking for it crosses a thread, so it answers with a
-promise — in both host modes, so a consumer writes against one shape. What stays synchronous is what
-does not have to ask: the whole of `log`, because the journal and every table live in memory the page
-shares and reads itself; the sound ring, because its memory was handed over once at start; and
-`session.export()`/`registry()`, because what an exit left behind travels back with the exit itself.
+promise — in both host modes, so a consumer writes against one shape. The whole of `log` is in that
+set now: every read is a request to the keeper, which holds the reader the page used to. What stays
+synchronous is what does not have to ask: the sound ring, because its memory was handed over once at
+start, and `session.export()`/`registry()`, because what an exit left behind travels back with the
+exit itself.
 
 That is the rule the log half is built on: **nothing a reader does may reach the engine's thread.**
-A poll of `diagnostics()` breaks it, which is why the figures a poll wants — frames, phases,
-counters, threads, the guest attribution — are published into tables instead and summed on the
-reader's side. `diagnostics()` stays for the cold description and for the layers that publish no
-table yet (audio, graphics, bridge, win32, media).
+The keeper is what makes that true on the page's side too — it drains the ring, keeps the history
+and sums the derived views on a thread that is nobody else's. A poll of `diagnostics()` breaks the
+rule, which is why the figures a poll wants — frames, phases, counters, threads, the guest
+attribution — are published into tables instead and summed on the reader's side. `diagnostics()`
+stays for the cold description and for the layers that publish no table yet (audio, graphics,
+bridge, win32, media).
 
 The controller does not carry the engine's `debug`, `post`, `guestProfile`, `mainThread`,
 `recordedSession`, `off`, `exitCode` or `replacements`. Those are reachable only by importing
@@ -256,14 +264,15 @@ that batches those wakes, and is not the default until a measurement says it sho
 
 ## 7. The worker as a build entry
 
-`scripts/build.mjs` runs one esbuild pass with two entry points, `src/index.js` and
-`src/host/engine.worker.js`, bundled separately because a worker is loaded by URL rather than
-imported and each has to carry the engine it needs. The outputs:
+`scripts/build.mjs` runs one esbuild pass with three entry points, `src/index.js`,
+`src/host/engine.worker.js` and `src/host/log.worker.js`, bundled separately because a worker is
+loaded by URL rather than imported and each has to carry what it needs. The outputs:
 
 | file | from | exported as |
 |---|---|---|
 | `dist/core.js` | `src/index.js` (renamed) | `@bottlify/core` |
 | `dist/engine.worker.js` | `src/host/engine.worker.js` | `@bottlify/core/engine.worker.js` |
+| `dist/log.worker.js` | `src/host/log.worker.js` | loaded by URL from `createApp` |
 | `dist/worklet.js` | copied from `src/layers/audio/output/worklet.js` | `@bottlify/core/worklet.js` |
 | `dist/vendor/libv86.mjs`, `v86.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/libv86.mjs`, `@bottlify/core/v86.wasm` |
 | `dist/vendor/video-decoder.wasm` | copied from `vendor/prebuilt/` | `@bottlify/core/video-decoder.wasm` |
@@ -285,6 +294,10 @@ was handed to: disposing a program leaves that worker alive with its `OffscreenC
 next `createApp` on the same canvas starts in the same worker without transferring anything. A
 host with no canvas is closed when its program is disposed. If `start` fails on a fresh host, the
 host is closed and the canvas forgotten.
+
+The keeper is per `createApp` rather than per canvas: each controller creates its own and ends it
+when the application is disposed, so a second program in the same canvas gets a fresh keeper and
+the first one's history and poll are gone with it.
 
 ## 9. Limitations
 

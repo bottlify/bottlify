@@ -153,8 +153,20 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     // its first call, so take it again at the handover -- the parent's last
     // lines then -- which is the cursor a live view would be holding.
     let cursor = app.log.drain(0, 1000).next;
+    /** What `process-replace` said the parent's journal had reached. */
+    let replacedAt = 0;
     app.on('process-replace', ()=>{
         cursor = app.log.drain(0, 1000).next;
+        replacedAt = cursor;
+    });
+
+    // The child's journal is a fresh block whose numbering continues the
+    // parent's. `process-started` carries the base it begins at, which is the
+    // one thing a keeper following the swap cannot work out for itself.
+    /** @type {{ image: string, sequenceBase: number } | null} */
+    let started = null;
+    app.on('process-started', (/** @type {any} */ payload)=>{
+        started = payload;
     });
 
     /** @type {string[]} */
@@ -181,6 +193,18 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     // journal's sequence numbers continue the old one's rather than restart.
     assert.ok(after.records.length > 0,
         'draining from the parent\'s cursor returned the child\'s lines');
+
+    // `process-started` named the block the child's journal begins at, and the
+    // child's own records start exactly there -- the signal a keeper following
+    // the swap uses to pick up the next block.
+    assert.ok(started, 'process-started fired after the rebuild');
+    const announced = /** @type {{ image: string, sequenceBase: number }} */ (started);
+    assert.equal(announced.image, 'C:\\App\\Child.exe');
+    assert.equal(announced.sequenceBase, replacedAt,
+        'the child continues the sequence the parent reached');
+    assert.ok(after.records.some((/** @type {any} */ record)=>
+        record.sequence === announced.sequenceBase),
+    'and the child\'s journal actually starts at that base');
 
     // The sink attached before the handover was still the one detachLog knew.
     assert.deepEqual(output, ['A'],

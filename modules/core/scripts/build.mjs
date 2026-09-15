@@ -145,12 +145,16 @@ async function copyVendor(){
 }
 
 await mkdir(DIST, { recursive: true });
-// Two entries, one build: the module a page imports and the worker it starts
-// the engine in. Bundled apart because a worker is loaded by URL, not imported,
-// and each carries the engine it needs. Both sit in dist/, so the vendor
-// directory below is the same for either.
+// Three entries, one build: the module a page imports and the workers it
+// starts -- the engine and the log keeper. Bundled apart because a worker is
+// loaded by URL, not imported, and each carries what it needs. All sit in
+// dist/, so the vendor directory below is the same for each.
 await build({
-    entryPoints: [join(SRC, 'index.js'), join(SRC, 'host', 'engine.worker.js')],
+    entryPoints: [
+        join(SRC, 'index.js'),
+        join(SRC, 'host', 'engine.worker.js'),
+        join(SRC, 'host', 'log.worker.js'),
+    ],
     bundle: true,
     format: 'esm',
     platform: 'browser',
@@ -185,4 +189,5 @@ for (const name of LEGAL)
     await copyFile(join(REPO, name), join(ROOT, name));
 }
 await writeChecksums();
-console.log(`dist: core.js + engine.worker.js + ${vendored} vendor artifacts + checksums.json`);
+console.log('dist: core.js + engine.worker.js + log.worker.js + '
+    + `${vendored} vendor artifacts + checksums.json`);

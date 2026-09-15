@@ -8,6 +8,7 @@ import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createRemoteApp } from './remote.js';
 import { serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS } from './serve.js';
+import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 import { createMetrics } from '../layers/log/internal/metrics.js';
@@ -23,6 +24,24 @@ import {
 
 /** A wait for everything queued on the ports to be delivered. */
 const settled = ()=>new Promise(resolve=>setTimeout(resolve, 20));
+
+/** Waits for a condition to hold, so no test depends on a keeper poll landing in time. */
+/** @param {() => Promise<boolean> | boolean} check @param {number} [timeoutMs] */
+const until = async(check, timeoutMs = 2000)=>{
+    const deadline = Date.now() + timeoutMs;
+    for (;;)
+    {
+        if (await check())
+        {
+            return;
+        }
+        if (Date.now() > deadline)
+        {
+            throw new Error('timed out waiting for the keeper');
+        }
+        await settled();
+    }
+};
 
 /** Every channel opened, closed at the end: an open port keeps the process alive. */
 /** @type {(() => void)[]} */
@@ -225,6 +244,33 @@ function fakeViewport({ width, height }){
 }
 
 /**
+ * The log keeper, served over a real `MessageChannel` so the test sees what
+ * the page posted to it. A page no longer holds a reader, so this is the
+ * stand-in that proves every read went to the keeper rather than being decoded
+ * where the caller is.
+ */
+function openTestKeeper(){
+    const channel = new MessageChannel();
+    /** @type {any[]} */
+    const sent = [];
+    const serving = serveKeeper(/** @type {any} */ (channel.port2), { intervalMs: 5 });
+    const port = {
+        /** @param {any} message @param {any[]} [handOver] */
+        postMessage(message, handOver){
+            sent.push(message);
+            channel.port1.postMessage(message, handOver ?? []);
+        },
+        get onmessage(){ return channel.port1.onmessage; },
+        set onmessage(handler){ channel.port1.onmessage = handler; },
+    };
+    return { port, sent, close(){
+        serving.close();
+        channel.port1.close();
+        channel.port2.close();
+    } };
+}
+
+/**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
  *     journal?: { capacity?: number, shared?: boolean } }} [deps]
@@ -232,6 +278,7 @@ function fakeViewport({ width, height }){
 async function connect(options = {}, { journal, ...deps } = {}){
     const channel = new MessageChannel();
     const app = fakeApp(journal);
+    const keeper = openTestKeeper();
     const { gpu, canvas, screen } = fakeGpu();
     /** @type {any} */
     let built = null;
@@ -253,6 +300,7 @@ async function connect(options = {}, { journal, ...deps } = {}){
         channel.port2.close();
     } });
     opened.push(()=>worker.terminate());
+    opened.push(()=>keeper.close());
     const remote = await createRemoteApp({
         worker,
         canvas,
@@ -263,8 +311,9 @@ async function connect(options = {}, { journal, ...deps } = {}){
             bundle: { url: 'http://bundle/b.btl', id: 'b', store: null },
             ...options,
         },
+        keeper: keeper.port,
     });
-    return { remote, app, worker, canvas, built: ()=>built };
+    return { remote, app, worker, canvas, keeper, built: ()=>built };
 }
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -385,29 +434,41 @@ test('a failed run rejects with the reason and trace the page shows', async()=>{
     await remote.dispose();
 });
 
-test('the page reads the journal, the frames and the phases without asking the engine', async()=>{
-    const { remote, app } = await connect();
+test('the page reads the journal, the frames and the phases through the keeper', async()=>{
+    const { remote, app, keeper } = await connect();
     app.write('one');
     app.write('two');
     app.frame();
+    // A write is picked up by the keeper's next poll; wait for it rather than
+    // guessing a cadence under whatever load the suite is running at.
+    await until(async()=>(await remote.log.recent(1)).length === 1);
     const crossed = remote.traffic().request;
 
     assert.equal(remote.log.reading(), 'shared');
-    assert.deepEqual(remote.log.recent(1).map((/** @type {any} */ r)=>r.text), ['two']);
-    const first = remote.log.drain(0, 10);
+    // A read is a request to a worker now, not a decode on this thread: that
+    // is the whole point, and it is why every one of them is a promise.
+    const recent = remote.log.recent(1);
+    assert.ok(recent instanceof Promise, 'the page holds no reader of its own');
+    assert.deepEqual((await recent).map((/** @type {any} */ r)=>r.text), ['two']);
+    const first = await remote.log.drain(0, 10);
     assert.deepEqual(first.records.map((/** @type {any} */ r)=>r.text), ['one', 'two']);
     assert.equal(first.next, 2);
-    assert.deepEqual(remote.log.drain(first.next, 10), { records: [], from: 2, next: 2, lost: 0 });
+    assert.deepEqual(await remote.log.drain(first.next, 10),
+        { records: [], from: 2, next: 2, lost: 0 });
 
-    const frames = remote.log.frames(8);
+    const frames = await remote.log.frames(8);
     assert.equal(frames.length, 1, 'the frame the engine closed, read out of its table');
-    const profile = remote.log.profile(1);
+    const profile = await remote.log.profile(1);
     assert.equal(profile.frames, 1);
     assert.ok(profile.phases.some((/** @type {any} */ phase)=>phase.name === 'turn'),
         'and the phase inside it');
-    assert.deepEqual(remote.log.counters('log'), { rejected: 0 });
-    assert.equal(remote.log.table('log', 'frames')?.written(), 1);
-    assert.deepEqual(remote.log.stats(), { written: 2, capacity: 4096, lost: 0, rejected: 0 });
+    assert.deepEqual(await remote.log.counters('log'), { rejected: 0 });
+    assert.equal((await remote.log.table('log', 'frames'))?.written, 1);
+    assert.equal(typeof await remote.log.word(0), 'string');
+    assert.deepEqual(await remote.log.threads(), []);
+    assert.deepEqual(await remote.log.guestByModule(), {});
+    assert.deepEqual(await remote.log.stats(),
+        { written: 2, capacity: 4096, lost: 0, rejected: 0 });
     assert.ok(remote.log.memory()?.journal instanceof SharedArrayBuffer);
 
     assert.equal(remote.traffic().request, crossed,
@@ -418,18 +479,24 @@ test('the page reads the journal, the frames and the phases without asking the e
     await remote.log.setDefaultLevel('debug');
     assert.deepEqual(app.levels, ['debug']);
     assert.equal(remote.traffic().request, crossed + 1);
+
+    // The keeper was handed the block and asked; the page decoded nothing.
+    assert.ok(keeper.sent.some((/** @type {any} */ message)=>message.type === 'attach'));
+    assert.ok(keeper.sent.some((/** @type {any} */ message)=>
+        message.type === 'request' && message.name === 'recent'));
     await remote.dispose();
 });
 
-test('the log memory is handed over once, in the answer that starts the program', async()=>{
+test('the log block is handed over once, in the answer that starts the program', async()=>{
     const { remote, app } = await connect();
     app.write('one');
     app.frame();
-    remote.log.recent(10);
-    remote.log.frames(8);
-    remote.log.profile(1);
-    remote.log.guestByModule();
-    remote.log.threads();
+    await settled();
+    await remote.log.recent(10);
+    await remote.log.frames(8);
+    await remote.log.profile(1);
+    await remote.log.guestByModule();
+    await remote.log.threads();
     await remote.run();
     assert.equal(app.memories, 1, 'asked for at start and never again');
     await remote.dispose();
@@ -437,11 +504,27 @@ test('the log memory is handed over once, in the answer that starts the program'
     assert.equal(app.memories, 1);
 });
 
-test('without shared memory the same answers come back over the port', async()=>{
-    // A flood laps the engine's ring between two refreshes, and a reader slower
-    // than the mirror is lapped by the mirror's own bound. Both leave holes in
-    // what the mirror holds, and a reader is told the size of every hole in what
-    // it asked for -- never "0 lost" over a sequence with gaps.
+test('a rebuilt process hands the keeper the next block', async()=>{
+    const { remote, worker, keeper } = await connect();
+    // A second machine's journal, as the engine publishes it after a swap: a
+    // fresh block whose sequences continue the one the parent left behind.
+    const child = createJournal({ now: ()=>0, shared: true, capacity: 64, sequenceBase: 5 });
+    child.write(Level.INFO, 'child', 'after the swap');
+    worker.onmessage?.({ data: { type: 'log-memory',
+        memory: { journal: child.memory() }, sequenceBase: 5 } });
+    await settled();
+
+    const attach = keeper.sent.filter((/** @type {any} */ message)=>
+        message.type === 'attach').pop();
+    assert.equal(attach.sequenceBase, 5, 'the base the child begins at reached the keeper');
+    assert.ok(attach.memory.journal instanceof SharedArrayBuffer);
+    const records = await remote.log.drain(5, 10);
+    assert.deepEqual(records.records.map((/** @type {any} */ r)=>r.text), ['after the swap'],
+        'and the keeper reads the new block from there');
+    await remote.dispose();
+});
+
+test('without shared memory the keeper is fed by relay, and a table does not cross', async()=>{
     const { remote, app } = await connect({ log: { capacity: 8 } },
         { journal: { shared: false, capacity: 6 } });
     assert.equal(remote.log.reading(), 'requests');
@@ -451,49 +534,21 @@ test('without shared memory the same answers come back over the port', async()=>
         app.write(`${at}`);
     }
     await remote.run();
-    const first = remote.log.drain(0, 100);
+    const first = await remote.log.drain(0, 100);
     assert.equal(first.lost, 0);
     assert.equal(first.next, 4);
+    assert.deepEqual(first.records.map((/** @type {any} */ r)=>r.text),
+        ['0', '1', '2', '3']);
     app.frame();
     assert.equal((await remote.log.frames(8)).length, 1, 'a frame still answers, by request');
     assert.equal((await remote.log.profile(1)).frames, 1);
     assert.deepEqual(await remote.log.counters('log'), { rejected: 0 });
-    assert.equal(remote.log.table('log', 'frames'), null, 'a table cannot cross as a copy');
+    assert.equal(await remote.log.table('log', 'frames'), null, 'a table cannot cross as a copy');
+    assert.equal(await remote.log.word(3), '#3');
 
-    // Ten more while the mirror was not looking: the engine's ring of six kept
-    // only the tail, and the journal wrote its own warning about the lap, so
-    // what the mirror can hand over starts later than it asked for.
-    for (let at = 4; at < 14; at++)
-    {
-        app.write(`${at}`);
-    }
-    await remote.run();
-    const lapped = remote.log.drain(first.next, 100);
-    assert.ok(lapped.from > first.next, 'the ring lapped between the two looks');
-    assert.equal(lapped.lost, lapped.from - first.next,
-        'and every sequence asked for that it cannot hand over is counted');
-    assert.deepEqual(lapped.records.map((/** @type {any} */ r)=>r.sequence),
-        lapped.records.map((/** @type {any} */ _, /** @type {number} */ i)=>lapped.from + i),
-        'what it does hand over is unbroken');
-
-    // The mirror keeps eight; a reader that has not looked since sequence 4 is
-    // now behind the mirror as well as behind the ring.
-    for (let at = 14; at < 18; at++)
-    {
-        app.write(`${at}`);
-    }
-    await remote.run();
-    const slow = remote.log.drain(4, 100);
-    assert.equal(slow.records.length, 8, 'the mirror holds eight records');
-    assert.deepEqual(slow.records.map((/** @type {any} */ r)=>r.text).slice(-4),
-        ['14', '15', '16', '17']);
-    assert.equal(slow.lost, slow.next - 4 - slow.records.length,
-        'the ring lost some and the mirror dropped the rest, all of them counted');
-    assert.equal(remote.log.drain(slow.next, 100).lost, 0, 'and none once caught up');
     const stats = await remote.log.stats();
-    assert.equal(stats.written, slow.next, 'everything the engine has written');
+    assert.equal(stats.written, 4, 'everything the keeper was relayed');
     assert.equal(stats.capacity, 8);
-    assert.ok(stats.lost > 0, 'and what the engine said it had lapped before a refresh read it');
     await remote.dispose();
 });
 
