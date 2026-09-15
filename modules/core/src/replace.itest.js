@@ -135,6 +135,11 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         imagePath: 'C:\\App\\Parent.exe',
         // A call area on from the first instruction is what a `?log=` asks for.
         log: { categories: { 'call.cpu': 'trace' } },
+        // Something is reading the far end of the sound ring, as the launcher
+        // does when its worklet is attached. It matters here because the ring
+        // is the machine's, not the program's: the child has to mix into the
+        // output the reader was handed before the parent ran.
+        audio: { drained: true },
         // The child the parent hands over to has to be on the volume.
         storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
         v86: {
@@ -178,6 +183,16 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     };
     app.attachLog(sink);
 
+    // The sound output the parent's machine made, and what a reader on the
+    // page was handed for its worklet. A little of the parent's sound is put
+    // in and taken out, so the cursor the reader holds is not at zero.
+    const ring = app.audio.ring();
+    const before = ring.memory;
+    ring.write(new Float32Array([1, 1, 2, 2]));
+    assert.equal(ring.read(new Float32Array(4)), 2, 'the reader took the parent\'s sound');
+    const consumed = ring.consumed();
+    assert.ok(consumed > 0, 'the reader is not at the start of the ring');
+
     const code = await app.run({ timeoutMs: 20000 });
     assert.equal(code, 0, 'the child exited cleanly');
 
@@ -209,4 +224,15 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
     // The sink attached before the handover was still the one detachLog knew.
     assert.deepEqual(output, ['A'],
         'detaching after the replacement stopped the sink receiving');
+
+    // The child's machine mixes into the output the reader already holds,
+    // rather than making a ring of its own that nobody would read.
+    const childRing = app.audio.ring();
+    assert.equal(childRing.memory.control, before.control, 'the same control block');
+    assert.equal(childRing.memory.samples, before.samples, 'the same samples');
+    assert.equal(childRing.consumed(), consumed, 'the read cursor continued, not reset');
+
+    childRing.write(new Float32Array([3, 3]));
+    assert.equal(childRing.read(new Float32Array(2)), 1, 'the child writes into the same ring');
+    assert.equal(childRing.consumed(), consumed + 1, 'and the reader keeps counting');
 });

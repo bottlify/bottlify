@@ -83,11 +83,14 @@ import { createBlockCache, resolveBlockStore }
  *     decides while starting up, so a category switched on once the engine
  *     exists is switched on too late to see any of it. `sequenceBase` is set by
  *     `createApp` on a rebuilt machine and is not something a caller supplies.
- * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean }} [audio]
+ * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean,
+ *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike } }} [audio]
  *     Sound leaves through a ring in shared memory. `drained` says that
  *     something on the other side of it is really reading -- a WebAudio
  *     worklet, usually -- which is what decides whether a program's play cursor
- *     follows the sound or a clock.
+ *     follows the sound or a clock. `memory` is set by `createApp` on a rebuilt
+ *     machine so the ring outlives the process that made it, and is not
+ *     something a caller supplies.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -2071,6 +2074,11 @@ async function buildApp(options){
             // opened a device, and it decides whether a program's play cursor
             // follows the sound or the clock.
             drained: options.audio?.drained ?? false,
+            // The storage of the output an earlier machine made, so a process
+            // replacement mixes into the ring its reader already holds instead
+            // of orphaning it on a buffer nothing reads. Absent on the first
+            // process, which makes its own.
+            memory: options.audio?.memory,
             // Whose call a sound provider is answering, read before it awaits
             // anything: a callback into the guest after an await has to name
             // the thread whose call it continues.
@@ -4562,6 +4570,12 @@ export async function createApp(options){
     /** @type {string | number | null} */
     let logDefaultLevel = null;
     let logSequence = 0;
+    // The sound output's storage outlives the process for the same reason, and
+    // for one more: the page was handed the ring before any of this ran and
+    // builds its audio graph over that memory once. A rebuilt machine has to
+    // mix into the ring that already exists rather than make one nobody reads.
+    /** @type {{ control: ArrayBufferLike, samples: ArrayBufferLike } | null} */
+    let ringMemory = null;
 
     /** @param {any} [extra] */
     const machine = extra=>({
@@ -4570,11 +4584,24 @@ export async function createApp(options){
         spawned: remember,
         logSinks,
         log: { ...options.log, sequenceBase: logSequence },
+        audio: { ...options.audio, memory: ringMemory },
         ...extra,
     });
 
     /** @type {any} */
     let current = await buildApp(machine());
+
+    // Read from the machine that made it, while it still stands, and handed to
+    // every rebuild from here on.
+    try
+    {
+        ringMemory = current.audio.ring().memory;
+    }
+    catch {
+        // A build with no sound layer has no ring to carry, and that is not a
+        // fault: the rebuilt machine runs without one too.
+        ringMemory = null;
+    }
 
     /** What a caller holds. Rebound to the live process on every replacement. */
     const facade = /** @type {any} */ ({});

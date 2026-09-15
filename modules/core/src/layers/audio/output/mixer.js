@@ -48,19 +48,29 @@ const CAPACITY_FRAMES = OUTPUT_RATE / 5;
  *        region the program wrote into long ago and plays out of at its own
  *        pace: somebody has to read out the part its cursor has just passed,
  *        and the only moment that makes sense is just before mixing.
+ * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
+ *        The storage of the output an earlier machine made. Given, this
+ *        mixer's ring is that same output rather than a new one: the process
+ *        was replaced, not the device, and whoever reads the far end -- a
+ *        worklet, a person's own sound card -- still holds it.
  */
 export function createMixer(
-    { sampleRate = OUTPUT_RATE, capacityFrames = CAPACITY_FRAMES, fill } = {})
+    { sampleRate = OUTPUT_RATE, capacityFrames = CAPACITY_FRAMES, fill, memory } = {})
 {
     const ring = createRing({
         channels: OUTPUT_CHANNELS,
         capacityFrames,
+        memory,
     });
 
     /** @type {Set<any>} */
     const tracks = new Set();
-    /** How many output frames have been handed to the ring. */
-    let produced = 0;
+    /**
+     * How many output frames have been handed to the ring. A machine that
+     * replaced another starts from what the shared storage already holds, so
+     * this is the device's count rather than one mixer's.
+     */
+    let produced = ring.written();
     /**
      * Frames a track was mixed short by while another track was carrying the
      * block. A block is as long as the longest track has to give, so a track

@@ -8,6 +8,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createMixer } from './mixer.js';
+import { createRing } from './ring.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
 const DIRECT = { sampleRate: 48000, channels: 2, bitsPerSample: 16 };
@@ -38,6 +39,38 @@ test('a track carries its samples through to the ring', ()=>{
     assert.ok(Math.abs(heard[0] - 1) < 0.001);
     assert.ok(Math.abs(heard[1] + 1) < 0.001);
     assert.ok(Math.abs(heard[2] - 0.5) < 0.001);
+});
+
+test('a mixer over the ring of one it replaced continues the stream', ()=>{
+    // A process replacement is not a device replacement. The reader on the
+    // other side -- a worklet, a person's sound card -- was handed the ring
+    // once and holds it across the change, so the rebuilt machine must mix
+    // into that same storage, leaving the reader's place untouched.
+    const first = createMixer({ capacityFrames: 32 });
+    const music = first.open(DIRECT);
+    music.write(pcm16([1000, 1000, 2000, 2000]));
+    assert.equal(first.pump(), 2);
+
+    // The reader takes those two frames and keeps its cursor.
+    const reader = createRing({ channels: 2, capacityFrames: 32, memory: first.ring.memory });
+    assert.equal(reader.read(new Float32Array(4)), 2);
+
+    const second = createMixer({ memory: first.ring.memory });
+    assert.equal(second.ring.memory, first.ring.memory, 'the output that already exists');
+    assert.equal(second.diagnostics().produced, 2,
+        "the frames already in the ring are the device's, not one mixer's");
+
+    const child = second.open(DIRECT);
+    child.write(pcm16([3000, 3000, 4000, 4000]));
+    assert.equal(second.pump(), 2);
+
+    // The same reader, continuing: the child's frames, in order, where the
+    // parent's left off -- no gap and no restart from the beginning.
+    const rest = new Float32Array(4);
+    assert.equal(reader.read(rest), 2);
+    const heard = [...rest];
+    assert.ok(Math.abs(heard[0] - 3000 / 32768) < 0.001, 'the first frame after the parent');
+    assert.ok(Math.abs(heard[2] - 4000 / 32768) < 0.001, 'and the next, in order');
 });
 
 test('two tracks are added together rather than played in turn', ()=>{

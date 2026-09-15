@@ -17,6 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
+import { createRing } from './output/ring.js';
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
@@ -106,14 +107,20 @@ function fixture(){
     };
 }
 
-/** A module with one playing sound buffer full of something to hear. */
-async function playing({ silent = false, drained = true } = {}){
+/**
+ * A module with one playing sound buffer full of something to hear.
+ *
+ * @param {{ silent?: boolean, drained?: boolean,
+ *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike } }} [options]
+ */
+async function playing({ silent = false, drained = true, memory } = {}){
     const f = fixture();
     /** @type {number[]} */
     const signalled = [];
     const api = await audioModule.create({
         ...f.config,
         drained,
+        memory,
         /** @param {number} handle */
         signal: handle=>signalled.push(handle),
     }, {
@@ -166,6 +173,23 @@ test('a playing sound buffer reaches the ring', async()=>{
     const mixed = f.api.output().diagnostics();
     assert.equal(mixed.tracks, 1, 'the buffer opened a track of its own');
     assert.ok(mixed.produced > 0, 'and its samples reached the ring');
+});
+
+test('a process that replaces another mixes into the same sound output', async()=>{
+    // The ring is the machine's, not the program's: the page was handed it
+    // before the program changed and its worklet holds it across the change.
+    // A child that made its own left that reader on a dead buffer -- audible
+    // as a menu with no sound at all.
+    const inherited = createRing({ channels: 2, capacityFrames: 32 });
+    const f = await playing({ memory: inherited.memory });
+    assert.equal(f.api.output().ring.memory, inherited.memory,
+        'the output the reader already holds');
+
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(50);
+    assert.ok(f.api.pump() > 0, 'the child mixed frames');
+    assert.ok(inherited.read(new Float32Array(16)) > 0,
+        'and the reader that held it hears them');
 });
 
 test('a build with nothing draining the ring does not read a buffer out', async()=>{

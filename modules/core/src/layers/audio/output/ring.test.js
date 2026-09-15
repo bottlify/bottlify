@@ -76,6 +76,27 @@ test('a second view over the same memory sees the same ring', ()=>{
     assert.equal(ring.filled(), 0, 'the writer sees the reader take it');
 });
 
+test('a ring over memory another wrote to continues its counts', ()=>{
+    // The control block belongs to the storage, not to the object: a machine
+    // rebuilt over the same output -- a process replacement, where the reader
+    // on the far side was handed the ring once -- must pick the stream up
+    // where it was rather than restart the count under the reader.
+    const first = createRing({ channels: 2, capacityFrames: 4 });
+    first.write(frames([1, 1, 2, 2]));
+    assert.equal(first.read(new Float32Array(4)), 2);
+
+    const second = createRing({ channels: 2, capacityFrames: 4, memory: first.memory });
+    assert.equal(second.written(), 2, "the first ring's write count");
+    assert.equal(second.consumed(), 2, "the reader's position");
+
+    // And what it writes lands after what was written, not over it.
+    assert.equal(second.write(frames([3, 3])), 1);
+    assert.equal(second.written(), 3);
+    const out = new Float32Array(2);
+    assert.equal(second.read(out), 1);
+    assert.deepEqual([...out], [3, 3]);
+});
+
 test('clearing drops what was queued without disturbing the count', ()=>{
     const ring = createRing({ channels: 1, capacityFrames: 4 });
     ring.write(frames([1, 2, 3]));

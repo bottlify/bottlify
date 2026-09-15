@@ -94,6 +94,10 @@ export const audioModule = {
         const mixer = createMixer({
             sampleRate: config?.sampleRate,
             fill: ()=>feedBuffers(),
+            // The output a machine that replaced this program's predecessor
+            // already handed whoever reads its far end. Absent on the first
+            // process, which makes its own.
+            memory: config?.memory,
         });
 
         const dsound = createDirectSound({

@@ -31,6 +31,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | option | type | default | meaning |
 |---|---|---|---|
 | `drained` | boolean | `false` | Whether something is reading the far end of the ring. `false` means the mixer is never fed from DirectSound buffers (`refusedFills` counts each refusal), `available()` is false, and a program's cursors advance against the clock alone. |
+| `memory` | `{ control, samples }` | absent | The storage of an existing ring. Given, the mixer's output is that ring rather than a new one, continuing its written/read counts. Set by `createApp` on a rebuilt machine so a process replacement mixes into the sound output its reader already holds. |
 | `sampleRate` | number | `48000` | The mixer's output rate. Every track is resampled to it. |
 | `allocate` | `(bytes) => address` | page-aligned addresses from `0x50000000`, never written | Guest memory for a sound buffer's samples and the provider's tables. The default lets the model run with no guest at all. |
 | `now` | `() => ms` | `Date.now` | The guest's clock; cursors advance against it. |

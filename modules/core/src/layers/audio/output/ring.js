@@ -85,7 +85,19 @@ export function createRing({ channels, capacityFrames, memory }){
             return capacity - this.filled();
         },
 
-        /** Frames the reader has taken since the ring was made. */
+        /**
+         * Frames the writer has put in over this storage's life.
+         *
+         * The control block is the storage's, not this object's: a ring made
+         * over memory another ring already wrote to continues from what is
+         * there rather than from zero, so a rebuilt machine and the reader
+         * that outlived its predecessor share one count.
+         */
+        written(){
+            return Atomics.load(control, WRITTEN);
+        },
+
+        /** Frames the reader has taken over this storage's life. */
         consumed(){
             return Atomics.load(control, READ);
         },
