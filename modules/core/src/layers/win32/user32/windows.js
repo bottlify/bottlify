@@ -402,9 +402,23 @@ function characterFor(key){
  *           Where the pointer is. Absent in a build with no input, and then
  *           the answer is the origin.
  * @property {(key: number) => number} [keyState]
- *           Whether a virtual key is down, as GetAsyncKeyState reports it:
- *           the high bit set while it is held. Absent means nothing is
- *           pressed, which is the one safe wrong answer.
+ *           Whether a virtual key is down, as GetKeyState reports it: the
+ *           high bit set while it is held. Absent means nothing is pressed,
+ *           which is the one safe wrong answer.
+ * @property {(key: number) => number} [asyncKeyState]
+ *           Whether a virtual key is down and whether it has gone down since
+ *           the last call, as GetAsyncKeyState reports it: the high bit held,
+ *           the low bit pressed since the previous read, which the read
+ *           clears. Absent means nothing is pressed.
+ * @property {() => Uint8Array | null} [keyboardState]
+ *           256 bytes, one per virtual key, as GetKeyboardState fills its
+ *           caller's array: the high bit down and the low bit the toggle for
+ *           CapsLock, NumLock and ScrollLock. Absent means no keyboard, and
+ *           then the caller's array is zeroed.
+ * @property {(bytes: Uint8Array) => void} [setKeyboardState]
+ *           Makes the table GetKeyboardState would read: the down bits and
+ *           the toggle bits in those 256 bytes become the synchronous state.
+ *           Absent leaves the state untouched.
  * @property {(rect: { left: number, top: number, right: number,
  *           bottom: number } | null) => void} [clipCursor]
  *           The cursor space a program declares with ClipCursor, forwarded to

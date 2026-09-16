@@ -184,6 +184,45 @@ test('either shift is VK_SHIFT, and the pair is up only when both are', ()=>{
     assert.equal(h.router.keyState(VK_SHIFT), 0);
 });
 
+test('the keyboard-state table has a held key down and a toggle toggled', ()=>{
+    const h = harness();
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    h.send({ kind: 'key', code: 'CapsLock', down: true });
+    let state = h.router.keyboardState();
+    assert.equal(state.length, 256);
+    assert.equal(state[0x41], 0x80, 'KeyA is virtual key 0x41, down');
+    assert.equal(state[0x42], 0, 'nothing else is down');
+    assert.equal(state[0x14], 0x81, 'CapsLock is down and toggled on');
+
+    // The toggle survives the release; only the down bit goes.
+    h.send({ kind: 'key', code: 'CapsLock', down: false });
+    state = h.router.keyboardState();
+    assert.equal(state[0x14], 0x01);
+});
+
+test('SetKeyboardState makes the table GetKeyboardState would read', ()=>{
+    const h = harness();
+    const table = new Uint8Array(256);
+    table[0x41] = 0x80;
+    table[0x14] = 0x01;
+    h.router.setKeyboardState(table);
+    assert.equal(h.router.keyState(0x41), 0x8000);
+    assert.equal(h.router.keyState(0x42), 0);
+    assert.equal(h.router.keyboardState()[0x14], 0x01);
+});
+
+test('the async low bit is a press the next read clears', ()=>{
+    const h = harness();
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.equal(h.router.asyncKeyState(0x41), 0x8001);
+    assert.equal(h.router.asyncKeyState(0x41), 0x8000, 'the read consumed the press');
+    // A repeat is the same press, not a new one.
+    h.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.equal(h.router.asyncKeyState(0x41), 0x8000);
+    h.send({ kind: 'key', code: 'KeyA', down: false });
+    assert.equal(h.router.asyncKeyState(0x41), 0);
+});
+
 test('a key nothing maps is dropped rather than sent as some other key', ()=>{
     const h = harness();
     assert.equal(h.send({ kind: 'key', code: 'LaunchMail', down: true }), false);

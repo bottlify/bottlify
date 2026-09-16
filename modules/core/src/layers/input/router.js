@@ -50,7 +50,13 @@ const HTCLIENT = 1;
 const VK_SHIFT = 0x10;
 const VK_CONTROL = 0x11;
 const VK_MENU = 0x12;
+const VK_CAPITAL = 0x14;
+const VK_NUMLOCK = 0x90;
+const VK_SCROLL = 0x91;
 const VK_F10 = 0x79;
+
+/** The three keys whose low bit reports a toggle rather than a press. */
+const TOGGLE_KEYS = new Set([VK_CAPITAL, VK_NUMLOCK, VK_SCROLL]);
 
 /** What a mouse message's wParam says is held. */
 const MK = Object.freeze({
@@ -160,6 +166,17 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
 
     /** Virtual keys that are down. Indexed by VK, both the paired and the sided. */
     const keys = new Uint8Array(256);
+    /**
+     * Whether a toggle key is toggled on, the low bit GetKeyboardState and
+     * GetKeyState report for CapsLock, NumLock and ScrollLock.
+     */
+    const toggles = new Uint8Array(256);
+    /**
+     * Keys that have gone down since GetAsyncKeyState last read them. That
+     * call's low bit promises a press happened, not that one is happening,
+     * and the read is what clears it.
+     */
+    const pressedSinceRead = new Uint8Array(256);
     /** @type {Map<string, import('./keys.js').KeyMapping>} */
     const held = new Map();
     /** @type {Set<string>} */
@@ -272,6 +289,17 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             held.set(String(event.code), mapping);
             keys[mapping.vk] = 1;
             keys[mapping.vkSide] = 1;
+            // A repeat is the same press still held, not a new one: the
+            // async low bit is owed on the transition only.
+            if (!wasDown)
+            {
+                pressedSinceRead[mapping.vk] = 1;
+                pressedSinceRead[mapping.vkSide] = 1;
+                if (TOGGLE_KEYS.has(mapping.vk))
+                {
+                    toggles[mapping.vk] ^= 1;
+                }
+            }
         }
         else
         {
@@ -643,13 +671,60 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         },
 
         /**
-         * Whether a virtual key is down, in the form GetAsyncKeyState answers
-         * with. Nothing asks yet -- user32 reports no keyboard at all -- and
-         * this is where that answer comes from when it does.
+         * Whether a virtual key is down, in the form GetKeyState answers with:
+         * the high bit set while it is held. This is the synchronous state the
+         * queue also reads, never the async one.
          *
          * @param {number} vk
          */
         keyState: vk=>(keys[vk & 0xff] ? 0x8000 : 0),
+
+        /**
+         * Whether a virtual key is down and whether it went down since the
+         * last read, in the form GetAsyncKeyState answers with. The low bit is
+         * a promise that a press happened, and reading is what clears it, so
+         * two calls with no event between them answer the second without it.
+         *
+         * @param {number} vk
+         */
+        asyncKeyState(vk){
+            const index = vk & 0xff;
+            const answer = (keys[index] ? 0x8000 : 0) | (pressedSinceRead[index] ? 1 : 0);
+            pressedSinceRead[index] = 0;
+            return answer;
+        },
+
+        /**
+         * The whole keyboard as 256 bytes, one per virtual key, in the form
+         * GetKeyboardState fills its caller's array: the high bit of a byte
+         * says the key is down and the low bit the toggle for CapsLock,
+         * NumLock and ScrollLock.
+         *
+         * A copy, because the array is written into guest memory and then
+         * keeps changing here.
+         */
+        keyboardState(){
+            const state = new Uint8Array(256);
+            for (let index = 0; index < 256; index++)
+            {
+                state[index] = (keys[index] ? 0x80 : 0) | toggles[index];
+            }
+            return state;
+        },
+
+        /**
+         * Makes the 256-byte table the synchronous state: the down bits and
+         * the toggle bits in it become what GetKeyState answers.
+         *
+         * @param {Uint8Array} bytes
+         */
+        setKeyboardState(bytes){
+            for (let index = 0; index < 256; index++)
+            {
+                keys[index] = (bytes[index] & 0x80) ? 1 : 0;
+                toggles[index] = bytes[index] & 1;
+            }
+        },
 
         /** Where the cursor is, in client coordinates. */
         cursor: ()=>({ x: cursor.x, y: cursor.y }),

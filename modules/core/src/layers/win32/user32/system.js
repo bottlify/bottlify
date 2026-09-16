@@ -2086,10 +2086,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
         /**
          * SHORT GetAsyncKeyState(int vKey) / SHORT GetKeyState(int nVirtKey)
          *
-         * The high bit says the key is down; the low bit of GetKeyState says a
-         * toggle is on. A program polls these instead of reading messages when
-         * it wants the state now rather than in the order it changed, and a
-         * game does both at once -- menus from messages, movement from these.
+         * The high bit says the key is down; the low bit of GetAsyncKeyState
+         * says it went down since the last time it was asked, and the low bit
+         * of GetKeyState says a toggle is on. A program polls these instead
+         * of reading messages when it wants the state now rather than in the
+         * order it changed, and a game does both at once -- menus from
+         * messages, movement from these.
          *
          * A build with nothing feeding it answers that nothing is pressed,
          * which is the one safe wrong answer: a state invented here would have
@@ -2098,7 +2100,7 @@ export function createSystemFunctions({ host, live, windows, classes }){
         GetAsyncKeyState: {
             argBytes: 4,
             /** @param {number[]} args */
-            handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+            handler: ([key])=>host.asyncKeyState?.(key >>> 0) ?? 0,
         },
 
         /** SHORT GetKeyState(int nVirtKey) */
@@ -2106,6 +2108,49 @@ export function createSystemFunctions({ host, live, windows, classes }){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([key])=>host.keyState?.(key >>> 0) ?? 0,
+        },
+
+        /**
+         * BOOL GetKeyboardState(PBYTE lpKeyState)
+         *
+         * The synchronous state as a 256-byte table, one byte per virtual key:
+         * the high bit of a byte says the key is down and the low bit the
+         * toggle for CapsLock, NumLock and ScrollLock. The same source
+         * GetKeyState reads one key at a time.
+         */
+        GetKeyboardState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([state])=>{
+                if ((state >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.writeMemory(state >>> 0, host.keyboardState?.() ?? new Uint8Array(256));
+                return 1;
+            },
+        },
+
+        /**
+         * BOOL SetKeyboardState(const BYTE *lpKeyState)
+         *
+         * Makes the caller's table the synchronous state: the down bits and
+         * the toggle bits in those 256 bytes become what GetKeyState and
+         * GetKeyboardState answer from then on.
+         */
+        SetKeyboardState: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([state])=>{
+                if ((state >>> 0) === 0)
+                {
+                    host.setLastError?.(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
+                host.setKeyboardState?.(host.readMemory(state >>> 0, 256));
+                return 1;
+            },
         },
 
         /**

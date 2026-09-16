@@ -197,6 +197,11 @@ export const inputModule = {
 
             /** @param {number} vk */
             keyState: vk=>router.keyState(vk),
+            /** @param {number} vk */
+            asyncKeyState: vk=>router.asyncKeyState(vk),
+            keyboardState: ()=>router.keyboardState(),
+            /** @param {Uint8Array} bytes */
+            setKeyboardState: bytes=>router.setKeyboardState(bytes),
             cursor: ()=>router.cursor(),
             pad: ()=>router.pad(),
 

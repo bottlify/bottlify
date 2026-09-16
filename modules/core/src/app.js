@@ -2519,6 +2519,14 @@ async function buildApp(options){
             sendInput: event=>core.api('input')?.send?.(event),
             /** @param {number} key */
             keyState: key=>core.api('input')?.keyState?.(key) ?? 0,
+            /** @param {number} key */
+            asyncKeyState: key=>core.api('input')?.asyncKeyState?.(key) ?? 0,
+            // The whole keyboard, as GetKeyboardState fills its caller's array
+            // and SetKeyboardState writes back: the same state GetKeyState
+            // reads one key at a time, so the two can never disagree.
+            keyboardState: ()=>core.api('input')?.keyboardState?.() ?? null,
+            /** @param {Uint8Array} bytes */
+            setKeyboardState: bytes=>core.api('input')?.setKeyboardState?.(bytes),
             // The same reporter the graphics layer gets: a Win32 function that
             // accepts a flag it does not act on owes the reader the same
             // warning as a Direct3D state that is stored and unused.

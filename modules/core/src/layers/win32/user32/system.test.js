@@ -19,6 +19,7 @@ import {
     DEVMODEA, DM_BITSPERPEL, DM_DISPLAYFREQUENCY, DM_PELSHEIGHT, DM_PELSWIDTH, PAINTSTRUCT, RECT,
 } from './structs.js';
 import { createWindowFunctions } from './windows.js';
+import { createInputRouter } from '../../input/router.js';
 
 const CLASS_NAME = 0x10000;
 const CLASS_STRUCT = 0x10100;
@@ -30,6 +31,7 @@ const FORMAT_BUFFER = 0x11500;
 const OUT_BUFFER = 0x11600;
 const DEVMODE_BUFFER = 0x11800;
 const INPUT_BUFFER = 0x11a00;
+const KEYBOARD_BUFFER = 0x11c00;
 
 const WNDPROC = 0x401000;
 const HINSTANCE = 0x400000;
@@ -158,6 +160,9 @@ function fakeContexts(){
  * @param {{ x: number, y: number }} [options.cursor] Where the host says the
  *        pointer is, for the queries a game polls instead of reading messages.
  * @param {(key: number) => number} [options.keyState]
+ * @param {(key: number) => number} [options.asyncKeyState]
+ * @param {() => Uint8Array | null} [options.keyboardState]
+ * @param {(bytes: Uint8Array) => void} [options.setKeyboardState]
  * @param {(instance: number, type: number, name: number | string) => unknown}
  *        [options.findResource]
  *        Which resources the program's own image carries.
@@ -174,7 +179,8 @@ function fakeContexts(){
  *        the notice and answering nothing.
  */
 function setup(
-    { cursor, keyState, findResource, loadString, dispatch = ()=>0, screen, messageBox } = {})
+    { cursor, keyState, asyncKeyState, keyboardState, setKeyboardState,
+        findResource, loadString, dispatch = ()=>0, screen, messageBox } = {})
 {
     screen ??= { ...SCREEN, displayWidth: SCREEN.width, displayHeight: SCREEN.height };
     const memory = fakeMemory();
@@ -215,6 +221,9 @@ function setup(
         idle: ()=>new Promise(()=>{}),
         cursor: cursor && (()=>cursor),
         keyState,
+        asyncKeyState,
+        keyboardState,
+        setKeyboardState,
         findResource,
         loadString,
         /** @param {any} notice */
@@ -1078,11 +1087,61 @@ test('a build with nothing feeding it reports nothing pressed', ()=>{
 
 test('the key-state queries pass the key through to the host', ()=>{
     const down = new Set([0x41]);
-    const { fns } = setup({ keyState: key=>(down.has(key) ? 0x8000 : 0) });
+    const state = key=>(down.has(key) ? 0x8000 : 0);
+    const { fns } = setup({ keyState: state, asyncKeyState: state });
 
     assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0x8000, 'the high bit is "down"');
     assert.equal(fns.GetAsyncKeyState.handler([0x42]), 0);
     assert.equal(fns.GetKeyState.handler([0x41]), 0x8000);
+});
+
+test('GetAsyncKeyState reports a press once and the read clears it', ()=>{
+    const router = createInputRouter({ post: ()=>{}, device: ()=>{} });
+    const { fns } = setup({ asyncKeyState: key=>router.asyncKeyState(key) });
+
+    router.send({ kind: 'key', code: 'KeyA', down: true });
+    assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0x8001,
+        'the low bit promises a press since the last call');
+    assert.equal(fns.GetAsyncKeyState.handler([0x41]), 0x8000,
+        'the press belongs to the call that asked for it');
+});
+
+test('GetKeyboardState fills 256 bytes of the router the keys reached', ()=>{
+    const router = createInputRouter({ post: ()=>{}, device: ()=>{} });
+    const { memory, fns } = setup({ keyboardState: ()=>router.keyboardState() });
+
+    router.send({ kind: 'key', code: 'KeyA', down: true });
+    memory.fill(OUT_BUFFER, 64);
+    assert.equal(fns.GetKeyboardState.handler([OUT_BUFFER]), 1);
+    assert.equal(memory.bytes[OUT_BUFFER + 0x41], 0x80, 'KeyA is virtual key 0x41');
+    assert.equal(memory.bytes[OUT_BUFFER + 0x42], 0, 'and no other key reads as down');
+});
+
+test('SetKeyboardState becomes the state GetKeyboardState reads back', ()=>{
+    const router = createInputRouter({ post: ()=>{}, device: ()=>{} });
+    const { memory, fns } = setup({
+        keyboardState: ()=>router.keyboardState(),
+        setKeyboardState: bytes=>router.setKeyboardState(bytes),
+    });
+
+    const table = new Uint8Array(256);
+    table[0x41] = 0x80;
+    table[0x14] = 0x01;
+    memory.writeMemory(KEYBOARD_BUFFER, table);
+    assert.equal(fns.SetKeyboardState.handler([KEYBOARD_BUFFER]), 1);
+
+    memory.fill(OUT_BUFFER, 0);
+    assert.equal(fns.GetKeyboardState.handler([OUT_BUFFER]), 1);
+    assert.equal(memory.bytes[OUT_BUFFER + 0x41], 0x80);
+    assert.equal(memory.bytes[OUT_BUFFER + 0x14], 0x01, 'the CapsLock toggle');
+});
+
+test('the keyboard-state calls refuse a null pointer', ()=>{
+    const { fns } = setup({ keyboardState: ()=>new Uint8Array(256),
+        setKeyboardState: ()=>{} });
+
+    assert.equal(fns.GetKeyboardState.handler([0]), 0);
+    assert.equal(fns.SetKeyboardState.handler([0]), 0);
 });
 
 test('a message box is handed up whole, with the buttons its type asks for', ()=>{

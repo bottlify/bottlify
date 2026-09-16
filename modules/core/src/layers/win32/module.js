@@ -1038,6 +1038,13 @@ export const win32Module = {
                 // it answered before, which is that nothing is pressed.
                 cursor: config?.cursor,
                 keyState: config?.keyState,
+                // The same state in the other two forms a program reads it:
+                // the async low bit, which the read itself clears, and the
+                // whole 256-byte table GetKeyboardState fills and
+                // SetKeyboardState writes back.
+                asyncKeyState: config?.asyncKeyState,
+                keyboardState: config?.keyboardState,
+                setKeyboardState: config?.setKeyboardState,
                 // The cursor space a program declares with ClipCursor, handed
                 // down the same way and for the same reason: the input layer
                 // that scales pointer motion into it sits above this one.
