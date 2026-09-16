@@ -22,18 +22,19 @@ import { createClock } from './internal/time.js';
  * a thread is `win32/kernel32`'s business; what happens as a result is here.
  */
 
-/** @type {any} */
-let scheduler = null;
-/** @type {any} */
-let sync = null;
-/** @type {any} */
-let handles = null;
-/** @type {any} */
-let clock = null;
-/** @type {any} */
-let switcher = null;
-/** @type {any} */
-let processes = null;
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the scheduler, the sync objects, the handle table, the
+ * process table and the clock belong to the closure `create()` returns, so a
+ * second instance in one realm cannot take the first one's threads.
+ *
+ * @type {any}
+ */
+let current = null;
 
 /**
  * The scheduler's shared tables, registered with the log layer when there is
@@ -95,19 +96,41 @@ export const kernelModule = {
             issued: 0,
         };
 
-        switcher = createSwitcher({ cpu });
-        clock = createClock(config?.clock);
-        scheduler = createScheduler({
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own threads, sync objects and handles.
+         *
+         * @type {{ scheduler: any, sync: any, handles: any, clock: any,
+         *          switcher: any, processes: any, disposed: boolean }}
+         */
+        const state = {
+            scheduler: null,
+            sync: null,
+            handles: null,
+            clock: null,
+            switcher: null,
+            processes: null,
+            disposed: false,
+        };
+
+        state.switcher = createSwitcher({ cpu });
+        state.clock = createClock(config?.clock);
+        state.scheduler = createScheduler({
             cpu,
-            switcher,
+            switcher: state.switcher,
             // The guest's clock, which is what a timed wait is timed against
             // and what the scheduler moves when every thread is waiting on one.
-            now: ()=>clock.virtualTime(),
+            now: ()=>state.clock.virtualTime(),
             // Moved *to* the deadline rather than *by* an interval, because
             // the clock is the one that knows the host's, and a wait nobody has
             // to sit through must never carry the guest past real time.
             /** @param {number} deadline */
-            skipTo: deadline=>clock.skipTo(deadline),
+            skipTo: deadline=>state.clock.skipTo(deadline),
             // The answer a parked call woke with, which the trace has no other
             // record of: a program that quits a loop on a wait's answer cannot
             // be read back without it.
@@ -121,12 +144,21 @@ export const kernelModule = {
         });
         if (typeof log.metrics?.onFrame === 'function')
         {
-            log.metrics.onFrame(()=>scheduler.publish());
+            log.metrics.onFrame(()=>state.scheduler.publish());
         }
-        sync = createSyncObjects({ scheduler });
-        handles = createHandleTable();
-        processes = createProcessTable();
+        state.sync = createSyncObjects({ scheduler: state.scheduler });
+        state.handles = createHandleTable();
+        state.processes = createProcessTable();
 
+        /**
+         * Whether this instance is still open. A call still in flight when the
+         * machine was disposed must not find the scheduler, the sync objects
+         * or the handle table gone: it answers the harmless value below
+         * rather than dereferencing what disposal took away.
+         */
+        const live = ()=>!state.disposed;
+
+        current = state;
         return {
             ThreadState,
             WaitResult,
@@ -155,10 +187,16 @@ export const kernelModule = {
              *   instructions, and keeps whatever it was holding. The default is
              *   that loop, for a caller with nothing better -- but a caller
              *   that can end the thread should pass somewhere that does.
+             * @returns {any} null once this instance is disposed -- there is
+             *     no scheduler left to give a thread to.
              */
             createThread(
                 { entry, parameter = 0, stackTop, stackLimit, tebAddress, name, returnTo })
             {
+                if (!live())
+                {
+                    return null;
+                }
                 /** @type {number | undefined} */
                 let low = stackLimit;
                 // A stack from the pool unless the caller brought its own (the
@@ -191,14 +229,14 @@ export const kernelModule = {
                 memory.writeU32(top + 4, parameter);
                 memory.writeU32(top, returnTo ?? cpu.parkAddress());
 
-                const thread = scheduler.create({
+                const thread = state.scheduler.create({
                     entry,
                     stackTop: top,
                     stackLimit: low,
                     tebAddress: tebAddress ?? 0,
                     name,
                 });
-                thread.handle = handles.open('thread', thread);
+                thread.handle = state.handles.open('thread', thread);
                 return thread;
             },
 
@@ -251,8 +289,8 @@ export const kernelModule = {
                 thread.resumeStack = esp ?? null;
                 thread.waitResult = returnValue;
             },
-            currentThread: ()=>scheduler.current(),
-            threads: ()=>scheduler.all(),
+            currentThread: ()=>live() ? state.scheduler.current() : null,
+            threads: ()=>live() ? state.scheduler.all() : [],
 
             /** @param {number} address @param {number} id */
             writeThreadId: (address, id)=>memory.writeU32(address, id),
@@ -260,11 +298,14 @@ export const kernelModule = {
             /**
              * Runs one turn. Returns what happened rather than a count, so a
              * caller can tell progress from an idle system from a finished one.
+             * Once this instance is disposed there is nothing to run.
              */
-            runOnce: ()=>scheduler.runOnce(),
+            runOnce: ()=>live()
+                ? state.scheduler.runOnce()
+                : { ran: null, instructions: 0, switched: false },
 
             /** The scheduler's own view, for a caller driving the machine. */
-            diagnosticsSnapshot: ()=>scheduler.diagnostics(),
+            diagnosticsSnapshot: ()=>live() ? state.scheduler.diagnostics() : {},
             /**
              * Where the guest ran, by page of guest code, weighted by retired
              * instructions. Addresses, because naming them needs the image map.
@@ -272,13 +313,13 @@ export const kernelModule = {
              * once, not for a poll. The `kernel/pages` table is the same
              * figures with no walk.
              */
-            pages: ()=>scheduler.pages(),
+            pages: ()=>live() ? state.scheduler.pages() : {},
             /**
              * Every synchronisation object ever made, one row each. Thousands
              * in a running program, so asked for by name rather than carried
              * in the diagnostics table.
              */
-            syncObjects: ()=>sync.diagnostics(),
+            syncObjects: ()=>live() ? state.sync.diagnostics() : [],
 
             /**
              * The soonest guest time a blocked thread is waiting for, or null.
@@ -287,18 +328,22 @@ export const kernelModule = {
              * look identical from outside: nothing can run because nothing ever
              * will, and nothing can run until a moment that is coming.
              */
-            nextDeadline: ()=>scheduler.nextDeadline(),
+            nextDeadline: ()=>live() ? state.scheduler.nextDeadline() : null,
 
             /** @param {any} thread @param {number} exitCode */
             exitThread(thread, exitCode){
+                if (!live())
+                {
+                    return;
+                }
                 // A thread that dies holding a mutex leaves whatever it protected
                 // half-written; the next owner has to be told (§ abandoned mutex).
-                sync.abandonMutexesOwnedBy(thread);
-                scheduler.terminate(thread, exitCode);
+                state.sync.abandonMutexesOwnedBy(thread);
+                state.scheduler.terminate(thread, exitCode);
                 // And a thread is itself something a program waits on. Whoever
                 // joined it is released now and stays released: the object is
                 // signalled by having ended, not by handing anything over.
-                sync.releaseAll(thread);
+                state.sync.releaseAll(thread);
             },
 
             /**
@@ -308,7 +353,12 @@ export const kernelModule = {
              *   completion port lives above this layer, and its wait still has
              *   to expire in guest time like any other.
              */
-            block: (thread, reason, timed)=>scheduler.block(thread, reason, timed),
+            block: (thread, reason, timed)=>{
+                if (live())
+                {
+                    state.scheduler.block(thread, reason, timed);
+                }
+            },
             /**
              * @param {any} thread
              * @param {number} [result]
@@ -318,11 +368,15 @@ export const kernelModule = {
              * @returns {boolean} whether the thread was blocked at all
              */
             wake(thread, result){
+                if (!live())
+                {
+                    return false;
+                }
                 if (result !== undefined)
                 {
                     thread.waitResult = result >>> 0;
                 }
-                return scheduler.wake(thread);
+                return state.scheduler.wake(thread);
             },
 
             /**
@@ -331,32 +385,47 @@ export const kernelModule = {
              *
              * @param {(thread: any) => void} handler
              */
-            onTimeout: handler=>scheduler.onTimeout(handler),
+            onTimeout: handler=>{
+                if (live())
+                {
+                    state.scheduler.onTimeout(handler);
+                }
+            },
 
-            createEvent: (/** @type {any} */ options)=>sync.createEvent(options),
-            createMutex: (/** @type {any} */ options)=>sync.createMutex(options),
-            createSemaphore: (/** @type {any} */ options)=>sync.createSemaphore(options),
+            createEvent: (/** @type {any} */ options)=>
+                live() ? state.sync.createEvent(options) : null,
+            createMutex: (/** @type {any} */ options)=>
+                live() ? state.sync.createMutex(options) : null,
+            createSemaphore: (/** @type {any} */ options)=>
+                live() ? state.sync.createSemaphore(options) : null,
             /**
              * A waitable timer, whose due time the clock honours on its own.
              *
              * @param {any} options
              */
-            createTimer: (/** @type {any} */ options)=>sync.createTimer(options),
+            createTimer: (/** @type {any} */ options)=>
+                live() ? state.sync.createTimer(options) : null,
             /**
              * @param {any} timer @param {number} due @param {number} period
              */
             armTimer: (/** @type {any} */ timer, due, period)=>
-                sync.armTimer(timer, due, period),
+                live() ? state.sync.armTimer(timer, due, period) : false,
             /** @param {any} timer */
-            cancelTimer: (/** @type {any} */ timer)=>sync.cancelTimer(timer),
+            cancelTimer: (/** @type {any} */ timer)=>{
+                if (live())
+                {
+                    state.sync.cancelTimer(timer);
+                }
+            },
             /**
              * @param {any} object
              * @param {any} thread
              * @param {{ deadline?: number, result?: number }} [timed]
              */
-            wait: (object, thread, timed)=>sync.wait(object, thread, timed),
+            wait: (object, thread, timed)=>
+                live() ? state.sync.wait(object, thread, timed) : WaitResult.FAILED,
             /** @param {any} object @param {any} thread */
-            poll: (object, thread)=>sync.poll(object, thread),
+            poll: (object, thread)=>live() ? state.sync.poll(object, thread) : WaitResult.FAILED,
 
             /**
              * Blocks a thread for a span of guest time and nothing else.
@@ -368,8 +437,12 @@ export const kernelModule = {
              * @param {any} thread @param {number} milliseconds
              */
             sleep(thread, milliseconds){
-                scheduler.block(thread, `${milliseconds} ms`, {
-                    deadline: clock.virtualTime() + milliseconds,
+                if (!live())
+                {
+                    return;
+                }
+                state.scheduler.block(thread, `${milliseconds} ms`, {
+                    deadline: state.clock.virtualTime() + milliseconds,
                     result: 0,
                 });
             },
@@ -377,26 +450,34 @@ export const kernelModule = {
              * @param {any[]} objects @param {any} thread
              * @param {{ deadline?: number, result?: number }} [timed]
              */
-            waitAll: (objects, thread, timed)=>sync.waitAll(objects, thread, timed),
+            waitAll: (objects, thread, timed)=>
+                live() ? state.sync.waitAll(objects, thread, timed) : WaitResult.FAILED,
             /**
              * @param {any[]} objects @param {any} thread
              * @param {{ deadline?: number, result?: number }} [timed]
              */
-            waitAny: (objects, thread, timed)=>sync.waitAny(objects, thread, timed),
-            setEvent: (/** @type {any} */ object)=>sync.setEvent(object),
-            resetEvent: (/** @type {any} */ object)=>sync.resetEvent(object),
+            waitAny: (objects, thread, timed)=>live()
+                ? state.sync.waitAny(objects, thread, timed)
+                : { index: -1, result: WaitResult.FAILED },
+            setEvent: (/** @type {any} */ object)=>live() ? state.sync.setEvent(object) : [],
+            resetEvent: (/** @type {any} */ object)=>{
+                if (live())
+                {
+                    state.sync.resetEvent(object);
+                }
+            },
             releaseMutex: (/** @type {any} */ object, /** @type {any} */ thread)=>
-                sync.releaseMutex(object, thread),
+                live() ? state.sync.releaseMutex(object, thread) : false,
             releaseSemaphore: (/** @type {any} */ object, /** @type {number} */ count)=>
-                sync.releaseSemaphore(object, count),
+                live() ? state.sync.releaseSemaphore(object, count) : 0,
 
             handles: {
                 /** @param {string} type @param {any} object */
-                open: (type, object)=>handles.open(type, object),
+                open: (type, object)=>live() ? state.handles.open(type, object) : 0,
                 /** @param {number} handle @param {string} [type] */
-                resolve: (handle, type)=>handles.resolve(handle, type),
+                resolve: (handle, type)=>live() ? state.handles.resolve(handle, type) : null,
                 /** @param {number} handle */
-                close: handle=>handles.close(handle),
+                close: handle=>live() ? state.handles.close(handle) : null,
                 /**
                  * What kind of object a handle names, without resolving it.
                  *
@@ -406,14 +487,14 @@ export const kernelModule = {
                  *
                  * @param {number} handle
                  */
-                typeOf: handle=>handles.typeOf(handle),
+                typeOf: handle=>live() ? state.handles.typeOf(handle) : null,
                 /**
                  * Whether anything still holds a handle to this object. A
                  * Win32 name lives exactly as long as one does.
                  *
                  * @param {any} object
                  */
-                holds: object=>handles.holds(object),
+                holds: object=>live() ? state.handles.holds(object) : false,
             },
 
             /**
@@ -428,42 +509,44 @@ export const kernelModule = {
                  * @param {{ imagePath: string, commandLine: string,
                  *           suspended?: boolean, completed?: boolean }} options
                  */
-                create: options=>processes.create(options),
-                pending: ()=>processes.pending(),
-                all: ()=>processes.all(),
+                create: options=>live() ? state.processes.create(options) : null,
+                pending: ()=>live() ? state.processes.pending() : null,
+                all: ()=>live() ? state.processes.all() : [],
                 /** @param {any} record */
-                finished: record=>processes.finished(record),
+                finished: record=>live() ? state.processes.finished(record) : false,
             },
 
-            clock,
+            clock: state.clock,
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return { name: 'kernel', version: '0.1.0', status: 'created', metrics: {} };
+        }
         return {
             name: 'kernel',
             version: '0.1.0',
-            status: scheduler ? 'ready' : 'created',
-            metrics: scheduler
-                ? {
-                    ...scheduler.diagnostics(),
-                    ...switcher.diagnostics(),
-                    handles: handles.diagnostics(),
-                    sync: sync.summary(),
-                    processes: processes.diagnostics(),
-                    time: clock.diagnostics(),
-                }
-                : {},
+            status: 'ready',
+            metrics: {
+                ...instance.scheduler.diagnostics(),
+                ...instance.switcher.diagnostics(),
+                handles: instance.handles.diagnostics(),
+                sync: instance.sync.summary(),
+                processes: instance.processes.diagnostics(),
+                time: instance.clock.diagnostics(),
+            },
         };
     },
 
     async dispose(){
-        scheduler = null;
-        sync = null;
-        handles = null;
-        clock = null;
-        switcher = null;
-        processes = null;
+        if (current)
+        {
+            current.disposed = true;
+        }
+        current = null;
     },
 };

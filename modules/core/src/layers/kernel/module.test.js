@@ -170,3 +170,83 @@ test('the kernel publishes its figures as tables and keeps the object tables col
     assert.equal(kernel.syncObjects().length, 2);
     await kernelModule.dispose();
 });
+
+test('a second instance in one realm does not take the first one\'s state', async()=>{
+    const { kernel: first } = await makeKernel();
+    first.createThread({ entry: 0x00402000, name: 'first-thread' });
+    first.createMutex({ name: 'first-mutex' });
+
+    const { kernel: second } = await makeKernel();
+    second.createThread({ entry: 0x00402000, name: 'second-thread' });
+    second.createEvent({ name: 'second-event' });
+    second.createEvent({ name: 'second-event-2' });
+
+    assert.equal(first.threads().length, 1, 'the first instance keeps only its own thread');
+    assert.equal(first.threads()[0].name, 'first-thread');
+    assert.equal(first.syncObjects().length, 1, 'and only its own sync object');
+    assert.equal(first.syncObjects()[0].kind, 'mutex');
+
+    await kernelModule.dispose();
+});
+
+test('a disposed kernel answers harmlessly rather than throwing', async()=>{
+    const { kernel } = await makeKernel();
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'thread' });
+    const event = kernel.createEvent({ name: 'e' });
+
+    await kernelModule.dispose();
+
+    assert.equal(kernel.createThread({ entry: 0x00402000 }), null);
+    assert.equal(kernel.currentThread(), null);
+    assert.deepEqual(kernel.threads(), []);
+    assert.deepEqual(kernel.runOnce(), { ran: null, instructions: 0, switched: false });
+    assert.deepEqual(kernel.diagnosticsSnapshot(), {});
+    assert.deepEqual(kernel.pages(), {});
+    assert.deepEqual(kernel.syncObjects(), []);
+    assert.equal(kernel.nextDeadline(), null);
+    kernel.exitThread(thread, 0);
+    kernel.block(thread, 'x');
+    assert.equal(kernel.wake(thread), false);
+    kernel.onTimeout(()=>{});
+    assert.equal(kernel.createEvent({}), null);
+    assert.equal(kernel.createMutex({}), null);
+    assert.equal(kernel.createSemaphore({ initial: 0, maximum: 1 }), null);
+    assert.equal(kernel.createTimer({}), null);
+    assert.equal(kernel.armTimer(event, 0, 0), false);
+    kernel.cancelTimer(event);
+    assert.equal(kernel.wait(event, thread), kernel.WaitResult.FAILED);
+    assert.equal(kernel.poll(event, thread), kernel.WaitResult.FAILED);
+    kernel.sleep(thread, 10);
+    assert.equal(kernel.waitAll([event], thread), kernel.WaitResult.FAILED);
+    assert.deepEqual(kernel.waitAny([event], thread),
+        { index: -1, result: kernel.WaitResult.FAILED });
+    assert.deepEqual(kernel.setEvent(event), []);
+    kernel.resetEvent(event);
+    assert.equal(kernel.releaseMutex(event, thread), false);
+    assert.equal(kernel.releaseSemaphore(event, 1), 0);
+    assert.equal(kernel.handles.open('thread', thread), 0);
+    assert.equal(kernel.handles.resolve(thread.handle), null);
+    assert.equal(kernel.handles.close(thread.handle), null);
+    assert.equal(kernel.handles.typeOf(thread.handle), null);
+    assert.equal(kernel.handles.holds(thread), false);
+    assert.equal(kernel.processes.create({ imagePath: 'x', commandLine: 'x' }), null);
+    assert.equal(kernel.processes.pending(), null);
+    assert.deepEqual(kernel.processes.all(), []);
+    assert.equal(kernel.processes.finished({ exitCode: 0 }), false);
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await makeKernel();
+    const { kernel: second } = await makeKernel();
+    second.createEvent({ name: 'e' });
+    second.createEvent({ name: 'e2' });
+    second.createMutex({ name: 'm' });
+
+    const diag = /** @type {any} */ (kernelModule.diagnostics());
+    assert.equal(diag.status, 'ready');
+    assert.deepEqual(diag.metrics.sync,
+        { objects: 3, event: 2, mutex: 1, semaphore: 0, timer: 0 },
+        'diagnostics reports the second (most recent) instance');
+
+    await kernelModule.dispose();
+});

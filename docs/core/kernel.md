@@ -105,6 +105,24 @@ Handles, processes and the clock:
 | `processes.all` | `() => ProcessRecord[]` | |
 | `clock` | `{ virtualTime, wallClock, advance, skipTo, suspend, resume, diagnostics }` | The guest's clock (below). |
 
+An instance owns its threads. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so the
+scheduler, the sync objects, the handle table, the process table and the clock live in the
+instance the api closes over, and a second `create()` cannot take the first one's threads;
+`diagnostics()` answers for the most recently created instance. After `dispose()`, a call that
+was in flight answers harmlessly rather than throwing: the creating calls
+(`createThread`/`createEvent`/`createMutex`/`createSemaphore`/`createTimer`/`processes.create`)
+answer `null`, the boolean calls (`wake`, `armTimer`, `releaseMutex`,
+`handles.holds`/`processes.finished`) answer `false`, the wait calls (`wait`/`poll`/`waitAll`)
+answer `WaitResult.FAILED` and `waitAny` answers `{ index: -1, result: WaitResult.FAILED }`, the
+listing calls (`threads`/`pages`/`syncObjects`/`diagnosticsSnapshot`/`processes.all`) answer
+empty, `currentThread`/`nextDeadline`/`processes.pending`/`handles.resolve`/`handles.close`/
+`handles.typeOf` answer `null`, `handles.open` answers `0`, `setEvent` answers `[]`,
+`releaseSemaphore` answers `0`, `runOnce` answers `{ ran: null, instructions: 0, switched: false }`,
+and `exitThread`/`block`/`onTimeout`/`cancelTimer`/`sleep`/`resetEvent` are no-ops.
+`holdThread`/`parkThread`/`scheduleResume`/`writeThreadId` touch only `cpu` and `memory`, which
+outlive this layer's own disposal, so they are unaffected.
+
 A `Thread` is a plain record: `id`, `name`, `state`, `tebAddress`, `stackTop`, `stackLimit`,
 `entry`, `context`, `instructions`, `exitCode`, `waitingOn`, `awaitingHost`, `kind: 'thread'`,
 `waiters`, `handle`, plus the scheduling fields `parkedReturn`, `resumeStack`, `waitResult`,
@@ -331,7 +349,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/kernel/internal/<fil
 | `internal/time.test.js` | unit | Advance, credit floor and ceiling, skip never past real time, diagnostics. |
 | `internal/handles.test.js` | unit | Alignment, type assertion, invalid/closed handles, deferred reuse. |
 | `internal/processes.test.js` | unit | Record contents, id spacing, suspended children not pending. |
-| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack. |
+| `module.test.js` | unit | `createThread` priming: return address, park-loop default, headroom, pool registration, a caller-supplied stack; a second instance in one realm does not take the first one's threads; a disposed kernel answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance. |
 
 Integration (`npm run test:integration`): `src/threads.itest.js` runs a real two-thread
 executable contending on a mutex and checks the Windows answer, that both threads took turns,
