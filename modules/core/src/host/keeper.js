@@ -20,7 +20,9 @@
  * answers requests from what it kept; when the machine is rebuilt on a child's
  * image it is simply handed the next block and goes on. Its history is its
  * own ring, so a `drain` cursor taken before a replacement resolves in the
- * records the keeper already holds.
+ * records the keeper already holds. A `recent` or `drain` read polls the
+ * current block first, so a tail written since the last tick -- the lines a
+ * crash popup is built from -- is answered without waiting for the clock.
  *
  * It is deliberately not a transport for the writer: a record never crosses as
  * a message on the way in. `attach` hands over memory, and the keeper reads it
@@ -50,13 +52,16 @@ const POLL_ROUNDS = 16;
 /**
  * @typedef {Object} KeeperOptions
  * @property {number} [capacity]   Records of history kept.
- * @property {number} [intervalMs] The poll clock; `MIRROR_MS` by default.
+ * @property {number} [intervalMs] The poll clock; `MIRROR_MS` by default. `0`
+ *     runs no timer: a `{ type: 'poll', id }` message polls once on request,
+ *     which a test drives so it never races a clock.
  * @property {number} [limit]      Records one round may carry.
  */
 
 /**
  * Serves the keeper over a port: a worker's global scope, a `MessagePort`, or
- * anything shaped like either.
+ * anything shaped like either. With a timer it polls itself; with
+ * `intervalMs: 0` it polls only when a `poll` message or a read asks it to.
  *
  * @param {KeeperPort} port
  * @param {KeeperOptions} [options]
@@ -124,7 +129,8 @@ export function serveKeeper(port, options = {}){
     /**
      * Reads the current block forward as far as it can go in one look, keeping
      * the records and telling the subscribers. This is the only place the
-     * block is read; requests read what a poll left behind.
+     * block is read; the timer, a `poll` message, an `attach` and the journal
+     * reads all come through here, and what they answer is what it kept.
      */
     const poll = ()=>{
         if (!reader)
@@ -155,7 +161,9 @@ export function serveKeeper(port, options = {}){
 
     /**
      * A read the page asked for, answered from the keeper's history for the
-     * journal and from the current block for the derived views.
+     * journal and from the current block for the derived views. `recent` and
+     * `drain` poll first: a read is often the last look (a crash tail), so it
+     * catches the current block up rather than answering one tick stale.
      *
      * @param {string} name
      * @param {unknown[]} args
@@ -166,10 +174,12 @@ export function serveKeeper(port, options = {}){
         {
             case 'recent':
             {
+                poll();
                 const count = Math.max(0, Number(args[0] ?? 100));
                 return history.slice(Math.max(0, history.length - count));
             }
             case 'drain':
+                poll();
                 return drain(Number(args[0] ?? 0), Number(args[1] ?? 1000));
             case 'lost':
                 return lost;
@@ -260,6 +270,18 @@ export function serveKeeper(port, options = {}){
                 if (typeof message.next === 'number')
                 {
                     cursor = Math.max(cursor, message.next);
+                }
+                return;
+            }
+            case 'poll':
+            {
+                // The manual clock a test drives with `intervalMs: 0`. It
+                // answers when the poll is done, so the caller knows the
+                // block was read rather than guessing at a timer.
+                poll();
+                if (message.id !== undefined)
+                {
+                    port.postMessage({ type: 'polled', id: message.id });
                 }
                 return;
             }

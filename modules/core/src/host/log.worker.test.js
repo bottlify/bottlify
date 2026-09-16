@@ -19,27 +19,6 @@ import assert from 'node:assert/strict';
 import { Worker } from 'node:worker_threads';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 
-/** A wait for everything queued to be delivered. */
-const settled = (ms = 30)=>new Promise(resolve=>setTimeout(resolve, ms));
-
-/** Waits for a condition to hold, so no test depends on a poll landing in time. */
-/** @param {() => Promise<boolean> | boolean} check @param {number} [timeoutMs] */
-const until = async(check, timeoutMs = 2000)=>{
-    const deadline = Date.now() + timeoutMs;
-    for (;;)
-    {
-        if (await check())
-        {
-            return;
-        }
-        if (Date.now() > deadline)
-        {
-            throw new Error('timed out waiting for the keeper');
-        }
-        await settled(5);
-    }
-};
-
 /**
  * The keeper under `worker_threads`, driven the way a page drives it. The
  * worker script adapts `parentPort` to the port shape `serveKeeper` wants, so
@@ -108,12 +87,24 @@ function openKeeper(options = {}){
         }
         return answer.value;
     };
+    /**
+     * Runs one poll on the keeper and resolves once it has finished, so a test
+     * says when the block is read instead of waiting for a timer to land.
+     */
+    const poll = async()=>{
+        const id = ++ids;
+        send({ type: 'poll', id });
+        await next(/** @param {any} message */ message=>
+            message.type === 'polled' && message.id === id);
+    };
 
-    return { send, ask, next, messages, stop: ()=>worker.terminate() };
+    return { send, ask, poll, next, messages, stop: ()=>worker.terminate() };
 }
 
 test('the keeper answers reads and hands subscribers their batches', async t=>{
-    const keeper = openKeeper({ intervalMs: 5, capacity: 64 });
+    // No timer: every poll below is the test's own, so nothing here races a
+    // clock under load.
+    const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
     const journal = createJournal({ now: ()=>0, shared: true, capacity: 64 });
@@ -121,9 +112,8 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     journal.write(Level.WARN, 'call.cpu', 'two');
     journal.write(Level.INFO, 'boot', 'three');
     keeper.send({ type: 'attach', memory: { journal: journal.memory() }, sequenceBase: 0 });
+    await keeper.poll();
 
-    // The attach and the request travel in order, so the keeper has polled the
-    // block before it answers -- no clock is being raced here.
     assert.deepEqual((await keeper.ask('recent', [10])).map(/** @param {any} r */ r=>r.text),
         ['one', 'two', 'three']);
     const first = await keeper.ask('drain', [0, 10]);
@@ -143,6 +133,7 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     await keeper.ask('lost');
     journal.write(Level.INFO, 'boot', 'four');
     journal.write(Level.INFO, 'call.cpu', 'five');
+    await keeper.poll();
     const batch = await keeper.next(/** @param {any} m */ m=>
         m.type === 'records' && m.id === 7);
     assert.deepEqual(batch.records.map(/** @param {any} r */ r=>r.text), ['five']);
@@ -152,6 +143,7 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     await keeper.ask('lost');
     journal.write(Level.INFO, 'boot', 'six');
     journal.write(Level.ERROR, 'boot', 'seven');
+    await keeper.poll();
     const starred = await keeper.next(/** @param {any} m */ m=>
         m.type === 'records' && m.id === 8);
     assert.deepEqual(starred.records.map(/** @param {any} r */ r=>r.text), ['seven']);
@@ -162,19 +154,45 @@ test('the keeper answers reads and hands subscribers their batches', async t=>{
     keeper.send({ type: 'unsubscribe', id: 7 });
     const before = keeper.messages.length;
     journal.write(Level.INFO, 'call.cpu', 'eight');
-    await until(async()=>(await keeper.ask('recent', [10]))
-        .some(/** @param {any} r */ r=>r.text === 'eight'));
+    await keeper.poll();
+    assert.ok((await keeper.ask('recent', [10]))
+        .some(/** @param {any} r */ r=>r.text === 'eight'), 'the history kept the last write');
     assert.equal(keeper.messages.slice(before).filter(/** @param {any} m */ m=>
         m.type === 'records' && m.id === 7).length, 0, 'nothing was delivered to it');
 });
 
+test('a read catches the current block up, so a tail since the last poll is not missed', async t=>{
+    const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
+    t.after(()=>keeper.stop());
+
+    const journal = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    journal.write(Level.INFO, 'boot', 'one');
+    keeper.send({ type: 'attach', memory: { journal: journal.memory() }, sequenceBase: 0 });
+    await keeper.poll();
+
+    // The program writes its last lines and exits; no poll runs for them. A
+    // read is the last look, so it must see them without a timer.
+    journal.write(Level.INFO, 'boot', 'crash-a');
+    journal.write(Level.ERROR, 'boot', 'crash-b');
+
+    const tail = await keeper.ask('recent', [10]);
+    assert.deepEqual(tail.map(/** @param {any} r */ r=>r.text),
+        ['one', 'crash-a', 'crash-b']);
+
+    const drained = await keeper.ask('drain', [0, 10]);
+    assert.deepEqual(drained.records.map(/** @param {any} r */ r=>r.text),
+        ['one', 'crash-a', 'crash-b']);
+    assert.equal(drained.lost, 0);
+});
+
 test('a second block attached continues the first, and a cursor from it resolves', async t=>{
-    const keeper = openKeeper({ intervalMs: 5, capacity: 64 });
+    const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
     const first = createJournal({ now: ()=>0, shared: true, capacity: 64 });
     first.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: first.memory() }, sequenceBase: 0 });
+    await keeper.poll();
     /** A cursor a live view would be holding before the handover. */
     const cursor = 0;
     const base = first.diagnostics().written;
@@ -186,6 +204,7 @@ test('a second block attached continues the first, and a cursor from it resolves
     assert.equal(base, 1);
 
     keeper.send({ type: 'attach', memory: { journal: second.memory() }, sequenceBase: base });
+    await keeper.poll();
 
     const across = await keeper.ask('drain', [cursor, 100]);
     assert.deepEqual(across.records.map(/** @param {any} r */ r=>[r.sequence, r.text]),

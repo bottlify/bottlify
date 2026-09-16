@@ -93,7 +93,7 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 | place | what it does |
 |---|---|
 | **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, relays the log between the caller and the keeper, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
-| **The log keeper** (`src/host/log.worker.js` → `src/host/keeper.js`) | Owns the log. Handed the journal's block, it polls it before the ring laps, keeps the history, works out the frames, the profile and the module attribution, and answers the page's reads. A process replacement hands it the next block rather than restarting it. The page's thread never keeps the log. |
+| **The log keeper** (`src/host/log.worker.js` → `src/host/keeper.js`) | Owns the log. Handed the journal's block, it polls it before the ring laps, keeps the history, works out the frames, the profile and the module attribution, and answers the page's reads. A `recent` or `drain` read polls the block first, so a tail right after an exit is not a tick stale. A process replacement hands it the next block rather than restarting it. The page's thread never keeps the log. |
 | **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the emulator, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
 | **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | The `bottlify-output` `AudioWorkletProcessor` reads the ring in shared memory; its read index is what a program's play cursor is built on when `audio.drained` is true. |
 
@@ -175,7 +175,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
 | `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |
-| `log.recent(count?)`, `log.drain(since?, limit?)` | `Promise` | Answered by the keeper out of its history, which spans a process replacement. A drain's `lost` counts every sequence asked for that cannot be handed over. |
+| `log.recent(count?)`, `log.drain(since?, limit?)` | `Promise` | Answered by the keeper out of its history, which spans a process replacement. Each polls the current block first, so a read right after an exit sees the tail. A drain's `lost` counts every sequence asked for that cannot be handed over. |
 | `log.frames(count?)`, `log.profile(worst?)` | `Promise` | The keeper's derived views of the profiler's frame and phase tables. |
 | `log.counters(layer)`, `log.threads()`, `log.guestByModule()` | `Promise` | A layer's counters as a record; the kernel's thread table with its names resolved; retired instructions summed by the region each page is in, heaviest first. |
 | `log.table(layer, name)`, `log.word(id)` | `Promise` | A published table as the keeper read it — a snapshot of its rows, not a live buffer — and what a name id in one means. |
