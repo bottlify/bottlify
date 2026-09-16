@@ -248,6 +248,9 @@ export const graphicsModule = {
                 backend: api.backend(),
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
+                // A lock of a render target brings its pixels back into the
+                // guest's bytes before the pointer is handed out.
+                writeMemory: services.writeMemory,
                 createSampler: (/** @type {any} */ descriptor)=>
                     device.device.createSampler(descriptor),
                 // Where a locked surface or buffer's bytes live. It has to be
@@ -288,6 +291,10 @@ export const graphicsModule = {
                     ?? device?.device?.features?.has('texture-compression-bc') === true,
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
+                // The copies between surfaces (UpdateSurface, StretchRect,
+                // GetRenderTargetData) move bytes only through this; the
+                // seam makes none of them itself.
+                writeMemory: services.writeMemory,
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,

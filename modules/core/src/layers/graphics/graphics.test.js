@@ -86,6 +86,39 @@ test('the backend is built once, on first use', async()=>{
     await graphicsModule.dispose();
 });
 
+test('a Direct3D 9 object made by the module can write guest memory', async()=>{
+    // UpdateSurface, StretchRect and GetRenderTargetData describe their moves
+    // and make them only when the device can write guest memory; the seam
+    // makes none of them itself. A factory that forgets the writer hands out
+    // a device whose every copy succeeds and moves nothing.
+    /** @type {{ address: number, bytes: Uint8Array }[]} */
+    const writes = [];
+    const memory = {
+        readBytes: (/** @type {number} */ _address, /** @type {number} */ length)=>
+            new Uint8Array(length).fill(7),
+        writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            writes.push({ address, bytes }),
+    };
+    const api = await graphicsModule.create({ allocate: ()=>0x1000 }, hostWith(memory));
+    const d3d9 = api.create('d3d9');
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d9.CreateDevice({
+        backBufferWidth: 4, backBufferHeight: 4, backBufferFormat: 0x16, backBufferCount: 1,
+        swapEffect: 1,
+    }, out), 0);
+    /** @type {{ surface?: any }} */
+    const source = {};
+    assert.equal(out.device.CreateOffscreenPlainSurface(4, 4, 0x16, 2, source), 0);
+    /** @type {{ surface?: any }} */
+    const destination = {};
+    assert.equal(out.device.CreateOffscreenPlainSurface(4, 4, 0x16, 0, destination), 0);
+    assert.equal(out.device.UpdateSurface(source.surface, null, destination.surface, null), 0);
+    assert.ok(writes.length > 0, 'the copy wrote guest memory');
+    assert.equal(writes[0].bytes[0], 7, 'with the source\'s bytes');
+    await graphicsModule.dispose();
+});
+
 test('the adapter\'s block-compression capability reaches a Direct3D 9 device', async()=>{
     // The launcher asks its adapter for block compression, because the art of
     // this era is DXT (host/serve.js). Direct3D 9 put the question in
