@@ -335,8 +335,8 @@ the first one's history and poll are gone with it.
   the engine in a worker, the pump's self time was 921 ms of a 186 s run (0.5 %, 11 µs a turn); a
   device drawing under one percent of the thread is not what to move first. The seam a split would
   need — buffer writes copied into a block the audio worker owns, cursors in a shared control block
-  read with `Atomics` — is recorded in `roadmap/registers/decisions-and-optimisations.md` (B12) and
-  waits for a measurement that says the pump has become material.
+  read with `Atomics` — is recorded in `roadmap/decisions.md` (B12) and waits for a measurement
+  that says the pump has become material.
 - **`pacing: 'event'` is slower today** (section 6).
 - **The engine's shared-memory signal needs a cross-origin-isolated page.** Without
   `SharedArrayBuffer` the worker still runs; a message waits for the next timed yield, at most

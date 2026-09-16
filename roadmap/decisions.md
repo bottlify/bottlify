@@ -1,0 +1,328 @@
+# Decisions
+
+Behaviour this project chose rather than derived from a specification, plus the handful of
+standing rules that came out of measuring a real title rather than reading code. Bottlify is under
+no obligation to match any particular reimplementation of Windows: what a program observes is the
+contract, and where no published expectation exists, or a different answer serves this engine
+better, that is a choice — defended here on its merits, revisited when something argues against
+it. A bug is not a decision; a bug goes in the code and gets fixed, and an open one is tracked in
+`roadmap/00-TODO-list.md`.
+
+Each entry is dated to the commit that made the call (or, where a later commit corrected it, both).
+Nothing here is rewritten to say something different than what was actually decided; a decision
+later reconsidered is recorded as reconsidered.
+
+## A. Win32, COM and the loader
+
+**A1 — DirectDraw refuses a 15- or 24-bit display mode.** `SetDisplayMode` answers
+`DDERR_INVALIDMODE` for 15 and 24 bpp; there is no conformance expectation either way, and this
+layer has no three-byte pixel path to create such a surface with. Revisit if a title is found that
+treats the refusal as fatal. *2026-09-07, `94e7f597`.*
+
+**A2 — This build announces itself as hardware, with transform and lighting.** `GetCaps` reports a
+real 3D hardware device (plus a software rasteriser and a T&L device, in that enumeration order)
+because there is a real GPU underneath and programs of this era branch on the claim — an
+emulation-only enumeration reads as "no accelerator" and sends them into software rendering or a
+refusal. A capability bit claimed here is a promise the renderer has to honour, so this grows only
+as the renderer does. *2026-09-07, `94e7f597`.*
+
+**A3 — `_allmul`/`_alldiv`/`_allrem`/`_aulldiv`/`_aullrem` pop their own 16 argument bytes
+(stdcall), against a published spec that calls them cdecl.** The spec's own C implementation is
+declared `WINAPI`, and real compiled call sites emit four pushes with no cleanup after — two
+sources against one, so the spec is the one not believed. If this is ever wrong the symptom is a
+stack skewed by 16 bytes with nothing pointing at the cause; remove all five rather than adjust
+them if it is ever suspected. *2026-09-07, `94e7f597`.*
+
+**A4 — `_allshl`/`_allshr`/`_aullshr` are not exported at all**, rather than shipped as a wrong
+shift: the trap stub already overwrites the operand before any handler runs, so a shift of "the
+stub left behind" is worse than an unresolved import. A save-before-trap variant is the known fix,
+worth building the day a program actually imports them. *2026-09-07, `94e7f597`.*
+
+**A5 — `SYSTEM_BASIC_INFORMATION`'s timer resolution is a plausible 15.625 ms, not a measured
+one** — there is no periodic interrupt here to measure with. Revisit once there is one.
+*2026-09-07, `94e7f597`.*
+
+**A6 — ANSI→Unicode widening in ntdll ignores the code page** (byte-for-byte, correct only below
+0x80). `kernel32/locale.js` already has a real single-byte decoder that isn't threaded through yet.
+*2026-09-07, `94e7f597`.*
+
+**A7 — Only `SystemBasicInformation` and `ProcessBasicInformation`/`ProcessDebugPort` are
+answered**; every other information class is refused with a status rather than filled with
+invented numbers. A refusal is a message; a fabricated structure is a wrong answer that propagates.
+*2026-09-07, `94e7f597`.*
+
+**A8 — There is one user, called "User".** `GetUserNameA` answers a constant because there is one
+account and no way to become another; it exists at all because some programs refuse to start
+without a name. *2026-09-07, `94e7f597`.*
+
+**A9 — The boot ROM installs thirty-two interrupt vectors, not two hundred and fifty-six.** A full
+table was tried and reverted: a vector fired during protected-mode entry and landed in a halting
+stub, which reads as a hang — worse than a loud refusal. *2026-09-07, `94e7f597`.*
+
+**A10 — Direct3D 7's format and capability lists are narrower than the era's hardware, on
+purpose.** `EnumTextureFormats`/`EnumZBufferFormats` name only what the renderer implements, and
+`d3d7/caps.js` claims only the cull modes, compares, blends, stage ops, filters and address modes
+the pipeline actually has — no fog, stencil, lighting, bump mapping, cube maps or W-buffer. A
+capability bit is a promise; claiming one the renderer can't honour sends a program down a fast
+path to a wrong picture instead of a slow path to a right one. Grows only when the renderer grows.
+*2026-09-07, `765d7866`.*
+
+**A11 — Direct3D 8 refuses shaders, cube maps, volume textures, palettes, extra swap chains, the
+hardware cursor, `GetFrontBuffer` and `ProcessVertices`, rather than pretending to support them**
+— the same A10 rule. The sharpest case is shaders: the renderer skips any draw with one bound, so
+accepting `CreateVertexShader` would put a program on a path where every draw silently vanishes.
+Multisampling is accepted and silently dropped everywhere (aesthetic, not structural); the gamma
+ramp and clip planes are stored state with no effect and report zero capability so a checking
+program is told the truth. `GetDeviceCaps` still writes an almost entirely zero `D3DCAPS8` —
+known and unfixed, contradicts A2 for a program that branches on it. *2026-09-07, `ea288f16`.*
+
+**A12 — Every COM interface method in this engine is stdcall, with the interface pointer first on
+the stack — not thiscall.** Established against real compiled binaries: twelve call sites read
+instruction-by-instruction across five images, plus a census where two COM-only libraries show 24
+and 30 stack-passed call sites and zero register-passed ones, against the same binaries emitting
+thousands of register-form calls for their own C++ virtual calls. This corrected an earlier wrong
+assumption that no test caught, because the harness's own vtables agreed with the mistake — a
+convention is not verified by a test written against the same assumption. `Convention.THISCALL`
+is kept, unused, only because a `msvcp` C++ runtime on the porting list genuinely needs it one day.
+*2026-09-07, `ea288f16`.*
+
+**A13 — A loaded image's whole file stays in host memory, for its resources.** Without it a
+library's strings, icons, dialogs, menus and version info answer nothing, since a resource is read
+from the file rather than the mapping. Known cost: a large title's twenty libraries hold tens of
+megabytes host-side for the process's life. The alternative — re-reading from the volume per
+resource call — costs a guest-thread wait, which this project ranks above memory. Revisit only
+with a measurement that says memory matters more. *2026-09-07, `ea288f16`.*
+
+**A15 — `DllMain`'s third argument is 1 (only its non-nullness is contractual) for a program-import
+load, and would be NULL for `LoadLibrary`.** A real library's archive code built its hash table
+twice — once for itself, once (wrongly) for the dynamic-load path — when told the wrong thing,
+silently corrupting every later lookup. `DLL_PROCESS_DETACH` carries the same distinction and will
+matter once detach is implemented. *2026-09-08, `43aad592`.*
+
+**A16 — A named Win32 object (event, mutex) is destroyed, and its name released, when its last
+handle closes** — checked on every named create, not cached. Needed for the create-check-close-
+create-again single-instance idiom to work at all. *2026-09-08, `43aad592`.*
+
+**A17 — `VirtualAlloc` places a reservation on a 64 KiB boundary**, matching the granularity
+`GetSystemInfo` reports, because an allocator that recovers its segment from the top bits of a
+page-aligned base corrupts silently if handed a merely page-aligned one. Costs address space, the
+resource this engine has most of. *2026-09-08, `43aad592`.*
+
+**A18 — A device's cursor advances on the run loop's own clock, not only when the guest calls
+in.** A program is entitled to hand a buffer to a wave device and spin on its `WHDR_DONE` flag
+without ever polling an API — measured at 80% of one real title's instructions sitting on that
+spin. Generalised: anything a guest can wait on without making a call has to be driven from the
+scheduler. *2026-09-08, `33c69c47`.*
+
+**A19 — A COM method receives its arguments with the `this` pointer already stripped** —
+`bridge/internal/vtable.js`'s own contract. Two seams (DirectSound, DirectInput) were written as
+though it hadn't been, reading every argument one slot late, and their own test fixtures agreed
+with the bug instead of the bridge. Both now drive the real vtable publisher by slot number rather
+than a stand-in. *2026-09-08, `33c69c47`.*
+
+**A20 — DirectShow answers, and answers that it cannot render** (`RenderFile` →
+`VFW_E_CANNOT_RENDER`, `Run` queues `EC_ERRORABORT`) rather than hiding the file so the program
+never asks. A program that plays a cinematic sits in a modal loop until the graph reports an
+outcome; with no graph and no error, that loop never exits. *2026-09-08, `33c69c47`.*
+
+**A21 — The guest's clock is credited with the wall time a slice actually took, not just the
+slices the guest ran.** Everything between two slices — the yield, the mix, the polls — used to
+pass on the wall clock without moving virtual time, so a device paced by that clock (a
+`DirectSound` cursor) never finished a buffer for a title that spins on it instead of waiting.
+Capped at a quarter second so a genuine stall (a fetch, a hidden tab) isn't handed to the program
+as time it spent. *2026-09-08, `33f251d6`.*
+
+**A22 — `WM_CREATE` is sent when a window is made; `WM_NCCREATE` deliberately is not.** A window
+procedure does its real setup in `WM_CREATE`; without it a window looks real and does nothing.
+`WM_NCCREATE` would mean running guest code twice from one host call, with the second starting
+while the first unwinds — left out until a program is seen to need it. *2026-09-08, `33f251d6`.*
+
+**A23 — `DefWindowProc` does nothing with `WM_DESTROY`**, rather than posting a quit. Windows
+programs destroy windows constantly (dialogs, tooltips, splash screens) and pass `WM_DESTROY` to
+the default handler with nothing to add; posting a quit there ended the whole process on every one
+of those. Ending the message loop is the main window's own `PostQuitMessage` call. *2026-09-08,
+`33f251d6`.*
+
+**A24 — `SetTimer` makes a real timer, due against the guest's own clock, and `WM_TIMER` is
+synthesised when a program asks for a message and finds nothing else** — the way Windows does it,
+so a long handler doesn't leave a backlog. Refusing outright, tried first, is indefensible once
+there is a clock to be due against. *2026-09-08, `33f251d6`.*
+
+**A25 — A DirectShow graph with nothing to play finishes at once (`EC_COMPLETE`), rather than
+`RenderFile` refusing outright.** A program checking `RenderFile`, releasing the graph it can't use
+and arming its own caption timer unconditionally then dereferences a pointer it already freed —
+refusing correctly still crashes it. An empty graph takes the same "finished" path a real film
+does. *2026-09-08, `33f251d6`.*
+
+**A26 — A thread handle is waitable: `WaitForSingleObject` treats a thread as an object that
+signals once and stays signalled on ending**, nothing taken from it so a second join doesn't hang
+forever. *2026-09-08, `33f251d6`.*
+
+**A27 — Every field a structure declares gets written, never a partial table of "the fields anyone
+fills in."** `D3DCAPS8` was tabulated as a handful of fields and every one was in the wrong offset
+— the real maximum texture size landed on the repeat-limit field and read as zero, so a program
+halving a texture until it fit halved it forever (97% of one measured profile on that one
+instruction). A partial table is not a partial implementation; it's a wrong one. *2026-09-08,
+`33f251d6`.*
+
+**A28 — A Direct3D device's per-draw state (render state, transforms, stream/index sources, the
+vertex shader handle, buffer lock/unlock) lives in a guest-memory block the guest writes directly,
+and the host trusts none of it.** The block is one-way (guest writes it; host only mirrors its own
+state into it), untrusted (every device-method entry diffs the whole block against the host's copy
+and replays each difference through the real setter, so validation stays centralised), and counted
+(the block tallies what it absorbed so the saving is a measured number, not a belief). What the
+fast path can't do — an unknown state, a shader handle, a held lock, a full ring — still falls to
+the method's own trap. Measured on one title's menu; the block takes a dedicated memory page so
+writing it never evicts compiled guest code sitting next to the routines that write it. *2026-09-10,
+`109d90f6`.*
+
+## B. From measured optimisation work
+
+**B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
+decoder callbacks stay on the engine's own thread rather than moving to a second worker, for
+now.** A split needs the buffer *writes* copied into a block an audio worker owns (the emulator's
+wasm memory isn't shared) and cursors travelling back through an `Atomics`-readable control block —
+real work, not a refactor. Measured over 60 000 scheduler turns on a real title's menu: the pump's
+self time was 921 ms of a 186 s run, 0.5% of wall, 11 µs a turn — under one percent of the thread
+is not what to move first. Build the seam when a measurement says the pump has become material
+(many tracks, a resampler on each), not before. *2026-09-12, `30f81135`.*
+
+**A redistributable runtime is ours to reimplement, regardless of who shipped the copy.** The
+project's original rule — only Windows system libraries are reimplemented, everything a game ships
+is run as real x86 — is exactly right for a program's own code, but a profile of one title at its
+menu found 27.3% of the machine in a bundled MP3 decoder and 10.1% in its archive library, against
+0.2% in this engine's own thunks: a third of the machine decoding audio that then arrives at 60% of
+real time, heard as a broken stream, unfixable anywhere in the sound path because the path measured
+clean at every stage. **The decision:** a library is ours to reimplement when it is a
+redistributable runtime with a stable published API, whoever's copy it is — a middleware sound
+engine, a video codec, an archive library shipped in hundreds of titles is the same class of act as
+reimplementing DirectSound, and helps every title on that path (rule 4's own test). Safe because a
+decoder is a pure function (bytes in, samples/frames out, no state of the program's own) and the
+`media` layer already crossed this line for cinematics. What stays off-limits: the program's own
+code, and anything chosen by which title shipped it. A substituted runtime reports its divergence
+like any other, and is picked for what the target titles actually need. *2026-09-11, `d4fe29ac`.*
+
+**Uniform blocks live in one ring buffer, bound at a dynamic offset, rather than one buffer per
+draw.** Measured before: ~140 bind groups created per frame on a title's menu, none reused over
+100,000 draws, because a bind group is keyed on the buffers it names and every draw had its own.
+After: 71 groups created in total against 890,000 reuses — the cache now lives for the backend's
+life, not one pass. The ring wraps rather than growing; a write is ordered after every prior
+submit, so a wrap can only overwrite a finished frame's blocks. *2026-09-11, `dae4d203`.*
+
+**One hardware sampler serves every draw (linear, repeating); the Direct3D sampler state (address
+modes, filtering, mip mode) is carried in the uniform block and applied in the shader.** Traced on
+this project's own development adapter (Parallels' WDDM device through Dawn's D3D12 backend): a
+title's main-menu sky alternated between its cloud texture and a flat wash of its corner texel for
+seconds, and across dozens of controlled probes the sampler a draw *binds* on this device was
+provably not the sampler it *samples with* — switching every 51 frames regardless of frame rate, in
+no arrangement of bind groups. Address modes fold/hold the coordinate inside the outermost texel
+centres so the one repeating sampler can't blend across an edge; point filtering snaps to texel
+centres; mip level is chosen explicitly from derivatives taken beforehand. Costs a few operations
+per sample and three words in the block; doesn't cover anisotropy or border colour, neither seen
+in use by the target titles. *2026-09-11, `dae4d203`.*
+
+**A sound middleware's bundled MPEG (Layer 3) decoder is hosted as the ASI provider it loads by
+convention, decoding through WebCodecs, rather than run as emulated x86.** The redistributable
+scans a directory for `*.asi` files and calls the registered provider directly; run as guest code
+it took a fifth of the machine's retired instructions and delivered music in bursts. Three things
+learned only from the running middleware: the open-time size argument is its own 4 KiB read
+buffer (not the stream length); every read continues from the last stop, since a read naming an
+offset outside the held window was measured copying a negative count; a seek serves fresh from the
+named byte, dropping whatever was already held. Measured over 60s at the main menu: starved audio
+frames 0 vs 9091 (189 ms of invented silence) and engine frames 2007 vs 1232, with the shipped
+decoder gone from the guest's instruction share. *2026-09-11, `6717fb63`.*
+
+**The guest's clock is credited with all real time between two turns (not only slices the guest
+ran), and a DirectSound buffer is read out to its write cursor rather than only as far as its play
+cursor.** Measured: about a tenth of every block asked for came back empty (a constant crackle)
+while the ring never held more than a few hundred frames. The clock omission made a DirectSound
+buffer's play cursor fall behind the real device by the loop's own uncredited share; reading only
+to the play cursor meant a turn longer than one device block was a click. After both: no starved
+block once music started, ring holding 50–100 ms throughout. *2026-09-11, `0d2ad55b`.*
+
+**A zero-timeout wait is its own primitive — it takes what is ready and never queues the thread —
+rather than a wait with no time in it.** A stale queue entry from treating a poll as a real wait
+handed a later signal to a thread that had moved on to waiting on something else entirely; measured
+on a title whose sound-loader thread polled a completion event every loop pass and then waited on
+its own quit/data pair — the stale entry woke it with the wrong index, it read that as quit and
+exited, and every sound effect after that was requested and never loaded. *2026-09-11, `f54a8136`.*
+
+**A program's registry writes and its own file-based profile travel inside the session (packed
+under a name no real path can have), laid onto the mounted volume after the bundle is mounted, not
+before.** A title's options and profile name are registry values while its save profile is a file;
+carrying only files lost the registry half, and laying session files on *before* the bundle mount
+put a fresh writable layer over them, erasing a restored profile before the program's first
+instruction (which then cleared the registry value naming the now-missing file). Pinned by an
+integration test mounting a bundle over a session. *2026-09-11, `603384a1`.*
+
+**The package carries its own vendored emulator artifacts and ships built minified, without a
+source map.** `createApp` finds the module and its binary beside the built package unless a part
+is named to override it; the audio worklet ships as its own export since an audio thread loads it
+by URL rather than importing it. *2026-09-11, `603384a1`.*
+
+**Every COM interface gets one shared table of stubs, keyed by the method list's identity, with
+the object found from the interface pointer the call arrived on — not a table of stub slots per
+published object.** A title in a match published 1,216 objects into a table of 16,384 slots and
+exhausted it; every later publish was refused as "out of video memory," and the program's own
+retry-without-picture behaviour (white textures, remade every frame) ran the guest heap out too.
+After: 5,079 objects on 210 stubs, 1,606 slots in use, textures stable near 1,600, heap steady at
+168 MB. An object now costs two words (table pointer, state word). *2026-09-11, `17ef05ad`.*
+
+**A picture codec (JPEG) a program ships (`ijl15.dll`) is hosted by its export contract — six
+functions over one structure — the same rule as the MPEG provider.** The title's own inner loops
+(Huffman, inverse transform, colour planes) cost 5.7% of the guest's time in a match on top of the
+title's own code, with each texture arriving mid-fight on the frame's critical path. Two facts
+learned from the program's own memory rather than a header: the DIB pointer is the structure's
+second word with channel count before colour space on both sides, and rows deliver in the picture's
+own order for a positive height (an inverted delivery showed as upside-down atlas tiles). Checked
+byte-for-byte against the shipped textures decoded a second way. Measured: the library gone from
+the guest's share, 1,877 decodes of a map load costing 1.9 s of host time total. *2026-09-11,
+`79276f0a`.*
+
+**A ready thread's turn is chosen by priority the way Windows composes it for a normal-class
+process** (base 8, moved by the seven values a normal process may set, `IDLE`→1, `TIME_CRITICAL`→
+15; equal-priority threads round-robin as before), **with starvation control (four seconds of
+guest time unserved outranks everything for one turn) and no wake boost.** `SetThreadPriority` had
+been accepted and silently ignored. Measured: a title's own streaming thread raises itself to
+`TIME_CRITICAL` when its sound library comes up; with priority honoured, the burst of stale
+(re-played) audio bytes right at the menu's first draws fell from 158–168 KB to 8.5–24 KB per cold
+start. No wake boost because the measurement never asked for one — a scheduling rule nobody can
+read back from a run is not worth having. *2026-09-12, `06603a5d`.*
+
+**A downloaded bundle block is never fetched again — cached under a bare filename the origin's
+file system actually accepts — and a demand miss brings in its whole 2 MiB-aligned window, not
+just the missed block.** The cache had been naming its files with a path separator, which the
+origin private file system refuses; the refusal was swallowed and it silently fell back to an
+in-memory store that nothing survives between starts, and the field reporting this (`backed:
+false`) was never read anywhere. After the fix plus the window-on-miss change: a warm second start
+issued zero range requests; across four cold starts, requests fell 38% for 60% more bytes fetched,
+because misses stopped being served one block at a time. A block-fetch order recorded per bundle
+(bounded to 4096 entries) lets the next start's background filler bring in what was actually
+demanded last time, first. *2026-09-12, `9683fc51`.*
+
+## C. Process model and porting
+
+**Process replacement, not two processes in one address space or two machines.** `CreateProcess`
+records a request; the parent keeps running; when it exits or waits on the child's handle, the
+engine tears the app down and rebuilds it on the child's image. The alternatives cost real things
+this project doesn't have a use for yet: two processes in one realm needs per-process handles,
+heap, module table, message queue and registry plus region release and image relocation (weeks,
+and still blocked behind "cpu: already booted"); two machines needs a second emulator and a
+cross-machine channel to model a launcher that often exits within milliseconds of spawning.
+Replacement gets the common case right at near-zero cost and, crucially, makes the classic
+`0x400000`-collision impossible rather than solving it, because there is only ever one image at
+that address. What it gives up: a parent that must run genuinely alongside its child (Battlefield
+2's installer is the concrete case — tracked as work, not solved by this design).
+`CREATE_SUSPENDED`+`WriteProcessMemory`+`ResumeThread` is handled as deferral: writes into a
+suspended child are recorded as patches against an image that doesn't exist yet, and replayed once
+it is mapped — no cross-process memory needed. *2026-09-07, `c3e8db9b`; built `2026-09-08`,
+`6bb72c18`.*
+
+**Only Windows system libraries are reimplemented; a redistributable middleware runtime is ours to
+reimplement too (§B above); anything else a game ships in its own directory is loaded and run as
+real x86.** `mss32`, `bass`, `openal`, `a3d`, `binkw32`, `smackw32`, `glide2x`, `galaxy` are
+therefore read only for knowledge, never implemented. `d3dx9` is the one case with a third option:
+the engine ships the June 2010 DirectX End-User Runtime as a read-only system volume and the
+loader runs the real `d3dx9_24…43.dll` from it whenever a program doesn't bring its own; the
+engine's own `d3dx9_25`/`26`/`27` stub tables (`layers/win32/d3dx9/`) still answer a program that
+ships neither — the fallback now, not the primary path. *2026-09-07, `42e8e9bc`.*

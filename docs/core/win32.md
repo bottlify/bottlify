@@ -119,7 +119,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 33 each | One socket registry under both names, over an injected adapter (loopback by default). |
 | `SHELL32.dll` | `shell32/` | 21 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
 | `COMCTL32.dll` | `comctl32/` | 17 | Image lists (indices only), mouse tracking, and `msctls_progress32`/`SysTreeView32` as built-in window classes. |
-| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`porting.md`](../../roadmap/registers/porting.md)). |
+| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`decisions.md`](../../roadmap/decisions.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
 | `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
 | `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
