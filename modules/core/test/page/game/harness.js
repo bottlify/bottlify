@@ -548,7 +548,7 @@ function listen(app, collected){
     });
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
-        'bundle', 'bundle-unavailable'])
+        'bundle', 'bundle-unavailable', 'divergence'])
     {
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
@@ -626,6 +626,9 @@ function scalars(layers){
  *     megabytes, more than one evaluation carries back, so the driver asks
  *     repeatedly until it is told there is no more.
  * @property {() => number} logLines
+ * @property {() => boolean} clearLog
+ *     Drops what the call log holds, so a window measured after it is the
+ *     window's own calls rather than whatever filled the cap getting there.
  * @property {() => string} frameReport
  *     Where a frame's time goes, asked while the run is still going. A report
  *     at the end of a run answers what a whole run cost; this answers what one
@@ -1106,6 +1109,13 @@ export function createHarness(canvas, how = {}){
         run,
         drainLog: (from, count)=>callLog.slice(from, from + count).join(NEWLINE),
         logLines: ()=>callLog.length,
+        // A window measured by holding a view still wants the calls that view
+        // made, not the calls that got there -- the cap is a count of lines,
+        // not of time, and a loading screen alone can spend it.
+        clearLog: ()=>{
+            callLog.length = 0;
+            return true;
+        },
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
         exactRestart: ()=>{
             // The sampled account is cleared with the emulator's own, so a

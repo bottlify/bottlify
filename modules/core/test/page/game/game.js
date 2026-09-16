@@ -132,6 +132,10 @@ if (inWorker)
     namespace.frameReport = ()=>ask('frameReport');
     namespace.exactRestart = ()=>ask('exactRestart');
     namespace.exactStop = ()=>ask('exactStop');
+    namespace.clearLog = ()=>{
+        callLog.length = 0;
+        return ask('clearLog');
+    };
     out.textContent = 'starting the engine in a worker';
 }
 else
@@ -143,6 +147,7 @@ else
     namespace.frameReport = harness.frameReport;
     namespace.exactRestart = harness.exactRestart;
     namespace.exactStop = harness.exactStop;
+    namespace.clearLog = harness.clearLog;
     namespace.errors = harness.errors;
 
     /**

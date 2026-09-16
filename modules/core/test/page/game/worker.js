@@ -112,6 +112,11 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.exactStop() ?? false });
             break;
+        case 'clearLog':
+            sentLines = 0;
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.clearLog() ?? false });
+            break;
         default:
             break;
     }
