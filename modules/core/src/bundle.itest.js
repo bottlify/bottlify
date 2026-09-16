@@ -74,83 +74,83 @@ async function bundleWith(contents, filler = 300 * 1024){
     };
 }
 
-test('a program reads a file out of a bundle, fetching only what it touches', async()=>{
-    const source = await bundleWith(PLANTED);
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
+test('a program reads a file out of a bundle, fetching only what it touches',
+    { timeout: 30000 }, async t=>{
+        const source = await bundleWith(PLANTED);
+        t.after(()=>source.cleanup());
+        const [wasm, exe] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(FIXTURE),
+        ]);
 
-    const app = await createApp({
-        executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-        // Mounted at the root rather than in an installation directory: this
-        // fixture asks for an absolute path, and what is under test here is the
-        // transport -- a read that misses, waits for its block and is retried
-        // -- not where a bundle is mounted.
-        bundle: { fetch: source.fetch, prefix: '' },
+        const app = await createApp({
+            executable: new Uint8Array(exe),
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+            // Mounted at the root rather than in an installation directory: this
+            // fixture asks for an absolute path, and what is under test here is
+            // the transport -- a read that misses, waits for its block and is
+            // retried -- not where a bundle is mounted.
+            bundle: { fetch: source.fetch, prefix: '' },
+        });
+        t.after(()=>app.dispose());
+
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
+
+        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+
+        assert.equal(exitCode, 0);
+        assert.equal(printed, PLANTED,
+            'the bytes came out of the bundle, through a read that had to wait for them');
+
+        // A miss brings the window around it rather than the block alone, so
+        // what bounds a read of an eight-byte file is the window and not the
+        // bundle: a fixture smaller than one window is fetched whole and that
+        // is correct. What must not happen is a second window for one small
+        // read, or a request for a range nothing asked about.
+        assert.ok(source.fetched.bytes <= READ_AHEAD_BYTES + BLOCK_SIZE,
+            `one window at most was fetched (${source.fetched.bytes} for a window of`
+            + ` ${READ_AHEAD_BYTES})`);
+        assert.ok(source.fetched.calls <= 4,
+            `a handful of requests brought it in (${source.fetched.calls})`);
     });
 
-    let printed = '';
-    app.on('output', (/** @type {any} */ payload)=>{
-        printed += payload.text;
+test('what the bundle holds is visible to the program, and stays read-only',
+    { timeout: 30000 }, async t=>{
+        const source = await bundleWith(PLANTED);
+        t.after(()=>source.cleanup());
+        const [wasm, exe] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(FIXTURE),
+        ]);
+
+        const app = await createApp({
+            executable: new Uint8Array(exe),
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+            // Mounted at the root rather than in an installation directory: this
+            // fixture asks for an absolute path, and what is under test here is
+            // the transport -- a read that misses, waits for its block and is
+            // retried -- not where a bundle is mounted.
+            bundle: { fetch: source.fetch, prefix: '' },
+        });
+        t.after(()=>app.dispose());
+
+        await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+
+        // The fixture writes the file after reading it. What it wrote belongs
+        // to the session; the bundle underneath is untouched, which is what
+        // makes a bundle cacheable by content and shareable between players.
+        const session = app.session.export();
+        assert.deepEqual(session.map((/** @type {any} */ file)=>file.path), ['C:\\save.dat']);
     });
-
-    const exitCode = await app.run({ maxTurns: 20000 });
-    await app.dispose();
-
-    assert.equal(exitCode, 0);
-    assert.equal(printed, PLANTED,
-        'the bytes came out of the bundle, through a read that had to wait for them');
-
-    // A miss brings the window around it rather than the block alone, so what
-    // bounds a read of an eight-byte file is the window and not the bundle: a
-    // fixture smaller than one window is fetched whole and that is correct.
-    // What must not happen is a second window for one small read, or a request
-    // for a range nothing asked about.
-    assert.ok(source.fetched.bytes <= READ_AHEAD_BYTES + BLOCK_SIZE,
-        `one window at most was fetched (${source.fetched.bytes} for a window of`
-        + ` ${READ_AHEAD_BYTES})`);
-    assert.ok(source.fetched.calls <= 4,
-        `a handful of requests brought it in (${source.fetched.calls})`);
-
-    await source.cleanup();
-});
-
-test('what the bundle holds is visible to the program, and stays read-only', async()=>{
-    const source = await bundleWith(PLANTED);
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
-
-    const app = await createApp({
-        executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-        // Mounted at the root rather than in an installation directory: this
-        // fixture asks for an absolute path, and what is under test here is the
-        // transport -- a read that misses, waits for its block and is retried
-        // -- not where a bundle is mounted.
-        bundle: { fetch: source.fetch, prefix: '' },
-    });
-
-    await app.run({ maxTurns: 20000 });
-
-    // The fixture writes the file after reading it. What it wrote belongs to the
-    // session; the bundle underneath is untouched, which is what makes a bundle
-    // cacheable by content and shareable between players.
-    const session = app.session.export();
-    assert.deepEqual(session.map((/** @type {any} */ file)=>file.path), ['C:\\save.dat']);
-
-    await app.dispose();
-    await source.cleanup();
-});
 
 /**
  * Somewhere to keep blocks, over ordinary buffers. Node has no OPFS, so without
@@ -195,34 +195,34 @@ function fakeStore(){
     };
 }
 
-test('a session arriving from outside lands on the volume the bundle is mounted on', async()=>{
-    // The bundle mount puts a fresh writable layer over the bundle. A session
-    // laid down before it went with the layer that was replaced: a program's
-    // saved profile was written faithfully, kept faithfully, and never seen
-    // again on the next start.
-    const source = await bundleWith(PLANTED);
-    const [wasm, exe] = await Promise.all([
-        readFile(new URL('v86.wasm', PREBUILT)),
-        readFile(FIXTURE),
-    ]);
-    const kept = { path: 'C:\\Save\\profile.w3p', bytes: new Uint8Array([1, 2, 3]) };
+test('a session arriving from outside lands on the volume the bundle is mounted on',
+    { timeout: 30000 }, async t=>{
+        // The bundle mount puts a fresh writable layer over the bundle. A
+        // session laid down before it went with the layer that was replaced: a
+        // program's saved profile was written faithfully, kept faithfully, and
+        // never seen again on the next start.
+        const source = await bundleWith(PLANTED);
+        t.after(()=>source.cleanup());
+        const [wasm, exe] = await Promise.all([
+            readFile(new URL('v86.wasm', PREBUILT)),
+            readFile(FIXTURE),
+        ]);
+        const kept = { path: 'C:\\Save\\profile.w3p', bytes: new Uint8Array([1, 2, 3]) };
 
-    const app = await createApp({
-        executable: new Uint8Array(exe),
-        v86: {
-            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
-            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
-        },
-        bundle: { fetch: source.fetch, prefix: '' },
-        storage: { load: async()=>({ files: [kept], registry: null }) },
+        const app = await createApp({
+            executable: new Uint8Array(exe),
+            v86: {
+                moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+                wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+            },
+            bundle: { fetch: source.fetch, prefix: '' },
+            storage: { load: async()=>({ files: [kept], registry: null }) },
+        });
+        t.after(()=>app.dispose());
+
+        const paths = app.session.export().map((/** @type {any} */ file)=>file.path);
+        assert.ok(paths.includes(kept.path), `the session's file is on the volume: ${paths}`);
     });
-
-    const paths = app.session.export().map((/** @type {any} */ file)=>file.path);
-    assert.ok(paths.includes(kept.path), `the session's file is on the volume: ${paths}`);
-
-    await app.dispose();
-    await source.cleanup();
-});
 
 test('what the program never read is fetched anyway, in the gaps', { timeout: 120000 }, async t=>{
     // The fixture reads save.dat and nothing else. Data\big.bin is

@@ -91,7 +91,7 @@ function buildSelfLoadExe(){
 }
 
 test('a program that names its own image gets the one it runs from, exports included',
-    async t=>{
+    { timeout: 15000 }, async t=>{
         const wasm = await readFile(new URL('v86.wasm', PREBUILT));
         const app = await createApp({
             executable: buildSelfLoadExe(),

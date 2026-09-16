@@ -47,29 +47,41 @@ async function startApp(){
  *
  * The program reports its result as four raw bytes rather than formatted text,
  * so a wrong answer says what it actually was instead of just failing to match.
+ *
+ * Disposes before returning, success or failure: the machine is one per
+ * process, and a caller that runs this in a loop needs the previous one gone
+ * before the next `createApp` -- a second machine boots onto the same
+ * process-wide state and fails with "already booted", so waiting for the test
+ * to end to dispose (a `t.after`) is too late here.
  */
 async function runFixture(){
     const app = await startApp();
-    /** @type {number[]} */
-    const bytes = [];
-    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>{
-        for (const character of text)
-        {
-            bytes.push(character.charCodeAt(0));
-        }
-    });
+    try
+    {
+        /** @type {number[]} */
+        const bytes = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>{
+            for (const character of text)
+            {
+                bytes.push(character.charCodeAt(0));
+            }
+        });
 
-    const exitCode = await app.run();
-    const total = bytes.length >= 4
-        ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
-        : null;
+        const exitCode = await app.run({ timeoutMs: 8000 });
+        const total = bytes.length >= 4
+            ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
+            : null;
 
-    const diagnostics = app.diagnostics();
-    await app.dispose();
-    return { total, exitCode, diagnostics };
+        const diagnostics = app.diagnostics();
+        return { total, exitCode, diagnostics };
+    }
+    finally
+    {
+        await app.dispose();
+    }
 }
 
-test('two threads contending on a mutex produce the Windows answer', async()=>{
+test('two threads contending on a mutex produce the Windows answer', { timeout: 15000 }, async()=>{
     const { total, exitCode } = await runFixture();
 
     assert.equal(total, EXPECTED_TOTAL,
@@ -77,7 +89,7 @@ test('two threads contending on a mutex produce the Windows answer', async()=>{
     assert.equal(exitCode, 0);
 });
 
-test('the threads really did run, and really did take turns', async()=>{
+test('the threads really did run, and really did take turns', { timeout: 15000 }, async()=>{
     const { diagnostics } = await runFixture();
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
@@ -103,7 +115,7 @@ test('the threads really did run, and really did take turns', async()=>{
         `guest time advanced (${byName.kernel.metrics.time.virtualMs} ms)`);
 });
 
-test('the answer is the same every time', async()=>{
+test('the answer is the same every time', { timeout: 90000 }, async()=>{
     // Determinism is the actual acceptance criterion: a scheduler that is right
     // only sometimes is not right. Ten runs rather than a hundred keeps the test
     // honest about cost -- each one boots a fresh emulator.

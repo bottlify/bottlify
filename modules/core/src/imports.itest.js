@@ -94,33 +94,35 @@ async function startApp(t){
     return app;
 }
 
-test('every import nothing claims is reported at load, before anything runs', async t=>{
-    const app = await startApp(t);
-    assert.deepEqual(app.image.unresolved, [
-        `KERNEL32.dll!${DECORATED}`, `KERNEL32.dll!${STDCALL}`, `msvcrt.dll!${CDECL}`,
-    ]);
-});
+test('every import nothing claims is reported at load, before anything runs',
+    { timeout: 15000 }, async t=>{
+        const app = await startApp(t);
+        assert.deepEqual(app.image.unresolved, [
+            `KERNEL32.dll!${DECORATED}`, `KERNEL32.dll!${STDCALL}`, `msvcrt.dll!${CDECL}`,
+        ]);
+    });
 
-test('a decorated and a cdecl stub answer zero, stack intact; a stdcall one stops', async t=>{
-    const app = await startApp(t);
-    /** @type {string[]} */
-    const called = [];
-    app.on('unimplemented', (/** @type {any} */ e)=>called.push(`${e.origin}:${e.import}`));
+test('a decorated and a cdecl stub answer zero, stack intact; a stdcall one stops',
+    { timeout: 15000 }, async t=>{
+        const app = await startApp(t);
+        /** @type {string[]} */
+        const called = [];
+        app.on('unimplemented', (/** @type {any} */ e)=>called.push(`${e.origin}:${e.import}`));
 
-    await assert.rejects(app.run({ timeoutMs: 8000 }), (/** @type {any} */ e)=>{
-        assert.equal(e.reason, 'guest-fault', e.message);
-        assert.match(e.message, new RegExp(
-            `^unimplemented import KERNEL32\\.dll!${STDCALL}, called from 0x0040103[0-9a-f]`
+        await assert.rejects(app.run({ timeoutMs: 8000 }), (/** @type {any} */ e)=>{
+            assert.equal(e.reason, 'guest-fault', e.message);
+            assert.match(e.message, new RegExp(
+                `^unimplemented import KERNEL32\\.dll!${STDCALL}, called from 0x0040103[0-9a-f]`
             + ' image\\+0x0000103[0-9a-f] \\(rva 0x0000103[0-9a-f]\\);'
             + ' argument bytes unknown, the stack holds 0x00000011 0x00000022 '));
-        assert.match(e.traceText, /^at 0x0040103[0-9a-f] image\+/, 'the report is at the caller');
-        return true;
+            assert.match(e.traceText, /^at 0x0040103[0-9a-f] image\+/, 'the report is at the caller');
+            return true;
+        });
+        // The two that returned were reached and answered; the guest's own checks
+        // passed, or the run would have ended in ExitProcess(1) instead of here.
+        assert.deepEqual(called, [
+            `system:KERNEL32.dll!${DECORATED}`,
+            `system:msvcrt.dll!${CDECL}`,
+            `system:KERNEL32.dll!${STDCALL}`,
+        ]);
     });
-    // The two that returned were reached and answered; the guest's own checks
-    // passed, or the run would have ended in ExitProcess(1) instead of here.
-    assert.deepEqual(called, [
-        `system:KERNEL32.dll!${DECORATED}`,
-        `system:msvcrt.dll!${CDECL}`,
-        `system:KERNEL32.dll!${STDCALL}`,
-    ]);
-});

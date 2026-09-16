@@ -36,6 +36,14 @@ const PAYLOAD = 'SAVED-01';
  * Runs the fixture once against a given session, and reports what it printed
  * and what it left behind.
  *
+ * The save is coalesced (`coalescedSaver`) and settles on its own timer, but
+ * `dispose` flushes it immediately -- "what the program wrote last is saved
+ * now rather than after it settles" -- so `saved`/`announced` are read only
+ * after `dispose`, which is what actually delivers them, not a wait of our
+ * own. Disposed on the error path too: the machine is one per process, and
+ * the first test below runs this twice in the same test body, so the second
+ * `createApp` needs the first machine gone before it runs.
+ *
  * @param {{ path: string, bytes: Uint8Array }[]} incoming
  */
 async function runOnce(incoming){
@@ -64,41 +72,44 @@ async function runOnce(incoming){
             },
         },
     });
+    try
+    {
+        let printed = '';
+        app.on('output', (/** @type {any} */ payload)=>{
+            printed += payload.text;
+        });
 
-    let printed = '';
-    app.on('output', (/** @type {any} */ payload)=>{
-        printed += payload.text;
-    });
-
-    const exitCode = await app.run({ maxTurns: 20000 });
-    // The save is announced on a microtask so a burst of writes becomes one
-    // notification; let that settle before looking at what it produced.
-    await new Promise(resolve=>setTimeout(resolve, 0));
-
-    const session = app.session.export();
-    await app.dispose();
-    return { printed, exitCode, saved, announced, session };
+        const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 20000 });
+        const session = app.session.export();
+        await app.dispose();
+        return { printed, exitCode, saved, announced, session };
+    }
+    catch (e){
+        await app.dispose();
+        throw e;
+    }
 }
 
-test('a program finds, on its second run, what it wrote on its first', async()=>{
-    const first = await runOnce([]);
+test('a program finds, on its second run, what it wrote on its first',
+    { timeout: 30000 }, async()=>{
+        const first = await runOnce([]);
 
-    assert.equal(first.exitCode, 0);
-    assert.equal(first.printed, '', 'nothing to read the first time round');
-    assert.deepEqual(first.session.map((/** @type {any} */ file)=>file.path), ['C:\\save.dat'],
-        'and it left exactly one file behind');
+        assert.equal(first.exitCode, 0);
+        assert.equal(first.printed, '', 'nothing to read the first time round');
+        assert.deepEqual(first.session.map((/** @type {any} */ file)=>file.path), ['C:\\save.dat'],
+            'and it left exactly one file behind');
 
-    // Everything between the runs is what a cloud would carry: out through the
-    // interface an upload uses, back in through the one a restore uses.
-    const travelled = await unpackSession(await packSession(first.session));
-    const second = await runOnce(travelled.files);
+        // Everything between the runs is what a cloud would carry: out through
+        // the interface an upload uses, back in through the one a restore uses.
+        const travelled = await unpackSession(await packSession(first.session));
+        const second = await runOnce(travelled.files);
 
-    assert.equal(second.exitCode, 0);
-    assert.equal(second.printed, PAYLOAD,
-        'the second run read what the first wrote, through a packed session');
-});
+        assert.equal(second.exitCode, 0);
+        assert.equal(second.printed, PAYLOAD,
+            'the second run read what the first wrote, through a packed session');
+    });
 
-test('a run announces what changed, once per file', async()=>{
+test('a run announces what changed, once per file', { timeout: 15000 }, async()=>{
     const { announced, saved } = await runOnce([]);
 
     // The program writes its save in more than one call; what comes out is the
@@ -108,14 +119,15 @@ test('a run announces what changed, once per file', async()=>{
     assert.equal(saved.length, 1, 'and the save was handed the whole session, not a delta');
 });
 
-test('a session arriving from outside is there before the first instruction', async()=>{
-    // Not a detail of ordering: a save that appears after the program has
-    // looked for it is a save that was not there.
-    const seeded = [{
-        path: 'C:\\save.dat',
-        bytes: new Uint8Array([...'RESTORED'].map(character=>character.charCodeAt(0))),
-    }];
+test('a session arriving from outside is there before the first instruction',
+    { timeout: 15000 }, async()=>{
+        // Not a detail of ordering: a save that appears after the program has
+        // looked for it is a save that was not there.
+        const seeded = [{
+            path: 'C:\\save.dat',
+            bytes: new Uint8Array([...'RESTORED'].map(character=>character.charCodeAt(0))),
+        }];
 
-    const { printed } = await runOnce(seeded);
-    assert.equal(printed, 'RESTORED');
-});
+        const { printed } = await runOnce(seeded);
+        assert.equal(printed, 'RESTORED');
+    });

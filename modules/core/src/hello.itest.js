@@ -48,28 +48,30 @@ async function startApp(t){
     return app;
 }
 
-test('hello.exe prints what it prints on Windows, then exits cleanly', async t=>{
-    const app = await startApp(t);
-    /** @type {string[]} */
-    const output = [];
-    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
+test('hello.exe prints what it prints on Windows, then exits cleanly',
+    { timeout: 15000 }, async t=>{
+        const app = await startApp(t);
+        /** @type {string[]} */
+        const output = [];
+        app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
 
-    const code = await app.run({ timeoutMs: 8000 });
+        const code = await app.run({ timeoutMs: 8000 });
 
-    assert.equal(output.join(''), EXPECTED_OUTPUT, 'same bytes real Windows writes to stdout');
-    assert.equal(code, 0, "the guest's own exit code");
-});
+        assert.equal(output.join(''), EXPECTED_OUTPUT, 'same bytes real Windows writes to stdout');
+        assert.equal(code, 0, "the guest's own exit code");
+    });
 
-test('the image lands where its headers ask, and every import is bound', async t=>{
-    const app = await startApp(t);
-    await app.run({ timeoutMs: 8000 });
+test('the image lands where its headers ask, and every import is bound',
+    { timeout: 15000 }, async t=>{
+        const app = await startApp(t);
+        await app.run({ timeoutMs: 8000 });
 
-    assert.equal(app.image.base, 0x400000, 'the fixture has no relocations and cannot move');
-    assert.equal(app.image.entryPoint, 0x401000);
-    assert.deepEqual(app.image.unresolved, [], 'nothing the fixture imports is missing');
-});
+        assert.equal(app.image.base, 0x400000, 'the fixture has no relocations and cannot move');
+        assert.equal(app.image.entryPoint, 0x401000);
+        assert.deepEqual(app.image.unresolved, [], 'nothing the fixture imports is missing');
+    });
 
-test('diagnostics describe the run afterwards', async t=>{
+test('diagnostics describe the run afterwards', { timeout: 15000 }, async t=>{
     const app = await startApp(t);
     await app.run({ timeoutMs: 8000 });
 
@@ -123,7 +125,7 @@ test('diagnostics describe the run afterwards', async t=>{
     }
 });
 
-test('a detached log sink stops receiving output', async t=>{
+test('a detached log sink stops receiving output', { timeout: 15000 }, async t=>{
     const app = await startApp(t);
     /** @type {string[]} */
     const kept = [];
