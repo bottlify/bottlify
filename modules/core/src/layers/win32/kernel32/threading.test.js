@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createThreadingFunctions } from './threading.js';
+import { createNamedObjects } from './named-objects.js';
 
 const ERROR_SUCCESS = 0;
 const ERROR_FILE_NOT_FOUND = 2;
@@ -131,6 +132,8 @@ function fakeKernel(){
         /** @param {any} options */
         createEvent: options=>(
             { kind: 'event', signalled: false, manualReset: false, waiters: [], ...options }),
+        /** @param {any} options */
+        createSemaphore: options=>({ kind: 'semaphore', waiters: [], ...options }),
         /** @param {any} options */
         createTimer: options=>(
             { kind: 'timer', signalled: false, manualReset: false, waiters: [], ...options }),
@@ -265,10 +268,12 @@ function fakeKernel(){
             },
             /** @param {number} handle */
             close(handle){
-                if (!handles.delete(handle))
+                const entry = handles.get(handle);
+                if (!entry || !handles.delete(handle))
                 {
                     throw new Error('Invalid handle');
                 }
+                return entry.object;
             },
             /** @param {number} handle */
             typeOf: handle=>handles.get(handle)?.type ?? null,
@@ -326,12 +331,15 @@ function setup(names){
         },
         /** @param {number} pointer */
         readCString: pointer=>names?.[pointer] ?? '',
+        /** @param {number} pointer */
+        readWideString: pointer=>names?.[pointer] ?? '',
         /** @param {number} code */
         setLastError: code=>{
             errors.push(code);
         },
         /** @param {number} handle */
         handleType: handle=>kernel.handles.typeOf(handle),
+        namedObjects: createNamedObjects(),
     };
     const fns = createThreadingFunctions(host);
     return { kernel, fns, host, parked, current, written, errors };
@@ -483,7 +491,7 @@ test('ExitThread ends the thread and parks it', ()=>{
 
 test('a second create of a live name hands back the same object', ()=>{
     const NAME = 0x2000;
-    const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
+    const { kernel, fns, errors } = setup({ [NAME]: 'Warcraft III' });
 
     const first = fns.CreateMutexA.handler([0, 0, NAME]);
     assert.equal(errors.at(-1), ERROR_SUCCESS, 'nothing held the name yet');
@@ -492,6 +500,82 @@ test('a second create of a live name hands back the same object', ()=>{
     assert.notEqual(second, first, 'a create always returns a handle of its own');
     assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS,
         'the single-instance idiom reads exactly this');
+    assert.equal(kernel.handles.resolve(second, 'mutex'), kernel.handles.resolve(first, 'mutex'),
+        'both handles name the one mutex');
+});
+
+test('CreateMutexW reads the wide name and finds what CreateMutexA made', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns, errors } = setup({ [NAME]: 'Warcraft III' });
+
+    const ansi = fns.CreateMutexA.handler([0, 0, NAME]);
+    const wide = fns.CreateMutexW.handler([0, 0, NAME]);
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
+    assert.equal(kernel.handles.resolve(wide, 'mutex'), kernel.handles.resolve(ansi, 'mutex'));
+    assert.equal(fns.CreateMutexW.argBytes, 12);
+});
+
+test('a named semaphore is found by a second create, and by OpenSemaphore', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns, errors } = setup({ [NAME]: 'Warcraft III' });
+
+    const first = fns.CreateSemaphoreA.handler([0, 1, 4, NAME]);
+    assert.notEqual(first, 0);
+    assert.equal(errors.at(-1), ERROR_SUCCESS);
+
+    const second = fns.CreateSemaphoreW.handler([0, 0, 0, NAME]);
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS,
+        'the bogus counts of the second create are ignored -- the name found the first');
+    assert.equal(kernel.handles.resolve(second, 'semaphore'),
+        kernel.handles.resolve(first, 'semaphore'));
+
+    const opened = fns.OpenSemaphoreA.handler([0, 0, NAME]);
+    assert.equal(kernel.handles.resolve(opened, 'semaphore'),
+        kernel.handles.resolve(first, 'semaphore'));
+    assert.equal(fns.OpenSemaphoreW.argBytes, 12);
+});
+
+test('an unnamed CreateSemaphore still validates its counts', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.CreateSemaphoreA.handler([0, 0, 0, 0]), 0, 'a maximum of zero is refused');
+    assert.equal(fns.CreateSemaphoreA.handler([0, 5, 4, 0]), 0, 'initial above maximum is refused');
+    assert.notEqual(fns.CreateSemaphoreA.handler([0, 1, 4, 0]), 0);
+});
+
+test('OpenSemaphoreA reports no such thing for a name nothing created', ()=>{
+    const NAME = 0x2000;
+    const { fns, errors } = setup({ [NAME]: 'Warcraft III' });
+    assert.equal(fns.OpenSemaphoreA.handler([0, 0, NAME]), 0);
+    assert.equal(errors.at(-1), ERROR_FILE_NOT_FOUND);
+});
+
+test('a named waitable timer is found by a second create, and by OpenWaitableTimer', ()=>{
+    const NAME = 0x2000;
+    const { kernel, fns, errors } = setup({ [NAME]: 'Warcraft III' });
+
+    const first = fns.CreateWaitableTimerW.handler([0, 1, NAME]);
+    assert.notEqual(first, 0);
+    const second = fns.CreateWaitableTimerA.handler([0, 0, NAME]);
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS);
+    assert.equal(kernel.handles.resolve(second, 'timer'), kernel.handles.resolve(first, 'timer'));
+
+    const opened = fns.OpenWaitableTimerW.handler([0, 0, NAME]);
+    assert.equal(kernel.handles.resolve(opened, 'timer'), kernel.handles.resolve(first, 'timer'));
+    assert.equal(fns.OpenWaitableTimerA.argBytes, 12);
+});
+
+test('OpenMutexW and OpenEventW read the wide name too', ()=>{
+    const MUTEX_NAME = 0x2000;
+    const EVENT_NAME = 0x2100;
+    const { kernel, fns } = setup({ [MUTEX_NAME]: 'Warcraft III', [EVENT_NAME]: 'wc3-ready' });
+
+    const mutex = fns.CreateMutexA.handler([0, 0, MUTEX_NAME]);
+    assert.equal(kernel.handles.resolve(fns.OpenMutexW.handler([0, 0, MUTEX_NAME]), 'mutex'),
+        kernel.handles.resolve(mutex, 'mutex'));
+
+    const event = fns.CreateEventA.handler([0, 0, 0, EVENT_NAME]);
+    assert.equal(kernel.handles.resolve(fns.OpenEventW.handler([0, 0, EVENT_NAME]), 'event'),
+        kernel.handles.resolve(event, 'event'));
 });
 
 test('a name lives only as long as a handle to the object behind it', ()=>{

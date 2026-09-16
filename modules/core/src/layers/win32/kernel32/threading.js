@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { TAKEN } from './named-objects.js';
+
 /**
  * The kernel32 surface a threaded program calls.
  *
@@ -36,9 +38,6 @@ const CURRENT_THREAD = 0xfffffffe;
 
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
-const ERROR_SUCCESS = 0;
-/** What a create reports when the name was already taken. */
-const ERROR_ALREADY_EXISTS = 183;
 
 /** A name is at most this long; longer is a pointer that is not a string. */
 const MAX_NAME = 260;
@@ -53,10 +52,15 @@ const DUPLICATE_CLOSE_SOURCE = 0x00000001;
  * @property {any} kernel                       The kernel layer's API.
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
  * @property {() => any} currentThread
  * @property {(thread?: any) => any} park       Stops a thread; returns the parked token.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {(code: number) => void} setLastError
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
+ *           The one table every named sync object and file mapping shares --
+ *           constructed once outside this process so a name a parent gave an
+ *           object still finds it after a replacement rebuilds this layer.
  * @property {() => number} [threadReturn]
  * @property {(thread: any) => void} [threadBlock]
  *           Gives a thread just made its own environment block -- the thing FS
@@ -205,81 +209,177 @@ export function createThreadingFunctions(host){
     const settle = result=>result === null ? host.park() : result;
 
     /**
-     * Objects that have a name, by that name.
+     * One entry point, in both spellings. A name is the only thing that ever
+     * differs between an ANSI create/open and its wide sibling, so the body
+     * takes which form to read it in rather than being written twice.
      *
-     * A name is not decoration. Two calls naming the same object must get the
-     * same object -- that is how one process coordinates with itself across
-     * libraries, and how a second copy of a program discovers the first. The
-     * create reports that the name was already taken, and the canonical
-     * single-instance idiom reads exactly that.
-     *
-     * Kept here rather than in the kernel because naming is a Win32 idea: the
-     * kernel has objects and no namespace.
-     *
-     * @type {Map<string, { kind: string, object: any }>}
+     * @param {number} argBytes
+     * @param {(args: number[], wide: boolean) => number} body
      */
-    const named = new Map();
-
-    /** @param {number} pointer @returns {string | null} */
-    const nameOf = pointer=>((pointer >>> 0) === 0
-        ? null
-        : host.readCString(pointer >>> 0, MAX_NAME) || null);
+    const bothNamedForms = (argBytes, body)=>({
+        ansi: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, false) },
+        wide: { argBytes, handler: (/** @type {number[]} */ args)=>body(args, true) },
+    });
 
     /**
-     * A live name standing for an object of some other kind. Windows keeps one
-     * namespace and does not convert between kinds, so neither a create nor an
-     * open may quietly take the name over: the call fails and the object that
-     * holds the name keeps it.
+     * @param {number} pointer @param {boolean} [wide] @returns {string | null}
      */
-    const TAKEN = Symbol('taken');
+    const nameOf = (pointer, wide)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME)
+            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+    };
+
+    // The table itself is shared with the file-mapping surface and lives
+    // outside this call -- see named-objects.js for why one namespace covers
+    // every kind. This closure only needs its two operations.
+    const { existing } = host.namedObjects;
+    /** @param {string | null} name @param {string} kind @param {any} made @param {boolean} reused */
+    const remember = (name, kind, made, reused)=>
+        host.namedObjects.remember(name, kind, made, reused, host.setLastError);
 
     /**
-     * The object this name already stands for, TAKEN if another kind holds it,
-     * or null if the name is free.
-     *
-     * @param {string | null} name @param {string} kind
+     * What an Open* call reports for what `existing` found: nothing by that
+     * name is "no such thing", and a different kind holding it is a bad
+     * handle rather than a silent conversion between kinds.
+     * @param {string} kind @param {any} found
      */
-    const existing = (name, kind)=>{
+    const namedOpen = (kind, found)=>{
+        if (!found || found === TAKEN)
+        {
+            host.setLastError(found === TAKEN ? ERROR_INVALID_HANDLE : ERROR_FILE_NOT_FOUND);
+            return 0;
+        }
+        host.namedObjects.reference(found);
+        return kernel.handles.open(kind, found);
+    };
+
+    const openMutex = bothNamedForms(12, ([, , namePointer], wide)=>
+        namedOpen('mutex', existing(nameOf(namePointer, wide), 'mutex')));
+
+    /**
+     * Unlike the mutex form this can succeed, and routinely does: one process
+     * names an event in one library and opens it by name in another, which is
+     * how two parts of the same program that do not know about each other
+     * agree on a signal.
+     */
+    const openEvent = bothNamedForms(12, ([, , namePointer], wide)=>
+        namedOpen('event', existing(nameOf(namePointer, wide), 'event')));
+
+    const openSemaphore = bothNamedForms(12, ([, , namePointer], wide)=>
+        namedOpen('semaphore', existing(nameOf(namePointer, wide), 'semaphore')));
+
+    const openWaitableTimer = bothNamedForms(12, ([, , namePointer], wide)=>
+        namedOpen('timer', existing(nameOf(namePointer, wide), 'timer')));
+
+    const createMutex = bothNamedForms(12, ([, initialOwner, namePointer], wide)=>{
+        const name = nameOf(namePointer, wide);
+        const found = existing(name, 'mutex');
+        if (found === TAKEN)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
+        if (initialOwner && found === null)
+        {
+            kernel.wait(mutex, host.currentThread());
+        }
+        remember(name, 'mutex', mutex, found !== null);
+        const handle = kernel.handles.open('mutex', mutex);
         if (name === null)
         {
-            return null;
+            mutex.name = `#${handle.toString(16)}`;
         }
-        const held = named.get(name);
-        if (!held)
+        return handle;
+    });
+
+    const createEvent = bothNamedForms(16, ([, manualReset, initialState, namePointer], wide)=>{
+        const name = nameOf(namePointer, wide);
+        const found = existing(name, 'event');
+        if (found === TAKEN)
         {
-            return null;
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
         }
-        // A name lives exactly as long as a handle to the object behind it.
-        // Windows destroys the object when the last one closes and the name
-        // goes with it, which is what makes the single-instance idiom work at
-        // all: a program creates the object to probe for a first copy, closes
-        // it, and creates it again for real -- and the second create must not
-        // be told the name is taken by the handle it just closed.
-        if (!kernel.handles.holds(held.object))
+        const event = found ?? kernel.createEvent({
+            manualReset: Boolean(manualReset),
+            signalled: Boolean(initialState),
+            name: name ?? 'event',
+        });
+        remember(name, 'event', event, found !== null);
+        const handle = kernel.handles.open('event', event);
+        // An unnamed object is most of them, and "event" tells a reader
+        // nothing when three threads are blocked on three of them. The handle
+        // is what the trace shows at every other call, so it is what ties a
+        // blocked thread to the code that made the object.
+        if (name === null)
         {
-            named.delete(name);
-            return null;
+            event.name = `#${handle.toString(16)}`;
         }
-        return held.kind === kind ? held.object : TAKEN;
-    };
+        return handle;
+    });
 
     /**
-     * Records the name and reports what the create should leave behind: a
-     * create that found its name already taken says so, and one that did not
-     * must clear the slot rather than leave whatever an unrelated call put
-     * there. The single-instance idiom reads this immediately after the call
-     * and cannot tell a stale value from its own.
-     *
-     * @param {string | null} name @param {string} kind @param {any} made
-     * @param {boolean} reused
+     * The counts are signed and both are checked, because the failure they
+     * guard against is silent: a maximum of zero or an initial count above it
+     * makes every later wait behave in a way the caller cannot explain. They
+     * are only checked on a fresh create -- the documented contract is that
+     * they are ignored, like a mutex's initial owner, when the name already
+     * names one.
      */
-    const remember = (name, kind, made, reused)=>{
-        if (name !== null && !reused)
+    const createSemaphore = bothNamedForms(16, ([, initial, maximum, namePointer], wide)=>{
+        const name = nameOf(namePointer, wide);
+        const found = existing(name, 'semaphore');
+        if (found === TAKEN)
         {
-            named.set(name, { kind, object: made });
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
         }
-        host.setLastError(reused ? ERROR_ALREADY_EXISTS : ERROR_SUCCESS);
-    };
+        if (found === null)
+        {
+            const start = initial | 0;
+            const limit = maximum | 0;
+            if (limit <= 0 || start < 0 || start > limit)
+            {
+                return 0;
+            }
+        }
+        const semaphore = found ?? kernel.createSemaphore({
+            initial: initial | 0, maximum: maximum | 0, name: name ?? 'semaphore',
+        });
+        remember(name, 'semaphore', semaphore, found !== null);
+        const handle = kernel.handles.open('semaphore', semaphore);
+        if (name === null)
+        {
+            semaphore.name = `#${handle.toString(16)}`;
+        }
+        return handle;
+    });
+
+    const createWaitableTimer = bothNamedForms(12, ([, manualReset, namePointer], wide)=>{
+        const name = nameOf(namePointer, wide);
+        const found = existing(name, 'timer');
+        if (found === TAKEN)
+        {
+            host.setLastError(ERROR_INVALID_HANDLE);
+            return 0;
+        }
+        const timer = found ?? kernel.createTimer({
+            manualReset: Boolean(manualReset),
+            name: name ?? 'timer',
+        });
+        remember(name, 'timer', timer, found !== null);
+        const handle = kernel.handles.open('timer', timer);
+        if (name === null)
+        {
+            timer.name = `#${handle.toString(16)}`;
+        }
+        return handle;
+    });
 
     return {
         /** HANDLE CreateThread(LPSECURITY_ATTRIBUTES, SIZE_T, LPTHREAD_START_ROUTINE, LPVOID, DWORD, LPDWORD) */
@@ -384,31 +484,12 @@ export function createThreadingFunctions(host){
             },
         },
 
-
         /**
-         * HANDLE CreateSemaphoreA(LPSECURITY_ATTRIBUTES, LONG lInitialCount,
-         *                         LONG lMaximumCount, LPCSTR lpName)
-         *
-         * The counts are signed and both are checked, because the failure they
-         * guard against is silent: a maximum of zero or an initial count above
-         * it makes every later wait behave in a way the caller cannot explain.
+         * HANDLE CreateSemaphoreA/W(LPSECURITY_ATTRIBUTES, LONG lInitialCount,
+         *                           LONG lMaximumCount, LPCSTR/LPCWSTR lpName)
          */
-        CreateSemaphoreA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, initial, maximum])=>{
-                const start = initial | 0;
-                const limit = maximum | 0;
-                if (limit <= 0 || start < 0 || start > limit)
-                {
-                    return 0;
-                }
-                const semaphore = kernel.createSemaphore({
-                    initial: start, maximum: limit, name: 'semaphore',
-                });
-                return kernel.handles.open('semaphore', semaphore);
-            },
-        },
+        CreateSemaphoreA: createSemaphore.ansi,
+        CreateSemaphoreW: createSemaphore.wide,
 
         /**
          * BOOL ReleaseSemaphore(HANDLE, LONG lReleaseCount, LPLONG lpPreviousCount)
@@ -447,55 +528,32 @@ export function createThreadingFunctions(host){
         },
 
         /**
-         * HANDLE OpenMutexA(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
+         * HANDLE OpenMutexA/W(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
          *
-         * Always fails with "no such thing", and that is the useful answer. A
-         * named mutex is how a program discovers a second copy of itself already
-         * running; there is exactly one process here, so nothing it could open
-         * exists, and reporting one would make it exit believing it is the
-         * second copy.
+         * Finds a mutex a create in this same process already named; a name
+         * nothing here made is "no such thing" -- not an error a caller cannot
+         * tell apart from a failure to open one that exists.
          */
-        OpenMutexA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, , namePointer])=>{
-                const mutex = existing(nameOf(namePointer), 'mutex');
-                if (!mutex || mutex === TAKEN)
-                {
-                    host.setLastError(mutex === TAKEN
-                        ? ERROR_INVALID_HANDLE
-                        : ERROR_FILE_NOT_FOUND);
-                    return 0;
-                }
-                return kernel.handles.open('mutex', mutex);
-            },
-        },
+        OpenMutexA: openMutex.ansi,
+        OpenMutexW: openMutex.wide,
 
         /**
-         * HANDLE OpenEventA(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
+         * HANDLE OpenEventA/W(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName)
          *
-         * Unlike the mutex form this can succeed, and routinely does: one
-         * process names an event in one library and opens it by name in
-         * another, which is how two parts of the same program that do not know
-         * about each other agree on a signal. A name nothing created is
-         * "no such thing" -- not an error the caller cannot tell apart from a
-         * failure to open one that exists.
+         * Routinely succeeds: one process names an event in one library and
+         * opens it by name in another, which is how two parts of the same
+         * program that do not know about each other agree on a signal.
          */
-        OpenEventA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, , namePointer])=>{
-                const event = existing(nameOf(namePointer), 'event');
-                if (!event || event === TAKEN)
-                {
-                    host.setLastError(event === TAKEN
-                        ? ERROR_INVALID_HANDLE
-                        : ERROR_FILE_NOT_FOUND);
-                    return 0;
-                }
-                return kernel.handles.open('event', event);
-            },
-        },
+        OpenEventA: openEvent.ansi,
+        OpenEventW: openEvent.wide,
+
+        /** HANDLE OpenSemaphoreA/W(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpName) */
+        OpenSemaphoreA: openSemaphore.ansi,
+        OpenSemaphoreW: openSemaphore.wide,
+
+        /** HANDLE OpenWaitableTimerA/W(DWORD dwDesiredAccess, BOOL bInheritHandle, LPCSTR lpTimerName) */
+        OpenWaitableTimerA: openWaitableTimer.ansi,
+        OpenWaitableTimerW: openWaitableTimer.wide,
 
         /**
          * BOOL DuplicateHandle(HANDLE hSourceProcessHandle, HANDLE hSourceHandle,
@@ -526,6 +584,11 @@ export function createThreadingFunctions(host){
                         : ERROR_INVALID_HANDLE);
                     return 0;
                 }
+                // A no-op on anything unnamed, and on a named object this is
+                // the reference CloseHandle will one day take back off -- a
+                // duplicate onto a mutex is a real handle onto it, the same
+                // as the one DuplicateHandle was given.
+                host.namedObjects.reference(held);
                 const duplicate = kernel.handles.open(kind, held);
                 host.writeMemory(target >>> 0, new Uint8Array([
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
@@ -536,37 +599,15 @@ export function createThreadingFunctions(host){
                 if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0 && !pseudo(source))
                 {
                     kernel.handles.close(source >>> 0);
+                    host.namedObjects.forget(held);
                 }
                 return 1;
             },
         },
 
-        /** HANDLE CreateMutexA(LPSECURITY_ATTRIBUTES, BOOL bInitialOwner, LPCSTR) */
-        CreateMutexA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, initialOwner, namePointer])=>{
-                const name = nameOf(namePointer);
-                const found = existing(name, 'mutex');
-                if (found === TAKEN)
-                {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                const mutex = found ?? kernel.createMutex({ name: name ?? 'mutex' });
-                if (initialOwner && found === null)
-                {
-                    kernel.wait(mutex, host.currentThread());
-                }
-                remember(name, 'mutex', mutex, found !== null);
-                const handle = kernel.handles.open('mutex', mutex);
-                if (name === null)
-                {
-                    mutex.name = `#${handle.toString(16)}`;
-                }
-                return handle;
-            },
-        },
+        /** HANDLE CreateMutexA/W(LPSECURITY_ATTRIBUTES, BOOL bInitialOwner, LPCSTR/LPCWSTR) */
+        CreateMutexA: createMutex.ansi,
+        CreateMutexW: createMutex.wide,
 
         /** BOOL ReleaseMutex(HANDLE) */
         ReleaseMutex: {
@@ -582,36 +623,12 @@ export function createThreadingFunctions(host){
             },
         },
 
-        /** HANDLE CreateEventA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, BOOL bInitialState, LPCSTR) */
-        CreateEventA: {
-            argBytes: 16,
-            /** @param {number[]} args */
-            handler: ([, manualReset, initialState, namePointer])=>{
-                const name = nameOf(namePointer);
-                const found = existing(name, 'event');
-                if (found === TAKEN)
-                {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                const event = found ?? kernel.createEvent({
-                    manualReset: Boolean(manualReset),
-                    signalled: Boolean(initialState),
-                    name: name ?? 'event',
-                });
-                remember(name, 'event', event, found !== null);
-                const handle = kernel.handles.open('event', event);
-                // An unnamed object is most of them, and "event" tells a reader
-                // nothing when three threads are blocked on three of them. The
-                // handle is what the trace shows at every other call, so it is
-                // what ties a blocked thread to the code that made the object.
-                if (name === null)
-                {
-                    event.name = `#${handle.toString(16)}`;
-                }
-                return handle;
-            },
-        },
+        /**
+         * HANDLE CreateEventA/W(LPSECURITY_ATTRIBUTES, BOOL bManualReset,
+         *                       BOOL bInitialState, LPCSTR/LPCWSTR)
+         */
+        CreateEventA: createEvent.ansi,
+        CreateEventW: createEvent.wide,
 
         /** BOOL SetEvent(HANDLE) */
         SetEvent: {
@@ -661,35 +678,13 @@ export function createThreadingFunctions(host){
          * APCs here, so it is ignored and never runs. A program that arms a
          * timer and waits on it, which is what a limiter does, is unaffected.
          *
-         * HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, LPCSTR)
+         * HANDLE CreateWaitableTimerA/W(LPSECURITY_ATTRIBUTES, BOOL bManualReset, LPCSTR/LPCWSTR)
          * BOOL SetWaitableTimer(HANDLE, const LARGE_INTEGER* pDueTime, LONG lPeriod,
          *     PTIMERAPCROUTINE, LPVOID, BOOL fResume)
          * BOOL CancelWaitableTimer(HANDLE)
          */
-        CreateWaitableTimerA: {
-            argBytes: 12,
-            /** @param {number[]} args */
-            handler: ([, manualReset, namePointer])=>{
-                const name = nameOf(namePointer);
-                const found = existing(name, 'timer');
-                if (found === TAKEN)
-                {
-                    host.setLastError(ERROR_INVALID_HANDLE);
-                    return 0;
-                }
-                const timer = found ?? kernel.createTimer({
-                    manualReset: Boolean(manualReset),
-                    name: name ?? 'timer',
-                });
-                remember(name, 'timer', timer, found !== null);
-                const handle = kernel.handles.open('timer', timer);
-                if (name === null)
-                {
-                    timer.name = `#${handle.toString(16)}`;
-                }
-                return handle;
-            },
-        },
+        CreateWaitableTimerA: createWaitableTimer.ansi,
+        CreateWaitableTimerW: createWaitableTimer.wide,
 
         SetWaitableTimer: {
             argBytes: 24,
@@ -817,7 +812,9 @@ export function createThreadingFunctions(host){
             handler: ([handle])=>{
                 try
                 {
-                    kernel.handles.close(handle >>> 0);
+                    const closed = kernel.handles.close(handle >>> 0);
+                    // A no-op on anything that was never named.
+                    host.namedObjects.forget(closed);
                     return 1;
                 }
                 catch (e){

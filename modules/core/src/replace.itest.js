@@ -301,5 +301,117 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
             assert.ok(parentDecoder, 'the parent had made a decoder to hand over');
             assert.equal(app.media.instance(), parentDecoder,
                 'the child uses the parent\'s decoder, not a new one');
+
+/** The name a single-instance mutex is probed and created under, in both processes. */
+const MUTEX_NAME = 'BottlifyReplacementInstanceMutex';
+
+/**
+ * Creates a named mutex and hands over to `C:\App\Child.exe`, without ever
+ * closing the mutex handle -- exactly what a process that is about to be
+ * replaced does, since nothing here models an orderly shutdown.
+ */
+function buildMutexParentExe(){
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': ['CreateMutexA', 'CreateProcessA', 'ExitProcess'],
+        },
+        codeSize: 0x100,
+        data: {
+            name: [...MUTEX_NAME].map(c=>c.charCodeAt(0)).concat(0),
+            child: [...'C:\\App\\Child.exe'].map(c=>c.charCodeAt(0)).concat(0),
+            startup: [68, ...new Array(67).fill(0)],
+            information: new Array(16).fill(0),
+        },
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('name')),
+            0x6a, 0x00,
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('CreateMutexA')),
+
+            0x68, ...u32(at('information')), //  lpProcessInformation
+            0x68, ...u32(at('startup')), //      lpStartupInfo
+            0x6a, 0x00, //                       lpCurrentDirectory
+            0x6a, 0x00, //                       lpEnvironment
+            0x6a, 0x00, //                       dwCreationFlags
+            0x6a, 0x00, //                       bInheritHandles
+            0x6a, 0x00, //                       lpThreadAttributes
+            0x6a, 0x00, //                       lpProcessAttributes
+            0x6a, 0x00, //                       lpCommandLine
+            0x68, ...u32(at('child')), //        lpApplicationName
+            0xff, 0x15, ...u32(iat('CreateProcessA')),
+
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+/**
+ * Probes the same name the parent created and reports what it found: the low
+ * byte of GetLastError() after CreateMutexA, written to stdout.
+ */
+function buildMutexChildExe(){
+    return buildExe({
+        imports: {
+            'KERNEL32.dll': [
+                'CreateMutexA', 'GetLastError', 'GetStdHandle', 'WriteFile', 'ExitProcess',
+            ],
+        },
+        codeSize: 0x100,
+        data: {
+            name: [...MUTEX_NAME].map(c=>c.charCodeAt(0)).concat(0),
+            errorByte: [0],
+            written: [0, 0, 0, 0],
+        },
+        code: ({ iat, at })=>[
+            0x68, ...u32(at('name')),
+            0x6a, 0x00,
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('CreateMutexA')),
+
+            0xff, 0x15, ...u32(iat('GetLastError')), //  no arguments, result in EAX
+            0xa2, ...u32(at('errorByte')), //             mov [errorByte], al
+
+            0x6a, 0xf5, //                        push STD_OUTPUT_HANDLE
+            0xff, 0x15, ...u32(iat('GetStdHandle')),
+            0x6a, 0x00,
+            0x68, ...u32(at('written')),
+            0x6a, 0x01,
+            0x68, ...u32(at('errorByte')),
+            0x50,
+            0xff, 0x15, ...u32(iat('WriteFile')),
+
+            0x6a, 0x00,
+            0xff, 0x15, ...u32(iat('ExitProcess')),
+        ],
+    });
+}
+
+test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it too', async t=>{
+    const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+    const child = buildMutexChildExe();
+
+    const app = await createApp({
+        executable: buildMutexParentExe(),
+        imagePath: 'C:\\App\\Parent.exe',
+        storage: { load: async()=>({ files: [{ path: 'C:\\App\\Child.exe', bytes: child }] }) },
+        v86: {
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        },
+    });
+    t.after(()=>app.dispose());
+
+    /** @type {string[]} */
+    const output = [];
+    app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>output.push(text));
+
+    const code = await app.run({ timeoutMs: 20000 });
+
+    assert.equal(code, 0, 'the child exited cleanly');
+    const ERROR_ALREADY_EXISTS = 183;
+    assert.equal(output.join('').charCodeAt(0), ERROR_ALREADY_EXISTS,
+        'the child found the name the parent registered, never closed across the handover');
+});
         }
     });

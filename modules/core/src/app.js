@@ -2003,6 +2003,7 @@ export function areaOf(call, cache){
  *     patches?: { address: number, bytes: Uint8Array }[],
  *     spawned?: (request: any) => void,
  *     logSinks?: Map<Function, (payload: any) => void>,
+ *     namedObjects?: Map<string, { kind: string, object: any }>,
  * }} options
  * @returns {Promise<any>} an AppController
  */
@@ -2532,6 +2533,13 @@ async function buildApp(options){
             cursor: cursor=>events.emit('cursor', cursor),
         },
         win32: {
+            // The one namespace a named mutex, event, semaphore, timer and
+            // file mapping all share, carried in from outside this build so a
+            // name a parent registered is one a child still finds: the table
+            // outlives the process the way the log's sinks and the sound
+            // ring do, for the same reason -- a replacement rebuilds this
+            // layer, and the name was never this process's to keep.
+            namedObjects: options.namedObjects,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
@@ -4885,6 +4893,12 @@ export async function createApp(options){
     // sink or holds a drain cursor did so before the handover and must not have
     // to notice it: the machine is rebuilt, the log is not.
     const logSinks = new Map();
+    // A named mutex, event, semaphore, timer or file mapping outlives the
+    // process that named it too: the single-instance idiom this exists for is
+    // exactly a parent naming an object and a child -- what a replacement
+    // makes of this same process -- discovering it by that name.
+    /** @type {Map<string, { kind: string, object: any }>} */
+    const namedObjects = new Map();
     /** @type {Map<string, string | number>} */
     const logLevels = new Map();
     /** @type {string | number | null} */
@@ -4934,6 +4948,7 @@ export async function createApp(options){
         events,
         spawned: remember,
         logSinks,
+        namedObjects,
         log: { ...options.log, sequenceBase: logSequence },
         audio: { ...options.audio, memory: ringMemory },
         media: { ...options.media, instance: mediaInstance },

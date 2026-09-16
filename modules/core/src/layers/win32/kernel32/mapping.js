@@ -4,6 +4,8 @@
  * See LICENSE for details
  */
 
+import { TAKEN } from './named-objects.js';
+
 /**
  * The two things kernel32 lets a program treat as memory instead of as a
  * stream: a file mapping and a pipe.
@@ -35,6 +37,9 @@ const ERROR_IO_DEVICE = 1117;
 /** INVALID_HANDLE_VALUE, which CreateFileMapping takes to mean "no file". */
 const INVALID_HANDLE_VALUE = 0xffffffff;
 
+/** A name is at most this long; longer is a pointer that is not a string. */
+const MAX_NAME = 260;
+
 /** flProtect values we distinguish. Everything else is read-only. */
 const PAGE_READWRITE = 0x04;
 const PAGE_WRITECOPY = 0x08;
@@ -47,7 +52,13 @@ const FILE_MAP_ALL_ACCESS = 0xf001f;
  * @typedef {Object} MappingHost
  * @property {(address: number, length: number) => Uint8Array} readMemory
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
+ * @property {(address: number, maxLength: number) => string} readCString
+ * @property {(address: number, maxLength: number) => string} readWideString
  * @property {(code: number) => void} setLastError
+ * @property {ReturnType<typeof import('./named-objects.js').createNamedObjects>} namedObjects
+ *           The table a named mapping shares with a named mutex, event,
+ *           semaphore and timer -- Windows keeps one namespace across every
+ *           kind of kernel object, not one per kind.
  * @property {(thread: any, code: number) => void} [setLastErrorFor]
  *           The error of a thread that is not the one running: a map that
  *           waited for its bytes answers on somebody else's turn.
@@ -118,55 +129,88 @@ export function createMappingFunctions(host){
         }
     };
 
-    return {
-        /**
-         * HANDLE CreateFileMappingA(HANDLE hFile, LPSECURITY_ATTRIBUTES,
-         *   DWORD flProtect, DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow,
-         *   LPCSTR lpName)
-         *
-         * Nothing is read here. A mapping is a description of what a later view
-         * would hold; the bytes move when MapViewOfFile is called, which is also
-         * when Windows first touches them.
-         */
-        CreateFileMappingA: {
-            argBytes: 24,
-            /** @param {number[]} args */
-            handler: ([file, , protect, sizeHigh, sizeLow])=>{
-                if (sizeHigh !== 0)
-                {
-                    // A mapping larger than 4 GiB has nowhere to go: a view of it
-                    // would not fit in the address space it is mapped into.
-                    return fail(ERROR_NOT_ENOUGH_MEMORY);
-                }
-                const anonymous = (file >>> 0) === INVALID_HANDLE_VALUE || file === 0;
-                const opened = anonymous ? null : object(file, 'file');
-                if (!anonymous && !opened)
-                {
-                    return fail(ERROR_INVALID_HANDLE);
-                }
-                // What a file handle resolves to is the open-file record --
-                // path, position, access -- and the volume's node is a field
-                // of it. The mapping keeps the node, because the record's
-                // position is the handle's and a view has its own offset.
-                const node = opened ? opened.node : null;
-                const writable = (protect >>> 0) === PAGE_READWRITE
-                    || (protect >>> 0) === PAGE_WRITECOPY;
-                if (anonymous && (sizeLow >>> 0) === 0)
-                {
-                    // A mapping with no file must be told how big it is; there
-                    // is nothing else to derive a size from.
-                    return fail(ERROR_INVALID_PARAMETER);
-                }
-                // A size of zero over a file means the file's own size, which
-                // is how a program maps a file whole without asking first.
-                const size = (sizeLow >>> 0) || (node ? host.files.size?.(node) ?? 0 : 0);
-                if (size === 0)
-                {
-                    return fail(ERROR_FILE_INVALID);
-                }
-                return host.handles.open('mapping', { node, writable, size });
-            },
+    /** @param {number} pointer @param {boolean} wide @returns {string | null} */
+    const nameOf = (pointer, wide)=>{
+        if ((pointer >>> 0) === 0)
+        {
+            return null;
+        }
+        return (wide ? host.readWideString(pointer >>> 0, MAX_NAME)
+            : host.readCString(pointer >>> 0, MAX_NAME)) || null;
+    };
+
+    /**
+     * HANDLE CreateFileMappingA/W(HANDLE hFile, LPSECURITY_ATTRIBUTES,
+     *   DWORD flProtect, DWORD dwMaximumSizeHigh, DWORD dwMaximumSizeLow,
+     *   LPCSTR/LPCWSTR lpName)
+     *
+     * Nothing is read here for a fresh mapping. A mapping is a description of
+     * what a later view would hold; the bytes move when MapViewOfFile is
+     * called, which is also when Windows first touches them.
+     *
+     * A named mapping already made by this process is found rather than
+     * remade, the same as a named mutex or event: the protection and size a
+     * second create passes are ignored, and the handle is a second one onto
+     * the object the first create made, with ERROR_ALREADY_EXISTS to say so.
+     *
+     * @param {boolean} wide
+     */
+    const createFileMapping = wide=>({
+        argBytes: 24,
+        /** @param {number[]} args */
+        handler: ([file, , protect, sizeHigh, sizeLow, namePointer])=>{
+            const name = nameOf(namePointer, wide);
+            const found = host.namedObjects.existing(name, 'mapping');
+            if (found === TAKEN)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            if (found)
+            {
+                host.namedObjects.remember(name, 'mapping', found, true, host.setLastError);
+                return host.handles.open('mapping', found);
+            }
+            if (sizeHigh !== 0)
+            {
+                // A mapping larger than 4 GiB has nowhere to go: a view of it
+                // would not fit in the address space it is mapped into.
+                return fail(ERROR_NOT_ENOUGH_MEMORY);
+            }
+            const anonymous = (file >>> 0) === INVALID_HANDLE_VALUE || file === 0;
+            const opened = anonymous ? null : object(file, 'file');
+            if (!anonymous && !opened)
+            {
+                return fail(ERROR_INVALID_HANDLE);
+            }
+            // What a file handle resolves to is the open-file record -- path,
+            // position, access -- and the volume's node is a field of it. The
+            // mapping keeps the node, because the record's position is the
+            // handle's and a view has its own offset.
+            const node = opened ? opened.node : null;
+            const writable = (protect >>> 0) === PAGE_READWRITE
+                || (protect >>> 0) === PAGE_WRITECOPY;
+            if (anonymous && (sizeLow >>> 0) === 0)
+            {
+                // A mapping with no file must be told how big it is; there is
+                // nothing else to derive a size from.
+                return fail(ERROR_INVALID_PARAMETER);
+            }
+            // A size of zero over a file means the file's own size, which is
+            // how a program maps a file whole without asking first.
+            const size = (sizeLow >>> 0) || (node ? host.files.size?.(node) ?? 0 : 0);
+            if (size === 0)
+            {
+                return fail(ERROR_FILE_INVALID);
+            }
+            const mapping = { node, writable, size };
+            host.namedObjects.remember(name, 'mapping', mapping, false, host.setLastError);
+            return host.handles.open('mapping', mapping);
         },
+    });
+
+    return {
+        CreateFileMappingA: createFileMapping(false),
+        CreateFileMappingW: createFileMapping(true),
 
         /**
          * LPVOID MapViewOfFile(HANDLE hFileMappingObject, DWORD dwDesiredAccess,

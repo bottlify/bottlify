@@ -6,6 +6,7 @@
 
 import { createConsoleFunctions } from './kernel32/console.js';
 import { createThreadingFunctions } from './kernel32/threading.js';
+import { createNamedObjects } from './kernel32/named-objects.js';
 import { createDebugFunctions } from './kernel32/debug.js';
 import { createHeapAllocator, createHeapFunctions } from './kernel32/heap.js';
 import { createProcessFunctions, createThreadState } from './kernel32/process.js';
@@ -155,6 +156,12 @@ export const win32Module = {
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
         const filesystem = host.requireApi('filesystem');
+
+        // The one namespace a mutex, event, semaphore, timer and file mapping
+        // all share. Handed a table from outside when there is a process
+        // replacement to survive; a caller with nothing to carry across a
+        // rebuild gets one that does not.
+        const namedObjects = createNamedObjects({ table: config?.namedObjects });
 
         /** @type {Record<string, Record<string, any>>} */
         let libraries = {};
@@ -581,8 +588,10 @@ export const win32Module = {
                     kernel,
                     readMemory,
                     readCString,
+                    readWideString,
                     writeMemory,
                     setLastError: setError,
+                    namedObjects,
                     currentThread: ()=>kernel.currentThread(),
                     park: (/** @type {any} */ thread)=>bridge.park(thread),
                     // Where a start routine returns to. Registered once, the
@@ -688,7 +697,10 @@ export const win32Module = {
                 ...createMappingFunctions({
                     readMemory,
                     writeMemory,
+                    readCString,
+                    readWideString,
                     setLastError: setError,
+                    namedObjects,
                     metrics: mappings,
                     /** @param {number} bytes */
                     allocate: bytes=>allocator.allocate(bytes),
@@ -817,6 +829,7 @@ export const win32Module = {
                     setLastError: setError,
                     writeConsole: (handle, text)=>sink(handle, text),
                     handles,
+                    namedObjects,
                     currentThread: ()=>kernel.currentThread(),
                     setLastErrorFor: setErrorOn,
                     ports: {

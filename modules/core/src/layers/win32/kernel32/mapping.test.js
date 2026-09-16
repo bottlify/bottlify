@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMappingFunctions } from './mapping.js';
+import { createNamedObjects } from './named-objects.js';
 
 const INVALID_HANDLE_VALUE = 0xffffffff;
 const PAGE_READWRITE = 0x04;
@@ -14,7 +15,12 @@ const PAGE_READONLY = 0x02;
 const FILE_MAP_WRITE = 0x0002;
 const FILE_MAP_READ = 0x0004;
 
-function setup(){
+/**
+ * @param {Record<number, string>} [names] What each name pointer spells, for
+ *   the tests that are about named mappings. Every other test passes nothing
+ *   and every pointer reads as the empty name, which is no name at all.
+ */
+function setup(names = {}){
     const bytes = new Uint8Array(0x4000);
     /** @type {Map<number, { type: string, object: any }>} */
     const table = new Map();
@@ -31,6 +37,9 @@ function setup(){
     const fns = createMappingFunctions({
         readMemory: (address, length)=>bytes.slice(address, address + length),
         writeMemory: (address, data)=>bytes.set(data, address),
+        readCString: pointer=>names[pointer] ?? '',
+        readWideString: pointer=>names[pointer] ?? '',
+        namedObjects: createNamedObjects(),
         setLastError: code=>{
             errors.push(code);
         },
@@ -152,6 +161,33 @@ test('a mapping with no file must be told its size', ()=>{
         0);
 });
 
+test('a second CreateFileMapping by the same name finds the first, wide or ansi', ()=>{
+    const ERROR_ALREADY_EXISTS = 183;
+    const NAME = 0x900;
+    const { fns, errors, fileHandle } = setup({ [NAME]: 'MyShmem' });
+
+    const first = fns.CreateFileMappingA.handler([fileHandle, 0, PAGE_READWRITE, 0, 8, NAME]);
+    assert.notEqual(first, 0);
+    assert.equal(errors.at(-1), 0, 'a fresh create is not an error');
+
+    const second = fns.CreateFileMappingW.handler(
+        [INVALID_HANDLE_VALUE, 0, PAGE_READWRITE, 0, 4, NAME]);
+    assert.equal(errors.at(-1), ERROR_ALREADY_EXISTS,
+        'the size and file of the second create are ignored -- the name found the first');
+
+    const firstView = fns.MapViewOfFile.handler([first, FILE_MAP_WRITE, 0, 0, 8]);
+    const secondView = fns.MapViewOfFile.handler([second, FILE_MAP_WRITE, 0, 0, 8]);
+    assert.notEqual(firstView, 0);
+    assert.notEqual(secondView, 0,
+        'the second handle names a real mapping, not an anonymous fallback');
+});
+
+test('CreateFileMappingA argBytes accounts for the name', ()=>{
+    const { fns } = setup();
+    assert.equal(fns.CreateFileMappingA.argBytes, 24);
+    assert.equal(fns.CreateFileMappingW.argBytes, 24);
+});
+
 test('unmapping an address nobody was given fails', ()=>{
     const { fns } = setup();
     assert.equal(fns.UnmapViewOfFile.handler([0x1234]), 0);
@@ -191,7 +227,8 @@ test('a view of a file whose bytes are not here yet is answered when they are', 
     const view = await answer;
     assert.notEqual(view, 0);
     assert.deepEqual([...bytes.slice(view, view + 8)], [1, 2, 3, 4, 5, 6, 7, 8]);
-    assert.deepEqual(errors, [], 'no error was set: nothing went wrong');
+    assert.deepEqual(errors, [0],
+        'the create cleared the last error; nothing after it went wrong');
     assert.equal(fns.UnmapViewOfFile.handler([view]), 1);
 });
 

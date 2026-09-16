@@ -230,6 +230,12 @@ export const WIN32_FIND_DATAA = Object.freeze({
  *           The running program, whose directory is the first place a search
  *           with no path of its own looks. Absent, the search starts at the
  *           current directory.
+ * @property {{ forget: (object: any) => void }} [namedObjects]
+ *           Told when a handle closes, so a named mutex, event, semaphore,
+ *           timer or file mapping can free its name once nothing holds it any
+ *           more. Absent, a name is never freed -- the same as never closing
+ *           the object, which is what the calls this table serves already do
+ *           when there is nothing to tell.
  */
 
 /** @param {number} value */
@@ -1276,6 +1282,8 @@ export function createFileFunctions(host){
                     {
                         files.close(closed.node);
                     }
+                    // A no-op on anything that was never named.
+                    host.namedObjects?.forget(closed);
                     // Handle numbers are recycled, so anything keyed by this one
                     // has to go now: a completion-port association that outlives
                     // its handle sends the next file's packets to a port nobody
@@ -1788,6 +1796,7 @@ export function createFileFunctions(host){
                     {
                         files.close(closed.node);
                     }
+                    host.namedObjects?.forget(closed);
                     host.setLastError(ERROR_SUCCESS);
                     return 0;
                 }
