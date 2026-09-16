@@ -1940,6 +1940,56 @@ async function mountBundle({ options, cpu, filesystem, events }){
 }
 
 /**
+ * Which part of the machine a host call belongs to.
+ *
+ * A program of this age reaches one engine through a dozen libraries, and the
+ * question a reader has is never "which DLL" but "what was it doing" --
+ * drawing, making a sound, reading a file, asking the processor something. So
+ * the libraries are grouped the way the work is, and the group is the
+ * journal's category, which is what makes a filter possible at all.
+ *
+ * @type {Record<string, string>}
+ */
+export const CALL_AREAS = {
+    'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
+    'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
+    'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio', 'Mp3dec.asi': 'audio',
+    'quartz.dll': 'video', 'blizzard.ax': 'video', 'ijl15.dll': 'video',
+    'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
+    'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
+    'WININET.dll': 'net',
+};
+
+/**
+ * The journal category one call is written under.
+ *
+ * A COM method arrives named by its interface rather than by a library, and
+ * there is no library to look up -- so it gets its own group instead of being
+ * filed under a guess. Everything else that is not drawing, sound, video,
+ * input or the network is the processor's own business: memory, files,
+ * threads, the registry, the C runtime.
+ *
+ * Memoised by name in the cache the caller hands in: a call site is made
+ * thousands of times in a run and the name it arrives under never changes, so
+ * only the first occurrence pays for the split and the lookup.
+ *
+ * @param {any} call
+ * @param {Map<string, string>} cache
+ */
+export function areaOf(call, cache){
+    const name = String(call?.name ?? '');
+    const cached = cache.get(name);
+    if (cached !== undefined)
+    {
+        return cached;
+    }
+    const at = name.indexOf('!');
+    const area = at === -1 ? 'call.com' : `call.${CALL_AREAS[name.slice(0, at)] ?? 'cpu'}`;
+    cache.set(name, area);
+    return area;
+}
+
+/**
  * One machine, running one image.
  *
  * `createApp` below is what a caller reaches for; this is what it builds, once
@@ -2146,47 +2196,12 @@ async function buildApp(options){
         events.emit('divergence', { api, detail });
     };
 
-    /**
-     * Which part of the machine a host call belongs to.
-     *
-     * A program of this age reaches one engine through a dozen libraries, and
-     * the question a reader has is never "which DLL" but "what was it doing" --
-     * drawing, making a sound, reading a file, asking the processor something.
-     * So the libraries are grouped the way the work is, and the group is the
-     * journal's category, which is what makes a filter possible at all.
-     *
-     * @type {Record<string, string>}
-     */
-    const CALL_AREAS = {
-        'D3D8.dll': 'gpu', 'D3D9.dll': 'gpu', 'DDRAW.dll': 'gpu',
-        'OPENGL32.dll': 'gpu', 'GDI32.dll': 'gpu',
-        'DSOUND.dll': 'audio', 'WINMM.dll': 'audio', 'mss32.dll': 'audio', 'Mp3dec.asi': 'audio',
-        'quartz.dll': 'video', 'blizzard.ax': 'video', 'ijl15.dll': 'video',
-        'DINPUT.dll': 'input', 'DINPUT8.dll': 'input', 'USER32.dll': 'input',
-        'WSOCK32.dll': 'net', 'WS2_32.dll': 'net', 'MSWSOCK.dll': 'net',
-        'WININET.dll': 'net',
-    };
-
-    /**
-     * The journal category one call is written under.
-     *
-     * A COM method arrives named by its interface rather than by a library, and
-     * there is no library to look up -- so it gets its own group instead of
-     * being filed under a guess. Everything else that is not drawing, sound,
-     * video, input or the network is the processor's own business: memory,
-     * files, threads, the registry, the C runtime.
-     *
-     * @param {any} call
-     */
-    const areaOf = call=>{
-        const name = String(call?.name ?? '');
-        const at = name.indexOf('!');
-        if (at === -1)
-        {
-            return 'call.com';
-        }
-        return `call.${CALL_AREAS[name.slice(0, at)] ?? 'cpu'}`;
-    };
+    // A call site is made thousands of times in a run and its name never
+    // changes, so the area string is built once per name rather than on
+    // every call; the cache is this instance's own, not shared with another.
+    /** @type {Map<string, string>} */
+    const areaCache = new Map();
+    const areaOfCall = (/** @type {any} */ call)=>areaOf(call, areaCache);
 
     /**
      * Writes one host call to the journal.
@@ -2199,7 +2214,7 @@ async function buildApp(options){
      * @param {any} call
      */
     const journalCall = call=>{
-        const category = areaOf(call);
+        const category = areaOfCall(call);
         if (!journal.enabled(category, journal.Level.TRACE))
         {
             return;

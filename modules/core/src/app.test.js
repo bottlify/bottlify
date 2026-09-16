@@ -22,6 +22,7 @@ import {
     resourceLookup,
     createMissingImports,
     shippedLibraryReader,
+    areaOf,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -869,4 +870,21 @@ test("a name a library the program brought does not export is the program's own"
     assert.deepEqual(announced, [
         { import: 'Game.dll!MissingExport', origin: 'program', count: 1 },
     ]);
+});
+
+test('a call area is memoised by name, computed once for every call site', ()=>{
+    /** @type {Map<string, string>} */
+    const cache = new Map();
+    assert.equal(areaOf({ name: 'D3D8.dll!Present' }, cache), 'call.gpu');
+    assert.equal(areaOf({ name: 'WSOCK32.dll!send' }, cache), 'call.net');
+    // A COM method arrives named by its interface, with no library to split off.
+    assert.equal(areaOf({ name: 'DrawPrimitive' }, cache), 'call.com');
+    assert.equal(cache.size, 3);
+
+    // A second call under an already-seen name answers from the cache: the
+    // cached value is what comes back even if it could no longer be recomputed
+    // correctly, which is the only way to tell a hit from a fresh split.
+    cache.set('D3D8.dll!Present', 'call.stale');
+    assert.equal(areaOf({ name: 'D3D8.dll!Present' }, cache), 'call.stale');
+    assert.equal(cache.size, 3, 'no new entry was made for a name already cached');
 });
