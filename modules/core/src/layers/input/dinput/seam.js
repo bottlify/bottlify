@@ -745,7 +745,7 @@ export function createDirectInput(
             attached.push({
                 guid: GUID_SysMouse,
                 name: 'Mouse',
-                product: 'Wine Mouse',
+                product: 'Mouse',
                 devType: (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE)
                     | (DI8DEVTYPEMOUSE_TRADITIONAL << 8),
             });
@@ -755,7 +755,7 @@ export function createDirectInput(
             attached.push({
                 guid: GUID_SysKeyboard,
                 name: 'Keyboard',
-                product: 'Wine Keyboard',
+                product: 'Keyboard',
                 devType: (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD)
                     | (DI8DEVTYPEKEYBOARD_PCENH << 8),
             });

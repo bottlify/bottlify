@@ -657,7 +657,7 @@ test('EnumDevices describes the mouse and the keyboard to the callback', async()
     assert.equal(readWide(f.memory,
         mouseInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Mouse');
     assert.equal(readWide(f.memory,
-        mouseInstance + DIDEVICEINSTANCE.tszInstanceName + 260 * 2, 260), 'Wine Mouse');
+        mouseInstance + DIDEVICEINSTANCE.tszInstanceName + 260 * 2, 260), 'Mouse');
 
     const keyboardInstance = f.calls[1].args[0];
     assert.equal(readGuid(f.memory, keyboardInstance + DIDEVICEINSTANCE.guidInstance),
