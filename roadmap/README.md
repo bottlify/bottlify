@@ -9,12 +9,11 @@ Two kinds of document, in two directories, because they are consulted differentl
 - **`registers/`** — what is consulted throughout and belongs to no phase: the knowledge registers,
   and two standing plans for work that spans phases.
 
-`00-bottlify-master-plan.md` sits above both and is the source of truth: product model,
-architecture, the whole phase list, and Part IV — the register of pitfalls that each cost weeks and
-is required reading before touching the kernel, bridge, graphics or audio layers. **It is not in
-git** (`.gitignore` excludes `roadmap/00-*`), so a fresh clone has everything here except that file.
-Nothing else depends on having read it: each phase document states the scope and acceptance criteria
-it inherited.
+Two `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
+the follow-ups roadmap — what is decided and not yet built after the phased plan — and the
+register of pitfalls that each cost weeks, required reading before touching the kernel, bridge,
+graphics or audio layers. A fresh clone has everything here except those two. Nothing else depends
+on having read them: each phase document states the scope and acceptance criteria it inherited.
 
 ## The phases
 
@@ -34,9 +33,9 @@ it inherited.
 | `phases/phase-10-warcraft-iii.md` | Phase 10 — titles: bringing up the first one | **active** |
 | `phases/phase-11-generated-code.md` | Phase 11 — the generated code, and the frame it has to fit in | **active** |
 
-The order in the master plan is the plan, not a queue anyone is standing in. Phases 6 to 9 have work
-landed in them while Phase 5 is still open, because a title asks for what it asks for. Where a phase
-has no document, the master plan's Part III entry is all there is.
+The phase order is the plan, not a queue anyone is standing in. Phases 6 to 9 have work landed in
+them while Phase 5 is still open, because a title asks for what it asks for. A phase with no
+document has only its row above.
 
 **Phase 5** — the backend, GDI's drawing half and DirectDraw are done; Direct3D 7, 8, 9 and 10,
 OpenGL and Vulkan all have guest-facing seams; Direct3D 8 is the one that has drawn a real title,
