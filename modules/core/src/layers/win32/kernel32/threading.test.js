@@ -283,6 +283,19 @@ function fakeKernel(){
 const PARKED = Object.freeze({ parked: true });
 
 /**
+ * A little-endian dword a handler wrote into guest memory.
+ *
+ * @param {Map<number, Uint8Array>} written
+ * @param {number} address
+ * @returns {number}
+ */
+function writtenU32(written, address){
+    const bytes = written.get(address);
+    assert.ok(bytes, `nothing was written at 0x${address.toString(16)}`);
+    return new DataView(bytes.buffer, bytes.byteOffset).getUint32(0, true);
+}
+
+/**
  * @param {Record<number, string>} [names] What each name pointer spells, for the
  *   tests that are about the Win32 object namespace. Every other test passes
  *   nothing and every pointer reads as the empty name, which is no name at all.
@@ -695,4 +708,42 @@ test('CancelWaitableTimer un-arms without signalling a parked waiter', ()=>{
     assert.equal(object.waiters.length, 1, 'it is still parked on the object');
 });
 
+test('DuplicateHandle accepts the pseudo-handles wherever a handle is taken', ()=>{
+    const { fns, kernel, written } = setup();
 
+    // DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), ...)
+    assert.equal(
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 0]), 1);
+    const thread = writtenU32(written, 0x300);
+    assert.equal(kernel.handles.typeOf(thread), 'thread', 'a real handle to the current thread');
+    assert.equal(kernel.handles.resolve(thread).name, 'caller', 'which is this thread');
+
+    // The current process pseudo-handle names a process object.
+    assert.equal(
+        fns.DuplicateHandle.handler([0xffffffff, 0xffffffff, 0xffffffff, 0x304, 0, 0, 0]), 1);
+    const process = writtenU32(written, 0x304);
+    assert.equal(kernel.handles.typeOf(process), 'process');
+    assert.equal(kernel.handles.resolve(process, 'process').current, true);
+
+    // A duplicate may close the source, but a pseudo-handle cannot be closed.
+    assert.equal(
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x308, 0, 0, 1]), 1);
+    assert.ok(writtenU32(written, 0x308) > 0);
+});
+
+test('a wait on a pseudo-handle is a wait on the running object, which is not signalled', ()=>{
+    const { fns, kernel, current, written } = setup();
+
+    // WaitForSingleObject(NtCurrentThread(), 0) and (NtCurrentProcess(), 0):
+    // Wine's sync.c test_WaitForSingleObject requires WAIT_TIMEOUT for both.
+    assert.equal(fns.WaitForSingleObject.handler([0xfffffffe, 0]), 0x102);
+    assert.equal(fns.WaitForSingleObject.handler([0xffffffff, 0]), 0x102);
+
+    // A timeout on a duplicate of the running thread expires while it runs.
+    assert.equal(
+        fns.DuplicateHandle.handler([0xffffffff, 0xfffffffe, 0xffffffff, 0x300, 0, 0, 0]), 1);
+    const duplicate = writtenU32(written, 0x300);
+    assert.equal(fns.WaitForSingleObject.handler([duplicate, 100]), PARKED);
+    kernel.advance(100);
+    assert.equal(current.waitResult, 0x102, 'the thread was still running');
+});

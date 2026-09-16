@@ -27,6 +27,11 @@ const WAIT_TIMEOUT = 0x102;
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
+/** The pseudo-handle for the running process; -1 on every Windows. */
+const CURRENT_PROCESS = 0xffffffff;
+/** GetCurrentThread hands out this, and it is -2 on every Windows. */
+const CURRENT_THREAD = 0xfffffffe;
+
 /** Codes this surface reports. */
 const ERROR_FILE_NOT_FOUND = 2;
 const ERROR_SUCCESS = 0;
@@ -111,6 +116,44 @@ export function createThreadingFunctions(host){
     const { kernel } = host;
 
     /**
+     * The running program, as the object the (HANDLE)-1 pseudo-handle names.
+     *
+     * It is a process object but not a child: a child takes this process's
+     * place rather than running beside it, so a wait on it is a handover,
+     * while a wait on this one is a wait on something that can only be
+     * signalled when the waiter itself has stopped.
+     */
+    const currentProcess = {
+        kind: 'process',
+        current: true,
+        /** @returns {string} */
+        get imagePath(){
+            return host.imagePath?.() ?? '';
+        },
+    };
+
+    /**
+     * The two pseudo-handles Windows accepts wherever a handle is taken:
+     * (HANDLE)-1 is the current process, (HANDLE)-2 the current thread. They
+     * are not entries in the handle table -- that is what makes them always
+     * valid -- so a lookup has to map them before it misses.
+     *
+     * @param {number} handle
+     * @returns {{ type: string, object: any } | null}
+     */
+    const pseudo = handle=>{
+        if ((handle >>> 0) === CURRENT_THREAD)
+        {
+            return { type: 'thread', object: host.currentThread() };
+        }
+        if ((handle >>> 0) === CURRENT_PROCESS)
+        {
+            return { type: 'process', object: currentProcess };
+        }
+        return null;
+    };
+
+    /**
      * Resolves a handle to a kernel object, or null if the guest passed
      * something that is not one. A bad handle is a return code, not a crash:
      * programs do pass stale handles, and Windows answers with a failure.
@@ -119,6 +162,11 @@ export function createThreadingFunctions(host){
      * @param {string} [type]
      */
     const object = (handle, type)=>{
+        const special = pseudo(handle);
+        if (special)
+        {
+            return !type || type === special.type ? special.object : null;
+        }
         try
         {
             return kernel.handles.resolve(handle, type);
@@ -127,6 +175,21 @@ export function createThreadingFunctions(host){
             void e;
             return null;
         }
+    };
+
+    /**
+     * What kind of object a handle names, the pseudo-handles included.
+     *
+     * @param {number} handle
+     * @returns {string | null}
+     */
+    const kindOf = handle=>{
+        const special = pseudo(handle);
+        if (special)
+        {
+            return special.type;
+        }
+        return host.handleType ? host.handleType(handle >>> 0) : null;
     };
 
     /**
@@ -256,8 +319,25 @@ export function createThreadingFunctions(host){
                 const wait = timeout >>> 0;
                 const thread = host.currentThread();
 
-                if (host.handleType?.(handle >>> 0) === 'process')
+                if (kindOf(handle >>> 0) === 'process')
                 {
+                    // The running process is signalled only when it ends, and
+                    // that cannot happen while the waiter is still running: a
+                    // poll or a timeout answers WAIT_TIMEOUT, and an infinite
+                    // wait parks until a moment that never comes.
+                    if (target.current)
+                    {
+                        if (wait === 0)
+                        {
+                            return WAIT_TIMEOUT;
+                        }
+                        kernel.block(thread, `the current process "${target.imagePath}"`,
+                            wait === INFINITE ? undefined : {
+                                deadline: kernel.clock.virtualTime() + wait,
+                                result: WAIT_TIMEOUT,
+                            });
+                        return host.park(thread);
+                    }
                     // A child process is never signalled while its parent can
                     // look: it takes this process's place rather than running
                     // beside it. So a poll says the child is still running,
@@ -424,7 +504,7 @@ export function createThreadingFunctions(host){
             /** @param {number[]} args */
             handler: ([, source, , target, , , options])=>{
                 const held = object(source >>> 0);
-                const kind = host.handleType ? host.handleType(source >>> 0) : null;
+                const kind = kindOf(source >>> 0);
                 if (!held || target === 0 || kind === null)
                 {
                     // Without the source handle's type there is nothing to
@@ -441,7 +521,9 @@ export function createThreadingFunctions(host){
                     duplicate & 0xff, duplicate >>> 8 & 0xff,
                     duplicate >>> 16 & 0xff, duplicate >>> 24 & 0xff,
                 ]));
-                if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0)
+                // A pseudo-handle cannot be closed: duplicating one and closing
+                // the source leaves both usable, as it does on Windows.
+                if ((options >>> 0 & DUPLICATE_CLOSE_SOURCE) !== 0 && !pseudo(source))
                 {
                     kernel.handles.close(source >>> 0);
                 }
