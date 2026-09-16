@@ -122,7 +122,7 @@ const X87_SITE_NAMES = [
     'transcendental', 'frstor', 'fxrstor', 'mmx', '', '',
     'arm.binop.m32', 'arm.binop.m64', 'arm.binop.sti', 'arm.fld.sti',
     'arm.fst.m32', 'arm.fst.m64', 'arm.fxch', 'arm.fchs.fabs', 'arm.fsqrt',
-    'arm.fst.sti', 'arm.fcom.sti', 'arm.fcom.mem', 'arm.fist',
+    'arm.fst.sti', 'arm.fcom.sti', 'arm.fcom.mem', 'arm.fist', 'interp.inline',
 ];
 
 /**
@@ -769,6 +769,10 @@ export async function createV86Host(config){
                     entries: read(2),
                     interpretedDispatches: read(3),
                     f80Conversions: read(4),
+                    // The x87 instructions retired, compiled and interpreted, so the
+                    // class's share of a frame is a count rather than a disassembly.
+                    x87Compiled: read(26),
+                    x87Interpreted: read(27),
                     // Writes that reached a page holding code, and what they
                     // cost: a module thrown away, or a page's hotness before
                     // it compiled. The pages written most while holding code
