@@ -321,7 +321,13 @@ level into another). `GetRenderTargetData`, and a lock of a lockable render targ
 read the GPU back into the guest's bytes first: the frame recorded so far is submitted without a
 present, the surface is copied out, and the caller is suspended on the promise. A lock write to a
 render target uploads at the unlock. A `StretchRect` from a plain surface still moves guest bytes
-and marks the destination for upload.
+and marks the destination for upload. Two limits of the rule: a move in guest memory into a level
+the GPU has drawn (`UpdateSurface`, `UpdateTexture`, a `StretchRect` or `CopyRects` from a plain
+surface) replaces the whole level with the guest bytes, which the draw was never read back into,
+so a partial blit onto a drawn target reverts the rest of it; and a mip-chained render-target
+texture is drawn into one level at a time, with nothing generating the smaller levels from the
+drawn one (`D3DUSAGE_AUTOGENMIPMAP` and `GenerateMipSubLevels` do nothing), so a sample that
+reaches those levels reads what the guest put there.
 
 A draw is prepared once per state change rather than once per draw. The device raises one counter,
 `drawStateVersion`, for every state change a preparation depends on -- a render state, a stage

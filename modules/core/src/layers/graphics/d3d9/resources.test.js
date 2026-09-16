@@ -11,7 +11,7 @@ import {
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
-import { createReferenceCount, createSurface, createTexture } from './resources.js';
+import { createReferenceCount, createSurface, createTexture, packColour } from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
 
 const SIZE = 128;
@@ -437,4 +437,13 @@ test('a surface says its own length in bytes, for a caller that sizes a copy fro
     assert.equal(described.desc.Size, surfacePitch(D3DFMT.A8R8G8B8, SIZE) * SIZE);
     assert.equal(described.desc.MultiSampleType, 0);
     assert.equal(described.desc.MultiSampleQuality, 0);
+});
+
+test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
+    assert.deepEqual([...packColour(D3DFMT.X8R8G8B8, 0x00123456)], [0x56, 0x34, 0x12, 0x00]);
+    assert.deepEqual([...packColour(D3DFMT.R5G6B5, 0xffff0000)], [0x00, 0xf8]);
+    assert.deepEqual([...packColour(D3DFMT.L8, 0xff123456)], [0x12]);
+    assert.equal(packColour(D3DFMT.D16, 0xff123456).length, 2, 'a two-byte format packColour'
+        + ' has no layout for still packs to two bytes');
+    assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
 });

@@ -362,8 +362,10 @@ export function packColour(format, colour){
             return Uint8Array.from([r, a]);
         case D3DFMT.A4L4:
             return Uint8Array.from([((a >>> 4) << 4) | (r >>> 4)]);
+        // A format with no layout here still gets a pixel of its own width,
+        // so that a row packed from it is the row's length and nothing else.
         default:
-            return Uint8Array.from([b, g, r, a]);
+            return Uint8Array.from([b, g, r, a]).subarray(0, FORMAT_INFO[format]?.bytesPerPixel ?? 4);
     }
 }
 

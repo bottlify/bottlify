@@ -2523,10 +2523,13 @@ export function createRenderer(options){
             const level = surfaceLevels.get(surface) ?? 0;
             return level === 0 && record.levels === 1 ? record.gpu : levelSurfaceOf(record, level);
         }
-        const desc = describe(surface);
+        // A hit is the per-draw case, twice per draw; the description is
+        // for making the texture and for a flush, and neither is the common
+        // path.
         let made = surfaces.get(surface);
         if (!made)
         {
+            const desc = describe(surface);
             const depth = FORMAT_INFO[desc.Format].depth;
             made = backend.createSurface({
                 width: desc.Width,
@@ -2546,6 +2549,7 @@ export function createRenderer(options){
         }
         if (dirtyTargets.delete(surface))
         {
+            const desc = describe(surface);
             const bytes = readMemory(surface.base,
                 surfaceBytes(desc.Format, desc.Width, desc.Height));
             uploadTexels(made, {
