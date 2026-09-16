@@ -554,7 +554,7 @@ test('the program is told it is active once, when input is wired to a window', (
     h.router.arm();
     h.router.arm();
     assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]),
-        [[WM.ACTIVATEAPP, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
+        [[WM.ACTIVATEAPP, 1], [WM.NCACTIVATE, 1], [WM.ACTIVATE, 1], [WM.SETFOCUS, 0]]);
 
     h.send({ kind: 'focus', gained: false });
     h.send({ kind: 'focus', gained: true });
@@ -636,8 +636,8 @@ test('activation waits for a window rather than being spent on hwnd zero', ()=>{
     h.router.arm();
     const told = h.all();
     assert.deepEqual(told.map(entry=>entry.message),
-        [WM.ACTIVATEAPP, WM.ACTIVATE, WM.SETFOCUS]);
-    assert.deepEqual(told.map(entry=>entry.hwnd), [HWND, HWND, HWND]);
+        [WM.ACTIVATEAPP, WM.NCACTIVATE, WM.ACTIVATE, WM.SETFOCUS]);
+    assert.deepEqual(told.map(entry=>entry.hwnd), [HWND, HWND, HWND, HWND]);
 
     // Latched on having delivered, so a second window does not activate twice.
     h.router.arm();

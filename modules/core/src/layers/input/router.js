@@ -30,6 +30,7 @@ export const WM = Object.freeze({
     KILLFOCUS: 0x0008,
     SETCURSOR: 0x0020,
     ACTIVATEAPP: 0x001c,
+    NCACTIVATE: 0x0086,
     KEYDOWN: 0x0100,
     KEYUP: 0x0101,
     CHAR: 0x0102,
@@ -639,6 +640,10 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
             }
             activated = true;
             emit(WM.ACTIVATEAPP, 1, 0);
+            // Matches Wine's dlls/user32/tests/msg.c WmActivateApp/WmSetFocus
+            // sequences: the frame is told it is active (WM_NCACTIVATE)
+            // before the window itself is (WM_ACTIVATE).
+            emit(WM.NCACTIVATE, 1, 0);
             emit(WM.ACTIVATE, WA_ACTIVE, 0);
             emit(WM.SETFOCUS, 0, 0);
         },

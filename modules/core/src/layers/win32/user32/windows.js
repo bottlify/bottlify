@@ -69,6 +69,13 @@ const WA_INACTIVE = 0;
 const WA_ACTIVE = 1;
 const WM_NCCALCSIZE = 0x0083;
 const WM_NCPAINT = 0x0085;
+/**
+ * Sent before WM_ACTIVATE, to the same two windows in the same order: the
+ * frame is told to draw itself inactive or active -- the caption's colour,
+ * mainly -- before the client is told activation changed at all. wParam is
+ * the same TRUE/FALSE a caller of DefWindowProc reads; lParam is unused.
+ */
+const WM_NCACTIVATE = 0x0086;
 const WM_NCMOUSEMOVE = 0x00a0;
 const WM_NCLBUTTONDOWN = 0x00a1;
 const WM_RBUTTONDOWN = 0x0204;
@@ -798,10 +805,17 @@ export function createWindowFunctions(host){
         // never told it is.
         if (previous !== 0 && active !== previous)
         {
+            // Matches Wine's dlls/user32/tests/msg.c activation sequences
+            // (WmActivateWindow, WmSetFocus): WM_NCACTIVATE always comes
+            // first, to the window losing activation and then, when there is
+            // one, to the window gaining it -- the frame redraws itself
+            // before either window's own procedure hears WM_ACTIVATE.
+            host.queue.post({ hwnd: previous, message: WM_NCACTIVATE, wParam: 0, lParam: 0 });
             host.queue.post({ hwnd: previous, message: WM_ACTIVATE,
                 wParam: WA_INACTIVE, lParam: active });
             if (active !== 0)
             {
+                host.queue.post({ hwnd: active, message: WM_NCACTIVATE, wParam: 1, lParam: 0 });
                 host.queue.post({ hwnd: active, message: WM_ACTIVATE,
                     wParam: WA_ACTIVE, lParam: previous });
             }
@@ -1906,6 +1920,7 @@ export function createWindowFunctions(host){
             case WM_HSCROLL:
                 return scrollWindowBar(record, message);
             case WM_ACTIVATE:
+            case WM_NCACTIVATE:
             case WM_SHOWWINDOW:
             default:
                 return 0;
@@ -2192,6 +2207,15 @@ export function createWindowFunctions(host){
         const hide = cmdShow === SW_HIDE;
         const covered = wasVisible && hide && shown(record)
             ? geometry.windowRect(record) : null;
+        // Matches Wine's dlls/user32/tests/msg.c WmShowNormal sequence: sent
+        // before WS_VISIBLE actually changes, and only when this call changes
+        // it -- SW_SHOW on an already-visible window says nothing happened,
+        // because nothing did.
+        if (wasVisible === hide)
+        {
+            host.queue.post({ hwnd: record.hwnd, message: WM_SHOWWINDOW,
+                wParam: hide ? 0 : 1, lParam: 0 });
+        }
         record.style = hide
             ? (record.style & ~WS_VISIBLE) >>> 0
             : (record.style | WS_VISIBLE) >>> 0;

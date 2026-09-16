@@ -43,6 +43,8 @@ const WM_KEYDOWN = 0x0100;
 const WM_LBUTTONDOWN = 0x0201;
 const WM_CHAR = 0x0102;
 const WM_PAINT = 0x000f;
+const WM_SHOWWINDOW = 0x0018;
+const WM_NCACTIVATE = 0x0086;
 const WM_USER = 0x0400;
 
 const PM_NOREMOVE = 0;
@@ -713,6 +715,17 @@ test('a window that takes the activation is told, and the one it replaced is tol
         && entry.hwnd === second && entry.wParam === WA_ACTIVE).length;
     assert.equal(activations, 1,
         'exactly once: the switch does not re-send the first activation');
+
+    // WM_NCACTIVATE tells the frame before WM_ACTIVATE tells the window, for
+    // both the one losing activation and the one gaining it.
+    const yieldedNc = told.find(entry=>entry.hwnd === first && entry.message === WM_NCACTIVATE);
+    const gainedNc = told.find(entry=>entry.hwnd === second && entry.message === WM_NCACTIVATE);
+    assert.ok(yieldedNc);
+    assert.equal(yieldedNc.wParam, 0);
+    assert.ok(gainedNc);
+    assert.equal(gainedNc.wParam, 1);
+    assert.equal(told.indexOf(yieldedNc) < told.indexOf(yielded), true);
+    assert.equal(told.indexOf(gainedNc) < told.indexOf(gained), true);
 });
 
 // --- the message queue ---
@@ -870,6 +883,10 @@ test('a window with an area to paint is handed WM_PAINT when nothing else is que
     // it -- a look that does not remove finds the same paint again.
     const { fns, memory, queue, hwnd } = withWindow();
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
+    // WM_SHOWWINDOW first, because the window was hidden and now is not.
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.wParam), 1, 'TRUE: the window is being shown');
     // Showing a window is the first thing that paints it.
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT, 'a shown window paints');
@@ -907,6 +924,8 @@ test('a paint dispatched to a window with no procedure is validated as the defau
     const { fns, memory, hwnd } = withWindow({ wndProc: 0 });
     fns.ShowWindow.handler([hwnd, SW_SHOW]);
     fns.InvalidateRect.handler([hwnd, 0, 0]);
+    assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
+    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_SHOWWINDOW);
     assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, PM_REMOVE]), 1);
     assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_PAINT);
     assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0);

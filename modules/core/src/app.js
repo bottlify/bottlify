@@ -2112,8 +2112,11 @@ async function buildApp(options){
      * thread without one reads its id, its stack bounds and its thread-local
      * slots from linear address zero and up.
      *
-     * @type {{ createThreadBlock: (thread: { id: number, stackBase: number,
-     *          stackLimit: number }) => { teb: number, tls: number } } | null}
+     * @type {{
+     *     createThreadBlock: (thread: { id: number, stackBase: number,
+     *         stackLimit: number }) => { teb: number, tls: number },
+     *     addModule: (module: import('./layers/win32/kernel32/teb.js').LoadedModule) => number,
+     * } | null}
      */
     let threadBlocks = null;
 
