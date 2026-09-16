@@ -58,6 +58,33 @@ const LIMITS = {
  */
 const samples = new Map();
 
+/**
+ * One retirement at one address, folded into the running account by module
+ * and offset rather than kept as a list -- a title at a low quantum samples
+ * hundreds of thousands of times a second, and a list stops measuring the
+ * window at all once it is capped.
+ *
+ * @param {number} eip
+ * @param {number} retired
+ */
+export function recordSample(eip, retired){
+    const at = samples.get(eip);
+    if (at)
+    {
+        at.retired += retired;
+        at.count++;
+    }
+    else
+    {
+        samples.set(eip, { retired, count: 1 });
+    }
+}
+
+/** Begins the sampled account afresh, the way a new window of it should. */
+export function resetSamples(){
+    samples.clear();
+}
+
 /** Written out rather than escaped, so no tooling can mangle it. */
 const NEWLINE = String.fromCharCode(10);
 
@@ -70,7 +97,7 @@ const callLog = [];
  * @param {any} call
  * @returns {string}
  */
-function formatCall(call){
+export function formatCall(call){
     const args = (call.args ?? []).map((/** @type {number} */ value,
         /** @type {number} */ index)=>(
         call.strings?.[index]
@@ -86,7 +113,7 @@ function formatCall(call){
  *
  * @param {string[]} layout
  */
-function regionsOf(layout){
+export function regionsOf(layout){
     return layout.map(entry=>{
         const [name, extent] = entry.split(' ');
         const [base, size] = extent.split('+').map(Number);
@@ -105,7 +132,7 @@ function regionsOf(layout){
  * @param {string[]} layout  As the memory layer reports it.
  * @returns {(address: number, mask?: number) => string}
  */
-function symboliser(layout){
+export function symboliser(layout){
     const regions = regionsOf(layout);
 
     return (address, mask = 0xffffffff)=>{
@@ -126,7 +153,7 @@ function symboliser(layout){
  * @param {{ address: number, weight: number }[]} entries
  * @param {string[]} layout
  */
-function byModule(entries, layout){
+export function byModule(entries, layout){
     const regions = regionsOf(layout);
     /** @type {Map<string, number>} */
     const counts = new Map();
@@ -145,7 +172,7 @@ function byModule(entries, layout){
 /**
  * @param {string[]} layout  As the memory layer reports it.
  */
-function profile(layout){
+export function profile(layout){
     if (samples.size === 0)
     {
         return null;
@@ -524,7 +551,7 @@ function drainSound(app){
  * @param {any} app
  * @param {any} collected
  */
-function listen(app, collected){
+export function listen(app, collected){
     app.on('error', (/** @type {any} */ payload)=>{
         collected.failures.push({
             reason: payload.reason ?? payload.error?.reason,
@@ -546,9 +573,13 @@ function listen(app, collected){
             collected.output.push(`[${stream}] ${text}`);
         }
     });
+    // A run that hands its process to a child -- an installer's redistributable
+    // finishing as the title, a launcher's bootstrapper stepping aside -- keeps
+    // going under a different image. Without this a report from such a run
+    // looks like one process throughout, which is the one thing it was not.
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
-        'bundle', 'bundle-unavailable', 'divergence'])
+        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace'])
     {
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
@@ -573,12 +604,116 @@ function listen(app, collected){
 }
 
 /**
+ * Types a key at a wall-clock moment, not a presented frame: a screen that
+ * stops presenting while it waits for a key cannot be reached by a frame
+ * number, because the frame it would be sent on never comes.
+ *
+ * @param {any} app
+ * @param {{ keyTimes?: { code: string, atMs: number, holdMs?: number }[] }} request
+ */
+export function scheduleKeyTimes(app, request){
+    for (const key of request.keyTimes ?? [])
+    {
+        setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: true }),
+            key.atMs);
+        setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: false }),
+            key.atMs + (key.holdMs ?? 120));
+    }
+}
+
+/**
+ * @typedef {Object} PresentState
+ * @property {any} presented          The last frame this run presented.
+ * @property {boolean} pointerDown    Whether the held pointer's button is down.
+ * @property {{ x: number, y: number }} pointerAt  Where the last click left it.
+ * @property {number[]} gaps          Milliseconds between one present and the next.
+ * @property {number} lastPresent     `performance.now()` at the previous present, or 0.
+ * @property {number} presents        How many frames this harness has presented, ever.
+ */
+
+/**
+ * One presented frame: counts it, records the gap since the last one, and
+ * forwards whatever the request asked to happen at this frame number -- a
+ * held pointer, a click a frame long, a key held the same way. The counter is
+ * on the harness rather than the run, so it keeps counting across a
+ * `process-replace`: the frame after a handover is one more, not the first.
+ *
+ * @param {any} app
+ * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
+ *           clicks?: { x: number, y: number, after: number }[],
+ *           keys?: { code: string, after: number }[] }} request
+ * @param {PresentState} state
+ * @param {any} frame
+ */
+export function presentFrame(app, request, state, frame){
+    state.presented = frame;
+    state.presents++;
+    const now = performance.now();
+    if (state.lastPresent > 0 && state.gaps.length < LIMITS.samples)
+    {
+        state.gaps.push(now - state.lastPresent);
+    }
+    state.lastPresent = now;
+    // A pointer the run asked to hold somewhere, put there every frame: a
+    // program that hit-tests the cursor against its own controls draws a
+    // different cursor over one than over none, and this page has no mouse
+    // of its own to hold still.
+    if (request.pointer)
+    {
+        app.input.send({ kind: 'pointerMove',
+            x: request.pointer.x, y: request.pointer.y,
+            dx: request.pointer.dx ?? 0, dy: request.pointer.dy ?? 0 });
+        if (request.pointer.down && !state.pointerDown)
+        {
+            state.pointerDown = true;
+            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+        }
+    }
+    // A click, a frame long, once the program has drawn a number of frames:
+    // pressed on one presented frame and released on the next, which is how a
+    // person's click reaches a program that reads the button once a frame.
+    for (const click of request.clicks ?? [])
+    {
+        if (state.presents === click.after)
+        {
+            // With the motion that would have brought a pointer there from
+            // where it was: a program that reads the mouse as relative motion
+            // moves its own cursor by it.
+            app.input.send({ kind: 'pointerMove',
+                x: click.x, y: click.y,
+                dx: click.x - state.pointerAt.x, dy: click.y - state.pointerAt.y });
+            state.pointerAt = { x: click.x, y: click.y };
+            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
+        }
+        if (state.presents === click.after + 1)
+        {
+            app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+        }
+    }
+    // A key press, held for one presented frame and released on the next, the
+    // same shape a person's tap has and the only shape a program that reads
+    // the transition can see. A scenario with no way to type can drive a
+    // program's menus and nothing that answers the keyboard.
+    for (const key of request.keys ?? [])
+    {
+        if (state.presents === key.after)
+        {
+            app.input.send({ kind: 'key', code: key.code, down: true });
+        }
+        if (state.presents === key.after + 1)
+        {
+            app.input.send({ kind: 'key', code: key.code, down: false });
+        }
+    }
+}
+
+/**
  * The diagnostics table, reduced to what survives JSON without carrying a ring
  * buffer per layer along with it.
  *
  * @param {any[]} layers
  */
-function scalars(layers){
+export function scalars(layers){
     return layers.map(layer=>{
         /** @type {Record<string, string | number>} */
         const metrics = {};
@@ -658,10 +793,11 @@ export function createHarness(canvas, how = {}){
     let frameReport = null;
     /** @type {any} */
     let running = null;
-    /** @type {number[]} */
-    const gaps = [];
-    let lastPresent = 0;
-    let presents = 0;
+    /** @type {PresentState} */
+    const presentState = {
+        presented: null, pointerDown: false, pointerAt: { x: 0, y: 0 },
+        gaps: [], lastPresent: 0, presents: 0,
+    };
 
     /**
      * Runs one title and reports what came out of it.
@@ -696,11 +832,12 @@ export function createHarness(canvas, how = {}){
         // run can turn it off to compare against the engine's own d3dx table.
         const system = request.runtime === false ? undefined : await loadRuntime();
 
-        /** @type {any} */
-        let presented = null;
-        let pointerDown = false;
-        /** Where the last click left the pointer, for the motion to the next. */
-        let pointerAt = { x: 0, y: 0 };
+        // Reset per run: the frame this run presents is its own, but the
+        // counter and the gaps it feeds keep counting across a run -- see
+        // `presentFrame`.
+        presentState.presented = null;
+        presentState.pointerDown = false;
+        presentState.pointerAt = { x: 0, y: 0 };
         /** @type {any} */
         const collected = { failures: [], missing: [], output: [], events: [] };
 
@@ -769,7 +906,7 @@ export function createHarness(canvas, how = {}){
                 traps: layers.cpu?.traps ?? 0,
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
-                presents: presents,
+                presents: presentState.presents,
                 // What we send to the card against what the program actually
                 // wrote. A buffer uploaded whole for a lock of a few hundred bytes
                 // is traffic nobody asked for, and it scales with the buffer rather
@@ -823,20 +960,7 @@ export function createHarness(canvas, how = {}){
             // which is exactly the situation once a game reaches its own main loop.
             jit: request.jit || undefined,
             quantum: request.quantum || undefined,
-            sample: request.profile || request.quantum
-                ? (/** @type {number} */ eip, /** @type {number} */ retired)=>{
-                    const at = samples.get(eip);
-                    if (at)
-                    {
-                        at.retired += retired;
-                        at.count++;
-                    }
-                    else
-                    {
-                        samples.set(eip, { retired, count: 1 });
-                    }
-                }
-                : undefined,
+            sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
                 device: handle.device,
                 queue: handle.device.queue,
@@ -860,69 +984,7 @@ export function createHarness(canvas, how = {}){
                 fog: request.fog !== false,
                 mips: request.mips !== false,
                 /** @param {any} frame */
-                presentTo: frame=>{
-                    presented = frame;
-                    presents++;
-                    const now = performance.now();
-                    if (lastPresent > 0 && gaps.length < LIMITS.samples)
-                    {
-                        gaps.push(now - lastPresent);
-                    }
-                    lastPresent = now;
-                    // A pointer the run asked to hold somewhere, put there every
-                    // frame: a program that hit-tests the cursor against its own
-                    // controls draws a different cursor over one than over none,
-                    // and this page has no mouse of its own to hold still.
-                    if (request.pointer)
-                    {
-                        app.input.send({ kind: 'pointerMove',
-                            x: request.pointer.x, y: request.pointer.y,
-                            dx: request.pointer.dx ?? 0, dy: request.pointer.dy ?? 0 });
-                        if (request.pointer.down && !pointerDown)
-                        {
-                            pointerDown = true;
-                            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
-                        }
-                    }
-                    // A click, a frame long, once the program has drawn a
-                    // number of frames: pressed on one presented frame and
-                    // released on the next, which is how a person's click
-                    // reaches a program that reads the button once a frame.
-                    for (const click of request.clicks ?? [])
-                    {
-                        if (presents === click.after)
-                        {
-                            // With the motion that would have brought a pointer
-                            // there from where it was: a program that reads the
-                            // mouse as relative motion moves its own cursor by it.
-                            app.input.send({ kind: 'pointerMove',
-                                x: click.x, y: click.y,
-                                dx: click.x - pointerAt.x, dy: click.y - pointerAt.y });
-                            pointerAt = { x: click.x, y: click.y };
-                            app.input.send({ kind: 'pointerButton', button: 'left', down: true });
-                        }
-                        if (presents === click.after + 1)
-                        {
-                            app.input.send({ kind: 'pointerButton', button: 'left', down: false });
-                        }
-                    }
-                    // A key press, held for one presented frame and released on
-                    // the next, the same shape a person's tap has and the only
-                    // shape a program that reads the transition can see. A
-                    // scenario with no way to type can drive a program's menus
-                    // and nothing that answers the keyboard.
-                    for (const key of request.keys ?? [])
-                    {
-                        if (presents === key.after)
-                        {
-                            app.input.send({ kind: 'key', code: key.code, down: true });
-                        }
-                        if (presents === key.after + 1)
-                        {
-                            app.input.send({ kind: 'key', code: key.code, down: false });
-                        }
-                    }
-                },
+                presentTo: frame=>presentFrame(app, request, presentState, frame),
             },
             bundle: {
                 fetch: rangeFetcher(request.bundleUrl),
@@ -940,17 +1002,7 @@ export function createHarness(canvas, how = {}){
         drainSound(app);
 
         listen(app, collected);
-
-        // Keys at wall-clock moments, not presented frames: a screen that
-        // stops presenting while it waits for a key cannot be reached by a
-        // frame number, because the frame it would be sent on never comes.
-        for (const key of request.keyTimes ?? [])
-        {
-            setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: true }),
-                key.atMs);
-            setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: false }),
-                key.atMs + (key.holdMs ?? 120));
-        }
+        scheduleKeyTimes(app, request);
 
         /** @type {any} */
         const result = { ok: false, gpu: true, adapter: handle.adapter };
@@ -991,20 +1043,20 @@ export function createHarness(canvas, how = {}){
         }
         result.elapsedMs = Math.round(performance.now() - started);
 
-        if (presented)
+        if (presentState.presented)
         {
-            const image = await readBack(handle.device, presented.surface);
+            const image = await readBack(handle.device, presentState.presented.surface);
             show(canvas, image);
             result.frame = {
-                index: presented.frameIndex,
+                index: presentState.presented.frameIndex,
                 width: image.width,
                 height: image.height,
-                format: presented.surface.format,
+                format: presentState.presented.surface.format,
             };
             result.colours = census(image);
             result.opacity = opacity(image);
         }
-        result.presents = presents;
+        result.presents = presentState.presents;
 
         const layers = app.diagnostics();
         /** @param {string} name */
@@ -1094,7 +1146,7 @@ export function createHarness(canvas, how = {}){
         result.output = collected.output;
         result.events = collected.events;
         result.errors = errors;
-        result.presentGaps = gaps.slice();
+        result.presentGaps = presentState.gaps.slice();
 
         await app.dispose();
         return result;
@@ -1121,7 +1173,7 @@ export function createHarness(canvas, how = {}){
             // The sampled account is cleared with the emulator's own, so a
             // window that begins here is measured by itself and not by the
             // loading and the view before it.
-            samples.clear();
+            resetSamples();
             return Boolean(running?.guestProfile.start());
         },
         // A window is measured while it is held, so the account can be turned
@@ -1133,7 +1185,7 @@ export function createHarness(canvas, how = {}){
         },
         errors,
         get presents(){
-            return { count: presents, gaps: gaps.slice() };
+            return { count: presentState.presents, gaps: presentState.gaps.slice() };
         },
     };
 }
