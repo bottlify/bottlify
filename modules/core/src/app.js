@@ -21,6 +21,7 @@ import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
     from './layers/loader/internal/init.js';
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
+import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
@@ -53,6 +54,14 @@ import { createBlockCache, resolveBlockStore }
  *           it attaches to the same compiled module and linear memory rather
  *           than instantiate the binary again. Set by `createApp` on a rebuilt
  *           machine and not something a caller supplies.
+ * @property {Object} [system]            The engine's own read-only volume.
+ * @property {{ path: string, bytes: Uint8Array }[]} [system.files]
+ *           Files to mount under `C:\WINDOWS\system32\`, a name each: the
+ *           DirectX runtime a title links against. Absent, the volume has no
+ *           system layer and a `d3dx9_*` name answers from the engine's own
+ *           table, as it did before this existed. The bytes are handed in the
+ *           same way the decoder's are, because which build carries them is the
+ *           assembling caller's decision.
  * @property {number} [stackSize]
  * @property {number} [memorySize]   Guest RAM in bytes; a power of two.
  * @property {number} [heapSize]     Bytes the guest's heap may allocate out of.
@@ -1105,6 +1114,38 @@ export function resolveLibraryPath(name, imagePath){
 /** Where Windows looks for a bare library name after the program's own directory. */
 const SYSTEM_LIBRARY_DIRECTORIES = ['C:\\WINDOWS\\system32\\', 'C:\\WINDOWS\\'];
 
+/** The directory the engine's own volume appears under, without a trailing separator. */
+export const SYSTEM_VOLUME_DIRECTORY = 'WINDOWS\\system32';
+
+/**
+ * The engine's read-only volume, as a store, from the files the caller handed in.
+ *
+ * The paths the caller gave are bare names -- `d3dx9_26.dll` -- because that is
+ * what a runtime directory is; where they appear is this engine's decision and
+ * is the same place Windows keeps them. Absent any files the volume has no
+ * system layer at all, and a `d3dx9_*` name is answered by the engine's own
+ * table, exactly as it was before this route existed.
+ *
+ * @param {any} system  The `system` option, or nothing.
+ * @returns {import('./layers/filesystem/internal/memory-store.js').SourceStore | null}
+ */
+export function systemVolume(system){
+    const files = system?.files ?? [];
+    if (files.length === 0)
+    {
+        return null;
+    }
+    /** @type {Record<string, Uint8Array>} */
+    const seed = {};
+    for (const file of files)
+    {
+        // Forward slashes are accepted and normalised, so a caller that built a
+        // path with them does not silently miss the search that uses backslashes.
+        seed[`${SYSTEM_VOLUME_DIRECTORY}\\${file.path.replace(/\//g, '\\')}`] = file.bytes;
+    }
+    return createMemoryStore(seed);
+}
+
 /**
  * Every place a LoadLibrary at run time looks, in order: beside the
  * executable first, then the system directories -- which is where an
@@ -1123,6 +1164,37 @@ export function libraryCandidates(name, imagePath){
         return [first];
     }
     return [first, ...SYSTEM_LIBRARY_DIRECTORIES.map(directory=>directory + name)];
+}
+
+/**
+ * Reads a library from wherever the loader would find it, in the order it
+ * would find it: beside the running program, then the system directories the
+ * engine fills. The first place that has the file is the one whose bytes come
+ * back; a name in none of them is null, which is what lets `planDependencies`
+ * fall back to the engine's own table.
+ *
+ * The order matters because the bytes decide whether a real PE is mapped or a
+ * synthesised table stands in for one, and the two answer different exports.
+ * A title that shipped its own `d3dx9_26.dll` gets that file; one that did not
+ * gets the runtime the engine mounted in `C:\WINDOWS\system32\`.
+ *
+ * @param {any} filesystem
+ * @param {any} blocks       The bundle fetcher, or null when there is no bundle.
+ * @param {string} imagePath The running program, whose directory is searched first.
+ * @returns {(name: string) => Promise<Uint8Array | null>}
+ */
+export function shippedLibraryReader(filesystem, blocks, imagePath){
+    return async name=>{
+        for (const candidate of libraryCandidates(name, imagePath))
+        {
+            const file = await readWholeFile(filesystem, blocks, candidate);
+            if (file)
+            {
+                return file;
+            }
+        }
+        return null;
+    };
 }
 
 /**
@@ -1376,11 +1448,36 @@ async function mapShippedLibraries(options){
         isKnownDll, byName, byBase } = options;
     const directory = imagePath.slice(0, imagePath.lastIndexOf('\\') + 1);
 
+    /**
+     * The first place a bare library name is on the volume: beside the program,
+     * then the system directories. Where it was found is what the module is
+     * recorded as living at, so a program reading its own loaded path off a
+     * library gets the directory it is really in -- a `d3dx9_26` off the
+     * system volume belongs in `system32`, not beside the executable.
+     *
+     * @param {string} name
+     * @returns {string}
+     */
+    const placeOf = name=>libraryCandidates(name, imagePath).find(candidate=>{
+        try
+        {
+            const entry = filesystem.stat(candidate);
+            return Boolean(entry) && !entry.directory;
+        }
+        catch {
+            return false;
+        }
+    }) ?? `${directory}${name}`;
+
     const { order, missing } = await planDependencies({
         entry: executable,
         isSystem,
         isKnownDll,
-        readLibrary: name=>readWholeFile(filesystem, blocks, `${directory}${name}`),
+        // A file the program brought is read from beside it; a file it did not
+        // bring is looked for in the system directories the engine fills, which
+        // is where the runtime a title links against actually lives. Only when
+        // neither has it does the engine's own table answer.
+        readLibrary: shippedLibraryReader(filesystem, blocks, imagePath),
     });
 
     if (missing.length > 0)
@@ -1433,10 +1530,12 @@ async function mapShippedLibraries(options){
             file,
             image,
             // Where it came from. A program asks a library where it lives and
-            // then looks for its own data beside it, so answering with a
-            // system directory sends it looking in the wrong place -- and a
-            // library a game ships does not live in a system directory.
-            path: `${directory}${name}`,
+            // then looks for its own data beside it, so this has to be the
+            // directory the file was really found in -- a library the program
+            // brought lives beside it, and one the engine supplied out of the
+            // system volume lives in `system32`, where a program that walks
+            // its own installation expects to find it.
+            path: placeOf(name),
         };
         byName.set(name.toLowerCase().replace(/\.dll$/, ''), held);
         byBase.set(base, held);
@@ -2119,6 +2218,13 @@ async function buildApp(options){
     };
 
     const core = await assembleModules({
+        filesystem: {
+            // The runtime lives in the volume before the bundle is mounted, so
+            // every drive gets it: a title finds a `d3dx9_*` in `system32` the
+            // way it does on a real machine, and the bundle's own copy, when it
+            // has one, still wins.
+            system: systemVolume(options.system),
+        },
         kernel: {
             // How many guest instructions a thread runs before the next one
             // gets a turn. Lowering it is how a sampled profile gets enough

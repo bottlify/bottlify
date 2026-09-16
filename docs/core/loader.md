@@ -142,13 +142,16 @@ The assembler places system modules at `0x02000000 + index * 0x00100000` (a mega
 the order the layers list their libraries, then maps the libraries a program ships above them
 (in dependency order from `planDependencies`, `internal/dependencies.js`: depth-first, a
 dependency before what depends on it, cycles visited once, KnownDLL names skipped). A name that
-is not a KnownDLL is looked for beside the program even when the engine has a table for it —
-that file is what a Windows loader maps, and the table is only the fallback when the program did
-not bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry defaults). The
-run-time `LoadLibrary` path makes the same choice in `src/app.js`. Then the assembler places a
-`process-startup` arena. The name/base module table (`byName`, `byBase`, `addressOf`,
-`addressOfOrdinal`, `attached`) lives in `src/app.js`, not in this layer; `list()` here is the
-flat record of what was placed.
+is not a KnownDLL is looked for on the volume, even when the engine has a table for it — that
+file is what a Windows loader maps, and the table is only the fallback when the program did not
+bring one (the set is `win32.knownDlls()`, from Wine's `[KnownDLLs]` registry defaults). The
+search order is `libraryCandidates` in `src/app.js`: the program's own directory first, then
+`C:\WINDOWS\system32\` and `C:\WINDOWS\`, which is where the engine mounts the DirectX runtime —
+so a title that imported `d3dx9_26.dll` without shipping one is bound to the real redistributable
+in the system volume, not to the engine's `d3dx9_*` table. The run-time `LoadLibrary` path makes
+the same choice. Then the assembler places a `process-startup` arena. The name/base module table
+(`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`) lives in `src/app.js`, not in
+this layer; `list()` here is the flat record of what was placed.
 
 ### Thread-local storage and process start (`internal/tls.js`, `internal/init.js`)
 

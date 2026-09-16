@@ -320,6 +320,35 @@ function fromBase64(text){
 }
 
 /**
+ * The DirectX runtime this checkout has fetched, as the engine's own volume.
+ *
+ * The lock names every DLL; each is optional, because a checkout that never ran
+ * `npm run fetch:directx-runtime` has none. Absent, `createApp` gets no system
+ * layer and a `d3dx9_*` a title links against is answered by the engine's own
+ * table -- a valid machine, just not the one that lets the title's shipped
+ * runtime drive the effect.
+ *
+ * @returns {Promise<{ files: { path: string, bytes: Uint8Array }[] } | undefined>}
+ */
+async function loadRuntime(){
+    const lock = await fetch(new URL('../../../directx-runtime-lock.json', import.meta.url))
+        .then(response=>response.ok ? response.json() : null)
+        .catch(()=>null);
+    if (!lock?.artifacts)
+    {
+        return undefined;
+    }
+    const files = (await Promise.all(Object.keys(lock.artifacts).map(async name=>{
+        const bytes = await fetch(
+            new URL(`../../../vendor/prebuilt/directx/${name}`, import.meta.url))
+            .then(response=>response.ok ? response.arrayBuffer() : null)
+            .catch(()=>null);
+        return bytes ? { path: name, bytes: new Uint8Array(bytes) } : null;
+    }))).filter(Boolean);
+    return files.length > 0 ? { files: /** @type {any} */ (files) } : undefined;
+}
+
+/**
  * One byte range of the bundle.
  *
  * A 206 is the only acceptable answer: a 200 means the server ignored the range
@@ -660,6 +689,10 @@ export function createHarness(canvas, how = {}){
             .then(response=>response.ok ? response.arrayBuffer() : null)
             .catch(()=>null);
 
+        // The engine's own volume, when this checkout fetched the runtime. A
+        // run can turn it off to compare against the engine's own d3dx table.
+        const system = request.runtime === false ? undefined : await loadRuntime();
+
         /** @type {any} */
         let presented = null;
         let pointerDown = false;
@@ -761,6 +794,7 @@ export function createHarness(canvas, how = {}){
                 wasmBytes: wasm,
             },
             media: decoder ? { wasmBytes: decoder } : undefined,
+            system,
             imagePath: request.imagePath,
             screen: request.screen ?? undefined,
             // A run is read afterwards, which is exactly when a stack string is gone.

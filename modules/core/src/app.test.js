@@ -21,8 +21,13 @@ import {
     spaceAbove,
     resourceLookup,
     createMissingImports,
+    shippedLibraryReader,
 } from './app.js';
 import { createEvents } from './events.js';
+import { filesystemModule } from './layers/filesystem/module.js';
+import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
+import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
 const QUICK = { attempts: 4, baseDelayMs: 1, maxDelayMs: 4 };
@@ -332,6 +337,58 @@ test('a bare name is looked for beside the executable, then where the system kee
         'a qualified name has one place');
     assert.deepEqual(libraryCandidates('plugins\\Sound.dll', IMAGE),
         ['C:\\App\\plugins\\Sound.dll'], 'and so does one with a directory in it');
+});
+
+test('a library missing beside the program is read from the system volume', async()=>{
+    // The runtime a title links against lives in `system32`, put there by the
+    // engine the way `DXSETUP` puts it there on a real machine. A search that
+    // stopped beside the executable would report every one of them missing.
+    const d3dx = new Uint8Array([1, 2, 3, 4]);
+    const filesystem = await filesystemModule.create({
+        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+    });
+    const read = shippedLibraryReader(filesystem, null, IMAGE);
+
+    assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))],
+        [1, 2, 3, 4]);
+    assert.equal(await read('nothing.dll'), null);
+});
+
+test('a file beside the program still wins over the system volume', async()=>{
+    const beside = new Uint8Array([9]);
+    const system = new Uint8Array([7]);
+    const filesystem = await filesystemModule.create({
+        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': system }),
+        drives: { C: { source: createMemoryStore({ 'App\\d3dx9_26.dll': beside }) } },
+    });
+    const read = shippedLibraryReader(filesystem, null, IMAGE);
+    assert.deepEqual([.../** @type {Uint8Array} */ (await read('d3dx9_26.dll'))], [9]);
+});
+
+test('an import the engine has a table for is planned from the system file', async()=>{
+    const d3dx = new Uint8Array(buildExe({
+        imports: { 'KERNEL32.dll': ['Anything'] },
+        code: ()=>[0xc3],
+    }));
+    const entry = new Uint8Array(buildExe({
+        imports: { 'd3dx9_26.dll': ['D3DXCreateEffect'], 'KERNEL32.dll': ['Anything'] },
+        code: ()=>[0xc3],
+    }));
+    const filesystem = await filesystemModule.create({
+        system: createMemoryStore({ 'WINDOWS\\system32\\d3dx9_26.dll': d3dx }),
+    });
+
+    const { order, missing } = await planDependencies({
+        entry,
+        // The engine does have a d3dx9_26 table; the file is still the answer.
+        isSystem: (/** @type {string} */ name)=>name.toLowerCase() === 'd3dx9_26.dll',
+        isKnownDll: (/** @type {string} */ name)=>name.toLowerCase() === 'kernel32.dll',
+        readLibrary: shippedLibraryReader(filesystem, null, IMAGE),
+    });
+
+    assert.deepEqual(order.map(/** @type {any} */ one=>one.name), ['d3dx9_26.dll']);
+    assert.deepEqual([...order[0].file], [...d3dx], 'the file was planned, not the table');
+    assert.deepEqual(missing, []);
 });
 
 test('a parent\'s deferred writes land only inside the child it wrote them for', ()=>{
