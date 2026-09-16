@@ -36,6 +36,7 @@ const RAM_BASE = 0x40000000;
 const RAM_SIZE = 32 << 20;
 
 const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
+const SENTINEL = 0xee;
 
 /** @param {number} r @param {number} g @param {number} b @param {number} [a] */
 const argb = (r, g, b, a = 255)=>((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
@@ -44,8 +45,13 @@ const argb = (r, g, b, a = 255)=>((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
  * A device of either version over the recording GPU, with guest memory it can
  * read and write.
  *
+ * With `guarded`, every allocation is followed by one sentinel byte and the
+ * next allocation starts right after it: a write that leaves its block lands
+ * on a sentinel.
+ *
  * @param {8 | 9} version
- * @param {{ width?: number, height?: number, lockableBackBuffer?: boolean }} [options]
+ * @param {{ width?: number, height?: number, lockableBackBuffer?: boolean,
+ *           guarded?: boolean }} [options]
  */
 function harness(version, options = {}){
     const gpu = createFakeDevice();
@@ -59,6 +65,8 @@ function harness(version, options = {}){
     });
     const ram = new Uint8Array(RAM_SIZE);
     let next = RAM_BASE;
+    /** @type {number[]} guest addresses of the sentinel bytes */
+    const sentinels = [];
     /** @type {string[]} */
     const reports = [];
     const services = {
@@ -75,6 +83,13 @@ function harness(version, options = {}){
         /** @param {number} bytes */
         allocate: bytes=>{
             const address = next;
+            if (options.guarded)
+            {
+                ram[address + bytes - RAM_BASE] = SENTINEL;
+                sentinels.push(address + bytes);
+                next += bytes + 1;
+                return address;
+            }
             next += bytes + 0x100;
             return address;
         },
@@ -110,6 +125,15 @@ function harness(version, options = {}){
         presented,
         reports,
         device,
+        /** @param {string} after what was just done */
+        assertSentinels(after){
+            assert.ok(sentinels.length > 0);
+            for (const address of sentinels)
+            {
+                assert.equal(ram[address - RAM_BASE], SENTINEL,
+                    `the byte after the block at ${address.toString(16)} survives ${after}`);
+            }
+        },
         /** @param {number} address @param {number} length */
         read(address, length){
             return ram.slice(address - RAM_BASE, address - RAM_BASE + length);
@@ -525,3 +549,115 @@ test('a lock of a render target made without lockable is refused, as the real AP
         assert.equal(h.backBuffer().LockRect(locked, null, 0), 0x8876086c,
             'and so is the back buffer without D3DPRESENTFLAG_LOCKABLE_BACKBUFFER');
     });
+
+test('bounds (D3D9): every write the device makes into guest memory stays inside the surface'
+    + ' it names', async()=>{
+    const h = harness(9, { lockableBackBuffer: true, guarded: true });
+    const { device } = h;
+    /** @param {number} w @param {number} h @param {number} pool */
+    const plain = (w, h, pool)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(device.CreateOffscreenPlainSurface(w, h, D3DFMT.X8R8G8B8, pool, held),
+            D3D_OK);
+        return held.surface;
+    };
+    /** @param {number} w @param {number} h @param {number} levels @param {number} pool */
+    const texture = (w, h, levels, pool)=>{
+        /** @type {{ texture?: any }} */
+        const held = {};
+        assert.equal(device.CreateTexture(w, h, levels, 0, D3DFMT.X8R8G8B8, pool, held), D3D_OK);
+        return held.texture;
+    };
+    /** @param {any} texture @param {number} level */
+    const levelOf = (texture, level)=>{
+        /** @type {{ surface?: any }} */
+        const held = {};
+        assert.equal(texture.GetSurfaceLevel(level, held), D3D_OK);
+        held.surface.release();
+        return held.surface;
+    };
+    /** @param {any} surface @param {number} bytes */
+    const paint = (surface, bytes)=>{
+        assert.equal(typeof surface.base, 'number');
+        h.write(surface.base, new Uint8Array(bytes).fill(0x5a));
+    };
+
+    // UpdateSurface: the bottom-right corner of the source onto a smaller
+    // destination level, filling it to its last byte.
+    const sysmem = plain(8, 8, D3DPOOL.SYSTEMMEM);
+    paint(sysmem, 256);
+    const small = texture(4, 4, 1, D3DPOOL.DEFAULT);
+    assert.equal(device.UpdateSurface(sysmem, { left: 4, top: 4, right: 8, bottom: 8 },
+        levelOf(small, 0), { x: 0, y: 0 }), D3D_OK);
+    assert.deepEqual([...h.read(levelOf(small, 0).base + 60, 4)], [0x5a, 0x5a, 0x5a, 0x5a],
+        'the last pixel of the level arrived');
+    h.assertSentinels('UpdateSurface');
+
+    // UpdateTexture: three matched levels; a source larger than its
+    // destination at the matched level is refused before any byte moves.
+    const chain = texture(4, 4, 3, D3DPOOL.SYSTEMMEM);
+    for (let level = 0; level < 3; level++)
+    {
+        paint(levelOf(chain, level), 4 * (4 >> level) * (4 >> level));
+    }
+    const chained = texture(4, 4, 3, D3DPOOL.DEFAULT);
+    assert.equal(device.UpdateTexture(chain, chained), D3D_OK);
+    assert.equal(h.read(levelOf(chained, 2).base, 4)[0], 0x5a, 'the smallest level arrived');
+    h.assertSentinels('UpdateTexture');
+    const wide = texture(8, 8, 1, D3DPOOL.SYSTEMMEM);
+    paint(levelOf(wide, 0), 256);
+    const before = h.read(levelOf(small, 0).base, 64);
+    const refused = device.UpdateTexture(wide, small);
+    h.assertSentinels('an UpdateTexture whose source level is larger than the destination');
+    assert.equal(refused, 0x8876086c,
+        'a source level of another size than its matched destination level');
+    const deep = texture(8, 8, 3, D3DPOOL.SYSTEMMEM);
+    assert.equal(device.UpdateTexture(deep, small), 0x8876086c,
+        'the matched level of a deeper chain is its 2x2 one, not the 4x4');
+    assert.equal(device.UpdateTexture(deep, chained), 0x8876086c);
+    assert.deepEqual(h.read(levelOf(small, 0).base, 64), before, 'nothing moved');
+    h.assertSentinels('a refused UpdateTexture');
+
+    // StretchRect through guest bytes: two offscreen plain surfaces, which
+    // the GPU never holds.
+    const from = plain(4, 4, D3DPOOL.DEFAULT);
+    paint(from, 64);
+    const into = plain(4, 4, D3DPOOL.DEFAULT);
+    assert.equal(device.StretchRect(from, { left: 2, top: 2, right: 4, bottom: 4 }, into,
+        { left: 2, top: 2, right: 4, bottom: 4 }, 1), D3D_OK);
+    assert.equal(h.read(into.base + 60, 1)[0], 0x5a);
+    h.assertSentinels('StretchRect');
+
+    // ColorFill: a whole plain surface, and the last row of a render target.
+    assert.equal(device.ColorFill(into, null, argb(1, 2, 3)), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const target = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.X8R8G8B8, true, target), D3D_OK);
+    assert.equal(device.ColorFill(target.surface, { left: 0, top: 3, right: 4, bottom: 4 },
+        argb(1, 2, 3)), D3D_OK);
+    assert.deepEqual([...h.read(target.surface.base + 60, 4)], [3, 2, 1, 0xff]);
+    h.assertSentinels('ColorFill');
+
+    // GetRenderTargetData and the lock read-back: a snapshot of the whole
+    // target packed into exactly the destination's bytes.
+    const twin = plain(4, 4, D3DPOOL.SYSTEMMEM);
+    h.setTarget(target.surface);
+    h.clear(argb(0x12, 0x34, 0x56));
+    assert.equal(await device.GetRenderTargetData(target.surface, twin), D3D_OK);
+    assert.deepEqual([...h.read(twin.base + 60, 4)], [0x56, 0x34, 0x12, 0xff]);
+    h.assertSentinels('GetRenderTargetData');
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(await target.surface.LockRect(locked, null, 0), D3D_OK);
+    assert.equal(target.surface.UnlockRect(), D3D_OK);
+    h.setTarget(h.backBuffer());
+    h.clear(argb(0x12, 0x34, 0x56));
+    assert.equal(await h.backBuffer().LockRect(locked, null, 0), D3D_OK);
+    assert.equal(h.backBuffer().UnlockRect(), D3D_OK);
+    assert.deepEqual([...h.read(/** @type {number} */ (locked.pBits) + 60, 4)],
+        [0x56, 0x34, 0x12, 0xff]);
+    h.assertSentinels('the lock read-back');
+    await h.present();
+    h.assertSentinels('the present');
+});

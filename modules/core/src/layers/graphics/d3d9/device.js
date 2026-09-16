@@ -2959,7 +2959,10 @@ function createDeviceObject(parameters, caps, services, identity){
         /**
          * Every level of a system-memory texture into the matching level of a
          * default-pool one. The destination may have fewer levels, in which
-         * case the source's top levels are the ones copied.
+         * case the source's top levels are the ones copied. Matched levels
+         * must be the same size: the move takes its rows from the source and
+         * its pitch from the destination, and a larger source would run past
+         * the destination's bytes.
          *
          * @param {any} source @param {any} destination
          * @param {{ moves?: SurfaceMove[] }} [out]
@@ -2995,6 +2998,11 @@ function createDeviceObject(parameters, caps, services, identity){
                     break;
                 }
                 const desc = describe(one);
+                const into = describe(other);
+                if (desc.Width !== into.Width || desc.Height !== into.Height)
+                {
+                    return D3DERR_INVALIDCALL;
+                }
                 moves.push(rectMove(one, wholeOf(desc), other, { x: 0, y: 0 }));
             }
             deliverMoves(moves, out);
