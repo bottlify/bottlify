@@ -394,10 +394,15 @@ divergence rather than drawing something wrong. A clear is a triangle
 over the viewport under the scissor and the masks, which a pass's load operation would ignore.
 The frame is shown through an opaque copy that alternates between two surfaces, because a
 program's destination alpha is its own scratch and a page composites a presented texture by its
-alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, level by level
-as the context marks them written; a cube map is six layers with a cube view. A copy from the
+alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm`, only the rectangle a
+`glTexSubImage2D` rewrote (the union of every rectangle since the last upload; a full redefine is
+the whole level), level by level as the context marks them written; a cube map is six layers with
+a cube view. An S3TC texture whose every level still holds the blocks it arrived in uploads them
+as `bc1`/`bc2`/`bc3` blocks instead, on a device with `texture-compression-bc`; one level rewritten
+decoded (`glTexSubImage2D` into it) falls the whole texture back to `rgba8unorm`. A copy from the
 framebuffer into a texture level is a render pass into a view of that level, sampling the back
-buffer with the row order GL's bottom-up framebuffer implies.
+buffer with the row order GL's bottom-up framebuffer implies -- never into a BC surface, which
+WebGPU refuses a render-attachment usage on.
 
 Without a device, the same scene is drawn on the processor: `pipeline.js` runs the fixed-function
 stages in the specification's order (per-vertex lighting, fog, texture generation and matrix;
