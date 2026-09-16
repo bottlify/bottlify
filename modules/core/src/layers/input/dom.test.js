@@ -327,6 +327,61 @@ test('a border and padding are page furniture, not part of the picture', ()=>{
     }
 });
 
+test('a pointer reaches the far corner before, during and after fullscreen', ()=>{
+    // Entering fullscreen draws the canvas larger and leaving it draws it
+    // small again. The pointer must land on the same picture pixel each time:
+    // a projection that keeps a box from the previous phase maps the corner of
+    // the picture to a position short of it, which from the chair is a cursor
+    // that cannot reach the bottom-right.
+    const rect = { left: 30, top: 20, width: 802, height: 602 };
+    const style = {
+        borderLeftWidth: '1px', borderRightWidth: '1px',
+        borderTopWidth: '1px', borderBottomWidth: '1px',
+        paddingLeft: '0px', paddingRight: '0px', paddingTop: '0px', paddingBottom: '0px',
+    };
+    const before = globalThis.getComputedStyle;
+    globalThis.getComputedStyle = /** @type {any} */ (()=>style);
+    try
+    {
+        const h = harness({ canvas: { width: 800, height: 600, rect } });
+        h.canvas.fire('focus', {});
+        h.drain();
+
+        const corner = ()=>{
+            const content = { width: rect.width - 2, height: rect.height - 2 };
+            h.canvas.fire('pointermove', {
+                clientX: rect.left + 1 + content.width - 1,
+                clientY: rect.top + 1 + content.height - 1,
+            });
+            const [seen] = h.drain();
+            return [seen.x, seen.y];
+        };
+
+        // Windowed: 800x600 of picture drawn one-to-one.
+        assert.deepEqual(corner(), [799, 599], 'the windowed corner');
+        // Fullscreen: drawn twice the size, and twice the pixels behind it.
+        rect.left = 0;
+        rect.top = 0;
+        rect.width = 1602;
+        rect.height = 1202;
+        h.canvas.width = 1600;
+        h.canvas.height = 1200;
+        assert.deepEqual(corner(), [1599, 1199], 'the fullscreen corner');
+        // Back to the windowed size, and to the windowed picture.
+        rect.left = 30;
+        rect.top = 20;
+        rect.width = 802;
+        rect.height = 602;
+        h.canvas.width = 800;
+        h.canvas.height = 600;
+        assert.deepEqual(corner(), [799, 599], 'the windowed corner again');
+    }
+    finally
+    {
+        globalThis.getComputedStyle = before;
+    }
+});
+
 test('a trackpad\'s many small deltas are one wheel notch', ()=>{
     const h = harness();
     h.canvas.fire('focus', {});

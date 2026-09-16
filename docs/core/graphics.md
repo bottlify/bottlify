@@ -43,7 +43,7 @@ allows because `win32` is declared.
 | `free` | `(address) => void` | absent | Returns guest memory a texture or map is finished with, so a program that sizes its cache from free heap sees textures released. |
 | `divergence` | `(api, detail) => void` | absent | Where "this call succeeded and did not do all of what it promises" is reported. See *Limitations*. |
 | `cursor` | `(notice: CursorNotice) => void` | absent | Receives a Direct3D program's cursor bitmap (`width`, `height`, `hotSpot`, `bgra`, `shown`). Without it `SetCursorProperties` is refused with `D3DERR_INVALIDCALL`, which tells the program to draw its own. |
-| `resolution` | `(width, height, where?) => void` | absent | Told the back-buffer size a device is created or reset at, and for Direct3D 8 which window it presents into; the reported screen follows it. |
+| `resolution` | `(width, height, where?) => void` | absent | Told the back-buffer size a device is created or reset at, and which window it presents into; the reported screen follows it. A fullscreen device's window is placed at the mode's size, so a program clipping its cursor to that window reaches the picture's corners. |
 | `publishInterface` | `(object, iid) => address` | `() => 0` | The bridge's vtable publisher. The default publishes nothing, so a build without a bridge gets tables that refuse rather than pointers into nowhere. |
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
 

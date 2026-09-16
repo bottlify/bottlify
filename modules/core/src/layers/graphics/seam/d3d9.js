@@ -122,8 +122,11 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(api: string, detail: string) => void} [deps.divergence]
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  *     Where the program's cursor goes; without a taker the call is refused.
- * @param {(width: number, height: number) => void} [deps.resolution]
- *     Told the resolution a device is created at, to report as the screen.
+ * @param {(width: number, height: number,
+ *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *     Told the resolution a device is created or reset at, to report as the
+ *     screen -- and which window it presents into, so a fullscreen one can be
+ *     placed.
  * @param {() => AdapterIdentity | null} [deps.identity]
  */
 export function createDirect3D9Seam(
@@ -967,7 +970,14 @@ export function createDirect3D9Seam(
             if (hr === D3D_OK)
             {
                 writePresentParameters(parameters >>> 0, next);
-                resolution?.(next.backBufferWidth >>> 0, next.backBufferHeight >>> 0);
+                // The window is this resolution now, and a fullscreen reset has
+                // to take it with it the way a created one does; a window left
+                // at the old size has the program clipping its cursor to a
+                // rectangle the picture no longer fills.
+                resolution?.(next.backBufferWidth >>> 0, next.backBufferHeight >>> 0, {
+                    window: (next.hDeviceWindow >>> 0) || deviceWindow,
+                    fullscreen: !next.windowed,
+                });
             }
             return hr;
         },
@@ -2143,7 +2153,16 @@ export function createDirect3D9Seam(
                 return hr;
             }
             writePresentParameters(parameters >>> 0, wanted);
-            resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0);
+            // The window is now this resolution; the reported screen is too.
+            // Fullscreen, the device's window follows the mode, as the real
+            // device moves it; windowed, the window is the program's own. The
+            // window is kept for a later Reset, whose present parameters need
+            // not repeat it.
+            deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
+            resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
+                window: deviceWindow,
+                fullscreen: !wanted.windowed,
+            });
             const result = handBack(held.device, deviceInterfaces, IID_IDirect3DDevice9,
                 out >>> 0, D3DERR_OUTOFVIDEOMEMORY);
             if (result === D3D_OK)
@@ -2182,6 +2201,11 @@ export function createDirect3D9Seam(
 
     /** @type {any} */
     let lastDevice = null;
+    // The window the last device was created into. A Reset's present
+    // parameters name it too, but not always -- a program may leave it zero --
+    // and the window a reset leaves at the wrong size is one the program then
+    // clips its cursor to.
+    let deviceWindow = 0;
 
     return {
         /**

@@ -145,7 +145,7 @@ function seamed(options = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
-    /** @type {[number, number][]} */
+    /** @type {[number, number, number | undefined, boolean | undefined][]} */
     const resolutions = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const seam = createDirect3D9Seam({
@@ -154,7 +154,9 @@ function seamed(options = {}){
         screen: ()=>SCREEN,
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
-        resolution: (/** @type {number} */ w, /** @type {number} */ h)=>resolutions.push([w, h]),
+        /** @param {number} w @param {number} h
+         *  @param {{ window?: number, fullscreen?: boolean }} [where] */
+        resolution: (w, h, where)=>resolutions.push([w, h, where?.window, where?.fullscreen]),
         identity: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
     });
     // The device reports its own divergences: the assembling caller hands
@@ -214,7 +216,7 @@ test('the root makes a device and describes itself in the shape the header gives
     const { hr, device, parameters } = h.createDevice(root);
     assert.equal(hr, D3D_OK);
     assert.notEqual(device, 0);
-    assert.deepEqual(h.resolutions, [[64, 64]]);
+    assert.deepEqual(h.resolutions, [[64, 64, HWND, false]]);
     // The count a zero stood for is written back, as this version does.
     assert.equal(h.fields.readU32(parameters + D3DPRESENT_PARAMETERS9.BackBufferCount), 1);
 
@@ -260,6 +262,43 @@ test('the root makes a device and describes itself in the shape the header gives
     assert.equal(h.object(device), null);
     h.release(root);
     assert.equal(h.root.refCount, 0);
+});
+
+test('a fullscreen device names the window it takes with it', ()=>{
+    // The real device places its window at the mode's size; the window is
+    // named so whoever answers can do the same, and fullscreen is the signal.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
+    assert.notEqual(device, 0);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
+});
+
+test('a reset that changes the mode names the window it presents into', ()=>{
+    // Leaving fullscreen resets to the windowed size, and the window has to be
+    // named then too: a window left at the mode's size leaves the program
+    // clipping its cursor to a rectangle the picture no longer fills.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root);
+    const at = 0x2200;
+    /** @param {Record<string, number>} over */
+    const write = over=>{
+        h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS9.SIZE));
+        h.fields.writeStruct(at, D3DPRESENT_PARAMETERS9, {
+            BackBufferWidth: 64, BackBufferHeight: 64, BackBufferFormat: D3DFMT.X8R8G8B8,
+            BackBufferCount: 1, SwapEffect: 1, hDeviceWindow: HWND, Windowed: 1, ...over,
+        });
+    };
+
+    write({ BackBufferWidth: 320, BackBufferHeight: 240, Windowed: 0 });
+    assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true], 'fullscreen names the window');
+
+    write({});
+    assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
+        'and so does the reset back to windowed');
 });
 
 test('a device is refused for the behaviour a program must not ask with', ()=>{

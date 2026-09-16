@@ -345,6 +345,41 @@ test('clearing the declared space returns motion to the viewport', ()=>{
     assert.deepEqual(h.router.cursor(), { x: 800, y: 600 }, 'unclipped, the viewport is the space');
 });
 
+test('the declared space is bounded by the viewport in effect, before and after fullscreen', ()=>{
+    // Entering fullscreen changes the viewport, and a program re-clips its
+    // cursor to the new one; leaving it changes both back. The cursor must
+    // reach the declared space's far corner in each phase, by an absolute
+    // position and by relative motion, or it is the viewport and the declared
+    // space disagreeing about which is which.
+    const h = harness({ bounds: ()=>({ width: 800, height: 600 }) });
+    const full = { left: 0, top: 0, right: 800, bottom: 600 };
+
+    h.router.confineTo(()=>({ width: 800, height: 600 }));
+    h.router.clip(full);
+    h.send({ kind: 'pointerMove', x: 799, y: 599 });
+    assert.deepEqual(h.router.cursor(), { x: 799, y: 599 }, 'windowed, absolute');
+
+    h.router.confineTo(()=>({ width: 1600, height: 1200 }));
+    h.router.clip({ left: 0, top: 0, right: 1600, bottom: 1200 });
+    h.send({ kind: 'pointerMove', x: 1599, y: 1199 });
+    assert.deepEqual(h.router.cursor(), { x: 1599, y: 1199 }, 'fullscreen, absolute');
+
+    h.router.confineTo(()=>({ width: 800, height: 600 }));
+    h.router.clip(full);
+    h.send({ kind: 'pointerMove', x: 799, y: 599 });
+    assert.deepEqual(h.router.cursor(), { x: 799, y: 599 }, 'windowed again, absolute');
+
+    h.router.place(0, 0);
+    h.send({ kind: 'pointerMove', dx: 800, dy: 600 });
+    assert.deepEqual(h.router.cursor(), { x: 799, y: 599 }, 'windowed, relative');
+
+    h.router.confineTo(()=>({ width: 1600, height: 1200 }));
+    h.router.clip({ left: 0, top: 0, right: 1600, bottom: 1200 });
+    h.router.place(0, 0);
+    h.send({ kind: 'pointerMove', dx: 1600, dy: 1200 });
+    assert.deepEqual(h.router.cursor(), { x: 1599, y: 1199 }, 'fullscreen, relative');
+});
+
 test('a button posts its own message pair and reaches the DirectInput mouse', ()=>{
     const h = harness();
     h.send({ kind: 'pointerMove', x: 8, y: 9 });
