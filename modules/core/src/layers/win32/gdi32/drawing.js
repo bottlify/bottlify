@@ -228,6 +228,16 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
         {
             return null;
         }
+        // The emulator grows its memory in place, which detaches every view of
+        // it taken before the growth; a view on a detached buffer is empty. A
+        // bound surface is one such view, held for the bitmap's life, so after
+        // a growth it would read zeroes and swallow every write. Its bytes
+        // being gone is the growth, and the pixels are at the same guest
+        // address, so it is taken again rather than trusted.
+        if (dc.boundSurface && dc.boundSurface.bytes && dc.boundSurface.bytes.length === 0)
+        {
+            dc.boundSurface = null;
+        }
         if (!dc.boundSurface)
         {
             const surface = services.surfaceFor(dc, surfaceOf(dc));

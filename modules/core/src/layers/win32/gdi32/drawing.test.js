@@ -289,6 +289,38 @@ test('a memory context is bound to the bitmap selected into it, and rebound on a
         'once per bitmap');
 });
 
+test('a surface whose bytes the guest outgrew is taken again, not drawn into nowhere', ()=>{
+    // The emulator grows its memory in place, which detaches every view of it
+    // taken before the growth. A context holds one such view for as long as its
+    // selected bitmap does, so after a growth every draw through it reads
+    // zeroes and writes nowhere -- an installer that copied for ten minutes and
+    // then painted its last screen black. The view is taken again at the same
+    // guest address, which the growth did not move.
+    const graphics = fakeDrawing();
+    /** @type {any[]} */
+    const surfaces = [];
+    graphics.services.surfaceFor = (/** @type {any} */ dc, /** @type {any} */ bitmap)=>{
+        void dc;
+        const surface = { width: bitmap.width, height: bitmap.height, bytes: new Uint8Array(16) };
+        surfaces.push(surface);
+        return surface;
+    };
+    const { fns, hdc } = setup(graphics.services);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    const bitmap = fns.CreateBitmap.handler([4, 4, 1, 8, 0x1000]);
+    fns.SelectObject.handler([memoryDc, bitmap]);
+
+    assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
+    assert.equal(surfaces.length, 1, 'bound while the bytes are there');
+
+    // The emulator's buffer is replaced: the bound view goes empty.
+    surfaces[0].bytes = new Uint8Array(0);
+    assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
+    assert.equal(surfaces.length, 2, 'the next draw takes the view again');
+    assert.equal(graphics.calls.filter(call=>call[0] === 'bind').length, 2,
+        'and binds the fresh one, because the old binding is empty');
+});
+
 test('the blits that need no source, and the ones that scale, reach the service', ()=>{
     // An installer paints its banner with PatBlt and StretchDIBits; a missing
     // import there was a zero answer that popped nothing, and eight calls
