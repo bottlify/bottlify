@@ -493,6 +493,10 @@ export function createMultiByteFunctions(narrow){
         _mbsdup: '_strdup',
         _mbsupr: '_strupr',
         _mbslwr: '_strlwr',
+        // A classifier, not a string function, but the same shape: one
+        // character code in, one flag out, and the C locale's answer is the
+        // byte one's exactly, the same as every multi-byte function above.
+        _ismbcspace: 'isspace',
     }))
     {
         if (narrow[byte])

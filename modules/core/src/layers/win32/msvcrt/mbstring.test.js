@@ -97,15 +97,18 @@ test('mbtowc reports one byte consumed, and zero at the terminator', ()=>{
 
 test('the multi-byte names are bound to the byte functions themselves', ()=>{
     const memory = fakeMemory();
-    const narrow = createMsvcrtFunctions({
+    const narrow = /** @type {Record<string, any>} */ (createMsvcrtFunctions({
         ...memory,
         write: ()=>{},
         callGuest: async()=>0,
-    });
+    }));
     const multi = /** @type {Record<string, any>} */ (createMultiByteFunctions(narrow));
     assert.equal(multi._mbscpy, narrow.strcpy, 'one implementation, two names');
     assert.equal(multi._mbslen, narrow.strlen);
     assert.equal(multi._mbsicmp, narrow._stricmp);
+    assert.equal(multi._ismbcspace, narrow.isspace, 'a classifier, bound the same way');
+    assert.equal(multi._ismbcspace.handler([' '.charCodeAt(0)]), 1);
+    assert.equal(multi._ismbcspace.handler(['x'.charCodeAt(0)]), 0);
 });
 
 test('under a single-byte locale a character is one byte and nothing leads', ()=>{
