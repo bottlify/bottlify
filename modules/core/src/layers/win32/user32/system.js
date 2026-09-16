@@ -110,6 +110,8 @@ const MONITORINFOF_PRIMARY = 1;
  */
 const INPUT_SIZE = 28;
 const INPUT_MOUSE = 0;
+const INPUT_KEYBOARD = 1;
+const INPUT_HARDWARE = 2;
 const MOUSEEVENTF_MOVE = 0x0001;
 const MOUSEEVENTF_LEFTDOWN = 0x0002;
 const MOUSEEVENTF_LEFTUP = 0x0004;
@@ -121,6 +123,11 @@ const MOUSEEVENTF_XDOWN = 0x0080;
 const MOUSEEVENTF_XUP = 0x0100;
 const MOUSEEVENTF_WHEEL = 0x0800;
 const MOUSEEVENTF_ABSOLUTE = 0x8000;
+/** KEYBDINPUT.dwFlags: what wVk/wScan mean and which half of a press this is. */
+const KEYEVENTF_EXTENDEDKEY = 0x0001;
+const KEYEVENTF_KEYUP = 0x0002;
+const KEYEVENTF_UNICODE = 0x0004;
+const KEYEVENTF_SCANCODE = 0x0008;
 const ERROR_INVALID_PARAMETER = 87;
 
 /** GetWindow's relations. */
@@ -619,6 +626,12 @@ export function createSystemFunctions({ host, live, windows, classes }){
     };
 
     /** @param {number} address */
+    const readU16 = address=>{
+        const bytes = host.readMemory(address, 2);
+        return (bytes[0] | bytes[1] << 8) >>> 0;
+    };
+
+    /** @param {number} address */
     const readI32 = address=>readU32(address) | 0;
 
     /**
@@ -695,6 +708,44 @@ export function createSystemFunctions({ host, live, windows, classes }){
             inserted = true;
         }
         return inserted;
+    };
+
+    /**
+     * One INPUT_KEYBOARD event, turned into the same key press the input
+     * router builds from a real one -- WM_KEYDOWN/WM_KEYUP, the key table
+     * GetKeyState and GetAsyncKeyState read, and DirectInput's array.
+     *
+     * `wScan`/`KEYEVENTF_SCANCODE` and `wVk` are the two ways a caller names
+     * the key; the router resolves either back to the physical key it names,
+     * because that is where the table naming physical keys already lives.
+     * `KEYEVENTF_UNICODE` names no physical key at all -- Windows synthesises
+     * VK_PACKET and lets TranslateMessage alone turn it into WM_CHAR, so only
+     * the down half of such a pair produces anything here.
+     *
+     * @param {number} at  Where the INPUT begins.
+     * @returns {boolean} whether anything was inserted.
+     */
+    const injectKeyboard = at=>{
+        const wVk = readU16(at + 4);
+        const wScan = readU16(at + 6);
+        const flags = readU32(at + 8);
+        const up = (flags & KEYEVENTF_KEYUP) !== 0;
+
+        if ((flags & KEYEVENTF_UNICODE) !== 0)
+        {
+            if (!up)
+            {
+                host.sendInput?.({ kind: 'text', text: String.fromCharCode(wScan) });
+            }
+            return true;
+        }
+
+        const extended = (flags & KEYEVENTF_EXTENDEDKEY) !== 0;
+        const named = (flags & KEYEVENTF_SCANCODE) !== 0
+            ? { scan: wScan, extended }
+            : { vk: wVk };
+        host.sendInput?.({ kind: 'key', ...named, down: !up });
+        return true;
     };
 
     /**
@@ -2032,9 +2083,10 @@ export function createSystemFunctions({ host, live, windows, classes }){
          * `cbSize` is checked rather than trusted: it is sizeof(INPUT) or the
          * caller is not describing one, and Windows refuses the whole call
          * with ERROR_INVALID_PARAMETER rather than read past what it was
-         * given. Keyboard and hardware events are a device model of their own;
-         * this build does not inject them and says so rather than pretending
-         * the insertion happened.
+         * given. `INPUT_HARDWARE` is a device model of its own -- a low-level
+         * message replay nothing here reproduces -- and is counted without
+         * being injected, exactly as this build's mouse and keyboard are
+         * counted when they are.
          */
         SendInput: {
             argBytes: 12,
@@ -2051,14 +2103,22 @@ export function createSystemFunctions({ host, live, windows, classes }){
                 for (let index = 0; index < events; index++)
                 {
                     const piece = at + index * INPUT_SIZE;
-                    if (readU32(piece) === INPUT_MOUSE)
+                    const type = readU32(piece);
+                    if (type === INPUT_MOUSE)
                     {
                         inserted += injectMouse(piece) ? 1 : 0;
                     }
+                    else if (type === INPUT_KEYBOARD)
+                    {
+                        inserted += injectKeyboard(piece) ? 1 : 0;
+                    }
+                    else if (type === INPUT_HARDWARE)
+                    {
+                        inserted++;
+                    }
                     else
                     {
-                        host.divergence?.('SendInput',
-                            `INPUT type ${readU32(piece)} is not injected`);
+                        host.divergence?.('SendInput', `INPUT type ${type} is not injected`);
                     }
                 }
                 return inserted;

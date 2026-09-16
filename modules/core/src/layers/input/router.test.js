@@ -111,6 +111,28 @@ test('a key down carries its virtual key, its scan code and a repeat count of on
     assert.equal(message.lParam, 0x001e0001);
 });
 
+test('SendInput names a key by virtual key or scan code, not by KeyboardEvent.code', ()=>{
+    // The same path a real 'A' key press takes, reached the way SendInput's
+    // INPUT_KEYBOARD reaches it: a virtual key, or a scan code with the E0
+    // prefix carried separately, resolved back to the physical key before
+    // anything downstream can tell the two origins apart.
+    const h = harness();
+    assert.equal(h.send({ kind: 'key', vk: 0x41, down: true }), true);
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]), [[WM.KEYDOWN, 0x41]]);
+
+    assert.equal(h.send({ kind: 'key', vk: 0x41, down: false }), true);
+    assert.deepEqual(h.drain().map(m=>m.message), [WM.KEYUP]);
+
+    assert.equal(h.send({ kind: 'key', scan: 0x11, extended: false, down: true }), true);
+    assert.deepEqual(h.drain().map(m=>[m.message, m.wParam]), [[WM.KEYDOWN, 0x57]], 'KeyW');
+});
+
+test('an unresolvable virtual key or scan code is dropped, not guessed at', ()=>{
+    const h = harness();
+    assert.equal(h.send({ kind: 'key', vk: 0xff, down: true }), false);
+    assert.deepEqual(h.drain(), []);
+});
+
 test('a key up sets the previous-state and transition bits', ()=>{
     const h = harness();
     h.send({ kind: 'key', code: 'KeyA', down: true });

@@ -21,7 +21,7 @@
  * browser, which is where its correctness is actually established.
  */
 
-import { keyFor, dikOf } from './keys.js';
+import { keyFor, dikOf, codeForVk, codeForScan } from './keys.js';
 
 /** The messages this layer produces. */
 export const WM = Object.freeze({
@@ -94,6 +94,12 @@ const BUTTONS = Object.freeze({
  * @property {'key' | 'text' | 'pointerMove' | 'pointerButton' | 'wheel' | 'focus'
  *           | 'padAxis' | 'padButton'} kind
  * @property {string} [code]     For `key`: a `KeyboardEvent.code`.
+ * @property {number} [vk]       For `key` with no `code`: a virtual key,
+ *           `SendInput`'s own way of naming one -- resolved to the physical
+ *           key it names before anything else happens.
+ * @property {number} [scan]     For `key` with no `code`: a scan code,
+ *           `SendInput`'s other way, read together with `extended`.
+ * @property {boolean} [extended] Whether `scan` carries the E0 prefix.
  * @property {boolean} [down]    For `key`, `pointerButton` and `padButton`.
  * @property {string} [text]     For `text`: the character the browser composed.
  * @property {number} [x]        For `pointerMove`: client coordinates.
@@ -274,20 +280,36 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         emit(WM.SETCURSOR, targetWindow(), (message & 0xffff) << 16 | HTCLIENT);
     };
 
-    /** @param {HostInputEvent} event */
+    /**
+     * A physical key going down or up -- named the way a browser names one,
+     * by `event.code`, or the way `SendInput` does, by a virtual key or a
+     * scan code resolved back to the same physical key before anything else
+     * here runs. Whichever named it, everything past this line is one key on
+     * one keyboard, and cannot tell the two apart.
+     *
+     * @param {HostInputEvent} event
+     */
     const key = event=>{
-        const mapping = keyFor(event.code ?? '');
+        const code = event.code
+            ?? (event.scan !== undefined ? codeForScan(event.scan, event.extended === true)
+                : event.vk !== undefined ? codeForVk(event.vk) : null);
+        if (code === null)
+        {
+            dropped++;
+            return false;
+        }
+        const mapping = keyFor(code);
         if (!mapping)
         {
             dropped++;
             return false;
         }
 
-        const wasDown = held.has(event.code ?? '');
+        const wasDown = held.has(code);
         const altBefore = keys[VK_MENU] !== 0;
         if (event.down)
         {
-            held.set(String(event.code), mapping);
+            held.set(code, mapping);
             keys[mapping.vk] = 1;
             keys[mapping.vkSide] = 1;
             // A repeat is the same press still held, not a new one: the
@@ -304,7 +326,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
         }
         else
         {
-            held.delete(String(event.code));
+            held.delete(code);
             keys[mapping.vkSide] = 0;
             // A modifier is two keys and one virtual key: letting go of the
             // left shift while the right is down does not mean shift is up.

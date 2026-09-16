@@ -136,6 +136,49 @@ export function keyFor(code){
 }
 
 /**
+ * The reverse of `keyFor`, built once: a virtual key or a scan code back to
+ * the physical key it names -- what `SendInput`'s `INPUT_KEYBOARD` is given
+ * instead of a `KeyboardEvent.code`, and has to be resolved to one before it
+ * can take the same path a real key press does.
+ *
+ * A generic virtual key (`VK_SHIFT`, `VK_CONTROL`, `VK_MENU`) does not say
+ * which side, and Windows resolves it to the left one -- which is what
+ * iterating the table in its own order and keeping the first hit does here,
+ * since the left of each such pair is declared first.
+ *
+ * @type {Map<number, string>}
+ */
+const CODE_BY_VK = new Map();
+/** Keyed by the scan code with the E0 prefix folded into bit 8, so the two
+ *  scan-code spaces (prefixed and not) never collide. @type {Map<number, string>} */
+const CODE_BY_SCAN = new Map();
+for (const [code, mapping] of KEYS)
+{
+    if (!CODE_BY_VK.has(mapping.vk))
+    {
+        CODE_BY_VK.set(mapping.vk, code);
+    }
+    CODE_BY_VK.set(mapping.vkSide, code);
+    CODE_BY_SCAN.set(mapping.extended ? mapping.scan | 0x100 : mapping.scan, code);
+}
+
+/**
+ * @param {number} vk
+ * @returns {string | null}
+ */
+export function codeForVk(vk){
+    return CODE_BY_VK.get(vk) ?? null;
+}
+
+/**
+ * @param {number} scan @param {boolean} extended
+ * @returns {string | null}
+ */
+export function codeForScan(scan, extended){
+    return CODE_BY_SCAN.get(extended ? scan | 0x100 : scan) ?? null;
+}
+
+/**
  * The DirectInput code for a key: the scan code, with the E0 prefix as bit 7.
  *
  * @param {KeyMapping} mapping

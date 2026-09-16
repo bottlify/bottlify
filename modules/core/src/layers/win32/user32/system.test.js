@@ -1062,11 +1062,67 @@ test('a cbSize that is not an INPUT is refused whole, with the last error set', 
     assert.deepEqual(sent, [], 'and nothing was inserted');
 });
 
-test('a keyboard INPUT is reported rather than silently inserted', ()=>{
-    // This build has no keyboard injection path; returning the count would be
-    // telling the program a key it will never see went in.
+test('SendInput injects a keyboard event named by virtual key', ()=>{
+    const INPUT_KEYBOARD = 1;
+    const VK_A = 0x41;
+    const { memory, fns, sent } = setup();
+    // KEYBDINPUT: wVk, wScan packed into one dword, then dwFlags. No flags:
+    // a key going down, named by wVk rather than a scan code.
+    memory.putU32s(INPUT_BUFFER, [INPUT_KEYBOARD, VK_A, 0, 0, 0, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
+    assert.deepEqual(sent, [{ kind: 'key', vk: VK_A, down: true }]);
+});
+
+test('SendInput reads a scan code and the key-up flag off KEYBDINPUT', ()=>{
+    const INPUT_KEYBOARD = 1;
+    const KEYEVENTF_KEYUP = 0x0002;
+    const KEYEVENTF_SCANCODE = 0x0008;
+    const SCAN_W = 0x11;
+    const { memory, fns, sent } = setup();
+    memory.putU32s(INPUT_BUFFER,
+        [INPUT_KEYBOARD, SCAN_W << 16, KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP, 0, 0, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
+    assert.deepEqual(sent, [{ kind: 'key', scan: SCAN_W, extended: false, down: false }]);
+});
+
+test('SendInput turns KEYEVENTF_UNICODE into a character with no physical key', ()=>{
+    const INPUT_KEYBOARD = 1;
+    const KEYEVENTF_UNICODE = 0x0004;
+    const KEYEVENTF_KEYUP = 0x0002;
+    const { memory, fns, sent } = setup();
+    const character = 'A'.charCodeAt(0);
+    memory.putU32s(INPUT_BUFFER, [INPUT_KEYBOARD, character << 16, KEYEVENTF_UNICODE, 0, 0, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1,
+        'the down half produces the character');
+    assert.deepEqual(sent, [{ kind: 'text', text: 'A' }]);
+
+    sent.length = 0;
+    memory.putU32s(INPUT_BUFFER,
+        [INPUT_KEYBOARD, character << 16, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0, 0, 0]);
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1,
+        'the up half is still counted, and produces nothing');
+    assert.deepEqual(sent, []);
+});
+
+test('SendInput counts an INPUT_HARDWARE event without injecting it', ()=>{
+    // A device model of its own -- low-level message replay -- that nothing
+    // here reproduces; Windows still accepts the call.
+    const INPUT_HARDWARE = 2;
+    const { memory, fns, sent, diverged } = setup();
+    memory.putU32s(INPUT_BUFFER, [INPUT_HARDWARE, 0, 0, 0, 0, 0, 0]);
+
+    assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 1);
+    assert.deepEqual(sent, []);
+    assert.deepEqual(diverged, []);
+});
+
+test('an INPUT type nothing here knows is reported rather than silently inserted', ()=>{
+    const UNKNOWN_TYPE = 99;
     const { memory, fns, diverged } = setup();
-    memory.putU32s(INPUT_BUFFER, [1, 0x41, 0x1e, 0, 0, 0, 0]);
+    memory.putU32s(INPUT_BUFFER, [UNKNOWN_TYPE, 0, 0, 0, 0, 0, 0]);
 
     assert.equal(fns.SendInput.handler([1, INPUT_BUFFER, 28]), 0);
     assert.equal(diverged.length, 1);
