@@ -430,7 +430,7 @@ export function createProfiler(options){
             const weight = detail?.weight ?? 1;
             const elapsed = now() - entry.startedAt;
             const self = elapsed - entry.children;
-            const weighedSelf = elapsed * weight - entry.weighed;
+            const weighedSelf = (elapsed - entry.weighed) * weight;
             if (depth > 0)
             {
                 stack[depth - 1].children += elapsed;

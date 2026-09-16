@@ -252,6 +252,24 @@ test('a weight scales the estimate over a window, never what one occurrence meas
     assert.equal(profiler.snapshot().hostShare, 0.8, 'the window is estimated');
 });
 
+test('weighted parent, unweighted child: self = (1 - 0.5) * 8 = 4', ()=>{
+    // The child was measured once and stands for itself alone; the parent
+    // stands for eight. Subtracting the child's raw time from the parent's
+    // raw time before scaling by the parent's own weight is what keeps the
+    // parent's self time from also multiplying the child's by eight.
+    const { profiler, at } = harness();
+
+    at(0).beginFrame();
+    at(0).begin('parent');
+    at(0).begin('child');
+    at(0.5).end('child');
+    at(1).end('parent', { weight: 8 });
+    at(1).endFrame();
+
+    const parent = profiler.snapshot().phases.find((/** @type {any} */ row)=>row.name === 'parent');
+    assert.equal(parent.selfMs, 4);
+});
+
 test('a frame whose one sample outweighs it never reports the guest at less than nothing', ()=>{
     // A thirty-seven millisecond crossing in a forty millisecond frame, weighed
     // as eight, stands for far more than the frame held. The frame's split is
