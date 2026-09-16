@@ -32,9 +32,17 @@ knowledge and never implemented:
 
 `mss32`, `bass`, `openal`, `a3d`, `binkw32`, `smackw32`, `glide2x`, `galaxy`, `d3dx9`.
 
-A title that needs one of them needs the loader to run it, not a reimplementation of it. If one of
-them fails, the defect is in a generic layer underneath — that is rule 4, and it has held every
-time so far.
+A title that needs one of them needs the loader to run it, not a reimplementation of it. For
+`d3dx9` this now has a mechanism rather than only a title's own copy: the engine ships the June
+2010 DirectX End-User Runtime as a read-only system volume and the loader runs the real
+`d3dx9_24…43.dll` from it whenever a program does not bring its own — so a title need not ship the
+redistributable itself. The engine's own `d3dx9_25`/`d3dx9_26`/`d3dx9_27` function tables
+(`layers/win32/d3dx9/`) still exist and still answer a program that ships neither the real DLL nor
+finds the system volume mounted, but are shadowed by the real DLL the moment the volume is present
+— the tables are the fallback now, not the primary path, and whether they are worth keeping once
+the volume is always mounted is for the master plan to decide. If one of the other libraries
+fails, the defect is in a generic layer underneath — that is rule 4, and it has held every time so
+far.
 
 The just-in-time compiler, the ahead-of-time cache and the differential oracle from that tree were
 read only at the level of their commit messages. They are a substantial body of work and worth a
@@ -51,8 +59,18 @@ handling through `RtlUnwind`. Then `shlwapi` and `oleaut32`, which COM-heavy cod
 
 After those, roughly by how likely a title is to call them at all: `msvfw32`, `avifil32` and
 `quartz` (video playback, where the codec itself ships with the game); `gdiplus` and `msimg32`;
-`glu32`; `dbghelp` and `imagehlp`; `crypt32`; `iphlpapi`, `mpr` and `netapi32`; `msacm32`;
-`setupapi`, `winspool`, `uxtheme`, `secur32`, `wintrust`, `oleacc`, `oledlg`.
+`glu32`; `dbghelp` and `imagehlp`; `crypt32`; `iphlpapi` and `netapi32`; `msacm32`;
+`setupapi`, `uxtheme`, `secur32`, `wintrust`, `oleacc`, `oledlg`.
+
+`crypt32` (certificate stores, `CertOpenStore` and friends) is still one of these; `advapi32`'s own
+CryptoAPI provider is not — hashing (MD5, SHA-1, SHA-256), RC4 and `CryptVerifySignatureA`, a real
+RSA PKCS#1 v1.5 verification over a public key, already exist there (`layers/win32/advapi32/`),
+because they are `advapi32`'s own exports (`CryptCreateHash`, `CryptEncrypt`, …), not `crypt32`'s.
+`CryptGenKey` and `CryptSignHashA` still answer as a provider with no private key would — the
+first hands out only a session key, the second fails with `NTE_BAD_KEY` and a divergence naming
+the reason — since generating an RSA key pair is not built. `mpr` and `winspool` are built too,
+both answering the state a title without a network share or a printer sees (`layers/win32/mpr/`,
+`layers/win32/winspool/`).
 
 The alternative C runtimes are their own group: `msvcp60`, `msvcp90`, `msvcr90`, `crtdll`. A
 program links whichever one it was built against, and they are not interchangeable.
@@ -61,8 +79,11 @@ program links whichever one it was built against, and they are not interchangeab
 
 - **Library name aliasing.** A program asks for a name that is not the one on disk, and the
   resolution rules are not obvious from the name alone.
-- **Process creation.** `process-creation.md` is the plan; it was being implemented when this line
-  was last checked (`kernel/internal/processes.js`, `win32/kernel32/spawn.js`).
+- **Process creation.** `process-creation.md` is the plan; the replacement model it describes is
+  built (`kernel/internal/processes.js`, `win32/kernel32/spawn.js`), and a redistributable
+  installer is answered as a child that has already finished rather than handed over to. What
+  remains is the case the register calls "two machines": a parent that must resume once its child
+  has finished, rather than being replaced by it.
 - **Stack cleanup derived from a decorated name.** The only way to give an unknown export a stub
   that pops the right number of bytes, and small enough to be worth doing before it is needed.
 

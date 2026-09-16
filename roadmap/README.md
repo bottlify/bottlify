@@ -9,10 +9,11 @@ Two kinds of document, in two directories, because they are consulted differentl
 - **`registers/`** — what is consulted throughout and belongs to no phase: the knowledge registers,
   and two standing plans for work that spans phases.
 
-Two `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
-the follow-ups roadmap — what is decided and not yet built after the phased plan — and the
+Several `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
+the follow-ups roadmap — what is decided and not yet built after the phased plan — the
 register of pitfalls that each cost weeks, required reading before touching the kernel, bridge,
-graphics or audio layers. A fresh clone has everything here except those two. Nothing else depends
+graphics or audio layers — and `00-TODO-list.md`, the current follow-ups list drawn from staff
+reports and review audits. A fresh clone has everything here except those files. Nothing else depends
 on having read them: each phase document states the scope and acceptance criteria it inherited.
 
 ## The phases
@@ -38,8 +39,9 @@ them while Phase 5 is still open, because a title asks for what it asks for. A p
 document has only its row above.
 
 **Phase 5** — the backend, GDI's drawing half and DirectDraw are done; Direct3D 7, 8, 9 and 10,
-OpenGL and Vulkan all have guest-facing seams; Direct3D 8 is the one that has drawn a real title,
-the rest are verified by tests; Glide is not started. Pixels have reached a real GPU.
+OpenGL and Vulkan all have guest-facing seams; Direct3D 8, OpenGL and Direct3D 9 have each drawn a
+real program on a real GPU; Direct3D 7 and 10 are verified by tests alone; Glide is not started.
+Pixels have reached a real GPU.
 
 **Phase 10** — Warcraft III runs in a browser on a real GPU and draws its main menu. This is the
 phase that decides what the others do next.
@@ -52,7 +54,7 @@ phase that decides what the others do next.
 | `registers/defects-carried-forward.md` | The narrower half of the above: each entry checked against *this* tree's source and marked live, gap, satisfied or unchecked. |
 | `registers/decisions-and-optimisations.md` | Behaviour we decided rather than established (A), and where the correct implementation is knowingly the slow one (B). |
 | `registers/porting.md` | What has been rebuilt here, what deliberately will not be, and what remains. A checklist, expected to shrink. |
-| `registers/process-creation.md` | A standing plan: how `CreateProcess` will work. Being implemented as this index was written; Phase 8's later stages are blocked on it. |
+| `registers/process-creation.md` | A standing plan: how `CreateProcess` works. The replacement model is built and two installers (Mafia, NFSU2's SFX stage) have run through it; what blocks Phase 8's later stages now is the case the register calls "two machines" — a parent that must resume after its child rather than being replaced by it (Battlefield 2). |
 | `registers/ui-quick-start.md` | A standing plan for the product UI, which is built and lives outside this repository. |
 
 ## How to work with these

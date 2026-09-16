@@ -142,22 +142,20 @@ reported lost and restored cleared, and the state must be cleared when a new pro
 These are the shape that produces "the program failed and nothing points at it": a call that
 succeeded, with an answer the program then acts on.
 
-- **A window is created and never told.** `CreateWindowEx` sends no creation messages and `ShowWindow`
-  sends none of the show, size or activate group. The call returns a valid handle, so from the
-  program's side it worked — and everything its own procedure was going to build in those messages
-  silently did not happen. They are synchronous, inside the creating call; posting them lets the
-  caller's own code run first and stomp what the handler was about to build. **Live.**
-- **Enumerations that succeed having enumerated nothing.** Device enumeration in the sound and input
-  layers returns success with no callbacks, because calling guest code needed a route those tables
-  did not have. That route now exists and is used elsewhere. The earlier work found this fatal: a
-  title walked the enumerated names for one exact string, found none, and shut its own sound manager
-  down. **The enumerated name is load-bearing — programs pick by string, not by position.** **Live.**
-- **Version information says there is none, for every file.** The block walker is correct and has no
-  source wired to it. Titles of this era discover the installed DirectX generation by asking the
-  drawing libraries for their own version resource, and "no version information" is not a neutral
-  answer to a version probe. Two gaps: no real file resource, and no way at all to synthesise one for
-  a library we implement — reporting the level actually implemented is better than reporting past it.
-  **Live.**
+- **A window is created and never told — partly satisfied.** `CreateWindowEx` still sends no
+  creation messages, but `ShowWindow` is no longer silent for activation: `WM_ACTIVATE` is now
+  posted whenever activation moves between windows, which is the change the Quake III mouse fix
+  needed. `WM_SHOWWINDOW` and `WM_NCACTIVATE` are still not sent, and `CreateWindowEx` itself sends
+  none of `WM_CREATE`'s siblings. **Live**, narrower than it was.
+- **Enumerations that succeed having enumerated nothing — satisfied for both named layers.** The
+  route to call guest code from an enumeration exists and is used: `DirectSoundEnumerate` already
+  called the guest before this range, and `IDirectInputA/W::EnumDevices` does now, writing
+  `DIDEVICEINSTANCE` for the system mouse and keyboard through a guest callback. **The enumerated
+  name is load-bearing — programs pick by string, not by position** remains the rule to keep in
+  mind for the next enumeration this engine adds.
+- **Version information says there is none, for every file — satisfied.** `VerQueryValueA` was
+  measured answering real strings out of a file's own version resource before this range began (an
+  installer probe on `06d3a42`); the block walker has a source wired to it.
 - **The registry has the four roots and nothing else.** No `Windows NT\CurrentVersion`, no
   `ProgramFilesDir`, no DirectX version, no processor description. The earlier work built a lazily
   materialised baseline that any stored value shadows. Only the ANSI half of the registry API exists.
@@ -176,8 +174,10 @@ succeeded, with an answer the program then acts on.
   manager that walks the address space and asks each base its name finds runtimes the program never
   linked and can conclude it is running against a foreign one. Track what was asked for — import
   binding and name-to-base handouts — rather than what exists. **Live.**
-- **`GetProcAddress` on the program's own module always answers zero.** How a program probes for its
-  own optional symbols, and how a plugin resolves back into its host. **Live, small.**
+- **`GetProcAddress` on the program's own module always answers zero — satisfied.** A program's own
+  exports are now bound and found by name and by ordinal, the same as any other module's
+  (`docs/core/loader.md`, "Where system modules go"). How a program probes for its own optional
+  symbols, and how a plugin resolves back into its host.
 
 ---
 
@@ -189,7 +189,10 @@ succeeded, with an answer the program then acts on.
   case-sensitive and Win32 paths are not; `.` and `..` must be canonicalised before matching; named
   objects must survive the replacement, unowned, with one reference; and **a self-relaunch is not
   always a re-execution** — some engines launch their own image as a probe whose whole contract is a
-  file it leaves behind, and treating that as a re-exec makes the probe become the game.
+  file it leaves behind, and treating that as a re-exec makes the probe become the game. Replacement
+  itself is built (`process-creation.md`), but named objects surviving it is not, and it is no longer
+  a hypothetical: every Warcraft III demo start now goes through a replacement, so a single-instance
+  mutex created before it and checked after is the first thing that will observe the gap.
 - **Suspension is orthogonal to waiting.** Flipping a waiting thread to suspended loses every signal
   that arrives meanwhile, and resuming then returns from a wait that never completed. A consuming
   signal must skip a suspended waiter. The maximum suspend count is 127 and exceeding it has its own

@@ -126,11 +126,16 @@ handle to a process record — the kernel gains a `process` handle type, which i
 must learn. The record holds the pending image, its command line, its patches, and an exit code
 that is `STILL_ACTIVE` (259). `WaitForSingleObject` on it is the trigger: a parent that waits for
 its child has told us it has nothing left to do, so the wait is where the replacement happens. The
-wait never returns, because the thread that issued it ceases to exist.
+wait never returns, because the thread that issued it ceases to exist — except for the one child
+the engine answers for itself rather than running: a redistributable installer (`DXSETUP` and
+similar, §"What was built") is recorded `completed` at creation, and a wait on it returns at once
+with its exit code, because there is no runtime left for it to install that this engine does not
+already carry.
 
 **What does `GetExitCodeProcess` return, and when?** `STILL_ACTIVE` for as long as the parent can
-ask. There is no moment at which the parent is alive and the child has finished, so any other
-answer would be a fiction.
+ask, for the same reason — there is no moment at which the parent is alive and an ordinary child
+has finished, so any other answer would be a fiction — with the same one exception: a
+redistributable installer reports its own code (0) from the moment it is created.
 
 **`CREATE_SUSPENDED` + `WriteProcessMemory` + `ResumeThread`?** Made to work, by deferral.
 `CREATE_SUSPENDED` records the request without scheduling the
@@ -200,17 +205,23 @@ before the rest was built: `libraries`, `exitCode`, `hive`, `queue` and `com` ar
 alone. Nothing to do.
 
 **2. The kernel gained processes** — `layers/kernel/internal/processes.js`, reached through
-`kernel.processes`. A record holds the image path, the command line, `suspended`, a list of patches,
-an exit code that is always `STILL_ACTIVE`, and the two handles the caller opens for it. `pending()`
-is the first record that is not suspended, which is the whole of the scheduling policy. Nothing in
-that file executes anything.
+`kernel.processes`. A record holds the image path, the command line, `suspended`, a `completed`
+flag, a list of patches, an exit code that is `STILL_ACTIVE` until the child runs (`0` from the
+start when created `completed`), and the two handles the caller opens for it. `pending()` is the
+first record that is neither suspended nor completed, which is the whole of the scheduling policy;
+`finished()` answers whether a record's exit code is no longer `STILL_ACTIVE`, for a wait or an
+exit-code query. Nothing in that file executes anything.
 
 **3. `layers/win32/kernel32/spawn.js`** holds `CreateProcessA`, `CreateProcessW`, `WinExec` and
 `WriteProcessMemory`; `CreateProcessA`/`W`'s refusals were deleted from `kernel32/system.js`.
 `GetExitCodeProcess` there now answers for a child handle as well as for the running process.
 `WaitForSingleObject` on a `process` handle blocks the thread for good (a zero timeout polls
 `WAIT_TIMEOUT`, because a parent that is only checking must not be stopped), and `ResumeThread` on a
-`process-thread` handle clears `suspended`.
+`process-thread` handle clears `suspended` — except for a redistributable installer
+(`isRedistributableInstaller`, matched on the child's own file name: `DXSETUP`/`DXWebSetup`,
+`vcredist*`/`vc_redist*`, `dotnetfx*`/`ndp*`/`netfx*`, anything under a `DirectX\` directory),
+created `completed` so a title that starts one and waits on it is answered at once instead of
+waiting for a runtime the engine already carries on its system volume.
 
 Two things were settled from Win32's documented behaviour rather than from this document:
 
@@ -255,17 +266,27 @@ addition when a title asks for it, and a guess until then.
 
 Three runs, headless, in Node:
 
-- **Doom 3's Wise stub** (`_l*` file family, `GetTempFileNameA`) never reaches `WinExec`: it cannot
-  extract its payload, tries to `LoadLibrary` the temp file it failed to write, and exits 1. The
-  missing calls are the ones `installers.md` already lists; process creation is not what is stopping
-  it.
-- **The Warcraft III demo installer** dies in the msvcrt startup — `__set_app_type`, `_initterm`,
-  `__getmainargs`, `_controlfp` — before `main`. Also already listed.
-- **`Frozen Throne.exe`, the launcher this document was written about, never executes a host call at
-  all.** Its image maps at `0x400000`, its entry point is `0x403606`, every import resolves, and the
-  guest is then at `eip=0` with the stack walking down and every register but `eax=0xffff` clear. It
-  makes no call into anything, so `CreateProcessA` is never reached. Reproduced identically with the
-  process-creation work stashed out, so it is not caused by it. `war3.exe` from the same bundle, run
-  the same way, reaches `Direct3DCreate8` — so the harness is sound and the fault is in what the
-  launcher's first instructions do. **This is the next measurement**: until it is found, none of the
-  above can be exercised by the title it was designed for.
+- **Doom 3's Wise stub** (`_l*` file family, `GetTempFileNameA`) never reached `WinExec` as of the
+  run this section records: it could not extract its payload, tried to `LoadLibrary` the temp file
+  it failed to write, and exited 1. The missing calls were the ones `installers.md` already lists;
+  process creation was not what stopped it. Not re-measured since `_control87`, `_ismbcspace` and
+  the rest of the startup gap were closed, so whether it gets further is open again.
+- **The Warcraft III demo installer no longer dies in the msvcrt startup.** The missing startup
+  calls (`__set_app_type`, `_initterm`, `__getmainargs`, `_controlfp`) were closed, `va_list`'s
+  window was bounded and the audio ring fix landed, and the installer now runs to its own end
+  screen and exits 0 through the ordinary replacement path (`qwen-installer`, `qwen-endscreen`
+  reports, `Frozen Throne.exe`'s launcher loop no longer the blocker — see below). In-map freezes
+  during the run remain, host-bound and separate from process creation.
+- **`Frozen Throne.exe`, the launcher this document was written about, was measured not to execute
+  any host call at all** at the time this section was written — mapped, every import resolved, and
+  then `eip=0` with nothing called, reproduced with the process-creation work stashed out. Whichever
+  fix let the demo installer's own launcher loop complete (above) applies to the same class of
+  program; this line is not re-verified against `Frozen Throne.exe` specifically since that
+  measurement and should not be read as still current.
+- **Battlefield 2 is the concrete "two machines" case this document predicted.** Its installer's
+  parent process starts `Battlefield 2_code.exe`, waits for it, and then goes on to copy files
+  itself — a parent that must resume after its child, not be replaced by it, which is exactly what
+  §"The decision" named as out of scope for replacement (`qwen-installshield`
+  `dbg/installers/qwen-report.md`, Task 2). It is what motivates the multi-process item in
+  `../00-bottlify-master-plan.md`, and is unbuilt: the parent is torn down when the child is spawned,
+  the same as any other replacement, so the copy step after the wait never runs.
