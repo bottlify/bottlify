@@ -17,12 +17,19 @@ import { WRITER_COLUMNS, WRITER_ROWS, createWriterAccount } from './internal/wri
  * unmapped or wrongly-permitted access is an error instead of a silent write.
  */
 
-/** @type {any} */
-let regions = null;
-/** @type {any} */
-let accessors = null;
-/** @type {import('./internal/writers.js').WriterAccount | null} */
-let writers = null;
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the region map and the writer account belong to the
+ * closure `create()` returns, so a second instance in one realm cannot take
+ * the first one's layout.
+ *
+ * @type {any}
+ */
+let current = null;
 
 /**
  * The layout as published: name as a dictionary id, base, size, and access
@@ -41,6 +48,9 @@ export const REGION_ROWS = 1024;
  */
 export const MEMORY_COUNTERS = ['frameWriter', 'frameWriterBytes'];
 
+/** The empty answer `readBytes`/`window` give once this instance is disposed. */
+const EMPTY = new Uint8Array(0);
+
 export const memoryModule = {
     name: 'memory',
     version: '0.1.0',
@@ -57,7 +67,22 @@ export const memoryModule = {
         const cpu = /** @type {import('./internal/accessors.js').RawMemory} */ (
             /** @type {unknown} */ (host.requireApi('cpu')));
         const log = host.requireApi('log');
-        regions = createRegionMap();
+
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own region map, accessors and writer account.
+         *
+         * @type {{ regions: any, accessors: any,
+         *          writers: import('./internal/writers.js').WriterAccount | null,
+         *          disposed: boolean }}
+         */
+        const state = { regions: null, accessors: null, writers: null, disposed: false };
+        state.regions = createRegionMap();
 
         // Who wrote what into the guest, by name. Nothing published means no
         // charge at all: the write path takes a branch rather than a call, and
@@ -69,7 +94,7 @@ export const memoryModule = {
         const account = writerTable
             ? createWriterAccount({ table: writerTable, intern: log.intern })
             : null;
-        writers = account;
+        state.writers = account;
         if (account && typeof log.metrics?.counters === 'function')
         {
             const counters = log.metrics.counters('memory', MEMORY_COUNTERS);
@@ -79,7 +104,8 @@ export const memoryModule = {
                 counters[1] = busiest.bytes;
             });
         }
-        accessors = createAccessors({ raw: cpu, regions, charge: account?.charge ?? null });
+        state.accessors = createAccessors(
+            { raw: cpu, regions: state.regions, charge: account?.charge ?? null });
 
         // The layout as a table a reader elsewhere can name a page from:
         // one row per region, its name as a dictionary id. Written when a
@@ -93,7 +119,7 @@ export const memoryModule = {
             {
                 return;
             }
-            const mapped = regions.list();
+            const mapped = state.regions.list();
             const rows = Math.min(mapped.length, table.rows);
             for (let row = 0; row < rows; row++)
             {
@@ -106,30 +132,48 @@ export const memoryModule = {
             table.used(rows);
         };
 
+        /**
+         * Whether this instance is still open. A call still in flight when
+         * the machine was disposed must not find the region map gone: it
+         * answers the harmless value below -- an empty read, a write that
+         * does nothing -- rather than dereferencing what disposal took away.
+         */
+        const live = ()=>!state.disposed;
+
+        current = state;
         return {
             Access,
             RegionKind,
 
             /** @param {any} region */
             register: region=>{
-                const made = regions.register(region);
+                if (!live())
+                {
+                    return null;
+                }
+                const made = state.regions.register(region);
                 publish();
                 return made;
             },
             /** @param {string} name @param {string} access */
             protect: (name, access)=>{
-                regions.protect(name, access);
+                if (!live())
+                {
+                    return;
+                }
+                state.regions.protect(name, access);
                 publish();
             },
             /** @param {number} address */
-            find: address=>regions.find(address),
-            list: ()=>regions.list(),
+            find: address=>live() ? state.regions.find(address) : undefined,
+            list: ()=>live() ? state.regions.list() : [],
             /**
              * @param {number} address
              * @param {number} length
              * @param {'read' | 'write' | 'execute'} mode
              */
-            assert: (address, length, mode)=>regions.assert(address, length, mode),
+            assert: (address, length, mode)=>live()
+                ? state.regions.assert(address, length, mode) : undefined,
 
             /**
              * The slot a name's writes are charged to, resolved once by
@@ -137,44 +181,84 @@ export const memoryModule = {
              *
              * @param {string} name
              */
-            writer: name=>writers?.writer(name) ?? -1,
+            writer: name=>live() ? (state.writers?.writer(name) ?? -1) : -1,
             /**
              * Charges what follows to a slot and answers who was being
              * charged, for the caller to put back on the way out.
              *
              * @param {number} slot
              */
-            charging: slot=>writers?.charging(slot) ?? -1,
+            charging: slot=>live() ? (state.writers?.charging(slot) ?? -1) : -1,
 
-            readBytes: accessors.readBytes,
-            writeBytes: accessors.writeBytes,
-            fillBytes: accessors.fillBytes,
-            window: accessors.window,
-            readU8: accessors.readU8,
-            readU16: accessors.readU16,
-            readU32: accessors.readU32,
-            writeU8: accessors.writeU8,
-            writeU16: accessors.writeU16,
-            writeU32: accessors.writeU32,
+            readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
+                live() ? state.accessors.readBytes(address, length) : EMPTY,
+            writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+                if (live())
+                {
+                    state.accessors.writeBytes(address, bytes);
+                }
+            },
+            fillBytes: (/** @type {number} */ address, /** @type {number} */ value,
+                /** @type {number} */ length)=>
+            {
+                if (live())
+                {
+                    state.accessors.fillBytes(address, value, length);
+                }
+            },
+            window: (/** @type {number} */ address, /** @type {number} */ length)=>
+                live() ? state.accessors.window(address, length) : EMPTY,
+            readU8: (/** @type {number} */ address)=>live() ? state.accessors.readU8(address) : 0,
+            readU16: (/** @type {number} */ address)=>
+                live() ? state.accessors.readU16(address) : 0,
+            readU32: (/** @type {number} */ address)=>
+                live() ? state.accessors.readU32(address) : 0,
+            writeU8: (/** @type {number} */ address, /** @type {number} */ value)=>{
+                if (live())
+                {
+                    state.accessors.writeU8(address, value);
+                }
+            },
+            writeU16: (/** @type {number} */ address, /** @type {number} */ value)=>{
+                if (live())
+                {
+                    state.accessors.writeU16(address, value);
+                }
+            },
+            writeU32: (/** @type {number} */ address, /** @type {number} */ value)=>{
+                if (live())
+                {
+                    state.accessors.writeU32(address, value);
+                }
+            },
             /** @param {number} address @param {number} [limit] */
-            readCString: (address, limit)=>accessors.readCString(address, limit),
+            readCString: (address, limit)=>
+                live() ? state.accessors.readCString(address, limit) : '',
             /**
              * @param {number} address @param {number} [limit]
              * @param {Uint8Array} [wanted]  Byte values that end the scan.
              */
-            scanCString: (address, limit, wanted)=>accessors.scanCString(address, limit, wanted),
+            scanCString: (address, limit, wanted)=>live()
+                ? state.accessors.scanCString(address, limit, wanted)
+                : { index: -1, byte: 0 },
             /** @param {number} address @param {number} [limit] */
-            readWideString: (address, limit)=>accessors.readWideString(address, limit),
+            readWideString: (address, limit)=>
+                live() ? state.accessors.readWideString(address, limit) : '',
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
-        const mapped = regions ? regions.list() : [];
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return { name: 'memory', version: '0.1.0', status: 'created', metrics: {} };
+        }
+        const mapped = instance.regions.list();
         return {
             name: 'memory',
             version: '0.1.0',
-            status: regions ? 'ready' : 'created',
+            status: 'ready',
             metrics: {
                 regions: mapped.length,
                 // Worth having in a snapshot: a layout that looks wrong usually
@@ -187,8 +271,10 @@ export const memoryModule = {
     },
 
     async dispose(){
-        regions = null;
-        accessors = null;
-        writers = null;
+        if (current)
+        {
+            current.disposed = true;
+        }
+        current = null;
     },
 };

@@ -70,6 +70,17 @@ Who is writing (see [§3](#who-writes-into-guest-memory)):
 | `writer` | `(name) => number` | The number a name's writes are charged under, resolved once by whoever registers the name. `-1` with no log registry. |
 | `charging` | `(slot) => number` | Charges what follows to a number and answers who was being charged, for the caller to put back on the way out. A number outside the table leaves the charge where it was. |
 
+An instance owns its address space. `create()` may run more than once in the same realm (a
+process replacement runs it again; the plan for two machines in one worker needs two at once), so
+the region map, the accessors and the writer account live in the instance the api closes over,
+and a second `create()` cannot take the first one's layout; `diagnostics()` answers for the most
+recently created instance. After `dispose()`, a call that was in flight answers harmlessly rather
+than throwing: `register` answers `null`, `find` answers `undefined`, `list` answers `[]`,
+`assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `readBytes`/
+`window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readCString`/
+`readWideString` answer `''`, `scanCString` answers `{ index: -1, byte: 0 }`, and
+`protect`/`writeBytes`/`fillBytes`/`writeU8`/`writeU16`/`writeU32` are no-ops.
+
 ### Diagnostics
 
 `status` is `'created'` before `create()` and `'ready'` after.

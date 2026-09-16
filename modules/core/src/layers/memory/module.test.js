@@ -116,3 +116,69 @@ test('an unknown name and a build with no tables charge nothing and still write'
     assert.equal(bytes[0x1000], 0x44, 'the write still happens');
     await memoryModule.dispose();
 });
+
+test('a second instance in one realm does not take the first one\'s state', async()=>{
+    const first = await open({});
+    first.register({ name: 'first-only', base: 0x300000, size: 0x1000, kind: 'stack',
+        access: 'rw' });
+
+    const second = await open({});
+    second.register({ name: 'second-only', base: 0x500000, size: 0x1000, kind: 'stack',
+        access: 'rw' });
+
+    assert.deepEqual(first.list().map((/** @type {any} */ region)=>region.name), ['first-only']);
+    assert.equal(first.find(0x500000), undefined,
+        'the first instance never saw the second one\'s region');
+
+    await memoryModule.dispose();
+});
+
+test('a disposed memory answers harmlessly rather than throwing', async()=>{
+    const bytes = new Uint8Array(0x2000);
+    const memory = await open({}, {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.slice(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    });
+    memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
+        access: 'rw' });
+
+    await memoryModule.dispose();
+
+    assert.equal(
+        memory.register({ name: 'late', base: 0x2000, size: 0x10, kind: 'stack', access: 'rw' }),
+        null);
+    memory.protect('data', 'rwx');
+    assert.equal(memory.find(0x1000), undefined);
+    assert.deepEqual(memory.list(), []);
+    assert.equal(memory.assert(0x1000, 4, 'read'), undefined);
+    assert.equal(memory.writer('x'), -1);
+    assert.equal(memory.charging(1), -1);
+    assert.deepEqual(memory.readBytes(0x1000, 4), new Uint8Array(0));
+    memory.writeBytes(0x1000, new Uint8Array(4));
+    memory.fillBytes(0x1000, 1, 4);
+    assert.deepEqual(memory.window(0x1000, 4), new Uint8Array(0));
+    assert.equal(memory.readU8(0x1000), 0);
+    assert.equal(memory.readU16(0x1000), 0);
+    assert.equal(memory.readU32(0x1000), 0);
+    memory.writeU8(0x1000, 1);
+    memory.writeU16(0x1000, 1);
+    memory.writeU32(0x1000, 1);
+    assert.equal(memory.readCString(0x1000), '');
+    assert.deepEqual(memory.scanCString(0x1000), { index: -1, byte: 0 });
+    assert.equal(memory.readWideString(0x1000), '');
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await open({});
+    const second = await open({});
+    second.register({ name: 'a', base: 0x1000, size: 0x10, kind: 'stack', access: 'rw' });
+    second.register({ name: 'b', base: 0x2000, size: 0x10, kind: 'stack', access: 'rw' });
+
+    const diag = /** @type {any} */ (memoryModule.diagnostics());
+    assert.equal(diag.status, 'ready');
+    assert.equal(diag.metrics.regions, 2, 'diagnostics reports the second (most recent) instance');
+
+    await memoryModule.dispose();
+});
