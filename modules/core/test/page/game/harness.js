@@ -585,7 +585,8 @@ export function createHarness(canvas, how = {}){
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
-     *           keys?: { code: string, after: number }[] }} request
+     *           keys?: { code: string, after: number }[],
+     *           keyTimes?: { code: string, atMs: number, holdMs?: number }[] }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -843,6 +844,17 @@ export function createHarness(canvas, how = {}){
         drainSound(app);
 
         listen(app, collected);
+
+        // Keys at wall-clock moments, not presented frames: a screen that
+        // stops presenting while it waits for a key cannot be reached by a
+        // frame number, because the frame it would be sent on never comes.
+        for (const key of request.keyTimes ?? [])
+        {
+            setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: true }),
+                key.atMs);
+            setTimeout(()=>app.input.send({ kind: 'key', code: key.code, down: false }),
+                key.atMs + (key.holdMs ?? 120));
+        }
 
         /** @type {any} */
         const result = { ok: false, gpu: true, adapter: handle.adapter };
