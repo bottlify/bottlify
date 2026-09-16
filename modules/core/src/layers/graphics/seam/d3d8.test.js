@@ -1275,6 +1275,33 @@ test('a device with no window of its own presents into the focus window', ()=>{
     assert.equal(h.resolutions.at(-1)?.[2], HWND, 'hFocusWindow, as CreateDevice was given');
 });
 
+test('a reset that changes the mode names the window it presents into', ()=>{
+    // Leaving fullscreen resets to the windowed size, and the window has to be
+    // named then too: a window left at the mode's size leaves the program
+    // clipping its cursor to a rectangle the picture no longer fills.
+    const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root);
+    const at = 0x2200;
+    /** @param {Record<string, number>} over */
+    const write = over=>{
+        h.box.services.writeMemory(at, new Uint8Array(D3DPRESENT_PARAMETERS8.SIZE));
+        h.fields.writeStruct(at, D3DPRESENT_PARAMETERS8, {
+            BackBufferWidth: 64, BackBufferHeight: 64, BackBufferFormat: D3DFMT.X8R8G8B8,
+            BackBufferCount: 1, SwapEffect: 1, hDeviceWindow: HWND, Windowed: 1, ...over,
+        });
+    };
+
+    write({ BackBufferWidth: 320, BackBufferHeight: 240, Windowed: 0 });
+    assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [320, 240, HWND, true], 'fullscreen names the window');
+
+    write({});
+    assert.equal(h.device(device, 'Reset', [at]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, HWND, false],
+        'and so does the reset back to windowed');
+});
+
 test('a texture, a stage state and a material the guest wrote reach the device', ()=>{
     const h = seamed({ shadow: true });
     const device = h.createDevice(h.create());

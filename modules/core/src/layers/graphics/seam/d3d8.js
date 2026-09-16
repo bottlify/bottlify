@@ -747,6 +747,18 @@ export function createDirect3D8Seam(
             const next = readPresentParameters(parameters >>> 0);
             const hr = device.Reset(next);
             writePresentParameters(parameters >>> 0, next);
+            if (hr === D3D_OK)
+            {
+                // The window is this resolution now, fullscreen or back to
+                // windowed; a window left at the old size has the program
+                // clipping its cursor to a rectangle the picture no longer
+                // fills.
+                deviceWindow = (next.hDeviceWindow >>> 0) || deviceWindow;
+                resolution?.(next.backBufferWidth >>> 0, next.backBufferHeight >>> 0, {
+                    window: deviceWindow,
+                    fullscreen: !next.windowed,
+                });
+            }
             // The block is brought to what the device now holds, not to what
             // it held before: a reset is the host changing state on its own.
             shadowOf(device)?.remirror();
@@ -1920,8 +1932,11 @@ export function createDirect3D8Seam(
                 // The window is now this resolution; the reported screen is too.
                 // Fullscreen, the device's window follows the mode, as the real
                 // device moves it; windowed, the window is the program's own.
+                // The window is kept for a later Reset, whose present
+                // parameters need not repeat it.
+                deviceWindow = (wanted.hDeviceWindow >>> 0) || (focus >>> 0);
                 resolution?.(wanted.backBufferWidth >>> 0, wanted.backBufferHeight >>> 0, {
-                    window: (wanted.hDeviceWindow >>> 0) || (focus >>> 0),
+                    window: deviceWindow,
                     fullscreen: !wanted.windowed,
                 });
             }
@@ -2007,6 +2022,11 @@ export function createDirect3D8Seam(
 
     /** @type {any} */
     let lastDevice = null;
+    // The window the last device was created into. A Reset's present
+    // parameters name it too, but not always -- a program may leave it zero --
+    // and the window a reset leaves at the wrong size is one the program then
+    // clips its cursor to.
+    let deviceWindow = 0;
 
     return {
         /**
