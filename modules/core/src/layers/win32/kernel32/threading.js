@@ -24,8 +24,6 @@ const INFINITE = 0xffffffff;
 const WAIT_FAILED = 0xffffffff;
 /** The wait ran out of time; the object was never signalled. */
 const WAIT_TIMEOUT = 0x102;
-/** The object waited for was signalled, or the timer waited for came due. */
-const WAIT_OBJECT_0 = 0;
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
@@ -99,66 +97,6 @@ const readU32 = (bytes, at)=>
  * @param {ThreadingHost} host
  */
 export function createThreadingFunctions(host){
-    /**
-     * Each armed timer's due time on the guest clock and its period in
-     * milliseconds, by the event that stands for it. A timer that is not here
-     * is not armed, and a wait on it is a wait on an event nobody signals.
-     *
-     * @type {WeakMap<object, { due: number, period: number }>}
-     */
-    const armed = new WeakMap();
-
-    /**
-     * A single-object wait on a timer: the thread sleeps until the due time,
-     * or until its own timeout if that comes first, and the timer is consumed
-     * -- re-armed a period on, or disarmed -- as the real one is when a wait
-     * takes it.
-     *
-     * @param {any} timer @param {any} thread @param {number} timeout
-     * @returns {number | null} the wait result, or null once the thread is blocked
-     */
-    const waitForTimer = (timer, thread, timeout)=>{
-        const state = armed.get(timer);
-        if (!state)
-        {
-            return null;
-        }
-        const now = kernel.clock.virtualTime();
-        const consume = ()=>{
-            if (state.period > 0)
-            {
-                // The next period boundary after now: a timer nobody waited on
-                // for a while signalled once, not once per period missed.
-                const missed = Math.floor((now - state.due) / state.period) + 1;
-                state.due += missed * state.period;
-            }
-            else
-            {
-                armed.delete(timer);
-            }
-            kernel.resetEvent(timer);
-            return WAIT_OBJECT_0;
-        };
-        if (state.due <= now)
-        {
-            return consume();
-        }
-        if (timeout === 0)
-        {
-            return WAIT_TIMEOUT;
-        }
-        if (timeout !== INFINITE && now + timeout < state.due)
-        {
-            kernel.block(thread, `timer "${timer.name}"`,
-                { deadline: now + timeout, result: WAIT_TIMEOUT });
-            return null;
-        }
-        // Consumed now rather than at the wake: the deadline is the wake, and
-        // nothing runs on this thread between the two.
-        kernel.block(thread, `timer "${timer.name}"`, { deadline: state.due, result: consume() });
-        return null;
-    };
-
     /** @param {number} handle @returns {{ flags: number, walked: boolean } | null} */
     const snapshotOf = handle=>{
         try
@@ -318,14 +256,15 @@ export function createThreadingFunctions(host){
                 const wait = timeout >>> 0;
                 const thread = host.currentThread();
 
-                // A child process is never signalled while its parent can look:
-                // it takes this process's place rather than running beside it.
-                // So a poll says the child is still running, which is true, and
-                // a real wait is the parent saying it has nothing left to do --
-                // the thread stops here for good, and the replacement is what
-                // happens instead of the wait ever returning.
                 if (host.handleType?.(handle >>> 0) === 'process')
                 {
+                    // A child process is never signalled while its parent can
+                    // look: it takes this process's place rather than running
+                    // beside it. So a poll says the child is still running,
+                    // which is true, and a real wait is the parent saying it
+                    // has nothing left to do -- the thread stops here for good,
+                    // and the replacement is what happens instead of the wait
+                    // ever returning.
                     if (wait === 0)
                     {
                         return WAIT_TIMEOUT;
@@ -334,11 +273,12 @@ export function createThreadingFunctions(host){
                     return host.park(thread);
                 }
 
-                if (host.handleType?.(handle >>> 0) === 'timer' && armed.has(target))
-                {
-                    return settle(waitForTimer(target, thread, wait));
-                }
-
+                // A timer is ordinary here. Its signal is a property of the
+                // object and the kernel's clock, not of this wait: the clock
+                // sets it when the due time arrives whether this call came
+                // before or after it was armed, so there is nothing left to
+                // special-case.
+                //
                 // Zero is a poll, not a wait: it asks whether the object is
                 // available now and never blocks or queues. A wait with a zero
                 // deadline answered at once too, but left the thread queued on
@@ -614,19 +554,20 @@ export function createThreadingFunctions(host){
         /**
          * The waitable timer, which a frame limiter arms and then waits on.
          *
-         * A kernel event with a due time on the guest's clock. A wait on it
-         * is a wait for that time: the thread is blocked with the due time as
-         * its deadline and WAIT_OBJECT_0 as its answer, so the interval is
-         * measured out on the virtual clock exactly as a sleep is, and a
-         * periodic timer is re-armed a period on as it is consumed. Declared
-         * for the stack it pops as much as for what it does: these are
-         * stdcall and exported undecorated, so a stub popping nothing walks
-         * the caller's stack off -- which for a limiter called every frame
+         * A kernel object whose due time the scheduler's clock honours: when
+         * the due time arrives the object is signalled, releasing whoever is
+         * waiting on it -- all of them for a manual-reset timer, one for a
+         * synchronisation timer, which is reset by the wait that takes it --
+         * whether the wait began before or after the arm. A periodic timer
+         * re-arms itself on the same clock with no thread present. Declared
+         * for the stack it pops as much as for what it does: these are stdcall
+         * and exported undecorated, so a stub popping nothing walks the
+         * caller's stack off -- which for a limiter called every frame
          * exhausts the stack.
          *
-         * Only a single-object wait knows the due time; a timer among several
-         * objects is its event, which is signalled when a single wait on it
-         * consumes it and otherwise not.
+         * The completion routine a caller passes is not modelled: there are no
+         * APCs here, so it is ignored and never runs. A program that arms a
+         * timer and waits on it, which is what a limiter does, is unaffected.
          *
          * HANDLE CreateWaitableTimerA(LPSECURITY_ATTRIBUTES, BOOL bManualReset, LPCSTR)
          * BOOL SetWaitableTimer(HANDLE, const LARGE_INTEGER* pDueTime, LONG lPeriod,
@@ -644,9 +585,8 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                const timer = found ?? kernel.createEvent({
+                const timer = found ?? kernel.createTimer({
                     manualReset: Boolean(manualReset),
-                    signalled: false,
                     name: name ?? 'timer',
                 });
                 remember(name, 'timer', timer, found !== null);
@@ -678,8 +618,7 @@ export function createThreadingFunctions(host){
                     ? now + Number(-raw) / 10000
                     : now + Math.max(0,
                         Number(raw / 10000n) - FILETIME_EPOCH_MS - kernel.clock.wallClock());
-                armed.set(timer, { due, period: Math.max(0, period | 0) });
-                kernel.resetEvent(timer);
+                kernel.armTimer(timer, due, Math.max(0, period | 0));
                 return 1;
             },
         },
@@ -694,8 +633,7 @@ export function createThreadingFunctions(host){
                     host.setLastError(ERROR_INVALID_HANDLE);
                     return 0;
                 }
-                armed.delete(timer);
-                kernel.resetEvent(timer);
+                kernel.cancelTimer(timer);
                 return 1;
             },
         },

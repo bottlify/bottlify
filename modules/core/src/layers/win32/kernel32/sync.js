@@ -189,6 +189,10 @@ export function createSyncFunctions(host){
         {
             case 'event':
                 return target.signalled === true;
+            // A waitable timer's signal is set by the clock, so by the time a
+            // wait on a set sees it, it is the same test as an event's.
+            case 'timer':
+                return target.signalled === true;
             case 'mutex':
                 return target.owner === null || target.owner === thread;
             case 'semaphore':

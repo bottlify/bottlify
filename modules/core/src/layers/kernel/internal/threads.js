@@ -265,12 +265,47 @@ export function createScheduler(options){
      */
     let noDeadlineBefore = null;
 
-    /** The soonest deadline any blocked thread is waiting on, or null. */
-    const soonest = ()=>threads.reduce((best, thread)=>(
-        thread.state === ThreadState.BLOCKED && thread.deadline !== null
-        && thread.deadline !== undefined && (best === null || thread.deadline < best)
-            ? thread.deadline
-            : best), /** @type {number | null} */ (null));
+    /**
+     * A due time the clock honours whether or not a thread is waiting for it.
+     *
+     * A waitable timer is not a property of the wait that happens to arrive
+     * after it is armed: the object becomes signalled when its due time comes
+     * round, releasing whoever is already parked on it, and a periodic one
+     * re-arms on its own clock with no thread present. So the due time is
+     * registered here, with the same clock the scheduler already moves for
+     * timed waits, and the callback is what signals the object.
+     *
+     * A callback that re-arms itself for the next period is `period`
+     * milliseconds on; zero means fire once.
+     *
+     * @type {Map<number, { deadline: number, period: number,
+     *     fire: (nextDue: number) => void }>}
+     */
+    const timers = new Map();
+    let nextTimerToken = 1;
+
+    /** The soonest deadline any blocked thread or armed timer is waiting on, or null. */
+    const soonest = ()=>{
+        /** @type {number | null} */
+        let best = null;
+        for (const thread of threads)
+        {
+            if (thread.state === ThreadState.BLOCKED
+                && thread.deadline !== null && thread.deadline !== undefined
+                && (best === null || thread.deadline < best))
+            {
+                best = thread.deadline;
+            }
+        }
+        for (const timer of timers.values())
+        {
+            if (best === null || timer.deadline < best)
+            {
+                best = timer.deadline;
+            }
+        }
+        return best;
+    };
 
     /**
      * Wakes every thread whose deadline has passed.
@@ -291,6 +326,30 @@ export function createScheduler(options){
             return;
         }
         noDeadlineBefore = null;
+        // Timers first: one of them may signal an object and wake a waiter,
+        // and that wake has to be visible to the selection this turn makes.
+        // A timer that was cancelled from inside another's callback is skipped
+        // by the lookup; the snapshot is only of the keys.
+        for (const token of [...timers.keys()])
+        {
+            const timer = timers.get(token);
+            if (!timer || timer.deadline > at)
+            {
+                continue;
+            }
+            if (timer.period > 0)
+            {
+                // The next period boundary after now: a timer nobody waited on
+                // for a while signalled once, not once per period missed.
+                const missed = Math.floor((at - timer.deadline) / timer.period) + 1;
+                timer.deadline += missed * timer.period;
+            }
+            else
+            {
+                timers.delete(token);
+            }
+            timer.fire(timer.deadline);
+        }
         for (const thread of threads)
         {
             if (thread.state !== ThreadState.BLOCKED
@@ -613,6 +672,37 @@ export function createScheduler(options){
             onExpiry.push(handler);
         },
 
+        /**
+         * Registers a due time the clock must reach, whether or not any thread
+         * is waiting: the callback runs on the guest's clock, and a positive
+         * period re-arms it for the next boundary. Returns the token
+         * `removeTimer` needs to disarm it.
+         *
+         * @param {number} deadline @param {number} period
+         * @param {(nextDue: number) => void} fire
+         * @returns {number}
+         */
+        addTimer(deadline, period, fire){
+            const token = nextTimerToken++;
+            timers.set(token, { deadline, period: Math.max(0, period), fire });
+            if (noDeadlineBefore === null || deadline < noDeadlineBefore)
+            {
+                noDeadlineBefore = deadline;
+            }
+            return token;
+        },
+
+        /**
+         * Disarms a timer. The earliest deadline may be left behind, which
+         * costs one empty scan and nothing else, exactly as a wait that ends
+         * early does.
+         *
+         * @param {number} token
+         */
+        removeTimer(token){
+            timers.delete(token);
+        },
+
         /** Whether any thread is waiting on a time rather than on another thread. */
         nextDeadline: ()=>soonest(),
 
@@ -746,6 +836,8 @@ export function createScheduler(options){
                     s.thread ?? '?'} 0x${s.from.toString(16)}->0x${s.at.toString(16)}`).join('; '),
                 // Timed waits that ran out rather than being satisfied.
                 expiries,
+                // Due times the clock owes an object rather than a thread.
+                timers: timers.size,
                 // Turns handed out against priority, to a thread passed over
                 // too long. A steady count is a high-priority thread that
                 // never yields, which a program does not mean to do.

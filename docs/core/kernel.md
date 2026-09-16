@@ -60,11 +60,13 @@ Threads and turns:
 | `currentThread` / `threads` | `() => Thread \| null` / `() => Thread[]` | The thread on the CPU; every thread ever created. |
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |
 | `runOnce` | `() => { ran, instructions, switched }` | One turn. `ran: null` means nothing could run. |
-| `nextDeadline` | `() => number \| null` | The soonest guest time a blocked thread waits for. |
+| `nextDeadline` | `() => number \| null` | The soonest guest time a blocked thread or an armed timer waits for. |
 | `exitThread` | `(thread, exitCode) => void` | Abandons the thread's mutexes, terminates it, releases everything waiting on it. |
 | `block` | `(thread, reason?, { deadline?, result? }?) => void` | Blocks a thread on something the kernel does not hold a queue for. |
 | `wake` | `(thread, result?) => boolean` | Makes a blocked thread ready, optionally with the value its call answers. |
 | `onTimeout` | `(handler) => void` | Told when a timed wait expires, so an external queue can drop the thread. |
+| `addTimer` | `(deadline, period, fire) => number` | Registers a due time the clock must reach whether or not a thread is waiting; `fire(nextDue)` runs when it arrives, and a positive `period` re-arms it. Returns the token. |
+| `removeTimer` | `(token) => void` | Disarms a timer. |
 | `sleep` | `(thread, milliseconds) => void` | Block until a guest-time deadline, answering 0. |
 | `diagnosticsSnapshot` | `() => object` | The scheduler's metrics alone. |
 | `pages` | `() => Record<string, number>` | Retired instructions by 64 KiB page of guest code. A walk of every page of guest memory: for a one-off call on this thread, not a poll; the `kernel/pages` table is the same figures with no walk. |
@@ -77,6 +79,9 @@ Synchronisation (`internal/sync.js`):
 | `createEvent` | `({ manualReset?, signalled?, name? }) => Event` | |
 | `createMutex` | `({ name? }) => Mutex` | Recursive, owner-tracked, abandonment-aware. |
 | `createSemaphore` | `({ initial, maximum, name? }) => Semaphore` | Throws unless `0 <= initial <= maximum`. |
+| `createTimer` | `({ manualReset?, name? }) => Timer` | A waitable timer: the clock owns its signalled state. |
+| `armTimer` | `(timer, due, period) => boolean` | Sets the due time on the guest clock; a positive period re-arms it. A waiter that parked before this call is released at the due time. |
+| `cancelTimer` | `(timer) => void` | Disarms without signalling; signalled state and parked waiters are untouched. |
 | `wait` | `(object, thread, timed?) => number \| null` | Result now, or `null` after blocking the thread. |
 | `poll` | `(object, thread) => number \| null` | Takes the object if available; never queues. |
 | `waitAll` | `(objects, thread, timed?) => number \| null` | Takes nothing until everything is available. |
@@ -105,6 +110,11 @@ A `Thread` is a plain record: `id`, `name`, `state`, `tebAddress`, `stackTop`, `
 `waiters`, `handle`, plus the scheduling fields `parkedReturn`, `resumeStack`, `waitResult`,
 `deadline`, `timeoutResult`. It is itself a waitable object (`SyncKind.THREAD`): signalled once
 its `exitCode` is not null, never taken.
+
+A `Timer` is the other clock-owned waitable object (`SyncKind.TIMER`): `kind`, `manualReset`,
+`signalled`, `waiters`, `due`, `period`, `token` — the token being its entry in the scheduler's
+timer map. Its signalled state is set by the clock at `due`, not by a wait: a waiter that parked
+before `armTimer` is released by the arm, exactly as one that arrived after it.
 
 ### Diagnostics
 
@@ -238,6 +248,14 @@ FIFO; choosing an order and keeping it makes a multithreaded program reproducibl
   `WAIT_ABANDONED`.
 - **Semaphores**: count within `[0, maximum]`; release past the maximum throws.
 - **Threads**: signalled once ended, never consumed, so a second join does not wait for ever.
+- **Timers**: `armTimer` registers the due time with the scheduler (`addTimer`), which fires it
+  when the guest clock reaches it — before the expired-wait scan, so a waiter it releases is a
+  candidate for that same turn. `setEvent` signals the timer: a manual-reset one releases
+  everyone and stays signalled until re-armed, a synchronisation one releases a single waiter and
+  is reset by the wait that takes it. A periodic timer's next boundary is advanced by whole
+  periods past the current time, so a timer nobody observed signalled once, not once per period
+  missed. `cancelTimer` removes the clock entry and leaves the signalled state and the waiters
+  alone.
 
 `releaseTo(object)` hands a signalled object to the first waiter that can take it: a thread
 waiting for **all** of a set is passed over unless every member is signalled or already owned
@@ -288,8 +306,10 @@ stops the machine from outside the trap.
   `stackEscaped`, not raised as an exception.
 - **Timed waits expire on guest time**, which moves only by `advance`/`skipTo`; a deadline is
   never met by the host clock alone.
-- **No completion ports, critical sections, condition variables, timers or named objects** in
-  this layer; `block`/`wake` with a `timed` record is the hook the layers above use for them.
+- **No completion ports, critical sections, condition variables or named objects** in this
+  layer; `block`/`wake` with a `timed` record is the hook the layers above use for them. Waitable
+  timers are the exception: a `SyncKind.TIMER` object's due time is a clock entry here, because
+  the signal has to outlive any single wait (`armTimer`/`cancelTimer`).
 - **Waits do not fail** — there is no `WAIT_FAILED` path; an invalid object is a thrown
   `Unknown sync object`.
 - **`releaseSemaphore` past the maximum throws** rather than returning `FALSE`; the caller

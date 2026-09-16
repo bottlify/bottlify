@@ -32,6 +32,11 @@ export const SyncKind = {
     // thread by waiting on its handle, and a wait that did not know about it
     // would fail on the one object every program waits on.
     THREAD: 'thread',
+    // A waitable timer: an object whose signalled state the clock sets when
+    // its due time arrives, with no thread having to be present. It carries
+    // the due time and period; the scheduler holds the clock entry that
+    // releases the waiters.
+    TIMER: 'timer',
 };
 
 /**
@@ -42,7 +47,9 @@ export function createSyncObjects({ scheduler }){
     /** @type {any[]} */
     const objects = [];
     /** How many of each kind were ever made; the cheap answer about the table. */
-    const created = { [SyncKind.EVENT]: 0, [SyncKind.MUTEX]: 0, [SyncKind.SEMAPHORE]: 0 };
+    const created = {
+        [SyncKind.EVENT]: 0, [SyncKind.MUTEX]: 0, [SyncKind.SEMAPHORE]: 0, [SyncKind.TIMER]: 0,
+    };
 
     // A thread whose wait ran out of time has stopped waiting, and a queue that
     // still holds it would hand it the object later -- signalling something
@@ -75,6 +82,8 @@ export function createSyncObjects({ scheduler }){
                 return object.count > 0;
             case SyncKind.THREAD:
                 return object.exitCode !== null;
+            case SyncKind.TIMER:
+                return object.signalled === true;
             default:
                 throw new Error(`Unknown sync object: ${object.kind}`);
         }
@@ -100,6 +109,15 @@ export function createSyncObjects({ scheduler }){
             case SyncKind.EVENT:
             // An auto-reset event releases exactly one waiter and goes back to
             // unsignalled; a manual-reset one stays open until someone resets it.
+                if (!object.manualReset)
+                {
+                    object.signalled = false;
+                }
+                return WaitResult.OBJECT_0;
+
+            // A synchronisation timer is reset by the wait that takes it, a
+            // manual-reset one stays signalled until it is armed again.
+            case SyncKind.TIMER:
                 if (!object.manualReset)
                 {
                     object.signalled = false;
@@ -278,6 +296,68 @@ export function createSyncObjects({ scheduler }){
             objects.push(object);
             created[SyncKind.SEMAPHORE]++;
             return object;
+        },
+
+        /**
+         * A waitable timer. Its signalled state is set by the clock, not by a
+         * wait: arming registers the due time with the scheduler, which
+         * signals the object when it comes round whether or not anyone is
+         * waiting, and re-arms a periodic one on the same clock.
+         *
+         * @param {Object} [options]
+         * @param {boolean} [options.manualReset]
+         * @param {string} [options.name]
+         */
+        createTimer({ manualReset = false, name } = {}){
+            const object = {
+                kind: SyncKind.TIMER, name: name ?? 'timer',
+                manualReset, signalled: false, waiters: [],
+                due: null, period: 0, token: null,
+            };
+            objects.push(object);
+            created[SyncKind.TIMER]++;
+            return object;
+        },
+
+        /**
+         * Sets when a timer comes due, replacing any due time it already had.
+         * The signal belongs to the object and the clock from here: a waiter
+         * that parked before this call is released at the due time just as one
+         * that arrives after it.
+         *
+         * @param {any} object @param {number} due @param {number} period
+         */
+        armTimer(object, due, period){
+            if (object.token !== null && object.token !== undefined)
+            {
+                scheduler.removeTimer(object.token);
+            }
+            object.signalled = false;
+            object.due = due;
+            object.period = Math.max(0, period);
+            object.token = scheduler.addTimer(due, object.period, (/** @type {number} */ next)=>{
+                // A periodic timer moves on to its next boundary; a one-shot
+                // has fired for the last time.
+                object.due = object.period > 0 ? next : null;
+                api.setEvent(object);
+            });
+            return true;
+        },
+
+        /**
+         * Disarms a timer without signalling it. What is signalled stays
+         * signalled; a waiter that is parked stays parked.
+         *
+         * @param {any} object
+         */
+        cancelTimer(object){
+            if (object.token !== null && object.token !== undefined)
+            {
+                scheduler.removeTimer(object.token);
+            }
+            object.token = null;
+            object.due = null;
+            object.period = 0;
         },
 
         /**

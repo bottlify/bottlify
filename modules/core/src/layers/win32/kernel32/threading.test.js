@@ -30,10 +30,86 @@ function fakeKernel(){
         exited: /** @type {any[]} */ ([]),
         blocked: /** @type {any[]} */ ([]),
         threadIds: /** @type {any[]} */ ([]),
+        /** Threads a signal or a timeout released from a wait. */
+        woken: /** @type {any[]} */ ([]),
+        /** Every arm, in order: what due time and period the timer was given. */
+        arms: /** @type {any[]} */ ([]),
+        /** The armed timers the clock below fires. */
+        timers: /** @type {any[]} */ ([]),
+        /** Threads parked on a wait, with the deadline that ends it. */
+        parked: /** @type {any[]} */ ([]),
         /** Set this to make the next wait block. */
         waitBlocks: false,
         /** Guest time, which a deadline is measured against. */
         now: 0,
+    };
+
+    /** @param {any} object @param {any} thread */
+    const acquire = (object, thread)=>{
+        if (object.kind === 'mutex')
+        {
+            const abandoned = object.abandoned === true;
+            object.owner = thread;
+            object.recursion = 1;
+            object.abandoned = false;
+            return abandoned ? 0x80 : 0;
+        }
+        // An auto-reset event and a synchronisation timer are reset by the
+        // wait that takes them; a manual-reset one stays signalled.
+        if ((object.kind === 'event' || object.kind === 'timer') && !object.manualReset)
+        {
+            object.signalled = false;
+        }
+        return 0;
+    };
+
+    /** @param {any} object */
+    const signalled = object=>{
+        if (object.kind === 'mutex')
+        {
+            return object.owner === null;
+        }
+        return object.kind === 'event' || object.kind === 'timer'
+            ? object.signalled === true
+            : false;
+    };
+
+    /** @param {any} thread @param {number} result */
+    const wake = (thread, result)=>{
+        thread.waitResult = result;
+        const at = state.parked.findIndex(entry=>entry.thread === thread);
+        if (at >= 0)
+        {
+            state.parked.splice(at, 1);
+        }
+        state.woken.push(thread);
+    };
+
+    /**
+     * The clock setting an object signalled, releasing waiters the way the
+     * real kernel does: everyone for a manual-reset object, one for an
+     * auto-reset one, which then closes again.
+     *
+     * @param {any} object
+     */
+    const signal = object=>{
+        object.signalled = true;
+        if (object.manualReset)
+        {
+            for (const thread of object.waiters.splice(0))
+            {
+                wake(thread, 0);
+            }
+        }
+        else
+        {
+            const thread = object.waiters.shift();
+            if (thread)
+            {
+                object.signalled = false;
+                wake(thread, 0);
+            }
+        }
     };
 
     const kernel = {
@@ -49,29 +125,117 @@ function fakeKernel(){
         /** @param {number} address @param {number} id */
         writeThreadId: (address, id)=>state.threadIds.push({ address, id }),
         /** @param {any} options */
-        createMutex: options=>({ kind: 'mutex', ...options }),
+        createMutex: options=>({
+            kind: 'mutex', owner: null, recursion: 0, abandoned: false, waiters: [], ...options,
+        }),
         /** @param {any} options */
-        createEvent: options=>({ kind: 'event', ...options }),
+        createEvent: options=>(
+            { kind: 'event', signalled: false, manualReset: false, waiters: [], ...options }),
+        /** @param {any} options */
+        createTimer: options=>(
+            { kind: 'timer', signalled: false, manualReset: false, waiters: [], ...options }),
+        /**
+         * Registers a timer with the fake clock. The clock is what makes the
+         * signal a property of the object: it fires whether or not a thread
+         * was already parked, and a positive period re-arms it.
+         *
+         * @param {any} timer @param {number} due @param {number} period
+         */
+        armTimer(timer, due, period){
+            const at = state.timers.findIndex(entry=>entry.timer === timer);
+            if (at >= 0)
+            {
+                state.timers.splice(at, 1);
+            }
+            timer.signalled = false;
+            timer.due = due;
+            timer.period = period;
+            state.timers.push({ timer, due, period });
+            state.arms.push({ timer, due, period });
+        },
+        /** @param {any} timer */
+        cancelTimer(timer){
+            const at = state.timers.findIndex(entry=>entry.timer === timer);
+            if (at >= 0)
+            {
+                state.timers.splice(at, 1);
+            }
+            timer.due = null;
+            timer.period = 0;
+        },
+        /** The guest's clock reaching a moment, and everything it releases. */
+        /** @param {number} milliseconds */
+        advance(milliseconds){
+            state.now += milliseconds;
+            for (const armed of [...state.timers])
+            {
+                if (armed.due > state.now)
+                {
+                    continue;
+                }
+                if (armed.period > 0)
+                {
+                    const missed = Math.floor((state.now - armed.due) / armed.period) + 1;
+                    armed.due += missed * armed.period;
+                }
+                else
+                {
+                    state.timers.splice(state.timers.indexOf(armed), 1);
+                }
+                signal(armed.timer);
+            }
+            for (const entry of [...state.parked])
+            {
+                if (entry.timed && entry.timed.deadline <= state.now)
+                {
+                    const at = entry.object.waiters.indexOf(entry.thread);
+                    if (at >= 0)
+                    {
+                        entry.object.waiters.splice(at, 1);
+                    }
+                    wake(entry.thread, entry.timed.result);
+                }
+            }
+        },
         /** @param {any} object @param {any} thread @param {any} [timed] */
         wait(object, thread, timed){
             state.waits.push({ object, thread, timed });
-            return state.waitBlocks ? null : 0;
+            if (object.kind === 'mutex' && object.owner === thread)
+            {
+                object.recursion++;
+                return 0;
+            }
+            if (signalled(object))
+            {
+                return acquire(object, thread);
+            }
+            // A thread is itself waitable and has no queue until someone
+            // waits on it; the kernel's own thread record carries one.
+            if (!object.waiters)
+            {
+                object.waiters = [];
+            }
+            object.waiters.push(thread);
+            state.parked.push({ thread, object, timed });
+            return null;
         },
         /** @param {any} object @param {any} thread */
         poll(object, thread){
             state.polls.push({ object, thread });
-            return state.waitBlocks ? null : 0;
+            return signalled(object) ? acquire(object, thread) : null;
         },
-        clock: { virtualTime: ()=>state.now },
+        clock: { virtualTime: ()=>state.now, wallClock: ()=>state.now },
         /** @param {any} object @param {any} thread */
         releaseMutex(object, thread){
             state.released.push({ object, thread });
             return true;
         },
         /** @param {any} event */
-        setEvent: event=>state.waits.push({ set: event }),
+        setEvent: event=>signal(event),
         /** @param {any} event */
-        resetEvent: event=>state.waits.push({ reset: event }),
+        resetEvent: event=>{
+            event.signalled = false;
+        },
         /** @param {any} thread @param {number} code */
         exitThread: (thread, code)=>state.exited.push({ thread, code }),
         /** @param {any} thread @param {string} [reason] */
@@ -125,6 +289,7 @@ const PARKED = Object.freeze({ parked: true });
  */
 function setup(names){
     const kernel = fakeKernel();
+    /** @type {any} */
     const current = { name: 'caller' };
     /** @type {any[]} */
     const parked = [];
@@ -416,43 +581,118 @@ test('a Toolhelp snapshot holds this process and nothing after it', ()=>{
     assert.equal(fns.Process32Next.argBytes, 8);
 });
 
-test('a wait on an armed timer sleeps until it is due on the guest clock, then consumes it', ()=>{
-    const { fns, kernel, host, errors } = setup();
+test('arming a timer with a waiter already parked releases it at the due time', ()=>{
+    // The deadlock in one line: thread B waits before thread A arms. The
+    // signal is a property of the object and the clock, so the arm is what
+    // schedules the wake -- the wait that arrived first is not a lost one.
+    const { fns, kernel, host, current } = setup();
     const bytes = new Uint8Array(0x100);
     host.readMemory = (address, length)=>bytes.subarray(address, address + length);
     kernel.state.now = 1000;
-    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
-    assert.ok(timer > 0);
+    const timer = fns.CreateWaitableTimerA.handler([0, 1, 0]);
     assert.equal(kernel.handles.typeOf(timer), 'timer');
+    const object = kernel.handles.resolve(timer, 'timer');
+
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED,
+        'nothing has armed it yet, so the waiter parks on the timer itself');
+    assert.equal(object.waiters.length, 1);
 
     // -160000 in hundreds of nanoseconds: 16 ms from now, one-shot.
     new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
     assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]), 1);
+    assert.deepEqual(kernel.state.arms.at(-1), { timer: object, due: 1016, period: 0 },
+        'the due time lands on the same clock the scheduler already keeps');
+
+    kernel.advance(16);
+    assert.equal(current.waitResult, 0, 'released with WAIT_OBJECT_0 at the due time');
+    assert.equal(object.signalled, true, 'a manual-reset timer stays signalled');
+    assert.equal(object.waiters.length, 0);
+});
+
+test('a wait on an armed timer parks until it is due, then consumes it', ()=>{
+    const { fns, kernel, host, current } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    const object = kernel.handles.resolve(timer, 'timer');
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]), 1);
+
     assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED,
-        'not due yet, so the thread sleeps');
-    assert.deepEqual(kernel.state.blocked.at(-1).timed, { deadline: 1016, result: 0 },
-        'until the due time, waking with WAIT_OBJECT_0');
-    kernel.state.now = 1016;
-    fns.WaitForSingleObject.handler([timer, 0xffffffff]);
-    assert.equal(kernel.state.waits.at(-1).object, kernel.handles.resolve(timer, 'timer'),
-        'consumed by the sleep: a one-shot timer is now unarmed and the wait is on its event');
-
-    // Periodic: due at once, consumed and re-armed a period on.
-    new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
-    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 20, 0, 0, 0]), 1);
-    kernel.state.now = 1100;
-    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), 0, 'already due');
-    assert.equal(fns.WaitForSingleObject.handler([timer, 0]), 0x102,
-        'polled before the next period');
-    assert.equal(fns.WaitForSingleObject.handler([timer, 5]), PARKED);
-    assert.deepEqual(kernel.state.blocked.at(-1).timed, { deadline: 1105, result: 0x102 },
-        'a wait shorter than the period times out on its own clock');
-
-    assert.equal(fns.CancelWaitableTimer.handler([timer]), 1);
-    assert.equal(fns.SetWaitableTimer.handler([0x999, 0x10, 0, 0, 0, 0]), 0, 'a stranger fails');
-    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+        'not due yet, so the thread parks');
+    assert.deepEqual(kernel.state.waits.at(-1), { object, thread: current, timed: undefined },
+        'on the object, with no deadline of its own: the clock owns the due time');
+    kernel.advance(16);
+    assert.equal(current.waitResult, 0, 'the clock signals the object and releases the wait');
+    assert.equal(object.signalled, false,
+        'a synchronisation timer is reset by the wait that takes it');
+    assert.equal(kernel.state.timers.length, 0, 'a one-shot timer is disarmed once it has fired');
 
     assert.equal(fns.CreateWaitableTimerA.argBytes, 12);
     assert.equal(fns.SetWaitableTimer.argBytes, 24, 'six stdcall arguments, or the stack leaks');
     assert.equal(fns.CancelWaitableTimer.argBytes, 4);
 });
+
+test('a periodic timer signals again a period on, with no thread present between', ()=>{
+    const { fns, kernel, host, current } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    new DataView(bytes.buffer).setBigInt64(0x10, -10000n, true);
+    assert.equal(fns.SetWaitableTimer.handler([timer, 0x10, 20, 0, 0, 0]), 1);
+
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED);
+    kernel.advance(1);
+    assert.equal(current.waitResult, 0, 'the first period');
+    current.waitResult = null;
+
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED,
+        'the second wait does not see a signal left over from the first');
+    kernel.advance(20);
+    assert.equal(current.waitResult, 0, 'and the next period releases it, one period later');
+    assert.equal(kernel.state.timers.length, 1, 'still armed for the period after');
+});
+
+test('cancelling a timer leaves a parked waiter parked, and its own timeout still ends it', ()=>{
+    const { fns, kernel, host, current, errors } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    const object = kernel.handles.resolve(timer, 'timer');
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+    fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]);
+
+    assert.equal(fns.WaitForSingleObject.handler([timer, 5]), PARKED);
+    assert.deepEqual(kernel.state.waits.at(-1).timed, { deadline: 1005, result: 0x102 },
+        'a wait shorter than the due time times out on its own clock');
+    assert.equal(fns.CancelWaitableTimer.handler([timer]), 1);
+    assert.equal(kernel.state.timers.length, 0, 'disarmed');
+    assert.equal(object.signalled, false, 'and it did not signal');
+    kernel.advance(5);
+    assert.equal(current.waitResult, 0x102, 'the wait times out exactly as it would have');
+
+    assert.equal(fns.SetWaitableTimer.handler([0x999, 0x10, 0, 0, 0, 0]), 0, 'a stranger fails');
+    assert.equal(errors.at(-1), 6, 'ERROR_INVALID_HANDLE');
+});
+
+test('CancelWaitableTimer un-arms without signalling a parked waiter', ()=>{
+    const { fns, kernel, host, current } = setup();
+    const bytes = new Uint8Array(0x100);
+    host.readMemory = (address, length)=>bytes.subarray(address, address + length);
+    kernel.state.now = 1000;
+    const timer = fns.CreateWaitableTimerA.handler([0, 0, 0]);
+    const object = kernel.handles.resolve(timer, 'timer');
+    new DataView(bytes.buffer).setBigInt64(0x10, -160000n, true);
+    fns.SetWaitableTimer.handler([timer, 0x10, 0, 0, 0, 0]);
+
+    assert.equal(fns.WaitForSingleObject.handler([timer, 0xffffffff]), PARKED);
+    assert.equal(fns.CancelWaitableTimer.handler([timer]), 1);
+    kernel.advance(1000);
+    assert.equal(current.waitResult, undefined, 'nothing released it');
+    assert.equal(object.waiters.length, 1, 'it is still parked on the object');
+});
+
+

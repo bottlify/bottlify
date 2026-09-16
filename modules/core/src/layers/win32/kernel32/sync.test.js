@@ -49,7 +49,7 @@ function fakeKernel(){
             object.abandoned = false;
             return abandoned ? WAIT_ABANDONED_0 : WAIT_OBJECT_0;
         }
-        if (object.kind === 'event' && !object.manualReset)
+        if ((object.kind === 'event' || object.kind === 'timer') && !object.manualReset)
         {
             object.signalled = false;
         }
@@ -68,6 +68,8 @@ function fakeKernel(){
                 return object.owner === null;
             case 'event':
                 return object.signalled === true;
+            case 'timer':
+                return object.signalled === true;
             case 'semaphore':
                 return object.count > 0;
             default:
@@ -83,6 +85,9 @@ function fakeKernel(){
         /** @param {any} options */
         createEvent: options=>(
             { kind: 'event', signalled: false, manualReset: false, waiters: [], ...options }),
+        /** @param {any} options */
+        createTimer: options=>(
+            { kind: 'timer', signalled: false, manualReset: false, waiters: [], ...options }),
         /** @param {any} object @param {any} thread */
         wait(object, thread){
             if (object.kind === 'mutex' && object.owner === thread)
@@ -425,6 +430,27 @@ test('a zero timeout that finds an object ready still takes it', ()=>{
 
     assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_OBJECT_0);
     assert.equal(event.signalled, false, 'an auto-reset event was consumed, not merely peeked');
+});
+
+test('a waitable timer in a set is ready once the clock has signalled it', ()=>{
+    // WaitForSingleObject stopped needing a timer special case; a timer among
+    // several handles is the same test as an event's, because the clock owns
+    // the object's signalled state and a poll only reads it.
+    const host = fakeHost();
+    const fns = createSyncFunctions(host);
+    const timer = host.kernel.createTimer({ manualReset: false });
+    timer.signalled = true;
+    host.register(0x10, 'timer', timer);
+    const idle = host.kernel.createTimer({ manualReset: false });
+    host.register(0x14, 'timer', idle);
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x10, true);
+
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_OBJECT_0);
+    assert.equal(timer.signalled, false, 'a synchronisation timer is consumed by the wait');
+
+    new DataView(host.bytes.buffer).setUint32(0x400, 0x14, true);
+    assert.equal(fns.WaitForMultipleObjects.handler([1, 0x400, 0, 0]), WAIT_TIMEOUT,
+        'an armed but not-yet-due timer is not ready');
 });
 
 test('a finite timeout is a wait with a deadline, not an immediate refusal', ()=>{

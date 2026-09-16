@@ -337,6 +337,19 @@ export const kernelModule = {
             createMutex: (/** @type {any} */ options)=>sync.createMutex(options),
             createSemaphore: (/** @type {any} */ options)=>sync.createSemaphore(options),
             /**
+             * A waitable timer, whose due time the clock honours on its own.
+             *
+             * @param {any} options
+             */
+            createTimer: (/** @type {any} */ options)=>sync.createTimer(options),
+            /**
+             * @param {any} timer @param {number} due @param {number} period
+             */
+            armTimer: (/** @type {any} */ timer, due, period)=>
+                sync.armTimer(timer, due, period),
+            /** @param {any} timer */
+            cancelTimer: (/** @type {any} */ timer)=>sync.cancelTimer(timer),
+            /**
              * @param {any} object
              * @param {any} thread
              * @param {{ deadline?: number, result?: number }} [timed]

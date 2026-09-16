@@ -164,7 +164,8 @@ test('the kernel publishes its figures as tables and keeps the object tables col
     assert.equal(readTable(tables.counters).row(0).turns, 1);
 
     const metrics = /** @type {any} */ (kernelModule.diagnostics().metrics);
-    assert.deepEqual(metrics.sync, { objects: 2, event: 1, mutex: 1, semaphore: 0 },
+    assert.deepEqual(metrics.sync,
+        { objects: 2, event: 1, mutex: 1, semaphore: 0, timer: 0 },
         'counts in the snapshot; the rows only by name');
     assert.equal(kernel.syncObjects().length, 2);
     await kernelModule.dispose();
