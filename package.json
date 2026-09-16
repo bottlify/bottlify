@@ -15,6 +15,7 @@
     "build:video-decoder": "npm run build:video-decoder -w @bottlify/core --",
     "fetch:v86": "npm run fetch:v86 -w @bottlify/core",
     "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",
+    "fetch:directx-runtime": "npm run fetch:directx-runtime -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",
     "typecheck": "npm run typecheck -w @bottlify/core && npm run typecheck -w @bottlify/networking && npm run typecheck -w @bottlify/installer",
     "lint": "eslint . --max-warnings 0",

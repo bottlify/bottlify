@@ -50,6 +50,7 @@
     "build:video-decoder": "node scripts/build-video-decoder.mjs",
     "fetch:v86": "node scripts/fetch-v86.mjs",
     "fetch:video-decoder": "node scripts/fetch-video-decoder.mjs",
+    "fetch:directx-runtime": "node scripts/fetch-directx-runtime.mjs",
     "verify:reproducibility": "node scripts/verify-reproducibility.mjs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:package": "node scripts/check-package.mjs",
