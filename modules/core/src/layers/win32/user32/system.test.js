@@ -1087,6 +1087,7 @@ test('a build with nothing feeding it reports nothing pressed', ()=>{
 
 test('the key-state queries pass the key through to the host', ()=>{
     const down = new Set([0x41]);
+    /** @param {number} key */
     const state = key=>(down.has(key) ? 0x8000 : 0);
     const { fns } = setup({ keyState: state, asyncKeyState: state });
 
