@@ -308,6 +308,12 @@ export const graphicsModule = {
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
+                // The same adapter-derived answer the other APIs get: kept
+                // blocks are four to eight times fewer bytes to upload, and
+                // spare the processor decoding every S3TC texture in the
+                // guest's own code.
+                compressedTextures: device?.device?.features?.has('texture-compression-bc')
+                    === true,
                 presenter: ()=>state.presenter,
                 // The same per-draw account the Direct3D 8 device takes, on
                 // the device handle for the same reason: only the assembling

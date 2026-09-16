@@ -65,6 +65,22 @@ const MIPMAP_FILTERS = new Set([
  *           given a shape and no data
  * @property {number} [compressedFormat]  the S3TC format the data arrived in
  * @property {number} [compressedBytes]   and how many bytes it took
+ * @property {{ format: number, bytes: Uint8Array } | null} [compressed]
+ *           the S3TC blocks as the guest gave them, kept alongside the
+ *           decoded texels so a device that samples the blocks directly
+ *           never has to decode what it can upload as-is
+ */
+
+/**
+ * A rectangle of a level written since the GPU copy last read it, in the
+ * level's own pixels. `null` (as the map's value, not this type) means the
+ * whole level -- see `markDirty`.
+ *
+ * @typedef {Object} DirtyRect
+ * @property {number} x
+ * @property {number} y
+ * @property {number} width
+ * @property {number} height
  */
 
 /**
@@ -74,8 +90,9 @@ const MIPMAP_FILTERS = new Set([
  * @property {Map<number, number>} parameters
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
- * @property {Set<number>} dirty   the level keys written since a copy kept
- *           elsewhere last read them
+ * @property {Map<number, DirtyRect | null>} dirty   the level keys written
+ *           since a copy kept elsewhere last read them, each with the
+ *           rectangle written or `null` for the whole level
  */
 
 /**
@@ -173,8 +190,47 @@ export function createTextureObject(name, target){
         parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
         borderColour: [0, 0, 0, 0],
         levels: new Map(),
-        dirty: new Set(),
+        dirty: new Map(),
     };
+}
+
+/**
+ * The smallest rectangle covering both.
+ *
+ * @param {DirtyRect} a
+ * @param {DirtyRect} b
+ * @returns {DirtyRect}
+ */
+export function unionRect(a, b){
+    const x = Math.min(a.x, b.x);
+    const y = Math.min(a.y, b.y);
+    return {
+        x,
+        y,
+        width: Math.max(a.x + a.width, b.x + b.width) - x,
+        height: Math.max(a.y + a.height, b.y + b.height) - y,
+    };
+}
+
+/**
+ * Records that a level's rectangle needs to reach the GPU copy. `null`
+ * (a full redefine, or a rectangle wide enough to say "the whole level" would
+ * be) always wins over a smaller rectangle recorded before or after it, so a
+ * later small write never shrinks what an earlier full upload already
+ * promised to send.
+ *
+ * @param {TextureObject} texture
+ * @param {number} key
+ * @param {DirtyRect | null} rect
+ */
+export function markDirty(texture, key, rect){
+    const existing = texture.dirty.get(key);
+    if (existing === null || rect === null)
+    {
+        texture.dirty.set(key, null);
+        return;
+    }
+    texture.dirty.set(key, existing === undefined ? rect : unionRect(existing, rect));
 }
 
 /**

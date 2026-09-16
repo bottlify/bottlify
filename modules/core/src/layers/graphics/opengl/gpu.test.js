@@ -310,6 +310,67 @@ test('a DXT5 level reaches the upload decoded, its alpha per texel intact', asyn
         'the colour block is untouched by the alpha decode');
 });
 
+test('a DXT5 texture with the device compressed and every level kept travels as blocks',
+    async()=>{
+        const r = rig({ compressedTextures: true });
+        const { context } = r;
+        const block = new Uint8Array(16).fill(7);
+        context.glGenTextures(1);
+        context.glBindTexture(GL.TEXTURE_2D, 1);
+        context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+            GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
+        assert.equal(context.glGetError(), GL.NO_ERROR, 'the compressed level loaded');
+        context.glEnable(GL.TEXTURE_2D);
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+
+        const surface = r.gpu.of('createTexture')
+            .find(c=>/gl-texture:1/.test(c.descriptor.label));
+        assert.equal(surface.descriptor.format, 'bc3-rgba-unorm', 'the surface itself is BC3');
+        assert.equal(surface.descriptor.usage & r.backend.TextureUsage.RENDER_ATTACHMENT, 0,
+            'a compressed surface never asks WebGPU for a render attachment usage');
+        assert.equal(r.gpu.of('writeTexture').length, 0, 'no decoded, unstaged upload happened');
+        // Padded to the copy's row-pitch alignment; the block itself is the
+        // first sixteen bytes, unpadded and undecoded.
+        const staged = r.gpu.of('writeBuffer').find(w=>w.bytes[0] === 7 && w.bytes[15] === 7);
+        assert.ok(staged, 'the sixteen compressed bytes travelled, undecoded, through staging');
+        const copy = r.gpu.of('copyBufferToTexture')
+            .find(c=>c.destination.texture === surface.texture);
+        assert.ok(copy, 'and were copied into the BC surface');
+        assert.deepEqual(copy.size, { width: 4, height: 4, depthOrArrayLayers: 1 });
+    });
+
+test('a sub-image write into a kept level falls that texture back to the decoded path',
+    async()=>{
+        const r = rig({ compressedTextures: true });
+        const { context } = r;
+        const block = new Uint8Array(16).fill(7);
+        context.glGenTextures(1);
+        context.glBindTexture(GL.TEXTURE_2D, 1);
+        context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+            GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
+        context.glTexSubImage2D(GL.TEXTURE_2D, 0, 0, 0, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+            Uint8Array.from([1, 2, 3, 4]));
+        context.glEnable(GL.TEXTURE_2D);
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+
+        const surface = r.gpu.of('createTexture')
+            .find(c=>/gl-texture:1/.test(c.descriptor.label));
+        assert.equal(surface.descriptor.format, 'rgba8unorm',
+            'the rewritten level has no blocks to keep, so the whole texture falls back');
+    });
+
 test('a clear is a triangle under the scissor with the masks in its pipeline', async()=>{
     const r = rig();
     const { context } = r;
@@ -419,6 +480,87 @@ function copyUniforms(r){
         COPY_UNIFORM_FLOATS);
     return [...floats.subarray(0, 6)];
 }
+
+/**
+ * A texture with an 8x8 RGBA level, drawn once so the define itself is
+ * uploaded.
+ *
+ * @param {ReturnType<typeof rig>} r
+ * @returns {Promise<() => void>} draws the triangle again
+ */
+async function definedTexture(r){
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 8, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(8 * 8 * 4));
+    context.glEnable(GL.TEXTURE_2D);
+    const draw = ()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+    };
+    draw();
+    await r.swap();
+    return draw;
+}
+
+test('a sub-image write uploads only its rectangle, at its own origin', async()=>{
+    const r = rig();
+    const { context } = r;
+    const draw = await definedTexture(r);
+
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 3, 4, 2, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4 * 2 * 4).fill(9));
+    draw();
+    await r.swap();
+
+    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
+    assert.equal(uploads.length, 2, 'the full define, then the rectangle alone');
+    const sub = uploads[1];
+    assert.deepEqual([sub.destination.origin.x, sub.destination.origin.y], [2, 3]);
+    assert.equal(sub.bytes.length, 4 * 2 * 4, 'only the rectangle\'s bytes, not the whole level');
+});
+
+test('two overlapping sub-image writes upload their union once', async()=>{
+    const r = rig();
+    const { context } = r;
+    const draw = await definedTexture(r);
+
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 1, 1, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(3 * 3 * 4).fill(1));
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 2, 3, 3, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(3 * 3 * 4).fill(2));
+    draw();
+    await r.swap();
+
+    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
+    assert.equal(uploads.length, 2, 'the full define, then one upload of the union');
+    const union = uploads[1];
+    // (1,1) 3x3 and (2,2) 3x3 -> (1,1) 4x4.
+    assert.deepEqual([union.destination.origin.x, union.destination.origin.y], [1, 1]);
+    assert.equal(union.bytes.length, 4 * 4 * 4);
+});
+
+test('a full redefine after a sub-write uploads the whole level again', async()=>{
+    const r = rig();
+    const { context } = r;
+    const draw = await definedTexture(r);
+
+    context.glTexSubImage2D(GL.TEXTURE_2D, 0, 2, 3, 1, 1, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4).fill(9));
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 8, 8, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(8 * 8 * 4));
+    draw();
+    await r.swap();
+
+    const uploads = r.gpu.of('writeTexture').filter(w=>w.destination.mipLevel === 0);
+    assert.equal(uploads.length, 2, 'the original define, then the redefine');
+    assert.equal(uploads[1].bytes.length, 8 * 8 * 4, 'the redefine sent the whole level');
+});
 
 test('glCopyTexSubImage2D renders the framebuffer rect into a view of the level', async()=>{
     const r = rig();

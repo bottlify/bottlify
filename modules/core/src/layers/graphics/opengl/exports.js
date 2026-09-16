@@ -315,6 +315,10 @@ const LIST_TYPES = new Map([
  * @property {string | null} [probeTexture]
  *           A texture id whose draws are read around: the colour target
  *           before and after each one, on that draw's dump line.
+ * @property {boolean} [compressedTextures]
+ *           The device has `texture-compression-bc`: an S3TC texture whose
+ *           every level kept its blocks uploads them as blocks instead of
+ *           the four-to-eight-times-larger texels the context decoded.
  */
 
 /**
@@ -381,6 +385,7 @@ export function createOpengl(services){
                 maxDraws: services.maxDraws,
                 skipTexture: services.skipTexture,
                 probeTexture: services.probeTexture,
+                compressedTextures: services.compressedTextures,
             });
         }
         return gpu ?? undefined;

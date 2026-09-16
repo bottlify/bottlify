@@ -22,7 +22,7 @@
  */
 
 import { GL } from './constants.js';
-import { createTextureObject, isTextureComplete, levelKey } from './objects.js';
+import { createTextureObject, isTextureComplete, levelKey, markDirty } from './objects.js';
 import { createMatrixStacks } from './matrix.js';
 import { CONVENTIONAL_UNITS, TEXTURE_UNITS } from './state.js';
 import {
@@ -510,8 +510,9 @@ export function installTextureCalls(context, kernel){
         image.texture.levels.set(levelKey(level, image.face), {
             width, height, internalFormat: internal, border, baseFormat,
             texels: texels instanceof Uint8Array ? texels : null,
+            compressed: null,
         });
-        image.texture.dirty.add(levelKey(level, image.face));
+        markDirty(image.texture, levelKey(level, image.face), null);
         kernel.shareGroup().used = true;
     }
 
@@ -565,7 +566,12 @@ export function installTextureCalls(context, kernel){
         {
             conformTexels(texels, existing.baseFormat);
             writeSubImage(existing, x0, y0, width, height, texels);
-            image.texture.dirty.add(levelKey(level, image.face));
+            // A rewritten rectangle of a level that arrived compressed no
+            // longer matches its kept blocks; the decoded texels are still
+            // right, so the level falls back to them rather than the stale
+            // compressed bytes.
+            existing.compressed = null;
+            markDirty(image.texture, levelKey(level, image.face), { x: x0, y: y0, width, height });
         }
     }
 
@@ -957,8 +963,9 @@ export function installTextureCalls(context, kernel){
             texels,
             compressedFormat: internal,
             compressedBytes: size,
+            compressed: bytes ? { format: internal, bytes } : null,
         });
-        image.texture.dirty.add(levelKey(level, image.face));
+        markDirty(image.texture, levelKey(level, image.face), null);
         kernel.shareGroup().used = true;
     }
 
@@ -1294,8 +1301,8 @@ export function installTextureCalls(context, kernel){
             }
             conformTexels(texels, baseFormat);
             image.texture.levels.set(levelKey(level, image.face),
-                { width, height, internalFormat, border, baseFormat, texels });
-            image.texture.dirty.add(levelKey(level, image.face));
+                { width, height, internalFormat, border, baseFormat, texels, compressed: null });
+            markDirty(image.texture, levelKey(level, image.face), null);
             kernel.shareGroup().used = true;
         },
 
@@ -1349,7 +1356,9 @@ export function installTextureCalls(context, kernel){
             }
             conformTexels(texels, existing.baseFormat);
             writeSubImage(existing, xoffset, yoffset, width, height, texels);
-            image.texture.dirty.add(levelKey(level, image.face));
+            existing.compressed = null;
+            markDirty(image.texture, levelKey(level, image.face), { x: xoffset, y: yoffset,
+                width, height });
         },
 
         /**
@@ -1526,7 +1535,12 @@ export function installTextureCalls(context, kernel){
             if (texels)
             {
                 writeSubImage(existing, x0, y0, width, height, texels);
-                image.texture.dirty.add(levelKey(level, image.face));
+                // The rectangle arrived decoded, so the level's kept blocks no
+                // longer match it: the whole texture falls back to the
+                // decoded path rather than travel as blocks with a hole in them.
+                existing.compressed = null;
+                markDirty(image.texture, levelKey(level, image.face), { x: x0, y: y0,
+                    width, height });
             }
         },
 

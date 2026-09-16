@@ -105,6 +105,20 @@ const WRAPS = Object.freeze({
 const alignUp = value=>(value + 3) & ~3;
 
 /**
+ * The S3TC format a program uploaded → the block-compressed format a device
+ * that has `texture-compression-bc` samples it as. Both DXT1 variants are the
+ * same block layout; WebGPU has one BC1 format for either.
+ *
+ * @type {Readonly<Record<number, string>>}
+ */
+const BC_FORMATS = Object.freeze({
+    [GL.COMPRESSED_RGB_S3TC_DXT1_EXT]: 'bc1-rgba-unorm',
+    [GL.COMPRESSED_RGBA_S3TC_DXT1_EXT]: 'bc1-rgba-unorm',
+    [GL.COMPRESSED_RGBA_S3TC_DXT3_EXT]: 'bc2-rgba-unorm',
+    [GL.COMPRESSED_RGBA_S3TC_DXT5_EXT]: 'bc3-rgba-unorm',
+});
+
+/**
  * @typedef {Object} GpuServices
  * @property {any} backend
  * @property {(descriptor: any) => any} createSampler
@@ -113,6 +127,9 @@ const alignUp = value=>(value + 3) & ~3;
  * @property {number} [maxDraws]    stop a frame after this many draws
  * @property {string | null} [skipTexture]  drop draws sampling these ids
  * @property {string | null} [probeTexture]  read the target around its draws
+ * @property {boolean} [compressedTextures]  the device has `texture-compression-bc`:
+ *           an S3TC texture whose every level kept its blocks travels as
+ *           blocks instead of the texels the context decoded them into
  */
 
 /**
@@ -558,6 +575,8 @@ export function createGpuRenderer(services){
      * @property {number} height
      * @property {number} levels
      * @property {boolean} cube
+     * @property {string} format   the surface's own format: `TEXTURE_FORMAT`,
+     *           or a BC format when every level travels as blocks
      * @property {Map<number, any>} views   a level as a target, by level key, once drawn into
      */
     /** @type {WeakMap<import('./objects.js').TextureObject, TextureRecord>} */
@@ -673,6 +692,67 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The block format every level of a texture travels as, when the device
+     * can sample it and every level still holds the blocks it arrived in --
+     * one level rewritten by `glTexSubImage2D` (decoded, never re-compressed)
+     * falls the whole texture back to `null`, the uncompressed path.
+     *
+     * @param {import('./objects.js').TextureObject} texture
+     * @param {number} levels
+     * @param {boolean} cube
+     * @returns {string | null}
+     */
+    const bcFormatOf = (texture, levels, cube)=>{
+        if (!services.compressedTextures)
+        {
+            return null;
+        }
+        let format = null;
+        for (let level = 0; level < levels; level++)
+        {
+            for (let face = 0; face < (cube ? 6 : 1); face++)
+            {
+                const image = texture.levels.get(levelKey(level, face));
+                const mapped = image?.compressed ? BC_FORMATS[image.compressed.format] : undefined;
+                if (!mapped || (format !== null && format !== mapped))
+                {
+                    return null;
+                }
+                format = mapped;
+            }
+        }
+        return format;
+    };
+
+    /**
+     * The bytes of one rectangle of a level's decoded texels, packed with no
+     * gap between rows -- what an upload of just that rectangle needs, since
+     * the level itself is a full-width buffer.
+     *
+     * @param {import('./objects.js').TextureLevel} image
+     * @param {import('./objects.js').DirtyRect} rect
+     * @returns {Uint8Array}
+     */
+    const sliceRect = (image, rect)=>{
+        if (!image.texels)
+        {
+            return new Uint8Array(rect.width * rect.height * 4);
+        }
+        if (rect.x === 0 && rect.width === image.width)
+        {
+            return image.texels.subarray(rect.y * image.width * 4,
+                (rect.y + rect.height) * image.width * 4);
+        }
+        const packed = new Uint8Array(rect.width * rect.height * 4);
+        for (let row = 0; row < rect.height; row++)
+        {
+            const from = ((rect.y + row) * image.width + rect.x) * 4;
+            packed.set(image.texels.subarray(from, from + rect.width * 4), row * rect.width * 4);
+        }
+        return packed;
+    };
+
+    /**
      * The GPU copy of a texture, uploaded or brought up to date.
      *
      * @param {import('./objects.js').TextureObject} texture
@@ -687,9 +767,11 @@ export function createGpuRenderer(services){
         {
             levels++;
         }
+        const bcFormat = bcFormatOf(texture, levels, cube);
+        const format = bcFormat ?? TEXTURE_FORMAT;
         let record = textures.get(texture);
         if (record && (record.width !== base.width || record.height !== base.height
-            || record.levels !== levels || record.cube !== cube))
+            || record.levels !== levels || record.cube !== cube || record.format !== format))
         {
             record = undefined;
         }
@@ -699,30 +781,35 @@ export function createGpuRenderer(services){
                 gpu: backend.createSurface({
                     width: base.width,
                     height: base.height,
-                    format: TEXTURE_FORMAT,
+                    format,
                     mipLevelCount: levels,
                     layers: cube ? 6 : 1,
                     dimension: cube ? 'cube' : undefined,
                     label: `gl-texture:${texture.name}`,
                     // A target too: a program copies its framebuffer into a
-                    // level, and that copy is a draw into it.
+                    // level, and that copy is a draw into it -- except a BC
+                    // surface, which WebGPU refuses a render attachment usage
+                    // on, and which this level shape never needs one for: a
+                    // copy target is never compressed.
                     usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
-                        | TextureUsage.COPY_SRC | TextureUsage.RENDER_ATTACHMENT,
+                        | TextureUsage.COPY_SRC
+                        | (bcFormat ? 0 : TextureUsage.RENDER_ATTACHMENT),
                 }),
                 width: base.width,
                 height: base.height,
                 levels,
                 cube,
+                format,
                 views: new Map(),
             };
             textures.set(texture, record);
             // A fresh copy has every level to receive.
             for (const key of texture.levels.keys())
             {
-                texture.dirty.add(key);
+                texture.dirty.set(key, null);
             }
         }
-        for (const key of texture.dirty)
+        for (const [key, rect] of texture.dirty)
         {
             const level = key % FACE_STRIDE;
             const face = (key - level) / FACE_STRIDE;
@@ -732,14 +819,30 @@ export function createGpuRenderer(services){
                 continue;
             }
             stats.uploads++;
+            if (bcFormat)
+            {
+                const compressed = /** @type {NonNullable<typeof image.compressed>} */ (
+                    image.compressed);
+                backend.uploadTexture({
+                    texture: record.gpu.texture,
+                    format: bcFormat,
+                    mipLevel: level,
+                    width: image.width,
+                    height: image.height,
+                    origin: { x: 0, y: 0, z: face },
+                    data: compressed.bytes,
+                });
+                continue;
+            }
+            const area = rect ?? { x: 0, y: 0, width: image.width, height: image.height };
             backend.uploadTexture({
                 texture: record.gpu.texture,
                 format: TEXTURE_FORMAT,
                 mipLevel: level,
-                width: image.width,
-                height: image.height,
-                origin: { x: 0, y: 0, z: face },
-                data: image.texels ?? new Uint8Array(image.width * image.height * 4),
+                width: area.width,
+                height: area.height,
+                origin: { x: area.x, y: area.y, z: face },
+                data: sliceRect(image, area),
             });
         }
         texture.dirty.clear();
