@@ -66,6 +66,18 @@ marshalling whatever bytes live at it.
 | `dispatch` | `(id) => void` | Handles a trap id by hand; a replay uses it. |
 | `calls` | `() => string[]` | The calls the guest has made, as many as the ring holds. |
 
+An instance owns its crossing. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so the
+dispatcher, the parking table, the callback bookkeeping and the COM vtables live in the instance
+the api closes over, and a second `create()` cannot take the first one's traps; `diagnostics()`
+answers for the most recently created instance. After `dispose()`, a call that was in flight — or
+a trap still arriving from a `cpu` that outlives this layer briefly during teardown — answers
+harmlessly rather than throwing: `register`/`watch`/`callGuest`/`publishInterface` answer
+`0`/`0`/`Promise.resolve(0)`/`0`, `park`/`useHeap`/`callerThread`/`failure`/`sentinelTrap`/
+`symbolize` answer `undefined`/`null`/`null`/`null`/`null`/`null`, `suspended` answers `0`,
+`answered` resolves at once, `recentlyStarted`/`recorded`/`chain`/`recent`/`calls` answer `[]`,
+and `label`/`dispatch` are no-ops.
+
 A handler is called as `handler(args: number[], frame)` where `frame` is
 `{ name, freeStack, callerStack, restingStack, hostReturn }`. Arguments arrive **signed**, as
 the guest pushed them. A handler returns a number (placed in EAX as `>>> 0`), the parked token,
@@ -274,7 +286,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object. |
-| `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused. |
+| `module.test.js` | unit | A handler calling back onto its own thread; a handler that awaited being refused without a thread and building on the named thread's stack; an off-stack frame refused; a second instance in one realm does not take the first one's traps; a disposed bridge answers harmlessly rather than throwing; `diagnostics()` answers for the most recently created instance. |
 | `replay.test.js` | replay | Three sessions built in the test replayed through the real module (unnamed-thread refusal, the same session named replays cleanly, address zero names its sender), plus every `*.json` in `sessions/` — none is checked in today. |
 
 Integration (`npm run test:integration`): `src/callbacks.itest.js` runs a real executable

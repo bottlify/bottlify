@@ -20,16 +20,19 @@ import { createVtables } from './internal/vtable.js';
  * reaches it, and `cpu` emits the stub without knowing what it implements.
  */
 
-/** @type {any} */
-let dispatcher = null;
-/** @type {any} */
-let parking = null;
-/** @type {any} */
-let callbacks = null;
-/** @type {any} */
-let vtables = null;
-/** @type {Error | null} */
-let failure = null;
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That is
+ * the only reason this exists, and it holds a reference rather than the state
+ * itself -- the crossing belongs to the closure `create()` returns, so a second
+ * instance in one realm cannot take the first one's dispatcher, parking or
+ * vtables.
+ *
+ * @type {any}
+ */
+let current = null;
 
 export const bridgeModule = {
     name: 'bridge',
@@ -49,7 +52,26 @@ export const bridgeModule = {
         const kernel = host.requireApi('kernel');
         const memory = host.requireApi('memory');
 
-        failure = null;
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own dispatcher, parking and vtables.
+         *
+         * @type {{ dispatcher: any, parking: any, callbacks: any, vtables: any,
+         *          failure: Error | null, disposed: boolean }}
+         */
+        const state = {
+            dispatcher: null,
+            parking: null,
+            callbacks: null,
+            vtables: null,
+            failure: null,
+            disposed: false,
+        };
 
         // What actually happened at this seam, in order, so that a session can
         // be replayed later without the machine it came from. A crash here is
@@ -73,7 +95,7 @@ export const bridgeModule = {
             }
         };
 
-        parking = createParking({
+        state.parking = createParking({
             kernel,
             // Wired only when recording: the event is built before it is
             // kept or dropped, and building one per call for nobody was an
@@ -94,7 +116,7 @@ export const bridgeModule = {
         const reserveTrap = (name, popBytes, options)=>
             cpu.registerTrap(name, popBytes, options);
 
-        callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
+        state.callbacks = createCallbacks({ cpu, kernel, memory, reserveTrap });
 
         /**
          * A handler that has not finished: the thread is stopped, and told where
@@ -113,17 +135,17 @@ export const bridgeModule = {
             // that called the guest back has since written over that part of
             // the stack, so reading it now would find an argument.
             kernel.holdThread();
-            callbacks.suspended(thread, { name, restingStack, hostReturn });
+            state.callbacks.suspended(thread, { name, restingStack, hostReturn });
             answer.then(
                 value=>{
                     record({ t: 'finish', name, thread: thread?.name });
-                    callbacks.finish(thread, value | 0);
+                    state.callbacks.finish(thread, value | 0);
                 },
                 // Nothing above is waiting on this promise, so a handler that
                 // throws would otherwise vanish and leave the guest parked
                 // forever. Whoever is driving the machine asks for this.
                 (/** @type {Error} */ error)=>{
-                    failure ??= error;
+                    state.failure ??= error;
                 });
         };
 
@@ -133,8 +155,8 @@ export const bridgeModule = {
         // publisher: what it buys is a trace that says which call left an
         // error behind, and that is the only cheap way to find out where a
         // code a program later complains about actually came from.
-        dispatcher = createDispatcher({
-            cpu, memory, parking, suspend, lastError: config?.lastError,
+        state.dispatcher = createDispatcher({
+            cpu, memory, parking: state.parking, suspend, lastError: config?.lastError,
             traceStrings: config?.traceStrings ?? false,
             callPhases: config?.callPhases ?? false,
             onCall: config?.onCall,
@@ -145,22 +167,35 @@ export const bridgeModule = {
             profiler: /** @type {any} */ (host.requireApi('log')),
         });
 
+        /**
+         * Whether this instance is still open. A trap that fires after
+         * disposal -- the cpu it was registered on outlives it, briefly, while
+         * the rest of the machine is torn down -- must not dispatch through a
+         * table that answers for nobody.
+         */
+        const live = ()=>!state.disposed;
+
         // Claimed here rather than by whoever assembles the process: a trap that
         // reached anything but the bridge would be a call nobody marshalled.
         cpu.onTrap((/** @type {number} */ id)=>{
-            if (id === callbacks.sentinel())
+            if (!live())
+            {
+                return;
+            }
+            if (id === state.callbacks.sentinel())
             {
                 // A guest callback has returned. Stop the thread before reading
                 // its answer: the sentinel stub is about to `ret` into whatever
                 // the callback left on the stack, which is not code.
                 kernel.holdThread();
                 record({ t: 'returned', thread: kernel.currentThread()?.name });
-                callbacks.returned(kernel.currentThread());
+                state.callbacks.returned(kernel.currentThread());
                 return;
             }
-            dispatcher.dispatch(id);
+            state.dispatcher.dispatch(id);
         });
 
+        current = state;
         return {
             Convention,
 
@@ -179,7 +214,9 @@ export const bridgeModule = {
              *     Whether the function can set the thread's last error, which
              *     the trace reads after each call that can. A COM method
              *     cannot, and says so.
-             * @returns {number} the guest address that calls it
+             * @returns {number} the guest address that calls it, or 0 once
+             *     this instance is disposed -- there is no guest left to place
+             *     one in.
              */
             register(
                 name,
@@ -188,13 +225,17 @@ export const bridgeModule = {
                     preserveResult = false, lastError = true,
                 })
             {
+                if (!live())
+                {
+                    return 0;
+                }
                 // Before the first import, so the slot a callback returns to is
                 // in the table that gets written into guest memory.
-                callbacks.reserve();
+                state.callbacks.reserve();
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes), { preserveResult });
-                dispatcher.register(id, { name, convention, argBytes, handler, lastError });
-                dispatcher.placed(address, name);
+                state.dispatcher.register(id, { name, convention, argBytes, handler, lastError });
+                state.dispatcher.placed(address, name);
                 return address;
             },
 
@@ -215,13 +256,18 @@ export const bridgeModule = {
              * @param {number} fn.target  The real function, where the call goes on to.
              * @param {string} [fn.convention]
              * @param {Function} fn.handler
-             * @returns {number} the guest address to use in place of `target`
+             * @returns {number} the guest address to use in place of `target`,
+             *     or 0 once this instance is disposed.
              */
             watch(name, { argBytes, target, convention = Convention.STDCALL, handler }){
-                callbacks.reserve();
+                if (!live())
+                {
+                    return 0;
+                }
+                state.callbacks.reserve();
                 const { id, address } = cpu.registerTrap(
                     name, calleeCleanup(convention, argBytes), { forwardTo: target });
-                dispatcher.register(id, {
+                state.dispatcher.register(id, {
                     name, convention, argBytes, handler,
                     // So a trace does not report our nothing as the function's
                     // answer. What this call returns is decided by the code it
@@ -230,7 +276,7 @@ export const bridgeModule = {
                     forwards: true,
                     saved: cpu.forwardSave,
                 });
-                dispatcher.placed(address, name);
+                state.dispatcher.placed(address, name);
                 return address;
             },
 
@@ -240,7 +286,7 @@ export const bridgeModule = {
              *
              * @param {any} [thread]
              */
-            park: thread=>parking.park(thread),
+            park: thread=>live() ? state.parking.park(thread) : undefined,
 
             /**
              * Calls a guest routine and resolves with what it returned.
@@ -267,10 +313,15 @@ export const bridgeModule = {
              *   itself -- an exception record and context, handed to the
              *   routine it is about to run -- names the stack below that, or
              *   the routine's own frames grow down over what it was given.
-             * @returns {Promise<number>}
+             * @returns {Promise<number>} resolves to 0 once this instance is
+             *     disposed -- there is no guest left to call into.
              */
             callGuest({ entry, args = [], thread, stackAtRest }){
-                const frame = parking.current();
+                if (!live())
+                {
+                    return Promise.resolve(0);
+                }
+                const frame = state.parking.current();
                 // Whose call this answers, and never "whoever is running". A
                 // handler still holding the processor is answering the call in
                 // flight, and that call knows its own thread. A handler that
@@ -289,19 +340,19 @@ export const bridgeModule = {
                 }
                 record({
                     t: 'guest', entry: entry >>> 0, thread: runOn?.name,
-                    by: parking.chain().at(-1) ?? null, named: thread !== undefined,
+                    by: state.parking.chain().at(-1) ?? null, named: thread !== undefined,
                 });
-                return callbacks.call({
+                return state.callbacks.call({
                     thread: runOn,
                     entry,
                     args,
                     // Which host call is sending the guest off, so a fault in
                     // what it runs has an author.
-                    by: parking.chain().at(-1) ?? 'somewhere',
+                    by: state.parking.chain().at(-1) ?? 'somewhere',
                     // Only a call still holding the processor describes this
                     // thread's stack; otherwise the thread's own suspended call
                     // is the record of where it came to rest.
-                    stackAtRest: stackAtRest ?? parking.freeStackFor(runOn),
+                    stackAtRest: stackAtRest ?? state.parking.freeStackFor(runOn),
                 });
             },
 
@@ -315,15 +366,20 @@ export const bridgeModule = {
              * should have to know.
              *
              * @param {{ allocate: (bytes: number) => number }} heap
+             * @returns {any} null once this instance is disposed.
              */
             useHeap(heap){
-                vtables = createVtables({
+                if (!live())
+                {
+                    return null;
+                }
+                state.vtables = createVtables({
                     memory,
                     heap,
                     register: (/** @type {string} */ name, /** @type {any} */ fn)=>
                         this.register(name, fn),
                 });
-                return vtables;
+                return state.vtables;
             },
 
             /**
@@ -332,11 +388,15 @@ export const bridgeModule = {
              * @returns {number}
              */
             publishInterface(object, interfaceId){
-                if (!vtables)
+                if (!live())
+                {
+                    return 0;
+                }
+                if (!state.vtables)
                 {
                     throw new Error('bridge: no heap to put a COM interface in yet');
                 }
-                return vtables.publish(object, interfaceId);
+                return state.vtables.publish(object, interfaceId);
             },
 
             /**
@@ -344,14 +404,15 @@ export const bridgeModule = {
              * loop that sees this above zero has to let the host run, not merely
              * flush microtasks.
              */
-            suspended: ()=>callbacks.pendingCalls(),
+            suspended: ()=>live() ? state.callbacks.pendingCalls() : 0,
 
             /**
              * Settles when the next suspended call answers: what a driver loop
              * with nothing else to do waits on, so it wakes when the machine
-             * can move rather than on a schedule of its own.
+             * can move rather than on a schedule of its own. Resolves at once
+             * once this instance is disposed -- nothing will ever answer.
              */
-            answered: ()=>callbacks.answered(),
+            answered: ()=>live() ? state.callbacks.answered() : Promise.resolve(),
 
             /**
              * Whose call is being handled right now.
@@ -361,10 +422,12 @@ export const bridgeModule = {
              * somebody else, and this is the only moment the answer is still
              * there to take.
              */
-            callerThread: ()=>parking.current()?.thread ?? kernel.currentThread(),
+            callerThread: ()=>live()
+                ? (state.parking.current()?.thread ?? kernel.currentThread())
+                : null,
 
             /** Where the guest was last sent by us, newest last. */
-            recentlyStarted: ()=>callbacks.recentlyStarted(),
+            recentlyStarted: ()=>live() ? state.callbacks.recentlyStarted() : [],
 
             /**
              * The recorded session: every event at this seam, in order.
@@ -374,36 +437,38 @@ export const bridgeModule = {
              * minute of clicking to produce becomes a file that reproduces it
              * in a test, with no browser and no game.
              */
-            recorded: ()=>events.slice(),
+            recorded: ()=>live() ? events.slice() : [],
 
             /**
              * An error thrown by a suspended handler, which nothing above was
              * waiting on. Null unless one happened.
              */
-            failure: ()=>failure,
+            failure: ()=>live() ? state.failure : null,
 
             /**
              * The trap a guest callback returns through. Needed by anything
              * driving this layer without a processor under it -- a replay of a
              * recorded session -- which has to raise it by hand.
              */
-            sentinelTrap: ()=>callbacks.sentinel(),
+            sentinelTrap: ()=>live() ? state.callbacks.sentinel() : null,
 
             /**
              * What is on our side of the boundary right now, for a failure
              * report: which host calls are in flight, what the guest has been
              * calling, and what name -- if any -- a guest address belongs to.
              */
-            chain: ()=>[
-                // Suspended first: a call waiting on a callback is the reason
-                // the one running right now is running at all.
-                ...callbacks.waiting(kernel.currentThread()),
-                ...parking.chain(),
-            ],
+            chain: ()=>live()
+                ? [
+                    // Suspended first: a call waiting on a callback is the reason
+                    // the one running right now is running at all.
+                    ...state.callbacks.waiting(kernel.currentThread()),
+                    ...state.parking.chain(),
+                ]
+                : [],
             /** @param {number} [count] */
-            recent: (count = 12)=>dispatcher.recent(count),
+            recent: (count = 12)=>live() ? state.dispatcher.recent(count) : [],
             /** @param {number} address */
-            symbolize: address=>dispatcher.symbolize(address),
+            symbolize: address=>live() ? state.dispatcher.symbolize(address) : null,
 
             /**
              * Gives a guest address a name for a failure report. A stub already
@@ -414,44 +479,57 @@ export const bridgeModule = {
              * @param {number} address
              * @param {string} name
              */
-            label: (address, name)=>dispatcher.placed(address, name),
+            label: (address, name)=>{
+                if (live())
+                {
+                    state.dispatcher.placed(address, name);
+                }
+            },
 
             /** @param {number} id */
-            dispatch: id=>dispatcher.dispatch(id),
-            calls: ()=>dispatcher.calls(),
+            dispatch: id=>{
+                if (live())
+                {
+                    state.dispatcher.dispatch(id);
+                }
+            },
+            calls: ()=>live() ? state.dispatcher.calls() : [],
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return { name: 'bridge', version: '0.1.0', status: 'created', metrics: {} };
+        }
         return {
             name: 'bridge',
             version: '0.1.0',
-            status: dispatcher ? 'ready' : 'created',
-            metrics: dispatcher
-                ? {
-                    ...dispatcher.diagnostics(),
-                    recentDetailed: dispatcher.detailed(),
-                    // The order calls arrived in, not just how many of each.
-                    // A program stuck between two functions, or one that took
-                    // a branch nobody expected, is legible here and nowhere
-                    // else: the histogram below says what it did, this says
-                    // what it was doing.
-                    sequence: dispatcher.recent(80),
-                    ...parking.diagnostics(),
-                    ...callbacks.diagnostics(),
-                    ...vtables ? vtables.diagnostics() : {},
-                    failure: failure ? failure.message : null,
-                }
-                : {},
+            status: 'ready',
+            metrics: {
+                ...instance.dispatcher.diagnostics(),
+                recentDetailed: instance.dispatcher.detailed(),
+                // The order calls arrived in, not just how many of each.
+                // A program stuck between two functions, or one that took
+                // a branch nobody expected, is legible here and nowhere
+                // else: the histogram below says what it did, this says
+                // what it was doing.
+                sequence: instance.dispatcher.recent(80),
+                ...instance.parking.diagnostics(),
+                ...instance.callbacks.diagnostics(),
+                ...instance.vtables ? instance.vtables.diagnostics() : {},
+                failure: instance.failure ? instance.failure.message : null,
+            },
         };
     },
 
     async dispose(){
-        dispatcher = null;
-        parking = null;
-        callbacks = null;
-        vtables = null;
-        failure = null;
+        if (current)
+        {
+            current.disposed = true;
+        }
+        current = null;
     },
 };

@@ -238,3 +238,76 @@ test('a frame that would land off its thread\'s stack is refused, whatever led t
 
     assert.match(String(refused), /callback frame for thread-3 .* is outside its stack/);
 });
+
+test('a second instance in one realm does not take the first one\'s state', async()=>{
+    const first = await bridge();
+    /** @type {number[]} */
+    const seen = [];
+    first.api.register('TEST.dll!First', {
+        argBytes: 0,
+        handler: ()=>{
+            seen.push(1);
+            return 0;
+        },
+    });
+    const firstTrapId = first.lastTrap();
+
+    // A second instance, in the same realm, registering a trap of its own --
+    // with the same id, since each machine's own trap table starts at one.
+    const second = await bridge();
+    second.api.register('TEST.dll!Second', {
+        argBytes: 0,
+        handler: ()=>{
+            throw new Error('the second instance must never see a trap raised on the first');
+        },
+    });
+
+    first.trap(firstTrapId, first.main, MAIN.top - 0x100);
+    await settle();
+
+    assert.deepEqual(seen, [1],
+        'the trap on the first machine ran the first instance\'s own handler');
+});
+
+test('a disposed bridge answers harmlessly rather than throwing', async()=>{
+    const machine = await bridge();
+    machine.api.register('TEST.dll!Something', { argBytes: 0, handler: ()=>0 });
+
+    await bridgeModule.dispose();
+
+    assert.equal(machine.api.register('TEST.dll!Late', { argBytes: 0, handler: ()=>0 }), 0);
+    assert.equal(
+        machine.api.watch('TEST.dll!LateWatch', { argBytes: 0, target: 0x1000, handler: ()=>0 }),
+        0);
+    assert.equal(machine.api.park(), undefined);
+    assert.equal(await machine.api.callGuest({ entry: 0x00402000 }), 0);
+    assert.equal(machine.api.useHeap({ allocate: ()=>0 }), null);
+    assert.equal(machine.api.publishInterface({ interfaceFor: ()=>null }, 'IUnknown'), 0);
+    assert.equal(machine.api.suspended(), 0);
+    await machine.api.answered();
+    assert.equal(machine.api.callerThread(), null);
+    assert.deepEqual(machine.api.recentlyStarted(), []);
+    assert.deepEqual(machine.api.recorded(), []);
+    assert.equal(machine.api.failure(), null);
+    assert.equal(machine.api.sentinelTrap(), null);
+    assert.deepEqual(machine.api.chain(), []);
+    assert.deepEqual(machine.api.recent(), []);
+    assert.equal(machine.api.symbolize(0x1000), null);
+    machine.api.label(0x1000, 'x');
+    machine.api.dispatch(1);
+    assert.deepEqual(machine.api.calls(), []);
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await bridge();
+    const second = await bridge();
+    second.api.register('TEST.dll!B', { argBytes: 0, handler: ()=>0 });
+    second.api.register('TEST.dll!C', { argBytes: 0, handler: ()=>0 });
+
+    const diag = /** @type {any} */ (bridgeModule.diagnostics());
+    assert.equal(diag.status, 'ready');
+    assert.equal(diag.metrics.implemented, 2,
+        'diagnostics reports the second (most recent) instance');
+
+    await bridgeModule.dispose();
+});
