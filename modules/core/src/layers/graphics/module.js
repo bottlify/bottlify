@@ -137,24 +137,22 @@ export function uncoveredRegion(windows, owner, exclusive, screen){
  * up rather than fail at assembly time.
  */
 
-/** @type {any} */
-let backend = null;
-/** @type {any} */
-let factories = null;
-/** @type {string[]} */
-let created = [];
-/** @type {any} */
-let seam = null;
-/** @type {any} */
-let presenter = null;
 /**
- * Whether the presenter was handed in rather than made here. A presenter that
- * belongs to the run is not this machine's to dispose: the process that
- * replaces this one draws into the same canvas and the same texture.
+ * The most recently created instance, for `diagnostics()` alone.
  *
- * @type {boolean}
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the backend, the factories, the published interfaces and
+ * the run's presenter belong to the closure `create()` returns, so a second
+ * instance in one realm cannot take the first one's GPU. Disposing marks the
+ * instance closed, so a call still in flight when the machine went away is
+ * answered the way a build with no graphics layer at all answers it -- the
+ * stub's refusal -- rather than dereferencing what is gone.
+ *
+ * @type {any}
  */
-let presenterGiven = false;
+let current = null;
 
 export const graphicsModule = {
     name: 'graphics',
@@ -170,8 +168,28 @@ export const graphicsModule = {
         const memory = host.requireApi('memory');
         const win32 = host.requireApi('win32');
         const bridge = host.requireApi('bridge');
-        backend = null;
-        created = [];
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own backend. The presenter is in the state too, but its lifetime is
+         * the run's: a given one is attached, never disposed here.
+         *
+         * @type {{ backend: any, factories: any, created: string[], seam: any,
+         *     presenter: any, presenterGiven: boolean, disposed: boolean }}
+         */
+        const state = {
+            backend: null,
+            factories: null,
+            created: [],
+            seam: null,
+            presenter: null,
+            presenterGiven: false,
+            disposed: false,
+        };
 
         /**
          * The GPU, when there is one.
@@ -204,7 +222,8 @@ export const graphicsModule = {
             screen: config?.screen ?? { width: 640, height: 480, bitsPerPixel: 32 },
         };
 
-        factories = {
+        /** @type {Record<string, any>} */
+        const factories = {
             /** @returns {any} */
             ddraw: (/** @type {any} */ options)=>createDirectDraw({
                 ...services,
@@ -289,7 +308,7 @@ export const graphicsModule = {
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
-                presenter: ()=>presenter,
+                presenter: ()=>state.presenter,
                 // The same per-draw account the Direct3D 8 device takes, on
                 // the device handle for the same reason: only the assembling
                 // caller decides it wants one.
@@ -349,20 +368,20 @@ export const graphicsModule = {
              * would fail somewhere further away with less to say.
              */
             backend(){
-                if (!backend)
+                if (!state.backend)
                 {
                     if (!device)
                     {
                         throw new Error(
                             'graphics: no GPU device was supplied to this build');
                     }
-                    backend = createBackend({
+                    state.backend = createBackend({
                         device: device.device,
                         queue: device.queue,
                         presentTo: device.presentTo,
                     });
                 }
-                return backend;
+                return state.backend;
             },
 
             /** Whether this build can draw at all. */
@@ -420,13 +439,14 @@ export const graphicsModule = {
                 {
                     throw new Error(`graphics: no such API "${name}"`);
                 }
-                created.push(name);
+                state.created.push(name);
                 return factory(options);
             },
 
             /** Which APIs this build can hand out. */
             apis: ()=>Object.keys(factories),
         };
+        state.factories = factories;
 
         // The presenter is a service of the run, not of this machine. The
         // canvas, the format it was configured in, the pacer that decides when
@@ -436,8 +456,8 @@ export const graphicsModule = {
         // address space to it rather than making a second. A build assembled
         // without one -- a test, an inspection -- gets its own, so the layer
         // still presents on its own.
-        presenterGiven = config?.presenter != null;
-        presenter = config?.presenter ?? createPresenter({
+        state.presenterGiven = config?.presenter != null;
+        state.presenter = config?.presenter ?? createPresenter({
             device: device?.device,
             queue: device?.queue,
             screen: device?.screen,
@@ -448,7 +468,7 @@ export const graphicsModule = {
         });
         // The backend is asked for on the first present rather than now, so a
         // build that never shows one of these surfaces never builds a GPU.
-        presenter.attach({
+        state.presenter.attach({
             backend: ()=>api.backend(),
             readMemory: services.readMemory,
         });
@@ -531,19 +551,19 @@ export const graphicsModule = {
             // place on it. The ceiling on this: such a primary is shown as
             // it is, and anything over it is not seen.
             const wholeScreen = { left: 0, top: 0, right: screen.width, bottom: screen.height };
-            const region = presenter.isClaimed(surface.buffer)
+            const region = state.presenter.isClaimed(surface.buffer)
                 || surface.width !== screen.width || surface.height !== screen.height
                 ? null
                 : uncoveredRegion(win32.windows?.() ?? [], window, exclusive, wholeScreen);
             if (!region || (region.length === 1 && sameRect(region[0], wholeScreen)))
             {
-                presenter.present(surface);
+                state.presenter.present(surface);
                 return;
             }
             const target = desktop();
             if (!target)
             {
-                presenter.present(surface);
+                state.presenter.present(surface);
                 return;
             }
             const bytesPerPixel = surface.bitCount >>> 3;
@@ -571,7 +591,7 @@ export const graphicsModule = {
                     }
                 }
             }
-            presenter.present(target);
+            state.presenter.present(target);
         };
 
         /**
@@ -597,7 +617,7 @@ export const graphicsModule = {
             } : null;
         };
 
-        seam = createGraphicsLibraries({
+        state.seam = createGraphicsLibraries({
             graphics: api,
             memory: services,
             // Guest memory for the state a program sets without crossing,
@@ -650,7 +670,7 @@ export const graphicsModule = {
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
-                presenter,
+                presenter: state.presenter,
             }),
 
             // Enumeration is the one thing here that runs guest code: the
@@ -666,149 +686,208 @@ export const graphicsModule = {
             },
         });
 
+        /**
+         * Whether this instance is still open. There is no value that stands
+         * in for a drawing API -- a backend, a device factory, a GDI drawing
+         * -- so a call into a machine that has been disposed is answered the
+         * way a build with no graphics layer at all answers it: the stub's
+         * refusal. `graphics: null` in a configuration gets the same shape,
+         * and a program that reaches it fails where it can see it rather than
+         * dereferencing what disposal took away.
+         */
+        const live = ()=>!state.disposed;
+        /** @param {string} name */
+        const refuse = name=>{
+            const error = /** @type {Error & { code: string }} */ (
+                new Error(`NOT_IMPLEMENTED: graphics.${name}`));
+            error.code = 'NOT_IMPLEMENTED';
+            throw error;
+        };
+        /**
+         * @param {string} name
+         * @param {(...args: any[]) => any} method
+         * @returns {(...args: any[]) => any}
+         */
+        const guarded = (name, method)=>(...args)=>{
+            if (!live())
+            {
+                refuse(name);
+            }
+            return method(...args);
+        };
+
+        /**
+         * GDI's own drawing, for the device contexts win32 keeps: the
+         * engine a context is bound to, and the pixels a context draws
+         * into -- a bitmap's own bytes in guest memory for a memory
+         * context, a view of the desktop for a context over a window.
+         */
+        const gdiDrawing = ()=>({
+            /** @param {{ objects: any, metrics: (font: number) => any }} options */
+            create: options=>createGdiDrawing({ ...options, fonts }),
+            /**
+             * What the font engine measures for a font, or null when
+             * there is no engine and the bookkeeping half's estimate stands.
+             *
+             * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+             */
+            fontMetrics: font=>fonts.metrics(font),
+            /**
+             * How wide a string is in a font, or null without an engine.
+             *
+             * @param {import('../win32/gdi32/structs.js').LogFontFields} font
+             * @param {string} text
+             */
+            textWidth: (font, text)=>{
+                const cell = cellOf(font);
+                return cell ? textExtent(text, cell) : null;
+            },
+            /**
+             * @param {{ kind: string, bounds?: { left: number, top: number,
+             *     right: number, bottom: number } }} dc
+             *     A window context names the screen rectangle it may
+             *     draw in, in screen coordinates; absent, the whole screen.
+             * @param {{ width: number, height: number, bitCount: number, bits?: number,
+             *     topDown?: boolean, palette?: number[], format?: string }} bitmap
+             */
+            surfaceFor: (dc, bitmap)=>{
+                if (dc.kind !== 'memory')
+                {
+                    const screen = desktop();
+                    if (!screen)
+                    {
+                        return null;
+                    }
+                    return viewOf(screen.surface, dc.bounds ?? {
+                        left: 0, top: 0, right: screen.width, bottom: screen.height,
+                    });
+                }
+                const bits = bitmap.bits ?? 0;
+                if (bits === 0)
+                {
+                    return null;
+                }
+                // The bitmap's own bytes, not a copy: a program draws into
+                // a DIB section and reads the pixels back through the
+                // pointer it was given, so the drawing has to land there.
+                const bytes = services.windowMemory(bits,
+                    dibPitch(bitmap.width, bitmap.bitCount) * bitmap.height);
+                return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
+            },
+            /** The desktop's pixels, or null in a build with no heap for them. */
+            desktop: ()=>desktop()?.surface ?? null,
+            /**
+             * Shows the desktop. Called after a paint pass rather than
+             * after every draw; the presenter coalesces what arrives
+             * within one flush anyway.
+             */
+            presentDesktop: ()=>{
+                const screen = desktop();
+                if (screen)
+                {
+                    state.presenter.present(screen);
+                }
+            },
+        });
+
+        current = state;
         return {
-            ...api,
+            backend: guarded('backend', api.backend),
+            available: guarded('available', api.available),
+            adapter: guarded('adapter', api.adapter),
+            present: guarded('present', api.present),
+            screen: guarded('screen', api.screen),
+            create: guarded('create', api.create),
+            apis: guarded('apis', api.apis),
 
             /**
              * The libraries, keyed as an import descriptor names them. The
              * assembling caller merges these with win32's and hands the lot to
              * the loader; nothing here needs a special case.
              */
-            libraries: ()=>seam.libraries,
+            libraries: guarded('libraries', ()=>state.seam.libraries),
 
             /**
              * The pixel-format negotiation and frame presentation whose entry
              * points GDI32 exports. win32 sits below this layer and cannot
              * reach it, so the assembling caller hands this down.
              */
-            opengl: ()=>seam.opengl,
+            opengl: guarded('opengl', ()=>state.seam.opengl),
 
-            /**
-             * GDI's own drawing, for the device contexts win32 keeps: the
-             * engine a context is bound to, and the pixels a context draws
-             * into -- a bitmap's own bytes in guest memory for a memory
-             * context, a view of the desktop for a context over a window.
-             */
-            gdiDrawing: ()=>({
-                /** @param {{ objects: any, metrics: (font: number) => any }} options */
-                create: options=>createGdiDrawing({ ...options, fonts }),
-                /**
-                 * What the font engine measures for a font, or null when
-                 * there is no engine and the bookkeeping half's estimate stands.
-                 *
-                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
-                 */
-                fontMetrics: font=>fonts.metrics(font),
-                /**
-                 * How wide a string is in a font, or null without an engine.
-                 *
-                 * @param {import('../win32/gdi32/structs.js').LogFontFields} font
-                 * @param {string} text
-                 */
-                textWidth: (font, text)=>{
-                    const cell = cellOf(font);
-                    return cell ? textExtent(text, cell) : null;
-                },
-                /**
-                 * @param {{ kind: string, bounds?: { left: number, top: number,
-                 *     right: number, bottom: number } }} dc
-                 *     A window context names the screen rectangle it may
-                 *     draw in, in screen coordinates; absent, the whole screen.
-                 * @param {{ width: number, height: number, bitCount: number, bits?: number,
-                 *     topDown?: boolean, palette?: number[], format?: string }} bitmap
-                 */
-                surfaceFor: (dc, bitmap)=>{
-                    if (dc.kind !== 'memory')
-                    {
-                        const screen = desktop();
-                        if (!screen)
-                        {
-                            return null;
-                        }
-                        return viewOf(screen.surface, dc.bounds ?? {
-                            left: 0, top: 0, right: screen.width, bottom: screen.height,
-                        });
-                    }
-                    const bits = bitmap.bits ?? 0;
-                    if (bits === 0)
-                    {
-                        return null;
-                    }
-                    // The bitmap's own bytes, not a copy: a program draws into
-                    // a DIB section and reads the pixels back through the
-                    // pointer it was given, so the drawing has to land there.
-                    const bytes = services.windowMemory(bits,
-                        dibPitch(bitmap.width, bitmap.bitCount) * bitmap.height);
-                    return surfaceForDibSection({ ...bitmap, bits }, bytes, bits);
-                },
-                /** The desktop's pixels, or null in a build with no heap for them. */
-                desktop: ()=>desktop()?.surface ?? null,
-                /**
-                 * Shows the desktop. Called after a paint pass rather than
-                 * after every draw; the presenter coalesces what arrives
-                 * within one flush anyway.
-                 */
-                presentDesktop: ()=>{
-                    const screen = desktop();
-                    if (screen)
-                    {
-                        presenter.present(screen);
-                    }
-                },
-            }),
+            gdiDrawing: guarded('gdiDrawing', gdiDrawing),
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return {
+                name: 'graphics',
+                version: '0.1.0',
+                status: 'created',
+                metrics: {
+                    apis: [],
+                    libraries: [],
+                    created: [],
+                    seam: null,
+                    shadow: null,
+                    backend: null,
+                    presenter: null,
+                    pacing: null,
+                },
+            };
+        }
         return {
             name: 'graphics',
             version: '0.1.0',
-            status: factories ? 'ready' : 'created',
+            status: 'ready',
             metrics: {
-                apis: factories ? Object.keys(factories) : [],
+                apis: Object.keys(instance.factories),
                 // Which libraries a program can reach this layer through. It
                 // exports its own, and anything counting what is synthesised
                 // into guest memory has to include them.
-                libraries: seam ? Object.keys(seam.libraries) : [],
+                libraries: Object.keys(instance.seam.libraries),
                 // What a program actually asked for says more about a run than
                 // what the build could have offered.
-                created,
-                seam: seam ? seam.diagnostics() : null,
+                created: instance.created,
+                seam: instance.seam.diagnostics(),
                 // State the program set in the guest, and the calls that never
                 // crossed: the saving is a number here, not a belief.
-                shadow: seam ? seam.shadow() : null,
-                backend: backend ? backend.diagnostics() : null,
+                shadow: instance.seam.shadow(),
+                backend: instance.backend ? instance.backend.diagnostics() : null,
                 // Counted separately from the backend's own: a surface shown
                 // through DirectDraw never enters a drawing pass, so nothing
                 // in those numbers says whether anything reached the screen.
-                presenter: presenter ? presenter.diagnostics() : null,
+                presenter: instance.presenter ? instance.presenter.diagnostics() : null,
                 // Absent in a build with no display to pace against. The pacer
                 // is the presenter's now, because the rhythm it enforces is a
                 // property of the canvas rather than of the process.
-                pacing: presenter ? presenter.pacing() : null,
+                pacing: instance.presenter ? instance.presenter.pacing() : null,
             },
         };
     },
 
     async dispose(){
-        if (backend)
+        const instance = current;
+        if (instance)
         {
-            backend.dispose();
+            if (instance.backend)
+            {
+                instance.backend.dispose();
+            }
+            // The presenter belongs to the run, not to this machine: what
+            // replaces this process draws into the same canvas and the same
+            // texture, so it is left exactly as it is. Only a presenter this
+            // layer made itself -- a build assembled without one -- is
+            // disposed here.
+            if (instance.presenter && !instance.presenterGiven)
+            {
+                instance.presenter.dispose?.();
+            }
+            instance.disposed = true;
         }
-        // The presenter belongs to the run, not to this machine: what replaces
-        // this process draws into the same canvas and the same texture, so it
-        // is left exactly as it is. Only a presenter this layer made itself --
-        // a build assembled without one -- is disposed here.
-        if (presenter && !presenterGiven)
-        {
-            presenter.dispose?.();
-        }
-        backend = null;
-        presenter = null;
-        presenterGiven = false;
-        factories = null;
-        seam = null;
-        created = [];
+        current = null;
     },
 };

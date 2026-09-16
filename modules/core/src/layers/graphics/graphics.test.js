@@ -418,3 +418,57 @@ test('dispose releases this machine\'s backend and leaves the run\'s presenter u
             'and the run\'s presenter was not the machine\'s to dispose');
         assert.ok(presenter.diagnostics().presents >= 1, 'its counters are untouched');
     });
+
+test('a second instance in one realm does not take the first one\'s backend', async()=>{
+    // A process replacement runs `create()` again in the same realm, and the
+    // plan for two machines in one worker needs two live at once. The backend
+    // belongs to the machine that asked for it, so a second create() cannot
+    // hand the first one's GPU to an api that was never given a device.
+    const gpu = {
+        device: {
+            createBuffer: ()=>({ destroy(){} }),
+            createBindGroupLayout: ()=>({}),
+            createCommandEncoder: ()=>({ finish: ()=>({}) }),
+        },
+        queue: { submit(){}, writeBuffer(){} },
+        presentTo: ()=>{},
+    };
+    const first = await graphicsModule.create({ device: gpu }, hostWith(fakeMemory()));
+    const second = await graphicsModule.create({}, hostWith(fakeMemory()));
+
+    assert.ok(first.backend(), 'the first builds its own backend');
+    assert.throws(()=>second.backend(), /no GPU device/,
+        'and the second, which has none, still says so');
+
+    await graphicsModule.dispose();
+});
+
+test('a disposed machine answers as a build with graphics disabled', async()=>{
+    // A host call that was in flight when the machine was disposed retires
+    // afterwards and reaches this layer. A build with `graphics: null` is the
+    // stub, and a disposed machine is the same absence: every method refuses
+    // the way the stub does rather than dereferencing what disposal took away.
+    const api = await graphicsModule.create({}, hostWith(fakeMemory()));
+
+    await graphicsModule.dispose();
+
+    for (const name of ['backend', 'available', 'adapter', 'present', 'screen',
+        'create', 'apis', 'libraries', 'opengl', 'gdiDrawing'])
+    {
+        assert.throws(()=>api[name](), (/** @type {any} */ error)=>
+            error.code === 'NOT_IMPLEMENTED', `graphics.${name} refuses`);
+    }
+    assert.equal(graphicsModule.diagnostics().status, 'created');
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await graphicsModule.create({}, hostWith(fakeMemory()));
+    const second = await graphicsModule.create({}, hostWith(fakeMemory()));
+    second.create('ddraw');
+
+    const diagnostics = graphicsModule.diagnostics();
+    assert.equal(diagnostics.status, 'ready');
+    assert.deepEqual(diagnostics.metrics?.created, ['ddraw'],
+        'the live instance is the one whose request is reported');
+    await graphicsModule.dispose();
+});
