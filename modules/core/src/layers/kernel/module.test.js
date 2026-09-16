@@ -22,11 +22,14 @@ const PARK = 0xf000dead;
 const STACK_BASE = 0x00300000;
 const STACK_SIZE = 0x10000;
 
-function fakeCpu(){
+/** @param {number} [esp]  What the stack pointer reads while a call is in flight. */
+function fakeCpu(esp = 0){
     return {
         parkAddress: ()=>PARK,
         /** @param {any} state */
         newContext: state=>({ ...state }),
+        /** @param {string} name */
+        readReg32: name=>(name === 'esp' ? esp : 0),
     };
 }
 
@@ -44,16 +47,19 @@ function fakeMemory(){
         register: region=>regions.push(region),
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>words.set(address >>> 0, value >>> 0),
+        /** @param {number} address */
+        readU32: address=>words.get(address >>> 0) ?? 0,
     };
 }
 
-async function makeKernel(){
+/** @param {number} [esp] */
+async function makeKernel(esp){
     const memory = fakeMemory();
     const kernel = await kernelModule.create(
         { stacks: { base: STACK_BASE, size: STACK_SIZE } },
         /** @type {any} */ ({
             /** @param {string} name */
-            requireApi: name=>(name === 'cpu' ? fakeCpu() : memory),
+            requireApi: name=>(name === 'cpu' ? fakeCpu(esp) : memory),
             provide: ()=>{},
         }),
     );
@@ -249,4 +255,16 @@ test('diagnostics answers for the live instance', async()=>{
         'diagnostics reports the second (most recent) instance');
 
     await kernelModule.dispose();
+});
+
+test('parking a thread keeps where its stub leaves the stack, for the resume', async()=>{
+    // Whether the stub's `ret` runs before or after the thread is switched
+    // away is the emulator's business; the resume must not depend on it.
+    const { kernel, memory } = await makeKernel(0x2ffed0);
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'main' });
+    memory.words.set(0x2ffed0, 0x007e8166);
+    kernel.parkThread(thread, 0x2ffedc);
+    assert.equal(thread.parkedReturn, 0x007e8166);
+    assert.equal(thread.resumeStack, 0x2ffedc);
+    assert.equal(memory.words.get(0x2ffed0), PARK);
 });

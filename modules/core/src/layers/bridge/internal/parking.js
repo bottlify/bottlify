@@ -98,6 +98,13 @@ export function createParking({ kernel, onBegin }){
         /**
          * Parks a thread and returns the token that says so.
          *
+         * The kernel is told where the stub's `ret` leaves the stack, because
+         * whether that `ret` has run by the time the thread is switched away
+         * is the emulator's business: a slice can end on the instruction
+         * after the trap. A resume that trusted the saved ESP would then pop
+         * the park address the kernel wrote over the return address, and
+         * return through whatever sat above it.
+         *
          * @param {any} [thread]  Defaults to the thread that is running.
          * @returns {Readonly<{ parked: true }>}
          */
@@ -107,7 +114,10 @@ export function createParking({ kernel, onBegin }){
                 throw new Error(
                     'bridge: park() is only meaningful while a guest call is in flight');
             }
-            kernel.parkThread(thread ?? kernel.currentThread());
+            const which = thread ?? kernel.currentThread();
+            const frame = inFlight[inFlight.length - 1];
+            kernel.parkThread(which,
+                frame.thread === which ? frame.restingStack : undefined);
             parked++;
             return PARKED;
         },

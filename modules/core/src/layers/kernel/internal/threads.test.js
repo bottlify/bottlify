@@ -543,3 +543,23 @@ test('each publish names the thread the machine was spent on and where its heavi
             'what it retired since the last publish, not since it started');
         assert.equal(column('frameAt'), 0x400000);
     });
+
+test('a parked thread resumes on the resting stack it was parked with', ()=>{
+    // The switch may catch a parking thread before its stub's `ret` has run,
+    // with ESP still on the return address the kernel overwrote. The resume
+    // has to put ESP where the `ret` would have left it, not trust the save.
+    /** @type {any[]} */
+    const resumes = [];
+    const cpu = { ...fakeCpu(),
+        /** @param {any} context @param {any} where */
+        resumeContextAt: (context, where)=>resumes.push(where) };
+    const sched = createScheduler({ cpu, switcher: createSwitcher({ cpu }), quantum: 5000 });
+    const a = sched.create({ entry: 1, stackTop: 2, tebAddress: 0xa000, name: 'a' });
+    sched.block(a, 'sleep');
+    sched.wake(a);
+    a.parkedReturn = 0x7e8166;
+    a.resumeStack = 0x2ffedc;
+    a.waitResult = 0;
+    sched.runOnce();
+    assert.deepEqual(resumes, [{ eip: 0x7e8166, esp: 0x2ffedc, returnValue: 0 }]);
+});

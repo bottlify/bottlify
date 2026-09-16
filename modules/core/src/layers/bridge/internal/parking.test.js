@@ -77,3 +77,40 @@ test('parking a caller answers with the token that says so, and only in a call',
     assert.ok(isParkedCall(made.park()));
     assert.deepEqual(parked, [main]);
 });
+
+test('parking a caller tells the kernel where the stub leaves the stack', ()=>{
+    // The stub's `ret` may not have run by the time the thread is switched
+    // away: a slice can end on the instruction after the trap. A resume that
+    // trusts the saved ESP then returns through the park address the kernel
+    // wrote there, and the thread lands in code that is not its own.
+    const main = thread('main');
+    /** @type {any[]} */
+    const parked = [];
+    const made = createParking({
+        kernel: {
+            currentThread: ()=>main,
+            /** @param {any} which @param {number} [resting] */
+            parkThread: (which, resting)=>parked.push([which, resting]),
+        },
+    });
+    made.beginCall(frame('KERNEL32.dll!SleepEx', 0x2ffed0));
+    made.park();
+    assert.deepEqual(parked, [[main, 0x2ffed8]]);
+});
+
+test('a resting stack is offered only for the thread whose call is in flight', ()=>{
+    const main = thread('main');
+    const worker = thread('thread-3');
+    /** @type {any[]} */
+    const parked = [];
+    const made = createParking({
+        kernel: {
+            currentThread: ()=>worker,
+            /** @param {any} which @param {number} [resting] */
+            parkThread: (which, resting)=>parked.push([which, resting]),
+        },
+    });
+    made.beginCall(frame('KERNEL32.dll!ReadFile', 0x1ff000));
+    made.park(main);
+    assert.deepEqual(parked, [[main, undefined]]);
+});

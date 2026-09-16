@@ -55,7 +55,7 @@ Threads and turns:
 |--------|-----------|---------|
 | `createThread` | `({ entry, parameter?, stackTop?, stackLimit?, tebAddress?, name?, returnTo? }) => Thread` | A ready thread with a primed stack (parameter above a return address). Stack from the pool unless `stackTop` is given. `returnTo` defaults to the park loop. Opens a `'thread'` handle on it. |
 | `holdThread` | `() => number` | Replaces the return address at ESP with the park loop and returns what it was. For a stub about to `ret`. |
-| `parkThread` | `(thread) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. |
+| `parkThread` | `(thread, restingStack?) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. `restingStack` — where the stub's `ret` leaves ESP — is kept on `thread.resumeStack`, so the resume does not depend on whether that `ret` ran before the switch. |
 | `scheduleResume` | `(thread, { eip, esp?, returnValue? }) => void` | Where a stopped thread continues on its next turn; applied inside the switch. |
 | `currentThread` / `threads` | `() => Thread \| null` / `() => Thread[]` | The thread on the CPU; every thread ever created. |
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |
@@ -230,6 +230,11 @@ loop and hands the original back to the caller, which decides where the thread g
 (`scheduleResume`). `parkThread()` does the same but keeps the address on the thread, so the
 next turn resumes exactly where the call was made with `waitResult` in EAX. Both work because a
 stub is about to `ret`: the park loop is `hlt; jmp`, a parking slot rather than code to run.
+Whether that `ret` has run by the time the thread is switched away is the emulator's business
+— a slice can end on the instruction after the trap — so a parked thread's ESP is set from the
+`restingStack` its caller passed rather than trusted from the saved context; without it the
+resume pops the park address the kernel wrote over the return address and returns through
+whatever sat above it.
 The redirection is applied inside the switch (`cpu.resumeContextAt`) so it happens exactly once
 and after the thread's own state is saved — which matters most when the thread coming back is
 the one already on the CPU.

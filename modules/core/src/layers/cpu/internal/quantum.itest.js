@@ -34,8 +34,9 @@ const u32 = value=>[
  *
  * @param {Uint8Array} code
  * @param {number} at
+ * @param {[number, Uint8Array][]} [also]  More bytes in place before the boot.
  */
-async function runningGuest(code, at){
+async function runningGuest(code, at, also = []){
     const wasm = await readFile(new URL('v86.wasm', PREBUILT));
     const host = await createV86Host({
         moduleUrl: new URL('libv86.mjs', PREBUILT).href,
@@ -47,6 +48,10 @@ async function runningGuest(code, at){
     });
 
     host.writePhysical(at, code);
+    for (const [where, bytes] of also)
+    {
+        host.writePhysical(where, bytes);
+    }
     host.writePhysical(0x7000, new Uint8Array(u32(at)));
     // One pass of the emulator's own loop carries the ROM through to the guest.
     host.cpu().main_loop();
@@ -106,6 +111,41 @@ test('a hot loop inside one block is bounded by the slice, compiled or not', asy
     const delivered = cpu.run_slice(1000);
     assert.ok(delivered >= 1000 && delivered <= 1002,
         `asked 1000 of a hot page, got ${delivered}`);
+
+    host.stop();
+});
+
+test('a slice can end between a stub\'s trap and its ret', async()=>{
+    // The fact the kernel's parking contract rests on: the instruction after
+    // the `out` is a separate step, and the bound can fall between the two.
+    // A thread parked by the trap is then switched away with ESP still on
+    // the return address the kernel overwrote, so its resume must set ESP
+    // itself rather than trust what was saved.
+    const STUB = 0x100000;
+    const CODE = 0x10000;
+    // push 1; push 1; call STUB; jmp back -- the stub is the real shape:
+    // mov dx, port; mov eax, id; out dx, eax; ret 8.
+    const caller = [0x6a, 0x01, 0x6a, 0x01, 0xe8, ...u32(STUB - (CODE + 9)), 0xeb, 0xf4];
+    const stub = [0x66, 0xba, 0x77, 0xb0, 0xb8, ...u32(7), 0xef, 0xc2, 0x08, 0x00];
+    const host = await runningGuest(new Uint8Array(caller), CODE,
+        [[STUB, new Uint8Array(stub)]]);
+    host.onTrap(()=>{});
+    const cpu = host.cpu();
+
+    const retAt = STUB + 10;
+    let stoppedOnRet = 0;
+    for (const size of [1, 2, 3, 5, 7, 11, 13, 17, 100, 101, 1000, 1003])
+    {
+        for (let i = 0; i < 40; i++)
+        {
+            cpu.run_slice(size);
+            if (host.readReg32('eip') === retAt)
+            {
+                stoppedOnRet++;
+            }
+        }
+    }
+    assert.ok(stoppedOnRet > 0, 'no slice ended on the stub\'s ret; the contract is moot');
 
     host.stop();
 });
