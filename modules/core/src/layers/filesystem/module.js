@@ -41,12 +41,21 @@ const splitComponents = path=>path.split(/[\\/]/).filter(Boolean);
  * until it is closed.
  */
 
-/** @type {any} */
-let drives = null;
-/** @type {any} */
-let directories = null;
-/** @type {any} */
-let files = null;
+/**
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the drives, the open files and the current directory belong
+ * to the closure `create()` returns, so a second instance in one realm cannot
+ * take the first one's volume. Disposing marks the instance closed, so a call
+ * still in flight when the volume went away answers "not found" instead of
+ * dereferencing what is gone.
+ *
+ * @type {any}
+ */
+let current = null;
 
 export const filesystemModule = {
     name: 'filesystem',
@@ -58,8 +67,24 @@ export const filesystemModule = {
      * @returns {Promise<any>}
      */
     async create(config){
-        drives = new Map();
-        files = createFileTable({ limit: config?.openFileLimit });
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own drives and open files.
+         *
+         * @type {{ drives: Map<string, any>, directories: any, files: any,
+         *     disposed: boolean }}
+         */
+        const state = {
+            drives: new Map(),
+            directories: null,
+            files: createFileTable({ limit: config?.openFileLimit }),
+            disposed: false,
+        };
 
         // What has changed since anyone last asked. Kept as a set of paths
         // rather than a log: a program writes one save in hundreds of writes,
@@ -83,7 +108,7 @@ export const filesystemModule = {
                 notifying = false;
                 const batch = [...changes.values()];
                 changes.clear();
-                if (batch.length > 0)
+                if (batch.length > 0 && !state.disposed)
                 {
                     listener?.(batch);
                 }
@@ -100,7 +125,7 @@ export const filesystemModule = {
             {
                 throw fsError(ErrorCode.INVALID_PATH, `"${letter}" is not a drive letter`);
             }
-            drives.set(key, createOverlay({
+            state.drives.set(key, createOverlay({
                 source: stores?.source ?? null,
                 writable: stores?.writable ?? createMemoryStore(),
                 now: config?.now,
@@ -118,21 +143,21 @@ export const filesystemModule = {
         {
             mount(letter, stores);
         }
-        if (drives.size === 0)
+        if (state.drives.size === 0)
         {
             mount('C', {});
         }
 
         // The process starts on the first drive it has, at its root, so that a
         // relative path resolves to something even before anyone sets it.
-        directories = createDirectoryState({ drive: [...drives.keys()][0] });
+        state.directories = createDirectoryState({ drive: [...state.drives.keys()][0] });
 
         /**
          * @param {string} path
          * @param {boolean} [allowWildcard]
          */
         const locate = (path, allowWildcard = false)=>{
-            const resolved = directories.resolve(path);
+            const resolved = state.directories.resolve(path);
             if (resolved.device)
             {
                 throw Object.assign(
@@ -145,7 +170,7 @@ export const filesystemModule = {
                 // literally, and a name cannot contain one.
                 throw fsError(ErrorCode.INVALID_PATH, `"${path}" is a pattern, not a file name`);
             }
-            const tree = drives.get(resolved.drive);
+            const tree = state.drives.get(resolved.drive);
             if (!tree)
             {
                 throw fsError(ErrorCode.NO_SUCH_DRIVE, `No drive ${resolved.drive}: is mounted`);
@@ -158,13 +183,27 @@ export const filesystemModule = {
             };
         };
 
+        /**
+         * Whether this instance is still open. A call that was in flight when
+         * the machine was disposed must not find the volume gone: after
+         * disposal every method answers the way it would for a file that is
+         * not there, rather than dereferencing what disposal took away.
+         */
+        const live = ()=>!state.disposed;
+
+        current = state;
         return {
             ErrorCode,
             Disposition,
             SeekFrom,
 
             /** @param {string} letter @param {any} stores */
-            mount: (letter, stores)=>mount(letter, stores),
+            mount: (letter, stores)=>{
+                if (live())
+                {
+                    mount(letter, stores);
+                }
+            },
 
             /**
              * Says what has changed, once per file, after the writes settle.
@@ -176,7 +215,10 @@ export const filesystemModule = {
              * @param {(changes: { path: string, kind: string }[]) => void} handler
              */
             onChanged(handler){
-                listener = handler;
+                if (live())
+                {
+                    listener = handler;
+                }
             },
 
             /**
@@ -195,7 +237,11 @@ export const filesystemModule = {
              * @returns {number} how many entries were applied
              */
             apply(batch){
-                const open = new Set(files.list().map((/** @type {any} */ file)=>
+                if (!live())
+                {
+                    return 0;
+                }
+                const open = new Set(state.files.list().map((/** @type {any} */ file)=>
                     foldName(file.path)));
                 for (const entry of batch)
                 {
@@ -254,9 +300,13 @@ export const filesystemModule = {
              * @returns {{ path: string, bytes: Uint8Array }[]}
              */
             export(letter){
+                if (!live())
+                {
+                    return [];
+                }
                 /** @type {{ path: string, bytes: Uint8Array }[]} */
                 const out = [];
-                for (const [key, tree] of drives)
+                for (const [key, tree] of state.drives)
                 {
                     if (letter && key !== String(letter).toUpperCase())
                     {
@@ -275,7 +325,7 @@ export const filesystemModule = {
             },
 
             /** @returns {string[]} */
-            drives: ()=>[...drives.keys()],
+            drives: ()=>live() ? [...state.drives.keys()] : [],
 
             /**
              * Resolves a path without touching the volume. This is what a
@@ -285,14 +335,22 @@ export const filesystemModule = {
              * @param {string} path
              */
             resolve(path){
-                const resolved = directories.resolve(path);
+                if (!live())
+                {
+                    return { drive: '', components: [], device: null, wildcard: false, path: '' };
+                }
+                const resolved = state.directories.resolve(path);
                 return { ...resolved, path: formatPath(resolved.drive, resolved.components) };
             },
 
             /** @returns {string} the current directory, as a full path. */
             currentDirectory(){
-                const drive = directories.drive();
-                return formatPath(drive, directories.directoryOf(drive));
+                if (!live())
+                {
+                    return '';
+                }
+                const drive = state.directories.drive();
+                return formatPath(drive, state.directories.directoryOf(drive));
             },
 
             /**
@@ -303,6 +361,10 @@ export const filesystemModule = {
              * @param {string} path
              */
             setCurrentDirectory(path){
+                if (!live())
+                {
+                    return;
+                }
                 const { tree, drive, components } = locate(path);
                 const entry = tree.stat(components);
                 if (!entry)
@@ -313,11 +375,15 @@ export const filesystemModule = {
                 {
                     throw fsError(ErrorCode.NOT_A_DIRECTORY, `"${path}" is not a directory`);
                 }
-                directories.setCurrent(drive, components);
+                state.directories.setCurrent(drive, components);
             },
 
             /** @param {string} path @returns {any} */
             stat(path){
+                if (!live())
+                {
+                    return null;
+                }
                 const { tree, drive, components } = locate(path);
                 const entry = tree.stat(components);
                 return entry ? { ...entry, path: formatPath(drive, components) } : null;
@@ -329,6 +395,10 @@ export const filesystemModule = {
              * @param {string} path @param {number} modified  Milliseconds since the epoch.
              */
             setModified(path, modified){
+                if (!live())
+                {
+                    return;
+                }
                 const { tree, components } = locate(path);
                 tree.setModified(components, modified);
             },
@@ -341,6 +411,10 @@ export const filesystemModule = {
              * @returns {any[]}
              */
             list(path, pattern){
+                if (!live())
+                {
+                    return [];
+                }
                 const split = pattern === undefined
                     ? splitPattern(path)
                     : { directory: path, pattern };
@@ -354,18 +428,30 @@ export const filesystemModule = {
 
             /** @param {string} path @returns {boolean} true when it was created. */
             createDirectory(path){
+                if (!live())
+                {
+                    return false;
+                }
                 const { tree, components } = locate(path);
                 return tree.createDirectory(components);
             },
 
             /** @param {string} path */
             removeDirectory(path){
+                if (!live())
+                {
+                    return;
+                }
                 const { tree, components } = locate(path);
                 tree.removeDirectory(components);
             },
 
             /** @param {string} path */
             deleteFile(path){
+                if (!live())
+                {
+                    return;
+                }
                 const { tree, components } = locate(path);
                 tree.removeFile(components);
             },
@@ -382,8 +468,12 @@ export const filesystemModule = {
              * @param {string} [options.disposition]  One of Disposition.
              */
             open(path, options = {}){
+                if (!live())
+                {
+                    return null;
+                }
                 const { tree, components, key } = locate(path);
-                return files.open({
+                return state.files.open({
                     tree,
                     key,
                     components,
@@ -397,20 +487,37 @@ export const filesystemModule = {
             },
 
             /** @param {any} handle @param {number} length @returns {Uint8Array} */
-            read: (handle, length)=>files.read(handle, length),
+            read: (handle, length)=>live()
+                ? state.files.read(handle, length)
+                : new Uint8Array(0),
             /** @param {any} handle @param {Uint8Array} bytes @returns {number} */
-            write: (handle, bytes)=>files.write(handle, bytes),
+            write: (handle, bytes)=>live() ? state.files.write(handle, bytes) : 0,
             /** @param {any} handle @param {number} offset @param {string} [from] */
-            seek: (handle, offset, from)=>files.seek(handle, offset, from),
+            seek: (handle, offset, from)=>{
+                if (live())
+                {
+                    state.files.seek(handle, offset, from);
+                }
+            },
             /** @param {any} handle */
-            position: handle=>files.position(handle),
+            position: handle=>live() ? state.files.position(handle) : 0,
             /** @param {any} handle */
-            size: handle=>files.size(handle),
+            size: handle=>live() ? state.files.size(handle) : 0,
             /** @param {any} handle */
-            setEndOfFile: handle=>files.setEnd(handle),
+            setEndOfFile: handle=>{
+                if (live())
+                {
+                    state.files.setEnd(handle);
+                }
+            },
             /** @param {any} handle */
-            close: handle=>files.close(handle),
-            openFiles: ()=>files.list(),
+            close: handle=>{
+                if (live())
+                {
+                    state.files.close(handle);
+                }
+            },
+            openFiles: ()=>live() ? state.files.list() : [],
 
             /**
              * Moves a name to another name.
@@ -425,6 +532,10 @@ export const filesystemModule = {
              * @param {string} to
              */
             rename(from, to){
+                if (!live())
+                {
+                    return;
+                }
                 const entry = this.stat(from);
                 if (!entry)
                 {
@@ -458,18 +569,18 @@ export const filesystemModule = {
                     // works in a test and fails on a real install.
                     for (;;)
                     {
-                        const chunk = files.read(source, MOVE_CHUNK);
+                        const chunk = state.files.read(source, MOVE_CHUNK);
                         if (chunk.length === 0)
                         {
                             break;
                         }
-                        files.write(destination, chunk);
+                        state.files.write(destination, chunk);
                     }
                 }
                 finally
                 {
-                    files.close(source);
-                    files.close(destination);
+                    state.files.close(source);
+                    state.files.close(destination);
                 }
                 this.deleteFile(from);
             },
@@ -478,32 +589,38 @@ export const filesystemModule = {
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return { name: 'filesystem', version: '0.1.0', status: 'created', metrics: {} };
+        }
         /** @type {Record<string, any>} */
         const volumes = {};
-        for (const [letter, tree] of drives ?? [])
+        for (const [letter, tree] of instance.drives)
         {
             volumes[`${letter}:`] = tree.diagnostics();
         }
         return {
             name: 'filesystem',
             version: '0.1.0',
-            status: drives ? 'ready' : 'created',
-            metrics: drives
-                ? {
-                    volumes,
-                    handles: files.diagnostics(),
-                    // A relative path that resolves somewhere unexpected is one
-                    // of the harder failures to see from the outside.
-                    current: formatPath(
-                        directories.drive(), directories.directoryOf(directories.drive())),
-                }
-                : {},
+            status: 'ready',
+            metrics: {
+                volumes,
+                handles: instance.files.diagnostics(),
+                // A relative path that resolves somewhere unexpected is one
+                // of the harder failures to see from the outside.
+                current: formatPath(
+                    instance.directories.drive(),
+                    instance.directories.directoryOf(instance.directories.drive())),
+            },
         };
     },
 
     async dispose(){
-        drives = null;
-        directories = null;
-        files = null;
+        if (current)
+        {
+            current.disposed = true;
+        }
+        current = null;
     },
 };

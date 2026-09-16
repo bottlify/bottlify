@@ -202,3 +202,74 @@ test('diagnostics answer before and after the volume exists', async()=>{
     fs.close(handle);
     await filesystemModule.dispose();
 });
+
+test('a second instance in one realm does not take the first one\'s volume', async()=>{
+    // A process replacement runs `create()` again in the same realm, and the
+    // plan for two machines in one worker needs two volumes at once. The
+    // drives, the open files and the current directory belong to the
+    // instance, so the first one's api keeps acting on the first one's
+    // volume however many times create() runs after.
+    const first = await volume();
+    first.setCurrentDirectory('C:\\Game');
+    first.createDirectory('C:\\FirstOnly');
+
+    const second = await filesystemModule.create(undefined);
+
+    assert.equal(first.currentDirectory(), 'C:\\Game');
+    assert.equal(first.stat('C:\\FirstOnly')?.directory, true);
+    assert.equal(second.currentDirectory(), 'C:\\');
+    assert.equal(second.stat('C:\\FirstOnly'), null, 'the second volume never saw it');
+
+    await filesystemModule.dispose();
+});
+
+test('a disposed volume answers not found rather than throwing', async()=>{
+    // A host call that was in flight when the machine was disposed retires
+    // afterwards and touches the volume. Every method has to answer the way
+    // it would for a file that is not there -- never dereferencing what
+    // disposal took away.
+    const fs = await volume();
+    const handle = fs.open('C:\\Readme.TXT');
+
+    await filesystemModule.dispose();
+
+    assert.deepEqual(fs.drives(), []);
+    assert.equal(fs.currentDirectory(), '');
+    assert.equal(fs.stat('C:\\Readme.TXT'), null);
+    assert.deepEqual(fs.list('C:\\'), []);
+    assert.equal(fs.open('C:\\Readme.TXT'), null);
+    assert.deepEqual(fs.openFiles(), []);
+    assert.equal(fs.read(handle, 8).length, 0);
+    assert.equal(fs.write(handle, bytes('x')), 0);
+    assert.equal(fs.position(handle), 0);
+    assert.equal(fs.size(handle), 0);
+    assert.equal(fs.createDirectory('C:\\X'), false);
+    assert.deepEqual(fs.export(), []);
+    assert.equal(fs.apply([]), 0);
+    assert.deepEqual(fs.resolve('C:\\Readme.TXT'),
+        { drive: '', components: [], device: null, wildcard: false, path: '' });
+
+    assert.doesNotThrow(()=>fs.setCurrentDirectory('C:\\Game'));
+    assert.doesNotThrow(()=>fs.setModified('C:\\Readme.TXT', 0));
+    assert.doesNotThrow(()=>fs.removeDirectory('C:\\Game'));
+    assert.doesNotThrow(()=>fs.deleteFile('C:\\Readme.TXT'));
+    assert.doesNotThrow(()=>fs.rename('C:\\Readme.TXT', 'C:\\Other.TXT'));
+    assert.doesNotThrow(()=>fs.seek(handle, 0));
+    assert.doesNotThrow(()=>fs.setEndOfFile(handle));
+    assert.doesNotThrow(()=>fs.close(handle));
+    assert.doesNotThrow(()=>fs.mount('D', {}));
+    assert.doesNotThrow(()=>fs.onChanged(()=>{}));
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await volume();
+    const second = await filesystemModule.create(undefined);
+    second.setCurrentDirectory('C:\\');
+
+    const report = /** @type {any} */ (filesystemModule.diagnostics());
+    assert.equal(report.status, 'ready');
+    assert.equal(report.metrics.current, 'C:\\');
+    assert.deepEqual(Object.keys(report.metrics.volumes), ['C:'],
+        'the live instance mounts one drive, whatever the one before it mounted');
+    await filesystemModule.dispose();
+});

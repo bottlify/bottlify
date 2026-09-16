@@ -63,6 +63,16 @@ store folds no case and invents no directories — every Windows rule lives one 
 | `apply(batch) → number` | Put files in from outside: `{ path, bytes?, delete? }[]`, through the overlay; refused whole if any named file is open. |
 | `export(letter?) → { path, bytes }[]` | Everything the writable layer holds — what a session is made of. The source is never in it. |
 
+An instance owns its volume. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so the
+drives, the open files and the current directory live in the instance the api closes over, and a
+second `create()` cannot take the first one's volume; `diagnostics()` answers for the most recently
+created instance. After `dispose()`, a call that was in flight answers the way it would for a file
+that is not there rather than dereferencing what disposal took away: `stat()` and `open()` answer
+`null`, `list()`/`drives()`/`openFiles()`/`export()` answer empty, `currentDirectory()` and
+`resolve()` answer an empty path, the handle calls (`read()` an empty buffer, `write()` and the
+position and size calls zero) and the mutating calls are no-ops, and nothing throws.
+
 `ErrorCode` (`src/layers/filesystem/internal/errors.js`): `INVALID_PATH`, `INVALID_PARAMETER`,
 `NO_SUCH_DRIVE`, `NOT_FOUND`, `PATH_NOT_FOUND`, `ALREADY_EXISTS`, `NOT_A_DIRECTORY`,
 `IS_A_DIRECTORY`, `DIRECTORY_NOT_EMPTY`, `ACCESS_DENIED`, `SHARING_VIOLATION`, `IS_DEVICE`,
