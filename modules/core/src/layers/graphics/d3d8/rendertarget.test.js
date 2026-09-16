@@ -160,12 +160,12 @@ function harness(version, options = {}){
         /**
          * A render-target texture and its top level.
          *
-         * @param {number} width @param {number} height
+         * @param {number} width @param {number} height @param {number} [levels]
          */
-        renderTargetTexture(width, height){
+        renderTargetTexture(width, height, levels = 1){
             /** @type {{ texture?: any }} */
             const made = {};
-            assert.equal(device.CreateTexture(width, height, 1, D3DUSAGE.RENDERTARGET,
+            assert.equal(device.CreateTexture(width, height, levels, D3DUSAGE.RENDERTARGET,
                 D3DFMT.X8R8G8B8, D3DPOOL.DEFAULT, made), D3D_OK);
             /** @type {{ surface?: any }} */
             const level = {};
@@ -420,6 +420,31 @@ for (const version of /** @type {const} */ ([9, 8]))
         const presented = rasterise(h).of(h.presented[0].surface);
         assert.equal(toBase64(presented),
             'VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/1Y0Ev9WNBL/VjQS/w==');
+    });
+}
+
+for (const version of /** @type {const} */ ([9, 8]))
+{
+    test(`recorded (D3D${version}): level zero of a mip-chained render-target texture is`
+        + ' attached through a view of that level alone', async()=>{
+        const h = harness(version);
+        const { texture, level } = h.renderTargetTexture(4, 4, 3);
+        h.setTarget(level);
+        h.clear(argb(0x12, 0x34, 0x56));
+        h.setTarget(h.backBuffer());
+        h.drawSampling(texture);
+        await h.present();
+
+        const pass = h.gpu.of('beginRenderPass')[0];
+        const view = pass.descriptor.colorAttachments[0].view;
+        assert.equal(view.texture.descriptor.mipLevelCount, 3, 'the chain is one texture');
+        assert.equal(view.viewDescriptor.mipLevelCount, 1,
+            'a colour attachment names one level, whatever the texture has');
+        assert.equal(view.viewDescriptor.baseMipLevel, 0);
+        const draw = h.device.diagnostics().lastFrame.find(
+            (/** @type {any} */ command)=>command.kind === 'draw');
+        assert.equal(draw.stageBindings[0].view.texture, view.texture,
+            'and the draw samples the texture the pass drew into');
     });
 }
 

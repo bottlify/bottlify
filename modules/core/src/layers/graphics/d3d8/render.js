@@ -2517,8 +2517,11 @@ export function createRenderer(options){
         if (record)
         {
             uploadIfDirty(record.texture);
+            // A pass attaches one level, and the texture's own view spans
+            // them all: even level zero of a chained texture goes through a
+            // view of that level alone.
             const level = surfaceLevels.get(surface) ?? 0;
-            return level === 0 ? record.gpu : levelSurfaceOf(record, level);
+            return level === 0 && record.levels === 1 ? record.gpu : levelSurfaceOf(record, level);
         }
         const desc = describe(surface);
         let made = surfaces.get(surface);
