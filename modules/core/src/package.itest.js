@@ -54,8 +54,12 @@ const artifacts = Object.fromEntries(
 console.log(JSON.stringify({ createApp: typeof createApp, artifacts }));
 `;
 
+// `npm run build`, `npm pack` and `npm install` are three real subprocesses,
+// and their wall time is npm's and the disk's, not the engine's: measured on
+// this one machine, back to back, from under a minute to over three. The
+// bound below is a backstop against a genuinely stuck process, not an SLA.
 test('the packed tarball installs and hands a consumer the emulator',
-    { timeout: 180000 }, async t=>{
+    { timeout: 600000 }, async t=>{
         npm(PACKAGE, ['run', 'build']);
 
         const consumer = await mkdtemp(join(tmpdir(), 'bottlify-pack-'));
