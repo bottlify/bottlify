@@ -172,9 +172,11 @@ function fakeDrawing(){
             calls.push(['fillRect', hdc, rect, brush]);
         },
     };
+    let presented = 0;
     return {
         drawing,
         calls,
+        presented: ()=>presented,
         services: {
             createDrawing: ()=>drawing,
             /** @param {any} dc @param {any} bitmap */
@@ -182,6 +184,9 @@ function fakeDrawing(){
                 void dc;
                 void bitmap;
                 return surface;
+            },
+            presentDesktop: ()=>{
+                presented++;
             },
             pixelFormat: {
                 count: ()=>3,
@@ -351,6 +356,28 @@ test('the blits that need no source, and the ones that scale, reach the service'
     'a palette-relative table is not decoded, and says so with zero lines');
     assert.equal(fns.PatBlt.argBytes, 24);
     assert.equal(fns.StretchDIBits.argBytes, 52);
+});
+
+test('a draw on a window\'s own context shows the desktop; one on a memory context does not', ()=>{
+    // A program that fetches its window's DC once at start-up and blits into
+    // it every frame -- never through BeginPaint/EndPaint, never releasing --
+    // is still a program that changed what is on screen. Gating the desktop
+    // presentation on ReleaseDC or an internal repaint, and not on the draw
+    // itself, leaves that program's every frame invisible after the first.
+    const graphics = fakeDrawing();
+    const { fns, hdc } = setup(graphics.services);
+    const memoryDc = fns.CreateCompatibleDC.handler([hdc]);
+    const bitmap = fns.CreateBitmap.handler([8, 8, 1, 32, 0x1000]);
+    fns.SelectObject.handler([memoryDc, bitmap]);
+
+    assert.equal(fns.BitBlt.handler([memoryDc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
+    assert.equal(graphics.presented(), 0, 'a memory surface is not the screen');
+
+    assert.equal(fns.BitBlt.handler([hdc, 0, 0, 2, 2, 0, 0, 0, SRCCOPY]), 1);
+    assert.equal(graphics.presented(), 1);
+
+    assert.equal(fns.LineTo.handler([hdc, 3, 3]), 1);
+    assert.equal(graphics.presented(), 2, 'every draw on the window, not only the first');
 });
 
 // --- regions ---

@@ -470,8 +470,13 @@ face. `createGdiDrawing` (`gdi/context.js`) is the entry; `src/app.js` hands it 
 measurements when there is one and the bookkeeping half's estimate otherwise. A memory context
 draws into its DIB section's own bytes; a window context draws into a view (`viewOf`) of the **desktop** — one
 32-bit surface the size of the display, allocated from the guest heap so the presenter can show it
-the way it shows a DirectDraw primary — at the rectangle `win32` names for the window. `win32`
-calls `presentDesktop` when a paint pass has ended.
+the way it shows a DirectDraw primary — at the rectangle `win32` names for the window. `gdi32`
+calls `presentDesktop` after every drawing entry point (`BitBlt`, `TextOutA`, `LineTo`, ...) that
+binds a window- or display-kind context, not only when `win32`'s own paint pass ends: a program
+that fetches its window's DC once and blits into it every frame, never through
+`BeginPaint`/`EndPaint` and never releasing it between frames, still changes what is on screen on
+every one of those blits, and the presenter's own coalescing (one flush per burst) is what keeps
+that cheap.
 
 ### Adapter and display
 

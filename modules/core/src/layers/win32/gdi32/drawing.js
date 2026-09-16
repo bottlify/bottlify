@@ -248,6 +248,19 @@ export function createDrawingFunctions({ host, objects, dcOf, surfaceOf, current
             interfaces.bind(handle >>> 0, surface, dc);
             dc.boundSurface = surface;
         }
+        // A window's pixels are the desktop's, and a program that fetches its
+        // window's DC once and blits into it every frame -- never through
+        // BeginPaint/EndPaint, never releasing it between frames -- is a real
+        // and common shape, not a special case. Gating the desktop's
+        // presentation on ReleaseDC or an internal repaint, and not on the
+        // draw itself, leaves such a program's every frame after the first
+        // invisible. The presenter already coalesces a burst of these onto
+        // one flush, so calling it once per drawing entry point costs nothing
+        // a real frame does not already pay for.
+        if (dc.kind !== 'memory')
+        {
+            services.presentDesktop?.();
+        }
         return interfaces;
     };
 
