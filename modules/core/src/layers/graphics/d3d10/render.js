@@ -1321,12 +1321,21 @@ export function createRenderer(services){
                 translationOf(state.pixelShader));
             const vertexBuffers = pipeline.vertexBuffers.map((buffer, slot)=>{
                 const backing = buffer ? backingOf(buffer) : null;
-                return backing && backing.gpu
-                    ? { gpu: backing.gpu.gpu, offset: pipeline.vertexOffsets[slot],
-                        stride: pipeline.vertexStrides[slot] }
-                    : null;
+                if (!backing || !backing.gpu)
+                {
+                    return null;
+                }
+                // The bytes this draw reads have to survive a later write into
+                // the same buffer, which is what makes such a write rename.
+                backing.gpu.markRead();
+                return { gpu: backing.gpu.gpu, offset: pipeline.vertexOffsets[slot],
+                    stride: pipeline.vertexStrides[slot] };
             });
             const indexBacking = pipeline.indexBuffer ? backingOf(pipeline.indexBuffer) : null;
+            if (indexBacking && indexBacking.gpu && pipeline.indexBuffer)
+            {
+                indexBacking.gpu.markRead();
+            }
             counters.draws++;
             recording.push({
                 kind: 'draw',

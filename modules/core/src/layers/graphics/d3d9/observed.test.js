@@ -119,15 +119,17 @@ test('a lock sends only its range, NOOVERWRITE renames nothing and DISCARD renam
     drawn = h.drawnFrom();
     assert.notEqual(drawn[2], drawn[1], 'renamed');
 
-    // A plain lock of a range after a draw has read the buffer: the old
-    // contents stay observable, so the rename resends everything.
+    // A plain lock of a range once the frame that read the buffer has been
+    // submitted: nothing pending reads it, so the write goes into the live
+    // backing and only the locked range travels. (A rename is owed only while
+    // a recorded draw still reads it; the render tests pin that case.)
     h.write(STRIDE * 6, STRIDE * 3, 0, 0x44);
     await h.draw(6);
     const last = h.uploads().slice(3);
     assert.equal(last.length, 1);
-    assert.equal(last[0].size, STRIDE * 60);
+    assert.equal(last[0].size, STRIDE * 3);
     drawn = h.drawnFrom();
-    assert.notEqual(drawn[3], drawn[2], 'renamed again');
+    assert.equal(drawn[3], drawn[2], 'the same backing, because nothing was in flight');
     h.release();
 });
 

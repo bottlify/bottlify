@@ -56,9 +56,29 @@ test('DISCARD sends only the dirty range, from that range own offset', ()=>{
     assert.equal(writes[0].size, 40);
 });
 
-test('a lock with neither flag renames, and a rename resends the whole buffer', ()=>{
+test('a lock with neither flag sends only the locked range when no draw has read it', ()=>{
+    // The ordinary case: a program fills a range and then draws from it. The
+    // bytes that were not locked are already in the live backing, so resending
+    // the whole buffer is traffic the guest never asked for.
+    const { gpu, dynamic } = buffer(1 << 20);
+
+    fill(dynamic, 4096, 4096, LockFlags.NONE);
+    dynamic.flush();
+
+    const writes = gpu.of('writeBuffer');
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0].bufferOffset, 4096, 'the upload starts where the guest wrote');
+    assert.equal(writes[0].size, 4096);
+    assert.equal(dynamic.renames, 0, 'nothing had read it, so nothing had to be renamed');
+});
+
+test('a lock with neither flag after a read renames and resends the whole buffer', ()=>{
+    // A draw already recorded this frame reads the bytes the lock would write
+    // over, so the backing has to be renamed and the old contents carried into
+    // the new one, which means all of it travels.
     const { gpu, dynamic } = buffer(4096);
 
+    dynamic.markRead();
     fill(dynamic, 64, 16, LockFlags.NONE);
     dynamic.flush();
 
@@ -68,6 +88,22 @@ test('a lock with neither flag renames, and a rename resends the whole buffer', 
         'the old contents stayed observable, so all of it travels');
     assert.equal(writes[0].size, 4096);
     assert.equal(dynamic.renames, 1);
+});
+
+test('a submitted frame forgets its reads, so the next lock writes in place again', ()=>{
+    const { gpu, dynamic } = buffer(1 << 20);
+
+    dynamic.markRead();
+    fill(dynamic, 0, 16, LockFlags.NONE);
+    dynamic.flush();
+    assert.equal(dynamic.renames, 1);
+    assert.equal(gpu.of('writeBuffer').at(-1).size, 1 << 20);
+
+    dynamic.endFrame();
+    fill(dynamic, 32, 16, LockFlags.NONE);
+    dynamic.flush();
+    assert.equal(dynamic.renames, 1, 'no second rename once the read had been submitted');
+    assert.equal(gpu.of('writeBuffer').at(-1).size, 16);
 });
 
 test('NOOVERWRITE writes into the live buffer and uploads only what was locked', ()=>{

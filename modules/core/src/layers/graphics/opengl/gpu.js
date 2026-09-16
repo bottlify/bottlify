@@ -789,7 +789,7 @@ export function createGpuRenderer(services){
             record.reads = [];
         }
         const lock = record.gpu.lock(written.start, written.end - written.start,
-            collides ? backend.LockFlags.NONE : backend.LockFlags.NOOVERWRITE);
+            collides ? backend.LockFlags.RENAME : backend.LockFlags.NOOVERWRITE);
         lock.data.set(buffer.data.subarray(written.start, written.end));
         record.gpu.unlock(lock);
         return record;

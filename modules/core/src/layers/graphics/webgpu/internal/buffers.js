@@ -16,10 +16,14 @@
  *   bytes written since the rename have to travel.
  * - `NOOVERWRITE` -- the guest promises not to touch bytes that recorded draws
  *   still read. Nothing is renamed and the newly written ranges are enough.
- * - neither -- a write into a buffer earlier draws in this frame already read is
- *   a hazard, so the buffer is renamed; but the old contents stay observable
- *   through the new one, so the whole buffer has to be resent. A rename is not
- *   a licence to send less, only `DISCARD` is.
+ * - neither -- the guest may write anywhere. Only if a draw of a frame not yet
+ *   submitted reads this buffer is that a hazard; the buffer is then renamed,
+ *   and because the old contents stay observable through the new one the whole
+ *   buffer has to be resent. When no such draw has read it, the write goes into
+ *   the live backing and only the locked range travels, which is the ordinary
+ *   case of a program that fills a buffer and then draws from it. `markRead` is
+ *   how a recorder says a draw has read the current backing; the flag is
+ *   dropped at `endFrame`, once the frames that read it are submitted.
  *
  * Two consequences that are easy to get subtly wrong and are asserted in the
  * tests: the uploaded range is aligned *outward*, because trimming it inward
@@ -31,6 +35,13 @@ export const LockFlags = {
     NONE: 0,
     DISCARD: 1,
     NOOVERWRITE: 2,
+    /**
+     * A caller that knows a recorded draw reads the bytes it is about to
+     * overwrite and wants the backing renamed. Not a guest flag: a guest with
+     * neither flag leaves the decision to `readSinceSubmit`, while a caller
+     * that tracks the range itself says so here.
+     */
+    RENAME: 4,
 };
 
 /** `writeBuffer` wants both the destination offset and the size in whole words. */
@@ -89,6 +100,10 @@ export function createDynamicBuffer(options){
     let renames = 0;
     let dirtyStart = -1;
     let dirtyEnd = -1;
+    // Whether a draw recorded in a frame not yet submitted read the live
+    // backing. A lock that would overwrite bytes such a draw still reads has to
+    // rename; otherwise the write can go into the backing in place.
+    let readSinceSubmit = false;
     /** @type {any} */
     let held = null;
 
@@ -127,6 +142,8 @@ export function createDynamicBuffer(options){
         retired.push({ gpu, at: presents });
         gpu = available.length > 0 ? available.shift() : allocate();
         renames++;
+        // Nothing has read the replacement yet.
+        readSinceSubmit = false;
         if (discard)
         {
             return;
@@ -166,8 +183,16 @@ export function createDynamicBuffer(options){
             {
                 rename(true);
             }
-            else if (!(flags & LockFlags.NOOVERWRITE))
+            else if (flags & LockFlags.RENAME)
             {
+                rename(false);
+            }
+            else if (!(flags & LockFlags.NOOVERWRITE) && readSinceSubmit)
+            {
+                // A draw not yet submitted read the bytes this lock may
+                // overwrite, and the old contents stay observable, so the
+                // backing is renamed and all of it is resent through the new
+                // one.
                 rename(false);
             }
             held = { data: shadow.subarray(offset, offset + length), offset, length, flags };
@@ -191,6 +216,16 @@ export function createDynamicBuffer(options){
         flush,
 
         /**
+         * A draw of the frame being recorded reads the live backing. A later
+         * lock with neither flag then has to rename instead of writing in
+         * place, because the bytes it overwrites are still observed by that
+         * draw at replay.
+         */
+        markRead(){
+            readSinceSubmit = true;
+        },
+
+        /**
          * Buffers retired during a frame may still be read by draws recorded in
          * it, so they only become reusable once that frame has been submitted.
          */
@@ -205,6 +240,10 @@ export function createDynamicBuffer(options){
         /** A frame was submitted; the backings its draws read are free now. */
         endFrame(){
             submits++;
+            // Every frame that could have read the live backing is submitted by
+            // the time this runs (the replay chain is serial), so a lock is
+            // free to write in place again.
+            readSinceSubmit = false;
             for (let index = retired.length - 1; index >= 0; index--)
             {
                 if (retired[index].at < submits)
