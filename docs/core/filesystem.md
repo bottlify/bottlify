@@ -29,7 +29,8 @@ only where the assembler hands it in. It requires `log`.
 
 | option          | type                                                        | default                      | meaning |
 |-----------------|-------------------------------------------------------------|------------------------------|---------|
-| `drives`        | `{ [letter]: { source?: SourceStore \| null, writable?: WritableStore } }` | `{}` → `C:` on an in-memory writable store | Volumes to mount. A missing `writable` is an in-memory store; a missing `source` is a drive with no read-only layer. |
+| `drives`        | `{ [letter]: { source?: SourceStore \| null, system?: SourceStore \| null, writable?: WritableStore } }` | `{}` → `C:` on an in-memory writable store | Volumes to mount. A missing `writable` is an in-memory store; a missing `source` is a drive with no bundle; a missing `system` is a drive with no engine volume. |
+| `system`        | `SourceStore \| null`                                       | `null`                       | The engine's own read-only layer, mounted beneath every bundle. `source` wins where both name a path, and a write to a file only `system` holds is `ACCESS_DENIED`. Per-mount `system` overrides it. |
 | `openFileLimit` | `number`                                                    | `4096`                       | Most files open at once. |
 | `onChanged`     | `(changes: { path, kind }[]) => void`                       | none                         | Told, once per file and after the writes settle, that the writable layer changed. |
 
@@ -43,7 +44,7 @@ store folds no case and invents no directories — every Windows rule lives one 
 | method | one line |
 |--------|----------|
 | `ErrorCode`, `Disposition`, `SeekFrom` | The vocabularies (below). |
-| `mount(letter, { source?, writable? })` | Mount or replace a drive. `letter` must be a single letter. |
+| `mount(letter, { source?, system?, writable? })` | Mount or replace a drive. `letter` must be a single letter. |
 | `drives() → string[]` | Mounted letters, in mount order. |
 | `resolve(path)` | `{ drive, components, device, wildcard, path }` without touching the volume — how a caller learns a path names a device before opening it. |
 | `currentDirectory() → string` | The current directory as a full path. |
@@ -119,15 +120,19 @@ Every failure is an `Error` with a `code` from this set. `Disposition` is `CREAT
 
 ### The overlay (`src/layers/filesystem/internal/tree.js`)
 
-One read-only source and one writable layer are indexed into a single tree of nodes at mount
-(`SourceStore.list()` is called once and never again — a source that changes behind the overlay's
-back is out of contract). Three rules do the work: a lookup finds the writable layer first, then the
-source; the first write to a source-only file copies it up (`copyUp`), so the source is never
-modified; deleting something that came from the source leaves a **tombstone**, because the source
-would otherwise hand it back on the next enumeration. Creating a directory over a source directory
-joins it rather than hiding what the source put in it; a directory is refused for removal while
-anything — including source-only content — is still in it. A node is the single answer to "does
-this exist, in which layer, under what spelling".
+Two read-only layers, a bundle `source` and the engine's `system` volume, and one writable layer
+are indexed into a single tree of nodes at mount (`SourceStore.list()` is called once and never
+again — a source that changes behind the overlay's back is out of contract). Three rules do the
+work: a lookup finds the writable layer first, then the bundle, then the system volume; the first
+write to a bundle-only file copies it up (`copyUp`), so the bundle is never modified; deleting
+something that came from the bundle leaves a **tombstone**, because the bundle would otherwise hand
+it back on the next enumeration. The system volume is genuinely read-only: a write, truncate,
+create or delete aimed at a file only it holds is `ACCESS_DENIED`, the way a system directory is
+refused to a program that is not an administrator, and nothing is copied up on the way. A file in
+both the bundle and the system volume is the bundle's, by bytes and by spelling. Creating a
+directory over a read-only directory joins it rather than hiding what it put there; a directory is
+refused for removal while anything — including source-only content — is still in it. A node is the
+single answer to "does this exist, in which layer, under what spelling".
 
 ### Open files (`src/layers/filesystem/internal/handles.js`)
 
@@ -174,6 +179,18 @@ file with zeroes. The table hands back objects; the win32 layer gives them numbe
   is re-asked whole), 2 MiB of read-ahead when a miss lands where a forward reader was expected,
   and a background fill of the whole bundle in container order, one request at a time, that stands
   aside whenever a read is parked and is off when there is no durable store.
+
+### The system volume
+
+A second read-only layer sits under the bundle: the engine's own volume, mounted at
+`C:\WINDOWS\system32\`. It is where the DirectX End-User Runtime's side-by-side DLLs live — the
+`d3dx9_*`, `d3dx10_*`, `d3dx11_*`, `d3dcompiler_*`, `xinput*`, `x3daudio*`, `xactengine*`,
+`xapofx*` and `xaudio2_*` set — because on a real machine DXSETUP puts them in `system32` and a
+title finds them there. The engine plays that role: `createApp` builds this layer from the files it
+is handed (`system.files`, bare names) and the layer prefixes them with the system directory. A
+title's own file of the same name, in the bundle, still wins; the runtime is the fallback that lets
+a title that only ever imported `D3DXCreateEffect` from the redistributable run without the DLL
+being added to its bundle. The layer is refused for writing as a volume, not merely as a source.
 
 ### The session (what the program wrote)
 
@@ -224,7 +241,7 @@ engine journals what its callers decide to say.
 | file | covers |
 |------|--------|
 | `src/layers/filesystem/internal/paths.test.js` | Drive parsing, separators, trailing dots/spaces, `.`/`..`, devices everywhere, refused namespaces, wildcard rules, per-drive current directory. |
-| `src/layers/filesystem/internal/tree.test.js` | Both layers as one volume, case-preserving enumeration, copy-up on write, tombstones, merge with source directories, distinct failures, diagnostics. |
+| `src/layers/filesystem/internal/tree.test.js` | Both layers as one volume, case-preserving enumeration, copy-up on write, tombstones, merge with source directories, distinct failures, diagnostics, and the system volume: a file only it holds is read from it, a bundle file of the same name wins, and every mutation is `ACCESS_DENIED`. |
 | `src/layers/filesystem/internal/handles.test.js` | Positions, reads past the end, zero-filled extension, dispositions, sharing in both directions, `SetEndOfFile`, closed handles, the per-path report. |
 | `src/layers/filesystem/internal/memory-store.test.js` | The seeded store. |
 | `src/layers/filesystem/internal/opfs-store.test.js` | Over a fake OPFS: mount walk, synchronous read/write, zero-fill, nested directories, the handle pool, the exclusive lock, main-thread refusal. |

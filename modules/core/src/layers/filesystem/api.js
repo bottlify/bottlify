@@ -22,11 +22,20 @@
  * ```js
  * {
  *     drives: {
- *         C: { source: SourceStore | null, writable: WritableStore },
+ *         C: {
+ *             source: SourceStore | null,
+ *             system: SourceStore | null,
+ *             writable: WritableStore,
+ *         },
  *     },
+ *     system: SourceStore | null,
  *     openFileLimit: 4096,
  * }
  * ```
+ *
+ * `system` is the engine's own read-only volume, mounted beneath every bundle;
+ * `source` wins where both name a path, and a write to a file only `system`
+ * holds is `ACCESS_DENIED`.
  *
  * Both stores are injected; nothing here reaches for a browser API. With no
  * configuration the layer mounts `C:` on an in-memory writable store, which is
@@ -36,7 +45,7 @@
  *
  * The API a consumer sees:
  *
- * - `mount(letter, { source, writable })`, `drives()`
+ * - `mount(letter, { source, system, writable })`, `drives()`
  * - `resolve(path)`, `currentDirectory()`, `setCurrentDirectory(path)`
  * - `stat(path)`, `list(path, pattern?)`
  * - `createDirectory(path)`, `removeDirectory(path)`, `deleteFile(path)`

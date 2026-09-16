@@ -5,20 +5,28 @@
  */
 
 /**
- * The overlay: one read-only source, one writable layer, and the rules that
- * make them look like a single volume to a program that cannot be told its
+ * The overlay: read-only sources, a writable layer, and the rules that make
+ * them look like a single volume to a program that cannot be told its
  * installation is not writable.
+ *
+ * There are two read-only layers. `source` is the bundle, and a title owns the
+ * files in it: writing one copies it up, and deleting one leaves a tombstone.
+ * `system` is the engine's own volume -- the DirectX runtime under
+ * `C:\WINDOWS\system32\` -- and it is genuinely read-only: a write is refused,
+ * the way writing a system directory is refused on a machine where the program
+ * is not an administrator. The bundle wins where both name a file.
  *
  * Three rules do all of the work:
  *
- * - A lookup finds the writable layer first, then the source.
- * - The first write to a file that exists only in the source copies it up, so
- *   the source is never modified and never has to be.
- * - Deleting something that came from the source leaves a tombstone, because
- *   the source cannot forget it and would otherwise hand it back on the next
+ * - A lookup finds the writable layer first, then the bundle, then the system
+ *   volume.
+ * - The first write to a file that exists only in the bundle copies it up, so
+ *   the bundle is never modified and never has to be.
+ * - Deleting something that came from the bundle leaves a tombstone, because
+ *   the bundle cannot forget it and would otherwise hand it back on the next
  *   enumeration.
  *
- * Both layers are indexed into one tree of nodes when the drive is mounted, and
+ * Every layer is indexed into one tree of nodes when the drive is mounted, and
  * the tree is kept in step by every mutation that goes through here. A node is
  * therefore the single answer to "does this exist, in which layer, and under
  * what spelling" -- which is also what makes case-insensitive lookup with
@@ -36,6 +44,7 @@ import { foldName, matchName } from './paths.js';
  * @property {Node | null} parent
  * @property {boolean} directory
  * @property {boolean} inSource
+ * @property {boolean} inSystem
  * @property {boolean} inWritable
  * @property {boolean} tombstone  Deleted here, still present in the source.
  * @property {Map<string, Node>} children  Keyed by folded name.
@@ -72,6 +81,7 @@ function makeNode(parent, name){
         parent,
         directory: false,
         inSource: false,
+        inSystem: false,
         inWritable: false,
         tombstone: false,
         children: new Map(),
@@ -82,11 +92,17 @@ function makeNode(parent, name){
 /**
  * @param {Object} options
  * @param {import('./memory-store.js').SourceStore | null} [options.source]
+ * @param {import('./memory-store.js').SourceStore | null} [options.system]
+ *        The engine's own read-only volume, beneath the source and refused for
+ *        writing. `source` wins where both name the same path.
  * @param {import('./memory-store.js').WritableStore} options.writable
  * @param {((change: { path: string, kind: string }) => void) | null} [options.onChanged]
  * @param {() => number} [options.now]  The clock a write is stamped with.
  */
-export function createOverlay({ source = null, writable, onChanged = null, now = Date.now }){
+export function createOverlay({
+    source = null, system = null, writable, onChanged = null, now = Date.now,
+})
+{
     /**
      * Announces that a path in the writable layer now differs from what anyone
      * outside has. Only the fact and the path: a program writes a save in
@@ -106,7 +122,7 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
     /**
      * @param {string} path
      * @param {boolean} directory
-     * @param {'source' | 'writable'} layer
+     * @param {'source' | 'system' | 'writable'} layer
      */
     const index = (path, directory, layer)=>{
         let node = root;
@@ -127,6 +143,10 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             {
                 child.inSource = true;
             }
+            else if (layer === 'system')
+            {
+                child.inSystem = true;
+            }
             else
             {
                 child.inWritable = true;
@@ -135,9 +155,16 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
         });
     };
 
+    // The bundle is indexed before the system volume so that, where both name
+    // a path, the node keeps the bundle's spelling and the bundle's bytes win
+    // in every lookup below.
     for (const entry of source?.list() ?? [])
     {
         index(entry.path, entry.directory, 'source');
+    }
+    for (const entry of system?.list() ?? [])
+    {
+        index(entry.path, entry.directory, 'system');
     }
     for (const entry of writable.list())
     {
@@ -206,9 +233,18 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
         {
             return 0;
         }
-        const store = node.inWritable ? writable : source;
+        const store = node.inWritable ? writable : node.inSource ? source : system;
         return store?.stat(node.path)?.size ?? 0;
     };
+
+    /**
+     * A node that only the engine's volume holds. Its bytes are not a title's
+     * to change: the runtime was put there by the engine the way `DXSETUP`
+     * puts it in `system32`, and a write is a mistake rather than a save.
+     *
+     * @param {Node} node
+     */
+    const readOnly = node=>node.inSystem && !node.inSource && !node.inWritable;
 
     /**
      * Gives a node somewhere in the writable layer to live, parents first. A
@@ -369,7 +405,7 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
-            const store = node.inWritable ? writable : source;
+            const store = node.inWritable ? writable : node.inSource ? source : system;
             return store ? store.read(node.path, offset, length) : new Uint8Array(0);
         },
 
@@ -379,6 +415,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             if (node.directory)
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (readOnly(node))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${node.path}" is on the engine's read-only volume`);
             }
             copyUp(node);
             writable.write(node.path, offset, bytes);
@@ -392,6 +433,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             if (node.directory)
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
+            }
+            if (readOnly(node))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${node.path}" is on the engine's read-only volume`);
             }
             if (size === 0 && !node.inWritable)
             {
@@ -416,6 +462,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
          */
         createFile(components){
             const parent = parentOf(components);
+            if (readOnly(parent))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${parent.path}" is on the engine's read-only volume`);
+            }
             const name = components[components.length - 1];
             if (name === undefined)
             {
@@ -446,6 +497,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
          */
         createDirectory(components){
             const parent = parentOf(components);
+            if (readOnly(parent))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${parent.path}" is on the engine's read-only volume`);
+            }
             const name = components[components.length - 1];
             if (name === undefined)
             {
@@ -482,6 +538,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             {
                 throw fsError(ErrorCode.IS_A_DIRECTORY, `"${node.path}" is a directory`);
             }
+            if (readOnly(node))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${node.path}" is on the engine's read-only volume`);
+            }
             forget(node);
             changed(node.path, 'removed');
         },
@@ -501,6 +562,11 @@ export function createOverlay({ source = null, writable, onChanged = null, now =
             if (node === root)
             {
                 throw fsError(ErrorCode.ACCESS_DENIED, 'A root cannot be removed');
+            }
+            if (readOnly(node))
+            {
+                throw fsError(ErrorCode.ACCESS_DENIED,
+                    `"${node.path}" is on the engine's read-only volume`);
             }
             const live = [...node.children.values()].some(child=>!child.tombstone);
             if (live)
