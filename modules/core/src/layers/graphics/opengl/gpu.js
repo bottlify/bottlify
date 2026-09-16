@@ -348,11 +348,23 @@ export function createGpuRenderer(services){
 
     /** @type {Map<string, Promise<any>>} */
     const pipelines = new Map();
+    /**
+     * A draw's generated source, by the same key its pipeline is cached under.
+     * The pipeline is built from the source once; without this the source was
+     * still built for every draw, which is per-draw work for identical state.
+     *
+     * @type {Map<string, ReturnType<typeof generateDraw>>}
+     */
+    const generatedDraws = new Map();
     /** @type {Map<string, any>} */
     const samplers = new Map();
     const stats = {
         frames: 0, pipelines: 0, draws: 0, clears: 0, fallbacks: 0, uploads: 0, renames: 0,
         refused: 0, skipped: 0, cut: 0,
+        // A draw's source is generated once per distinct state and reused after
+        // that, the same shape the Direct3D 8 path counts: a frame of identical
+        // shadow-volume draws is one generation, not one per draw.
+        prepared: 0, preparedReused: 0,
     };
 
     /**
@@ -502,6 +514,32 @@ export function createGpuRenderer(services){
         })();
         pipelines.set(key, building);
         return building;
+    };
+
+    /**
+     * The generated source of a draw, by the key its pipeline is cached under.
+     *
+     * A state that repeats -- and a shadow-volume frame repeats one state a
+     * hundred times -- must not re-emit its WGSL a hundred times: the source
+     * depends on the state alone, and the pipeline already reuses by the same
+     * key. A refusal is cached too, so a program that cannot be generated says
+     * so once rather than on every draw.
+     *
+     * @param {string} key
+     * @param {import('./wgsl.js').DrawState} state
+     * @returns {ReturnType<typeof generateDraw>}
+     */
+    const generatedFor = (key, state)=>{
+        const existing = generatedDraws.get(key);
+        if (existing !== undefined)
+        {
+            stats.preparedReused++;
+            return existing;
+        }
+        const made = generateDraw(state);
+        generatedDraws.set(key, made);
+        stats.prepared++;
+        return made;
     };
 
     /**
@@ -1079,7 +1117,7 @@ export function createGpuRenderer(services){
         }
         const state = drawStateOf(scene, layout, topology);
         const key = drawKey(state);
-        const generated = generateDraw(state);
+        const generated = generatedFor(key, state);
         const recording = recordingOf(context);
         if (generated.programs?.error)
         {

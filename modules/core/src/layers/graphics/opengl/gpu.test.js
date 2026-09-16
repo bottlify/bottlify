@@ -619,6 +619,41 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
 });
 
+test('a repeated draw state generates its source once and reuses it', async()=>{
+    // A frame repeats one state for a hundred shadow-volume draws. The
+    // pipeline cache already keyed the built pipeline by that state; the
+    // source it was built from was emitted again for every draw, which is
+    // per-draw work for a state that did not change.
+    const r = rig();
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    await r.swap();
+
+    const diagnostics = r.renderer.diagnostics();
+    assert.equal(diagnostics.draws, 2, 'both draws ran');
+    assert.equal(diagnostics.prepared, 1, 'the source was generated for the first');
+    assert.equal(diagnostics.preparedReused, 1, 'and the second reused it');
+});
+
+test('a changed draw state generates its source again', ()=>{
+    const r = rig();
+    programRig(r);
+    const { context } = r;
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+    // A different fixed state -- blending on, with its own factors -- is a
+    // different key and its own generation.
+    context.glEnable(GL.BLEND);
+    context.glBlendFunc(GL.SRC_ALPHA, GL.ONE);
+    context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+
+    const diagnostics = r.renderer.diagnostics();
+    assert.equal(diagnostics.draws, 2, 'both draws ran');
+    assert.equal(diagnostics.prepared, 2, 'each state generated its own source');
+    assert.equal(diagnostics.preparedReused, 0, 'neither reused the other');
+});
+
 test('the vertex block binds in the fixed group, the fragment block in its own', async()=>{
     // The device hands a stage zero for a dynamic uniform block outside the
     // first group the stage reads, and the fixed block is that first group's.
