@@ -72,6 +72,8 @@ const FIXED_FILE_VERSION_LS = 12;
  *           the file (VIF_CANNOTCREATE), which is a documented failure.
  */
 
+const ERROR_FILE_NOT_FOUND = 2;
+const ERROR_RESOURCE_DATA_NOT_FOUND = 1812;
 const ERROR_RESOURCE_TYPE_NOT_FOUND = 1813;
 
 /** A path is at most this long; longer is a pointer that is not a string. */
@@ -205,10 +207,25 @@ export function fileVersionOf(block){
  * @param {VersionHost} host
  */
 export function createVersionFunctions(host){
-    /** @param {number} address */
+    /**
+     * The file's version resource, or null with the last error already set --
+     * ERROR_FILE_NOT_FOUND when the file itself is not there (what
+     * GetFileAttributes reports, which real GetFileVersionInfoSize falls back
+     * to once loading the path as a module fails), ERROR_RESOURCE_DATA_NOT_FOUND
+     * when the file exists but carries no VS_VERSION_INFO resource. Without a
+     * filesystem behind this build there is no way to tell the two apart, so a
+     * missing resource reads as an ordinary file with no version information.
+     * @param {number} address
+     */
     const resourceFor = address=>{
         const path = host.readCString(address >>> 0, MAX_PATH);
-        return host.versionInfo?.(path) ?? null;
+        const resource = host.versionInfo?.(path) ?? null;
+        if (!resource)
+        {
+            const exists = host.files ? (host.files.stat(path)?.exists ?? false) : true;
+            host.setLastError(exists ? ERROR_RESOURCE_DATA_NOT_FOUND : ERROR_FILE_NOT_FOUND);
+        }
+        return resource;
     };
 
     /** @param {string} base @param {string} leaf */
@@ -302,7 +319,6 @@ export function createVersionFunctions(host){
                 const resource = resourceFor(filename);
                 if (!resource)
                 {
-                    host.setLastError(ERROR_RESOURCE_TYPE_NOT_FOUND);
                     return 0;
                 }
                 return resource.length;
@@ -320,7 +336,6 @@ export function createVersionFunctions(host){
                 const resource = resourceFor(filename);
                 if (!resource)
                 {
-                    host.setLastError(ERROR_RESOURCE_TYPE_NOT_FOUND);
                     return 0;
                 }
                 if ((length >>> 0) < resource.length)

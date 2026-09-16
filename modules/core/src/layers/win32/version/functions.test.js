@@ -133,6 +133,42 @@ test('the size reported is the resource, and zero when there is none', ()=>{
         'a file with no version information is ordinary, not an error');
 });
 
+test('GetFileVersionInfoSizeA tells a missing file from one with no version resource', ()=>{
+    const memory = new Uint8Array(0x2000);
+    /** @param {number} at @param {string} text */
+    const put = (at, text)=>memory.set(
+        new Uint8Array([...text].map(c=>c.charCodeAt(0)).concat([0])), at);
+    const files = /** @type {any} */ (fakeFiles());
+    files.nodes.set('C:\\present.exe', Uint8Array.from([1]));
+    /** @type {number[]} */
+    const errors = [];
+    const host = {
+        readMemory: (/** @type {number} */ a, /** @type {number} */ n)=>memory.slice(a, a + n),
+        writeMemory: (/** @type {number} */ a, /** @type {Uint8Array} */ b)=>memory.set(b, a),
+        readCString: (/** @type {number} */ a)=>{
+            let text = '';
+            for (let at = a; memory[at] !== 0 && at < memory.length; at++)
+            {
+                text += String.fromCharCode(memory[at]);
+            }
+            return text;
+        },
+        setLastError: (/** @type {number} */ code)=>errors.push(code),
+        files,
+    };
+    const version = /** @type {any} */ (createVersionFunctions(host));
+
+    put(0x10, 'C:\\missing.exe');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
+    assert.deepEqual(errors, [2], 'ERROR_FILE_NOT_FOUND: the file itself is not there');
+
+    errors.length = 0;
+    put(0x10, 'C:\\present.exe');
+    assert.equal(version.GetFileVersionInfoSizeA.handler([0x10, 0]), 0);
+    assert.deepEqual(errors, [1812],
+        'ERROR_RESOURCE_DATA_NOT_FOUND: present, but carries no version resource');
+});
+
 test('the block is copied whole, and a short buffer is refused', ()=>{
     const m = machine();
     m.putString(0x10, 'C:\\thing.exe');
