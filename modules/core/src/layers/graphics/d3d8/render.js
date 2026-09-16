@@ -3121,6 +3121,108 @@ export function createRenderer(options){
     let contentVersion = 0;
 
     /**
+     * The preparations of the states this frame has drawn with, so a program
+     * that alternates between a few states does not build each of them again on
+     * every draw. Bounded because a frame's distinct states are few and one
+     * that is no longer drawn with should not be kept for ever.
+     *
+     * @type {Map<string, PreparedDraw>}
+     */
+    const preparedCache = new Map();
+    const PREPARED_CACHE_LIMIT = 64;
+
+    /** @type {WeakMap<object, number>} */
+    const surfaceIds = new WeakMap();
+    let nextSurfaceId = 0;
+    /** @param {any} surface @returns {number} */
+    const surfaceIdOf = surface=>{
+        let id = surfaceIds.get(surface);
+        if (id === undefined)
+        {
+            id = ++nextSurfaceId;
+            surfaceIds.set(surface, id);
+        }
+        return id;
+    };
+
+    /**
+     * A stable name for the device state a preparation is built from.
+     *
+     * The device raises `drawStateVersion` on every change, but a counter cannot
+     * name a state that comes back: two draws alternating between the same two
+     * states raise it twice per pair, so a one-entry cache keyed on it misses on
+     * every draw. This is the state itself -- the values, not the fact that they
+     * changed -- so a preparation can be kept per distinct state the frame draws
+     * with. The world transform is the one state left out, because it moves
+     * between most draws and the block is written afresh from it on every one.
+     *
+     * Surface identity is part of the key because a Reset rebuilds the implicit
+     * surfaces: two states that read alike across one are not the same
+     * preparation, because the views they hold are of different things.
+     *
+     * @param {RenderModel} model
+     * @param {{ fvf: number }} processing
+     * @param {number} stride
+     * @param {string} topology
+     * @returns {string}
+     */
+    const preparationKeyOf = (model, processing, stride, topology)=>{
+        /** @type {(string | number)[]} */
+        const parts = [processing.fvf, stride, topology];
+        const formats = formatsOf(model);
+        parts.push(formats.targetFormat, formats.targetHasAlpha ? 1 : 0,
+            formats.depthFormat ?? '-');
+        parts.push(surfaceIdOf(surfaceFor(model.renderTarget)));
+        parts.push(model.depthStencil ? surfaceIdOf(surfaceFor(model.depthStencil)) : '-');
+        for (const [state, value] of model.renderStates)
+        {
+            parts.push(state, value);
+        }
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            for (const [state, value] of model.stageStates(stage))
+            {
+                parts.push(stage, state, value);
+            }
+        }
+        for (const [type, matrix] of model.transforms)
+        {
+            if (type >= D3DTS.WORLD && type <= D3DTS.WORLD_LAST)
+            {
+                continue;
+            }
+            parts.push(type, ...matrix);
+        }
+        const material = model.material;
+        for (const colour of [material.Diffuse, material.Ambient, material.Specular,
+            material.Emissive])
+        {
+            parts.push(colour.r, colour.g, colour.b, colour.a);
+        }
+        parts.push(material.Power);
+        for (const light of enabledLights(model))
+        {
+            parts.push(light.Type, light.Range, light.Falloff, light.Theta, light.Phi,
+                light.Diffuse.r, light.Diffuse.g, light.Diffuse.b, light.Diffuse.a,
+                light.Specular.r, light.Specular.g, light.Specular.b, light.Specular.a,
+                light.Ambient.r, light.Ambient.g, light.Ambient.b, light.Ambient.a,
+                light.Position.x, light.Position.y, light.Position.z,
+                light.Direction.x, light.Direction.y, light.Direction.z,
+                light.Attenuation0, light.Attenuation1, light.Attenuation2);
+        }
+        parts.push(model.viewport.rect.x, model.viewport.rect.y,
+            model.viewport.rect.width, model.viewport.rect.height,
+            ...model.viewport.offset, ...model.viewport.scale);
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const texture = model.textures.get(stage);
+            const held = texture ? textures.get(texture) : null;
+            parts.push(held ? `${held.id}:${held.soil}` : '-');
+        }
+        return parts.join('|');
+    };
+
+    /**
      * This draw's uniform block: the prepared state's block with the two
      * fields the world transform reaches written over it.
      *
@@ -3139,6 +3241,26 @@ export function createRenderer(options){
         UNIFORM_AT.worldViewProjection);
         block.set(world, UNIFORM_AT.world);
         return block;
+    };
+
+    /**
+     * Serves a draw from a preparation already built for its state, giving it a
+     * block of its own with this draw's world transform written over it.
+     *
+     * The tallies are per draw even where the state is not: a report that
+     * counted states rather than draws would say a frame drew a fraction of
+     * what it drew.
+     *
+     * @param {RenderModel} model
+     * @param {PreparedDraw} prepared
+     * @returns {PreparedDraw}
+     */
+    const reuse = (model, prepared)=>{
+        counters.prepared.reused++;
+        reportCascade(prepared);
+        countLighting(model, prepared);
+        prepared.uniforms = blockFor(model, prepared);
+        return prepared;
     };
 
     /**
@@ -3172,14 +3294,29 @@ export function createRenderer(options){
             && preparedState.contentVersion === contentVersion
             && preparedState.stride === stride && preparedState.topology === topology)
         {
-            // The tallies below are per draw even where the state is not: a
-            // report that counted states rather than draws would say a frame
-            // drew a fraction of what it drew.
-            counters.prepared.reused++;
-            reportCascade(preparedState);
-            countLighting(model, preparedState);
-            preparedState.uniforms = blockFor(model, preparedState);
-            return preparedState;
+            return reuse(model, preparedState);
+        }
+        // The state changed, but it may be one this frame has drawn with
+        // before and kept. A program that alternates between a few states is
+        // the case a one-entry cache cannot serve.
+        const key = preparationKeyOf(model, processing, stride, topology);
+        const cached = preparedCache.get(key);
+        if (cached !== undefined)
+        {
+            // The key names the values, so this is the state that was built.
+            // Its textures' generations are in the key, so nothing they hold
+            // was rewritten since. Refreshing the counters lets the next
+            // unchanged draw take the cheap path above.
+            cached.version = version;
+            cached.contentVersion = contentVersion;
+            cached.stride = stride;
+            cached.topology = topology;
+            // Moved to the end of the insertion order, so the entry a frame
+            // stops drawing with is the one eviction reaches first.
+            preparedCache.delete(key);
+            preparedCache.set(key, cached);
+            preparedState = cached;
+            return reuse(model, cached);
         }
         const layout = decodeFvf(processing.fvf);
         if (stride !== layout.stride)
@@ -3246,6 +3383,15 @@ export function createRenderer(options){
         };
         countLighting(model, preparedState);
         preparedState.uniforms = blockFor(model, preparedState);
+        preparedCache.set(key, preparedState);
+        if (preparedCache.size > PREPARED_CACHE_LIMIT)
+        {
+            const oldest = preparedCache.keys().next().value;
+            if (oldest !== undefined)
+            {
+                preparedCache.delete(oldest);
+            }
+        }
         return preparedState;
     };
 
@@ -3357,7 +3503,12 @@ export function createRenderer(options){
                 // level missing shows the gap at the distance that level
                 // covers.
                 dirtyLevels: new Set(Array.from({ length: levels }, (_, level)=>level)),
-                id: `t${nextTextureId++}`, ...desc,
+                id: `t${nextTextureId++}`,
+                // A per-texture generation of its contents, so a preparation
+                // key can say which bytes it was built against without a
+                // global counter that would invalidate every other texture's.
+                soil: 0,
+                ...desc,
             };
             textures.set(texture, entry);
             roster.push(entry);
@@ -3366,6 +3517,7 @@ export function createRenderer(options){
             const soiled = level=>{
                 entry.dirtyLevels.add(level);
                 entry.dirty = true;
+                entry.soil++;
                 contentVersion++;
             };
             const unlockLevel = texture.UnlockRect;
@@ -3430,6 +3582,7 @@ export function createRenderer(options){
             {
                 tracked.dirtyLevels.add(surfaceLevels.get(resource) ?? 0);
                 tracked.dirty = true;
+                tracked.soil++;
                 contentVersion++;
             }
         },
@@ -3579,8 +3732,12 @@ export function createRenderer(options){
             {
                 return;
             }
+            const streamBuffer = bufferFor(stream.buffer).gpu;
+            // The bytes this draw reads must survive a later lock of the same
+            // buffer in this frame, which is what makes such a lock rename.
+            streamBuffer.markRead();
             record(model, prepared, {
-                vertices: { gpu: bufferFor(stream.buffer).gpu.gpu, offset: 0 },
+                vertices: { gpu: streamBuffer.gpu, offset: 0 },
                 ...(fan
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
@@ -3617,13 +3774,17 @@ export function createRenderer(options){
                 return;
             }
             const byteOffset = startIndex * format.bytes;
-            const vertices = { gpu: bufferFor(stream.buffer).gpu.gpu, offset: 0 };
+            const streamBuffer = bufferFor(stream.buffer).gpu;
+            const indexBuffer = bufferFor(model.indices).gpu;
+            streamBuffer.markRead();
+            indexBuffer.markRead();
+            const vertices = { gpu: streamBuffer.gpu, offset: 0 };
             if (list === undefined)
             {
                 record(model, prepared, {
                     vertices,
                     indices: {
-                        gpu: bufferFor(model.indices).gpu.gpu,
+                        gpu: indexBuffer.gpu,
                         offset: byteOffset,
                         format: format.gpu,
                     },

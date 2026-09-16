@@ -811,28 +811,67 @@ test('recorded: a DISCARD lock renames, and the earlier draw reads the old gener
     out.buffer.release();
 });
 
-test('recorded: a lock with neither flag resends the whole buffer', async()=>{
-    const h = harness();
-    const { device, gpu } = h;
-    /** @type {{ buffer?: any }} */
-    const out = {};
-    assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
-    /** @type {{ pBits?: number }} */
-    const locked = {};
-    assert.equal(out.buffer.Lock(100, 20, locked, 0), D3D_OK);
-    assert.equal(out.buffer.Unlock(), D3D_OK);
-    assert.equal(out.buffer.Lock(200, 20, locked, D3DLOCK.NOOVERWRITE), D3D_OK);
-    assert.equal(out.buffer.Unlock(), D3D_OK);
-    await h.present();
+test('recorded: a lock with neither flag sends only the locked range when no draw has read it',
+    async()=>{
+        // A program that fills a range and then draws from it is the ordinary
+        // case: nothing has observed the bytes yet, so the write goes into the
+        // live backing and only the range the guest named travels.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(100, 20, locked, 0), D3D_OK);
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        assert.equal(out.buffer.Lock(200, 20, locked, D3DLOCK.NOOVERWRITE), D3D_OK);
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        await h.present();
 
-    const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
-        call.buffer.descriptor.label.startsWith('vertices'));
-    // The plain lock renamed and dirtied everything; the NOOVERWRITE range
-    // merged into that same generation's dirty range, so one upload of all of it.
-    assert.equal(writes.length, 1);
-    assert.equal(writes[0].size, 1024);
-    out.buffer.release();
-});
+        const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('vertices'));
+        // Both ranges merged into the one dirty extent [100, 220), aligned
+        // outward: no rename happened, so there was nothing else to carry.
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].size, 120);
+        assert.equal(writes[0].bufferOffset, 100);
+        out.buffer.release();
+    });
+
+test('recorded: a lock with neither flag after a draw renames and resends the whole buffer',
+    async()=>{
+        // The draw already recorded reads the bytes the lock overwrites, so the
+        // backing has to be renamed and its contents carried into the new one,
+        // because the old bytes stay observable through it.
+        const h = harness();
+        const { device, gpu } = h;
+        /** @type {{ buffer?: any }} */
+        const out = {};
+        assert.equal(device.CreateVertexBuffer(1024, 0, FVF_QUAD, D3DPOOL.DEFAULT, out), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+        assert.equal(device.SetStreamSource(0, out.buffer, 20), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(out.buffer.Lock(100, 20, locked, 0), D3D_OK);
+        h.write(/** @type {number} */ (locked.pBits), new Uint8Array(20).fill(7));
+        assert.equal(out.buffer.Unlock(), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        // The draw was replayed against the generation that existed when it was
+        // recorded, which is the one the lock had to retire.
+        const drawn = gpu.of('setVertexBuffer').at(-1).buffer;
+        const writes = gpu.of('writeBuffer').filter((/** @type {any} */ call)=>
+            call.buffer.descriptor.label.startsWith('vertices'));
+        assert.equal(writes.length, 1);
+        assert.equal(writes[0].size, 1024,
+            'the old contents stayed observable, so all of it travels');
+        assert.notEqual(writes[0].buffer, drawn, 'and through a renamed backing');
+        out.buffer.release();
+    });
 
 test('recorded: a read-only lock touches nothing on the backend', async()=>{
     const h = harness();
@@ -2327,25 +2366,28 @@ test('recorded: a state set to the value it already holds is not a change', asyn
     assert.deepEqual(prepared, { built: 1, reused: 1 });
 });
 
-test('recorded: a vertex shader bound between two draws ends the reuse', async()=>{
-    // Recorded commands. What the vertex stage runs decides the whole
-    // preparation, so a draw after an excursion through a shader must not be
-    // served the fixed-function preparation the draw before it built.
-    const h = harness();
-    /** @type {{ handle?: number }} */
-    const made = {};
-    assert.equal(h.device.CreateVertexShader([0xffffffff], null, made), D3D_OK);
-    const { draws, prepared } = await twoDraws(h, ()=>{
-        assert.equal(h.device.SetVertexShader(made.handle ?? 0), D3D_OK);
-        // Declined, because this build has no translation for a shader bound
-        // through a handle -- which is what makes it an excursion.
-        assert.equal(h.device.DrawPrimitiveUP(
-            D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], 0), 20), D3D_OK);
-        assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);
+test('recorded: a vertex shader bound and unbound between two draws leaves their state reusable',
+    async()=>{
+        // Recorded commands. The excursion through a shader is declined and
+        // changes nothing the two quad draws do, so the state they share is
+        // still the state that was built: a cache keyed on the values serves
+        // the second from the first, and the shader never leaks into it.
+        const h = harness();
+        /** @type {{ handle?: number }} */
+        const made = {};
+        assert.equal(h.device.CreateVertexShader([0xffffffff], null, made), D3D_OK);
+        const { draws, prepared } = await twoDraws(h, ()=>{
+            assert.equal(h.device.SetVertexShader(made.handle ?? 0), D3D_OK);
+            // Declined, because this build has no translation for a shader bound
+            // through a handle -- which is what makes it an excursion.
+            assert.equal(h.device.DrawPrimitiveUP(
+                D3DPT.TRIANGLELIST, 2, quad([0, 0, 4, 4], 0), 20), D3D_OK);
+            assert.equal(h.device.SetVertexShader(FVF_QUAD), D3D_OK);
+        });
+        assert.equal(draws.length, 2, 'the draw through the shader was not recorded');
+        assert.deepEqual(prepared, { built: 1, reused: 1 });
+        assert.equal(draws[0].state, draws[1].state, 'and the fixed-function state came back');
     });
-    assert.equal(draws.length, 2, 'the draw through the shader was not recorded');
-    assert.deepEqual(prepared, { built: 2, reused: 0 });
-});
 
 test('recorded: a device reset ends the reuse', async()=>{
     // Recorded commands. A reset takes the state back to its defaults and
@@ -2478,4 +2520,40 @@ test('recorded: a frame whose state never changes prepares once and binds one pi
     // And each still drew where its own transform put it.
     assert.deepEqual(draws.map((/** @type {any} */ command)=>
         command.uniforms[UNIFORM_AT.world + 12]), [...Array(DRAWS).keys()]);
+});
+
+test('recorded: two draws alternating between two states prepare once each', async()=>{
+    // Recorded commands. The shape a one-entry cache cannot serve: the state
+    // changes on every draw, but it only ever changes back and forth between
+    // two sets of values, so there are two preparations to build and not one
+    // per draw. The device counter cannot name either state -- it only says
+    // something changed -- which is why the cache is keyed on the values.
+    const DRAWS = 100;
+    const h = harness();
+    const { device } = h;
+    const geometry = quad([0, 0, 4, 4], argb(255, 0, 0));
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.SetVertexShader(FVF_QUAD), D3D_OK);
+    for (let index = 0; index < DRAWS; index++)
+    {
+        assert.equal(device.SetRenderState(D3DRS.ALPHAREF, index % 2), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, geometry, 20), D3D_OK);
+    }
+    assert.equal(device.EndScene(), D3D_OK);
+    await h.present();
+
+    assert.deepEqual(device.diagnostics().prepared, { built: 2, reused: DRAWS - 2 });
+    const draws = device.diagnostics().lastFrame.filter((/** @type {any} */ command)=>
+        command.kind === 'draw');
+    assert.equal(draws.length, DRAWS);
+    assert.equal(new Set(draws.map((/** @type {any} */ command)=>command.state)).size, 2,
+        'one state object per distinct state, not one per draw');
+    // The two states want the same pipeline: the alpha reference is a uniform,
+    // so the pipeline is looked up once and the two preparations share it.
+    assert.equal(h.backend.diagnostics().pipelines.built, 1);
+    // And each draw still carries its own alpha reference, whichever
+    // preparation it was served from.
+    assert.deepEqual(draws.map((/** @type {any} */ command)=>
+        command.uniforms[UNIFORM_AT.alphaRef]),
+    [...Array(DRAWS).keys()].map(index=>Math.fround((index % 2) / 255)));
 });
