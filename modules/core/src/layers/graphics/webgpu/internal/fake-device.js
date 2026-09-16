@@ -12,7 +12,19 @@
  * with no browser and no adapter. It records; it does not simulate. Anything
  * that would need a real GPU to answer is not a question this double can be
  * asked -- which is also why no test may judge a frame by looking at it.
+ *
+ * The one thing it keeps is bytes: a buffer's, and the top level of a
+ * four-byte-per-pixel texture's, as writes, clears and copies move them -- in
+ * queue order, so a copy encoded before a submit sees the write the queue took
+ * in between. A draw puts nothing in a texture; what a draw would paint is the
+ * reference rasteriser's to say.
  */
+
+/** Bytes per pixel of the formats whose texels are kept, by name. */
+const KEPT_FORMATS = /** @type {Record<string, number>} */ ({
+    bgra8unorm: 4,
+    rgba8unorm: 4,
+});
 
 /**
  * @param {{ compilationMessages?: Record<string, any[]> }} [options]
@@ -29,6 +41,12 @@ export function createFakeDevice(options = {}){
     /** @param {any} descriptor */
     const createTexture = descriptor=>{
         const texture = object('texture', { descriptor });
+        const kept = KEPT_FORMATS[descriptor.format];
+        if (kept)
+        {
+            texture.bytes = new Uint8Array(descriptor.size.width * descriptor.size.height * kept);
+            texture.bytesPerPixel = kept;
+        }
         texture.createView = (/** @type {any} */ viewDescriptor)=>{
             const view = object('view', { texture, viewDescriptor });
             calls.push({ op: 'createView', texture, view });
@@ -38,9 +56,76 @@ export function createFakeDevice(options = {}){
         return texture;
     };
 
-    /** @param {any} descriptor */
-    const beginRenderPass = descriptor=>{
+    /**
+     * A row-by-row move between the kept bytes of textures and buffers. A
+     * texture is addressed at its top level only; a copy that names another
+     * level moves nothing, which is what a double that keeps no chain can say.
+     *
+     * @param {{ texture?: any, buffer?: any, origin?: any, mipLevel?: number,
+     *           offset?: number, bytesPerRow?: number }} from
+     * @param {{ texture?: any, buffer?: any, origin?: any, mipLevel?: number,
+     *           offset?: number, bytesPerRow?: number }} to
+     * @param {{ width: number, height: number }} size
+     */
+    const moveTexels = (from, to, size)=>{
+        /** @param {any} side */
+        const rowOf = side=>{
+            if (side.texture)
+            {
+                const texture = side.texture;
+                if (!texture.bytes || (side.mipLevel ?? 0) !== 0)
+                {
+                    return null;
+                }
+                const pitch = texture.descriptor.size.width * texture.bytesPerPixel;
+                const x = side.origin?.x ?? 0;
+                const y = side.origin?.y ?? 0;
+                return { bytes: texture.bytes, pitch, at: y * pitch + x * texture.bytesPerPixel,
+                    bytesPerPixel: texture.bytesPerPixel };
+            }
+            return { bytes: side.buffer.bytes, pitch: side.bytesPerRow ?? 0,
+                at: side.offset ?? 0, bytesPerPixel: 0 };
+        };
+        const source = rowOf(from);
+        const destination = rowOf(to);
+        if (!source || !destination)
+        {
+            return;
+        }
+        const rowBytes = size.width * (source.bytesPerPixel || destination.bytesPerPixel);
+        for (let row = 0; row < size.height; row++)
+        {
+            const start = source.at + row * source.pitch;
+            destination.bytes.set(source.bytes.subarray(start, start + rowBytes),
+                destination.at + row * destination.pitch);
+        }
+    };
+
+    /**
+     * @param {any} descriptor
+     * @param {(() => void)[]} deferred  the encoder's, run at submit
+     */
+    const beginRenderPass = (descriptor, deferred)=>{
         const pass = object('pass', { descriptor });
+        for (const attachment of descriptor.colorAttachments ?? [])
+        {
+            const texture = attachment.view?.texture;
+            if (attachment.loadOp === 'clear' && texture?.bytes)
+            {
+                const value = attachment.clearValue ?? { r: 0, g: 0, b: 0, a: 1 };
+                /** @param {number} channel */
+                const byte = channel=>Math.round(Math.max(0, Math.min(1, channel)) * 255);
+                const pixel = texture.descriptor.format === 'bgra8unorm'
+                    ? [byte(value.b), byte(value.g), byte(value.r), byte(value.a)]
+                    : [byte(value.r), byte(value.g), byte(value.b), byte(value.a)];
+                deferred.push(()=>{
+                    for (let at = 0; at < texture.bytes.length; at += 4)
+                    {
+                        texture.bytes.set(pixel, at);
+                    }
+                });
+            }
+        }
         /** @param {string} op @param {any} args */
         const record = (op, args)=>calls.push({ op, pass, ...args });
         pass.setViewport = (/** @type {number[]} */ ...rect)=>record('setViewport', { rect });
@@ -86,15 +171,18 @@ export function createFakeDevice(options = {}){
     /** @param {any} descriptor */
     const createCommandEncoder = (descriptor = {})=>{
         const encoder = object('encoder', { descriptor });
-        encoder.beginRenderPass = beginRenderPass;
-        encoder.copyBufferToTexture = (/** @type {any} */ source, /** @type {any} */ destination,
-            /** @type {any} */ size)=>calls.push(
-            { op: 'copyBufferToTexture', encoder, source, destination, size });
         // A copy lands when its command buffer is submitted, not when it is
         // encoded: a write the queue takes between the two is seen by the copy,
         // which is the ordering a read-back at the end of a frame relies on.
         /** @type {(() => void)[]} */
         const deferred = [];
+        encoder.beginRenderPass = (/** @type {any} */ passDescriptor)=>
+            beginRenderPass(passDescriptor, deferred);
+        /** @param {any} source @param {any} destination @param {any} size */
+        encoder.copyBufferToTexture = (source, destination, size)=>{
+            deferred.push(()=>moveTexels(source, destination, size));
+            calls.push({ op: 'copyBufferToTexture', encoder, source, destination, size });
+        };
         /**
          * @param {any} source @param {number} sourceOffset @param {any} destination
          * @param {number} destinationOffset @param {number} size
@@ -105,14 +193,16 @@ export function createFakeDevice(options = {}){
             calls.push({ op: 'copyBufferToBuffer', encoder, source, sourceOffset,
                 destination, destinationOffset, size });
         };
-        // This device keeps no texels, so a texture read back is zeros of the
-        // right size: enough for a caller to be exercised end to end.
-        encoder.copyTextureToBuffer = (/** @type {any} */ source, /** @type {any} */ destination,
-            /** @type {any} */ size)=>calls.push(
-            { op: 'copyTextureToBuffer', encoder, source, destination, size });
-        encoder.copyTextureToTexture = (/** @type {any} */ source, /** @type {any} */ destination,
-            /** @type {any} */ size)=>calls.push(
-            { op: 'copyTextureToTexture', encoder, source, destination, size });
+        /** @param {any} source @param {any} destination @param {any} size */
+        encoder.copyTextureToBuffer = (source, destination, size)=>{
+            deferred.push(()=>moveTexels(source, destination, size));
+            calls.push({ op: 'copyTextureToBuffer', encoder, source, destination, size });
+        };
+        /** @param {any} source @param {any} destination @param {any} size */
+        encoder.copyTextureToTexture = (source, destination, size)=>{
+            deferred.push(()=>moveTexels(source, destination, size));
+            calls.push({ op: 'copyTextureToTexture', encoder, source, destination, size });
+        };
         encoder.finish = ()=>{
             const buffer = object('commandBuffer', { encoder, deferred });
             calls.push({ op: 'finish', encoder, buffer });
@@ -207,6 +297,9 @@ export function createFakeDevice(options = {}){
          * @param {any} destination @param {any} data @param {any} layout @param {any} size
          */
         writeTexture(destination, data, layout, size){
+            moveTexels({ buffer: { bytes: Uint8Array.prototype.slice.call(data) },
+                offset: layout.offset ?? 0, bytesPerRow: layout.bytesPerRow },
+            destination, size);
             calls.push({
                 op: 'writeTexture',
                 destination,

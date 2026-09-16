@@ -2146,13 +2146,19 @@ test('a probed draw reports what the target held right after it, inside the fram
     assert.equal(dumped.length, 2);
     for (const line of dumped)
     {
-        assert.match(line, / after=(0\/0\/0,){6}0\/0\/0 distinct=1 tex=(0\/0\/0,){6}0\/0\/0 distinct=1/);
-        for (const name of ['before', 'again', 'copy', 'host', 'hostuni', 'newpipe', 'newview',
+        // The double keeps texels through uploads, clears and copies and
+        // paints nothing for a draw: the target reads as the zeros it was
+        // made with, the sampled texture as the texels that were uploaded,
+        // and each scratch redraw as the colour its target was cleared to.
+        assert.match(line,
+            / after=(0\/0\/0,){6}0\/0\/0 distinct=1 tex=(255\/0\/0,){6}255\/0\/0 distinct=1/);
+        assert.match(line, / before=(0\/0\/0,){6}0\/0\/0 distinct=1/);
+        for (const name of ['again', 'copy', 'host', 'hostuni', 'newpipe', 'newview',
             'newsampler',
             'newshader', 'quad', 'mirrorsampler', 'clampsampler'])
         {
-            assert.match(line, new RegExp(` ${name}=(0\\/0\\/0,){6}0\\/0\\/0 distinct=1`),
-                `this device keeps no texels, so the ${name} copy reads as zeros`);
+            assert.match(line, new RegExp(` ${name}=(255\\/0\\/255,){6}255\\/0\\/255 distinct=1`),
+                `the ${name} redraw's scratch target was cleared, and no draw paints here`);
         }
     }
     assert.equal(gpu.count('copyTextureToBuffer'), 28,
