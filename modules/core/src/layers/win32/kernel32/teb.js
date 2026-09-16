@@ -62,6 +62,46 @@ export const PEB = Object.freeze({
 });
 
 /**
+ * Field offsets in `PEB_LDR_DATA`, the block `PEB.LDR` points at.
+ *
+ * Three circular `LIST_ENTRY` lists over the same set of modules, ordered
+ * differently: a program that walks one of them -- anti-tamper code, a plugin
+ * loader enumerating what is already loaded -- reads a real list, never a
+ * null it dereferences on the first `Flink`.
+ */
+export const LDR_DATA = Object.freeze({
+    LENGTH: 0x00,
+    INITIALIZED: 0x04,
+    SS_HANDLE: 0x08,
+    IN_LOAD_ORDER_MODULE_LIST: 0x0c,
+    IN_MEMORY_ORDER_MODULE_LIST: 0x14,
+    IN_INITIALIZATION_ORDER_MODULE_LIST: 0x1c,
+    SIZE: 0x24,
+});
+
+/**
+ * Field offsets in `LDR_DATA_TABLE_ENTRY`, one per loaded module.
+ *
+ * The three `LIST_ENTRY` pairs are the same module's links in each of the
+ * three orderings above; `FullDllName` and `BaseDllName` are `UNICODE_STRING`
+ * descriptors -- a 16-bit length, a 16-bit room and a 32-bit pointer to
+ * characters that live just past the entry, the same shape the process
+ * parameter block's strings already use.
+ */
+export const LDR_ENTRY = Object.freeze({
+    IN_LOAD_ORDER_LINKS: 0x00,
+    IN_MEMORY_ORDER_LINKS: 0x08,
+    IN_INITIALIZATION_ORDER_LINKS: 0x10,
+    DLL_BASE: 0x18,
+    ENTRY_POINT: 0x1c,
+    SIZE_OF_IMAGE: 0x20,
+    FULL_DLL_NAME: 0x24,
+    BASE_DLL_NAME: 0x2c,
+    FLAGS: 0x34,
+    SIZE: 0x38,
+});
+
+/**
  * Field offsets in the parameter block the process block points at.
  *
  * A program reads this far more often than it reads the process block itself:
@@ -108,6 +148,15 @@ export const END_OF_EXCEPTION_LIST = 0xffffffff;
 export const TLS_SLOTS = 64;
 
 /**
+ * @typedef {Object} LoadedModule
+ * @property {string} name       The module's own name, `BaseDllName`.
+ * @property {number} base       `DllBase`.
+ * @property {number} [size]     `SizeOfImage`; absent reads as zero.
+ * @property {number} [entryPoint]
+ * @property {string} [path]     The full path, `FullDllName`; absent falls back to `name`.
+ */
+
+/**
  * @param {Object} options
  * @param {(bytes: number) => number} options.allocate  Guest memory, zeroed.
  * @param {(address: number, bytes: Uint8Array) => void} options.writeMemory
@@ -118,6 +167,11 @@ export const TLS_SLOTS = 64;
  * @param {string} [options.commandLine]
  * @param {string} [options.currentDirectory]
  * @param {{ input: number, output: number, error: number }} [options.standardHandles]
+ * @param {LoadedModule[]} [options.modules]
+ *        Every module mapped before the process's first instruction runs --
+ *        the loader's own module table, snapshotted here once. `addModule`
+ *        on the returned object is how one loaded later, by `LoadLibrary`,
+ *        joins the same three lists.
  * @returns {any}
  */
 export function createProcessBlocks(options){
@@ -185,9 +239,109 @@ export function createProcessBlocks(options){
     writeUnicodeString(params + PARAMS.COMMAND_LINE, commandLine);
     writeUnicodeString(params + PARAMS.CURRENT_DIRECTORY, currentDirectory);
 
+    // PEB_LDR_DATA and its three lists of loaded modules. Never left null: a
+    // program that walks one starting from PEB->Ldr -- anti-tamper code, a
+    // plugin loader enumerating what is already there -- has every right to a
+    // real circular list, the way any other process's loader leaves it.
+    const ldr = allocate(LDR_DATA.SIZE);
+    writeMemory(ldr, new Uint8Array(LDR_DATA.SIZE));
+    write(peb + PEB.LDR, ldr);
+    write(ldr + LDR_DATA.LENGTH, LDR_DATA.SIZE);
+    write(ldr + LDR_DATA.INITIALIZED, 1);
+
+    const loadHead = ldr + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST;
+    const memoryHead = ldr + LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST;
+    const initHead = ldr + LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST;
+    // Empty is circular too: a list of nothing still answers Flink === Blink
+    // === its own address, or a walk that checks "have I got back to the
+    // head" never does.
+    for (const head of [loadHead, memoryHead, initHead])
+    {
+        write(head, head);
+        write(head + 4, head);
+    }
+    let loadTail = loadHead;
+    let memoryTail = memoryHead;
+    let initTail = initHead;
+
+    /**
+     * `InsertTailList`, done by hand: nothing here keeps a live pointer into
+     * guest memory to call the real one on, only the address it would be at.
+     *
+     * @param {number} head @param {number} tail @param {number} node
+     * @returns {number} the new tail
+     */
+    const insertTail = (head, tail, node)=>{
+        write(node, head);
+        write(node + 4, tail);
+        write(tail, node);
+        write(head + 4, node);
+        return node;
+    };
+
+    /**
+     * A `UNICODE_STRING` describing a wide buffer this call places itself,
+     * rather than one carved out of a shared arena -- each module entry owns
+     * exactly as much string room as its two names need and no more.
+     *
+     * @param {number} descriptorAt @param {number} bufferAt @param {string} text
+     */
+    const writeEntryString = (descriptorAt, bufferAt, text)=>{
+        const bytes = new Uint8Array(text.length * 2 + 2);
+        const view = new DataView(bytes.buffer);
+        for (let index = 0; index < text.length; index++)
+        {
+            view.setUint16(index * 2, text.charCodeAt(index), true);
+        }
+        writeMemory(bufferAt, bytes);
+        const descriptor = new Uint8Array(8);
+        const fields = new DataView(descriptor.buffer);
+        fields.setUint16(0, text.length * 2, true);
+        fields.setUint16(2, bytes.length, true);
+        fields.setUint32(4, bufferAt, true);
+        writeMemory(descriptorAt, descriptor);
+    };
+
+    /**
+     * Joins one more module to all three lists -- the loader's own table at
+     * process start, or a library `LoadLibrary` mapped afterwards. What a
+     * name lacks in one order it never lacks in another: this is the one
+     * place a module enters the process's module list at all.
+     *
+     * @param {LoadedModule} module
+     * @returns {number} the entry's own address
+     */
+    const addModule = module=>{
+        const fullName = module.path ?? module.name;
+        const baseName = module.name;
+        const entry = allocate(
+            LDR_ENTRY.SIZE + fullName.length * 2 + 2 + baseName.length * 2 + 2);
+        writeMemory(entry, new Uint8Array(LDR_ENTRY.SIZE));
+        write(entry + LDR_ENTRY.DLL_BASE, module.base);
+        write(entry + LDR_ENTRY.ENTRY_POINT, module.entryPoint ?? 0);
+        write(entry + LDR_ENTRY.SIZE_OF_IMAGE, module.size ?? 0);
+
+        const fullNameBuffer = entry + LDR_ENTRY.SIZE;
+        const baseNameBuffer = fullNameBuffer + fullName.length * 2 + 2;
+        writeEntryString(entry + LDR_ENTRY.FULL_DLL_NAME, fullNameBuffer, fullName);
+        writeEntryString(entry + LDR_ENTRY.BASE_DLL_NAME, baseNameBuffer, baseName);
+
+        loadTail = insertTail(loadHead, loadTail, entry + LDR_ENTRY.IN_LOAD_ORDER_LINKS);
+        memoryTail = insertTail(memoryHead, memoryTail, entry + LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+        initTail = insertTail(initHead, initTail, entry + LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+        return entry;
+    };
+
+    for (const module of options.modules ?? [])
+    {
+        addModule(module);
+    }
+
     return {
         peb,
         params,
+        ldr,
+        addModule,
 
         /**
          * A block for one thread, with its own thread-local array.

@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createProcessBlocks, TEB, PEB, PARAMS, END_OF_EXCEPTION_LIST } from './teb.js';
+import {
+    createProcessBlocks, TEB, PEB, PARAMS, LDR_DATA, LDR_ENTRY, END_OF_EXCEPTION_LIST,
+} from './teb.js';
 
 /** Guest memory as a flat array, with a bump allocator over it. */
 function guest(){
@@ -132,4 +134,119 @@ test('the strings do not overlap each other', ()=>{
         assert.ok(buffers[index].at >= buffers[index - 1].at + buffers[index - 1].size,
             'a string written over another gives a program the wrong one, with no error');
     }
+});
+
+/**
+ * Walks a circular LIST_ENTRY from its head, the way a program does, and
+ * returns every node but the head -- a bound guards a test against spinning
+ * for ever on a list this test itself broke.
+ *
+ * @param {any} memory @param {number} head
+ */
+function walkList(memory, head){
+    /** @type {number[]} */
+    const nodes = [];
+    let at = memory.view.getUint32(head, true);
+    for (let guard = 0; at !== head && guard < 100; guard++)
+    {
+        nodes.push(at);
+        at = memory.view.getUint32(at, true);
+    }
+    assert.equal(at, head, 'the walk returned to the head, or the list is not really circular');
+    return nodes;
+}
+
+/** @param {any} memory @param {number} at @param {number} length */
+function readWide(memory, at, length){
+    let text = '';
+    for (let index = 0; index < length; index++)
+    {
+        text += String.fromCharCode(memory.view.getUint16(at + index * 2, true));
+    }
+    return text;
+}
+
+/** @param {any} memory @param {number} descriptorAt */
+function readUnicodeString(memory, descriptorAt){
+    const length = memory.view.getUint16(descriptorAt, true);
+    const buffer = memory.view.getUint32(descriptorAt + 4, true);
+    return readWide(memory, buffer, length / 2);
+}
+
+test('PEB->Ldr is a real block, never null, with three empty circular lists', ()=>{
+    // A program that finds this null has every right to fault on the first
+    // field it reads -- an anti-tamper check or a plugin loader that walks
+    // the module list does exactly that before it does anything else.
+    const memory = guest();
+    const { peb } = build(memory);
+
+    const ldr = memory.view.getUint32(peb + PEB.LDR, true);
+    assert.notEqual(ldr, 0);
+
+    for (const offset of [
+        LDR_DATA.IN_LOAD_ORDER_MODULE_LIST,
+        LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST,
+        LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST,
+    ])
+    {
+        const head = ldr + offset;
+        assert.equal(memory.view.getUint32(head, true), head, 'an empty list points at itself');
+        assert.equal(memory.view.getUint32(head + 4, true), head);
+    }
+});
+
+test('the modules given at build time are all three lists, in order, walkable from the head', ()=>{
+    const memory = guest();
+    const modules = [
+        { name: 'kernel32.dll', base: 0x77000000, size: 0x80000, entryPoint: 0x77001000 },
+        { name: 'user32.dll', base: 0x77100000, size: 0x40000, entryPoint: 0x77101000 },
+        { name: 'app.exe', base: 0x00400000, size: 0x10000, entryPoint: 0x00401000,
+            path: 'C:\\App\\app.exe' },
+    ];
+    const { peb } = build(memory, { modules });
+    const ldr = memory.view.getUint32(peb + PEB.LDR, true);
+
+    const loadOrder = walkList(memory, ldr + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST);
+    assert.equal(loadOrder.length, modules.length);
+
+    // CONTAINING_RECORD subtracts the link's own offset to get back to the
+    // entry -- and InLoadOrderLinks sits at offset zero, so a node walked out
+    // of this list is the entry's own address.
+    for (const [index, entry] of loadOrder.entries())
+    {
+        assert.equal(memory.view.getUint32(entry + LDR_ENTRY.DLL_BASE, true), modules[index].base);
+        assert.equal(memory.view.getUint32(entry + LDR_ENTRY.ENTRY_POINT, true),
+            modules[index].entryPoint);
+        assert.equal(memory.view.getUint32(entry + LDR_ENTRY.SIZE_OF_IMAGE, true),
+            modules[index].size);
+        assert.equal(readUnicodeString(memory, entry + LDR_ENTRY.BASE_DLL_NAME),
+            modules[index].name);
+        assert.equal(readUnicodeString(memory, entry + LDR_ENTRY.FULL_DLL_NAME),
+            modules[index].path ?? modules[index].name);
+    }
+
+    // The same entries, reached through either of the other two orderings --
+    // by construction here they agree, and CONTAINING_RECORD for each link
+    // subtracts that link's own offset rather than the load order's.
+    const memoryOrder = walkList(memory, ldr + LDR_DATA.IN_MEMORY_ORDER_MODULE_LIST)
+        .map(node=>node - LDR_ENTRY.IN_MEMORY_ORDER_LINKS);
+    const initOrder = walkList(memory, ldr + LDR_DATA.IN_INITIALIZATION_ORDER_MODULE_LIST)
+        .map(node=>node - LDR_ENTRY.IN_INITIALIZATION_ORDER_LINKS);
+    assert.deepEqual(memoryOrder, loadOrder);
+    assert.deepEqual(initOrder, loadOrder);
+});
+
+test('addModule joins a library LoadLibrary mapped after the process started', ()=>{
+    const memory = guest();
+    const blocks = build(memory, {
+        modules: [{ name: 'kernel32.dll', base: 0x77000000, size: 0x1000, entryPoint: 0x77000100 }],
+    });
+    const ldr = memory.view.getUint32(blocks.peb + PEB.LDR, true);
+
+    blocks.addModule({ name: 'winmm.dll', base: 0x10000000, size: 0x2000, path: 'C:\\winmm.dll' });
+
+    const loadOrder = walkList(memory, ldr + LDR_DATA.IN_LOAD_ORDER_MODULE_LIST);
+    assert.equal(loadOrder.length, 2, 'the module list grew rather than being fixed at start');
+    assert.equal(readUnicodeString(memory, loadOrder[1] + LDR_ENTRY.BASE_DLL_NAME), 'winmm.dll');
+    assert.equal(memory.view.getUint32(loadOrder[1] + LDR_ENTRY.SIZE_OF_IMAGE, true), 0x2000);
 });

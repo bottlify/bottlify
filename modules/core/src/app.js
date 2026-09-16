@@ -3438,6 +3438,11 @@ async function buildApp(options){
                     // loaded -- finds an address rather than nothing.
                     byName.set(moduleKeyOf(name), held);
                     byBase.set(base, held);
+                    // Joins PEB->Ldr's own module list the same moment: a
+                    // program that walks it right after this LoadLibraryA
+                    // returns is not told the library it just asked for was
+                    // never loaded.
+                    threadBlocks?.addModule(held);
                     nextLibraryBase = base
                         + Math.ceil(image.sizeOfImage / LIBRARY_ALIGN) * LIBRARY_ALIGN;
 
@@ -3717,6 +3722,13 @@ async function buildApp(options){
         commandLine: options.commandLine ?? `"${options.imagePath ?? 'C:\\app.exe'}"`,
         currentDirectory: filesystem.currentDirectory(),
         standardHandles: { input: 0, output: 0, error: 0 },
+        // Every module in the table by the time the first instruction runs:
+        // every system library, everything the program shipped, and the
+        // program's own image -- PEB->Ldr walked before a program calls a
+        // single import of its own finds all of them, never an empty list.
+        modules: [...byBase.values()].map(held=>held === mainModule ? {
+            ...held, entryPoint: image.entryPoint, size: mainModule.image.sizeOfImage,
+        } : held),
     });
     threadBlocks = process;
 
