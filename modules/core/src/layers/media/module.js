@@ -24,23 +24,21 @@ import { createIjlLibrary } from './internal/ijl.js';
  * the clips this machine opened, leaving the instance for the next one.
  */
 
-/** @type {any} */
-let decoderInstance = null;
 /**
- * This machine's own view of the instance, which closes only the clips this
- * machine opened and leaves the instance itself alive.
+ * The most recently created instance, for `diagnostics()` alone.
+ *
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the binary, the decoder view and the given instance belong
+ * to the closure `create()` returns, so a second instance in one realm cannot
+ * take the first one's clips. Disposing marks the instance closed, so a call
+ * still in flight when the machine went away gets the refusal a build with no
+ * decoder binary gets instead of dereferencing what is gone.
  *
  * @type {any}
  */
-let decoder = null;
-/** @type {BufferSource | null} */
-let binary = null;
-/** @type {Promise<any> | null} */
-let loading = null;
-/** @type {string[]} */
-let issues = [];
-/** @type {ReturnType<typeof createIjlLibrary> | null} */
-let ijl = null;
+let current = null;
 
 export const mediaModule = {
     name: 'media',
@@ -52,11 +50,28 @@ export const mediaModule = {
      * @returns {Promise<any>}
      */
     async create(config){
-        decoderInstance = null;
-        decoder = null;
-        loading = null;
-        issues = [];
-        binary = config?.wasmBytes ?? null;
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own decoder view.
+         *
+         * @type {{ decoderInstance: any, decoder: any, binary: BufferSource | null,
+         *     loading: Promise<any> | null, issues: string[],
+         *     ijl: ReturnType<typeof createIjlLibrary> | null, disposed: boolean }}
+         */
+        const state = {
+            decoderInstance: null,
+            decoder: null,
+            binary: config?.wasmBytes ?? null,
+            loading: null,
+            issues: [],
+            ijl: null,
+            disposed: false,
+        };
         // A decoder another machine in this run already made. Given, this
         // machine's clips are opened over its memory and codecs instead of a
         // second instantiation of the same binary.
@@ -64,15 +79,15 @@ export const mediaModule = {
         // The JPEG library a program ships beside itself, hosted: it reaches
         // guest memory through the thunks the assembling caller hands down,
         // the same way the sound layer's hosted provider does.
-        ijl = config?.readMemory && config?.writeMemory && config?.allocate
+        state.ijl = config?.readMemory && config?.writeMemory && config?.allocate
             ? createIjlLibrary({
                 readMemory: config.readMemory, writeMemory: config.writeMemory,
                 allocate: config.allocate, warn: config.warn,
             })
             : null;
-        if (!binary && !given)
+        if (!state.binary && !given)
         {
-            issues.push('No decoder binary was configured: nothing can be played.');
+            state.issues.push('No decoder binary was configured: nothing can be played.');
         }
 
         /**
@@ -81,14 +96,14 @@ export const mediaModule = {
          * @param {any} built
          */
         const adopt = built=>{
-            decoderInstance = built;
-            decoder = decoderSession(built);
+            state.decoderInstance = built;
+            state.decoder = decoderSession(built);
             if (!built.audioCapable())
             {
-                issues.push('The decoder binary has no packet-fed audio path: '
+                state.issues.push('The decoder binary has no packet-fed audio path: '
                     + 'sound streams fall back to the platform decoder.');
             }
-            return decoder;
+            return state.decoder;
         };
         if (given)
         {
@@ -99,30 +114,42 @@ export const mediaModule = {
         const load = ()=>{
             if (given)
             {
-                return Promise.resolve(decoder);
+                return Promise.resolve(state.decoder);
             }
-            if (!binary)
+            if (!state.binary)
             {
                 throw new Error('media: this build has no decoder binary');
             }
-            loading ??= createDecoder(binary).then(adopt, e=>{
-                issues.push(`The decoder binary could not be instantiated: ${
+            state.loading ??= createDecoder(state.binary).then(adopt, e=>{
+                state.issues.push(`The decoder binary could not be instantiated: ${
                     e instanceof Error ? e.message : String(e)}`);
                 throw e;
             });
-            return loading;
+            return state.loading;
         };
 
+        /**
+         * Whether this instance is still open. A call that was in flight when
+         * the machine was disposed must not find the decoder gone: a disposed
+         * media can decode nothing, so it refuses the way a build with no
+         * decoder binary does rather than dereferencing what disposal took
+         * away.
+         */
+        const live = ()=>!state.disposed;
+
+        current = state;
         return {
             /** Whether this build can decode at all. */
-            available: ()=>binary !== null || given !== null,
+            available: ()=>live() && (state.binary !== null || given !== null),
 
             /**
              * Instantiates the decoder without opening anything, so that a
              * caller can pay that cost when it suits rather than on the frame
              * a cinematic starts.
              */
-            prepare: ()=>load().then(()=>undefined),
+            prepare: ()=>live()
+                ? load().then(()=>undefined)
+                : Promise.reject(new Error('media: this build has no decoder binary')),
 
             /**
              * Opens a clip from the whole file in memory.
@@ -130,7 +157,13 @@ export const mediaModule = {
              * @param {Uint8Array} bytes
              * @returns {Promise<any>}
              */
-            open: async bytes=>(await load()).open(bytes),
+            open: async bytes=>{
+                if (!live())
+                {
+                    throw new Error('media: this build has no decoder binary');
+                }
+                return (await load()).open(bytes);
+            },
 
             /**
              * An elementary audio stream decoded a packet at a time, in the
@@ -143,11 +176,15 @@ export const mediaModule = {
              * @returns {import('./internal/decoder.js').AudioStream | null}
              */
             openAudio(shape){
-                if (decoder)
+                if (!live())
                 {
-                    return decoder.openAudio(shape);
+                    return null;
                 }
-                if (!binary && !given)
+                if (state.decoder)
+                {
+                    return state.decoder.openAudio(shape);
+                }
+                if (!state.binary && !given)
                 {
                     return null;
                 }
@@ -156,7 +193,10 @@ export const mediaModule = {
             },
 
             closeAll(){
-                decoder?.closeAll();
+                if (live())
+                {
+                    state.decoder?.closeAll();
+                }
             },
 
             /**
@@ -165,36 +205,47 @@ export const mediaModule = {
              * binary again, and the counters of everything decoded through it
              * keep counting.
              */
-            instance: ()=>decoderInstance,
+            instance: ()=>live() ? state.decoderInstance : null,
 
             /** The libraries this layer stands in for, keyed as an import names them. */
-            libraries: ()=>({ ...(ijl?.libraries ?? {}) }),
+            libraries: ()=>live() ? { ...(state.ijl?.libraries ?? {}) } : {},
             /** Their exports by ordinal, for a program that imports by number. */
-            ordinals: ()=>({ ...(ijl?.ordinals ?? {}) }),
+            ordinals: ()=>live() ? { ...(state.ijl?.ordinals ?? {}) } : {},
         };
     },
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || instance.disposed)
+        {
+            return {
+                name: 'media',
+                version: '0.1.0',
+                status: 'created',
+                metrics: { configured: false, libraries: [], jpeg: null },
+                issues: [],
+            };
+        }
         return {
             name: 'media',
             version: '0.1.0',
-            status: decoder ? 'ready' : 'created',
+            status: instance.decoder ? 'ready' : 'created',
             metrics: {
                 // Separately from whether anything was decoded: a build with a
                 // binary that nothing ever asked to use looks the same as one
                 // with no binary at all until this is read.
-                configured: binary !== null || decoderInstance !== null,
-                ...(decoder ? decoder.diagnostics() : {}),
+                configured: instance.binary !== null || instance.decoderInstance !== null,
+                ...(instance.decoder ? instance.decoder.diagnostics() : {}),
                 // Which libraries a program can reach this layer through,
                 // reported the way every other exporting layer reports its
                 // own: a tally of what the loader synthesised is taken across
                 // all of them, and a library missing here is an image nobody
                 // accounts for.
-                libraries: ijl ? Object.keys(ijl.libraries) : [],
-                jpeg: ijl ? ijl.diagnostics() : null,
+                libraries: instance.ijl ? Object.keys(instance.ijl.libraries) : [],
+                jpeg: instance.ijl ? instance.ijl.diagnostics() : null,
             },
-            issues: [...issues],
+            issues: [...instance.issues],
         };
     },
 
@@ -202,12 +253,11 @@ export const mediaModule = {
         // Only this machine's clips close. The instance itself is not this
         // machine's to end: the process that replaces it -- or the next game in
         // the session -- attaches to the same compiled module and memory.
-        decoder?.closeAll();
-        decoder = null;
-        decoderInstance = null;
-        loading = null;
-        binary = null;
-        issues = [];
-        ijl = null;
+        if (current)
+        {
+            current.decoder?.closeAll();
+            current.disposed = true;
+        }
+        current = null;
     },
 };

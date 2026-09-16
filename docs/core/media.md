@@ -56,6 +56,15 @@ through the GitHub API; without one the script tries the plain release URL and t
 | `libraries()` | `{ 'ijl15.dll' }` when the guest-memory thunks are configured, else `{}`. |
 | `ordinals()` | `{ 'ijl15.dll': { 1..6 } }`, for a program that imports by number. |
 
+An instance owns its decoder view. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so the
+binary, the given `instance`, the machine's session over it and the hosted JPEG library live in the
+instance the api closes over, and a second `create()` cannot take the first one's clips;
+`diagnostics()` answers for the most recently created instance. After `dispose()`, a call that was
+in flight is answered as a build with no decoder binary is: `available()` is false, `open()` and
+`prepare()` reject with `media: this build has no decoder binary`, `openAudio()` and `instance()`
+answer null, `closeAll()` does nothing, and `libraries()`/`ordinals()` answer empty.
+
 A clip carries `width`, `height`, `fps`, `frameCount` (zero when the container does not say),
 `codec` (the decoder's own short name), `fourcc`, `pixelFormat` (the source format before
 conversion), `sampleRate`, `channels`, `hasVideo`, `hasAudio`, and four calls:
@@ -193,7 +202,7 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 33 
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/media/module.test.js` | Wiring | A build with no binary comes up and says so; a configured build is not instantiated until something is opened; `closeAll` is safe before anything was opened; a machine given an `instance` decodes over it without a binary, and its `dispose` closes only the clips it opened. |
+| `src/layers/media/module.test.js` | Wiring | A build with no binary comes up and says so; a configured build is not instantiated until something is opened; `closeAll` is safe before anything was opened; a machine given an `instance` decodes over it without a binary, and its `dispose` closes only the clips it opened; a second instance in one realm does not take the first one's decoder; a disposed media refuses to open rather than throwing. |
 | `src/layers/media/internal/decoder.test.js` | Contract against the real binary; skips with `video-decoder.wasm is absent: run npm run fetch:video-decoder` when it has not been fetched | A file the build cannot make sense of is refused by name; an empty file is refused; a WAVE clip reports what it holds and hands back every sample; a decoded clip is counted and `closeAll` lets it go; clips belong to a machine's session while the instance and its counters outlive it, so a second session over the same instance still opens and the count continues. |
 | `src/layers/media/internal/ijl.test.js` | Contract, over a flat guest memory | Ordinals; `ijlInit` clears the structure and sets the default quality; parameters without decoding; the whole image lands in the DIB four channels as they lie; row order, negative height and padding; refusals with the library's own codes and names. Each of the four routes from the picture's components to the DIB's channels -- converted for RGB, converted and exchanged for BGR, components dropped, channels padded opaque -- is pinned to exact bytes, because the route is chosen once per picture and one taken by mistake is a texture in the wrong colour that nothing reports. |
 | `src/layers/media/internal/jpeg.test.js` | Byte-exact, against pictures computed from the definition of the transform, and against itself | Streams built from coefficients with the file's own Huffman tables: no fixture from anywhere and nothing taken on trust from another decoder. Five blocks -- empty, DC only, one AC term, sparse, and every coefficient present -- are pinned to exact samples with no tolerance, because the transform takes a different route through each and a route that drifts by one has changed every texture in the game. |

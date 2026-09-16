@@ -102,3 +102,65 @@ test('a machine attaches to a decoder an earlier one made', async()=>{
     assert.equal(second.instance(), instance, 'the same decoder serves the next machine');
     await mediaModule.dispose();
 });
+
+test('a second instance in one realm does not take the first one\'s decoder', async()=>{
+    // A process replacement runs `create()` again in the same realm, and the
+    // plan for two machines in one worker needs two decoder views at once.
+    // The instance a machine was given belongs to that machine, so a second
+    // create() cannot take the first one's clips or its given decoder.
+    const instance = {
+        open: (/** @type {Uint8Array} */ bytes)=>({ bytes }),
+        openAudio: ()=>null,
+        audioCapable: ()=>true,
+        closeAll(){},
+        diagnostics: ()=>({ opened: 1, clips: 1, audioCapable: true, heapBytes: 0 }),
+    };
+    const first = await mediaModule.create({ instance });
+    const second = await mediaModule.create({});
+
+    assert.equal(first.available(), true, 'the first still has the decoder it was given');
+    assert.deepEqual(await first.open(new Uint8Array([7])), { bytes: new Uint8Array([7]) });
+    assert.equal(second.available(), false, 'the second has none');
+    await assert.rejects(()=>second.open(new Uint8Array(1)), /no decoder binary/);
+
+    await mediaModule.dispose();
+});
+
+test('a disposed media refuses to open rather than throwing', async()=>{
+    // A host call that was in flight when the machine was disposed retires
+    // afterwards and asks for a clip. A build that is gone can decode
+    // nothing, so it refuses the way a build with no decoder binary does, and
+    // answers the synchronous questions empty rather than dereferencing what
+    // disposal took away.
+    const instance = {
+        open: ()=>({}),
+        openAudio: ()=>null,
+        audioCapable: ()=>true,
+        closeAll(){},
+        diagnostics: ()=>({}),
+    };
+    const api = await mediaModule.create({ instance });
+
+    await mediaModule.dispose();
+
+    assert.equal(api.available(), false);
+    assert.equal(api.openAudio({ formatTag: 0x55, sampleRate: 44100, channels: 2 }), null);
+    assert.equal(api.instance(), null);
+    assert.deepEqual(api.libraries(), {});
+    assert.deepEqual(api.ordinals(), {});
+    assert.doesNotThrow(()=>api.closeAll());
+    await assert.rejects(()=>api.open(new Uint8Array(1)), /no decoder binary/);
+    await assert.rejects(()=>api.prepare(), /no decoder binary/);
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await mediaModule.create({});
+    const second = await mediaModule.create({ wasmBytes: new Uint8Array([0, 1, 2]) });
+
+    const report = mediaModule.diagnostics();
+    assert.equal(report.status, 'created');
+    assert.equal(report.metrics?.configured, true,
+        'the live instance was given a binary, whatever the one before it was');
+    assert.equal(second.available(), true);
+    await mediaModule.dispose();
+});
