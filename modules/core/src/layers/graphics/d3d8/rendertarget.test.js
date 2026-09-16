@@ -512,29 +512,35 @@ test('byte-exact (D3D9): GetRenderTargetData after a clear reads the clear colou
     assert.equal(h.presented.length, 1);
 });
 
-test('byte-exact (D3D9): a lock of a lockable back buffer reads the GPU back, and the unlock'
-    + ' uploads what was written', async()=>{
-    const h = harness(9, { lockableBackBuffer: true });
-    const backBuffer = h.backBuffer();
-    h.clear(argb(0x12, 0x34, 0x56));
-    /** @type {{ pBits?: number, Pitch?: number }} */
-    const locked = {};
-    assert.equal(await backBuffer.LockRect(locked, null, 0), D3D_OK);
-    assert.deepEqual([...h.read(/** @type {number} */ (locked.pBits), 4)],
-        [0x56, 0x34, 0x12, 0xff], 'the clear colour is in guest memory before the program reads');
-    h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([0x65, 0x43, 0x21, 0xff]));
-    assert.equal(backBuffer.UnlockRect(), D3D_OK);
-    await h.present();
+for (const version of /** @type {const} */ ([9, 8]))
+{
+    test(`byte-exact (D3D${version}): a lock of a lockable back buffer reads the GPU back, and`
+        + ' the unlock uploads what was written', async()=>{
+        const h = harness(version, { lockableBackBuffer: true });
+        const backBuffer = h.backBuffer();
+        h.clear(argb(0x12, 0x34, 0x56));
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const locked = {};
+        assert.equal(await backBuffer.LockRect(locked, null, 0), D3D_OK);
+        assert.deepEqual([...h.read(/** @type {number} */ (locked.pBits), 4)],
+            [0x56, 0x34, 0x12, 0xff],
+            'the clear colour is in guest memory before the program reads');
+        h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([0x65, 0x43, 0x21, 0xff]));
+        assert.equal(backBuffer.UnlockRect(), D3D_OK);
+        await h.present();
 
-    const kinds = h.device.diagnostics().lastFrame.map((/** @type {any} */ command)=>command.kind);
-    assert.deepEqual(kinds, ['upload'], 'the written bytes travel as a frame command');
-    assert.equal(h.gpu.count('copyBufferToTexture'), 1, 'through the staged path, in order');
-    const presented = rasterise(h).of(h.presented[0].surface);
-    assert.deepEqual(pixelAt(presented, 0, 0), [0x65, 0x43, 0x21, 0xff], 'the program\'s pixel');
-    assert.deepEqual(pixelAt(presented, 1, 0), [0x56, 0x34, 0x12, 0xff],
-        'beside what the read-back brought in');
-    assert.equal(h.reports.length, 0);
-});
+        const kinds = h.device.diagnostics().lastFrame.map(
+            (/** @type {any} */ command)=>command.kind);
+        assert.deepEqual(kinds, ['upload'], 'the written bytes travel as a frame command');
+        assert.equal(h.gpu.count('copyBufferToTexture'), 1, 'through the staged path, in order');
+        const presented = rasterise(h).of(h.presented[0].surface);
+        assert.deepEqual(pixelAt(presented, 0, 0), [0x65, 0x43, 0x21, 0xff],
+            'the program\'s pixel');
+        assert.deepEqual(pixelAt(presented, 1, 0), [0x56, 0x34, 0x12, 0xff],
+            'beside what the read-back brought in');
+        assert.equal(h.reports.length, 0);
+    });
+}
 
 test('a lock of a render target made without lockable is refused, as the real API refuses it',
     ()=>{

@@ -305,15 +305,16 @@ function reportPresentParameters(parameters){
  */
 export function createDirect3D8(options = {}){
     const {
-        backend, readMemory, windowMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips, ...caps
+        backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
+        free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
+        ...caps
     } = options;
     /** @type {DeviceCaps} */
     const resolved = { ...DEFAULT_CAPS, ...caps };
     /** @type {DeviceServices} */
     const services = {
-        backend, readMemory, windowMemory, createSampler, allocate: guestMemory, free: giveBack,
-        dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
+        backend, readMemory, windowMemory, writeMemory, createSampler, allocate: guestMemory,
+        free: giveBack, dumpDraws, maxDraws, divergence, skipTexture, probeTexture, fog, mips,
     };
     if (backend && !readMemory)
     {
