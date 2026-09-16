@@ -108,6 +108,10 @@ self.onmessage = ({ data })=>{
             self.postMessage({ type: 'answer', id: data.id,
                 value: harness?.exactRestart() ?? false });
             break;
+        case 'exactStop':
+            self.postMessage({ type: 'answer', id: data.id,
+                value: harness?.exactStop() ?? false });
+            break;
         default:
             break;
     }

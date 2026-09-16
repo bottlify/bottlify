@@ -48,9 +48,15 @@ const LIMITS = {
  * thousand -- and an unweighted profile of this machine therefore reads as
  * though it spends a seventh of its life in the park loop.
  *
- * @type {{ eip: number, retired: number }[]}
+ * Folded in as the samples arrive rather than kept as a list. A title at a low
+ * quantum samples hundreds of thousands of times a second, so a list is capped
+ * within a second or two and stops measuring the window at all; the addresses
+ * the guest runs are bounded by the code that exists, which is the right thing
+ * to keep.
+ *
+ * @type {Map<number, { retired: number, count: number }>}
  */
-const samples = [];
+const samples = new Map();
 
 /** Written out rather than escaped, so no tooling can mangle it. */
 const NEWLINE = String.fromCharCode(10);
@@ -76,6 +82,19 @@ function formatCall(call){
 }
 
 /**
+ * The guest's regions, lowest first, as the memory layer reports them.
+ *
+ * @param {string[]} layout
+ */
+function regionsOf(layout){
+    return layout.map(entry=>{
+        const [name, extent] = entry.split(' ');
+        const [base, size] = extent.split('+').map(Number);
+        return { name, base, end: base + size };
+    }).sort((left, right)=>left.base - right.base);
+}
+
+/**
  * Where the guest spent its instructions, by module and offset.
  *
  * Counted here rather than sent out raw: a couple of hundred thousand addresses
@@ -87,11 +106,7 @@ function formatCall(call){
  * @returns {(address: number, mask?: number) => string}
  */
 function symboliser(layout){
-    const regions = layout.map(entry=>{
-        const [name, extent] = entry.split(' ');
-        const [base, size] = extent.split('+').map(Number);
-        return { name, base, end: base + size };
-    }).sort((left, right)=>left.base - right.base);
+    const regions = regionsOf(layout);
 
     return (address, mask = 0xffffffff)=>{
         const region = regions.find(entry=>address >= entry.base && address < entry.end);
@@ -102,35 +117,68 @@ function symboliser(layout){
 }
 
 /**
+ * Instructions credited to each module, heaviest first.
+ *
+ * The same walk the histograms make, kept at module granularity: a title's own
+ * code is one region and the CRT it links another, so this is the number that
+ * says whether the guest's time is the game or the library under it.
+ *
+ * @param {{ address: number, weight: number }[]} entries
+ * @param {string[]} layout
+ */
+function byModule(entries, layout){
+    const regions = regionsOf(layout);
+    /** @type {Map<string, number>} */
+    const counts = new Map();
+    let total = 0;
+    for (const { address, weight } of entries)
+    {
+        const region = regions.find(entry=>address >= entry.base && address < entry.end);
+        const name = region ? region.name : '<unmapped>';
+        counts.set(name, (counts.get(name) ?? 0) + weight);
+        total += weight;
+    }
+    return [...counts].sort((left, right)=>right[1] - left[1])
+        .map(([at, count])=>({ at, count, share: count / Math.max(1, total) }));
+}
+
+/**
  * @param {string[]} layout  As the memory layer reports it.
  */
 function profile(layout){
-    if (samples.length === 0)
+    if (samples.size === 0)
     {
         return null;
     }
     const where = symboliser(layout);
+    let turns = 0;
+    let retired = 0;
+    for (const one of samples.values())
+    {
+        turns += one.count;
+        retired += one.retired;
+    }
     /** @param {number} mask @param {number} keep */
     const histogram = (mask, keep)=>{
         /** @type {Map<string, number>} */
         const counts = new Map();
-        let total = 0;
-        for (const { eip, retired } of samples)
+        for (const [eip, one] of samples)
         {
             const key = where(eip, mask);
-            counts.set(key, (counts.get(key) ?? 0) + retired);
-            total += retired;
+            counts.set(key, (counts.get(key) ?? 0) + one.retired);
         }
         return [...counts].sort((left, right)=>right[1] - left[1]).slice(0, keep)
-            .map(([at, count])=>({ at, count, share: count / Math.max(1, total) }));
+            .map(([at, count])=>({ at, count, share: count / Math.max(1, retired) }));
     };
 
-    const retired = samples.reduce((total, one)=>total + one.retired, 0);
     return {
-        samples: samples.length,
+        samples: turns,
         retired,
+        // The window's own modules, from the same samples the pages are.
+        modules: byModule([...samples].map(([address, one])=>(
+            { address, weight: one.retired })), layout),
         pages: histogram(~0xfff, 16),
-        exact: histogram(~0, 16),
+        exact: histogram(~0, 32),
     };
 }
 
@@ -162,18 +210,23 @@ function exactProfile(app, layout){
         blocks: account.entries.length,
         retired,
         dropped: account.dropped,
+        // The window's own modules, whole rather than top-of, so a share of the
+        // guest's time is a share of every instruction it retired.
+        modules: byModule(account.entries.map(entry=>(
+            { address: entry.address, weight: entry.instructions })), layout),
         pages: [...pages].sort((left, right)=>right[1] - left[1]).slice(0, 16)
             .map(([at, count])=>({ at, count, share: share(count) })),
         hot: [...account.entries].sort((left, right)=>right.instructions - left.instructions)
-            .slice(0, 32)
+            .slice(0, 8192)
             .map(entry=>({
                 at: where(entry.address),
                 instructions: entry.instructions,
                 hits: entry.hits,
                 share: share(entry.instructions),
-                // The bytes at the block, for a reader with a disassembler:
-                // an address alone says where, not what.
-                bytes: Array.from(app.debug.read(entry.address, 48))
+                // The bytes at the entry, for a reader with a disassembler:
+                // an address alone says where, not what. Fifteen bytes holds
+                // any x86 instruction in full.
+                bytes: Array.from(app.debug.read(entry.address, 16))
                     .map((/** @type {number} */ byte)=>byte.toString(16).padStart(2, '0')).join(' '),
             })),
     };
@@ -735,9 +788,15 @@ export function createHarness(canvas, how = {}){
             quantum: request.quantum || undefined,
             sample: request.profile || request.quantum
                 ? (/** @type {number} */ eip, /** @type {number} */ retired)=>{
-                    if (samples.length < LIMITS.samples)
+                    const at = samples.get(eip);
+                    if (at)
                     {
-                        samples.push({ eip, retired });
+                        at.retired += retired;
+                        at.count++;
+                    }
+                    else
+                    {
+                        samples.set(eip, { retired, count: 1 });
                     }
                 }
                 : undefined,
@@ -1014,7 +1073,20 @@ export function createHarness(canvas, how = {}){
         drainLog: (from, count)=>callLog.slice(from, from + count).join(NEWLINE),
         logLines: ()=>callLog.length,
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
-        exactRestart: ()=>Boolean(running?.guestProfile.start()),
+        exactRestart: ()=>{
+            // The sampled account is cleared with the emulator's own, so a
+            // window that begins here is measured by itself and not by the
+            // loading and the view before it.
+            samples.clear();
+            return Boolean(running?.guestProfile.start());
+        },
+        // A window is measured while it is held, so the account can be turned
+        // off again for the turn to the next one -- which otherwise pays a
+        // per-instruction tax while the camera moves.
+        exactStop: ()=>{
+            running?.guestProfile.stop();
+            return Boolean(running);
+        },
         errors,
         get presents(){
             return { count: presents, gaps: gaps.slice() };
