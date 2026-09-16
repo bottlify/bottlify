@@ -43,7 +43,7 @@ allows because `win32` is declared.
 | `free` | `(address) => void` | absent | Returns guest memory a texture or map is finished with, so a program that sizes its cache from free heap sees textures released. |
 | `divergence` | `(api, detail) => void` | absent | Where "this call succeeded and did not do all of what it promises" is reported. See *Limitations*. |
 | `cursor` | `(notice: CursorNotice) => void` | absent | Receives a Direct3D program's cursor bitmap (`width`, `height`, `hotSpot`, `bgra`, `shown`). Without it `SetCursorProperties` is refused with `D3DERR_INVALIDCALL`, which tells the program to draw its own. |
-| `resolution` | `(width, height, where?) => void` | absent | Told the back-buffer size a device is created or reset at, and which window it presents into; the reported screen follows it. A fullscreen device's window is placed at the mode's size, so a program clipping its cursor to that window reaches the picture's corners. |
+| `resolution` | `(width, height, where?: { window?, fullscreen? }) => void` | absent | Told the back-buffer size a device is created or reset at, and which window it presents into; the reported screen follows it. `where.window` is the device's `HWND` and `where.fullscreen` says whether it is exclusive; a fullscreen device's window is placed at the mode's size, so a program clipping its cursor to that window reaches the picture's corners, and a reset back to windowed reports the window at its own size again. |
 | `publishInterface` | `(object, iid) => address` | `() => 0` | The bridge's vtable publisher. The default publishes nothing, so a build without a bridge gets tables that refuse rather than pointers into nowhere. |
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
 
@@ -156,10 +156,15 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   keyed on those identities and lives as long as the backend.
 - **Dynamic buffers** (`internal/buffers.js`). A lock's flags are a promise: `DISCARD` renames the
   backing and only bytes written since travel; `NOOVERWRITE` renames nothing and sends the newly
-  written ranges; neither flag renames (a write into a buffer this frame's draws already read is a
-  hazard) and resends the whole buffer, because the old contents stay observable. Uploaded ranges
-  align outward to four bytes and are sent from their own offset. A retired backing returns to the
-  pool only after the frames that read it have been presented (`markPresent`).
+  written ranges; neither flag leaves the decision to whether a draw of a frame not yet submitted
+  has read the live backing (`markRead`) -- if none has, the write goes into the backing in place
+  and only the locked range travels, the ordinary case of a program that fills a buffer and then
+  draws from it; if one has, overwriting those bytes is a hazard, so the backing is renamed and the
+  whole buffer is resent, because the old contents stay observable through the new one.
+  `LockFlags.RENAME` is the same rename forced by a caller that tracks the hazard itself rather than
+  through `markRead`. Uploaded ranges align outward to four bytes and are sent from their own
+  offset. A retired backing returns to the pool only after the frames that read it have been
+  presented (`markPresent`).
 - **Textures** (`internal/textures.js`). Block-compressed formats (`bc1`, `bc2`, `bc3`) always go
   through a staging buffer plus a buffer-to-texture copy with rows repacked to the copy alignment;
   a direct `writeTexture` is used for uncompressed formats and either path can be forced. Row
@@ -297,8 +302,12 @@ pipeline exists, and each recorded draw captures the buffer generation it was is
 Guest memory is the boundary -- bytes are read back at unlock under the lock's flags and nowhere
 else. Every texture format is expanded to `bgra8unorm` on upload in integer arithmetic, except
 `DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the adapter has
-`texture-compression-bc`. The renderer serves Direct3D 7 and 9 too: one fixed-function pipeline
-with one set of numbers.
+`texture-compression-bc`. The luminance formats expand the same way: `L8` replicates its one byte
+across the three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with
+its own alpha byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a
+font atlas stored in one of them draws as glyphs, because the grey and the coverage each land in
+the channel the blend and the shader read. The renderer serves Direct3D 7 and 9 too: one
+fixed-function pipeline with one set of numbers.
 
 A draw is prepared once per state change rather than once per draw. The device raises one counter,
 `drawStateVersion`, for every state change a preparation depends on -- a render state, a stage
@@ -366,8 +375,10 @@ advertised -- `arb-program.js` parses program text into an IR with byte-exact er
 uniform block per draw, state matrices computed from the stacks at draw time, and the varyings
 widened to the eight coordinate sets a program may address. The vertex program's block is bound
 beside the fixed block in group zero, the group whose binding the vertex stage already reads,
-because the device hands a stage zero for a dynamic uniform block outside the first group the
-stage reads; the fragment program's block gets a bind group of its own, which the fragment stage
+because on the one headless adapter this was measured on the device hands a stage zero for a
+dynamic uniform block outside the first group the stage reads -- a device rule observed there, not
+one the WebGPU specification makes, so it is worth re-checking on a hardware adapter before it is
+relied on; the fragment program's block gets a bind group of its own, which the fragment stage
 reads alone. `HIDDEN_GL_EXTENSIONS` is empty: a name added back there stays sized, implemented and
 obtainable through `wglGetProcAddress`, as a driver's unannounced entry points would be, and only
 the string omits it. Two windows onto a program need a translation of their own: a program's

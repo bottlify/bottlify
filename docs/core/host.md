@@ -298,6 +298,13 @@ emulator beside itself.
 overrides that. `npm run check:package` (run by `prepublishOnly`) asserts the tarball carries every
 file `exports` names and that the binaries are not stubs.
 
+`log.worker.js` is **not** one of `package.json`'s `exports` -- unlike `engine.worker.js`, which
+is `@bottlify/core/engine.worker.js` -- because nothing outside `createApp` ever loads it by name;
+`src/host/remote.js` reaches it with `new URL('./log.worker.js', import.meta.url)` from wherever
+`core.js` itself resolved to. A consumer whose bundler rewrites `core.js` into a different file
+without carrying its siblings has to copy `log.worker.js` beside the output by hand, since there is
+no subpath a bundler's own `exports` resolution would otherwise find it through.
+
 ## 8. The worker's lifetime
 
 A canvas can transfer its control once. `createApp` keeps a `WeakMap` from canvas to the host it

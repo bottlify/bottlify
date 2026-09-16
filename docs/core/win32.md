@@ -107,32 +107,40 @@ instantiation of the module reports (method in "Inventory" below):
 
 | library | directory | exports | what it covers |
 |---------|-----------|--------:|----------------|
-| `KERNEL32.dll` | `kernel32/` | 256 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O. |
-| `msvcrt.dll` | `msvcrt/` | 209 (158 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, CRT exception helpers. |
-| `USER32.dll` | `user32/` | 145 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs. |
+| `KERNEL32.dll` | `kernel32/` | 316 | Console, threads and waits, heap and virtual memory, process and TLS, modules, files and directories, critical sections, locale and code pages, environment and command line, system info and time, `CreateProcess`, exceptions and SEH, resources, drives, file mappings and pipes, completion ports, file times, console I/O. |
+| `USER32.dll` | `user32/` | 250 | Windows and classes, painting, system queries and display settings, objects (cursors, icons, menus, clipboard), dialogs, hot keys, `SendInput`. |
+| `msvcrt.dll` | `msvcrt/` | 244 (193 without `fpu`) | The C runtime: strings, multibyte strings, conversion, formatting and scanning, heap, math, paths, streams (`stdio.js`: `fopen` and its family over the volume), threads (`threads.js`: `_beginthread`/`_beginthreadex` through kernel32's `CreateThread`), time, C++ support (`cxx.js`), CRT startup, CRT exception helpers. |
+| `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
-| `GDI32.dll` | `gdi32/` | 75 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
-| `WINMM.dll` | `winmm/` | 47 | `timeGetTime`, wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
+| `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
+| `WINMM.dll` | `winmm/` | 55 | `timeGetTime`, wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
+| `ole32.dll` | `ole32/` | 40 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. |
+| `OLEAUT32.dll` | `oleaut32/` | 39 | BSTR and VARIANT; imported by ordinal. |
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 33 each | One socket registry under both names, over an injected adapter (loopback by default). |
-| `ADVAPI32.dll` | `advapi32/` | 18 | The registry API over the hive, `GetUserNameA`, SIDs. |
-| `COMCTL32.dll` | `comctl32/` | 14 | Image lists (indices only), mouse tracking. |
-| `OLEAUT32.dll` | `oleaut32/` | 14 | BSTR and VARIANT; imported by ordinal. |
-| `ole32.dll` | `ole32/` | 13 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. |
+| `SHELL32.dll` | `shell32/` | 21 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume), and `CLSID_ShellLink` (`IShellLinkA/W`, `IPersistFile`). |
+| `COMCTL32.dll` | `comctl32/` | 17 | Image lists (indices only), mouse tracking, and `msctls_progress32`/`SysTreeView32` as built-in window classes. |
+| `d3dx9_25.dll`, `d3dx9_26.dll`, `d3dx9_27.dll` | `d3dx9/` | 13 each | Stub tables for the D3DX helper libraries, shadowed by the real DLL whenever the DirectX system volume is mounted and a program does not ship its own ([`porting.md`](../../roadmap/registers/porting.md)). |
 | `WININET.dll` | `wininet/` | 12 | HTTP as a handle tree; a request parks the caller. |
-| `IMM32.dll` | `imm32/` | 9 | "There is no input method" — which is the state a game asks for. |
-| `SHELL32.dll` | `shell32/` | 7 | Launching a program (`ShellExecute`, `ShellExecuteEx`, `FindExecutable`), documented refusals where a registry or a person is needed (a document's handler, folder browse), the drag-and-drop truths, and the namespace (`namespace.js`: `IShellFolder`/`IEnumIDList` over the volume). |
+| `IMM32.dll` | `imm32/` | 10 | "There is no input method" — which is the state a game asks for. |
+| `RPCRT4.dll` | `rpcrt4/` | 6 | `UuidCreate` and the other GUID/status helpers a COM-adjacent program links directly. |
+| `VERSION.dll` | `version/` | 5 | The version block read out of a file's own image. |
+| `LZ32.dll` | `lz32/` | 4 | The LZ compression stubs an older installer links and never has cause to call successfully. |
 | `MSWSOCK.dll` | `wsock32/` | 4 | The Winsock extensions. |
-| `VERSION.dll` | `version/` | 3 | The version block read out of a file's own image. |
-| `COMDLG32.dll` | `comdlg32/` | 3 | File dialogs, answered as cancelled. |
+| `COMDLG32.dll` | `comdlg32/` | 4 | File dialogs, answered as cancelled. |
+| `SHLWAPI.dll` | `shlwapi/` | 4 | Path and string helpers an installer imports for convenience. |
+| `WINSPOOL.DRV` | `winspool/` | 3 | Print spooler entry points, answered as "no printers". |
+| `MPR.dll` | `mpr/` | 2 | Network provider entry points, answered as "not connected to a network". |
+| `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 991 table entries across 18 libraries, 892 distinct functions.
+Total: 1412 table entries across 27 libraries, 1284 distinct functions.
 
-**Inventory method.** A script in the session scratchpad created the module against the same stub
-host `src/layers/win32/module.test.js` uses (`win32Module.create({ fpu: {} }, stubHost())`),
-then counted `Object.keys(table).length` for each entry of `api.libraries()`, summed them, and
-counted the keys of `Object.assign({}, ...tables)` for the distinct figure. `diagnostics().libraries`
-reports the same per-library numbers on a running engine.
+**Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
+module against the same stub host `src/layers/win32/module.test.js` uses
+(`win32Module.create({ fpu: {} }, stubHost())`), then counts `Object.keys(table).length` for each
+entry of `api.libraries()`, sums them, and counts the keys of the union of every table for the
+distinct figure. `diagnostics().libraries` reports the same per-library numbers on a running
+engine.
 
 ### From a table to a module
 
@@ -291,6 +299,74 @@ running on the host clock without its sound, position and rate accepted and igno
 implemented answers with the documented code that ends the caller's loop
 (`ERROR_CALL_NOT_IMPLEMENTED`, `ERROR_NO_MORE_ITEMS`, `E_NOTIMPL` for a COM slot nothing
 implements).
+
+### Small contracts, one paragraph each
+
+- **`SendInput`** inserts mouse events into the same stream a real device feeds: each one goes to
+  the input layer through `sendInput`, so it turns into a `WM_MOUSEMOVE`/button message and a
+  DirectInput delta both, exactly as a physical move or click would. `cbSize` must be
+  `sizeof(INPUT)` (28 bytes) or the whole call is refused with `ERROR_INVALID_PARAMETER`. Keyboard
+  and hardware `INPUT` records are not injected; a program that asks for one gets a `divergence`
+  naming the type it asked for, never a silent success (`user32/system.js`).
+- **`RegisterHotKey`/`UnregisterHotKey`** claim a keystroke in the message queue rather than at the
+  device. A null `hWnd` claims it for the calling thread: the `WM_HOTKEY` that follows is posted
+  with no window, which is exactly what a pump asking for every window retrieves and what one
+  naming a window never sees. A key already claimed answers `ERROR_HOTKEY_ALREADY_REGISTERED`;
+  releasing one nobody claimed answers `ERROR_HOTKEY_NOT_REGISTERED`.
+- **`LoadMenuA/W`** reads an `RT_MENU` resource out of the program's own module and builds it into
+  the same menu records the rest of user32's menu calls use; a resource that does not exist
+  answers zero, which is what a program checks before it puts the menu on a window.
+- **`CloseWindow` minimises**, despite its name — a program that means to be rid of a window
+  destroys it instead — and `IsIconic` reads back the minimised state that
+  `ShowWindow(SW_MINIMIZE)` (or `CloseWindow`) set.
+- **`SetCursorPos` moves the same cursor the input router owns**, through its `place()`: placing is
+  not motion, so a relative device (DirectInput) sees nothing from it, but a real cursor warp is
+  announced with `WM_MOUSEMOVE` when the position actually changes — what a mouse-look program that
+  reads its distance from the centre and warps back every frame needs to keep working.
+- **The `cursor` event is user32's own report.** `ShowCursor`'s display count and `SetCursor`'s
+  null/non-null answer both derive one picture, `{ shown }`, reported to the page only on a change
+  of that picture — a program that hides the cursor inside its frame loop does not flood the page's
+  queue — and it carries no image, because the bitmap behind a cursor handle is never decoded here.
+- **`CLSID_ShellLink`** (`IShellLinkA/W`, `IPersistFile`) exists so an installer's shortcut step can
+  finish: refusing the class turns every shortcut into "Access is denied" and ends the install in a
+  warning dialog. `Save` writes an empty file at the target path — enough for a later "is the link
+  there" check to pass — and it does not write a real `.lnk`, since the guest's Start Menu is never
+  drawn and the launcher starts a game's executable directly; every method that stands in for work
+  this build does not do reports so through the divergence channel, and the strings a program sets
+  are kept and handed back verbatim (`shell32/shelllink.js`).
+- **`_control87` is `_controlfp` under its older name** — the same word, the same mask arithmetic,
+  one piece of state — because a program may set the FPU control word through one entry point and
+  read it back through the other, and answering from two separate words would make that read-back a
+  coin toss (`msvcrt/startup.js`).
+- **The `isw*`/`tow*` wide-character classifiers are bound to the byte classifiers** so the two
+  families cannot disagree below `0x80`; above it they follow the C locale as a real Windows
+  answers through `iswctype`: the Latin-1 letters are alpha (except the multiplication and division
+  signs among them), `0x85` and `0xa0` are the two extra spaces the ASCII table does not carry, and
+  case folding stays ASCII, so those letters are alpha with no upper or lower answer of their own
+  (`msvcrt/mbstring.js`).
+- **A `va_list` is read as a fixed window**, since the list carries no argument count of its own:
+  `varargsSlots` reads slots up to the end of the memory region the pointer sits in — a thread's
+  stack has a top, and a program formatting from just below it is within its rights, since every
+  argument it reads is there — rather than faulting a read that would otherwise run past the region
+  (`msvcrt/format.js`).
+- **`(HANDLE)-1` and `(HANDLE)-2`** are the current-process and current-thread pseudo-handles
+  wherever a handle is taken (`WaitForSingleObject`, `WaitForMultipleObjects`, `DuplicateHandle`,
+  …): they are not entries in the handle table, which is what makes them always valid, so a lookup
+  maps them before it ever misses. A wait on the current-process pseudo-handle can only time out or
+  park for ever, since it can only be signalled once the waiter itself has stopped
+  (`kernel32/threading.js`).
+- **`WM_INITDIALOG` is sent, not posted**, during `CreateDialogParam`/`DialogBoxParam`: the dialog
+  procedure runs after every control exists and has set itself up, and before a template's
+  `WS_VISIBLE` shows the window — so a program that fills in a control from that handler finds it
+  already filled when the window first appears (`user32/dialogs.js`).
+- **A redistributable installer is a child that has already finished.** `CreateProcess` on
+  `DXSETUP.exe`/`DXWebSetup.exe`, a `vcredist*`/`vc_redist*`, a `dotnetfx*`/`ndp*`/`netfx*`, or
+  anything under a `DirectX\` directory answers a process record created `completed`: exit code 0
+  from the start, and never the process this one hands over to. `WaitForSingleObject`,
+  `WaitForMultipleObjects` and `GetExitCodeProcess` on it all return at once rather than parking for
+  a runtime the engine already carries itself — the DirectX DLLs on its system volume, the C
+  runtime under `msvcrt` — and would otherwise wait for a child that never runs
+  (`kernel32/spawn.js`, `isRedistributableInstaller`).
 
 ## 4. Limitations and divergences
 

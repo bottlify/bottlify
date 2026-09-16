@@ -153,6 +153,14 @@ the same choice. Then the assembler places a `process-startup` arena. The name/b
 (`byName`, `byBase`, `addressOf`, `addressOfOrdinal`, `attached`) lives in `src/app.js`, not in
 this layer; `list()` here is the flat record of what was placed.
 
+The program's own image is in that table too, known by its file name as well as its base: a
+program that loads or asks for a handle to itself by name is handed the mapping it is already
+running from, as Windows hands back a module already loaded rather than a second copy at the one
+base an image without relocations can take. Its export directory is read the same way a shipped
+library's is, so an export a program declares for itself binds and resolves by name and by
+ordinal, whether the caller is `GetProcAddress(GetModuleHandle(NULL), ...)` or another module's
+import of the program that loads it (`src/app.js`, `buildApp`).
+
 ### Thread-local storage and process start (`internal/tls.js`, `internal/init.js`)
 
 `readTls` reads the TLS directory: the template bytes and zero-fill size every thread's block
