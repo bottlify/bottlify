@@ -61,8 +61,9 @@ export const inputModule = {
             // guest from inside the host call -- the sound seam's own shape.
             allocate: config?.allocate ?? (bytes=>win32.heap().allocate(bytes)),
             callGuest: config?.callGuest
-                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args)=>
-                    bridge.callGuest({ entry, args })),
+                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
+                    /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
+            callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
         });
 
         // The queue is win32's, and this is the seam it exists for: a keystroke

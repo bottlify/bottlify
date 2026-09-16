@@ -116,12 +116,13 @@ export const audioModule = {
              * bridge parks the caller while it does, which is what makes a
              * callback delivered from inside a host call legal here.
              *
-             * @param {number} entry @param {number[]} args
+             * @param {number} entry @param {number[]} args @param {any} [thread]
              * @returns {Promise<number>}
              */
             callGuest: config?.callGuest
-                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args)=>
-                    bridge.callGuest({ entry, args })),
+                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args,
+                    /** @type {any} */ thread)=>bridge.callGuest({ entry, args, thread })),
+            callerThread: config?.callerThread ?? (()=>bridge.callerThread()),
         });
 
         // What decodes behind the provider. The library asks for its samples

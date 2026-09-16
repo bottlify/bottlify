@@ -146,11 +146,16 @@ function fixture(){
     /** @type {number[]} */
     const signalled = [];
     /** Every call the seam made into guest code, in order. */
-    /** @type {{ entry: number, args: number[] }[]} */
+    /** @type {{ entry: number, args: number[], thread: unknown }[]} */
     const calls = [];
     /** What the next guest callback answers; DIENUM_CONTINUE unless told. */
     /** @type {number[]} */
     const answers = [];
+    // A fresh token every call, so a test can tell "named once, before the
+    // enumeration's first await" from "asked again for a later device" --
+    // the second would be a different token in a real bridge, because by
+    // then the processor may belong to somebody else.
+    let threadRequests = 0;
     let arena = 0x80000;
     const dinput = createDirectInput({
         memory,
@@ -163,10 +168,11 @@ function fixture(){
             arena += (bytes + 15) & ~15;
             return address;
         },
-        callGuest: (entry, args)=>{
-            calls.push({ entry, args });
+        callGuest: (entry, args, thread)=>{
+            calls.push({ entry, args, thread });
             return Promise.resolve(answers.shift() ?? 1);
         },
+        callerThread: ()=>`thread-token-${++threadRequests}`,
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -659,6 +665,27 @@ test('EnumDevices describes the mouse and the keyboard to the callback', async()
     assert.equal(f.memory.u32(keyboardInstance + DIDEVICEINSTANCE.dwDevType), 0x0413);
     assert.equal(readWide(f.memory,
         keyboardInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Keyboard');
+});
+
+test('a second device\'s callback answers on the same thread as the first', async()=>{
+    // NFS: Most Wanted's demo enumerates all devices, and its callback
+    // creates and acquires each one right there -- so the mouse's callback
+    // does not return to `enumerate`'s loop until well after an await. A
+    // loop that asked the bridge for "the current thread" again for the
+    // keyboard would be asking after that await, when the processor may
+    // belong to another thread entirely; the bridge's own contract is to
+    // refuse a callback in that position rather than guess. `enumerate` is
+    // required to name the thread once, before its first await, and use
+    // that same name for every device -- which this pins by giving a fresh
+    // token on every ask and requiring both calls to have taken the first.
+    const f = fixture();
+    const root8 = directInput8(f, true);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0, 0x7777, 0x9999, 0]),
+        DI_OK);
+    assert.equal(f.calls.length, 2);
+    assert.equal(f.calls[0].thread, 'thread-token-1');
+    assert.equal(f.calls[1].thread, 'thread-token-1',
+        'the keyboard\'s callback names the same thread the mouse\'s did');
 });
 
 test('an interface before 8 uses the older device-type codes', async()=>{

@@ -370,13 +370,20 @@ export function createPublisher({ publishInterface }){
  * @param {() => number} deps.now   The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(event: number) => void} [deps.signal]  Signals an event a notification names.
- * @param {(entry: number, args: number[]) => Promise<number>} [deps.callGuest]
+ * @param {(entry: number, args: number[], thread?: any) => Promise<number>} [deps.callGuest]
  *        Runs a guest routine and answers with what it returned. A sound
  *        library of this era hands the system a callback and expects it run
  *        before the call returns, so a table without this route cannot answer
  *        those calls truthfully.
+ * @param {() => unknown} [deps.callerThread]
+ *        Whose call `EnumDevices` is answering, named before the loop's first
+ *        await: a second callback is a call made after that await, by when
+ *        the thread on the processor may no longer be this one.
  */
-export function createDirectSound({ memory, allocate, now, publishInterface, signal, callGuest }){
+export function createDirectSound(
+    { memory, allocate, now, publishInterface, signal, callGuest, callerThread },
+)
+{
     const publisher = createPublisher({ publishInterface });
 
     /** @param {number} address */
@@ -951,14 +958,17 @@ export function createDirectSound({ memory, allocate, now, publishInterface, sig
             0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ]));
+        // Named once, before the loop's first await -- see the parameter doc.
+        const thread = callerThread?.();
         return (async()=>{
             // TRUE asks for the next one, and a program that has seen enough
             // says FALSE -- so a caller that stops early is obeyed rather than
             // handed a list it did not want.
-            const more = await callGuest(callback >>> 0, [0, primary, blank, context >>> 0]);
+            const more = await callGuest(
+                callback >>> 0, [0, primary, blank, context >>> 0], thread);
             if ((more | 0) !== 0)
             {
-                await callGuest(callback >>> 0, [guid, device, blank, context >>> 0]);
+                await callGuest(callback >>> 0, [guid, device, blank, context >>> 0], thread);
             }
             return DS_OK;
         })();

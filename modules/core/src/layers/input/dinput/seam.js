@@ -367,13 +367,22 @@ export function createPublisher({ publishInterface }){
  * @param {(event: number) => void} [deps.signal]
  * @param {(bytes: number) => number} [deps.allocate]  Guest memory for a
  *        structure an enumeration callback is handed.
- * @param {(entry: number, args: number[]) => Promise<number>} [deps.callGuest]
+ * @param {(entry: number, args: number[], thread?: any) => Promise<number>} [deps.callGuest]
  *        Runs a guest routine and answers with what it returned. An
  *        enumeration callback is guest code and Windows runs it before
  *        EnumDevices returns, so a seam without this route cannot describe
  *        any device truthfully.
+ * @param {() => unknown} [deps.callerThread]
+ *        Whose call `EnumDevices` is answering. A callback that names a
+ *        second device is a call made after the first callback's own await,
+ *        by when the thread the processor is on may no longer be this one --
+ *        so the loop names it once, before that first await, rather than
+ *        asking the bridge to guess a second time.
  */
-export function createDirectInput({ memory, now, publishInterface, signal, allocate, callGuest }){
+export function createDirectInput(
+    { memory, now, publishInterface, signal, allocate, callGuest, callerThread },
+)
+{
     const publisher = createPublisher({ publishInterface });
     // The arena a structure handed to a callback is written in. It answers
     // zero when no heap was handed down, and the enumeration that needs one
@@ -753,6 +762,10 @@ export function createDirectInput({ memory, now, publishInterface, signal, alloc
         }
 
         enumerations++;
+        // Named once, before the loop's first await: after that, the thread
+        // the processor happens to be on is whoever else's turn the scheduler
+        // gave it, not the thread EnumDevices is answering for.
+        const thread = callerThread?.();
         return (async()=>{
             for (const offer of attached)
             {
@@ -768,7 +781,7 @@ export function createDirectInput({ memory, now, publishInterface, signal, alloc
                 }
                 const instance = writeInstance(
                     offer.guid, offer.devType, offer.name, offer.product, wide);
-                const more = await run(callback >>> 0, [instance, context >>> 0]);
+                const more = await run(callback >>> 0, [instance, context >>> 0], thread);
                 if ((more | 0) === DIENUM_STOP)
                 {
                     break;
