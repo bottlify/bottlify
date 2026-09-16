@@ -149,6 +149,19 @@ function machine(){
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
         /**
+         * The slot's answer as the bridge sees it: a number, or the promise
+         * it suspends the caller on.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         * @returns {number | Promise<number>}
+         */
+        callRaw(pointer, index, args = []){
+            const table = memory.readU32(pointer);
+            const entry = registered.get(memory.readU32(table + index * 4));
+            assert.ok(entry, `slot ${index} has an implementation`);
+            return entry.fn.handler([pointer, ...args]);
+        },
+        /**
          * The host's path of a method whose slot holds guest code: the trap
          * the guest routine falls back to, found by its name.
          *
@@ -697,6 +710,33 @@ test('a state block records what was set and puts it back', ()=>{
     assert.equal(h.release(device), 0);
     h.release(root);
 });
+
+test('a lock that settles later still writes the locked rectangle, and the caller waits',
+    async()=>{
+        // A render target's lock reads the GPU back first and answers with a
+        // promise; the bridge suspends the caller on it, and the
+        // D3DLOCKED_RECT is written when it settles.
+        const h = seamed();
+        const root = h.create();
+        const device = h.createDevice(root);
+        const back = 0xa100;
+        assert.equal(h.device(device, 'GetBackBuffer', [0, 0, back]), D3D_OK);
+        const pointer = h.box.memory.readU32(back);
+        const surface = h.publisher.objectAt(pointer);
+        surface.LockRect = (/** @type {any} */ locked)=>{
+            locked.Pitch = 256;
+            locked.pBits = 0x12340;
+            return Promise.resolve(D3D_OK);
+        };
+        const locked = 0xa200;
+        const answer = h.box.callRaw(pointer, slot(IDIRECT3DSURFACE8_SLOTS, 'LockRect'),
+            [locked, 0, 0]);
+        assert.ok(answer instanceof Promise, 'the slot hands the promise on');
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), 0, 'nothing yet');
+        assert.equal(await answer, D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 256);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), 0x12340);
+    });
 
 test('the surfaces a device already has are one object, however they are reached', ()=>{
     const h = seamed();

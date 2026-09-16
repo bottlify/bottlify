@@ -309,6 +309,20 @@ font atlas stored in one of them draws as glyphs, because the grey and the cover
 the channel the blend and the shader read. The renderer serves Direct3D 7 and 9 too: one
 fixed-function pipeline with one set of numbers.
 
+One backend texture per Direct3D resource, whichever way the program reaches it: the surface
+`GetSurfaceLevel` hands out is a view of a level of the texture's own backend texture, so a
+render-target texture that is drawn into and then sampled reads what was drawn. A level's pixels
+are the guest's until a draw, a clear or a copy on the GPU writes them, and the guest's again after
+an unlock or a move in guest memory; before any use on the GPU the guest bytes that are newer go
+up. Uploads into a texture only the guest writes go straight to the queue; an upload into a texture
+the GPU also writes is a frame command, replayed in order through the staged path, as are the
+copies between GPU surfaces (`StretchRect`, `CopyRects`, both from a render target or a texture
+level into another). `GetRenderTargetData`, and a lock of a lockable render target or back buffer,
+read the GPU back into the guest's bytes first: the frame recorded so far is submitted without a
+present, the surface is copied out, and the caller is suspended on the promise. A lock write to a
+render target uploads at the unlock. A `StretchRect` from a plain surface still moves guest bytes
+and marks the destination for upload.
+
 A draw is prepared once per state change rather than once per draw. The device raises one counter,
 `drawStateVersion`, for every state change a preparation depends on -- a render state, a stage
 state, a texture binding, a material, a light, the viewport, a transform other than the world one,

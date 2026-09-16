@@ -81,6 +81,7 @@
  * @property {string} format
  * @property {number} [mipLevelCount]  One unless the surface carries a chain.
  * @property {number} [layers]         Array layers; six for a cube map.
+ * @property {number} [mipLevel]       The level of `texture` this is a view of; zero unless said.
  * @property {string} label
  */
 

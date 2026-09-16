@@ -60,7 +60,9 @@ import {
 } from '../d3d8/render.js';
 import { createDefaultStageStates } from '../d3d8/stagestates.js';
 import { createDefaultRenderStates } from './renderstates.js';
-import { createReferenceCount, createSurface, createTexture } from './resources.js';
+import {
+    createReferenceCount, createSurface, createTexture, packColour, writePixels,
+} from './resources.js';
 import { SURFACE_TYPE, reportedBackBufferCount, validatePresentParameters } from './validity.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 import {
@@ -662,6 +664,28 @@ function createDeviceObject(parameters, caps, services, identity){
         : null;
 
     /**
+     * How a lockable render target reaches its pixels: read back off the GPU
+     * before the lock, uploaded after the unlock. Absent when the renderer
+     * cannot do either, and the lock then says so as a divergence.
+     *
+     * @returns {import('./resources.js').TargetPixels | undefined}
+     */
+    const targetPixels = ()=>{
+        const write = services.writeMemory;
+        if (!renderer?.readSurface || !write)
+        {
+            return undefined;
+        }
+        return {
+            readBack: surface=>renderer.readSurface(surface).then(
+                (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                    writePixels(surface, pixels.data, write);
+                }),
+            written: surface=>renderer.markDirty?.(surface),
+        };
+    };
+
+    /**
      * Storage addresses are handed out rather than computed, so that two
      * surfaces never overlap and the offset a lock reports means something.
      *
@@ -800,6 +824,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 count: implicitCount(),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
+                pixels: targetPixels(),
             }));
         }
         const depthFormat = presentParameters.autoDepthStencilFormat ?? D3DFMT.D24S8;
@@ -2791,6 +2816,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 count: explicitCount(D3DPOOL.DEFAULT),
                 rejectsMalformedRects: true,
                 divergence: services.divergence ?? null,
+                pixels: targetPixels(),
             });
             return D3D_OK;
         },
@@ -2978,13 +3004,15 @@ function createDeviceObject(parameters, caps, services, identity){
 
         /**
          * A render target into a system-memory surface of the same size and
-         * format. What is copied is the target's guest bytes, which the drawn
-         * pixels are never written back into: the call is reported so a run
-         * that reads a frame back knows what it got, and refusing it would send
-         * a program down a path it was not written for.
+         * format. With a renderer that can read the GPU back, the pixels are
+         * the target's as drawn, and the caller waits for them; without one,
+         * what is copied is the target's guest bytes, and the call is reported
+         * so a run that reads a frame back knows what it got -- refusing it
+         * would send a program down a path it was not written for.
          *
          * @param {any} target @param {any} destination
          * @param {{ moves?: SurfaceMove[] }} [out]
+         * @returns {number | Promise<number>}
          */
         GetRenderTargetData(target, destination, out = {}){
             if (!target || !destination)
@@ -2998,6 +3026,15 @@ function createDeviceObject(parameters, caps, services, identity){
                 || from.Height !== to.Height)
             {
                 return D3DERR_INVALIDCALL;
+            }
+            if (renderer?.readSurface && services.writeMemory)
+            {
+                const write = services.writeMemory;
+                return renderer.readSurface(target).then(
+                    (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                        writePixels(destination, pixels.data, write);
+                        return D3D_OK;
+                    });
             }
             report('readback', 'GetRenderTargetData copies a target\'s guest bytes, which the'
                 + ' rendered pixels are never read back into');
@@ -3021,8 +3058,10 @@ function createDeviceObject(parameters, caps, services, identity){
          * A rectangle of one default-pool surface into a rectangle of another,
          * same format, same size: this device stretches nothing, and a
          * rectangle pair of different sizes is refused and reported rather
-         * than copied at the wrong scale. A source that lives on the GPU is
-         * copied from its guest bytes, with the same report a read-back gets.
+         * than copied at the wrong scale. Between two surfaces that live on
+         * the GPU the copy is made there; otherwise guest bytes move, and a
+         * source that lives on the GPU is reported, with the same report a
+         * read-back gets.
          *
          * @param {any} source @param {Rect | null} sourceRect
          * @param {any} destination @param {Rect | null} destinationRect
@@ -3054,6 +3093,12 @@ function createDeviceObject(parameters, caps, services, identity){
                 report('stretch', 'a StretchRect between rectangles of different sizes was'
                     + ' refused: this device copies and does not scale');
                 return D3DERR_INVALIDCALL;
+            }
+            if (renderer?.copySurface?.(source, rect, destination,
+                { x: target.left, y: target.top }))
+            {
+                out.moves = [];
+                return D3D_OK;
             }
             if (isGpuResident(source))
             {
@@ -3392,47 +3437,6 @@ function fullMipCount(width, height){
         levels++;
     }
     return levels;
-}
-
-/**
- * One pixel of a D3DCOLOR in a format's own layout, little-endian.
- *
- * @param {number} format @param {number} colour
- * @returns {Uint8Array}
- */
-function packColour(format, colour){
-    const a = (colour >>> 24) & 0xff;
-    const r = (colour >>> 16) & 0xff;
-    const g = (colour >>> 8) & 0xff;
-    const b = colour & 0xff;
-    /** @param {number} bits */
-    const word = bits=>Uint8Array.from([bits & 0xff, (bits >>> 8) & 0xff]);
-    switch (format)
-    {
-        case D3DFMT.A8R8G8B8:
-        case D3DFMT.X8R8G8B8:
-            return Uint8Array.from([b, g, r, a]);
-        case D3DFMT.R5G6B5:
-            return word(((r >>> 3) << 11) | ((g >>> 2) << 5) | (b >>> 3));
-        case D3DFMT.X1R5G5B5:
-        case D3DFMT.A1R5G5B5:
-            return word(((a >>> 7) << 15) | ((r >>> 3) << 10) | ((g >>> 3) << 5) | (b >>> 3));
-        case D3DFMT.A4R4G4B4:
-        case D3DFMT.X4R4G4B4:
-            return word(((a >>> 4) << 12) | ((r >>> 4) << 8) | ((g >>> 4) << 4) | (b >>> 4));
-        case D3DFMT.A8:
-            return Uint8Array.from([a]);
-        // Luminance is the colour: the red byte stands in for it, the same
-        // way a sample replicates it into the channels it fills.
-        case D3DFMT.L8:
-            return Uint8Array.from([r]);
-        case D3DFMT.A8L8:
-            return Uint8Array.from([r, a]);
-        case D3DFMT.A4L4:
-            return Uint8Array.from([((a >>> 4) << 4) | (r >>> 4)]);
-        default:
-            return Uint8Array.from([b, g, r, a]);
-    }
 }
 
 /**

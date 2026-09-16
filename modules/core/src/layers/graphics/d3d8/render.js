@@ -38,7 +38,8 @@
 import {
     COLORWRITEENABLE_ALPHA, COORD_SET_MASK, D3DBLEND, D3DCLEAR, D3DCMP, D3DCULL, D3DFMT,
     D3DFMT_INDEX, D3DFOG, D3DLOCK, D3DPT, D3DRS, D3DTA, D3DTADDRESS, D3DTEXF, D3DTOP, D3DTS,
-    D3DTSS, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed, surfaceBytes,
+    D3DTSS, D3DUSAGE, D3DZB, D3D_OK, FORMAT_INFO, argumentsRead, dwordToFloat, isCompressed,
+    surfaceBytes,
 } from './constants.js';
 import { FVF, decodeFvf } from '../webgpu/internal/vertexformat.js';
 import { levelExtent } from '../d3d9/resources.js';
@@ -1398,6 +1399,15 @@ export function createRenderer(options){
 
     /** @type {WeakMap<object, any>} d3d8 surface -> backend surface */
     const surfaces = new WeakMap();
+    /**
+     * Render targets that are not texture levels whose guest bytes are newer
+     * than the GPU's -- written through a lock, or by a move in guest memory
+     * that the caller makes after the call that marked them. Flushed at the
+     * surface's next use on the GPU, as a texture level's dirty levels are.
+     *
+     * @type {WeakSet<object>}
+     */
+    const dirtyTargets = new WeakSet();
     /** @type {WeakMap<object, any>} d3d8 buffer -> { gpu, held } */
     const buffers = new WeakMap();
     /** @type {WeakMap<object, any>} d3d8 texture -> { gpu, dirty, ... } */
@@ -2492,24 +2502,136 @@ export function createRenderer(options){
         }
     };
 
-    /** @param {any} surface a d3d8 surface */
+    /**
+     * The one backend texture behind a d3d8 surface, made on first use.
+     *
+     * A texture's level is a view of the texture's own backend texture: a
+     * program draws into `GetSurfaceLevel(n)` and samples the texture, and
+     * both have to name the same pixels. Whatever the surface is, its guest
+     * bytes are uploaded first if they are newer than what the GPU holds.
+     *
+     * @param {any} surface a d3d8 surface
+     */
     const surfaceFor = surface=>{
-        const existing = surfaces.get(surface);
-        if (existing)
+        const record = textures.get(surface);
+        if (record)
         {
-            return existing;
+            uploadIfDirty(record.texture);
+            const level = surfaceLevels.get(surface) ?? 0;
+            return level === 0 ? record.gpu : levelSurfaceOf(record, level);
         }
         const desc = describe(surface);
-        const format = gpuFormatOf(desc.Format);
-        const made = backend.createSurface({
-            width: desc.Width,
-            height: desc.Height,
-            format,
-            label: FORMAT_INFO[desc.Format].depth ? 'depth' : 'target',
-            usage: FORMAT_INFO[desc.Format].depth ? TextureUsage.RENDER_ATTACHMENT : undefined,
-        });
-        surfaces.set(surface, made);
+        let made = surfaces.get(surface);
+        if (!made)
+        {
+            const depth = FORMAT_INFO[desc.Format].depth;
+            made = backend.createSurface({
+                width: desc.Width,
+                height: desc.Height,
+                format: gpuFormatOf(desc.Format),
+                label: depth ? 'depth' : 'target',
+                // A colour target is copied into as well as out of: a program
+                // that blits a decoded frame onto its target, or locks the
+                // target and writes it, puts bytes into it that a draw never
+                // did.
+                usage: depth
+                    ? TextureUsage.RENDER_ATTACHMENT
+                    : TextureUsage.RENDER_ATTACHMENT | TextureUsage.TEXTURE_BINDING
+                        | TextureUsage.COPY_SRC | TextureUsage.COPY_DST,
+            });
+            surfaces.set(surface, made);
+        }
+        if (dirtyTargets.delete(surface))
+        {
+            const bytes = readMemory(surface.base,
+                surfaceBytes(desc.Format, desc.Width, desc.Height));
+            uploadTexels(made, {
+                format: made.format,
+                mipLevel: 0,
+                width: desc.Width,
+                height: desc.Height,
+                texels: isCompressed(desc.Format)
+                    ? bytes
+                    : expandTexels(desc.Format, bytes, desc.Width * desc.Height),
+            }, true);
+        }
         return made;
+    };
+
+    /**
+     * A level above the top as a target: the same backend texture through a
+     * view of that level alone.
+     *
+     * @param {any} record @param {number} level
+     */
+    const levelSurfaceOf = (record, level)=>{
+        const views = record.levelSurfaces ??= new Map();
+        let made = views.get(level);
+        if (!made)
+        {
+            const label = `texture:${record.id}:${level}`;
+            made = {
+                texture: record.gpu.texture,
+                view: record.gpu.texture.createView({
+                    label, dimension: '2d', baseMipLevel: level, mipLevelCount: 1,
+                }),
+                width: levelExtent(record.width, level),
+                height: levelExtent(record.height, level),
+                format: record.gpu.format,
+                mipLevelCount: 1,
+                layers: 1,
+                label,
+                mipLevel: level,
+            };
+            views.set(level, made);
+        }
+        return made;
+    };
+
+    /**
+     * Whether a surface's pixels are the GPU's to give: a render target, or a
+     * level of a texture, which has a backend texture whichever way it is
+     * reached. An offscreen plain surface lives in guest memory and nowhere
+     * else, and a depth surface is never copied.
+     *
+     * @param {any} surface a d3d8 surface
+     */
+    const onGpu = surface=>{
+        const desc = describe(surface);
+        return !FORMAT_INFO[desc.Format].depth
+            && (textures.has(surface) || (desc.Usage & D3DUSAGE.RENDERTARGET) !== 0);
+    };
+
+    /**
+     * One level's texels onto the GPU.
+     *
+     * A level only the guest writes goes straight to the queue, which orders
+     * it before the frame's command buffer: enough, and the cheapest path. A
+     * level the GPU also writes -- a render-target texture, a level a copy
+     * has landed in -- needs its upload in command order, or a frame that
+     * clears the level and then blits into it would be replayed as the blit
+     * and then the clear; that upload is a frame command, replayed through
+     * the staged path on the frame's own encoder.
+     *
+     * @param {any} surface a backend surface
+     * @param {{ format: string, mipLevel: number, width: number, height: number,
+     *           texels: Uint8Array }} upload
+     * @param {boolean} ordered
+     */
+    const uploadTexels = (surface, upload, ordered)=>{
+        if (ordered)
+        {
+            ensureFrame().commands.push({ kind: 'upload', surface, ...upload });
+            return;
+        }
+        backend.uploadTexture({
+            texture: surface.texture,
+            format: upload.format,
+            mipLevel: upload.mipLevel,
+            width: upload.width,
+            height: upload.height,
+            data: upload.texels,
+        });
     };
 
     /** @param {any} buffer a d3d8 vertex or index buffer */
@@ -2653,11 +2775,13 @@ export function createRenderer(options){
                 format: gpuFormatOf(record.format),
                 mipLevelCount: record.levels,
                 label: 'texture',
-                // A dumping run reads these back to compare what the device
-                // holds against what was handed to it, which is the one link
-                // in the upload that reading the source cannot check.
+                // Copied out of as well as into: a dumping run reads a
+                // texture back to compare what the device holds against what
+                // was handed to it, and a program copies a texture level into
+                // a render target. A render-target texture is drawn into too.
                 usage: TextureUsage.TEXTURE_BINDING | TextureUsage.COPY_DST
-                    | (dumpDraws ? TextureUsage.COPY_SRC : 0),
+                    | TextureUsage.COPY_SRC
+                    | (record.ordered ? TextureUsage.RENDER_ATTACHMENT : 0),
             });
         }
         if (record.dirtyLevels.size > 0)
@@ -2686,14 +2810,9 @@ export function createRenderer(options){
                 const texels = isCompressed(record.format)
                     ? bytes
                     : expandTexels(record.format, bytes, width * height);
-                backend.uploadTexture({
-                    texture: record.gpu.texture,
-                    format: gpuFormat,
-                    mipLevel: level,
-                    width,
-                    height,
-                    data: texels,
-                });
+                uploadTexels(record.gpu,
+                    { format: gpuFormat, mipLevel: level, width, height, texels },
+                    record.ordered);
                 // Which levels the program has written, and what its smallest
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
@@ -3521,12 +3640,18 @@ export function createRenderer(options){
          * next draw that samples it.
          *
          * @param {any} texture
-         * @param {{ width: number, height: number, format: number, levels?: number }} desc
+         * @param {{ width: number, height: number, format: number, levels?: number,
+         *           usage?: number }} desc
          */
         trackTexture(texture, desc){
             const levels = desc.levels ?? 1;
             const entry = {
-                gpu: null, dirty: true, base: 0, levels,
+                gpu: null, dirty: true, base: 0, levels, texture,
+                // A render-target texture is written by the GPU as well as
+                // by the guest, so its uploads have to keep their place in
+                // the frame; see `uploadTexels`. A copy landing in a plain
+                // texture turns this on too.
+                ordered: ((desc.usage ?? 0) & D3DUSAGE.RENDERTARGET) !== 0,
                 // Every level, until each has been uploaded once: a program
                 // fills the chain it asked for, and a chain sampled with a
                 // level missing shows the gap at the distance that level
@@ -3613,7 +3738,82 @@ export function createRenderer(options){
                 tracked.dirty = true;
                 tracked.soil++;
                 contentVersion++;
+                return;
             }
+            // A render target that is not a texture level: its bytes go up
+            // at its next use on the GPU, in the order of the frame. A plain
+            // surface has no GPU copy to bring up to date.
+            const desc = describe(resource);
+            if ((desc.Usage & D3DUSAGE.RENDERTARGET) !== 0 && !FORMAT_INFO[desc.Format].depth)
+            {
+                dirtyTargets.add(resource);
+            }
+        },
+
+        /**
+         * A rectangle of one surface into another, on the GPU, when both live
+         * there: a render target's pixels are the GPU's and nothing else has
+         * them. Answers false when the copy is not one this can make -- a
+         * plain surface on either side, a depth format, two formats the GPU
+         * stores differently, or one texture on both sides -- and the caller
+         * then moves guest bytes as before.
+         *
+         * @param {any} source
+         * @param {{ left: number, top: number, right: number, bottom: number }} rect
+         * @param {any} destination @param {{ x: number, y: number }} point
+         * @returns {boolean}
+         */
+        copySurface(source, rect, destination, point){
+            if (!onGpu(source) || !onGpu(destination))
+            {
+                return false;
+            }
+            const from = surfaceFor(source);
+            const into = surfaceFor(destination);
+            if (from.format !== into.format || from.texture === into.texture)
+            {
+                return false;
+            }
+            const tracked = textures.get(destination);
+            if (tracked)
+            {
+                // The GPU has written this texture now; its uploads from
+                // here on keep their place in the frame.
+                tracked.ordered = true;
+            }
+            ensureFrame().commands.push({
+                kind: 'copy',
+                source: from,
+                destination: into,
+                sourceOrigin: { x: rect.left, y: rect.top },
+                destinationOrigin: { x: point.x, y: point.y },
+                width: rect.right - rect.left,
+                height: rect.bottom - rect.top,
+            });
+            return true;
+        },
+
+        /**
+         * A surface's pixels as the GPU holds them at this point of the
+         * frame, for a program that reads its target back.
+         *
+         * What has been recorded so far is replayed and submitted without a
+         * present, and the surface copied out after it: the one case where a
+         * frame reaches the queue in more than one piece, and the program
+         * asked for exactly that. Rows are four bytes a pixel in the
+         * surface's GPU format, blue first.
+         *
+         * @param {any} surface a d3d8 surface
+         * @returns {Promise<{ width: number, height: number, data: Uint8Array }>}
+         */
+        readSurface(surface){
+            const gpu = surfaceFor(surface);
+            const recorded = ensureFrame();
+            recording = null;
+            recorded.dump = dump;
+            const read = chain.then(()=>replay(recorded, null, gpu));
+            chain = read.then(()=>undefined, failure);
+            return /** @type {Promise<any>} */ (read);
         },
 
         /**
@@ -3947,6 +4147,9 @@ export function createRenderer(options){
          * @returns {Promise<void>} settled when this frame has been submitted
          */
         present(model){
+            // Before the frame closes: a back buffer the program wrote by
+            // hand owes its upload to this frame, not the next.
+            const surface = surfaceFor(model.backBuffer);
             const recorded = ensureFrame();
             recording = null;
             // Before the replay chain, so a rename in the next frame's
@@ -3958,7 +4161,6 @@ export function createRenderer(options){
             lastDump = dump;
             dump = [];
             kept = 0;
-            const surface = surfaceFor(model.backBuffer);
             frameHistory.push({
                 index: counters.frames,
                 draws: frameStats.draws,
@@ -4059,18 +4261,26 @@ export function createRenderer(options){
 
     /**
      * @param {any} recorded
-     * @param {any} surface what to present
+     * @param {any} surface what to present, or null for a flush
+     * @param {any} [snapshot] a backend surface to read back after the replay
+     * @returns {Promise<any>} the snapshot's pixels, when one was asked for
      */
-    async function replay(recorded, surface){
+    async function replay(recorded, surface, snapshot = null){
         const pipelines = await Promise.allSettled(recorded.pipelines);
         const frame = backend.beginFrame();
         /** @type {any[]} */
         const checks = [];
         /** @type {(() => Promise<Uint8Array[]>) | null} */
         let read = null;
+        /** @type {(() => Promise<any>) | null} */
+        let shot = null;
         try
         {
             replayInto(frame, pipelines, recorded, surface);
+            if (snapshot)
+            {
+                shot = frame.snapshot(snapshot);
+            }
             // After the draws, so the copies see the buffers as the draws did:
             // a flush at the end of the frame lands before the whole command
             // buffer, draws and copies alike.
@@ -4122,6 +4332,7 @@ export function createRenderer(options){
             frame.end();
         }
         lastFrame = recorded.commands;
+        const pixels = shot ? await shot() : undefined;
         if (read)
         {
             const held = await read();
@@ -4163,6 +4374,7 @@ export function createRenderer(options){
                                 : ''))).join('');
             }
         }
+        return pixels;
     }
 
     /**
@@ -4215,6 +4427,30 @@ export function createRenderer(options){
         let viewport = null;
         /** @type {any} */
         let scissor = null;
+        // An upload or a copy closes the pass it lands in; the pass is
+        // reopened, loading what is there, before the next command that
+        // needs one.
+        const reopen = ()=>{
+            if (pass || !opened)
+            {
+                return;
+            }
+            pass = frame.beginPass({
+                target: opened.target,
+                clear: false,
+                depthStencilAttachment: opened.depth
+                    ? depthAttachment({ depth: opened.depth })
+                    : undefined,
+            });
+            if (viewport)
+            {
+                pass.setViewport(viewport);
+            }
+            if (scissor)
+            {
+                pass.setScissor(scissor);
+            }
+        };
         for (const command of recorded.commands)
         {
             if (command.kind === 'pass')
@@ -4230,6 +4466,33 @@ export function createRenderer(options){
                 });
                 continue;
             }
+            if (command.kind === 'upload')
+            {
+                backend.uploadTexture({
+                    texture: command.surface.texture,
+                    format: command.format,
+                    mipLevel: command.mipLevel,
+                    width: command.width,
+                    height: command.height,
+                    data: command.texels,
+                    staging: true,
+                });
+                pass = null;
+                continue;
+            }
+            if (command.kind === 'copy')
+            {
+                frame.copyTexture(
+                    { texture: command.source.texture, mipLevel: command.source.mipLevel ?? 0,
+                        origin: command.sourceOrigin },
+                    { texture: command.destination.texture,
+                        mipLevel: command.destination.mipLevel ?? 0,
+                        origin: command.destinationOrigin },
+                    { width: command.width, height: command.height, depthOrArrayLayers: 1 });
+                pass = null;
+                continue;
+            }
+            reopen();
             if (command.kind === 'viewport')
             {
                 viewport = command.rect;
@@ -4578,7 +4841,10 @@ export function createRenderer(options){
                 }
             }
         }
-        frame.present(surface);
+        if (surface)
+        {
+            frame.present(surface);
+        }
     }
 
 

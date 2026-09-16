@@ -128,6 +128,20 @@ function machine(){
             return entry.fn.handler([pointer, ...args]) >>> 0;
         },
 
+        /**
+         * The slot's answer as the bridge sees it: a number, or the promise
+         * it suspends the caller on.
+         *
+         * @param {number} pointer @param {number} index @param {number[]} args
+         * @returns {number | Promise<number>}
+         */
+        callRaw(pointer, index, args = []){
+            const table = memory.readU32(pointer);
+            const entry = registered.get(memory.readU32(table + index * 4));
+            assert.ok(entry, `slot ${index} has an implementation`);
+            return entry.fn.handler([pointer, ...args]);
+        },
+
         /** @param {number} pointer @param {number} index */
         argBytesOf(pointer, index){
             const table = memory.readU32(pointer);
@@ -686,6 +700,37 @@ test('the viewport, scissor and the draws cross with their arguments in this ver
         assert.equal(h.device(device, 'SetSoftwareVertexProcessing', [0]), D3D_OK);
         assert.equal(h.device(device, 'GetSoftwareVertexProcessing', []), 0);
         assert.equal(h.device(device, 'SetDialogBoxMode', [1]), D3D_OK);
+        assert.equal(h.release(device), 0);
+        h.release(root);
+    });
+
+test('a lock that settles later still writes the locked rectangle, and the caller waits',
+    async()=>{
+        // A render target's lock reads the GPU back first and answers with a
+        // promise; the bridge suspends the caller on it. The D3DLOCKED_RECT
+        // has to be written when the promise settles, not skipped because the
+        // answer was not yet a number.
+        const h = seamed();
+        const root = h.create();
+        const { device } = h.createDevice(root);
+        const out = 0x3000;
+        assert.equal(h.device(device, 'GetBackBuffer', [0, 0, 0, out]), D3D_OK);
+        const back = h.box.memory.readU32(out);
+        const surface = h.publisher.objectAt(back);
+        surface.LockRect = (/** @type {any} */ locked)=>{
+            locked.Pitch = 256;
+            locked.pBits = 0x12340;
+            return Promise.resolve(D3D_OK);
+        };
+        const locked = 0x3200;
+        const answer = h.box.callRaw(back, slot(IDIRECT3DSURFACE9_SLOTS, 'LockRect'),
+            [locked, 0, 0]);
+        assert.ok(answer instanceof Promise, 'the slot hands the promise on');
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), 0, 'nothing yet');
+        assert.equal(await answer, D3D_OK);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.Pitch), 256);
+        assert.equal(h.fields.readU32(locked + D3DLOCKED_RECT.pBits), 0x12340);
+        h.release(back);
         assert.equal(h.release(device), 0);
         h.release(root);
     });

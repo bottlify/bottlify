@@ -33,7 +33,8 @@
  */
 
 import {
-    D3DERR_INVALIDCALL, D3DRTYPE, D3D_OK, offsetOfRect, surfaceBytes, surfacePitch,
+    D3DERR_INVALIDCALL, D3DFMT, D3DRTYPE, D3D_OK, FORMAT_INFO, offsetOfRect, surfaceBytes,
+    surfacePitch,
 } from './constants.js';
 import { SURFACE_TYPE, surfaceIsLockable } from './validity.js';
 
@@ -145,7 +146,10 @@ export function createReferenceCount(options = {}){
  * @property {number} refCount
  * @property {() => number} addRef
  * @property {() => number} release
- * @property {(out: LockedRect, rect?: LockRectangle | null, flags?: number) => number} LockRect
+ * @property {(out: LockedRect, rect?: LockRectangle | null, flags?: number)
+ *            => number | Promise<number>} LockRect
+ *           A promise when the surface is a render target whose pixels are
+ *           read back first; the bridge suspends the caller on it.
  * @property {() => number} UnlockRect
  * @property {(out: { desc?: SurfaceDesc }) => number} GetDesc
  * @property {number} lockFlags   The flags of the lock in force, if one is.
@@ -171,9 +175,21 @@ export function createReferenceCount(options = {}){
  * @property {number} [resourceType]  D3DRTYPE_SURFACE unless a texture level says otherwise.
  * @property {((api: string, detail: string) => void) | null} [divergence]
  *           Where "this call succeeded and did not do all of what it promises"
- *           goes. A render target lives on the GPU and its bytes are not read
- *           back into the guest's copy, so a lock of one hands out somewhere to
- *           read that holds something other than what was drawn.
+ *           goes. A render target lives on the GPU; without `pixels` its bytes
+ *           are not read back into the guest's copy, so a lock of one hands out
+ *           somewhere to read that holds something other than what was drawn.
+ * @property {TargetPixels} [pixels]
+ *           How a render target's pixels cross between the GPU and its guest
+ *           bytes. Given, a lock reads them back first and the caller waits;
+ *           an unlock after a write hands the bytes over.
+ */
+
+/**
+ * @typedef {Object} TargetPixels
+ * @property {(surface: Surface) => Promise<void>} readBack
+ *           Settles once the surface's guest bytes hold what the GPU holds.
+ * @property {(surface: Surface) => void} written
+ *           The guest bytes are newer than the GPU's now.
  */
 
 /**
@@ -206,7 +222,8 @@ export function createSurface(options){
         Height: options.height,
     };
 
-    return {
+    /** @type {Surface} */
+    const self = {
         base: options.base,
         /** Which of the five shapes this is: what a copy or a fill may do depends on it. */
         kind: options.type,
@@ -258,15 +275,18 @@ export function createSurface(options){
             // Said apart because a read-only lock discards nothing, and warning
             // that it does would be a false report of the more serious fault. A
             // texture level is neither: its unlock uploads what was written.
-            if (options.type === SURFACE_TYPE.RENDER_TARGET
-                || options.type === SURFACE_TYPE.DEPTH_STENCIL)
+            const target = options.type === SURFACE_TYPE.RENDER_TARGET;
+            if (target || options.type === SURFACE_TYPE.DEPTH_STENCIL)
             {
-                options.divergence?.('Direct3D', (flags & D3DLOCK_READONLY) !== 0
-                    ? `a read of a ${options.type} surface is accepted and hands out guest`
-                        + ' memory that the rendered pixels are never copied into'
-                    : `a write to a ${options.type} surface is accepted and goes into guest`
-                        + ' memory that the unlock never copies to the surface, so what the'
-                        + ' program draws by hand is discarded');
+                if (!(target && options.pixels))
+                {
+                    options.divergence?.('Direct3D', (flags & D3DLOCK_READONLY) !== 0
+                        ? `a read of a ${options.type} surface is accepted and hands out guest`
+                            + ' memory that the rendered pixels are never copied into'
+                        : `a write to a ${options.type} surface is accepted and goes into guest`
+                            + ' memory that the unlock never copies to the surface, so what the'
+                            + ' program draws by hand is discarded');
+                }
             }
             locked = true;
             out.Pitch = pitch;
@@ -275,6 +295,12 @@ export function createSurface(options){
             // The flags decide whether the backend may rename the storage or
             // must write into it; whoever consumes this must see them.
             lockFlags = flags;
+            if (target && options.pixels)
+            {
+                // The pointer is handed out only once the bytes behind it
+                // are the target's pixels; the caller is suspended until then.
+                return options.pixels.readBack(self).then(()=>D3D_OK);
+            }
             return D3D_OK;
         },
 
@@ -284,6 +310,11 @@ export function createSurface(options){
                 return forgivesDoubleUnlock ? D3D_OK : D3DERR_INVALIDCALL;
             }
             locked = false;
+            if (options.type === SURFACE_TYPE.RENDER_TARGET && options.pixels
+                && (lockFlags & D3DLOCK_READONLY) === 0)
+            {
+                options.pixels.written(self);
+            }
             return D3D_OK;
         },
 
@@ -292,6 +323,82 @@ export function createSurface(options){
             return lockFlags;
         },
     };
+    return self;
+}
+
+/**
+ * One pixel of a D3DCOLOR in a format's own layout, little-endian.
+ *
+ * @param {number} format @param {number} colour
+ * @returns {Uint8Array}
+ */
+export function packColour(format, colour){
+    const a = (colour >>> 24) & 0xff;
+    const r = (colour >>> 16) & 0xff;
+    const g = (colour >>> 8) & 0xff;
+    const b = colour & 0xff;
+    /** @param {number} bits */
+    const word = bits=>Uint8Array.from([bits & 0xff, (bits >>> 8) & 0xff]);
+    switch (format)
+    {
+        case D3DFMT.A8R8G8B8:
+        case D3DFMT.X8R8G8B8:
+            return Uint8Array.from([b, g, r, a]);
+        case D3DFMT.R5G6B5:
+            return word(((r >>> 3) << 11) | ((g >>> 2) << 5) | (b >>> 3));
+        case D3DFMT.X1R5G5B5:
+        case D3DFMT.A1R5G5B5:
+            return word(((a >>> 7) << 15) | ((r >>> 3) << 10) | ((g >>> 3) << 5) | (b >>> 3));
+        case D3DFMT.A4R4G4B4:
+        case D3DFMT.X4R4G4B4:
+            return word(((a >>> 4) << 12) | ((r >>> 4) << 8) | ((g >>> 4) << 4) | (b >>> 4));
+        case D3DFMT.A8:
+            return Uint8Array.from([a]);
+        // Luminance is the colour: the red byte stands in for it, the same
+        // way a sample replicates it into the channels it fills.
+        case D3DFMT.L8:
+            return Uint8Array.from([r]);
+        case D3DFMT.A8L8:
+            return Uint8Array.from([r, a]);
+        case D3DFMT.A4L4:
+            return Uint8Array.from([((a >>> 4) << 4) | (r >>> 4)]);
+        default:
+            return Uint8Array.from([b, g, r, a]);
+    }
+}
+
+/**
+ * Pixels read back off the GPU -- four bytes each, blue first, the surface's
+ * whole extent -- into the surface's guest bytes, packed the way its format
+ * lays a pixel out.
+ *
+ * @param {Surface} surface
+ * @param {Uint8Array} pixels
+ * @param {(address: number, bytes: Uint8Array) => void} writeMemory
+ */
+export function writePixels(surface, pixels, writeMemory){
+    /** @type {{ desc?: SurfaceDesc }} */
+    const out = {};
+    surface.GetDesc(out);
+    const desc = /** @type {SurfaceDesc} */ (out.desc);
+    const bytesPerPixel = FORMAT_INFO[desc.Format].bytesPerPixel;
+    const pitch = surfacePitch(desc.Format, desc.Width);
+    const row = new Uint8Array(desc.Width * bytesPerPixel);
+    for (let y = 0; y < desc.Height; y++)
+    {
+        for (let x = 0; x < desc.Width; x++)
+        {
+            const at = (y * desc.Width + x) * 4;
+            if (bytesPerPixel === 4)
+            {
+                row.set(pixels.subarray(at, at + 4), x * 4);
+                continue;
+            }
+            row.set(packColour(desc.Format, ((pixels[at + 3] << 24) | (pixels[at + 2] << 16)
+                | (pixels[at + 1] << 8) | pixels[at]) >>> 0), x * bytesPerPixel);
+        }
+        writeMemory(surface.base + y * pitch, row);
+    }
 }
 
 /**

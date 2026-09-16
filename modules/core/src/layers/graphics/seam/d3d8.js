@@ -398,15 +398,21 @@ export function createDirect3D8Seam(
         LockRect: (surface, [out, rect, flags])=>{
             /** @type {any} */
             const locked = {};
+            /** @param {number} hr */
+            const answer = hr=>{
+                if (hr === D3D_OK && (out >>> 0) !== 0)
+                {
+                    fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
+                        Pitch: locked.Pitch ?? 0,
+                        pBits: locked.pBits ?? 0,
+                    });
+                }
+                return hr;
+            };
+            // A render target's lock settles once its pixels are back in
+            // guest memory; the caller waits, and reads the rectangle then.
             const hr = surface.LockRect(locked, readRect(rect), flags >>> 0);
-            if (hr === D3D_OK && (out >>> 0) !== 0)
-            {
-                fields.writeStruct(out >>> 0, D3DLOCKED_RECT, {
-                    Pitch: locked.Pitch ?? 0,
-                    pBits: locked.pBits ?? 0,
-                });
-            }
-            return hr;
+            return hr instanceof Promise ? hr.then(answer) : answer(hr);
         },
         /** @param {any} surface */
         UnlockRect: surface=>surface.UnlockRect(),

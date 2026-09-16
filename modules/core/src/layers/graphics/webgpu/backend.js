@@ -667,7 +667,8 @@ export function createBackend(options){
                         size: bytesPerRow * surface.height,
                         usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST,
                     });
-                    encoder.copyTextureToBuffer({ texture: surface.texture },
+                    encoder.copyTextureToBuffer(
+                        { texture: surface.texture, mipLevel: surface.mipLevel ?? 0 },
                         { buffer: staging, bytesPerRow, rowsPerImage: surface.height },
                         { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
                     return async()=>{

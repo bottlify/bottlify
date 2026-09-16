@@ -54,7 +54,9 @@ import {
     SURFACE_TYPE, copyRectsResult, createResult, imageSurfaceCreateResult,
     reportedBackBufferCount, targetPairResult, validatePresentParameters,
 } from './validity.js';
-import { createReferenceCount, createSurface, createTexture } from '../d3d9/resources.js';
+import {
+    createReferenceCount, createSurface, createTexture, writePixels,
+} from '../d3d9/resources.js';
 import { DEVICE_STATE, LIGHT_ENABLED } from '../d3d9/device.js';
 import { fullTarget, viewportState } from '../webgpu/internal/viewport.js';
 
@@ -179,6 +181,9 @@ function isTransformType(type){
  * @property {(address: number, length: number)=>Uint8Array} [readMemory]
  * @property {(address: number, length: number)=>Uint8Array} [windowMemory]
  *     The same bytes without the copy, for a reader done with them at once.
+ * @property {(address: number, bytes: Uint8Array)=>void} [writeMemory]
+ *     How a lock of a render target brings the drawn pixels into the guest's
+ *     bytes. Absent, the lock hands out the bytes as they are and says so.
  * @property {(descriptor: any)=>any} [createSampler]
  * @property {(bytes: number)=>number} [allocate]
  *     Guest memory for a resource's bytes. A lock hands the program an address
@@ -598,6 +603,28 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
         : null;
 
     /**
+     * How a lockable render target reaches its pixels: read back off the GPU
+     * before the lock, uploaded after the unlock. Absent when the renderer
+     * cannot do either, and the lock then says so as a divergence.
+     *
+     * @returns {import('../d3d9/resources.js').TargetPixels | undefined}
+     */
+    const targetPixels = ()=>{
+        const write = services.writeMemory;
+        if (!renderer?.readSurface || !write)
+        {
+            return undefined;
+        }
+        return {
+            readBack: surface=>renderer.readSurface(surface).then(
+                (/** @type {{ data: Uint8Array }} */ pixels)=>{
+                    writePixels(surface, pixels.data, write);
+                }),
+            written: surface=>renderer.markDirty(surface),
+        };
+    };
+
+    /**
      * What stops a Reset. A default-pool resource the program still holds, or
      * a reference it still holds on one of the device's own surfaces -- either
      * one means storage the device cannot rebuild yet.
@@ -733,6 +760,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 lockable: ((presentParameters.flags ?? 0)
                     & D3DPRESENTFLAG.LOCKABLE_BACKBUFFER) !== 0,
                 divergence: services.divergence ?? null,
+                pixels: targetPixels(),
                 // The surface's own size, like every other surface's. A fixed
                 // megabyte covered nothing above 512x512 at four bytes a pixel:
                 // a lock hands out this address and the program reads and writes
@@ -2200,7 +2228,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             });
             if (renderer)
             {
-                renderer.trackTexture(texture, { width, height, format, levels: chain });
+                renderer.trackTexture(texture, { width, height, format, levels: chain, usage });
             }
             out.texture = texture;
             return D3D_OK;
@@ -2258,6 +2286,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
                 usage: D3DUSAGE.RENDERTARGET,
                 divergence: services.divergence ?? null,
                 lockable,
+                pixels: targetPixels(),
                 base: allocate(surfaceBytes(format, width, height)),
                 count: explicitCount(D3DPOOL.DEFAULT),
             });
@@ -2348,7 +2377,9 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
          * A blit between two surfaces, which D3D9 does not have. Neither side
          * may be a depth stencil, and it cannot stretch.
          *
-         * The bytes are not moved here. Both surfaces live in the guest's own
+         * Between two surfaces that live on the GPU -- a render target, a
+         * texture level -- the copy is made there, and no bytes move. Otherwise
+         * the bytes are not moved here: both surfaces live in the guest's own
          * memory and this file cannot reach it, so what a successful call hands
          * back is where they are and how they are laid out; whoever can read
          * that memory does the moving. The destination is marked for upload
@@ -2380,6 +2411,17 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             if (hr !== D3D_OK)
             {
                 return hr;
+            }
+            const whole = { left: 0, top: 0, right: from.Width, bottom: from.Height };
+            const copies = chosen && targets
+                ? chosen.map((rect, index)=>({ rect, at: targets[index] }))
+                : [{ rect: whole, at: { x: 0, y: 0 } }];
+            if (renderer?.copySurface
+                && copies.every(copy=>
+                    renderer.copySurface(source, copy.rect, destination, copy.at)))
+            {
+                out.moves = [];
+                return D3D_OK;
             }
             const bytesPerPixel = FORMAT_INFO[from.Format].bytesPerPixel;
             out.moves = chosen && targets
