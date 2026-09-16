@@ -20,6 +20,7 @@ import {
     moduleKeyOf, relocatablePrefix, jumpBytes, clockCredit, emulatorArtifacts, heapSizeFor,
     spaceAbove,
     resourceLookup,
+    createMissingImports,
 } from './app.js';
 import { createEvents } from './events.js';
 
@@ -699,4 +700,116 @@ test('the heap reaches the end of RAM unless a size was asked for', ()=>{
     assert.equal(heapSizeFor(1024 * 1024 * 1024), 1024 * 1024 * 1024 - 0x0c000000);
     assert.equal(heapSizeFor(1024 * 1024 * 1024, 0x14000000), 0x14000000, 'an asked-for size wins');
     assert.throws(()=>heapSizeFor(64 * 1024 * 1024), /less than the heap's base/);
+});
+
+/**
+ * The smallest machine `createMissingImports` needs: a register that keeps the
+ * handler it was given, the real event registry, and a journal that remembers
+ * every write. `fault` throws so a test that reaches it says so.
+ *
+ * @param {Partial<{ own: boolean, returns: boolean }>} [what]
+ */
+function missingImportsHarness(what = {}){
+    const events = createEvents();
+    /** @type {any[]} */
+    const announced = [];
+    events.on('unimplemented', e=>announced.push(e));
+    /** @type {any[][]} */
+    const written = [];
+    /** @type {(...args: any[]) => void} */
+    const write = (...args)=>{
+        written.push(args);
+    };
+    const journal = { write };
+    /** @type {Map<string, (args: number[], frame: any) => number>} */
+    const handlers = new Map();
+    let base = 0x1000;
+    const missing = createMissingImports({
+        register: (/** @type {string} */ name, /** @type {any} */ spec)=>{
+            handlers.set(name, spec.handler);
+            base += 0x10;
+            return base;
+        },
+        events,
+        journal,
+        classify: ()=>({ own: what.own ?? false, returns: what.returns ?? true, argBytes: 0 }),
+        fault: ()=>{
+            throw new Error('the fault branch was taken');
+        },
+    });
+    return { events, announced, written, handlers, missing };
+}
+
+test('a missing import called a thousand times is announced once and counted a thousand', ()=>{
+    // The observation this exists for: a wide-character classifier called per
+    // character raised the event on every call, tens of thousands of a second,
+    // each a structured clone and a wake-up through the port to the page, until
+    // the page's queue filled and the program froze. The page needs to be told
+    // once that the import is missing; every call after that is a number.
+    const { announced, written, handlers, missing } = missingImportsHarness();
+    missing.bind('KERNEL32.dll', 'iswspace', null);
+    const handler = handlers.get('KERNEL32.dll!iswspace');
+    assert.ok(handler, 'the import was bound to a stub');
+
+    for (let call = 0; call < 1000; call++)
+    {
+        assert.equal(handler([], { callerStack: 0, hostReturn: 0 }), 0,
+            'the returning stub answers zero');
+    }
+
+    assert.deepEqual(announced, [
+        { import: 'KERNEL32.dll!iswspace', origin: 'system', count: 1 },
+    ], 'one event, naming the import once');
+    assert.equal(missing.calls.get('KERNEL32.dll!iswspace'), 1000,
+        'and the count diagnostics reports');
+    assert.equal(written.length, 1000,
+        'the journal is a ring that never waits, so it keeps a record a call');
+    assert.deepEqual(written[0], ['warn', 'unimplemented', '{0}',
+        'import=KERNEL32.dll!iswspace origin=system count=1']);
+    assert.deepEqual(written.at(-1), ['warn', 'unimplemented', '{0}',
+        'import=KERNEL32.dll!iswspace origin=system count=1000']);
+});
+
+test('two missing imports are two announcements, each counted on its own', ()=>{
+    const { announced, handlers, missing } = missingImportsHarness();
+    missing.bind('KERNEL32.dll', 'iswspace', null);
+    missing.bind('USER32.dll', 'NoSuchThing', null);
+
+    /** @param {string} label */
+    const call = label=>{
+        const handler = handlers.get(label);
+        assert.ok(handler, label);
+        handler([], {});
+    };
+    call('KERNEL32.dll!iswspace');
+    call('KERNEL32.dll!iswspace');
+    call('USER32.dll!NoSuchThing');
+
+    assert.deepEqual(announced, [
+        { import: 'KERNEL32.dll!iswspace', origin: 'system', count: 1 },
+        { import: 'USER32.dll!NoSuchThing', origin: 'system', count: 1 },
+    ]);
+    assert.equal(missing.calls.get('KERNEL32.dll!iswspace'), 2);
+    assert.equal(missing.calls.get('USER32.dll!NoSuchThing'), 1);
+});
+
+test('a missing import is bound once, however often it is asked for', ()=>{
+    const { handlers, missing } = missingImportsHarness();
+    const first = missing.bind('KERNEL32.dll', 'iswspace', null);
+    const again = missing.bind('KERNEL32.dll', 'iswspace', null);
+
+    assert.equal(first, again);
+    assert.equal(handlers.size, 1);
+});
+
+test("a name a library the program brought does not export is the program's own", ()=>{
+    const { announced, handlers, missing } = missingImportsHarness({ own: true });
+    missing.bind('Game.dll', 'MissingExport', null);
+    const handler = handlers.get('Game.dll!MissingExport');
+    assert.ok(handler, 'the import was bound to a stub');
+    handler([], {});
+
+    assert.deepEqual(announced, [
+        { import: 'Game.dll!MissingExport', origin: 'program', count: 1 },
+    ]);
 });
