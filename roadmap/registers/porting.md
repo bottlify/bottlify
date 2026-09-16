@@ -116,7 +116,7 @@ Windowing, input routing, the dialog bridge and the archive reader.
 
 - **Container formats** — the installer readers. This is what turns a purchased copy into something
   this engine can mount. *Not started.* The other route to the same place is built: `@bottlify/installer`
-  runs a distribution's own installer and keeps what it wrote (`../phases/phase-8-installers.md`).
+  runs a distribution's own installer and keeps what it wrote (`../phases-history.md` (Phase 8)).
 - **Networking** — *partly built.* The guest-side socket bridge and the relay exist
-  (`../phases/phase-9-networking.md`); the room manager, DirectPlay and `WSAAsyncSelect` do not.
+  (`../phases-history.md` (Phase 9)); the room manager, DirectPlay and `WSAAsyncSelect` do not.
 - **Gamepad support.** *Done* — keyboard, mouse and gamepad reach the guest.

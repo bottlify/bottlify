@@ -8,7 +8,7 @@
 > `modules/ui`, is outside the npm workspaces, and is gitignored — the application ships from its own
 > place, with its own assets and their own attribution. U1 through U4 are done; the session view
 > shows a real canvas rather than the placeholder §2 described, and there is an install screen §4
-> explicitly excluded (`../phases/phase-8-installers.md`, behind `allowInstall`). The decisions in
+> explicitly excluded (`../phases-history.md` (Phase 8), behind `allowInstall`). The decisions in
 > §1 held; the location row below is corrected in place, and the rest is kept as written.
 
 ## 0. What this is
