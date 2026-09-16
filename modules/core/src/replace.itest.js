@@ -301,6 +301,8 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
             assert.ok(parentDecoder, 'the parent had made a decoder to hand over');
             assert.equal(app.media.instance(), parentDecoder,
                 'the child uses the parent\'s decoder, not a new one');
+        }
+    });
 
 /** The name a single-instance mutex is probed and created under, in both processes. */
 const MUTEX_NAME = 'BottlifyReplacementInstanceMutex';
@@ -413,5 +415,3 @@ test('a mutex the parent named is ERROR_ALREADY_EXISTS when the child names it t
     assert.equal(output.join('').charCodeAt(0), ERROR_ALREADY_EXISTS,
         'the child found the name the parent registered, never closed across the handover');
 });
-        }
-    });
