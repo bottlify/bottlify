@@ -91,7 +91,8 @@ const ELEMENTS = [
 ];
 const STRIDE = 24;
 
-function harness(){
+/** @param {{ dumpDraws?: boolean }} [options] */
+function harness(options = {}){
     const gpu = createFakeDevice();
     /** @type {string[]} */
     const reports = [];
@@ -115,6 +116,7 @@ function harness(){
             return address;
         },
         divergence: (_api, detail)=>reports.push(detail),
+        dumpDraws: options.dumpDraws ?? false,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -294,6 +296,49 @@ test('a shader pair draws: layout from the declaration, modules, constants, text
         h.vb.release();
         assert.equal(h.device.release(), 0);
     });
+
+test('a programmable draw is not blind to the dump: shaders, declaration and samplers', async()=>{
+    // render.js's `--dump-draws` table used to skip every draw with
+    // `prepared.program` outright (guarded by `!prepared.program`), so a
+    // title drawing through shaders left no line in the dump at all -- the
+    // instrument measured nothing on the one path this title actually draws.
+    const h = harness({ dumpDraws: true });
+    /** @type {{ shader?: any }} */
+    const vs = {};
+    /** @type {{ shader?: any }} */
+    const ps = {};
+    assert.equal(h.device.CreateVertexShader(VERTEX_SHADER, vs), D3D_OK);
+    assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+    h.device.SetVertexShader(vs.shader);
+    h.device.SetPixelShader(ps.shader);
+    h.device.SetTexture(0, h.texture);
+
+    await h.draw();
+    assert.deepEqual(h.reports, []);
+    const dump = h.device.diagnostics().lastDump;
+    assert.equal(dump.length, 1, 'the programmable draw got its own line');
+    assert.match(dump[0], /^#0 program /);
+    assert.match(dump[0], new RegExp(`vs=${vs.shader.id} ps=${ps.shader.id}`),
+        'both shader ids, not just "a program ran"');
+    assert.match(dump[0], new RegExp(`decl=${h.declaration.id}`));
+    // The texture bound at sampler 0 is named, not reported as a placeholder:
+    // a program that samples nothing and one that samples the wrong texture
+    // read the same otherwise.
+    assert.doesNotMatch(dump[0], /#0:placeholder/);
+    assert.match(dump[0], /\[#0:t\d+:/);
+
+    h.device.SetTexture(0, null);
+    h.device.SetVertexShader(null);
+    h.device.SetPixelShader(null);
+    h.device.SetVertexDeclaration(null);
+    h.device.SetStreamSource(0, null, 0, 0);
+    vs.shader.release();
+    ps.shader.release();
+    h.texture.release();
+    h.declaration.release();
+    h.vb.release();
+    assert.equal(h.device.release(), 0);
+});
 
 test('a pixel shader over fixed-function vertices gets a vertex stage of its own', async()=>{
     const h = harness();

@@ -1959,6 +1959,32 @@ export function createRenderer(options){
     };
 
     /**
+     * The dump line for a programmable draw. Its vertices go through a
+     * vertex shader rather than the fixed-function pipeline `screenExtent`
+     * projects with, so there is no screen box to print -- what is
+     * ambiguous instead is which shaders and declaration ran, and what each
+     * sampler was bound to.
+     *
+     * @param {RenderModel} model
+     * @param {PreparedDraw} prepared
+     * @param {number} count
+     */
+    const dumpProgram = (model, prepared, count)=>{
+        const program = prepared.program;
+        const bound = program.samplerBindings.map((/** @type {any} */ binding)=>
+            `#${binding.stage}:${binding.placeholder
+                ? 'placeholder'
+                : describeTexture(binding.texture)}`).join(' ');
+        dump.push(`#${dump.length} program n=${count}`
+            + ` vs=${prepared.state.vertexShader} ps=${prepared.state.pixelShader}`
+            + ` decl=${program.declarationId}`
+            + ` target=${describeTarget(model)}`
+            + ` view=${model.viewport.rect.x},${model.viewport.rect.y}`
+            + `+${model.viewport.rect.width}x${model.viewport.rect.height}`
+            + ` [${bound}]`);
+    };
+
+    /**
      * What a draw's colour target is, and whether it is a texture the frame
      * goes on to sample. Anything but the back buffer means the frame is built
      * in more than one place, and each place is a rectangle of its own.
@@ -2946,6 +2972,8 @@ export function createRenderer(options){
         const samplerBindings = pixel.samplers.map((/** @type {any} */ entry)=>{
             const texture = model.textures.get(entry.index);
             return {
+                stage: entry.index,
+                texture,
                 view: texture ? uploadIfDirty(texture).view : placeholderView(),
                 sampler: programSamplerFor(model.stageStates(entry.index)),
                 placeholder: !texture,
@@ -2985,6 +3013,7 @@ export function createRenderer(options){
                         + `/${shapes}/${stride}`,
                     vertex, pixel, layout,
                 },
+                declarationId: program.declarationId,
                 vertexBlocks,
                 pixelBlocks,
                 samplerBindings,
@@ -3742,7 +3771,11 @@ export function createRenderer(options){
                     ? expandedGeometry(type, ascending(count), startVertex)
                     : { indices: null, count, first: startVertex }),
             });
-            if (dumpDraws && !prepared.program)
+            if (dumpDraws && prepared.program)
+            {
+                dumpProgram(model, prepared, count);
+            }
+            else if (dumpDraws)
             {
                 const vertices = readMemory(stream.buffer.base + startVertex * stream.stride,
                     count * stream.stride);
@@ -3792,7 +3825,11 @@ export function createRenderer(options){
                     first: 0,
                     baseVertex: model.baseVertexIndex,
                 });
-                if (dumpDraws && !prepared.program)
+                if (dumpDraws && prepared.program)
+                {
+                    dumpProgram(model, prepared, count);
+                }
+                else if (dumpDraws)
                 {
                     const bytes = readMemory(model.indices.base + byteOffset, count * format.bytes);
                     dumpIndexed(model, prepared, indicesFrom(bytes, format.bytes));
@@ -3807,7 +3844,11 @@ export function createRenderer(options){
                 vertices,
                 ...expandedGeometry(type, order, model.baseVertexIndex),
             });
-            if (dumpDraws && !prepared.program)
+            if (dumpDraws && prepared.program)
+            {
+                dumpProgram(model, prepared, count);
+            }
+            else if (dumpDraws)
             {
                 dumpIndexed(model, prepared, order);
             }
@@ -3834,7 +3875,11 @@ export function createRenderer(options){
                 ? expandedGeometry(type, ascending(count), 0)
                 : { indices: null, count, first: 0 };
             record(model, prepared, { vertices, ...geometry });
-            if (dumpDraws && !prepared.program)
+            if (dumpDraws && prepared.program)
+            {
+                dumpProgram(model, prepared, count);
+            }
+            else if (dumpDraws)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, count * stride), stride, null);
                 noteDumpVertices(prepared, vertexData.subarray(0, count * stride), 0, stride);
@@ -3881,7 +3926,11 @@ export function createRenderer(options){
                     }
                     : expandedGeometry(type, indices, 0)),
             });
-            if (dumpDraws && !prepared.program)
+            if (dumpDraws && prepared.program)
+            {
+                dumpProgram(model, prepared, count);
+            }
+            else if (dumpDraws)
             {
                 dumpDraw(model, prepared, vertexData.subarray(0, numVertices * stride),
                     stride, indices);
