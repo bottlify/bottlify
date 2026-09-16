@@ -224,7 +224,7 @@ test('a session arriving from outside lands on the volume the bundle is mounted 
     await source.cleanup();
 });
 
-test('what the program never read is fetched anyway, in the gaps', async()=>{
+test('what the program never read is fetched anyway, in the gaps', { timeout: 120000 }, async t=>{
     // The fixture reads save.dat and nothing else. Data\big.bin is
     // incompressible filler it never opens, so if those blocks arrive, they
     // arrived because nothing was being read rather than because something
@@ -248,20 +248,55 @@ test('what the program never read is fetched anyway, in the gaps', async()=>{
         bundle: { fetch: source.fetch, store: fakeStore(), id: 'filled' },
     });
 
-    /** @type {any} */
-    let filled = null;
-    app.on('bundle-prefetch', (/** @type {any} */ payload)=>{
-        filled = payload;
+    // The machine is one per process and the filler runs until this app is
+    // disposed, so both happen however the test ends -- a failed assertion that
+    // skipped them left the process with live handles and node never exited.
+    t.after(async()=>{
+        await app.dispose();
+        await source.cleanup();
     });
 
-    assert.equal(await app.run({ maxTurns: 20000 }), 0);
+    /** @type {any} */
+    let filled = null;
+    /** @type {(() => void) | null} */
+    let reported = null;
+    /** @type {Promise<void>} */
+    const fillerMoved = new Promise(resolve=>{
+        reported = ()=>resolve();
+    });
+    app.on('bundle-prefetch', (/** @type {any} */ payload)=>{
+        filled = payload;
+        reported?.();
+    });
 
-    // The run ends when the program does, and the filler only moves in the gaps,
-    // so what matters is that it moved at all and never got ahead of the reads.
+    // Bounded in wall time as well as turns: a program parked on a block whose
+    // fetch never answered works no turn at all, so the turn budget never runs
+    // out on it and the clock is the only bound that returns.
+    assert.equal(await app.run({ maxTurns: 20000, timeoutMs: 60000 }), 0);
+
+    // The filler is best effort and only moves in the gaps, so the program is
+    // free to exit before it has reported. Wait for its first report with a
+    // deadline: a filler that never moves is a failure, not a wait for ever.
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let expire = null;
+    const deadline = new Promise((unused, reject)=>{
+        expire = setTimeout(()=>reject(
+            new Error('the background filler never reported progress')), 60000);
+    });
+    try
+    {
+        await Promise.race([fillerMoved, deadline]);
+    }
+    finally
+    {
+        if (expire !== null)
+        {
+            clearTimeout(expire);
+        }
+    }
+
+    // What matters is that it moved at all and never got ahead of the reads.
     assert.ok(filled, 'the filler reported progress');
     assert.ok(filled.resident > 1, `only ${filled.resident} block(s) ever arrived`);
     assert.ok(filled.resident <= filled.blocks);
-
-    await app.dispose();
-    await source.cleanup();
 });
