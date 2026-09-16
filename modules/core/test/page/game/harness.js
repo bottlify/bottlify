@@ -688,6 +688,11 @@ export function createHarness(canvas, how = {}){
                     ? {
                         frames: layers.graphics.seam.device.frames,
                         draws: layers.graphics.seam.device.draws,
+                        pipelines: layers.graphics.seam.device.pipelines,
+                        prepared: layers.graphics.seam.device.prepared,
+                        preparedReused: layers.graphics.seam.device.preparedReused,
+                        refused: layers.graphics.seam.device.refused,
+                        skipped: layers.graphics.seam.device.skipped,
                     }
                     : null,
             });
@@ -773,7 +778,8 @@ export function createHarness(canvas, how = {}){
                     if (request.pointer)
                     {
                         app.input.send({ kind: 'pointerMove',
-                            x: request.pointer.x, y: request.pointer.y, dx: 0, dy: 0 });
+                            x: request.pointer.x, y: request.pointer.y,
+                            dx: request.pointer.dx ?? 0, dy: request.pointer.dy ?? 0 });
                         if (request.pointer.down && !pointerDown)
                         {
                             pointerDown = true;
@@ -830,6 +836,10 @@ export function createHarness(canvas, how = {}){
         // Published before the run, not after: the whole point of the frame report
         // is to be asked while the frames are still happening.
         running = app;
+        // The pointer spec, reachable from outside so a driver can change the
+        // intended turn mid-run rather than holding one velocity for the whole
+        // run. Null when no pointer was asked for.
+        /** @type {any} */ (globalThis).__bottlifyPointer__ = request.pointer ?? null;
         if (request.exact)
         {
             // Kept by the emulator itself rather than sampled, so it costs the
