@@ -1443,7 +1443,11 @@ export function createGlContext(options = {}){
             setError(GL.INVALID_ENUM);
             return;
         }
-        if (value && cap === GL.STENCIL_TEST)
+        // On the device path every drawable's depth attachment carries a real
+        // stencil plane (`gpu.js` `DEPTH_FORMAT`, `depth24plus-stencil8`) and
+        // stencil ops are translated to it (`wgsl.js`); only the processor
+        // rasteriser has no stencil buffer to test against.
+        if (value && cap === GL.STENCIL_TEST && !gpu)
         {
             diverge('the stencil test was enabled and there is no stencil buffer: every'
                 + ' fragment passes it, and a program that masks with stencil draws unmasked');

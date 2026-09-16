@@ -381,6 +381,14 @@ test('a read of the framebuffer on the device path is reported, not answered', (
     assert.ok(r.divergences.some(d=>/glReadPixels was accepted and read black/.test(d)));
 });
 
+test('the stencil test on the device path is not reported: the depth attachment carries it',
+    ()=>{
+        const r = rig();
+        const { context } = r;
+        context.glEnable(GL.STENCIL_TEST);
+        assert.equal(r.divergences.some(d=>/stencil buffer/.test(d)), false);
+    });
+
 /**
  * The one view of a single level the copy renders into, and its render pass.
  *
