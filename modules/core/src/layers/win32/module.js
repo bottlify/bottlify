@@ -903,6 +903,7 @@ export const win32Module = {
                                 [0, stackSize, entry, parameter, 0, threadIdOut]) >>> 0,
                         exit: code=>libraries['KERNEL32.dll'].ExitThread.handler([code]),
                     },
+                    divergence: config?.divergence,
                 }),
             },
 

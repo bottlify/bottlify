@@ -127,6 +127,39 @@ test('a value outside unsigned char classifies as nothing at all', ()=>{
     assert.equal(table.isspace.handler([0x120]), 0);
 });
 
+test('_isctype answers by the real msvcrt bit values, from _UPPER to _ALPHA', ()=>{
+    const { table } = build();
+    const UPPER = 0x0001;
+    const DIGIT = 0x0004;
+    const SPACE = 0x0008;
+    const ALPHA = 0x0103;
+    assert.equal(table._isctype.handler(['A'.charCodeAt(0), UPPER]), 1);
+    assert.equal(table._isctype.handler(['a'.charCodeAt(0), UPPER]), 0);
+    assert.equal(table._isctype.handler(['a'.charCodeAt(0), ALPHA]), 1);
+    assert.equal(table._isctype.handler(['5'.charCodeAt(0), DIGIT]), 1);
+    assert.equal(table._isctype.handler([' '.charCodeAt(0), SPACE]), 1);
+    // EOF classifies as nothing, the same as every classifier above.
+    assert.equal(table._isctype.handler([-1, UPPER | DIGIT | SPACE]), 0);
+});
+
+test('_pctype publishes a table a guest can index straight through, EOF included', ()=>{
+    const { memory, table } = build();
+    const UPPER = 0x0001;
+    const DIGIT = 0x0004;
+    const ALPHA = 0x0103;
+    const pointerBytes = table._pctype.data();
+    const pointer = new DataView(pointerBytes.buffer, pointerBytes.byteOffset).getUint32(0, true);
+    const view = new DataView(memory.bytes.buffer, memory.bytes.byteOffset);
+    const maskOf = (/** @type {number} */ code)=>view.getUint16(pointer + code * 2, true);
+    assert.equal(maskOf('A'.charCodeAt(0)) & UPPER, UPPER);
+    assert.equal(maskOf('9'.charCodeAt(0)) & DIGIT, DIGIT);
+    assert.notEqual(maskOf('z'.charCodeAt(0)) & ALPHA, 0, 'z overlaps the _ALPHA mask');
+    assert.equal(maskOf('z'.charCodeAt(0)) & UPPER, 0, 'but carries none of _UPPER');
+    // pctype[-1], the EOF slot: a loop over getc()'s own result classifies it
+    // before ever comparing against EOF, and real msvcrt answers nothing there.
+    assert.equal(view.getUint16(pointer - 2, true), 0);
+});
+
 /**
  * A megabyte whose answer sits at byte 3, laid down once for the scans below:
  * three spaces, an 'x', then filler to the terminator.

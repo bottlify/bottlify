@@ -48,6 +48,26 @@ const W_GRAPH = 0x100;
 const W_XDIGIT = 0x200;
 
 /**
+ * The bits `iswctype`'s mask is built from, at the values msvcrt's own
+ * `<wctype.h>` gives them -- the same numbering `_isctype` uses, since a
+ * guest builds both from the same header.
+ */
+const CT_UPPER = 0x0001;
+const CT_LOWER = 0x0002;
+const CT_DIGIT = 0x0004;
+const CT_SPACE = 0x0008;
+const CT_PUNCT = 0x0010;
+const CT_CONTROL = 0x0020;
+const CT_BLANK = 0x0040;
+const CT_HEX = 0x0080;
+/**
+ * Set on an alpha character alongside `_UPPER`/`_LOWER`, never alone: a
+ * caller asking `iswctype(c, _ALPHA)` passes `0x0100|_UPPER|_LOWER` and
+ * matches on the overlap, the same as every other mask here.
+ */
+const CT_ALPHA_MARK = 0x0100;
+
+/**
  * Which byte classifier answers which class: the wide table is read from the
  * narrow answers, not from a second copy of them.
  *
@@ -388,6 +408,52 @@ export function createWideClassificationFunctions(narrow){
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([code])=>((code & 0xffff) < 0x80 ? 1 : 0),
+        },
+
+        /**
+         * int iswctype(wint_t c, wctype_t type)
+         *
+         * `_isctype` for a wide code unit: nonzero when `c` has any of the
+         * classes `type` names. Built from the same table the classifiers
+         * above are, translated to the bits a guest actually passes, since
+         * this table's own numbering exists only for the classifiers to share
+         * and was never meant to leave this function.
+         */
+        iswctype: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([code, type])=>{
+                const unit = code & 0xffff;
+                if (unit === WEOF || unit >= table.length)
+                {
+                    return 0;
+                }
+                const classes = table[unit];
+                let real = 0;
+                if (classes & W_UPPER)
+                    real |= CT_UPPER;
+                if (classes & W_LOWER)
+                    real |= CT_LOWER;
+                if (classes & W_DIGIT)
+                    real |= CT_DIGIT;
+                if (classes & W_SPACE)
+                    real |= CT_SPACE;
+                if (classes & W_PUNCT)
+                    real |= CT_PUNCT;
+                if (classes & W_CNTRL)
+                    real |= CT_CONTROL;
+                if (classes & W_XDIGIT)
+                    real |= CT_HEX;
+                if (unit === 0x20 || unit === 0x09)
+                    real |= CT_BLANK;
+                // The Latin-1 extension's letters are alpha with no case of
+                // their own, so the marker follows the table's own alpha bit
+                // rather than being derived from `_UPPER`/`_LOWER` here.
+                if (classes & W_ALPHA)
+                    real |= CT_ALPHA_MARK;
+                return (real & type) !== 0 ? 1 : 0;
+            },
         },
 
         /** wint_t towupper(wint_t) */

@@ -4,6 +4,9 @@
  * See LICENSE for details
  */
 
+import { formatToString } from './format.js';
+import { VARIADIC_SLOTS } from './scan.js';
+
 /**
  * Buffered file streams: fopen and the calls that take what it hands out.
  *
@@ -34,6 +37,11 @@ const SEEK_END = 2;
 const EOF = -1;
 
 const MAX_STRING = 1 << 20;
+
+/** `setvbuf`'s mode argument, at the values msvcrt gives them. */
+const IOFBF = 0x0000;
+const IOLBF = 0x0040;
+const IONBF = 0x0004;
 
 /**
  * @typedef {Object} StdioHost
@@ -250,5 +258,47 @@ export function createStdioFunctions(host){
 
         /** long ftell(FILE *stream) -- -1 for a stream that is not one. */
         ftell: cdecl(4, ([pointer])=>streamOf(pointer)?.position ?? -1),
+
+        /**
+         * int fprintf(FILE *stream, const char *format, ...)
+         *
+         * A negative count on a stream that is not open for writing, exactly
+         * as `fwrite` answers -- nothing here has an error code of its own to
+         * report through, so the same sentinel a failed write already gives.
+         */
+        fprintf: cdecl(8 + VARIADIC_SLOTS * 4, args=>{
+            const [pointer, format] = args;
+            const stream = streamOf(pointer);
+            if (!stream || (stream.flags & (IOWRT | IORW)) === 0)
+            {
+                return EOF;
+            }
+            const text = formatToString(readString(format), args.slice(2), readString);
+            const bytes = new TextEncoder().encode(text);
+            const stored = host.files.write(stream.node, stream.position, bytes);
+            stream.position += stored;
+            if (stored < bytes.length)
+            {
+                raise(stream, IOERR);
+                return EOF;
+            }
+            return text.length;
+        }),
+
+        /**
+         * int setvbuf(FILE *stream, char *buffer, int mode, size_t size)
+         *
+         * Every stream here reads and writes straight through to the volume
+         * with no buffer of its own, so a valid request is accepted and does
+         * nothing -- which is the buffering this call already promised.
+         */
+        setvbuf: cdecl(16, ([pointer, , mode])=>{
+            const stream = streamOf(pointer);
+            if (!stream || (mode !== IOFBF && mode !== IOLBF && mode !== IONBF))
+            {
+                return -1;
+            }
+            return 0;
+        }),
     };
 }

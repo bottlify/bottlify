@@ -97,6 +97,10 @@ const LEADING_INTEGER = /^[ \t\n\v\f\r]*([+-]?[0-9]+)/;
  *           cannot park: `exit` once its handlers have run.
  *           Ends the process; answers with what the calling thread must return,
  *           since `exit` does not come back.
+ * @property {(api: string, detail: string) => void} [divergence]
+ *           Where a call answers plausibly but not the way real Windows does
+ *           -- a locale we do not carry data for is the case here. Absent,
+ *           the difference goes unreported rather than the call refused.
  * @property {(message: string) => void} [abort]
  * @property {import('./threads.js').ThreadSeam} [threads]
  *           Where a thread the runtime starts is made and ended: the same
@@ -229,6 +233,14 @@ export function createMsvcrtFunctions(host){
      */
     let errorMode = 0;
 
+    /**
+     * `setlocale`'s answer: a pointer to "C" the caller may hold onto, built
+     * once rather than on every call, since a string setlocale returns is
+     * documented to stay valid until the next call that changes the locale --
+     * which nothing here ever does, this runtime carrying only the one.
+     */
+    let currentLocale = 0;
+
     const table = {
         /**
          * int _set_error_mode(int mode)
@@ -253,6 +265,42 @@ export function createMsvcrtFunctions(host){
                 const previous = errorMode;
                 errorMode = mode | 0;
                 return previous;
+            },
+        },
+
+        /**
+         * char *setlocale(int category, const char *locale)
+         *
+         * Only the C locale is carried: `locale` null or "C" answers "C" and
+         * takes hold; "" -- the native environment, on real Windows -- is
+         * accepted the same way, since the C locale is what this runtime's
+         * classifiers and formatters already are under. Anything else names a
+         * locale with no data behind it here, which is reported as the
+         * divergence it is and refused, the way an unset locale is on the
+         * real runtime: the previous setting stands and null comes back.
+         * `locale` is read before `category` is used for anything, since a
+         * query (`locale` null) never touches the category at all.
+         */
+        setlocale: {
+            convention: 'cdecl',
+            argBytes: 8,
+            /** @param {number[]} args */
+            handler: ([, locale])=>{
+                if (locale !== 0 && readString(locale) !== 'C' && readString(locale) !== '')
+                {
+                    host.divergence?.('setlocale',
+                        `locale "${readString(locale)}" is not carried; only "C" is`);
+                    return 0;
+                }
+                if (currentLocale === 0)
+                {
+                    currentLocale = allocate(2);
+                    if (currentLocale !== 0)
+                    {
+                        writeString(currentLocale, 'C');
+                    }
+                }
+                return currentLocale;
             },
         },
 

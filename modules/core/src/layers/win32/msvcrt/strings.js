@@ -36,6 +36,26 @@
 /** A string is scanned no further than this, since nothing in C bounds one. */
 const MAX_STRING = 1 << 20;
 
+/**
+ * The bits `_isctype`/`_pctype` classify a character with, at the values
+ * msvcrt's own `<ctype.h>` gives them: a mask a guest builds and passes is
+ * built from these, not from our own choice of numbering.
+ */
+const CT_UPPER = 0x0001;
+const CT_LOWER = 0x0002;
+const CT_DIGIT = 0x0004;
+const CT_SPACE = 0x0008;
+const CT_PUNCT = 0x0010;
+const CT_CONTROL = 0x0020;
+const CT_BLANK = 0x0040;
+const CT_HEX = 0x0080;
+/**
+ * Set on an alpha character alongside `_UPPER`/`_LOWER`, never alone: a
+ * caller asking `_isctype(c, _ALPHA)` passes `0x0100|_UPPER|_LOWER` and
+ * matches on the overlap, the same as every other mask here.
+ */
+const CT_ALPHA_MARK = 0x0100;
+
 /** Only the sign is defined by C; this runtime normalises it to -1, 0 or 1. */
 const compare = (/** @type {string} */ a, /** @type {string} */ b)=>{
     if (a === b)
@@ -118,7 +138,8 @@ export function createStringFunctions(host){
         },
     });
 
-    return {
+    /** @type {Record<string, any>} */
+    const table = {
         /** char *strrchr(const char *str, int ch) */
         strrchr: {
             convention: 'cdecl',
@@ -324,6 +345,87 @@ export function createStringFunctions(host){
         // and then does not.
         iscntrl: range(code=>code < 0x20 || code === 0x7f),
     };
+
+    // The table `_pctype` points at and `_isctype` reads: one mask per byte,
+    // built from the same classifiers above so the two families cannot
+    // disagree about a character. `_BLANK` answers for space and tab alone --
+    // narrower than `isspace`, and no classifier above already answers it.
+    // Slot 0 answers for EOF, exactly as `_pctype[-1]` does on real msvcrt: a
+    // loop that classifies whatever `getc` handed it, EOF included, reads
+    // nothing there rather than one byte before an allocation that has none.
+    /** @type {Uint16Array} */
+    const ctypeTable = new Uint16Array(257);
+    for (let code = 0; code < 256; code++)
+    {
+        let mask = 0;
+        if (table.isupper.handler([code]) !== 0)
+            mask |= CT_UPPER;
+        if (table.islower.handler([code]) !== 0)
+            mask |= CT_LOWER;
+        if (table.isdigit.handler([code]) !== 0)
+            mask |= CT_DIGIT;
+        if (table.isspace.handler([code]) !== 0)
+            mask |= CT_SPACE;
+        if (table.ispunct.handler([code]) !== 0)
+            mask |= CT_PUNCT;
+        if (table.iscntrl.handler([code]) !== 0)
+            mask |= CT_CONTROL;
+        if (table.isxdigit.handler([code]) !== 0)
+            mask |= CT_HEX;
+        if (code === 0x20 || code === 0x09)
+            mask |= CT_BLANK;
+        if ((mask & (CT_UPPER | CT_LOWER)) !== 0)
+            mask |= CT_ALPHA_MARK;
+        ctypeTable[code + 1] = mask;
+    }
+
+    /**
+     * int _isctype(int c, int type)
+     *
+     * Nonzero when `c` (an unsigned char, or EOF) has any of the classes
+     * `type` names; outside that range it has none, the same as every other
+     * classifier here.
+     */
+    table._isctype = {
+        convention: 'cdecl',
+        argBytes: 8,
+        /** @param {number[]} args */
+        handler: ([code, type])=>{
+            const value = code | 0;
+            if (value < -1 || value > 0xff)
+            {
+                return 0;
+            }
+            return (ctypeTable[value + 1] & type) !== 0 ? 1 : 0;
+        },
+    };
+
+    /**
+     * const unsigned short *_pctype
+     *
+     * A variable, not a function: the runtime's classification table, indexed
+     * by an unsigned char (and by EOF, at index -1). Published once, in guest
+     * memory the process heap owns, since nothing here has a static data
+     * segment of its own to hold it; the exported address is the table's
+     * second element, so `_pctype[-1]` reads the EOF slot before it.
+     */
+    table._pctype = {
+        data: ()=>{
+            const address = host.allocate(ctypeTable.byteLength);
+            if (address === 0)
+            {
+                return new Uint8Array(4);
+            }
+            const bytes = new Uint8Array(ctypeTable.buffer, ctypeTable.byteOffset,
+                ctypeTable.byteLength);
+            host.writeMemory(address, bytes);
+            const pointer = new Uint8Array(4);
+            new DataView(pointer.buffer).setUint32(0, address + 2, true);
+            return pointer;
+        },
+    };
+
+    return table;
 }
 
 /**

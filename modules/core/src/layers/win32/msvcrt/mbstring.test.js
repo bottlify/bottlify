@@ -154,6 +154,23 @@ test('the Latin-1 letters are alpha, the two signs among them are not', ()=>{
     assert.equal(fns.iswalpha.handler([0xffff]), 0);
 });
 
+test('iswctype answers by the real msvcrt bit values, over the Latin-1 range', ()=>{
+    const fns = runtime();
+    const UPPER = 0x0001;
+    const DIGIT = 0x0004;
+    const ALPHA = 0x0103;
+    assert.equal(fns.iswctype.handler(['A'.charCodeAt(0), UPPER]), 1);
+    assert.equal(fns.iswctype.handler(['a'.charCodeAt(0), UPPER]), 0);
+    assert.equal(fns.iswctype.handler(['5'.charCodeAt(0), DIGIT]), 1);
+    // The Latin-1 extension iswalpha itself carries: alpha, but no case.
+    assert.notEqual(fns.iswctype.handler([0xc0, ALPHA]), 0);
+    assert.equal(fns.iswctype.handler([0xc0, UPPER]), 0, 'the C locale gives it no case');
+    assert.equal(fns.iswctype.handler([0xd7, ALPHA]), 0, 'multiplication is not a letter');
+    // WEOF and anything past the Latin-1 table classify as nothing.
+    assert.equal(fns.iswctype.handler([0xffff, UPPER | DIGIT | ALPHA]), 0);
+    assert.equal(fns.iswctype.handler([0x4e2d, ALPHA]), 0, 'a CJK unit is nothing here');
+});
+
 test('the wide classifiers answer every ASCII code unit what the byte ones answer', ()=>{
     const fns = runtime();
     for (const [wide, byte] of Object.entries({

@@ -7,6 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createMsvcrtFunctions } from './functions.js';
+import { fakeMemory } from './harness.test.js';
 
 /**
  * A stand-in for guest memory, with the same contract as the real one.
@@ -422,6 +423,13 @@ test('every function is cdecl and declares the stack its arguments occupy', ()=>
 
     for (const [name, fn] of Object.entries(fns))
     {
+        // A variable rather than a function -- `_pctype` is the one here --
+        // has no calling convention at all: its export is the address of the
+        // data itself, never a stub a bridge crosses into.
+        if (/** @type {any} */ (fn).data)
+        {
+            continue;
+        }
         // A C++ member is the one exception: `this` travels in ECX. Its
         // decoration says so -- QBE/UAE are `const`/virtual thiscall members.
         const expected = /@@[QU][AB]E/.test(name) ? 'thiscall' : 'cdecl';
@@ -507,6 +515,34 @@ test('_set_error_mode hands back what was put in, and refuses a mode it has not 
     assert.equal(fns._set_error_mode.handler([1]), 2);
     assert.equal(fns._set_error_mode.handler([7]) | 0, -1, 'an unknown mode is refused');
     assert.equal(fns._set_error_mode.handler([REPORT]), 1, 'and changed nothing');
+});
+
+test('setlocale carries the C locale, and only the C locale', ()=>{
+    const memory = fakeMemory();
+    /** @type {[string, string][]} */
+    const divergences = [];
+    const fns = /** @type {any} */ (createMsvcrtFunctions({
+        ...memory,
+        write: ()=>{},
+        callGuest: async()=>0,
+        divergence: (api, detail)=>divergences.push([api, detail]),
+    }));
+    const LC_ALL = 0;
+
+    const queried = fns.setlocale.handler([LC_ALL, 0]);
+    assert.notEqual(queried, 0);
+    assert.equal(memory.readCString(queried, 16), 'C', 'a null locale only asks');
+
+    const set = fns.setlocale.handler([LC_ALL, memory.put('C')]);
+    assert.equal(set, queried, 'the same pointer every time it is asked');
+    assert.equal(memory.readCString(fns.setlocale.handler([LC_ALL, memory.put('')]), 16), 'C',
+        '"" is the native environment, which this runtime already is');
+    assert.deepEqual(divergences, [], 'nothing unsupported was asked for yet');
+
+    assert.equal(fns.setlocale.handler([LC_ALL, memory.put('German_Germany.1252')]), 0,
+        'a locale with no data behind it fails, rather than lying about it');
+    assert.equal(divergences.length, 1);
+    assert.equal(divergences[0][0], 'setlocale');
 });
 
 test('rand draws this runtime own sequence, and srand starts it where told', ()=>{

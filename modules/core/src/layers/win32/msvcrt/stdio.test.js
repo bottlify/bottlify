@@ -142,3 +142,43 @@ test('every entry is cdecl with the argument count it reads', ()=>{
         assert.equal(fns[name].argBytes, argBytes, name);
     }
 });
+
+test('fprintf formats and writes to the stream, not to stdout', ()=>{
+    const { memory, files, fns } = build();
+    const path = memory.put('C:\\new.txt');
+    const stream = fns.fopen.handler([path, memory.put('wb')]);
+    const format = memory.put('%s scored %d%%');
+    const name = memory.put('player');
+
+    assert.equal(fns.fprintf.handler([stream, format, name, 90]), 17);
+    assert.equal(fns.ftell.handler([stream]), 17);
+    assert.equal(String.fromCharCode(...files.files['C:\\new.txt']), 'player scored 90%');
+});
+
+test('fprintf on a stream not open for writing is a negative count, nothing written', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
+    const before = fns.ftell.handler([stream]);
+
+    assert.equal(fns.fprintf.handler([stream, memory.put('%d'), 5]), -1);
+    assert.equal(fns.ftell.handler([stream]), before, 'the position did not move');
+});
+
+test('fprintf on a stream that is not one is a negative count', ()=>{
+    const { memory, fns } = build();
+    assert.equal(fns.fprintf.handler([0x999, memory.put('x'), 0]), -1);
+});
+
+test('setvbuf accepts a stream and a real mode, and does nothing observable', ()=>{
+    const { memory, fns } = build();
+    const stream = fns.fopen.handler([memory.put('C:\\data.bin'), memory.put('rb')]);
+    const IONBF = 0x0004;
+    const IOFBF = 0x0000;
+    const IOLBF = 0x0040;
+
+    assert.equal(fns.setvbuf.handler([stream, 0, IONBF, 0]), 0);
+    assert.equal(fns.setvbuf.handler([stream, 0, IOFBF, 512]), 0);
+    assert.equal(fns.setvbuf.handler([stream, 0, IOLBF, 512]), 0);
+    assert.equal(fns.setvbuf.handler([stream, 0, 0x1234, 0]), -1, 'not a mode this runtime has');
+    assert.equal(fns.setvbuf.handler([0x999, 0, IONBF, 0]), -1, 'not a stream at all');
+});
