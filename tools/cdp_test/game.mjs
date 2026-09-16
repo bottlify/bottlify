@@ -18,6 +18,7 @@
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video]
+ *                                  [--click x,y[,after]] [--key Code[,after]]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -174,6 +175,18 @@ function parse(argv){
             }
             const [x, y, after] = argv[index + 1].split(',').map(Number);
             return [{ x, y, after: after || 30 }];
+        }),
+        // Key taps in the program's own keyboard codes, after that many
+        // presented frames each, as `Code,after`: pressed on one frame and
+        // released on the next. `Code` is a KeyboardEvent.code -- `Enter`,
+        // `Escape`, `Space`, `KeyA`.
+        keys: argv.flatMap((flag, index)=>{
+            if (flag !== '--key')
+            {
+                return [];
+            }
+            const [code, after] = argv[index + 1].split(',');
+            return [{ code, after: Number(after) || 30 }];
         }),
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
@@ -674,6 +687,7 @@ export async function game(options){
             fog: options.fog,
             pointer: options.pointer,
             clicks: options.clicks,
+            keys: options.keys,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,

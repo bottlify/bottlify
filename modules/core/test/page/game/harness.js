@@ -584,7 +584,8 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
-     *           clicks?: { x: number, y: number, after: number }[] }} request
+     *           clicks?: { x: number, y: number, after: number }[],
+     *           keys?: { code: string, after: number }[] }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -806,6 +807,22 @@ export function createHarness(canvas, how = {}){
                         if (presents === click.after + 1)
                         {
                             app.input.send({ kind: 'pointerButton', button: 'left', down: false });
+                        }
+                    }
+                    // A key press, held for one presented frame and released on
+                    // the next, the same shape a person's tap has and the only
+                    // shape a program that reads the transition can see. A
+                    // scenario with no way to type can drive a program's menus
+                    // and nothing that answers the keyboard.
+                    for (const key of request.keys ?? [])
+                    {
+                        if (presents === key.after)
+                        {
+                            app.input.send({ kind: 'key', code: key.code, down: true });
+                        }
+                        if (presents === key.after + 1)
+                        {
+                            app.input.send({ kind: 'key', code: key.code, down: false });
                         }
                     }
                 },
