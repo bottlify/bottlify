@@ -560,26 +560,27 @@ test('bounds (D3D9): every write the device makes into guest memory stays inside
     + ' it names', async()=>{
     const h = harness(9, { lockableBackBuffer: true, guarded: true });
     const { device } = h;
-    /** @param {number} w @param {number} h @param {number} pool */
-    const plain = (w, h, pool)=>{
+    /** @param {number} width @param {number} height @param {number} pool */
+    const plain = (width, height, pool)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        assert.equal(device.CreateOffscreenPlainSurface(w, h, D3DFMT.X8R8G8B8, pool, held),
+        assert.equal(device.CreateOffscreenPlainSurface(width, height, D3DFMT.X8R8G8B8, pool, held),
             D3D_OK);
         return held.surface;
     };
-    /** @param {number} w @param {number} h @param {number} levels @param {number} pool */
-    const texture = (w, h, levels, pool)=>{
+    /** @param {number} width @param {number} height @param {number} levels @param {number} pool */
+    const texture = (width, height, levels, pool)=>{
         /** @type {{ texture?: any }} */
         const held = {};
-        assert.equal(device.CreateTexture(w, h, levels, 0, D3DFMT.X8R8G8B8, pool, held), D3D_OK);
+        assert.equal(device.CreateTexture(width, height, levels, 0, D3DFMT.X8R8G8B8, pool, held),
+            D3D_OK);
         return held.texture;
     };
-    /** @param {any} texture @param {number} level */
-    const levelOf = (texture, level)=>{
+    /** @param {any} of @param {number} level */
+    const levelOf = (of, level)=>{
         /** @type {{ surface?: any }} */
         const held = {};
-        assert.equal(texture.GetSurfaceLevel(level, held), D3D_OK);
+        assert.equal(of.GetSurfaceLevel(level, held), D3D_OK);
         held.surface.release();
         return held.surface;
     };

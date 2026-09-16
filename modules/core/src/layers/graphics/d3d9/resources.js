@@ -365,7 +365,8 @@ export function packColour(format, colour){
         // A format with no layout here still gets a pixel of its own width,
         // so that a row packed from it is the row's length and nothing else.
         default:
-            return Uint8Array.from([b, g, r, a]).subarray(0, FORMAT_INFO[format]?.bytesPerPixel ?? 4);
+            return Uint8Array.from([b, g, r, a])
+                .subarray(0, FORMAT_INFO[format]?.bytesPerPixel ?? 4);
     }
 }
 
