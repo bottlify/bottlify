@@ -63,9 +63,19 @@ const PERMITS = {
 export function createRegionMap(){
     /** @type {Region[]} */
     const regions = [];
-    /** The region the last lookup found; regions are only ever added, so it stays valid. */
+    /**
+     * The last two regions a lookup found, most recent first. Regions are only
+     * ever added, so both stay valid once set. Two rather than one because a
+     * host call reads its own stack and the TEB in the same crossing, and those
+     * alternate: a one-entry cache misses on every single lookup for a pattern
+     * that a two-entry one answers from cache every time but the first.
+     * @type {Region | undefined}
+     */
+    let mostRecent;
     /** @type {Region | undefined} */
-    let last;
+    let secondMostRecent;
+    /** Bumped only when a lookup falls through to the linear scan below. */
+    let scans = 0;
 
     /**
      * @param {number} base
@@ -146,22 +156,37 @@ export function createRegionMap(){
          */
         find(address){
             // Asked on every read and write the host makes, thousands a
-            // frame, nearly all of them in the region the last one hit: that
-            // region is tried first, and the walk below makes no closure.
-            if (last && address >= last.base && address < last.base + last.size)
+            // frame, nearly all of them in one of the last two regions hit:
+            // those are tried first, and the walk below makes no closure.
+            if (mostRecent
+                && address >= mostRecent.base && address < mostRecent.base + mostRecent.size)
             {
-                return last;
+                return mostRecent;
             }
+            if (secondMostRecent
+                && address >= secondMostRecent.base
+                && address < secondMostRecent.base + secondMostRecent.size)
+            {
+                [mostRecent, secondMostRecent] = [secondMostRecent, mostRecent];
+                return mostRecent;
+            }
+            scans++;
             for (let index = 0; index < regions.length; index++)
             {
                 const region = regions[index];
                 if (address >= region.base && address < region.base + region.size)
                 {
-                    last = region;
+                    secondMostRecent = mostRecent;
+                    mostRecent = region;
                     return region;
                 }
             }
             return undefined;
+        },
+
+        /** How many lookups missed both cached regions. Diagnostics and tests only. */
+        get scans(){
+            return scans;
         },
 
         /**

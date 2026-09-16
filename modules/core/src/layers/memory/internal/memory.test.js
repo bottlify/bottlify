@@ -169,6 +169,27 @@ test('typed accessors round-trip little-endian values', ()=>{
     assert.equal(accessors.readU32(0x2030), 0xffffffff);
 });
 
+test('a region map hits its cache alternating between two regions, not one', ()=>{
+    const regions = createRegionMap();
+    regions.register({
+        name: 'stack', base: 0x1000, size: 0x100,
+        kind: RegionKind.STACK, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'teb', base: 0x2000, size: 0x100,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+
+    regions.find(0x1010);
+    regions.find(0x2010);
+    // A one-entry cache would miss on both of these, since each lookup evicted
+    // the other region; a two-entry one answers both from cache.
+    regions.find(0x1020);
+    regions.find(0x2020);
+
+    assert.equal(regions.scans, 2, 'each region was walked for once, not four times');
+});
+
 test('accessors refuse what the region map refuses', ()=>{
     const raw = fakeMemory();
     const accessors = createAccessors({ raw, regions: mapWithCode() });
@@ -179,6 +200,38 @@ test('accessors refuse what the region map refuses', ()=>{
 
     // Nothing was written by the rejected calls.
     assert.deepEqual([...raw.bytes.slice(0x1000, 0x1004)], [0, 0, 0, 0]);
+});
+
+test('a dword read alternating between the stack and the TEB hits the cache both times', ()=>{
+    // A host call reads its own stack and the TEB beside it in the same
+    // crossing, over and over; a cache that only remembers one region misses
+    // on every single dword this pattern reads.
+    const bytes = new Uint8Array(0x3000);
+    const view = new DataView(bytes.buffer);
+    const raw = {
+        readPhysical: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.slice(address, address + length),
+        writePhysical: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
+        readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
+    };
+    const regions = createRegionMap();
+    regions.register({
+        name: 'stack', base: 0x1000, size: 0x100,
+        kind: RegionKind.STACK, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'teb', base: 0x2000, size: 0x100,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    const accessors = createAccessors({ raw, regions });
+
+    accessors.readU32(0x1010);
+    accessors.readU32(0x2010);
+    accessors.readU32(0x1020);
+    accessors.readU32(0x2020);
+
+    assert.equal(regions.scans, 2, 'the stack and the TEB were each validated once');
 });
 
 test('a read is a snapshot, not a window onto guest memory', ()=>{

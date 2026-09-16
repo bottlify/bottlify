@@ -56,14 +56,45 @@ const NO_BYTES = new Uint8Array(256);
  */
 export function createAccessors({ raw, regions, charge = null }){
     /**
-     * The region the last dword read fell in, by its span and the table's
-     * version. A host call reads several dwords -- its arguments, the fields
-     * behind them -- and nearly all of them fall in the region the last one
-     * did; asking the table each time cost a fifth of what a call cost.
+     * The last two regions a read validated, by span and the table's version.
+     * A host call reads several dwords -- its arguments, the fields behind
+     * them, and often the TEB beside its own stack -- and nearly all of them
+     * fall in one of the last two regions a read did; asking the table each
+     * time cost a fifth of what a call cost, and a stack/TEB alternation
+     * missed a one-entry cache on every single read.
+     * @type {{ from: number, to: number, version: number } | null}
      */
-    let readableFrom = 0;
-    let readableTo = 0;
-    let readableVersion = -1;
+    let mostRecentReadable = null;
+    /** @type {{ from: number, to: number, version: number } | null} */
+    let secondMostRecentReadable = null;
+
+    /**
+     * Validates a span for reading and answers the cached region it fell in.
+     *
+     * @param {number} address
+     * @param {number} length
+     */
+    const readableSpan = (address, length)=>{
+        if (mostRecentReadable && mostRecentReadable.version === regions.version
+            && address >= mostRecentReadable.from && address + length <= mostRecentReadable.to)
+        {
+            return mostRecentReadable;
+        }
+        if (secondMostRecentReadable && secondMostRecentReadable.version === regions.version
+            && address >= secondMostRecentReadable.from
+            && address + length <= secondMostRecentReadable.to)
+        {
+            [mostRecentReadable, secondMostRecentReadable]
+                = [secondMostRecentReadable, mostRecentReadable];
+            return mostRecentReadable;
+        }
+        const region = regions.assert(address, length, 'read');
+        secondMostRecentReadable = mostRecentReadable;
+        mostRecentReadable = {
+            from: region.base, to: region.base + region.size, version: regions.version,
+        };
+        return mostRecentReadable;
+    };
 
     /**
      * @param {number} address
@@ -73,14 +104,7 @@ export function createAccessors({ raw, regions, charge = null }){
     const read = (address, length)=>{
         // The region the last read fell in, as for a dword below: a handler
         // that reads a structure reads it out of the region its pointer is in.
-        if (readableVersion !== regions.version
-            || address < readableFrom || address + length > readableTo)
-        {
-            const region = regions.assert(address, length, 'read');
-            readableFrom = region.base;
-            readableTo = region.base + region.size;
-            readableVersion = regions.version;
-        }
+        readableSpan(address, length);
         // A copy, not a window. The emulator hands back a subarray of its own
         // memory, and a caller that holds one has a value that changes under it
         // -- read two ranges, write one, and the other has silently moved. The
@@ -179,14 +203,7 @@ export function createAccessors({ raw, regions, charge = null }){
         {
             // The one read every host call makes several of -- an argument, a
             // pointer, a field -- and the one that must not cost a copy.
-            if (readableVersion !== regions.version
-                || address < readableFrom || address + 4 > readableTo)
-            {
-                const region = regions.assert(address, 4, 'read');
-                readableFrom = region.base;
-                readableTo = region.base + region.size;
-                readableVersion = regions.version;
-            }
+            readableSpan(address, 4);
             return raw.readU32(address);
         }
         const bytes = read(address, length);
