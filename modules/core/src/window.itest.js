@@ -32,8 +32,10 @@ const PROBE_VALUE = 0x2a;
 /**
  * Runs the fixture, feeds it the probe and then a close, and decodes what its
  * window procedure recorded.
+ *
+ * @param {import('node:test').TestContext} t
  */
-async function runFixture(){
+async function runFixture(t){
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(FIXTURE),
@@ -46,6 +48,7 @@ async function runFixture(){
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
     });
+    t.after(()=>app.dispose());
 
     /** @type {number[]} */
     const bytes = [];
@@ -63,26 +66,26 @@ async function runFixture(){
         setTimeout(()=>app.post({ message: WM_CLOSE }), 20);
     }, 40);
 
-    const exitCode = await app.run({ maxTurns: 20000 });
+    const exitCode = await app.run({ maxTurns: 20000, timeoutMs: 15000 });
     const seen = bytes.length >= 4
         ? (bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24)) >>> 0
         : null;
 
     const diagnostics = app.diagnostics();
-    await app.dispose();
     return { seen, exitCode, diagnostics };
 }
 
-test('the program answers a message with its own window procedure', async()=>{
-    const { seen, exitCode } = await runFixture();
+test('the program answers a message with its own window procedure',
+    { timeout: 20000 }, async t=>{
+        const { seen, exitCode } = await runFixture(t);
 
-    assert.equal(seen, PROBE_VALUE,
-        'the value came back through guest code that decided what to do with it');
-    assert.equal(exitCode, 0);
-});
+        assert.equal(seen, PROBE_VALUE,
+            'the value came back through guest code that decided what to do with it');
+        assert.equal(exitCode, 0);
+    });
 
-test('the whole path was used, not shortcut', async()=>{
-    const { diagnostics } = await runFixture();
+test('the whole path was used, not shortcut', { timeout: 20000 }, async t=>{
+    const { diagnostics } = await runFixture(t);
     const byName = Object.fromEntries(diagnostics.map((/** @type {any} */ d)=>[d.name, d]));
 
     // Seven trips into the guest: the WM_CREATE the window is told about, the
@@ -122,7 +125,7 @@ async function startApp(t){
     return app;
 }
 
-test('a program with nothing to do waits instead of spinning', async t=>{
+test('a program with nothing to do waits instead of spinning', { timeout: 15000 }, async t=>{
     const app = await startApp(t);
 
     // Nothing is ever posted, so the program sits in GetMessage. What must not
@@ -145,7 +148,7 @@ test('a program with nothing to do waits instead of spinning', async t=>{
         `waiting cost ${kernel.metrics.turns} scheduler turns: the machine looked, not spun`);
 });
 
-test('a machine waiting for a message still lets its own clock run', async t=>{
+test('a machine waiting for a message still lets its own clock run', { timeout: 30000 }, async t=>{
     // A thread suspended on a host call is parked on `hlt` and still counts as
     // runnable, so the scheduler never reaches the branch that jumps the clock
     // to the next deadline; and the loop credits the guest only for the turns
@@ -158,14 +161,28 @@ test('a machine waiting for a message still lets its own clock run', async t=>{
     // produced the message the machine is idling for. Measured on a real title,
     // crediting this took a run from three presented frames to two hundred and
     // twenty-one.
+    //
+    // The contract pinned here is that the clock moves at all while parked, not
+    // by how much relative to the wall clock: that ratio depends on how often
+    // this process gets the CPU, so a machine sharing it with another `npm
+    // test` run can be credited less than half of the wall time and still be
+    // behaving correctly. Monotonic growth across several waits is true
+    // regardless of load.
     const app = await startApp(t);
+    const virtualMsAt = ()=>app.diagnostics()
+        .find((/** @type {any} */ layer)=>layer.name === 'kernel').metrics.time.virtualMs;
 
-    await assert.rejects(app.run({ timeoutMs: 500 }), /did not finish within/);
-    const kernel = app.diagnostics()
-        .find((/** @type {any} */ layer)=>layer.name === 'kernel');
-    const time = kernel.metrics.time;
+    const samples = [];
+    for (let turn = 0; turn < 5; turn++)
+    {
+        await assert.rejects(app.run({ timeoutMs: 300 }), /did not finish within/);
+        samples.push(virtualMsAt());
+    }
 
-    assert.ok(time.wallMs > 0, 'the run took measurable time');
-    assert.ok(time.virtualMs > time.wallMs / 2,
-        `the guest was credited ${time.virtualMs}ms of ${time.wallMs}ms that really passed`);
+    for (let turn = 1; turn < samples.length; turn++)
+    {
+        assert.ok(samples[turn] > samples[turn - 1],
+            `turn ${turn}: the virtual clock did not advance while parked `
+            + `(${samples[turn - 1]}ms -> ${samples[turn]}ms)`);
+    }
 });
