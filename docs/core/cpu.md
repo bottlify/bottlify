@@ -84,6 +84,21 @@ otherwise.
 | `forwardSave` | `32` | Bytes a forwarding stub pushes (`pushad`) before it traps. |
 | `fpu` | `{ setResult, get, pop, depth, controlWord }` | The x87 stack, for a handler that returns a `double` or takes one from ST(n). |
 
+An instance owns its emulator. `create()` may run more than once in the same realm (a process
+replacement runs it again; the plan for two machines in one worker needs two at once), so the
+emulator, the stub table and the fault record live in the instance the api closes over, and a
+second `create()` cannot take the first one's machine; `diagnostics()` answers for the most
+recently created instance. **A second boot is a second instance's own first boot**, not a
+continuation of another one's: `boot()`'s "already booted" refusal reads only this instance's own
+state, so a process replacement's fresh cpu instance boots cleanly while the machine it is
+replacing is still standing (or already disposed) — it never sees the other instance's emulator
+and never throws on its account. After `dispose()`, this instance answers exactly as one that has
+never booted: `booted()` is `false`, `diagnostics()` reports `status: 'created'`, `fault()` is
+`null`, `raiseFault()` is a no-op, and every method that needs a running emulator throws the same
+`cpu: boot() must be called before the guest can run` a never-booted instance already throws —
+there is no separate "disposed" refusal, because a disposed machine and one that has not started
+yet are the same state from a caller's perspective.
+
 ### Diagnostics
 
 `diagnostics()` answers `status: 'created'` until `boot()`, `'ready'` after. Metrics:

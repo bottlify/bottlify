@@ -182,3 +182,42 @@ test('a guest that strays into the retired boot code is reported as an excursion
     api.stop();
     await cpuModule.dispose();
 });
+
+test('a second instance in one realm boots on its own, never seeing the first one\'s emulator',
+    async()=>{
+        const { api: first } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
+
+        const metrics = createMetrics({ shared: false });
+        const second = await cpuModule.create({}, /** @type {any} */ ({
+            requireApi: ()=>({ metrics, intern: ()=>-1 }),
+            provide: ()=>{},
+        }));
+        const wasm = await readFile(new URL('v86.wasm', PREBUILT));
+        // Before the fix this threw "cpu: already booted": the check read the
+        // module's own `host`, which the first instance had already set,
+        // rather than this instance's own -- still-null -- one.
+        await second.boot({
+            moduleUrl: new URL('libv86.mjs', PREBUILT).href,
+            wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
+        });
+        assert.equal(second.booted(), true);
+        assert.equal(first.booted(), true, 'and the first instance is unaffected');
+
+        second.stop();
+        first.stop();
+        await cpuModule.dispose();
+    });
+
+test('a disposed cpu answers as a never-booted one does, after a real boot', async()=>{
+    const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
+    assert.equal(api.booted(), true);
+
+    await cpuModule.dispose();
+
+    assert.equal(api.booted(), false);
+    assert.equal(api.fault(), null);
+    assert.throws(()=>api.readPhysical(0, 4),
+        /cpu: boot\(\) must be called before the guest can run/);
+    assert.throws(()=>api.runSlice(1),
+        /cpu: boot\(\) must be called before the guest can run/);
+});

@@ -30,6 +30,31 @@ The other typedefs:
 | `ScopedModuleHost` | `{ requireApi(name), provide(name, api) }` — the module's only view of the system. |
 | `CoreInstance` | `{ modules, api(name), diagnostics(), dispose() }` — what `assembleModules` returns. |
 
+### A module's live state belongs to its instance
+
+`create()` may run more than once in the same realm: a process replacement runs it again on the
+same worker, and the plan for more than one machine in one worker needs two `create()` calls live
+at once. Every layer under `src/layers/` follows the same shape so that this is safe: one `state`
+object is built inside `create()`, every method the returned api hands out closes over that
+object rather than over a module-level binding, and a single file-scope `current` — reassigned to
+the new `state` at the end of each `create()` — exists only so that `diagnostics()`, which the
+contract puts on the module rather than on the api, has something to read. Nothing outside
+`create()` ever holds the state itself, so a second `create()` cannot take the first instance's
+memory, threads, decoder, volume or GPU backend out from under it, and `diagnostics()` always
+answers for the most recently created instance rather than whichever one happened to run last.
+
+`dispose()` marks its instance's `state.disposed` and drops `current`; it never reaches into a
+different instance's state, so disposing the second machine leaves the first exactly as it was.
+Every api method a disposed instance still holds a reference to answers rather than throwing: a
+harmless value in the same shape a live call would have answered — an empty list, a null, a
+no-op — for a layer whose calls have one, and the same refusal a disabled or not-yet-built layer
+already answers (`system/stub.js`'s `NOT_IMPLEMENTED`) for a layer like `graphics` whose api
+returns whole object graphs with no harmless scalar to stand in for them. `cpu` is the one further
+step: a disposed instance answers exactly as one that has never booted, because from a caller's
+side those are the same state, and `boot()`'s "already booted" refusal reads only its own
+instance's state — never a different instance's emulator — so a fresh instance boots cleanly
+while the one it is replacing is still running or already disposed.
+
 ## 2. Configuration (`src/system/config.js`)
 
 `normalizeConfig(desired, known)` turns the caller's `{ [moduleName]: value }` into a

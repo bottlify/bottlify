@@ -38,3 +38,59 @@ test('a build without a log registry still creates', async()=>{
     assert.equal(cpuModule.diagnostics().status, 'created');
     await cpuModule.dispose();
 });
+
+/** A cpu instance with no log registry, for tests that never boot the emulator. */
+async function open(){
+    return cpuModule.create({}, /** @type {any} */ ({
+        requireApi: ()=>({}),
+        provide: ()=>{},
+    }));
+}
+
+test('a second instance in one realm does not take the first one\'s state', async()=>{
+    // Booting a real emulator is an integration concern (module.itest.js has
+    // the prebuilt-artifact test for `boot()` itself); this pins the same
+    // class of bug on the state a fresh, unbooted instance already owns --
+    // the fault record -- which used to live at module scope alongside `host`.
+    const first = await open();
+    first.raiseFault({ name: 'first-fault', detail: 'x', eip: 0x1000 });
+
+    const second = await open();
+
+    assert.ok(first.fault(), 'the first instance keeps its own fault');
+    assert.equal(first.fault().name, 'first-fault');
+    assert.equal(second.fault(), null, 'and the second starts with none of its own');
+
+    await cpuModule.dispose();
+});
+
+test('a disposed cpu answers harmlessly rather than throwing', async()=>{
+    const api = await open();
+    api.raiseFault({ name: 'x', detail: 'y', eip: 0x1000 });
+
+    await cpuModule.dispose();
+
+    assert.equal(api.booted(), false);
+    assert.equal(api.fault(), null);
+    api.raiseFault({ name: 'late', detail: 'z', eip: 0x2000 });
+    assert.equal(api.fault(), null, 'raiseFault is a no-op once disposed');
+    api.stop();
+    assert.throws(()=>api.run(), /cpu: boot\(\) must be called before the guest can run/,
+        'every method that needs a running emulator answers as a never-booted instance does');
+    assert.throws(()=>api.runSlice(1),
+        /cpu: boot\(\) must be called before the guest can run/);
+    assert.throws(()=>api.readPhysical(0, 4),
+        /cpu: boot\(\) must be called before the guest can run/);
+});
+
+test('diagnostics answers for the live instance', async()=>{
+    await open();
+    const second = await open();
+    second.raiseFault({ name: 'second-only', detail: 'x', eip: 0x1000 });
+
+    assert.equal(cpuModule.diagnostics().status, 'created',
+        'unbooted either way, but the second (most recently created) instance is the one asked');
+    assert.equal(second.fault().name, 'second-only');
+
+    await cpuModule.dispose();
+});

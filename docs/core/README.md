@@ -122,8 +122,6 @@ change and on a schedule.
 - **An image is mapped as one span** with the widest access its sections ask for
   (`src/layers/loader/module.js`); per-section permissions wait until something other than the
   loader writes there.
-- **Module state is per-process, not per-build.** `diagnostics()` has to answer after `create`, so
-  a module keeps its instance state on itself; two concurrent builds in one process would collide.
 - **The video decoder is optional and not in git.** `npm run fetch:video-decoder` pulls it against
   `video-decoder-lock.json`; a build without it comes up and the media layer reports
   `available() === false`, and a program that opens a clip gets the filter graph's truthful

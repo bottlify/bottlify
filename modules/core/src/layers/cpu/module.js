@@ -7,6 +7,9 @@
 import { createV86Host } from './internal/v86-host.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
+import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
+import { readFault, describeFault, hostFault } from './internal/faults.js';
+import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
 
 /**
  * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
@@ -16,54 +19,28 @@ import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
  * committed: the host pays only for what the guest touches.
  */
 export const DEFAULT_MEMORY_SIZE = 1024 * 1024 * 1024;
-import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
-import { readFault, describeFault, hostFault } from './internal/faults.js';
-
-/**
- * The exception that stopped the machine, if one did.
- *
- * Kept rather than raised: a fault is reported from inside the emulator's own
- * port write, and an exception thrown there is lost crossing back into wasm.
- *
- * @type {any}
- */
-let lastFault = null;
-import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
 
 /**
  * cpu — the guest CPU and the channel the guest calls us through.
  *
  * The only layer that knows an emulator is underneath. Everything above it
  * talks about running, stopping, registers, physical memory and traps.
- *
- * State lives on the module rather than in the returned API because
- * `diagnostics()` is part of the module contract and has to answer after the
- * instance exists. One build per process is the assumption; a second concurrent
- * build would need this hoisted into a per-instance record.
  */
 
-/** @type {any} */
-let host = null;
-/** @type {any} */
-let thunks = null;
-let running = false;
-/** Whether the stub table has been put into guest memory yet. */
-let tableWritten = false;
 /**
- * The heaviest interpreted stretch since the counters were last published:
- * how much the slice interpreted, and the address it began at.
+ * The most recently created instance, for `diagnostics()` alone.
  *
- * A slice is the finest boundary the host sees -- the interpreter is entered
- * and left inside one, in the emulator's own code -- so this is the slice the
- * interpreter ran most of, credited to where the slice started. That is the
- * same trick the scheduler uses for its heaviest slice, and honest for the
- * same reason: a slice of a hundred thousand that interpreted most of them was
- * in one place.
+ * The module contract puts `diagnostics()` on the module rather than on the
+ * api, so something outside a `create()` call has to be able to see in. That
+ * is the only reason this exists, and it holds a reference rather than the
+ * state itself -- the emulator, the stub table and the fault record belong
+ * to the closure `create()` returns, so a second instance in one realm
+ * cannot take the first one's machine, and its own `boot()` does not see the
+ * first one's emulator when it asks whether it has already booted.
+ *
+ * @type {any}
  */
-let worstInterpreted = 0;
-let worstInterpretedAt = 0;
-/** The emulator's interpreted-step count as it stood after the last slice. */
-let interpretedBefore = 0;
+let current = null;
 
 /**
  * What this layer publishes as numbers, once a frame: the counters the
@@ -116,22 +93,45 @@ export const cpuModule = {
      */
     async create(config, moduleHost){
         const log = moduleHost?.requireApi('log');
+
+        /**
+         * Everything this instance owns, and whether it is still open.
+         *
+         * The calls an api hands out close over this object rather than over
+         * module-level bindings, because `create()` may run more than once in
+         * one realm -- a process replacement does, and the plan for more than
+         * one machine in a worker needs two at once -- so each run keeps its
+         * own emulator, stub table and fault record. `host`/`thunks` double
+         * as the "has this instance booted" flag: `boot()`'s "already
+         * booted" refusal and every method that needs a running emulator
+         * read them, and only them, never a different instance's.
+         *
+         * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
+         *          worstInterpreted: number, worstInterpretedAt: number,
+         *          interpretedBefore: number, lastFault: any, disposed: boolean }}
+         */
+        const state = {
+            host: null, thunks: null, running: false, tableWritten: false,
+            worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
+            lastFault: null, disposed: false,
+        };
+
         if (typeof log?.metrics?.counters === 'function')
         {
             const counters = log.metrics.counters('cpu', CPU_COUNTERS);
             log.metrics.onFrame(()=>{
-                if (!host)
+                if (!state.host)
                 {
                     return;
                 }
-                counters[0] = running ? 1 : 0;
-                counters[1] = host.instructionCount();
-                counters[2] = host.inProtectedMode() ? 1 : 0;
-                counters[3] = thunks ? thunks.size : 0;
-                counters[4] = thunks ? thunks.capacity : 0;
-                counters[5] = host.eip();
-                counters[6] = host.trapCrossings();
-                const jit = host.jitState();
+                counters[0] = state.running ? 1 : 0;
+                counters[1] = state.host.instructionCount();
+                counters[2] = state.host.inProtectedMode() ? 1 : 0;
+                counters[3] = state.thunks ? state.thunks.size : 0;
+                counters[4] = state.thunks ? state.thunks.capacity : 0;
+                counters[5] = state.host.eip();
+                counters[6] = state.host.trapCrossings();
+                const jit = state.host.jitState();
                 // An emulator that refused to answer reports `-1` rather than a
                 // record, and reading fields off a number leaves every counter
                 // NaN -- which a frame's own figures are then subtracted from.
@@ -144,10 +144,10 @@ export const cpuModule = {
                             ? value : Number(value);
                     }
                 }
-                counters[FRAME_INTERPRETED] = worstInterpreted;
-                counters[FRAME_INTERPRETED + 1] = worstInterpretedAt;
-                worstInterpreted = 0;
-                worstInterpretedAt = 0;
+                counters[FRAME_INTERPRETED] = state.worstInterpreted;
+                counters[FRAME_INTERPRETED + 1] = state.worstInterpretedAt;
+                state.worstInterpreted = 0;
+                state.worstInterpretedAt = 0;
             });
         }
         const settings = {
@@ -186,15 +186,16 @@ export const cpuModule = {
 
         /** Every entry point that needs a running emulator goes through this. */
         const started = ()=>{
-            if (!host)
+            if (!state.host)
             {
                 throw new Error('cpu: boot() must be called before the guest can run');
             }
-            return host;
+            return state.host;
         };
 
         const fpu = createFpu({ get wasm_memory(){ return started().cpu().wasm_memory; } });
 
+        current = state;
         return {
             layout: {
                 entryVector: settings.entryVector,
@@ -225,25 +226,30 @@ export const cpuModule = {
              * artifacts, so that a consumer can inspect a build -- or run one with
              * the guest never started -- without paying for an emulator.
              *
+             * Throws if *this instance* has already booted. A different
+             * instance that has booted -- the one a process replacement is
+             * retiring, say -- has no bearing on this one: each keeps its own
+             * emulator, and only its own.
+             *
              * @param {Object} artifacts
              * @param {string} artifacts.moduleUrl
              * @param {ArrayBuffer} artifacts.wasmBytes
              */
             async boot({ moduleUrl, wasmBytes }){
-                if (host)
+                if (state.host)
                 {
                     throw new Error('cpu: already booted');
                 }
-                lastFault = null;
-                host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
-                thunks = createThunkTable({
+                state.lastFault = null;
+                state.host = await createV86Host({ ...settings, moduleUrl, wasmBytes });
+                state.thunks = createThunkTable({
                     base: settings.thunkBase,
                     port: settings.trapPort,
                     // The same span the region is registered with, so the table
                     // refuses a slot rather than laying one outside it.
                     capacity: settings.thunkCapacity,
                 });
-                host.onTrap((/** @type {number} */ id)=>{
+                state.host.onTrap((/** @type {number} */ id)=>{
                     // A processor exception arrives as a trap like any other,
                     // from a stub the ROM put behind its vector. Answered here
                     // rather than passed on, because the layer that owns the
@@ -256,9 +262,9 @@ export const cpuModule = {
                     {
                         const fault = readFault(
                             vector,
-                            host.readReg32('esp'),
+                            state.host.readReg32('esp'),
                             (/** @type {number} */ address)=>{
-                                const bytes = host.readPhysical(address, 4);
+                                const bytes = state.host.readPhysical(address, 4);
                                 return bytes[0] | bytes[1] << 8
                                     | bytes[2] << 16 | bytes[3] << 24;
                             },
@@ -269,24 +275,26 @@ export const cpuModule = {
                         // is lost crossing into wasm, and what is seen
                         // afterwards is a machine sitting in the stub's halt,
                         // which reads as a hang rather than as a fault.
-                        lastFault = fault;
-                        host.stop();
+                        state.lastFault = fault;
+                        state.host.stop();
                         return 0;
                     }
                     return dispatch(id);
                 });
             },
 
-            booted: ()=>host !== null,
+            booted: ()=>state.host !== null,
 
             /**
              * The processor exception that stopped the machine, or null.
              *
              * Asked after a run that ended without the program saying it had
              * finished: from outside, a halted processor and a finished program
-             * look the same.
+             * look the same. Null once this instance is disposed, along with
+             * everything else it never booted.
              */
-            fault: ()=>lastFault && { ...lastFault, text: describeFault(lastFault) },
+            fault: ()=>state.lastFault
+                && { ...state.lastFault, text: describeFault(state.lastFault) },
 
             /**
              * Stops the machine with a fault of the host's own naming, found
@@ -296,24 +304,29 @@ export const cpuModule = {
              * emulator is still standing on the stub and will run its `ret`
              * regardless. The caller sends that return into the park loop,
              * whose `hlt` is what actually ends the slice -- the same halt
-             * the ROM's fault stubs end on.
+             * the ROM's fault stubs end on. A no-op once this instance is
+             * disposed: there is no slice left for the record to explain.
              *
              * @param {Omit<Parameters<typeof hostFault>[0], 'vector' | 'errorCode'>} fault
              */
             raiseFault(fault){
-                lastFault ??= hostFault(fault);
+                if (state.disposed)
+                {
+                    return;
+                }
+                state.lastFault ??= hostFault(fault);
             },
 
             run(){
-                running = true;
+                state.running = true;
                 started().run();
             },
 
             stop(){
-                running = false;
-                if (host)
+                state.running = false;
+                if (state.host)
                 {
-                    host.stop();
+                    state.host.stop();
                 }
             },
 
@@ -349,15 +362,15 @@ export const cpuModule = {
              */
             registerTrap(name, popBytes, options){
                 started();
-                const taken = thunks.register(name, popBytes, options);
+                const taken = state.thunks.register(name, popBytes, options);
                 // Written straight into the guest when the table is already
                 // there. Registration never stops -- a COM interface published
                 // when a program first asks for it takes a slot per method --
                 // and a slot whose bytes were never written is sixteen zeroes
                 // that a guest will happily execute.
-                if (tableWritten)
+                if (state.tableWritten)
                 {
-                    started().writePhysical(taken.address, thunks.stub(taken.id));
+                    started().writePhysical(taken.address, state.thunks.stub(taken.id));
                 }
                 return taken;
             },
@@ -374,11 +387,11 @@ export const cpuModule = {
              */
             thunkImage(){
                 started();
-                tableWritten = true;
-                return thunks.image();
+                state.tableWritten = true;
+                return state.thunks.image();
             },
             /** Where a terminating call returns to instead of into its caller. */
-            parkAddress: ()=>thunks.parkAddress,
+            parkAddress: ()=>state.thunks.parkAddress,
 
             /** @param {(id: number) => void} handler */
             onTrap(handler){
@@ -397,7 +410,7 @@ export const cpuModule = {
              * @returns {number}
              */
             runSlice(maxInstructions){
-                running = true;
+                state.running = true;
                 const machine = started();
                 const from = machine.eip();
                 let instructions = 0;
@@ -422,7 +435,7 @@ export const cpuModule = {
                     const cr2 = machine.controlRegister(2);
                     const cr3 = machine.controlRegister(3);
                     const paging = (machine.controlRegister(0) & 0x80000000) !== 0;
-                    lastFault ??= hostFault({
+                    state.lastFault ??= hostFault({
                         vector: 8,
                         name: 'double fault',
                         errorCode: 0,
@@ -445,12 +458,12 @@ export const cpuModule = {
                 // frame can name the code the interpreter was in. The slice is
                 // already thousands of times more expensive than this.
                 const interpreted = machine.interpretedSteps();
-                const ran = interpreted - interpretedBefore;
-                interpretedBefore = interpreted;
-                if (ran > worstInterpreted)
+                const ran = interpreted - state.interpretedBefore;
+                state.interpretedBefore = interpreted;
+                if (ran > state.worstInterpreted)
                 {
-                    worstInterpreted = ran;
-                    worstInterpretedAt = from;
+                    state.worstInterpreted = ran;
+                    state.worstInterpretedAt = from;
                 }
                 return instructions;
             },
@@ -574,16 +587,21 @@ export const cpuModule = {
 
     /** @returns {import('../../system/contract.js').ModuleDiagnostics} */
     diagnostics(){
+        const instance = current;
+        if (!instance || !instance.host)
+        {
+            return { name: 'cpu', version: '0.1.0', status: 'created', metrics: {} };
+        }
         return {
             name: 'cpu',
             version: '0.1.0',
-            status: host ? 'ready' : 'created',
+            status: 'ready',
             metrics: {
-                running,
-                instructions: host ? host.instructionCount() : 0,
-                protectedMode: host ? host.inProtectedMode() : false,
-                traps: thunks ? thunks.size : 0,
-                trapCapacity: thunks ? thunks.capacity : 0,
+                running: instance.running,
+                instructions: instance.host.instructionCount(),
+                protectedMode: instance.host.inProtectedMode(),
+                traps: instance.thunks ? instance.thunks.size : 0,
+                trapCapacity: instance.thunks ? instance.thunks.capacity : 0,
                 // Whether the emulator is compiling guest code at all, and
                 // how much of it runs compiled rather than interpreted.
                 //
@@ -597,27 +615,33 @@ export const cpuModule = {
                 // out of a release build and answers zero always, which reads
                 // as a dead compiler on a healthy machine. Counted where the
                 // instructions are actually retired instead.
-                jit: host ? host.jitState() : null,
+                jit: instance.host.jitState(),
                 // Where the guest is right now. A thread that spins in guest
                 // code makes no host call, so nothing else in this report can
                 // say what it is doing; sampled repeatedly from outside, this
                 // one number names the loop.
-                eip: host ? host.eip() : 0,
+                eip: instance.host.eip(),
             },
         };
     },
 
     async dispose(){
-        if (host)
+        if (current)
         {
-            host.stop();
+            if (current.host)
+            {
+                current.host.stop();
+            }
+            current.host = null;
+            current.thunks = null;
+            current.running = false;
+            current.tableWritten = false;
+            current.worstInterpreted = 0;
+            current.worstInterpretedAt = 0;
+            current.interpretedBefore = 0;
+            current.lastFault = null;
+            current.disposed = true;
         }
-        host = null;
-        thunks = null;
-        running = false;
-        tableWritten = false;
-        worstInterpreted = 0;
-        worstInterpretedAt = 0;
-        interpretedBefore = 0;
+        current = null;
     },
 };
