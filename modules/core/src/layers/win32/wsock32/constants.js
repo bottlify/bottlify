@@ -95,6 +95,22 @@ export const SOL_SOCKET = 0xffff;
 export const IPPROTO_IP = 0;
 
 /**
+ * The network events WSAAsyncSelect and WSAEventSelect both arm a socket for,
+ * and the bit positions WSAEnumNetworkEvents' iErrorCode[] answers about --
+ * position N is the error for bit `1 << N`, which is why these are powers of
+ * two rather than an enumeration.
+ */
+export const FD_READ = 0x0001;
+export const FD_WRITE = 0x0002;
+export const FD_OOB = 0x0004;
+export const FD_ACCEPT = 0x0008;
+export const FD_CONNECT = 0x0010;
+export const FD_CLOSE = 0x0020;
+
+/** The length of WSANETWORKEVENTS.iErrorCode, whatever the caller's mask uses. */
+export const FD_MAX_EVENTS = 10;
+
+/**
  * The socket-level options we answer for. Everything else is accepted and
  * remembered without being enforced, because a program that sets a buffer size
  * and reads it back must see what it set, and nothing below honours it anyway.

@@ -155,6 +155,8 @@ function fixture(network){
             },
         },
         registry: createSocketRegistry({ adapter: network }),
+        post: ()=>{},
+        signalEvent: ()=>{},
     };
 
     const winsock = createWinsockFunctions(host);

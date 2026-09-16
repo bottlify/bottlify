@@ -32,8 +32,9 @@
  */
 
 import {
-    AF_INET, FIONBIO, FIONREAD, HOSTENT, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
-    SOCKET_ERROR, SOL_SOCKET, SO_TYPE, WSADATA, WSADESCRIPTION, WSASYSSTATUS,
+    AF_INET, FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_MAX_EVENTS, FD_READ, FD_WRITE,
+    FIONBIO, FIONREAD, HOSTENT, INADDR_LOOPBACK, INADDR_NONE, INVALID_SOCKET,
+    SOCKET_ERROR, SOCK_STREAM, SOL_SOCKET, SO_TYPE, WSADATA, WSADESCRIPTION, WSASYSSTATUS,
     WSAEAFNOSUPPORT, WSAEFAULT, WSAEINVAL, WSAENOTSOCK, WSAEMSGSIZE, WSAEOPNOTSUPP, WSAEWOULDBLOCK,
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WSOCK32_ORDINALS, WS2_32_ORDINALS,
 } from './constants.js';
@@ -55,13 +56,21 @@ const SIO_GET_EXTENSION_FUNCTION_POINTER = 0xc8000006;
  * @property {() => any} currentThread
  * @property {any} heap                 Allocates the buffers we hand back pointers to.
  * @property {any} registry             The socket registry.
+ * @property {(message: { hwnd: number, message: number, wParam: number,
+ *             lParam: number }) => void} post
+ *           Where a readiness notification goes -- the same window queue
+ *           PostMessage uses, so a program's own PeekMessage loop sees it.
+ * @property {(handle: number) => void} signalEvent
+ *           Signals a kernel event object by its guest handle, for
+ *           WSAEventSelect. A stale or mistyped handle is the program's
+ *           mistake, not a fault here.
  */
 
 /**
  * @param {WinsockHost} host
  */
 export function createWinsockFunctions(host){
-    const { registry } = host;
+    const { registry, post, signalEvent } = host;
 
     /**
      * The last error, per thread.
@@ -328,6 +337,186 @@ export function createWinsockFunctions(host){
     };
 
     /**
+     * Readiness as a window message (WSAAsyncSelect) or a kernel event
+     * (WSAEventSelect), over the same per-socket state machine.
+     *
+     * Both notify on the same four edges -- writable, a connection to
+     * accept, bytes to read, the peer done -- and both are level-triggered
+     * with the same re-enable rule: FD_READ waits for `recv` to be called
+     * again before it can fire a second time, FD_ACCEPT waits for `accept`.
+     * FD_WRITE and FD_CLOSE need no re-enabling here, because nothing in
+     * this stack ever reports WSAEWOULDBLOCK from a send to clear, and a
+     * closed connection has nothing further to report.
+     *
+     * A socket's selection lives on the socket object itself (`asyncSelect`
+     * or `eventSelect`, never both), alongside `nonBlocking` and the rest of
+     * what functions.js already keeps there directly.
+     */
+
+    /** The bit position WSAEnumNetworkEvents' iErrorCode[] answers about. */
+    const eventBit = (/** @type {number} */ event)=>Math.log2(event) | 0;
+
+    /**
+     * Delivers one event: a posted message for WSAAsyncSelect, an
+     * accumulated bit plus a signalled kernel event for WSAEventSelect.
+     *
+     * @param {any} socket @param {number} event @param {number} error
+     */
+    const notify = (socket, event, error)=>{
+        const select = socket.asyncSelect;
+        if (select)
+        {
+            post({
+                hwnd: select.hwnd, message: select.msg, wParam: socket.handle >>> 0,
+                lParam: ((event & 0xffff) | ((error & 0xffff) << 16)) >>> 0,
+            });
+            return;
+        }
+        const armed = socket.eventSelect;
+        if (armed)
+        {
+            const bit = eventBit(event);
+            armed.pending |= 1 << bit;
+            armed.errors[bit] = error & 0xffff;
+            signalEvent(armed.handle);
+        }
+    };
+
+    /** Whichever of the two selections is active, or undefined. */
+    const selectionOf = (/** @type {any} */ socket)=>socket.asyncSelect || socket.eventSelect;
+
+    /** Whether a socket has either kind of notification armed -- select()'s exclusion. */
+    const notifying = (/** @type {any} */ socket)=>Boolean(selectionOf(socket));
+
+    /** @param {any} socket */
+    const isStream = socket=>socket.type === SOCK_STREAM;
+
+    /** @param {any} socket */
+    const isWritable = socket=>!socket.closed && (!isStream(socket) || socket.connected);
+
+    /**
+     * Checks every edge but FD_CONNECT, which only ever fires from the
+     * connect call itself -- there being nothing to poll for it here, a
+     * local connect never being pending and a remote one settling its own
+     * promise once, exactly where the attempt was made.
+     *
+     * @param {any} socket
+     */
+    const pumpSelection = socket=>{
+        const state = selectionOf(socket);
+        if (!state || socket.closed)
+        {
+            return;
+        }
+        if ((state.mask & FD_WRITE) && !state.writeSent && isWritable(socket))
+        {
+            state.writeSent = true;
+            notify(socket, FD_WRITE, 0);
+        }
+        if ((state.mask & FD_ACCEPT) && state.acceptArmed && socket.backlog.length > 0)
+        {
+            state.acceptArmed = false;
+            notify(socket, FD_ACCEPT, 0);
+        }
+        if ((state.mask & FD_READ) && state.readArmed && socket.rx.length > 0)
+        {
+            state.readArmed = false;
+            notify(socket, FD_READ, 0);
+        }
+        if ((state.mask & FD_CLOSE) && !state.closeSent && socket.finished)
+        {
+            state.closeSent = true;
+            notify(socket, FD_CLOSE, socket.error || 0);
+        }
+    };
+
+    /**
+     * Re-enables FD_READ or FD_ACCEPT, then re-checks at once: the call that
+     * re-enabled it may itself have left more to report -- a `recv` for less
+     * than what was queued, an `accept` with another connection still
+     * backlogged.
+     *
+     * @param {any} socket @param {'read' | 'accept'} which
+     */
+    const rearm = (socket, which)=>{
+        const state = selectionOf(socket);
+        if (!state)
+        {
+            return;
+        }
+        if (which === 'read')
+        {
+            state.readArmed = true;
+        }
+        else
+        {
+            state.acceptArmed = true;
+        }
+        pumpSelection(socket);
+    };
+
+    /**
+     * Delivers FD_CONNECT (and, on success, whatever FD_WRITE that unlocks)
+     * from the one place a connect's outcome is ever learned, whether that
+     * was immediate or the far end of a promise.
+     *
+     * @param {any} socket @param {{ error?: number }} outcome
+     */
+    const notifyConnect = (socket, outcome)=>{
+        const state = selectionOf(socket);
+        if (!state)
+        {
+            return;
+        }
+        if (outcome.error)
+        {
+            if (state.mask & FD_CONNECT)
+            {
+                notify(socket, FD_CONNECT, outcome.error);
+            }
+            return;
+        }
+        if (state.mask & FD_CONNECT)
+        {
+            notify(socket, FD_CONNECT, 0);
+        }
+        pumpSelection(socket);
+    };
+
+    /**
+     * Keeps a selection live across state changes the socket did not cause
+     * itself to be asked about again.
+     *
+     * `registry`'s `wake` is one-shot: every waiter on a socket runs once and
+     * is forgotten. A selection needs the opposite -- watching for as long as
+     * it is armed -- so this re-attaches itself to the socket's waiter list
+     * every time it runs, which is the same trick `readableSoon` callers use
+     * one level up, done here so it never misses a second change that lands
+     * before anyone has pumped messages for the first.
+     *
+     * @param {any} socket
+     */
+    const watch = socket=>{
+        if (socket.watchingSelection)
+        {
+            return;
+        }
+        socket.watchingSelection = true;
+        const tick = ()=>{
+            pumpSelection(socket);
+            if (!socket.closed && selectionOf(socket))
+            {
+                socket.waiters.push(tick);
+            }
+            else
+            {
+                socket.watchingSelection = false;
+            }
+        };
+        socket.waiters.push(tick);
+    };
+
+    /**
      * The socket calls, shared by wsock32 and ws2_32.
      *
      * One table and one registry, because they are one library as far as a
@@ -510,8 +699,10 @@ export function createWinsockFunctions(host){
                 // Reaching anything outside this runtime takes a round trip, so
                 // the outcome may be a promise; the bridge parks the guest
                 // thread on one, which is what a blocking connect does anyway.
-                const settle = (/** @type {any} */ outcome)=>
-                    outcome.error ? fail(outcome.error) : ok(0);
+                const settle = (/** @type {any} */ outcome)=>{
+                    notifyConnect(socket, outcome);
+                    return outcome.error ? fail(outcome.error) : ok(0);
+                };
                 const outcome = registry.connect(socket, address);
                 return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
             },
@@ -527,6 +718,7 @@ export function createWinsockFunctions(host){
                     return fail(WSAENOTSOCK, INVALID_SOCKET);
                 }
                 return blocking(socket, ()=>registry.accept(socket), outcome=>{
+                    rearm(socket, 'accept');
                     if (outcome.error)
                     {
                         return fail(outcome.error, INVALID_SOCKET);
@@ -571,6 +763,7 @@ export function createWinsockFunctions(host){
                 }
                 const wanted = length >>> 0;
                 return blocking(socket, ()=>registry.receive(socket, wanted), outcome=>{
+                    rearm(socket, 'read');
                     if (outcome.error)
                     {
                         return fail(outcome.error);
@@ -615,6 +808,7 @@ export function createWinsockFunctions(host){
                 }
                 const wanted = length >>> 0;
                 return blocking(socket, ()=>registry.receive(socket, wanted), outcome=>{
+                    rearm(socket, 'read');
                     if (outcome.error)
                     {
                         return fail(outcome.error);
@@ -799,6 +993,13 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAENOTSOCK);
                 }
+                // WSAAsyncSelect/WSAEventSelect and select() are two ways of
+                // asking the same question, and Winsock refuses to answer
+                // both at once for one socket.
+                if ([...read, ...write, ...except].some(notifying))
+                {
+                    return fail(WSAEINVAL);
+                }
 
                 const answer = ()=>{
                     const ready = registry.poll(read, write, except);
@@ -840,6 +1041,119 @@ export function createWinsockFunctions(host){
             /** @param {number[]} args */
             handler: ([handle, pointer])=>
                 readFdSet(pointer).includes(handle >>> 0) ? 1 : 0,
+        },
+
+        /**
+         * int WSAAsyncSelect(SOCKET s, HWND hWnd, u_int wMsg, long lEvent)
+         *
+         * Puts the socket in non-blocking mode and arms it to post `wMsg` to
+         * `hWnd` for each event in `lEvent`; a fresh registration replaces
+         * whatever was armed before, and reports at once whatever in the new
+         * mask is already true -- there being no other moment such a thing
+         * would otherwise be noticed. `lEvent = 0` cancels.
+         */
+        WSAAsyncSelect: {
+            argBytes: 16,
+            /** @param {number[]} args */
+            handler: ([handle, hwnd, msg, mask])=>{
+                const socket = socketOf(handle);
+                if (!socket)
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                socket.nonBlocking = true;
+                socket.eventSelect = null;
+                const bits = mask >>> 0;
+                if (bits === 0)
+                {
+                    socket.asyncSelect = null;
+                    return ok(0);
+                }
+                socket.asyncSelect = {
+                    hwnd: hwnd >>> 0, msg: msg >>> 0, mask: bits,
+                    readArmed: true, acceptArmed: true, writeSent: false, closeSent: false,
+                };
+                watch(socket);
+                pumpSelection(socket);
+                return ok(0);
+            },
+        },
+
+        /**
+         * int WSAEventSelect(SOCKET s, WSAEVENT hEventObject, long lNetworkEvents)
+         *
+         * The same arming, over a kernel event instead of a window message:
+         * every event in the mask sets a bit in an accumulator that
+         * WSAEnumNetworkEvents reads and clears, and signals `hEventObject`
+         * each time a new bit is set. Also non-blocking, and replaces
+         * whatever WSAAsyncSelect had armed -- the two are one notification
+         * mechanism with two ways of collecting it, never both at once.
+         */
+        WSAEventSelect: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, hEvent, mask])=>{
+                const socket = socketOf(handle);
+                if (!socket)
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                socket.nonBlocking = true;
+                socket.asyncSelect = null;
+                const bits = mask >>> 0;
+                if (bits === 0)
+                {
+                    socket.eventSelect = null;
+                    return ok(0);
+                }
+                socket.eventSelect = {
+                    handle: hEvent >>> 0, mask: bits, pending: 0,
+                    errors: new Array(FD_MAX_EVENTS).fill(0),
+                    readArmed: true, acceptArmed: true, writeSent: false, closeSent: false,
+                };
+                watch(socket);
+                pumpSelection(socket);
+                return ok(0);
+            },
+        },
+
+        /**
+         * int WSAEnumNetworkEvents(SOCKET s, WSAEVENT hEventObject,
+         *                           LPWSANETWORKEVENTS lpNetworkEvents)
+         *
+         * Reports lNetworkEvents and iErrorCode[FD_MAX_EVENTS] as they stand
+         * and clears both -- the accumulator exists so nothing is lost
+         * between one enum call and the next, never so the same bit is read
+         * twice.
+         */
+        WSAEnumNetworkEvents: {
+            argBytes: 12,
+            /** @param {number[]} args */
+            handler: ([handle, , eventsPointer])=>{
+                const socket = socketOf(handle);
+                if (!socket)
+                {
+                    return fail(WSAENOTSOCK);
+                }
+                if (eventsPointer === 0)
+                {
+                    return fail(WSAEFAULT);
+                }
+                const armed = socket.eventSelect;
+                const pending = armed ? armed.pending : 0;
+                writeDword(eventsPointer, pending);
+                for (let bit = 0; bit < FD_MAX_EVENTS; bit++)
+                {
+                    const error = armed && (pending & (1 << bit)) ? armed.errors[bit] : 0;
+                    writeDword((eventsPointer >>> 0) + 4 + bit * 4, error);
+                }
+                if (armed)
+                {
+                    armed.pending = 0;
+                    armed.errors.fill(0);
+                }
+                return ok(0);
+            },
         },
 
         htons: { argBytes: 4, handler: (/** @type {number[]} */ [value])=>swap16(value) },
@@ -944,6 +1258,7 @@ export function createWinsockFunctions(host){
                 }
                 const taken = readBuffers(buffers, count >>> 0);
                 const outcome = registry.receive(socket, totalOf(taken));
+                rearm(socket, 'read');
                 if (!outcome.error)
                 {
                     scatter(taken, outcome.bytes);
@@ -972,6 +1287,7 @@ export function createWinsockFunctions(host){
                 }
                 return until(socket, ()=>registry.receive(socket, totalOf(taken)))
                     .then(later=>{
+                        rearm(socket, 'read');
                         if (later.error)
                         {
                             return fail(later.error);
@@ -1091,8 +1407,10 @@ export function createWinsockFunctions(host){
                 {
                     return fail(WSAEFAULT, 0);
                 }
-                const settle = (/** @type {any} */ outcome)=>
-                    outcome.error ? fail(outcome.error, 0) : 1;
+                const settle = (/** @type {any} */ outcome)=>{
+                    notifyConnect(socket, outcome);
+                    return outcome.error ? fail(outcome.error, 0) : 1;
+                };
                 const outcome = registry.connect(socket, address);
                 return outcome instanceof Promise ? outcome.then(settle) : settle(outcome);
             },

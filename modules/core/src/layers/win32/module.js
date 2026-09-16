@@ -415,6 +415,23 @@ export const win32Module = {
             registry: createSocketRegistry({
                 adapter: config?.network ?? createLoopbackAdapter(),
             }),
+            // Readiness as a window message, over the same queue PostMessage
+            // uses -- built below, but a function reaching for it now only
+            // ever runs once the machine is up and the queue exists.
+            /** @param {import('./user32/messages.js').PostedMessage} message */
+            post: message=>queue.post(message),
+            // Readiness as a kernel event, for WSAEventSelect. A stale or
+            // mistyped handle is the program's mistake, not a fault here.
+            /** @param {number} handle */
+            signalEvent: handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            },
         });
 
         // The host's half of a critical section: the queue behind a contended

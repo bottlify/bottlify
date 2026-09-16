@@ -16,8 +16,9 @@ import { createWinsockFunctions } from './functions.js';
 import { createSocketRegistry } from './sockets.js';
 import { createLoopbackAdapter } from './loopback.js';
 import {
-    AF_INET, FIONBIO, FIONREAD, INVALID_SOCKET, SOCKET_ERROR, SOCK_DGRAM, SOCK_STREAM,
-    SOL_SOCKET, SO_TYPE, WSADATA, WSAEMSGSIZE, WSAENOTSOCK, WSAEWOULDBLOCK,
+    AF_INET, FD_ACCEPT, FD_CLOSE, FD_CONNECT, FD_READ, FD_WRITE, FIONBIO, FIONREAD,
+    INVALID_SOCKET, SOCKET_ERROR, SOCK_DGRAM, SOCK_STREAM,
+    SOL_SOCKET, SO_TYPE, WSADATA, WSAEINVAL, WSAEMSGSIZE, WSAENOTSOCK, WSAEWOULDBLOCK,
     WSAHOST_NOT_FOUND, WSANOTINITIALISED, WSA_IO_PENDING, WS2_32_ORDINALS, WSOCK32_ORDINALS,
 } from './constants.js';
 import { SOCKADDR_IN_SIZE, writeSockaddr } from './sockaddr.js';
@@ -45,6 +46,10 @@ function fixture(){
     const bytes = new Uint8Array(0x1000);
     let nextHeap = 0x800;
     let thread = { name: 'main' };
+    /** @type {{ hwnd: number, message: number, wParam: number, lParam: number }[]} */
+    const posted = [];
+    /** @type {number[]} */
+    const signalled = [];
 
     const host = {
         /** @param {number} address @param {number} length */
@@ -70,6 +75,10 @@ function fixture(){
             },
         },
         registry: createSocketRegistry({ adapter: createLoopbackAdapter() }),
+        /** @param {{ hwnd: number, message: number, wParam: number, lParam: number }} message */
+        post: message=>posted.push(message),
+        /** @param {number} handle */
+        signalEvent: handle=>signalled.push(handle),
     };
 
     const winsock = createWinsockFunctions(host);
@@ -85,7 +94,7 @@ function fixture(){
     call('WSAStartup', [0x0202, 0]);
 
     return {
-        bytes, host, winsock, call, extension,
+        bytes, host, winsock, call, extension, posted, signalled,
         registry: host.registry,
         /** @param {any} next */
         onThread(next){
@@ -535,4 +544,164 @@ test('WSAIoctl is ioctlsocket with buffers, and refuses the extension lookup', (
     assert.equal(fx.call('WSAGetLastError'), 10022, 'WSAEINVAL for a command it has not got');
     assert.equal(fx.call('WSAIoctl', [0x7777, FIONBIO, FLAG, 4, 0, 0, 0, 0, 0]), SOCKET_ERROR);
     assert.equal(fx.call('WSAGetLastError'), 10038, 'WSAENOTSOCK');
+});
+
+/**
+ * Readiness as a window message. `wParam` is always the socket; `lParam` is
+ * WSAMAKESELECTREPLY(event, error) -- the event in the low word, the error
+ * (0 on success) in the high word.
+ */
+
+test('WSAAsyncSelect posts FD_ACCEPT the moment a connection lands in the backlog', ()=>{
+    const fx = fixture();
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+    const HWND = 0x9001, MSG = 0x8001;
+    assert.equal(fx.call('WSAAsyncSelect', [server, HWND, MSG, FD_ACCEPT]), 0);
+    assert.equal(fx.posted.length, 0, 'nothing is waiting yet');
+
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    assert.equal(fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]), 0);
+
+    assert.deepEqual(fx.posted, [{ hwnd: HWND, message: MSG, wParam: server, lParam: FD_ACCEPT }]);
+});
+
+test('WSAAsyncSelect posts FD_WRITE at once for a socket already writable, and not twice', ()=>{
+    const fx = fixture();
+    const { client } = connected(fx);
+    const HWND = 0x9002, MSG = 0x8002;
+    assert.equal(fx.call('WSAAsyncSelect', [client, HWND, MSG, FD_WRITE]), 0);
+    assert.deepEqual(fx.posted, [{ hwnd: HWND, message: MSG, wParam: client, lParam: FD_WRITE }]);
+
+    fx.call('send', [client, BUFFER, 0, 0]);
+    assert.equal(fx.posted.length, 1, 'this engine never has send report WSAEWOULDBLOCK to clear');
+});
+
+test('FD_READ is level-triggered and only recv re-arms it', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    const HWND = 0x9003, MSG = 0x8003;
+    assert.equal(fx.call('WSAAsyncSelect', [accepted, HWND, MSG, FD_READ]), 0);
+
+    fx.put(BUFFER, 'a');
+    fx.call('send', [client, BUFFER, 1, 0]);
+    assert.deepEqual(fx.posted, [{ hwnd: HWND, message: MSG, wParam: accepted, lParam: FD_READ }]);
+
+    fx.put(BUFFER, 'b');
+    fx.call('send', [client, BUFFER, 1, 0]);
+    assert.equal(fx.posted.length, 1, 'more data with no recv in between reports nothing new');
+
+    fx.call('recv', [accepted, OUT, 1, 0]);
+    assert.equal(fx.posted.length, 2, 'recv re-armed it, and a byte is still queued');
+    assert.equal(fx.posted[1].lParam, FD_READ);
+
+    fx.call('recv', [accepted, OUT, 1, 0]);
+    assert.equal(fx.posted.length, 2, 'the queue is empty now, so re-arming reports nothing');
+});
+
+test('WSAAsyncSelect delivers FD_CONNECT and then FD_WRITE when a connect succeeds', ()=>{
+    const fx = fixture();
+    const server = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT });
+    fx.call('bind', [server, NAME, SOCKADDR_IN_SIZE]);
+    fx.call('listen', [server, 5]);
+
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    const HWND = 0x9004, MSG = 0x8004;
+    assert.equal(fx.call('WSAAsyncSelect', [client, HWND, MSG, FD_CONNECT | FD_WRITE]), 0);
+    assert.equal(fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]), 0);
+
+    assert.deepEqual(fx.posted, [
+        { hwnd: HWND, message: MSG, wParam: client, lParam: FD_CONNECT },
+        { hwnd: HWND, message: MSG, wParam: client, lParam: FD_WRITE },
+    ]);
+});
+
+test('WSAAsyncSelect reports a refused connect through FD_CONNECT\'s error half', ()=>{
+    const fx = fixture();
+    const client = fx.call('socket', [AF_INET, SOCK_STREAM, 0]);
+    writeSockaddr(fx.host.writeMemory, NAME, { host: 0, port: PORT }); // nobody listens here
+    const HWND = 0x9005, MSG = 0x8005;
+    fx.call('WSAAsyncSelect', [client, HWND, MSG, FD_CONNECT]);
+
+    assert.equal(fx.call('connect', [client, NAME, SOCKADDR_IN_SIZE]), SOCKET_ERROR);
+    assert.equal(fx.posted.length, 1);
+    assert.equal(fx.posted[0].lParam & 0xffff, FD_CONNECT);
+    assert.equal(fx.posted[0].lParam >>> 16, 10061, 'WSAECONNREFUSED in the high word');
+});
+
+test('FD_CLOSE fires once for a peer that finished, and closesocket posts nothing itself', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    const HWND = 0x9006, MSG = 0x8006;
+    assert.equal(fx.call('WSAAsyncSelect', [accepted, HWND, MSG, FD_CLOSE]), 0);
+
+    fx.call('shutdown', [client, 1]); // SD_SEND
+    assert.deepEqual(fx.posted, [{ hwnd: HWND, message: MSG, wParam: accepted, lParam: FD_CLOSE }]);
+
+    fx.call('closesocket', [accepted]);
+    assert.equal(fx.posted.length, 1, 'closing this socket itself posts nothing more');
+});
+
+test('lEvent = 0 cancels a WSAAsyncSelect registration, and a second call replaces it', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    fx.call('WSAAsyncSelect', [accepted, 0x9007, 0x8007, FD_READ]);
+    assert.equal(fx.call('WSAAsyncSelect', [accepted, 0, 0, 0]), 0);
+
+    fx.put(BUFFER, 'z');
+    fx.call('send', [client, BUFFER, 1, 0]);
+    assert.equal(fx.posted.length, 0, 'nothing is armed any more');
+
+    const HWND = 0x9008, MSG = 0x8008;
+    assert.equal(fx.call('WSAAsyncSelect', [accepted, HWND, MSG, FD_READ]), 0);
+    assert.deepEqual(fx.posted, [{ hwnd: HWND, message: MSG, wParam: accepted, lParam: FD_READ }],
+        'data already waiting is reported at once, from the new registration');
+});
+
+test('select and WSAAsyncSelect are mutually exclusive on a socket', ()=>{
+    const fx = fixture();
+    const { accepted } = connected(fx);
+    fx.call('WSAAsyncSelect', [accepted, 0x9009, 0x8009, FD_READ]);
+
+    fx.setDword(FDSET, 1);
+    fx.setDword(FDSET + 4, accepted);
+    assert.equal(fx.call('select', [0, FDSET, 0, 0, 0]), SOCKET_ERROR);
+    assert.equal(fx.call('WSAGetLastError'), WSAEINVAL);
+});
+
+test('WSAEventSelect signals a kernel event, and WSAEnumNetworkEvents reports and clears it', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    const EVENT_HANDLE = 0x77;
+    const EVENTS = 0x700;
+
+    assert.equal(fx.call('WSAEventSelect', [accepted, EVENT_HANDLE, FD_READ]), 0);
+    assert.equal(fx.registry.get(accepted).nonBlocking, true, 'it sets non-blocking mode too');
+    assert.deepEqual(fx.signalled, [], 'nothing waiting yet');
+
+    fx.put(BUFFER, 'q');
+    fx.call('send', [client, BUFFER, 1, 0]);
+    assert.deepEqual(fx.signalled, [EVENT_HANDLE]);
+
+    assert.equal(fx.call('WSAEnumNetworkEvents', [accepted, EVENT_HANDLE, EVENTS]), 0);
+    assert.equal(fx.dword(EVENTS), FD_READ, 'lNetworkEvents carries the bit that fired');
+    assert.equal(fx.dword(EVENTS + 4), 0, 'iErrorCode[0] -- FD_READ succeeded');
+
+    assert.equal(fx.call('WSAEnumNetworkEvents', [accepted, EVENT_HANDLE, EVENTS]), 0);
+    assert.equal(fx.dword(EVENTS), 0, 'reading it clears it');
+});
+
+test('WSAEventSelect cancels a prior WSAAsyncSelect on the same socket', ()=>{
+    const fx = fixture();
+    const { client, accepted } = connected(fx);
+    fx.call('WSAAsyncSelect', [accepted, 0x900a, 0x800a, FD_READ]);
+    fx.call('WSAEventSelect', [accepted, 0x88, FD_READ]);
+
+    fx.put(BUFFER, 'w');
+    fx.call('send', [client, BUFFER, 1, 0]);
+    assert.equal(fx.posted.length, 0, 'the window registration no longer applies');
+    assert.deepEqual(fx.signalled, [0x88]);
 });
