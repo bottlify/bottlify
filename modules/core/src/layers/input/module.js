@@ -40,6 +40,7 @@ export const inputModule = {
     async create(config, host){
         const memory = host.requireApi('memory');
         const win32 = host.requireApi('win32');
+        const bridge = host.requireApi('bridge');
 
         const dinput = createDirectInput({
             memory: {
@@ -54,6 +55,14 @@ export const inputModule = {
             now: config?.now ?? (()=>Date.now()),
             publishInterface: config?.publishInterface ?? (()=>0),
             signal: config?.signal,
+            // Where a DIDEVICEINSTANCE is written for a program's enumeration
+            // callback, and the route into that callback itself. The callback
+            // is guest code, so answering an enumeration means running the
+            // guest from inside the host call -- the sound seam's own shape.
+            allocate: config?.allocate ?? (bytes=>win32.heap().allocate(bytes)),
+            callGuest: config?.callGuest
+                ?? ((/** @type {number} */ entry, /** @type {number[]} */ args)=>
+                    bridge.callGuest({ entry, args })),
         });
 
         // The queue is win32's, and this is the seam it exists for: a keystroke

@@ -48,14 +48,19 @@ Source: `src/layers/input/module.js`. The DirectInput seam imports `IUNKNOWN_MET
 | `detach()` | Removes every listener and releases whatever was held. |
 | `poll()` | Reads the gamepad, which has no events of its own; nothing when no canvas is attached. |
 | `clip(rect)` | The coordinate space the program declared with `ClipCursor`; null or a degenerate rect clears it. |
-| `keyState(vk)` | `0x8000` when the virtual key is down, as `GetAsyncKeyState` answers. |
+| `keyState(vk)` | `0x8000` when the virtual key is down, as `GetKeyState` answers. |
+| `asyncKeyState(vk)` | The same high bit, plus the low bit while a press is pending, as `GetAsyncKeyState` answers; the read clears the low bit. |
+| `keyboardState()` | A fresh 256-byte table, as `GetKeyboardState` fills: high bit down, low bit the toggle for CapsLock/NumLock/ScrollLock. |
+| `setKeyboardState(bytes)` | Makes a 256-byte table the synchronous state, as `SetKeyboardState` does. |
 | `cursor()` | `{ x, y }` in the program's client coordinates. |
 | `pad()` | `{ axes, buttons }` as the last poll left them. |
 | `device(guid)` | A created DirectInput device, for whoever is measuring. |
 | `dinput()`, `router()` | The seam and the router objects. |
 
-`src/app.js` hands `win32`'s user32 `cursor`, `clipCursor` and `keyState` from this API, so
-`GetCursorPos`, `ClipCursor` and `GetAsyncKeyState` read the router's state.
+`src/app.js` hands `win32`'s user32 `cursor`, `clipCursor`, `keyState`, `asyncKeyState`,
+`keyboardState` and `setKeyboardState` from this API, so `GetCursorPos`, `ClipCursor`,
+`GetKeyState`, `GetAsyncKeyState`, `GetKeyboardState` and `SetKeyboardState` read the router's
+state.
 
 ### The event model
 
@@ -90,6 +95,7 @@ from the right index.
 | `libraries` | Library names published. |
 | `devices[]` | Per DirectInput device: `guid`, `kind`, `acquired`, `buffered` (the `DIPROP_BUFFERSIZE`), `queued`. |
 | `published` | Interfaces published. |
+| `enumerations` | How often a program asked what DirectInput devices there are. |
 | `posted`, `dropped` | Messages posted; events with an unmapped key, unknown button or unknown kind. |
 | `keysDown`, `buttonsDown` | What is held right now, by code and by name. |
 | `cursor` | Where the cursor is. |
@@ -178,8 +184,12 @@ rather than writing at the wrong offsets, and `DIERR_INVALIDPARAM` to a keyboard
 or the reverse. `GetDeviceState` must be asked for exactly the size the format set. `SetProperty`
 takes `DIPROP_BUFFERSIZE` and accepts axis mode, ranges and dead zones without acting (the device
 is already relative and unscaled); `GetProperty` answers only the buffer size. `EnumDevices`
-succeeds having enumerated nothing -- it would need to call into guest code -- and a program that
-finds none falls back to the two `CreateDevice` hands out. `SetCooperativeLevel`,
+describes the two attached devices to the program's own callback, as Windows does: the pointer's
+class first and then the keyboard's, each written into a `DIDEVICEINSTANCE` in guest memory in the
+width of the vtable the call arrived on, with `DI8DEVTYPE_*` codes on an interface from 8 and the
+older `DIDEVTYPE_*` codes before it. The callback runs through the bridge, the caller parked while
+it does; `DIENUM_STOP` ends the enumeration and `DIEDFL_FORCEFEEDBACK` lists nothing. A null
+callback is `DIERR_INVALIDPARAM`. `SetCooperativeLevel`,
 `RunControlPanel`, `Initialize` succeed; `FindDevice` and `GetDeviceStatus` for an unknown GUID
 answer `DIERR_DEVICENOTREG`; `Poll` succeeds with nothing to do.
 
@@ -188,7 +198,9 @@ answer `DIERR_DEVICENOTREG`; `Poll` succeeds with nothing to do.
 - **No joystick device.** `padAxis`/`padButton` are stored for `pad()` and nothing in DirectInput
   reads them; `GetDeviceState` knows keyboard and mouse layouts only. The seam's header names "a
   joystick's" layout among the four it recognises; the `FORMATS` table holds three.
-- **Only two devices, never enumerated.** `EnumDevices` names nothing.
+- **Only two devices, and enumeration is static.** `EnumDevices` names `GUID_SysKeyboard` and
+  `GUID_SysMouse`; a device plugged in while the process runs is never reported, and the product
+  GUID of each is the device's own instance GUID, as Windows reports the system pair.
 - **Data formats are recognised by size**, not by walking the description; a hand-rolled format of
   an unfamiliar size is refused.
 - **Force feedback, effects, action maps, `GetObjectInfo`, `GetDeviceInfo`, `EnumObjects`,
@@ -198,8 +210,7 @@ answer `DIERR_DEVICENOTREG`; `Poll` succeeds with nothing to do.
 - **Two-pad play** is not modelled; the first pad present is the pad.
 - **One canvas at a time**; a second `attach` detaches the first.
 - **Pointer lock** is only requested from a `pointerdown`, and the browser may refuse it.
-- The router's own comment on `keyState` says nothing asks for it yet; `src/app.js` does wire it
-  to user32's `GetAsyncKeyState`.
+- **Force feedback is absent**, so `EnumDevices` with `DIEDFL_FORCEFEEDBACK` lists nothing.
 
 There is no `divergence` hook in this layer; what is reported is `dropped` (unmapped keys and
 unknown buttons), `viewport` against `clip`, and each device's `acquired`, `buffered` and
@@ -207,15 +218,15 @@ unknown buttons), `viewport` against `clip`, and each device's `acquired`, `buff
 
 ## Tests
 
-All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 122 `test()` cases.
+All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 140 `test()` cases.
 
 | file | kind | what it pins |
 |---|---|---|
 | `src/layers/input/module.test.js` | Wiring, over the real `win32` message queue | A key sent to the layer arrives in the queue the program pumps; DirectInput is published beside the message path; a build without `win32` still takes input; diagnostics report both halves. |
-| `src/layers/input/router.test.js` | Contract | Message and lParam encoding for keys, modifiers and system keys; mouse messages and masks; `WM_SETCURSOR` timing; text composition; clip scaling and confinement; the one activation; focus loss releasing everything. |
+| `src/layers/input/router.test.js` | Contract | Message and lParam encoding for keys, modifiers and system keys; mouse messages and masks; `WM_SETCURSOR` timing; text composition; clip scaling and confinement; the one activation; focus loss releasing everything; the keyboard-state table, its toggles and the async press bit. |
 | `src/layers/input/dom.test.js` | Unit, against a stand-in canvas | Which keys are taken from the page, what a press becomes, where a click is in the game's own pixels through border and scale, wheel accumulation, double-Escape release, that nothing stays attached. |
 | `src/layers/input/dinput/devices.test.js` | Contract | Delta consumption, ring overflow reporting, unacquired refusal, key state layout. |
-| `src/layers/input/dinput/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count for all eight interface generations, `SetDataFormat` by size, `GetDeviceState` size checks, `GetDeviceData` in both structure sizes, properties, creation and refusals. |
+| `src/layers/input/dinput/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count for all eight interface generations, `SetDataFormat` by size, `GetDeviceState` size checks, `GetDeviceData` in both structure sizes, properties, creation and refusals; `EnumDevices` describing both devices to a recorded guest callback, in both widths and both device-type generations. |
 
 What a real browser does with a `KeyboardEvent` or a `PointerEvent` is not covered by the unit
 suite; the `dom.js` tests settle only what the adapter decides for itself. No tracked CDP scenario

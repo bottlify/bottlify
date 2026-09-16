@@ -30,7 +30,7 @@
  */
 
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { readGuid } from '../../win32/ole32/guid.js';
+import { readGuid, writeGuid } from '../../win32/ole32/guid.js';
 import {
     createInputDevice, KEYBOARD, MOUSE, KEYBOARD_KEYS, DIMOUSE_OFS,
 } from './devices.js';
@@ -42,6 +42,28 @@ const DIERR_INVALIDPARAM = 0x80070057 | 0;
 const DIERR_NOTACQUIRED = 0x8007000c | 0;
 const DIERR_UNSUPPORTED = 0x80004001 | 0;
 const DIERR_DEVICENOTREG = 0x80040154 | 0;
+
+/** What a program's enumeration callback answers: another, or no more. */
+export const DIENUM_CONTINUE = 1;
+export const DIENUM_STOP = 0;
+
+/**
+ * The class a program asks EnumDevices for, and the device type each answers
+ * with. The class values are 0..4 and the types are the same numbers with the
+ * device family in the high byte, which is why the two are compared through
+ * the low byte.
+ */
+const DI8DEVCLASS_ALL = 0;
+const DI8DEVCLASS_POINTER = 2;
+const DI8DEVCLASS_KEYBOARD = 3;
+const DI8DEVCLASS_GAMECTRL = 4;
+const DI8DEVTYPE_MOUSE = 0x12;
+const DI8DEVTYPE_KEYBOARD = 0x13;
+const DIDEVTYPE_MOUSE = 2;
+const DIDEVTYPE_KEYBOARD = 3;
+const DI8DEVTYPEMOUSE_TRADITIONAL = 2;
+const DI8DEVTYPEKEYBOARD_PCENH = 4;
+const DIEDFL_FORCEFEEDBACK = 0x00000100;
 
 /** The devices a program creates, named by the GUIDs it was compiled with. */
 export const GUID_SysKeyboard = '{6F1D2B61-D5A0-11CF-BFC7-444553540000}';
@@ -101,6 +123,26 @@ export const DIDEVCAPS = Object.freeze({
     SIZE: 0x44,
 });
 
+/**
+ * DIDEVICEINSTANCE, the structure an enumeration callback is handed.
+ *
+ * The two names are inline fixed arrays rather than pointers, so the wide
+ * form puts every field after them at a different offset and is nearly twice
+ * the size: 580 bytes for the single-byte names and 1100 for the wide ones.
+ * Only the fields a callback reads are named; the tail -- guidFFDriver and
+ * the usage number -- stays zero, which is the honest answer here.
+ */
+export const DIDEVICEINSTANCE = Object.freeze({
+    dwSize: 0x00,
+    guidInstance: 0x04,
+    guidProduct: 0x14,
+    dwDevType: 0x24,
+    tszInstanceName: 0x28,
+    NAME_CHARS: 260,
+    SIZE_A: 580,
+    SIZE_W: 1100,
+});
+
 /** DIGDD_PEEK: read the buffer without consuming it. */
 const DIGDD_PEEK = 0x00000001;
 
@@ -121,11 +163,17 @@ const FORMATS = Object.freeze({
 /**
  * @param {string} id
  * @param {[string, number][]} slots
- * @param {Record<string, (target: any, args: number[]) => number>} [implemented]
+ * @param {Record<string, (target: any, args: number[], descriptor: any) => any>} [implemented]
+ * @param {{ wide?: boolean, legacy?: boolean }} [options]
+ *     `wide` for a W interface, `legacy` for one of the pre-8 generations.
+ *     Both are facts the method itself needs and the interface it arrived on
+ *     is the only thing that carries them.
  */
-export function describe(id, slots, implemented = {}){
+export function describe(id, slots, implemented = {}, options = {}){
     return {
         id,
+        wide: options.wide === true,
+        legacy: options.legacy === true,
         methods: slots.map(([name, args])=>({
             name,
             argBytes: 4 + args * 4,
@@ -239,7 +287,7 @@ function methodsFor(descriptor){
                 argBytes: method.argBytes,
                 invoke: method.invoke
                     ? (/** @type {any} */ adapter, /** @type {number[]} */ args)=>
-                        method.invoke(adapter.api, args) ?? 0
+                        method.invoke(adapter.api, args, descriptor) ?? 0
                     : undefined,
             })),
         ];
@@ -317,9 +365,20 @@ export function createPublisher({ publishInterface }){
  * @param {() => number} deps.now  The guest's clock, in milliseconds.
  * @param {(object: any, interfaceId: string) => number} deps.publishInterface
  * @param {(event: number) => void} [deps.signal]
+ * @param {(bytes: number) => number} [deps.allocate]  Guest memory for a
+ *        structure an enumeration callback is handed.
+ * @param {(entry: number, args: number[]) => Promise<number>} [deps.callGuest]
+ *        Runs a guest routine and answers with what it returned. An
+ *        enumeration callback is guest code and Windows runs it before
+ *        EnumDevices returns, so a seam without this route cannot describe
+ *        any device truthfully.
  */
-export function createDirectInput({ memory, now, publishInterface, signal }){
+export function createDirectInput({ memory, now, publishInterface, signal, allocate, callGuest }){
     const publisher = createPublisher({ publishInterface });
+    // The arena a structure handed to a callback is written in. It answers
+    // zero when no heap was handed down, and the enumeration that needs one
+    // refuses before it ever asks.
+    const arena = allocate ?? (()=>0);
 
     /** @param {number} address */
     const guidAt = address=>readGuid(memory, address >>> 0);
@@ -583,7 +642,143 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         return device;
     };
 
-    /** @type {Record<string, (target: any, args: number[]) => number>} */
+    /** How many times a program has asked what devices there are. */
+    let enumerations = 0;
+
+    /**
+     * A string where a diddeviceinstance's inline name array sits.
+     *
+     * @param {number} address @param {string} text @param {boolean} wide
+     */
+    const writeText = (address, text, wide)=>{
+        const units = wide ? 2 : 1;
+        const bytes = new Uint8Array((text.length + 1) * units);
+        for (let index = 0; index < text.length; index++)
+        {
+            const code = text.charCodeAt(index);
+            bytes[index * units] = code & 0xff;
+            if (wide)
+            {
+                bytes[index * units + 1] = code >>> 8 & 0xff;
+            }
+        }
+        memory.writeMemory(address, bytes);
+    };
+
+    /**
+     * One DIDEVICEINSTANCE, in the width the interface asked about.
+     *
+     * The two names are inline, so the block is the size the A or the W
+     * definition gives and every field after them is written at that form's
+     * own offset. Both GUIDs are the device's own, as Windows reports the
+     * one system keyboard and mouse; guidFFDriver and the usage number stay
+     * zero because nothing here rumbles.
+     *
+     * @param {string} guid @param {number} devType
+     * @param {string} instanceName @param {string} productName
+     * @param {boolean} wide
+     */
+    const writeInstance = (guid, devType, instanceName, productName, wide)=>{
+        const nameBytes = DIDEVICEINSTANCE.NAME_CHARS * (wide ? 2 : 1);
+        const size = wide ? DIDEVICEINSTANCE.SIZE_W : DIDEVICEINSTANCE.SIZE_A;
+        const address = arena(size);
+        memory.writeMemory(address, new Uint8Array(size));
+        writeU32(address + DIDEVICEINSTANCE.dwSize, size);
+        writeGuid(memory, address + DIDEVICEINSTANCE.guidInstance, guid);
+        writeGuid(memory, address + DIDEVICEINSTANCE.guidProduct, guid);
+        writeU32(address + DIDEVICEINSTANCE.dwDevType, devType);
+        writeText(address + DIDEVICEINSTANCE.tszInstanceName, instanceName, wide);
+        writeText(address + DIDEVICEINSTANCE.tszInstanceName + nameBytes, productName, wide);
+        return address;
+    };
+
+    /**
+     * Describes the attached devices to a program's own callback, as Windows
+     * does.
+     *
+     * For the class the caller asked (all, pointer or keyboard) each attached
+     * device is written into a DIDEVICEINSTANCE in guest memory and the
+     * callback is run on it; a callback that answers DIENUM_STOP ends the
+     * enumeration there. The callback is guest code, so this runs the guest
+     * from inside a host call and returns a promise the bridge parks the
+     * caller on -- the same shape the sound seam's enumeration has.
+     *
+     * @param {number} type @param {number} callback @param {number} context
+     * @param {number} flags @param {boolean} wide @param {boolean} legacy
+     * @returns {number | Promise<number>}
+     */
+    const enumerate = (type, callback, context, flags, wide, legacy)=>{
+        if ((callback >>> 0) === 0)
+        {
+            return DIERR_INVALIDPARAM;
+        }
+        const run = callGuest;
+        if (!run || allocate === undefined)
+        {
+            // No route to guest code -- a test harness, or an engine assembled
+            // without a bridge or a heap. Saying nothing is better than
+            // reporting no devices, which a program reads as a machine with no
+            // keyboard at all.
+            return DI_OK;
+        }
+        const requested = type >>> 0;
+        // A class is 0..4; anything above that names one device type, and the
+        // class it belongs to is then "all" with the type filtering.
+        const byClass = requested <= DI8DEVCLASS_GAMECTRL;
+        const deviceClass = byClass ? requested : DI8DEVCLASS_ALL;
+        const deviceType = byClass ? 0 : requested;
+
+        /** @type {{ guid: string, name: string, product: string,
+         *           devType: number }[]} */
+        const attached = [];
+        if (deviceClass === DI8DEVCLASS_ALL || deviceClass === DI8DEVCLASS_POINTER)
+        {
+            attached.push({
+                guid: GUID_SysMouse,
+                name: 'Mouse',
+                product: 'Wine Mouse',
+                devType: (legacy ? DIDEVTYPE_MOUSE : DI8DEVTYPE_MOUSE)
+                    | (DI8DEVTYPEMOUSE_TRADITIONAL << 8),
+            });
+        }
+        if (deviceClass === DI8DEVCLASS_ALL || deviceClass === DI8DEVCLASS_KEYBOARD)
+        {
+            attached.push({
+                guid: GUID_SysKeyboard,
+                name: 'Keyboard',
+                product: 'Wine Keyboard',
+                devType: (legacy ? DIDEVTYPE_KEYBOARD : DI8DEVTYPE_KEYBOARD)
+                    | (DI8DEVTYPEKEYBOARD_PCENH << 8),
+            });
+        }
+
+        enumerations++;
+        return (async()=>{
+            for (const offer of attached)
+            {
+                if (deviceType !== 0 && (offer.devType & 0xff) !== deviceType)
+                {
+                    continue;
+                }
+                // Nothing here can rumble, so a force-feedback request matches
+                // nothing: the guid a device would name its driver by is null.
+                if ((flags & DIEDFL_FORCEFEEDBACK) !== 0)
+                {
+                    continue;
+                }
+                const instance = writeInstance(
+                    offer.guid, offer.devType, offer.name, offer.product, wide);
+                const more = await run(callback >>> 0, [instance, context >>> 0]);
+                if ((more | 0) === DIENUM_STOP)
+                {
+                    break;
+                }
+            }
+            return DI_OK;
+        })();
+    };
+
+    /** @type {Record<string, (target: any, args: number[], descriptor?: any) => any>} */
     const rootMethods = {
         /** HRESULT CreateDevice(REFGUID, LPDIRECTINPUTDEVICE*, LPUNKNOWN) */
         CreateDevice(root, [guid, out]){
@@ -634,13 +829,21 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
         /**
          * HRESULT EnumDevices(DWORD, LPDIENUMDEVICESCALLBACK, LPVOID, DWORD)
          *
-         * Succeeds having enumerated nothing. The callback is guest code, and
-         * calling into it is a route this table does not have; a program that
-         * finds no devices falls back to the system keyboard and mouse, which
-         * are the two CreateDevice hands out.
+         * The callback is guest code and the instance structure is written in
+         * the width of the vtable the call arrived on, which is the one thing
+         * the descriptor carries that the arguments do not. A DI8 interface
+         * answers with DI8DEVTYPE_* and a pre-8 one with DIDEVTYPE_*, as the
+         * version the program created the object with decides.
+         *
+         * @param {any} root
+         * @param {number[]} args
+         * @param {{ wide?: boolean, legacy?: boolean }} descriptor
          */
-        EnumDevices(){
-            return DI_OK;
+        EnumDevices(root, args, descriptor){
+            const [type, callback, context, flags] = args;
+            return enumerate(
+                type >>> 0, callback, context, flags >>> 0,
+                descriptor?.wide === true, descriptor?.legacy === true);
         },
 
         /** HRESULT GetDeviceStatus(REFGUID) */
@@ -666,14 +869,17 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
 
     const root = { addRef: ()=>1, release: ()=>0 };
     const rootInterfaces = [
-        describe(IID_IDirectInputA, IDIRECTINPUT_SLOTS, rootMethods),
-        describe(IID_IDirectInputW, IDIRECTINPUT_SLOTS, rootMethods),
-        describe(IID_IDirectInput2A, IDIRECTINPUT2_SLOTS, rootMethods),
-        describe(IID_IDirectInput2W, IDIRECTINPUT2_SLOTS, rootMethods),
-        describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods),
-        describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods),
+        describe(IID_IDirectInputA, IDIRECTINPUT_SLOTS, rootMethods, { legacy: true }),
+        describe(IID_IDirectInputW, IDIRECTINPUT_SLOTS, rootMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInput2A, IDIRECTINPUT2_SLOTS, rootMethods, { legacy: true }),
+        describe(IID_IDirectInput2W, IDIRECTINPUT2_SLOTS, rootMethods,
+            { legacy: true, wide: true }),
+        describe(IID_IDirectInput7A, IDIRECTINPUT7_SLOTS, rootMethods, { legacy: true }),
+        describe(IID_IDirectInput7W, IDIRECTINPUT7_SLOTS, rootMethods,
+            { legacy: true, wide: true }),
         describe(IID_IDirectInput8A, IDIRECTINPUT8_SLOTS, rootMethods),
-        describe(IID_IDirectInput8W, IDIRECTINPUT8_SLOTS, rootMethods),
+        describe(IID_IDirectInput8W, IDIRECTINPUT8_SLOTS, rootMethods, { wide: true }),
     ];
 
     /** @param {number} out @param {string} id */
@@ -775,6 +981,9 @@ export function createDirectInput({ memory, now, publishInterface, signal }){
                 queued: devices.get(guid).queued,
             })),
             published: publisher.count(),
+            // How often a program asked what devices there are. A program that
+            // enumerates and then creates nothing is the question this answers.
+            enumerations,
         }),
     };
 }

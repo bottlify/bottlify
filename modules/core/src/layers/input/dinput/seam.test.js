@@ -8,16 +8,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createVtables } from '../../bridge/internal/vtable.js';
 import { IUNKNOWN_METHODS, IID_IUNKNOWN } from '../../win32/ole32/objects.js';
-import { writeGuid } from '../../win32/ole32/guid.js';
+import { writeGuid, readGuid } from '../../win32/ole32/guid.js';
 import {
     createDirectInput, createPublisher, describe,
-    DI_OK, DI_BUFFEROVERFLOW,
+    DI_OK, DI_BUFFEROVERFLOW, DIENUM_STOP,
     GUID_SysKeyboard, GUID_SysMouse,
-    IID_IDirectInputA, IID_IDirectInput7A, IID_IDirectInput8A, IID_IDirectInputDeviceA,
+    IID_IDirectInputA, IID_IDirectInput7A,
+    IID_IDirectInput8A, IID_IDirectInput8W, IID_IDirectInputDeviceA,
     IID_IDirectInputDevice2A, IID_IDirectInputDevice8A,
     IDIRECTINPUT_SLOTS, IDIRECTINPUT7_SLOTS, IDIRECTINPUT8_SLOTS,
     IDIRECTINPUTDEVICE_SLOTS, IDIRECTINPUTDEVICE2_SLOTS, IDIRECTINPUTDEVICE8_SLOTS,
-    DIDEVICEOBJECTDATA, DIPROPDWORD_DATA, DIPROP_BUFFERSIZE, DIDEVCAPS,
+    DIDEVICEOBJECTDATA, DIDEVICEINSTANCE, DIPROPDWORD_DATA, DIPROP_BUFFERSIZE, DIDEVCAPS,
 } from './seam.js';
 import { KEY_DOWN, DIMOUSE_OFS } from './devices.js';
 
@@ -111,6 +112,21 @@ function fakeBridge(){
             assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
             return method.invoke(entry.object, args) | 0;
         },
+        /**
+         * A call whose answer may be a promise, for the methods that call back
+         * into guest code -- an enumeration parks the caller while the guest
+         * runs, so coercing the answer here would lose it.
+         *
+         * @param {number} pointer @param {string} name @param {number[]} args
+         */
+        async callAsync(pointer, name, args = []){
+            const entry = byPointer.get(pointer);
+            assert.ok(entry, `nothing published at ${pointer}`);
+            const method = entry.methods.find((/** @type {any} */ m)=>m.name === name);
+            assert.ok(method, `${entry.id} has no ${name}`);
+            assert.ok(method.invoke, `${entry.id}::${name} is not implemented`);
+            return method.invoke(entry.object, args);
+        },
         /** @param {number} pointer */
         methodsOf: pointer=>byPointer.get(pointer)?.methods ?? [],
     };
@@ -129,11 +145,28 @@ function fixture(){
     const time = clock();
     /** @type {number[]} */
     const signalled = [];
+    /** Every call the seam made into guest code, in order. */
+    /** @type {{ entry: number, args: number[] }[]} */
+    const calls = [];
+    /** What the next guest callback answers; DIENUM_CONTINUE unless told. */
+    /** @type {number[]} */
+    const answers = [];
+    let arena = 0x80000;
     const dinput = createDirectInput({
         memory,
         now: time.now,
         publishInterface: (object, id)=>bridge.publishInterface(object, id),
         signal: event=>signalled.push(event),
+        /** @param {number} bytes */
+        allocate: bytes=>{
+            const address = arena;
+            arena += (bytes + 15) & ~15;
+            return address;
+        },
+        callGuest: (entry, args)=>{
+            calls.push({ entry, args });
+            return Promise.resolve(answers.shift() ?? 1);
+        },
     });
     const root = (()=>{
         const result = dinput.libraries['DINPUT.dll']
@@ -141,7 +174,7 @@ function fixture(){
         assert.equal(result, DI_OK);
         return memory.u32(AT.out);
     })();
-    return { memory, bridge, time, dinput, signalled, root };
+    return { memory, bridge, time, dinput, signalled, root, calls, answers };
 }
 
 /**
@@ -167,6 +200,37 @@ function dataFormat(memory, dataSize){
     memory.setU32(AT.format + 0x08, 0x02); // DIDF_RELAXIS
     memory.setU32(AT.format + 0x0c, dataSize);
     return AT.format;
+}
+
+/** @param {any} memory @param {number} address @param {number} max */
+function readAnsi(memory, address, max){
+    let text = '';
+    for (let index = 0; index < max; index++)
+    {
+        const code = memory.bytes[address + index];
+        if (code === 0)
+        {
+            break;
+        }
+        text += String.fromCharCode(code);
+    }
+    return text;
+}
+
+/** @param {any} memory @param {number} address @param {number} max */
+function readWide(memory, address, max){
+    let text = '';
+    for (let index = 0; index < max; index++)
+    {
+        const code = memory.bytes[address + index * 2]
+            | memory.bytes[address + index * 2 + 1] << 8;
+        if (code === 0)
+        {
+            break;
+        }
+        text += String.fromCharCode(code);
+    }
+    return text;
 }
 
 /** A keyboard, created, formatted and acquired. */
@@ -553,6 +617,113 @@ test('GetDeviceStatus knows the two devices and nothing else', ()=>{
     assert.equal(f.bridge.call(f.root, 'GetDeviceStatus', [AT.guid]), DI_OK);
     writeGuid(f.memory, AT.guid, '{11111111-2222-3333-4444-555555555555}');
     assert.equal(f.bridge.call(f.root, 'GetDeviceStatus', [AT.guid]), DIERR_DEVICENOTREG);
+});
+
+/**
+ * A DirectInput 8 object, published through the interface the caller names.
+ *
+ * @param {any} f @param {boolean} wide
+ */
+function directInput8(f, wide){
+    writeGuid(f.memory, AT.iid, wide ? IID_IDirectInput8W : IID_IDirectInput8A);
+    assert.equal(f.dinput.libraries['DINPUT8.dll']
+        .DirectInput8Create.handler([0, 0x0800, AT.iid, AT.out, 0]), DI_OK);
+    return f.memory.u32(AT.out);
+}
+
+test('EnumDevices describes the mouse and the keyboard to the callback', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, true);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0, 0x7777, 0x9999, 0]),
+        DI_OK);
+    assert.equal(f.calls.length, 2, 'there is one callback per attached device');
+    assert.equal(f.calls[0].entry, 0x7777);
+    assert.equal(f.calls[0].args[1], 0x9999, 'the caller\'s context is passed through');
+
+    // Wine's order: the pointer's class is enumerated first, then the
+    // keyboard's, and each is written in the width of the W vtable that ran it.
+    const mouseInstance = f.calls[0].args[0];
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwSize),
+        DIDEVICEINSTANCE.SIZE_W);
+    assert.equal(readGuid(f.memory, mouseInstance + DIDEVICEINSTANCE.guidInstance),
+        GUID_SysMouse);
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0212);
+    assert.equal(readWide(f.memory,
+        mouseInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Mouse');
+    assert.equal(readWide(f.memory,
+        mouseInstance + DIDEVICEINSTANCE.tszInstanceName + 260 * 2, 260), 'Wine Mouse');
+
+    const keyboardInstance = f.calls[1].args[0];
+    assert.equal(readGuid(f.memory, keyboardInstance + DIDEVICEINSTANCE.guidInstance),
+        GUID_SysKeyboard);
+    assert.equal(f.memory.u32(keyboardInstance + DIDEVICEINSTANCE.dwDevType), 0x0413);
+    assert.equal(readWide(f.memory,
+        keyboardInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Keyboard');
+});
+
+test('an interface before 8 uses the older device-type codes', async()=>{
+    const f = fixture();
+    assert.equal(await f.bridge.callAsync(f.root, 'EnumDevices', [0, 0x20, 0, 0]), DI_OK);
+    assert.equal(f.calls.length, 2);
+    const mouseInstance = f.calls[0].args[0];
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwSize),
+        DIDEVICEINSTANCE.SIZE_A);
+    assert.equal(f.memory.u32(mouseInstance + DIDEVICEINSTANCE.dwDevType), 0x0202);
+    assert.equal(readAnsi(f.memory,
+        mouseInstance + DIDEVICEINSTANCE.tszInstanceName, 260), 'Mouse');
+    assert.equal(f.memory.u32(f.calls[1].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0403);
+});
+
+test('a class filter narrows the enumeration to that class', async()=>{
+    const f = fixture();
+    assert.equal(await f.bridge.callAsync(f.root, 'EnumDevices', [3, 0x20, 0, 0]), DI_OK);
+    assert.equal(f.calls.length, 1, 'the keyboard class names only the keyboard');
+    assert.equal(readAnsi(f.memory,
+        f.calls[0].args[0] + DIDEVICEINSTANCE.tszInstanceName, 260), 'Keyboard');
+});
+
+test('the pointer class names the mouse, and nothing else', async()=>{
+    const f = fixture();
+    assert.equal(await f.bridge.callAsync(f.root, 'EnumDevices', [2, 0x20, 0, 0]), DI_OK);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.memory.u32(f.calls[0].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0202);
+});
+
+test('a specific device type asks for one device rather than a class', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, false);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0x13, 0x20, 0, 0]), DI_OK);
+    assert.equal(f.calls.length, 1);
+    assert.equal(f.memory.u32(f.calls[0].args[0] + DIDEVICEINSTANCE.dwDevType), 0x0413);
+});
+
+test('a callback that answers DIENUM_STOP ends the enumeration', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, true);
+    f.answers.push(DIENUM_STOP);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0, 0x20, 0, 0]), DI_OK);
+    assert.equal(f.calls.length, 1, 'the device after the refusal is never described');
+});
+
+test('a force-feedback request lists nothing, because nothing here rumbles', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, true);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0, 0x20, 0, 0x100]), DI_OK);
+    assert.equal(f.calls.length, 0);
+});
+
+test('DIEDFL_ATTACHEDONLY still lists both system devices', async()=>{
+    const f = fixture();
+    const root8 = directInput8(f, true);
+    assert.equal(await f.bridge.callAsync(root8, 'EnumDevices', [0, 0x20, 0, 1]), DI_OK);
+    assert.equal(f.calls.length, 2);
+});
+
+test('EnumDevices refuses a null callback rather than running nothing', async()=>{
+    const f = fixture();
+    assert.equal(await f.bridge.callAsync(f.root, 'EnumDevices', [0, 0, 0, 0]),
+        DIERR_INVALIDPARAM);
+    assert.equal(f.calls.length, 0);
 });
 
 test('the libraries export the entry points a program links against', ()=>{
