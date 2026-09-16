@@ -140,6 +140,17 @@ export function createWinsockFunctions(host){
     const needStarted = ()=>started ? null : WSANOTINITIALISED;
 
     /**
+     * Outstanding WSAAsyncGetHostByName tasks, keyed by the handle it gave
+     * back. Held only long enough to know whether WSACancelAsyncRequest
+     * reached it before its resolution did -- there is nothing else here for
+     * a program to ask about one.
+     *
+     * @type {Map<number, { cancelled: boolean }>}
+     */
+    const asyncTasks = new Map();
+    let nextAsyncTask = 1;
+
+    /**
      * A buffer we allocate and keep, for the calls documented to return a
      * pointer into library memory. One per name, reused, because the contract
      * is that it stays valid until the next call and nothing says it moves.
@@ -265,17 +276,15 @@ export function createWinsockFunctions(host){
         return until(socket, attempt).then(settle);
     };
 
+    /** How many bytes writeHostentAt needs, past what the caller already has room for. */
+    const HOSTENT_BLOCK_SIZE = HOSTENT.SIZE + 64;
+
     /**
-     * Lays out a hostent and returns the pointer a caller gets back.
+     * Lays out a hostent at a given block and returns it back.
      *
-     * One block holds the structure and everything it points at, so the pointers
-     * stay valid exactly as long as the structure does -- which is until the
-     * next call, the buffer being reused rather than reallocated.
-     *
-     * @param {string} name @param {number} address host order
+     * @param {number} block @param {string} name @param {number} address host order
      */
-    const writeHostent = (name, address)=>{
-        const block = staticBuffer('hostent', HOSTENT.SIZE + 64);
+    const writeHostentAt = (block, name, address)=>{
         const nameAt = block + HOSTENT.SIZE;
         const aliasesAt = nameAt + 32;
         const listAt = aliasesAt + 8;
@@ -297,6 +306,15 @@ export function createWinsockFunctions(host){
         host.writeMemory(block, record);
         return block >>> 0;
     };
+
+    /**
+     * The gethostbyname/gethostbyaddr form: one buffer this library keeps,
+     * reused rather than reallocated, valid until the next call.
+     *
+     * @param {string} name @param {number} address host order
+     */
+    const writeHostent = (name, address)=>
+        writeHostentAt(staticBuffer('hostent', HOSTENT_BLOCK_SIZE), name, address);
 
     /** fd_set is a count followed by that many handles. */
     const readFdSet = (/** @type {number} */ pointer)=>{
@@ -1230,6 +1248,103 @@ export function createWinsockFunctions(host){
                 return asked.then((/** @type {number[]} */ found)=>found.length === 0
                     ? fail(WSAHOST_NOT_FOUND, 0)
                     : writeHostent(name, found[0]));
+            },
+        },
+
+        /**
+         * HANDLE WSAAsyncGetHostByName(HWND hWnd, u_int wMsg, const char *name,
+         *                               char *buf, int buflen)
+         *
+         * Returns a task handle at once and answers later, always -- even a
+         * name this host can resolve without a round trip is still reported
+         * through the posted message, because that is the only place a
+         * caller is told the buffer is ready. The hostent is written into
+         * the caller's own buffer, with every pointer inside it fixed up to
+         * that buffer, since this answer does not get to live in the shared
+         * one gethostbyname reuses across calls.
+         */
+        WSAAsyncGetHostByName: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([hwnd, msg, namePointer, buf, buflen])=>{
+                const missing = needStarted();
+                if (missing !== null)
+                {
+                    return fail(missing, 0);
+                }
+                const task = nextAsyncTask++;
+                asyncTasks.set(task, { cancelled: false });
+                const name = namePointer === 0
+                    ? HOSTNAME : host.readCString(namePointer >>> 0, 256);
+
+                const deliver = (/** @type {number} */ error)=>{
+                    const record = asyncTasks.get(task);
+                    asyncTasks.delete(task);
+                    if (!record || record.cancelled)
+                    {
+                        return;
+                    }
+                    post({
+                        hwnd: hwnd >>> 0, message: msg >>> 0, wParam: task >>> 0,
+                        lParam: ((buflen & 0xffff) | ((error & 0xffff) << 16)) >>> 0,
+                    });
+                };
+                const answer = (/** @type {number} */ error, /** @type {number} */ address)=>{
+                    if (error !== 0)
+                    {
+                        deliver(error);
+                        return;
+                    }
+                    if (buf === 0 || (buflen >>> 0) < HOSTENT_BLOCK_SIZE)
+                    {
+                        deliver(WSAEFAULT);
+                        return;
+                    }
+                    writeHostentAt(buf >>> 0, name, address);
+                    deliver(0);
+                };
+
+                Promise.resolve().then(()=>{
+                    const literal = parseAddress(name);
+                    const known = name === HOSTNAME || name === 'localhost';
+                    if (literal !== INADDR_NONE || known)
+                    {
+                        answer(0, literal === INADDR_NONE ? INADDR_LOOPBACK : literal);
+                        return;
+                    }
+                    const asked = registry.resolve(name);
+                    if (!asked)
+                    {
+                        answer(WSAHOST_NOT_FOUND, 0);
+                        return;
+                    }
+                    asked.then((/** @type {number[]} */ found)=>answer(
+                        found.length === 0 ? WSAHOST_NOT_FOUND : 0, found[0]));
+                });
+
+                return task >>> 0;
+            },
+        },
+
+        /**
+         * BOOL WSACancelAsyncRequest(HANDLE hAsyncTaskHandle)
+         *
+         * Only WSAAsyncGetHostByName ever hands out a task handle here, so
+         * this is only ever cancelling that -- a request already answered or
+         * never issued is WSAEINVAL, matching what a stale handle means
+         * everywhere else on this surface.
+         */
+        WSACancelAsyncRequest: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([task])=>{
+                const record = asyncTasks.get(task >>> 0);
+                if (!record)
+                {
+                    return fail(WSAEINVAL);
+                }
+                record.cancelled = true;
+                return ok(0);
             },
         },
 

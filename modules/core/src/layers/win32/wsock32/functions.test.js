@@ -705,3 +705,39 @@ test('WSAEventSelect cancels a prior WSAAsyncSelect on the same socket', ()=>{
     assert.equal(fx.posted.length, 0, 'the window registration no longer applies');
     assert.deepEqual(fx.signalled, [0x88]);
 });
+
+test('WSAAsyncGetHostByName posts the reply with the hostent in the caller\'s buffer',
+    async()=>{
+        const fx = fixture();
+        const HWND = 0x900b, MSG = 0x800b;
+        fx.put(NAME, 'localhost');
+        const BUF = 0x900, BUFLEN = 128;
+
+        const task = fx.call('WSAAsyncGetHostByName', [HWND, MSG, NAME, BUF, BUFLEN]);
+        assert.notEqual(task, 0);
+        assert.equal(fx.posted.length, 0, 'the reply is never synchronous');
+
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(fx.posted.length, 1);
+        const { hwnd, message, wParam, lParam } = fx.posted[0];
+        assert.equal(hwnd, HWND);
+        assert.equal(message, MSG);
+        assert.equal(wParam, task);
+        assert.equal(lParam & 0xffff, BUFLEN, 'WSAMAKEASYNCREPLY: the length in the low word');
+        assert.equal(lParam >>> 16, 0, 'and no error in the high word');
+
+        const nameAt = fx.dword(BUF);
+        assert.ok(nameAt >= BUF && nameAt < BUF + BUFLEN, 'h_name lands inside the given buffer');
+    });
+
+test('WSACancelAsyncRequest stops the reply from ever being posted', async()=>{
+    const fx = fixture();
+    fx.put(NAME, 'localhost');
+    const task = fx.call('WSAAsyncGetHostByName', [0x900c, 0x800c, NAME, 0x900, 128]);
+    assert.equal(fx.call('WSACancelAsyncRequest', [task]), 0);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    assert.equal(fx.posted.length, 0, 'the cancelled task never posts');
+});
