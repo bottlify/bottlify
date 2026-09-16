@@ -64,6 +64,33 @@ const PI_THREAD_ID = 12;
 /** @param {string} path */
 const isQualified = path=>/^[A-Za-z]:[\\/]/.test(path) || /^[\\/]/.test(path);
 
+/**
+ * The redistributables whose job the engine already does.
+ *
+ * On a real machine these put side-by-side runtimes into `system32` and the
+ * registry: the DirectX End-User Runtime's `DXSETUP`, the Visual C++
+ * redistributable, the .NET runtime. The engine carries those itself -- the
+ * DirectX DLLs on its system volume, the C runtime under `msvcrt` -- so there
+ * is nothing for the child to install, and a game that starts one and waits
+ * for it would otherwise wait for ever on a process this engine never runs.
+ * The request is answered as a process that has run and exited 0, which is the
+ * same decision already made for a shortcut.
+ *
+ * The name is what the child is, and never the title that started it, so an
+ * installer is treated the same whatever bundle it came in. `DirectX\*.exe` is
+ * the redistributable's own subdirectory, which is where `DXSETUP` sits.
+ */
+const REDISTRIBUTABLE = /(^|[\\/])(dxsetup|dxwebsetup|directx(_[^\\/]*)?|vcredist[^\\/]*|vc_redist[^\\/]*|dotnetfx[^\\/]*|ndp[^\\/]*|netfx[^\\/]*|oalinst)\.exe$/i;
+const IN_DIRECTX_DIRECTORY = /[\\/]directx[\\/][^\\/]+\.exe$/i;
+
+/**
+ * @param {string} path
+ * @returns {boolean}
+ */
+export function isRedistributableInstaller(path){
+    return REDISTRIBUTABLE.test(path) || IN_DIRECTX_DIRECTORY.test(path);
+}
+
 /** @param {string} path The directory part, separator included. */
 const directoryOf = path=>path.slice(0, Math.max(
     path.lastIndexOf('\\'), path.lastIndexOf('/')) + 1);
@@ -240,6 +267,10 @@ export function createSpawner(host){
                 // quoted, for the reason in this file's header.
                 commandLine: line.trim() === '' ? `"${path}"` : line,
                 suspended: (flags & CREATE_SUSPENDED) !== 0,
+                // A redistributable installer is a process the engine itself
+                // stands in for: it is answered as already run and exited 0, so
+                // it is never what this process hands over to.
+                completed: isRedistributableInstaller(path),
             });
             // Both handles name the same record, and every spelling of "start a
             // program" hands one out: a parent waits on the first and resumes

@@ -42,6 +42,10 @@ export const STILL_ACTIVE = 259;
  * @property {string} imagePath     Resolved against the volume by the caller.
  * @property {string} commandLine   What the child will believe it was started with.
  * @property {boolean} suspended    CREATE_SUSPENDED; cleared by ResumeThread.
+ * @property {boolean} completed
+ *           The child already ran and exited: a redistributable installer the
+ *           engine itself plays the role of, so the request is answered as
+ *           though it had run and left exit code 0. It is never handed over.
  * @property {MemoryPatch[]} patches
  *           Writes made into the child before its image exists, replayed once
  *           the PE is mapped. This is process hollowing implemented as a queue.
@@ -69,18 +73,24 @@ export function createProcessTable(){
          * @param {string} options.imagePath
          * @param {string} options.commandLine
          * @param {boolean} [options.suspended]
+         * @param {boolean} [options.completed]
+         *        The child has already run and exited 0. Used for a
+         *        redistributable installer the engine answers for: a title
+         *        starting `DXSETUP.exe` gets a process that is over, not a
+         *        replacement.
          * @returns {ProcessRecord}
          */
-        create({ imagePath, commandLine, suspended = false }){
+        create({ imagePath, commandLine, suspended = false, completed = false }){
             const record = {
                 id: nextId,
                 threadId: nextId + 1,
                 imagePath,
                 commandLine,
                 suspended,
+                completed,
                 /** @type {MemoryPatch[]} */
                 patches: [],
-                exitCode: STILL_ACTIVE,
+                exitCode: completed ? 0 : STILL_ACTIVE,
                 handle: 0,
                 threadHandle: 0,
             };
@@ -100,8 +110,16 @@ export function createProcessTable(){
          * @returns {ProcessRecord | null}
          */
         pending(){
-            return records.find(record=>!record.suspended) ?? null;
+            return records.find(record=>!record.suspended && !record.completed) ?? null;
         },
+
+        /**
+         * Whether a record is finished, for a wait or an exit-code query.
+         *
+         * @param {ProcessRecord} record
+         * @returns {boolean}
+         */
+        finished: record=>record.exitCode !== STILL_ACTIVE,
 
         /** @returns {ProcessRecord[]} */
         all: ()=>[...records],
@@ -110,7 +128,9 @@ export function createProcessTable(){
             return {
                 created: records.length,
                 suspended: records.filter(record=>record.suspended).length,
-                pending: records.find(record=>!record.suspended)?.imagePath ?? null,
+                completed: records.filter(record=>record.completed).length,
+                pending: records.find(record=>!record.suspended && !record.completed)
+                    ?.imagePath ?? null,
             };
         },
     };

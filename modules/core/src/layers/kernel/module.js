@@ -11,7 +11,7 @@ import {
     createScheduler,
 } from './internal/threads.js';
 import { WaitResult, createSyncObjects } from './internal/sync.js';
-import { createProcessTable } from './internal/processes.js';
+import { STILL_ACTIVE, createProcessTable } from './internal/processes.js';
 import { createClock } from './internal/time.js';
 
 /**
@@ -422,13 +422,17 @@ export const kernelModule = {
              * has nothing left to do and the child takes its place.
              */
             processes: {
+                /** The exit code a process still running reports. */
+                STILL_ACTIVE,
                 /**
                  * @param {{ imagePath: string, commandLine: string,
-                 *           suspended?: boolean }} options
+                 *           suspended?: boolean, completed?: boolean }} options
                  */
                 create: options=>processes.create(options),
                 pending: ()=>processes.pending(),
                 all: ()=>processes.all(),
+                /** @param {any} record */
+                finished: record=>processes.finished(record),
             },
 
             clock,

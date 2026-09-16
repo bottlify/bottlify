@@ -24,6 +24,8 @@ const INFINITE = 0xffffffff;
 const WAIT_FAILED = 0xffffffff;
 /** The wait ran out of time; the object was never signalled. */
 const WAIT_TIMEOUT = 0x102;
+/** The object was signalled: the first of a set, or the one. */
+const WAIT_OBJECT_0 = 0;
 /** Milliseconds from the FILETIME epoch (1601) to the Unix one, for an absolute due time. */
 const FILETIME_EPOCH_MS = 11644473600000;
 
@@ -321,6 +323,14 @@ export function createThreadingFunctions(host){
 
                 if (kindOf(handle >>> 0) === 'process')
                 {
+                    // A child the engine already answered for -- a
+                    // redistributable installer it stands in for -- is
+                    // finished, and a wait on it returns at once with its exit
+                    // code, as on any already-signalled object.
+                    if (kernel.processes?.finished?.(target))
+                    {
+                        return WAIT_OBJECT_0;
+                    }
                     // The running process is signalled only when it ends, and
                     // that cannot happen while the waiter is still running: a
                     // poll or a timeout answers WAIT_TIMEOUT, and an infinite

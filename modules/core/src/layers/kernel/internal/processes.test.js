@@ -62,5 +62,28 @@ test('diagnostics name what is waiting to run', ()=>{
     table.create({ imagePath: 'ready.exe', commandLine: 'ready' });
 
     assert.deepEqual(table.diagnostics(),
-        { created: 2, suspended: 1, pending: 'ready.exe' });
+        { created: 2, suspended: 1, completed: 0, pending: 'ready.exe' });
+});
+
+test('a completed child is never what this process hands over to', ()=>{
+    const table = createProcessTable();
+    const done = table.create({
+        imagePath: 'DXSETUP.exe', commandLine: 'DXSETUP.exe', completed: true,
+    });
+    const ready = table.create({ imagePath: 'game.exe', commandLine: 'game' });
+
+    assert.equal(done.exitCode, 0, 'it exited cleanly');
+    assert.equal(table.finished(done), true);
+    assert.equal(table.finished(ready), false);
+    assert.equal(table.pending(), ready, 'the ordinary child is the one to replace with');
+    assert.deepEqual(table.diagnostics(),
+        { created: 2, suspended: 0, completed: 1, pending: 'game.exe' });
+
+    // Even resumed, a completed child does not become pending: there is nothing
+    // to run.
+    table.create({
+        imagePath: 'DXSETUP.exe', commandLine: 'DXSETUP.exe',
+        suspended: true, completed: true,
+    });
+    assert.equal(table.pending(), ready);
 });

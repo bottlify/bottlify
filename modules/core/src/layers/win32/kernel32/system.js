@@ -598,10 +598,12 @@ export function createSystemFunctions(host){
         /**
          * BOOL GetExitCodeProcess(HANDLE hProcess, LPDWORD lpExitCode)
          *
-         * STILL_ACTIVE for the running process and for a child alike. A child
-         * takes this process's place rather than running beside it, so there is
-         * no moment at which a parent is alive to ask and its child has already
-         * finished -- any other answer would be a fiction the parent acts on.
+         * STILL_ACTIVE for the running process and for a child that takes this
+         * process's place, which never reports anything else while its parent
+         * can look. A child the engine itself answered for -- a redistributable
+         * installer, already run and exited 0 -- reports its own code, because
+         * saying it is still running would make a caller that waits on it wait
+         * for ever.
          */
         GetExitCodeProcess: {
             argBytes: 8,

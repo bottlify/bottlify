@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSpawner, createSpawnFunctions } from './spawn.js';
+import { createSpawner, createSpawnFunctions, isRedistributableInstaller } from './spawn.js';
 import { createProcessTable } from '../../kernel/internal/processes.js';
 
 const ERROR_SUCCESS = 0;
@@ -404,4 +404,54 @@ test('the launcher every spelling shares finds one image and opens the handles',
     assert.equal(host.kernel.handles.resolve(made.threadHandle, 'process-thread'), made);
     assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
         ['C:\\App\\child.exe'], 'and the request left the process as it was recorded');
+});
+
+test('the redistributables the engine stands in for are recognised by what they are', ()=>{
+    for (const name of ['DXSETUP.exe', 'dxsetup.exe', 'dxwebsetup.exe',
+        'vcredist_x86.exe', 'vc_redist.x86.exe', 'dotnetfx35.exe', 'ndp48-x86-x64.exe',
+        'C:\\Install\\DirectX\\DXSETUP.EXE', 'C:\\Install\\DirectX\\anything.exe'])
+    {
+        assert.equal(isRedistributableInstaller(name), true, name);
+    }
+    for (const name of ['speedDemo.exe', 'War3.exe', 'launcher.exe',
+        'C:\\App\\directxess.exe', 'C:\\App\\DirectX\\readme.txt'])
+    {
+        assert.equal(isRedistributableInstaller(name), false, name);
+    }
+});
+
+test('a DXSETUP child is answered as a process that already ran and exited 0', ()=>{
+    // An installer starts the DirectX redistributable and waits for it. The
+    // engine carries the runtime itself, so the child is over before it begins
+    // -- and it must not be what this process hands over to.
+    const host = fakeHost({ files: ['C:\\App\\DXSETUP.exe'] });
+    const fns = createSpawnFunctions(host);
+
+    assert.equal(fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'DXSETUP.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]), 1);
+    const made = host.kernel.processes.all()[0];
+    assert.equal(made.completed, true);
+    assert.equal(made.exitCode, 0, 'it exited cleanly');
+    assert.equal(host.kernel.processes.pending(), null, 'nothing to replace this process with');
+    assert.notEqual(made.handle, 0, 'and the caller still gets a process to wait on');
+    assert.deepEqual(host.requests.map((/** @type {any} */ r)=>r.imagePath),
+        ['C:\\App\\DXSETUP.exe'], 'reported like any other child');
+
+    // WinExec is the other spelling an SFX stub uses for the same child.
+    const viaExec = fakeHost({ files: ['C:\\App\\DXSETUP.exe'] });
+    const execFns = createSpawnFunctions(viaExec);
+    assert.equal(execFns.WinExec.handler(
+        [putAnsi(viaExec, 0x100, 'DXSETUP.exe /Q'), 0]), WINEXEC_SUCCESS);
+    assert.equal(viaExec.kernel.processes.pending(), null);
+    assert.equal(viaExec.kernel.processes.all()[0].exitCode, 0);
+});
+
+test('an ordinary child is still held pending for the replacement', ()=>{
+    const host = fakeHost({ files: ['C:\\App\\game.exe'] });
+    const fns = createSpawnFunctions(host);
+
+    fns.CreateProcessA.handler(
+        [putAnsi(host, 0x100, 'game.exe'), 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.equal(host.kernel.processes.all()[0].completed, false);
+    assert.equal(host.kernel.processes.pending()?.imagePath, 'C:\\App\\game.exe');
 });

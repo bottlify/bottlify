@@ -355,6 +355,8 @@ export function createSyncFunctions(host){
                 const objects = [];
                 /** @type {any} */
                 let child = null;
+                /** Where a finished process sits in the caller's handle array. */
+                let finishedAt = -1;
                 for (let at = 0; at < total; at++)
                 {
                     const handle = view.getUint32(at * 4, true);
@@ -365,6 +367,10 @@ export function createSyncFunctions(host){
                     }
                     if (kernel.handles.typeOf?.(handle) === 'process')
                     {
+                        if (kernel.processes?.finished?.(target))
+                        {
+                            finishedAt = at;
+                        }
                         child = target;
                         continue;
                     }
@@ -372,6 +378,15 @@ export function createSyncFunctions(host){
                 }
 
                 const thread = host.currentThread();
+
+                // A process the engine already answered for -- a redistributable
+                // installer it stands in for -- is finished, so the wait is
+                // satisfied at once. The answer names its position in the
+                // caller's own array, which is what the index means.
+                if (finishedAt >= 0 && (waitAll === 0 || objects.length === 0))
+                {
+                    return WAIT_OBJECT_0 + finishedAt;
+                }
 
                 // A child process is in the set. It is never signalled while
                 // its parent can look -- it takes this process's place rather
