@@ -475,6 +475,19 @@ function listen(app, collected){
             }
         });
     }
+    // A message box parks the guest thread until somebody presses a button,
+    // and nothing on this page ever will. The box's own default is pressed for
+    // it, which is the answer the engine gave before a box waited at all, so a
+    // run that ends on one still ends.
+    app.on('message-box', (/** @type {any} */ payload)=>{
+        if (collected.events.length < LIMITS.events)
+        {
+            collected.events.push(`[message-box] ${JSON.stringify({
+                caption: payload.caption, text: payload.text, type: payload.type,
+            }).slice(0, 300)}`);
+        }
+        app.answerMessageBox?.(payload.id, payload.defaultButton ?? 1);
+    });
 }
 
 /**

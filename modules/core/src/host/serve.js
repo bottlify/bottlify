@@ -551,6 +551,14 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
         resume: ()=>app.resume(),
         stop: ()=>app.stop(),
         /**
+         * The button a person pressed in a message box, which resumes the
+         * thread parked inside MessageBox. A box nobody answers keeps that
+         * thread parked, as a program waiting on a person should.
+         *
+         * @param {number} id @param {number} button
+         */
+        answerMessageBox: (id, button)=>app.answerMessageBox(id, button),
+        /**
          * Ends the program and frees its device, and keeps the canvas for
          * the next one: the worker is the page's to end.
          */

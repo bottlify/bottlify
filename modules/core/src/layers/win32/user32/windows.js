@@ -428,11 +428,17 @@ function characterFor(key){
  *           null cursor. Handed up only on a change, through the same event the
  *           Direct3D device methods use. Absent in a build with nothing showing
  *           a cursor, and then the derived picture is kept to ourselves.
- * @property {(notice: { text: string, caption: string, type: number }) => void} [messageBox]
- *           A message box the program put up, handed up whole. It is a program
- *           explaining in its own words why it is about to stop, which is the
- *           most useful sentence it will ever say, and a line in a log is where
- *           such a sentence goes to be missed.
+ * @property {(notice: { id: number, text: string, caption: string, type: number,
+ *           buttons: { id: number, label: string }[], defaultButton: number,
+ *           icon: string | null }) => number | Promise<number> | void} [messageBox]
+ *           A message box the program put up, handed up whole with the buttons
+ *           uType asks for. The answer is the id of the button pressed: a
+ *           promise when a page will answer it, which the bridge parks the
+ *           calling thread on, or a number when it is already known. Returning
+ *           nothing means nobody is listening and the box's default is used.
+ *           It is a program explaining in its own words why it is about to
+ *           stop, which is the most useful sentence it will ever say, and a
+ *           line in a log is where such a sentence goes to be missed.
  * @property {(text: string) => void} [clipboard]
  *           The text a program copied, handed up when it closes the clipboard.
  *           A copy that stays inside the guest is one the person cannot paste

@@ -361,6 +361,15 @@ export async function createRemoteApp(wiring){
         resume: ()=>request('resume'),
         stop: ()=>request('stop'),
         /**
+         * Answers the message box the page was shown, with the id of the
+         * button the person pressed. The thread parked inside MessageBox
+         * resumes with it; a box nobody answers stays up.
+         *
+         * @param {number} id @param {number} button
+         * @returns {Promise<boolean>} whether a box was standing under that id.
+         */
+        answerMessageBox: (id, button)=>request('answerMessageBox', [id, button]),
+        /**
          * Every layer's table, or one layer's by name: the cold description of
          * where the engine stands, and the only way to see a layer that
          * publishes no table of its own.

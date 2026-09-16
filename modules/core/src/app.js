@@ -1752,6 +1752,13 @@ async function buildApp(options){
     // process they were made against: the program has changed, the machine it
     // is running in has not.
     const events = options.events ?? createEvents();
+    // The message boxes standing right now, by the id the page was shown. A
+    // box is a call the guest is parked inside, so the promise below is what
+    // holds that thread: nothing else can answer it, and a page that never
+    // does leaves it parked, which is what a program waiting on a person
+    // should do. A replacement starts empty and abandons the old boxes.
+    /** @type {Map<number, (button: number) => void>} */
+    const messageBoxes = new Map();
     // The presenter the run made. A machine is a process; the canvas, the
     // texture the primary is copied into and the pacer are not. This machine
     // hands the run's presenter to the graphics layer and draws through it, so
@@ -2417,13 +2424,20 @@ async function buildApp(options){
              * walking the stack costs real work, and a build with no consumer
              * would pay it for nothing.
              *
-             * @param {{ text: string, caption: string, type: number }} notice
+             * The answer is a promise the caller is left parked on until
+             * `answerMessageBox` is given the id: MessageBox is modal, and a
+             * page that never answers is a program waiting for a person.
+             *
+             * @param {{ id: number, text: string, caption: string, type: number }} notice
              */
-            onMessageBox: notice=>events.emit('message-box', {
-                ...notice,
-                trace: events.listening('message-box')
-                    ? formatTrace(captureTrace({ cpu, memory, kernel, bridge }))
-                    : null,
+            onMessageBox: notice=>new Promise(resolve=>{
+                messageBoxes.set(notice.id, resolve);
+                events.emit('message-box', {
+                    ...notice,
+                    trace: events.listening('message-box')
+                        ? formatTrace(captureTrace({ cpu, memory, kernel, bridge }))
+                        : null,
+                });
             }),
             // Text a program copied, for the page to put on the browser's
             // clipboard: the copy button of an error console is useless if
@@ -4235,6 +4249,27 @@ async function buildApp(options){
             paused = null;
         },
         stop: ()=>cpu.stop(),
+
+        /**
+         * Answers a message box the program put up, with the identifier of the
+         * button pressed. The thread parked inside MessageBox resumes with it,
+         * and a box nobody answers leaves that thread parked for ever, which is
+         * what a program waiting on a person does.
+         *
+         * @param {number} id   The id the `message-box` event carried.
+         * @param {number} button  One of the ids the box's own buttons carry.
+         * @returns {boolean} Whether a box was standing under that id.
+         */
+        answerMessageBox(id, button){
+            const resolve = messageBoxes.get(id >>> 0);
+            if (!resolve)
+            {
+                return false;
+            }
+            messageBoxes.delete(id >>> 0);
+            resolve(button >>> 0);
+            return true;
+        },
 
         /**
          * Watches, answers, or swallows something the program did.

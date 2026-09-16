@@ -125,7 +125,8 @@ the journal's next block. Only requests carry an id.
 | from engine | `log-memory` | `memory`, `sequenceBase` | The journal's next block, posted when a process is replaced. Shared memory, so it crosses as a share; the page forwards it to the keeper as `attach`. Only sent where a block could be shared. |
 
 The method table in `serve.js`: `start`, `run`, `pause`, `resume`, `stop`, `dispose`,
-`diagnostics`, `trace`, `presented`, `guestProfile.available`, `guestProfile.start`,
+`answerMessageBox`, `diagnostics`, `trace`, `presented`, `guestProfile.available`,
+`guestProfile.start`,
 `guestProfile.read`, `guestProfile.stop`, `guestProfile.instructionStats`, `log.setLevel`,
 `log.setDefaultLevel`, `input.attach`,
 `input.detach`, `on`, and — only for a page without shared memory — `log.recent`, `log.drain`,
@@ -159,6 +160,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 |---|---|---|
 | `run(runOptions?)` | `Promise<number>` | Exit code, once the page's own last look at the journal is done, so a tail read right after is the tail. `runOptions.maxTurns` bounds the turns the guest worked; `runOptions.timeoutMs` bounds the wall clock, which is the only bound a program that just waits ever reaches. |
 | `pause()`, `resume()`, `stop()` | `Promise` | |
+| `answerMessageBox(id, button)` | `Promise<boolean>` | Answers the `message-box` the page was shown, with the id of the button pressed. The guest thread parked inside `MessageBox` resumes with it; a box nobody answers stays up. `false` when no box is standing under that id. |
 | `dispose()` | `Promise` | Ends the program and its device. With a canvas the worker stays alive for the next program in the same canvas; without one it is terminated. |
 | `diagnostics(layer?)` | `Promise<ModuleDiagnostics[]>` | Every layer's table, or one layer's. The **cold** description: a request to the engine's thread, and the only way to see a layer that publishes no table of its own. Not for a poll — what a poll wants is under `log` below. |
 | `trace()` | `Promise<string>` | Where the guest was: registers, a stack scan, the host calls in flight. |

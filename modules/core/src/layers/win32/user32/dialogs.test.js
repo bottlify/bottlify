@@ -101,7 +101,11 @@ function setup({ resources = {}, dispatch = ()=>0, allocate } = {}){
         release: ()=>{},
         callerThread: ()=>'the caller',
         park: ()=>({ parked: true }),
-        idle: ()=>new Promise(()=>{}),
+        // A modal loop awaits this when its queue runs dry, and a test posts
+        // its messages after the call that opened the dialog returned -- so it
+        // resolves on a macrotask rather than never, or the loop could never
+        // see them.
+        idle: ()=>new Promise(resolve=>setImmediate(resolve)),
         // A module whose resources sit at fixed offsets from a fixed base:
         // the type is folded into the key so a lookup under the wrong type
         // finds nothing, as the real tree would answer.
@@ -281,16 +285,30 @@ test('DialogBox pumps until EndDialog and answers what it was given', async()=>{
 test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=>{
     // Most templates leave the bit off: the modal call is what shows the
     // window, and a dialog left invisible is a program that appears to do
-    // nothing when its own menu is clicked.
+    // nothing when its own menu is clicked. The showing happens after
+    // WM_INITDIALOG, so that is where it is looked at.
     /** @type {any} */
     let table = null;
     /** @type {number} */
     let visibleAtInit = -1;
+    let visibleWhileUp = -1;
+    let inits = 0;
+    const MARKER = 0x0400; // WM_USER
     const { memory, fns } = setup({
         dispatch: (wndProc, message)=>{
             if (message.message === WM_INITDIALOG)
             {
-                visibleAtInit = table.IsWindowVisible.handler([message.hwnd]);
+                // The modeless dialog made below initialises first and is not
+                // the one being looked at; only the modal one posts a marker.
+                if (++inits === 2)
+                {
+                    visibleAtInit = table.IsWindowVisible.handler([message.hwnd]);
+                    table.PostMessageA.handler([message.hwnd, MARKER, 0, 0]);
+                }
+            }
+            if (message.message === MARKER)
+            {
+                visibleWhileUp = table.IsWindowVisible.handler([message.hwnd]);
                 table.EndDialog.handler([message.hwnd, 1]);
             }
             return 0;
@@ -304,7 +322,8 @@ test('DialogBox shows a dialog whose template does not say WS_VISIBLE', async()=
         'a modeless dialog stays as the template made it');
 
     await fns.DialogBoxIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
-    assert.equal(visibleAtInit, 1, 'the modal one is visible by the time its procedure runs');
+    assert.equal(visibleAtInit, 0, 'not shown yet while its procedure runs');
+    assert.equal(visibleWhileUp, 1, 'and shown once the modal loop is running');
 });
 
 test('a message sent to a control with no procedure is answered with nothing', ()=>{
@@ -312,8 +331,14 @@ test('a message sent to a control with no procedure is answered with nothing', (
     // by handle instead, it used to ask the bridge to run code at address
     // zero, which stopped the machine inside the dialog's own initialisation.
     const { memory, fns } = setup({
-        dispatch: ()=>{
-            throw new Error('nothing to run');
+        // The dialog's own WM_INITDIALOG is sent during creation and is the
+        // one call a program made; nothing else has a procedure to run.
+        dispatch: (wndProc, message)=>{
+            if (message.message !== WM_INITDIALOG)
+            {
+                throw new Error('nothing to run');
+            }
+            return 0;
         },
     });
     putTemplate(memory, [{ id: 100, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
@@ -379,6 +404,9 @@ test('IsDialogMessage takes Enter for IDOK and nothing else', ()=>{
     putTemplate(memory, [{ id: 1, x: 4, y: 8, cx: 20, cy: 6, title: 'OK' }]);
     const dialog = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0]);
     const control = fns.GetDlgItem.handler([dialog, 1]);
+    // The dialog's own WM_INITDIALOG ran during the create; only the key's
+    // messages are what this test is about.
+    delivered.length = 0;
 
     const MSG = 0x3000;
     memory.writeMemory(MSG, Uint8Array.of(control, control >>> 8, 0, 0, 0x00, 0x01, 0, 0, 0x0d));
@@ -399,10 +427,21 @@ test('a modal dialog disables its owner until it ends', async()=>{
     const OWNERPROC = 0x402100;
     /** @type {any} */
     let table = null;
+    /** @type {number} */
+    let owner = 0;
+    let enabledWhileUp = -1;
+    const MARKER = 0x0400; // WM_USER
     const { memory, fns } = setup({
         dispatch: (wndProc, message)=>{
             if (wndProc === DIALOGPROC && message.message === WM_INITDIALOG)
             {
+                // Delivered once the modal loop is running, which is where the
+                // owner's state is the one the program would read.
+                table.PostMessageA.handler([message.hwnd, MARKER, 0, 0]);
+            }
+            if (wndProc === DIALOGPROC && message.message === MARKER)
+            {
+                enabledWhileUp = table.IsWindowEnabled.handler([owner]);
                 table.EndDialog.handler([message.hwnd, 7]);
             }
             return 0;
@@ -410,13 +449,14 @@ test('a modal dialog disables its owner until it ends', async()=>{
     });
     table = fns;
     putTemplate(memory, []);
-    const owner = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, OWNERPROC, 0]);
+    owner = fns.CreateDialogIndirectParamA.handler([HINSTANCE, TEMPLATE, 0, OWNERPROC, 0]);
     assert.equal(fns.IsWindowEnabled.handler([owner]), 1);
 
     const answer = fns.DialogBoxIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, owner, DIALOGPROC, 0]);
     assert.equal(fns.IsWindowEnabled.handler([owner]), 0, 'disabled while the dialog is up');
     assert.equal(await answer, 7);
+    assert.equal(enabledWhileUp, 0, 'the program saw it disabled from inside its own loop');
     assert.equal(fns.IsWindowEnabled.handler([owner]), 1, 'and enabled again after');
 });
 
@@ -447,6 +487,9 @@ test('CheckRadioButton tells every button in the range, and only the one named i
     fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 10]), GWL_WNDPROC, BUTTONPROC]);
     fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 11]), GWL_WNDPROC, BUTTONPROC]);
     fns.SetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 20]), GWL_WNDPROC, BUTTONPROC]);
+    // The dialog's own WM_INITDIALOG ran during the create; only the checks
+    // CheckRadioButton sends are what this test is about.
+    sent.length = 0;
 
     assert.equal(fns.CheckRadioButton.argBytes, 16);
     assert.equal(fns.CheckRadioButton.handler([dialog, 10, 12, 11]), 1);
@@ -591,29 +634,36 @@ test('a control of a class the program registered is the window of that class', 
     const meter = fns.GetDlgItem.handler([dialog, 201]);
     assert.notEqual(meter, 0);
     const WM_CREATE = 0x0001;
-    assert.deepEqual(seen.map(call=>[call.wndProc, call.message]), [[METER_PROC, WM_CREATE]],
-        'the class procedure was told, by name folded without regard to case');
+    assert.deepEqual(seen.map(call=>[call.wndProc, call.message]),
+        [[METER_PROC, WM_CREATE], [DIALOGPROC, WM_INITDIALOG]],
+        'the control was told it exists, then the dialog initialised, all during the call');
     assert.equal(memory.u32(seen[0].lParam + 12), dialog, 'CREATESTRUCT.hwndParent');
     assert.equal(memory.u32(seen[0].lParam + 8), 201, 'CREATESTRUCT.hMenu is the id');
     assert.equal(fns.SetWindowWord.handler([meter, 0, 7]), 0, 'and it has the extra bytes');
     assert.equal(fns.GetWindowWord.handler([meter, 0]), 7);
     assert.notEqual(fns.GetWindowLongA.handler([fns.GetDlgItem.handler([dialog, 1]), -4]),
         METER_PROC, 'a system-class control keeps the system procedure, not its own');
-
-    assert.equal(fns.GetMessageA.handler([OUT, 0, 0, 0]), 1);
-    assert.equal(memory.u32(OUT + 4), WM_INITDIALOG, 'posted after the controls were told');
 });
 
 test('WM_INITDIALOG carries the parameter the caller passed', ()=>{
-    const { memory, fns } = setup();
+    /** @type {number[]} */
+    const params = [];
+    const { memory, queue, fns } = setup({
+        dispatch: (wndProc, message)=>{
+            if (message.message === WM_INITDIALOG)
+            {
+                params.push(message.lParam);
+            }
+            return 0;
+        },
+    });
     putTemplate(memory, [{ id: 400, x: 0, y: 0, cx: 4, cy: 4 }]);
     const dialog = fns.CreateDialogIndirectParamA.handler(
         [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0xcafe]);
 
-    assert.equal(fns.GetMessageA.handler([OUT, 0, 0, 0]), 1);
-    assert.equal(memory.u32(OUT), dialog);
-    assert.equal(memory.u32(OUT + 4), WM_INITDIALOG);
-    assert.equal(memory.u32(OUT + 12), 0xcafe, 'the initialisation parameter');
+    assert.notEqual(dialog, 0);
+    assert.deepEqual(params, [0xcafe], 'the initialisation parameter, sent during the call');
+    assert.equal(queue.depth(), 0, 'and nothing was left posted for a loop to find');
 });
 
 test('an extended template is read with its own layout, font block and item ids', ()=>{

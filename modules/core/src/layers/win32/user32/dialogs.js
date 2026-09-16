@@ -37,11 +37,11 @@
  *   and Tab moves the focus between the controls that stop it. That is what
  *   IsDialogMessageA does too; every other message is reported as not a
  *   dialog message and the caller goes on to translate and dispatch it.
- * - **WM_INITDIALOG is posted rather than sent.** Sending means running the
- *   dialog procedure before this call returns, and a program that creates a
- *   dialog and then pumps sees no difference. One that creates a dialog and
- *   immediately reads a control the procedure was to fill in does, and that is
- *   the ceiling on this.
+ * - **WM_INITDIALOG is sent, not posted.** The dialog procedure runs during
+ *   `CreateDialogParam`/`DialogBoxParam`, after every control exists and has
+ *   set itself up, and before a template's WS_VISIBLE shows the window -- so a
+ *   program that creates a dialog and then reads a control the procedure was
+ *   to fill in finds it filled.
  */
 
 import { ANY_WINDOW, WM_QUIT } from './messages.js';
@@ -518,13 +518,15 @@ export function createDialogFunctions(options){
         // where GetWindowLong(DWLP_DLGPROC) reads it from.
         const extra = new DataView(new ArrayBuffer(DLGWINDOWEXTRA));
         extra.setUint32(DWLP_DLGPROC, dialogFunc >>> 0, true);
+        // A template that says WS_VISIBLE is shown only after WM_INITDIALOG
+        // has reached the procedure; until then the window is created without
+        // the bit, as Windows creates it, so a procedure that looks at its
+        // own window from there sees what Windows would show it.
+        const wantsVisible = (described.style & WS_VISIBLE) !== 0;
         const dialog = makeWindow({
             className: '#32770',
             title: described.title,
-            // WM_INITDIALOG is posted below, and a paint is only made up
-            // once nothing is posted, so the first paint sees what the
-            // procedure set up even though the window is visible from here.
-            style: described.style,
+            style: (described.style & ~WS_VISIBLE) >>> 0,
             exStyle,
             parent: parent >>> 0,
             instance: instance >>> 0,
@@ -597,23 +599,31 @@ export function createDialogFunctions(options){
                 ? [] : controls.map(record=>host.send(record.hwnd, WM_SETFONT, font, 0, thread));
             return told.some(answer=>typeof answer !== 'number') ? Promise.all(told) : null;
         };
-        const ready = ()=>{
+        const initialise = ()=>{
             host.created?.(dialog.hwnd);
-            host.queue.post({
-                hwnd: dialog.hwnd,
-                message: WM_INITDIALOG,
+            // Sent, not posted: a program that creates a dialog and then reads
+            // a control its procedure was to fill in is entitled to find it
+            // filled, so the call does not return until the procedure has run.
+            const answered = host.send(dialog.hwnd, WM_INITDIALOG,
                 // The control that takes the focus unless the procedure says
                 // otherwise: the first that stops the Tab key.
-                wParam: nextTabStop(dialog, 0, true)?.hwnd ?? 0,
-                lParam: initParam >>> 0,
+                nextTabStop(dialog, 0, true)?.hwnd ?? 0, initParam >>> 0, thread);
+            return after(answered, ()=>{
+                // A template that said WS_VISIBLE is shown only now, after the
+                // procedure has had its say. A procedure that ended the dialog
+                // from WM_INITDIALOG has left nothing to show.
+                if (wantsVisible && live(dialog.hwnd))
+                {
+                    host.show?.(dialog.hwnd);
+                }
+                return dialog.hwnd;
             });
-            return dialog.hwnd;
         };
         // WM_INITDIALOG comes after every control exists and has been told
         // so; a procedure that talks to a control from there expects the
         // control to have set itself up.
         const fonts = creating.length === 0 ? setFonts() : Promise.all(creating).then(setFonts);
-        return fonts ? fonts.then(ready) : ready();
+        return fonts ? fonts.then(initialise) : initialise();
     };
 
     /**

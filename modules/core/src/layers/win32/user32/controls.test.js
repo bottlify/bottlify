@@ -584,6 +584,38 @@ test('a static passes the pointer through to the dialog unless it has SS_NOTIFY'
     assert.equal(second.fns.SendMessageA.handler([notifier, WM_NCHITTEST, 0, 0]), HTCLIENT);
 });
 
+test('WM_INITDIALOG is sent during CreateDialogParam, after the controls exist', async()=>{
+    // A program that creates a dialog and then reads a control its procedure
+    // was to fill in is entitled to find it filled: the message is sent from
+    // inside the call, not posted for a loop that has not run yet, and it comes
+    // before a template's WS_VISIBLE shows the window.
+    /** @type {{ lParam: number, controlExists: boolean, visible: number }[]} */
+    const seen = [];
+    const context = setup({
+        reply: message=>{
+            if (message.message === WM_INITDIALOG)
+            {
+                seen.push({
+                    lParam: message.lParam,
+                    controlExists: context.fns.GetDlgItem.handler([message.hwnd, 100]) !== 0,
+                    visible: context.fns.IsWindowVisible.handler([message.hwnd]),
+                });
+            }
+            return 0;
+        },
+    });
+    putTemplate(context.memory, WIZARD_PAGE);
+    const dialog = context.fns.CreateDialogIndirectParamA.handler(
+        [HINSTANCE, TEMPLATE, 0, DIALOGPROC, 0xabcd]);
+    assert.notEqual(dialog, 0);
+    assert.deepEqual(seen, [{ lParam: 0xabcd, controlExists: true, visible: 0 }],
+        'sent inside the call, after the controls, before the window is shown');
+
+    await context.pump(dialog);
+    assert.equal(context.fns.IsWindowVisible.handler([dialog]), 1,
+        'and the template WS_VISIBLE shows it once initialisation is done');
+});
+
 test('Tab moves the focus between the tab stops, and Shift+Tab back', async()=>{
     const context = setup({ reply: message=>(message.message === WM_INITDIALOG ? 1 : 0) });
     const dialog = await openDialog(context);
