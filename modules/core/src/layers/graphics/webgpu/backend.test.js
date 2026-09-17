@@ -265,6 +265,41 @@ test('a texture upload outside a frame is encoded before that frame draws anythi
         'a copy cannot be recorded inside a render pass');
 });
 
+test('a staging buffer for a mid-frame upload is destroyed once that frame submits, not before',
+    ()=>{
+        const { gpu, backend } = harness();
+        const texture = gpu.device.createTexture({ label: 'atlas' });
+
+        const frame = backend.beginFrame();
+        backend.uploadTexture({
+            texture, format: 'bc1-rgba-unorm', width: 16, height: 16, data: new Uint8Array(128),
+        });
+        assert.equal(gpu.count('destroy'), 0, 'the frame has not submitted yet');
+        frame.end();
+
+        assert.equal(gpu.count('destroy'), 1, 'freed once its frame is submitted');
+        const order = gpu.calls.map(call=>call.op);
+        assert.ok(order.indexOf('submit') < order.indexOf('destroy'),
+            'destroyed after the submit, never before');
+    });
+
+test('a staging buffer for an upload between frames waits for the frame that encodes it',
+    ()=>{
+        const { gpu, backend } = harness();
+        const texture = gpu.device.createTexture({ label: 'atlas' });
+
+        backend.uploadTexture({
+            texture, format: 'bc1-rgba-unorm', width: 16, height: 16, data: new Uint8Array(128),
+        });
+        assert.equal(gpu.count('destroy'), 0, 'no encoder has recorded the copy yet');
+
+        const frame = backend.beginFrame();
+        assert.equal(gpu.count('destroy'), 0, 'encoded into this frame, but not yet submitted');
+        frame.end();
+        assert.equal(gpu.count('destroy'), 1,
+            'freed once this frame -- the one that encoded it -- submits');
+    });
+
 test('the snapshot is deep enough to find a regression that is not in the top rows', ()=>{
     const { backend } = harness();
     const vertices = backend.createDynamicBuffer({ size: 4096, usage: 0, label: 'vertices' });

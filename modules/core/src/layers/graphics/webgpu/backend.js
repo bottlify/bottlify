@@ -213,11 +213,15 @@ export function createBackend(options){
         onUpload: record=>profiler.textureUpload(record),
         // A copy needs an encoder, and there is only ever the frame's. An upload
         // issued while a frame is open joins it; one issued between frames waits
-        // for the next encoder rather than opening a second one.
+        // for the next encoder rather than opening a second one. Either way the
+        // staging buffer the copy reads from is only safe to destroy once the
+        // frame that encoded the copy has been submitted, so it is tracked on
+        // that frame (`frame.stagingBuffers`) rather than here.
         encodeCopy: (source, destination, size)=>{
             if (openFrame && !openFrame.ended)
             {
                 openFrame.encodeCopy(source, destination, size);
+                openFrame.stagingBuffers.push(source.buffer);
                 return;
             }
             pendingCopies.push({ source, destination, size });
@@ -532,11 +536,16 @@ export function createBackend(options){
             let presenting = null;
             const index = frameIndex++;
 
+            // Staging buffers for copies issued between frames: encoded into
+            // this frame's encoder now, so it is this frame's submit that
+            // frees them.
+            const stagingBuffers = [];
             const endUploads = profiler.phase('uploads');
             while (pendingCopies.length > 0)
             {
                 const copy = pendingCopies.shift();
                 encoder.copyBufferToTexture(copy.source, copy.destination, copy.size);
+                stagingBuffers.push(copy.source.buffer);
             }
             endUploads();
 
@@ -552,6 +561,7 @@ export function createBackend(options){
             const frame = {
                 index,
                 ended: false,
+                stagingBuffers,
 
                 /** @param {any} source @param {any} destination @param {any} size */
                 encodeCopy(source, destination, size){
@@ -718,6 +728,14 @@ export function createBackend(options){
                     queue.submit([encoder.finish()]);
                     profiler.count('submits');
                     endSubmit();
+
+                    // Safe once the copies that read them are submitted, not
+                    // before: a draw of a later frame never touches these, so
+                    // there is no reader left to wait on.
+                    for (const staging of frame.stagingBuffers)
+                    {
+                        staging.destroy();
+                    }
 
                     for (const buffer of dynamicBuffers)
                     {

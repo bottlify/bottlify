@@ -244,7 +244,9 @@ export function createFakeDevice(options = {}){
         };
         buffer.getMappedRange = ()=>buffer.bytes.buffer;
         buffer.unmap = ()=>{};
-        buffer.destroy = ()=>{};
+        buffer.destroy = ()=>{
+            calls.push({ op: 'destroy', buffer });
+        };
         calls.push({ op: 'createBuffer', createBuffer: buffer, descriptor });
         return buffer;
     };
