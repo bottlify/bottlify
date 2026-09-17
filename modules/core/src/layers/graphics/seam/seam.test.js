@@ -417,6 +417,35 @@ test('GDI32 and OPENGL32 negotiate over one runtime, not two', ()=>{
     assert.deepEqual(made, ['opengl'], 'both halves reached the one runtime');
 });
 
+test('a gl entry point declares that it never sets the last error of the thread', ()=>{
+    // GL reports through glGetError and touches nothing of Win32's; only the
+    // wgl half of the library, which is a Windows API, can leave a last error
+    // behind. The bridge reads the thread's error after every call that can
+    // set one -- a trip into the kernel layer for a value that did not change
+    // -- and a title's frame makes a dozen gl calls per draw, so the table
+    // has to say which ones cannot, the way a COM vtable already does.
+    const box = machine();
+    const seam = createGraphicsLibraries({
+        graphics: {
+            create: ()=>createOpengl({
+                readMemory: box.services.readMemory,
+                writeMemory: box.services.writeMemory,
+            }),
+        },
+        memory: box.services,
+        publishInterface: box.publishInterface,
+        screen: ()=>({ width: 640, height: 480, bitsPerPixel: 32 }),
+    });
+
+    const table = seam.libraries['OPENGL32.dll'];
+    const reading = Object.entries(table)
+        .filter(([name, entry])=>name.startsWith('gl') && entry.lastError !== false)
+        .map(([name])=>name);
+    assert.deepEqual(reading, [], 'every gl* export declares lastError: false');
+    assert.notEqual(table.wglMakeCurrent.lastError, false,
+        'a wgl entry point can set one, and the trace still reads it');
+});
+
 test('an object with no interfaces still answers AddRef and Release', ()=>{
     // IUnknown is every object's, and a program that queries for it and then
     // releases must not be released into nothing.
