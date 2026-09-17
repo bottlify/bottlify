@@ -294,7 +294,18 @@ export function createGlContext(options = {}){
         }
         if (compiling && !NOT_COMPILABLE.has(name))
         {
-            compiling.commands.push({ call: name, args });
+            // A list replays these arguments later, once the call that
+            // supplied them has long since moved on to the next one -- a
+            // caller that hands over a scratch it reuses on its next call
+            // (the fixed-count vector readers do, for a program parameter or
+            // a matrix) must not have this call's copy overwritten by that
+            // one before the list is ever played back.
+            compiling.commands.push({
+                call: name,
+                args: args.map(/** @param {any} arg */ arg=>(
+                    arg instanceof Float32Array || arg instanceof Float64Array)
+                    ? arg.slice() : arg),
+            });
             return compileMode === GL.COMPILE_AND_EXECUTE;
         }
         return true;

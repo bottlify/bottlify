@@ -275,6 +275,13 @@ const LIST_TYPES = new Map([
  *           guest runs again: for the `*v` arguments a draw reads and
  *           consumes before its handler returns. Falls back to `readMemory`
  *           where absent.
+ * @property {(address: number, count: number, into: Float32Array) => void} [readF32sInto]
+ *           `count` floats decoded straight into `into`, with nothing else
+ *           allocated: for the fixed-count vector arguments (a program
+ *           parameter, a matrix) a hot handler reads into its own reused
+ *           scratch. Absent in a build with no such path -- a test that
+ *           does not wire one -- and then that scratch is filled through
+ *           `readMemory` and a `DataView` instead.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => { width: number, height: number }} [screen]
  *           How big a drawable is, when nothing better can be asked.
@@ -457,6 +464,36 @@ export function createOpengl(services){
     const readF64s = (address, count)=>readTyped('d', address, count);
     /** @param {number} address @param {number} count @returns {number[]} */
     const readI32s = (address, count)=>readTyped('i', address, count);
+
+    /** Reused decode targets for the two fixed-count float vectors below. */
+    const floatScratch4 = new Float32Array(4);
+    const floatScratch16 = new Float32Array(16);
+
+    /**
+     * A fixed-count float vector -- a program parameter (4) or a matrix (16)
+     * -- decoded into the scratch it is always asked for, reused on every
+     * call: no window, no copy, no per-call array, through the memory
+     * layer's own span-checked reader. The context copies what it needs
+     * (`env.set`, `Float64Array.from`) before the next call overwrites it;
+     * `enter`'s display-list capture snapshots it too, for a call recorded
+     * rather than run now. A build with no `readF32sInto` (a test that does
+     * not wire one) falls back to `readTyped`, which is always a fresh copy.
+     *
+     * @param {number} address
+     * @param {Float32Array} scratch
+     * @returns {Float32Array}
+     */
+    const readF32Vector = (address, scratch)=>{
+        if (services.readF32sInto)
+        {
+            services.readF32sInto(address >>> 0, scratch.length, scratch);
+        }
+        else
+        {
+            scratch.set(readTyped('f', address, scratch.length));
+        }
+        return scratch;
+    };
 
     /** @param {number} address @returns {string} */
     const readCString = address=>{
@@ -1240,9 +1277,11 @@ export function createOpengl(services){
         glPushMatrix: ()=>call(context=>context.glPushMatrix()),
         glPopMatrix: ()=>call(context=>context.glPopMatrix()),
         glLoadIdentity: ()=>call(context=>context.glLoadIdentity()),
-        glLoadMatrixf: ([m])=>call(context=>context.glLoadMatrixf(readF32s(m, 16))),
+        glLoadMatrixf: ([m])=>call(context=>
+            context.glLoadMatrixf(readF32Vector(m, floatScratch16))),
         glLoadMatrixd: ([m])=>call(context=>context.glLoadMatrixf(readF64s(m, 16))),
-        glMultMatrixf: ([m])=>call(context=>context.glMultMatrixf(readF32s(m, 16))),
+        glMultMatrixf: ([m])=>call(context=>
+            context.glMultMatrixf(readF32Vector(m, floatScratch16))),
         glMultMatrixd: ([m])=>call(context=>context.glMultMatrixf(readF64s(m, 16))),
         glTranslatef: ([x, y, z])=>
             call(context=>context.glTranslatef(asFloat(x), asFloat(y), asFloat(z))),
@@ -1490,7 +1529,7 @@ export function createOpengl(services){
                 [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
         glProgramEnvParameter4fvARB: ([target, index, address])=>call(context=>
             context.glProgramEnvParameter4fARB(target >>> 0, index >>> 0,
-                readF32s(address, 4))),
+                readF32Vector(address, floatScratch4))),
         glProgramEnvParameter4dARB: a=>call(context=>context.glProgramEnvParameter4fARB(
             a[0] >>> 0, a[1] >>> 0,
             [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),
@@ -1502,7 +1541,7 @@ export function createOpengl(services){
                 [asFloat(x), asFloat(y), asFloat(z), asFloat(w)])),
         glProgramLocalParameter4fvARB: ([target, index, address])=>call(context=>
             context.glProgramLocalParameter4fARB(target >>> 0, index >>> 0,
-                readF32s(address, 4))),
+                readF32Vector(address, floatScratch4))),
         glProgramLocalParameter4dARB: a=>call(context=>context.glProgramLocalParameter4fARB(
             a[0] >>> 0, a[1] >>> 0,
             [asDouble(a[2], a[3]), asDouble(a[4], a[5]), asDouble(a[6], a[7]),

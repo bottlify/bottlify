@@ -565,3 +565,98 @@ test('a vector argument is decoded from the window over guest memory, not from a
     table.glGetFloatv.handler([GL.CURRENT_COLOR, out]);
     assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [0.5, 0.25, 1, 0]);
 });
+
+test('two consecutive glProgramEnvParameter4fvARB calls hand the context the same array '
+    + 'object, with the second call\'s values, and construct zero DataViews', ()=>{
+    // The env-parameter and matrix readers decode into one reused Float32Array
+    // scratch per count instead of a fresh array per call; correctness rests
+    // on the context copying out of it (`env.set`) before the next call
+    // overwrites it, which the readback below proves.
+    const box = machine();
+    const view = new DataView(box.bytes.buffer);
+    const opengl = createOpengl({
+        readMemory: box.readMemory,
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+        // The memory layer's own reader, decoding straight off the pre-existing
+        // view above: no window, no per-call `DataView`, the shape the real
+        // accessor takes.
+        readF32sInto: (/** @type {number} */ at, /** @type {number} */ count,
+            /** @type {Float32Array} */ into)=>
+        {
+            for (let i = 0; i < count; i++)
+            {
+                into[i] = view.getFloat32(at + i * 4, true);
+            }
+        },
+    });
+    const { table } = opengl;
+    startDrawing(table);
+    [1.5, -2, 0.25, 8].forEach((value, i)=>view.setFloat32(0x3000 + i * 4, value, true));
+    [4, 5, 6, 7].forEach((value, i)=>view.setFloat32(0x3100 + i * 4, value, true));
+
+    const RealSet = Float32Array.prototype.set;
+    const RealDataView = globalThis.DataView;
+    /** @type {any[]} */
+    const setOn = [];
+    let dataViews = 0;
+    globalThis.DataView = /** @type {any} */ (class extends RealDataView {
+        constructor(/** @type {any[]} */ ...args){
+            dataViews++;
+            super(.../** @type {[ArrayBufferLike, number?, number?]} */ (args));
+        }
+    });
+    Float32Array.prototype.set = /** @type {any} */ (
+        function(/** @type {any} */ source, /** @type {number} */ offset){
+            setOn.push(source);
+            return RealSet.call(this, source, offset);
+        });
+    try
+    {
+        table.glProgramEnvParameter4fvARB.handler([GL.VERTEX_PROGRAM_ARB, 0, 0x3000]);
+        table.glProgramEnvParameter4fvARB.handler([GL.VERTEX_PROGRAM_ARB, 1, 0x3100]);
+    }
+    finally
+    {
+        Float32Array.prototype.set = RealSet;
+        globalThis.DataView = RealDataView;
+    }
+
+    assert.equal(setOn.length, 2, 'the context copied out of the scratch both times');
+    assert.equal(setOn[0], setOn[1], 'the same array object, mutated for the second call');
+    assert.equal(dataViews, 0, 'no DataView constructed by either read');
+
+    const out = 0x4000;
+    table.glGetProgramEnvParameterfvARB.handler([GL.VERTEX_PROGRAM_ARB, 0, out]);
+    assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [1.5, -2, 0.25, 8],
+        'the first call\'s own values, not overwritten by the second');
+    table.glGetProgramEnvParameterfvARB.handler([GL.VERTEX_PROGRAM_ARB, 1, out]);
+    assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [4, 5, 6, 7]);
+});
+
+test('glDeleteBuffersARB still answers two independent lists, not a shared scratch', ()=>{
+    // readU32s is the variable-count reader glDeleteBuffersARB goes through;
+    // this pins that it stayed a fresh array per call while the two
+    // fixed-count float readers above moved to a reused one.
+    const { table, box } = library();
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    const namesA = 0x3000;
+    const namesB = 0x3100;
+    table.glGenBuffersARB.handler([2, namesA]);
+    table.glGenBuffersARB.handler([2, namesB]);
+    const [a0, a1] = [view.getUint32(namesA, true), view.getUint32(namesA + 4, true)];
+    const [b0, b1] = [view.getUint32(namesB, true), view.getUint32(namesB + 4, true)];
+    [a0, a1, b0, b1].forEach(name=>table.glBindBufferARB.handler([GL.ARRAY_BUFFER, name]));
+
+    table.glDeleteBuffersARB.handler([2, namesA]);
+    assert.equal(table.glIsBufferARB.handler([a0]), GL.FALSE);
+    assert.equal(table.glIsBufferARB.handler([a1]), GL.FALSE);
+    assert.equal(table.glIsBufferARB.handler([b0]), GL.TRUE, 'the second list is untouched');
+    assert.equal(table.glIsBufferARB.handler([b1]), GL.TRUE);
+
+    table.glDeleteBuffersARB.handler([2, namesB]);
+    assert.equal(table.glIsBufferARB.handler([b0]), GL.FALSE);
+    assert.equal(table.glIsBufferARB.handler([b1]), GL.FALSE);
+});

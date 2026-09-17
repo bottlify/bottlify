@@ -499,6 +499,35 @@ test('a list compiled for execution takes effect twice', ()=>{
     done();
 });
 
+test('a compiled list snapshots a float-vector argument, so a caller reusing its own scratch '
+    + 'after recording does not corrupt what was recorded', ()=>{
+    // A caller that hands over a scratch it reuses on its next call (the
+    // exports layer's fixed-count vector readers do exactly this) must not
+    // have this call's recorded arguments overwritten by the one after it,
+    // let alone by whatever the scratch holds by the time the list is
+    // finally played back.
+    const { gl, done } = fixture();
+    const list = gl.glGenLists(1);
+    const scratch = new Float32Array(4);
+
+    gl.glNewList(list, GL.COMPILE);
+    scratch.set([1, 2, 3, 4]);
+    gl.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 0, scratch);
+    scratch.set([5, 6, 7, 8]);
+    gl.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 1, scratch);
+    gl.glEndList();
+
+    scratch.set([9, 9, 9, 9]); // overwritten again, well before the list is ever run
+
+    gl.glCallList(list);
+    assert.deepEqual(gl.glGetProgramEnvParameterfvARB(GL.VERTEX_PROGRAM_ARB, 0), [1, 2, 3, 4],
+        'the first call kept the values it had when it was recorded');
+    assert.deepEqual(gl.glGetProgramEnvParameterfvARB(GL.VERTEX_PROGRAM_ARB, 1), [5, 6, 7, 8],
+        'and the second kept its own, not the scratch\'s later contents');
+
+    done();
+});
+
 test('a list refuses to be opened twice, closed unopened, or named zero', ()=>{
     const { gl, done } = fixture();
     const list = gl.glGenLists(1);

@@ -409,7 +409,10 @@ export function installProgramCalls(context, kernel){
             if (checkIndex('glProgramEnvParameter4fARB', [target, index, values], index,
                 env.get(target)))
             {
-                /** @type {Float32Array} */ (env.get(target)).set(values.slice(0, 4), index * 4);
+                // `values` is already exactly four wide, whether it came from
+                // the four immediate words or the reused vector scratch: the
+                // set below is the copy out of it the scratch's reuse relies on.
+                /** @type {Float32Array} */ (env.get(target)).set(values, index * 4);
             }
         },
 
@@ -423,8 +426,10 @@ export function installProgramCalls(context, kernel){
             if (checkIndex('glProgramLocalParameter4fARB', [target, index, values], index,
                 program?.local))
             {
+                // `values` is already exactly four wide; see the env
+                // parameter setter above for why the copy is no longer sliced.
                 /** @type {import('./objects.js').ProgramObject} */ (program).local
-                    .set(values.slice(0, 4), index * 4);
+                    .set(values, index * 4);
             }
         },
 

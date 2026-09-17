@@ -227,6 +227,14 @@ export const graphicsModule = {
                 : memory.readBytes(address, length)),
             /** A dword, read in place. @param {number} address */
             readU32: address=>memory.readU32(address),
+            /**
+             * `count` floats, decoded straight into `into` -- no window, no
+             * copy, no `DataView` -- for a fixed-count vector argument a
+             * handler consumes before it returns.
+             *
+             * @param {number} address @param {number} count @param {number[]} into
+             */
+            readF32sInto: (address, count, into)=>memory.readF32sInto(address, count, into),
             /** @param {number} address @param {Uint8Array} bytes */
             writeMemory: (address, bytes)=>memory.writeBytes(address, bytes),
             /** How many bytes a surface of this size needs. */
@@ -319,6 +327,7 @@ export const graphicsModule = {
             opengl: (/** @type {any} */ options)=>createOpengl({
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
+                readF32sInto: services.readF32sInto,
                 writeMemory: services.writeMemory,
                 screen: ()=>services.screen,
                 // With a device, contexts draw on it through the one backend
