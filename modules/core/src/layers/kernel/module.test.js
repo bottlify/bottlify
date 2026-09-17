@@ -268,3 +268,51 @@ test('parking a thread keeps where its stub leaves the stack, for the resume', a
     assert.equal(thread.resumeStack, 0x2ffedc);
     assert.equal(memory.words.get(0x2ffed0), PARK);
 });
+test('a parked thread resumes on the stack it was told, however far the stub got', async()=>{
+    // The slice can end on the trap itself, before the stub's `ret` has popped
+    // the return slot and the arguments. The context saved then has ESP on the
+    // slot, which now holds the park address; a resume that keeps that ESP
+    // returns through it into the park loop, as a ready thread nobody will
+    // ever wake. So the resume names the resting stack it was given at the
+    // park, and ESP no longer depends on how far the stub got.
+    const memory = fakeMemory();
+    const TRAP_ESP = 0x002ff090;
+    const RETURN = 0x050e6e9c;
+    /** @type {Map<number, number>} */
+    const words = memory.words;
+    words.set(TRAP_ESP, RETURN);
+    /** @type {any[]} */
+    const resumed = [];
+    const cpu = {
+        ...fakeCpu(),
+        /** @param {string} name */
+        readReg32: name=>(name === 'esp' ? TRAP_ESP : 0),
+        captureContext: ()=>({ esp: TRAP_ESP }),
+        /** @param {any} context @param {any} resume */
+        resumeContextAt: (context, resume)=>resumed.push({ ...resume }),
+        restoreContext: ()=>{},
+        runSlice: ()=>0,
+        eip: ()=>0,
+    };
+    const kernel = await kernelModule.create(
+        { stacks: { base: STACK_BASE, size: STACK_SIZE } },
+        /** @type {any} */ ({
+            /** @param {string} name */
+            requireApi: name=>(name === 'cpu' ? cpu
+                : name === 'log' ? { debug: ()=>{} }
+                    : { ...memory, readU32: (/** @type {number} */ at)=>words.get(at >>> 0) ?? 0 }),
+            provide: ()=>{},
+        }),
+    );
+    const thread = kernel.createThread({ entry: 0x00402000, name: 'main' });
+    kernel.runOnce();
+
+    kernel.parkThread(thread, TRAP_ESP + 12);
+    assert.equal(words.get(TRAP_ESP), PARK, 'the return slot now holds the park address');
+    kernel.block(thread, 'event "#4734"');
+    kernel.wake(thread, 0);
+    kernel.runOnce();
+
+    assert.deepEqual(resumed, [{ eip: RETURN, esp: TRAP_ESP + 12, returnValue: 0 }],
+        'the thread comes back at its return address with the stack at rest');
+});
