@@ -380,6 +380,48 @@ test('a DXT5 tail mip copies its block-rounded extent, not its own 2x2 or 1x1 si
             'and a 1x1 level\'s likewise');
     });
 
+test('a DXT1 base level narrower than one block decodes, a whole-block one takes the BC path',
+    async()=>{
+        const narrow = rig({ compressedTextures: true });
+        const wide = rig({ compressedTextures: true });
+        // Both a 2-wide and a 4-wide base round up to one column of blocks,
+        // so both need the same 16 rows-of-blocks worth of compressed bytes.
+        const block = new Uint8Array(128).fill(7);
+        /** @param {ReturnType<typeof rig>} r @param {number} width */
+        const upload = (r, width)=>{
+            const { context } = r;
+            context.glGenTextures(1);
+            context.glBindTexture(GL.TEXTURE_2D, 1);
+            context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+            context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+                GL.COMPRESSED_RGBA_S3TC_DXT1_EXT, width, 64, 0, 128, block);
+            context.glEnable(GL.TEXTURE_2D);
+            context.glBegin(GL.TRIANGLES);
+            context.glVertex2f(0, 0);
+            context.glVertex2f(8, 0);
+            context.glVertex2f(8, 8);
+            context.glEnd();
+            return r.swap();
+        };
+        await upload(narrow, 2);
+        await upload(wide, 4);
+
+        const narrowSurface = narrow.gpu.of('createTexture')
+            .find(c=>/gl-texture:1/.test(c.descriptor.label));
+        assert.equal(narrowSurface.descriptor.format, 'rgba8unorm',
+            'a 2-wide base is narrower than one block, so WebGPU refuses it as compressed');
+        assert.equal(narrow.gpu.of('copyBufferToTexture').length, 0,
+            'no staged, undecoded copy happened');
+        assert.equal(narrow.gpu.of('writeTexture').length, 1,
+            'the level travelled decoded instead');
+
+        const wideSurface = wide.gpu.of('createTexture')
+            .find(c=>/gl-texture:1/.test(c.descriptor.label));
+        assert.equal(wideSurface.descriptor.format, 'bc1-rgba-unorm',
+            'a 4-wide base is a whole block: it still takes the BC path');
+        assert.equal(wide.gpu.of('writeTexture').length, 0, 'no decoded, unstaged upload happened');
+    });
+
 test('a sub-image write into a kept level falls that texture back to the decoded path',
     async()=>{
         const r = rig({ compressedTextures: true });

@@ -718,6 +718,14 @@ export function createGpuRenderer(services){
                 {
                     return null;
                 }
+                // WebGPU validates a compressed texture's own (base level's)
+                // size against the block size -- unlike a copy's, a mip
+                // smaller than a block does not round up here; faces of a
+                // cube share the base's size, so this rules the whole texture.
+                if (level === 0 && image && (image.width % 4 !== 0 || image.height % 4 !== 0))
+                {
+                    return null;
+                }
                 format = mapped;
             }
         }

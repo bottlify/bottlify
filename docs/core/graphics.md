@@ -423,12 +423,17 @@ alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm
 `glTexSubImage2D` rewrote (the union of every rectangle since the last upload; a full redefine is
 the whole level), level by level as the context marks them written; a cube map is six layers with
 a cube view. An S3TC texture whose every level still holds the blocks it arrived in uploads them
-as `bc1`/`bc2`/`bc3` blocks instead, when the configuration asks for it and the device has
-`texture-compression-bc`; one level rewritten decoded (`glTexSubImage2D` into it) falls the whole
-texture back to `rgba8unorm`. A level smaller than one block (a tail mip) still copies the whole
-block its data physically occupies -- WebGPU's texture-copy validation compares a compressed
-copy's extent against the subresource's *physical* size, the logical size rounded up to the block,
-not against the level's own width and height. A copy from the
+as `bc1`/`bc2`/`bc3` blocks instead, when the configuration asks for it, the device has
+`texture-compression-bc`, and the base level's own width and height are each a multiple of the
+block size (WebGPU validates a compressed texture's own size against the block, and refuses to
+create one otherwise; a base level narrower or shorter than one block -- legal in GL, whose data is
+one block wide -- falls the whole texture back to `rgba8unorm` instead); one level rewritten
+decoded (`glTexSubImage2D` into it) falls the whole texture back to `rgba8unorm` too. A level
+smaller than one block (a tail mip) still copies the whole block its data physically occupies --
+WebGPU's texture-copy validation compares a compressed copy's extent against the subresource's
+*physical* size, the logical size rounded up to the block, not against the level's own width and
+height (that rounding is for a copy alone; the base level's own size is never rounded up). A copy
+from the
 framebuffer into a texture level is a render pass into a view of that level, sampling the back
 buffer with the row order GL's bottom-up framebuffer implies -- never into a BC surface, which
 WebGPU refuses a render-attachment usage on.
