@@ -270,6 +270,11 @@ const LIST_TYPES = new Map([
 /**
  * @typedef {Object} OpenglServices
  * @property {(address: number, length: number) => Uint8Array} readMemory
+ * @property {(address: number, length: number) => Uint8Array} [windowMemory]
+ *           The bytes themselves rather than a copy, valid only until the
+ *           guest runs again: for the `*v` arguments a draw reads and
+ *           consumes before its handler returns. Falls back to `readMemory`
+ *           where absent.
  * @property {(address: number, bytes: Uint8Array) => void} writeMemory
  * @property {() => { width: number, height: number }} [screen]
  *           How big a drawable is, when nothing better can be asked.
@@ -410,8 +415,14 @@ export function createOpengl(services){
     /** @returns {any | null} the calling thread's context */
     const current = ()=>wgl.wglGetCurrentContext();
 
+    /** The window over guest memory when the host offers one, a copy otherwise. */
+    const windowMemory = services.windowMemory ?? services.readMemory;
+
     /**
-     * `count` values of one type, read from guest memory.
+     * `count` values of one type, read from guest memory: a window rather
+     * than a copy, because every one of these is consumed before the handler
+     * returns. The result is always a fresh array -- a caller that keeps it
+     * (`glDeleteBuffersARB(readU32s(...))`) still gets one nothing else writes.
      *
      * @param {string} type
      * @param {number} address
@@ -420,9 +431,14 @@ export function createOpengl(services){
      */
     const readTyped = (type, address, count)=>{
         const spec = TYPES[type];
-        const bytes = services.readMemory(address >>> 0, count * spec.bytes);
+        const bytes = windowMemory(address >>> 0, count * spec.bytes);
         const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-        return Array.from({ length: count }, (unused, index)=>spec.read(view, index * spec.bytes));
+        const values = new Array(count);
+        for (let index = 0; index < count; index++)
+        {
+            values[index] = spec.read(view, index * spec.bytes);
+        }
+        return values;
     };
 
     /** @param {number} address @param {readonly number[]} values */

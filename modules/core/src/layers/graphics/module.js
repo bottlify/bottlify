@@ -315,6 +315,7 @@ export const graphicsModule = {
             /** @returns {any} */
             opengl: (/** @type {any} */ options)=>createOpengl({
                 readMemory: services.readMemory,
+                windowMemory: services.windowMemory,
                 writeMemory: services.writeMemory,
                 screen: ()=>services.screen,
                 // With a device, contexts draw on it through the one backend
