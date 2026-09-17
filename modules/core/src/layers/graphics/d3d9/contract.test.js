@@ -78,8 +78,9 @@ test('the adapter answers format questions from the table its creates consult', 
         D3DERR_NOTAVAILABLE, 'a depth format is not a colour target');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.D24S8), D3DERR_NOTAVAILABLE,
         'depth textures are off unless the capability says otherwise');
-    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3DERR_NOTAVAILABLE,
-        'and so are compressed ones');
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
+        'a compressed format is legal whatever compressedTextures says -- it only chooses'
+            + ' how the surface travels to the GPU');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.VOLUMETEXTURE, D3DFMT.A8R8G8B8),
         D3DERR_NOTAVAILABLE, 'volumes are never made');
     assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, 999), D3DERR_NOTAVAILABLE);

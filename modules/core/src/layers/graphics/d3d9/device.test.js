@@ -7,8 +7,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DFMT, D3DLIGHTTYPE, D3DPOOL,
-    D3DRS, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat, floatToDword,
+    D3DERR_DEVICELOST, D3DERR_DEVICENOTRESET, D3DERR_INVALIDCALL, D3DERR_NOTAVAILABLE, D3DFMT,
+    D3DLIGHTTYPE, D3DPOOL, D3DRS, D3DRTYPE, D3DSWAPEFFECT, D3DUSAGE, D3DZB, D3D_OK, dwordToFloat,
+    floatToDword,
 } from './constants.js';
 import { D3DFMT_INDEX } from '../d3d8/constants.js';
 import { DEFAULT_RENDER_STATES, resolveRenderStateDefault } from './renderstates.js';
@@ -549,19 +550,24 @@ test('a fresh device has a white material, not a black one', ()=>{
 
 // --- the block-compressed formats ---
 
-test('a compressed texture is refused unless the backend can sample blocks', ()=>{
+test('a compressed texture is created whatever compressedTextures says -- the flag only'
+    + ' chooses how its bytes travel to the GPU, never whether the format exists', ()=>{
+    const d3d = createDirect3D9({});
+    assert.equal(d3d.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
+        'legal on every device of the era, whatever the flag');
     const device = createDevice();
     /** @type {{ texture?: any }} */
     const out = {};
     assert.equal(
         device.CreateTexture(256, 256, 1, 0, D3DFMT.DXT1, D3DPOOL.MANAGED, out),
-        D3DERR_INVALIDCALL,
-        'a format we could not then create must not be offered');
-    assert.equal(out.texture, undefined, 'a refused call leaves the caller record alone');
+        D3D_OK,
+        'compressedTextures defaults to false, and the create still succeeds');
+    assert.ok(out.texture, 'the texture reached the caller');
+    out.texture.release();
     assertFullyReleased(device);
 });
 
-test('a compressed texture is created when the backend can sample blocks', ()=>{
+test('a compressed texture is created when the backend can sample blocks too', ()=>{
     const device = createDevice({ caps: { compressedTextures: true } });
     /** @type {{ texture?: any }} */
     const out = {};
@@ -573,8 +579,11 @@ test('a compressed texture is created when the backend can sample blocks', ()=>{
     assertFullyReleased(device);
 });
 
-test('nothing may be rendered into a compressed texture', ()=>{
-    const device = createDevice({ caps: { compressedTextures: true } });
+test('nothing may be rendered into a compressed texture, whatever compressedTextures says', ()=>{
+    const d3d = createDirect3D9({});
+    assert.equal(d3d.CheckDeviceFormat(D3DUSAGE.RENDERTARGET, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
+        D3DERR_NOTAVAILABLE, 'nothing draws into blocks, whatever the flag');
+    const device = createDevice();
     /** @type {{ texture?: any }} */
     const out = {};
     assert.equal(

@@ -157,7 +157,9 @@ export const PALETTE_BYTES = 256 * 4;
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as offscreen plain surfaces.
- * @property {boolean} [compressedTextures]  Whether the backend samples DXT blocks.
+ * @property {boolean} [compressedTextures]  Whether an upload keeps DXT blocks as BC
+ *           on the GPU (true) or decodes them to `bgra8unorm` (false); every DXT
+ *           format is creatable either way.
  * @property {{ major: number, minor: number }} vertexShaderVersion
  *     The highest vertex shader a create accepts, which is the highest the
  *     renderer's translator builds a pipeline from.
@@ -415,7 +417,11 @@ export function createDirect3D9(options = {}){
             }
             const wantsTarget = (usage & D3DUSAGE.RENDERTARGET) !== 0;
             const wantsDepth = (usage & D3DUSAGE.DEPTHSTENCIL) !== 0;
-            if (isCompressed(format) && (!resolved.compressedTextures || wantsTarget || wantsDepth))
+            // Legal on every device of the era regardless of `compressedTextures`,
+            // which only chooses how a created texture's bytes travel to the
+            // GPU; nothing draws into blocks, so a target or depth usage is
+            // still refused.
+            if (isCompressed(format) && (wantsTarget || wantsDepth))
             {
                 return D3DERR_NOTAVAILABLE;
             }
@@ -660,6 +666,7 @@ function createDeviceObject(parameters, caps, services, identity){
             probeTexture: services.probeTexture,
             fog: services.fog,
             mips: services.mips,
+            compressedTextures: caps.compressedTextures,
         })
         : null;
 
@@ -3469,11 +3476,11 @@ function checkTextureArguments(usage, format, pool, caps, cube){
     {
         return D3DERR_INVALIDCALL;
     }
-    // Offered only when the backend can sample blocks, and never as something
-    // the pipeline draws into: the blocks are not writable by it.
-    if (isCompressed(format)
-        && (!caps.compressedTextures
-            || (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0))
+    // Legal regardless of `caps.compressedTextures` -- that flag only chooses
+    // how the surface's bytes travel to the GPU (blocks or a decode) -- and
+    // never as something the pipeline draws into: the blocks are not writable
+    // by it.
+    if (isCompressed(format) && (usage & (D3DUSAGE.RENDERTARGET | D3DUSAGE.DEPTHSTENCIL)) !== 0)
     {
         return D3DERR_INVALIDCALL;
     }
