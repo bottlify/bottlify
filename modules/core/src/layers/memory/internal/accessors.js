@@ -27,6 +27,9 @@
  * @property {(address: number) => number} [readU32]
  *     A dword read in place, with nothing allocated. Absent in a build whose
  *     memory has no such path.
+ * @property {(address: number) => number} [readF32]
+ *     The same, reinterpreted as a float. Absent in a build whose memory has
+ *     no such path.
  * @property {(address: number, bytes: Uint8Array) => void} writePhysical
  */
 
@@ -192,6 +195,8 @@ export function createAccessors({ raw, regions, charge = null }){
     /** Scratch for the integer writers, so a dword does not cost an allocation. */
     const scratch = new Uint8Array(8);
 
+    /** Scratch for reinterpreting a dword's bits as the float it carries. */
+    const floatBits = new DataView(new ArrayBuffer(4));
 
     /**
      * @param {number} address
@@ -213,6 +218,83 @@ export function createAccessors({ raw, regions, charge = null }){
             value = value * 0x100 + bytes[i];
         }
         return value >>> 0;
+    };
+
+    /**
+     * A host call's stack words, straight into the array it fills: one span
+     * check rather than one per word, and nothing allocated.
+     *
+     * A stack is one region on every guest this engine has run, but nothing
+     * guarantees it -- a thread's stack straddling two adjacent regions is
+     * legal layout, and the span check refuses a span that crosses one. That
+     * rare case falls back here to reading each word on its own, so the
+     * caller never has to.
+     *
+     * @param {number} address
+     * @param {number} count
+     * @param {number[]} into
+     * @param {number} [at]  Where in `into` the first word lands.
+     */
+    const readU32sInto = (address, count, into, at = 0)=>{
+        if (raw.readU32)
+        {
+            let region;
+            try
+            {
+                region = readableSpan(address, count * 4);
+            }
+            catch {
+                region = null;
+            }
+            if (region)
+            {
+                for (let word = 0; word < count; word++)
+                {
+                    into[at + word] = raw.readU32(address + word * 4) | 0;
+                }
+                return;
+            }
+        }
+        for (let word = 0; word < count; word++)
+        {
+            into[at + word] = readInteger(address + word * 4, 4) | 0;
+        }
+    };
+
+    /**
+     * The float form of the same read, for a fixed-count vector argument
+     * (`glProgramEnvParameter4fvARB`'s four words, `glLoadMatrixf`'s sixteen):
+     * one span check, `raw.readF32` per word, nothing allocated.
+     *
+     * @param {number} address
+     * @param {number} count
+     * @param {number[]} into
+     */
+    const readF32sInto = (address, count, into)=>{
+        if (raw.readF32)
+        {
+            let region;
+            try
+            {
+                region = readableSpan(address, count * 4);
+            }
+            catch {
+                region = null;
+            }
+            if (region)
+            {
+                for (let word = 0; word < count; word++)
+                {
+                    into[word] = raw.readF32(address + word * 4);
+                }
+                return;
+            }
+        }
+        for (let word = 0; word < count; word++)
+        {
+            floatBits.setUint32(0, readInteger(address + word * 4, 4) >>> 0, true);
+            into[word] = floatBits.getFloat32(0, true);
+        }
     };
 
     /**
@@ -251,6 +333,9 @@ export function createAccessors({ raw, regions, charge = null }){
         readU16: address=>readInteger(address, 2),
         /** @param {number} address */
         readU32: address=>readInteger(address, 4),
+
+        readU32sInto,
+        readF32sInto,
 
         /** @param {number} address @param {number} value */
         writeU8: (address, value)=>writeInteger(address, value, 1),

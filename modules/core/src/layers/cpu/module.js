@@ -336,6 +336,8 @@ export const cpuModule = {
             writePhysical: (address, bytes)=>started().writePhysical(address, bytes),
             /** @param {number} address */
             readU32: address=>started().readU32(address),
+            /** @param {number} address */
+            readF32: address=>started().readF32(address),
             /** @param {number} address @param {Uint8Array} bytes */
             writeData: (address, bytes)=>started().writeData(address, bytes),
             /** @param {number} address @param {number} value @param {number} length */

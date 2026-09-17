@@ -190,6 +190,55 @@ test('a disposed memory answers harmlessly rather than throwing', async()=>{
     assert.equal(memory.readWideString(0x1000), '');
 });
 
+test('readU32sInto and readF32sInto read a whole span in one call, through the module\'s api',
+    async()=>{
+        const bytes = new Uint8Array(0x2000);
+        const view = new DataView(bytes.buffer);
+        const memory = await open({}, {
+            /** @param {number} address @param {number} length */
+            readPhysical: (address, length)=>bytes.slice(address, address + length),
+            /** @param {number} address @param {Uint8Array} data */
+            writePhysical: (address, data)=>bytes.set(data, address),
+            /** @param {number} address */
+            readU32: address=>view.getUint32(address, true),
+            /** @param {number} address */
+            readF32: address=>view.getFloat32(address, true),
+        });
+        memory.register({ name: 'data', base: 0x1000, size: 0x1000, kind: 'thunk-data',
+            access: 'rw' });
+
+        view.setUint32(0x1000, 10, true);
+        view.setUint32(0x1004, 20, true);
+        /** @type {number[]} */
+        const words = new Array(2);
+        memory.readU32sInto(0x1000, 2, words);
+        assert.deepEqual(words, [10, 20]);
+
+        view.setFloat32(0x1008, 1.5, true);
+        /** @type {number[]} */
+        const floats = new Array(1);
+        memory.readF32sInto(0x1008, 1, floats);
+        assert.deepEqual(floats, [1.5]);
+
+        await memoryModule.dispose();
+    });
+
+test('readU32sInto and readF32sInto answer harmlessly once disposed', async()=>{
+    const memory = await open({});
+    memory.register({ name: 'data', base: 0x1000, size: 0x10, kind: 'stack', access: 'rw' });
+    await memoryModule.dispose();
+
+    /** @type {number[]} */
+    const words = [1, 1];
+    memory.readU32sInto(0x1000, 2, words);
+    assert.deepEqual(words, [0, 0]);
+
+    /** @type {number[]} */
+    const floats = [1];
+    memory.readF32sInto(0x1000, 1, floats);
+    assert.deepEqual(floats, [0]);
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await open({});
     const second = await open({});

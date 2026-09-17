@@ -468,6 +468,9 @@ export async function createV86Host(config){
         /** A dword, read without a view or a copy being made. @param {number} address */
         readU32: address=>v().data.getUint32(v().ramOffset + address, true),
 
+        /** The same dword, reinterpreted as a float. @param {number} address */
+        readF32: address=>v().data.getFloat32(v().ramOffset + address, true),
+
         /** @param {number} address @param {Uint8Array} bytes */
         writePhysical: (address, bytes)=>{
             hostWrites++;

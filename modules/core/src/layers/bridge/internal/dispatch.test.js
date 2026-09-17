@@ -57,6 +57,21 @@ function machine(options = {}){
         },
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>cells.set(address, value),
+        /**
+         * @param {number} address @param {number} count
+         * @param {number[]} into @param {number} [at]
+         */
+        readU32sInto: (address, count, into, at = 0)=>{
+            for (let word = 0; word < count; word++)
+            {
+                const value = cells.get(address + word * 4);
+                if (value === undefined)
+                {
+                    throw new Error(`Unmapped read at ${(address + word * 4).toString(16)}`);
+                }
+                into[at + word] = value | 0;
+            }
+        },
         /** @param {number} address @param {number} length */
         window: (address, length)=>{
             const bytes = new Uint8Array(length);
@@ -680,91 +695,65 @@ test('a write into guest memory is charged to the call in flight, however it nes
     });
 });
 
-test('a five-argument stdcall makes one window call and zero per-word reads', ()=>{
-    // Five reads with a region check and a cache lookup each, against one
-    // window over the whole span: a title's frame makes this crossing
-    // thousands of times. The frame's own read of the return address at ESP
-    // is not an argument word and is not counted.
+test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' +
+    'and constructs zero DataViews', ()=>{
+    // The old path was five reads with a region check and a cache lookup
+    // each, then a `memory.window` + `DataView` per call; the crossing now
+    // makes one call into the memory layer and allocates nothing of its own.
+    // The frame's own read of the return address at ESP is not an argument
+    // word and is not counted.
     const esp = 0x3000;
     const m = machine({ esp, args: [10, 20, 30, 40, 50] });
     let windows = 0;
-    let argumentReads = 0;
+    let readU32sIntoCalls = 0;
     /** @type {any} */
     const memory = {
         ...m.memory,
-        /** @param {number} address */
-        readU32: address=>{
-            if (address > esp)
-            {
-                argumentReads++;
-            }
-            return m.memory.readU32(address);
-        },
         /** @param {number} address @param {number} length */
         window: (address, length)=>{
             windows++;
             return m.memory.window(address, length);
         },
+        /**
+         * @param {number} address @param {number} count
+         * @param {number[]} into @param {number} [at]
+         */
+        readU32sInto: (address, count, into, at = 0)=>{
+            readU32sIntoCalls++;
+            m.memory.readU32sInto(address, count, into, at);
+        },
     };
-    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
+    const RealDataView = globalThis.DataView;
+    let dataViews = 0;
+    globalThis.DataView = /** @type {any} */ (class extends RealDataView {
+        constructor(/** @type {any[]} */ ...args){
+            dataViews++;
+            super(.../** @type {[ArrayBufferLike, number?, number?]} */ (args));
+        }
+    });
     /** @type {number[][]} */
     const seen = [];
-    dispatcher.register(1, {
-        name: 'X.dll!Five', ...STDCALL, argBytes: 20,
-        /** @param {number[]} args */
-        handler: args=>{
-            seen.push(args.slice());
-            return 0;
-        },
-    });
+    try
+    {
+        const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
+        dispatcher.register(1, {
+            name: 'X.dll!Five', ...STDCALL, argBytes: 20,
+            /** @param {number[]} args */
+            handler: args=>{
+                seen.push(args.slice());
+                return 0;
+            },
+        });
 
-    dispatcher.dispatch(1);
+        dispatcher.dispatch(1);
+    }
+    finally
+    {
+        globalThis.DataView = RealDataView;
+    }
 
     assert.deepEqual(seen, [[10, 20, 30, 40, 50]], 'the arguments arrive in order');
-    assert.equal(windows, 1, 'one window call for the whole span');
-    assert.equal(argumentReads, 0, 'zero per-word reads');
-});
-
-test('arguments straddling a region boundary fall back to per-word reads', ()=>{
-    // A stack is one region on every guest this project has run so far, but
-    // nothing guarantees it: a thread's stack crossing two adjacent regions
-    // is legal layout, and `window` refuses a span crossing one on purpose
-    // (memory.md). The call still has to be answered, not refused outright.
-    const esp = 0x3000;
-    const m = machine({ esp, args: [10, 20, 30, 40, 50] });
-    let argumentReads = 0;
-    /** @type {any} */
-    const memory = {
-        ...m.memory,
-        /** @param {number} address */
-        readU32: address=>{
-            if (address > esp)
-            {
-                argumentReads++;
-            }
-            return m.memory.readU32(address);
-        },
-        /** @param {number} address @param {number} length */
-        window: (address, length)=>{
-            throw new Error(
-                `read of ${length} bytes at 0x${address.toString(16)}`
-                + ' runs past the end of region "stack-low"');
-        },
-    };
-    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
-    /** @type {number[][]} */
-    const seen = [];
-    dispatcher.register(1, {
-        name: 'X.dll!Five', ...STDCALL, argBytes: 20,
-        /** @param {number[]} args */
-        handler: args=>{
-            seen.push(args.slice());
-            return 0;
-        },
-    });
-
-    dispatcher.dispatch(1);
-
-    assert.deepEqual(seen, [[10, 20, 30, 40, 50]], 'the arguments still arrive, and in order');
-    assert.equal(argumentReads, 5, 'one per-word read per argument, the fallback');
+    assert.equal(windows, 0, 'no window call for the stack words');
+    assert.equal(readU32sIntoCalls, 1, 'one readU32sInto call for the whole span');
+    assert.equal(dataViews, 0, 'no DataView constructed by the crossing');
 });

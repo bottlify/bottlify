@@ -48,6 +48,16 @@ function machine(){
         readBytes: (address, length)=>new Uint8Array(words.buffer, address, length),
         /** @param {number} address @param {number} length */
         window: (address, length)=>new Uint8Array(words.buffer, address, length),
+        /**
+         * @param {number} address @param {number} count
+         * @param {number[]} into @param {number} [at]
+         */
+        readU32sInto: (address, count, into, at = 0)=>{
+            for (let word = 0; word < count; word++)
+            {
+                into[at + word] = words[(address >>> 2) + word] | 0;
+            }
+        },
     };
     const thread = { name: 'main' };
     const parking = createParking({

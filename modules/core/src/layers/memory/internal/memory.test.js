@@ -465,6 +465,111 @@ test('a fill still fills where the memory offers no fill of its own', ()=>{
         [0, 0, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0x7e, 0, 0]);
 });
 
+test('readU32sInto validates the whole span once and reads without an intermediate view', ()=>{
+    const bytes = new Uint8Array(0x3000);
+    const view = new DataView(bytes.buffer);
+    const raw = {
+        readPhysical: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.slice(address, address + length),
+        writePhysical: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
+        readU32: (/** @type {number} */ address)=>view.getUint32(address, true),
+    };
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    view.setUint32(0x2000, 10, true);
+    view.setUint32(0x2004, 20, true);
+    view.setUint32(0x2008, 30, true);
+
+    /** @type {number[]} */
+    const into = new Array(3);
+    accessors.readU32sInto(0x2000, 3, into);
+
+    assert.deepEqual(into, [10, 20, 30]);
+    assert.equal(regions.scans, 1, 'one span check for the whole read, not one per word');
+});
+
+test('readU32sInto writes into the array at the given offset, for a call\'s ecx already there',
+    ()=>{
+        const raw = fakeMemory();
+        const accessors = createAccessors({ raw, regions: mapWithCode() });
+        accessors.writeU32(0x2000, 10);
+        accessors.writeU32(0x2004, 20);
+
+        /** @type {number[]} */
+        const into = [0x401000, 0, 0];
+        accessors.readU32sInto(0x2000, 2, into, 1);
+
+        assert.deepEqual(into, [0x401000, 10, 20]);
+    });
+
+test('readU32sInto falls back to per-word reads across a region boundary, answering the same '
+    + 'words the whole-span path would', ()=>{
+    const raw = fakeMemory();
+    const regions = createRegionMap();
+    regions.register({
+        name: 'first', base: 0x1000, size: 8,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    regions.register({
+        name: 'second', base: 0x1008, size: 8,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE,
+    });
+    const accessors = createAccessors({ raw, regions });
+    accessors.writeU32(0x1004, 11); // the last word of "first"
+    accessors.writeU32(0x1008, 22); // the first word of "second"
+
+    /** @type {number[]} */
+    const into = new Array(2);
+    accessors.readU32sInto(0x1004, 2, into); // spans the boundary between the two regions
+
+    assert.deepEqual(into, [11, 22],
+        'the same words a per-word read gets, even though the span crosses a region');
+});
+
+test('readU32sInto refuses an unmapped word with the same error readU32 gives', ()=>{
+    const raw = fakeMemory();
+    const accessors = createAccessors({ raw, regions: mapWithCode() });
+
+    assert.throws(()=>accessors.readU32sInto(0x9000, 1, [0]), /Unmapped read/);
+    assert.throws(()=>accessors.readU32(0x9000), /Unmapped read/);
+});
+
+test('readF32sInto decodes floats through raw.readF32 with one span check', ()=>{
+    const bytes = new Uint8Array(0x3000);
+    const view = new DataView(bytes.buffer);
+    const raw = {
+        readPhysical: (/** @type {number} */ address, /** @type {number} */ length)=>
+            bytes.slice(address, address + length),
+        writePhysical: (/** @type {number} */ address, /** @type {Uint8Array} */ data)=>
+            bytes.set(data, address),
+        readF32: (/** @type {number} */ address)=>view.getFloat32(address, true),
+    };
+    const regions = mapWithCode();
+    const accessors = createAccessors({ raw, regions });
+    view.setFloat32(0x2000, 1.5, true);
+    view.setFloat32(0x2004, -2.25, true);
+
+    /** @type {number[]} */
+    const into = new Array(2);
+    accessors.readF32sInto(0x2000, 2, into);
+
+    assert.deepEqual(into, [1.5, -2.25]);
+    assert.equal(regions.scans, 1, 'one span check for the whole read, not one per word');
+});
+
+test('readF32sInto falls back without raw.readF32, decoding the same bits readU32 would', ()=>{
+    const raw = fakeMemory();
+    const accessors = createAccessors({ raw, regions: mapWithCode() });
+    accessors.writeU32(0x2000, 0x3fc00000); // the bits of 1.5 as an IEEE float
+
+    /** @type {number[]} */
+    const into = [0];
+    accessors.readF32sInto(0x2000, 1, into);
+
+    assert.equal(into[0], 1.5);
+});
+
 test('a fill is refused where the region map refuses a write', ()=>{
     const raw = machineMemory();
     const accessors = createAccessors({ raw, regions: mapWithPages() });

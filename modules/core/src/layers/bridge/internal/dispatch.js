@@ -446,37 +446,13 @@ export function createDispatcher(deps){
             }
             if (entry.stackWords > 0)
             {
-                // One window over the whole span rather than a read per word:
+                // One call for the whole span rather than a read per word:
                 // each of those cost its own region check and cache lookup,
-                // and a call takes several words at once. A stack is one
-                // region on every guest this engine has run, but nothing
-                // guarantees it: a thread's stack straddling two adjacent
-                // regions is legal layout, and `window` refuses a span that
-                // crosses one, so that rare call falls back to reading each
-                // word on its own rather than refusing the whole call.
-                let stack;
-                try
-                {
-                    stack = memory.window(esp + 4, entry.stackWords * 4);
-                }
-                catch {
-                    stack = null;
-                }
-                if (stack !== null)
-                {
-                    const view = new DataView(stack.buffer, stack.byteOffset, stack.byteLength);
-                    for (let word = 0; word < entry.stackWords; word++)
-                    {
-                        args[at++] = view.getInt32(word * 4, true);
-                    }
-                }
-                else
-                {
-                    for (let word = 0; word < entry.stackWords; word++)
-                    {
-                        args[at++] = memory.readU32(esp + 4 + word * 4) | 0;
-                    }
-                }
+                // and a call takes several words at once. The memory layer
+                // validates the span once and falls back to per-word reads
+                // itself when a stack straddles two adjacent regions (legal
+                // layout, if rare), so there is nothing to catch here.
+                memory.readU32sInto(esp + 4, entry.stackWords, args, at);
             }
 
             calls++;

@@ -80,6 +80,16 @@ async function bridge(){
             readU32: at=>cells.get(at >>> 0) ?? 0,
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>cells.set(at >>> 0, value >>> 0),
+            /**
+             * @param {number} at @param {number} count
+             * @param {number[]} into @param {number} [index]
+             */
+            readU32sInto: (at, count, into, index = 0)=>{
+                for (let word = 0; word < count; word++)
+                {
+                    into[index + word] = (cells.get((at + word * 4) >>> 0) ?? 0) | 0;
+                }
+            },
             readBytes: ()=>new Uint8Array(0),
             /** @param {number} at @param {number} length */
             window: (at, length)=>{

@@ -60,6 +60,8 @@ Accessors (all validated through `assert`):
 | `window` | `(address, length) => Uint8Array` | The emulator's own bytes, valid only until control returns to the guest. For a measured hot path. |
 | `writeBytes` | `(address, bytes) => void` | Writes; routes to `cpu.writeData` when the target region is not executable, `cpu.writePhysical` otherwise. |
 | `readU8` / `readU16` / `readU32` | `(address) => number` | Little-endian unsigned integers. `readU32` reads in place through `cpu.readU32` with nothing allocated. |
+| `readU32sInto` | `(address, count, into, at = 0) => void` | `count` signed dwords, written into `into` starting at `at`: one span check for the whole run through `cpu.readU32`, nothing allocated. A span a region boundary refuses falls back inside this call to a per-word read, so a caller never sees the boundary case. |
+| `readF32sInto` | `(address, count, into) => void` | The float form of the same read, through `cpu.readF32`, for a fixed-count vector argument a handler decodes into a reused scratch. |
 | `writeU8` / `writeU16` / `writeU32` | `(address, value) => void` | Little-endian writes through a shared scratch buffer. |
 | `readCString` | `(address, limit = 4096) => string` | NUL-terminated Latin-1 string. Throws if no NUL within `limit` bytes (clamped to the region). |
 | `readWideString` | `(address, limit = 8192) => string` | NUL-terminated UTF-16LE string; `limit` is in bytes. Throws if no terminator within it. |
@@ -78,9 +80,10 @@ and a second `create()` cannot take the first one's layout; `diagnostics()` answ
 recently created instance. After `dispose()`, a call that was in flight answers harmlessly rather
 than throwing: `register` answers `null`, `find` and `nextRegionAfter` answer `undefined`, `list` answers `[]`,
 `assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `readBytes`/
-`window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readCString`/
-`readWideString` answer `''`, `scanCString` answers `{ index: -1, byte: 0 }`, and
-`protect`/`writeBytes`/`fillBytes`/`writeU8`/`writeU16`/`writeU32` are no-ops.
+`window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readU32sInto`/
+`readF32sInto` fill `into` with zeroes, `readCString`/`readWideString` answer `''`, `scanCString`
+answers `{ index: -1, byte: 0 }`, and `protect`/`writeBytes`/`fillBytes`/`writeU8`/`writeU16`/
+`writeU32` are no-ops.
 
 ### Diagnostics
 
@@ -120,8 +123,8 @@ pick between the two write paths the cpu layer offers.
 ### Accessors
 
 `createAccessors({ raw, regions })` takes the cpu layer's API as `RawMemory`
-(`readPhysical`, `writePhysical`, and optionally `readU32` and `writeData`). Three decisions
-shape it:
+(`readPhysical`, `writePhysical`, and optionally `readU32`, `readF32` and `writeData`). Three
+decisions shape it:
 
 - **Reads copy.** The emulator hands back a subarray of its own memory, and a caller holding two
   such windows and writing through one finds the other silently moved. `readBytes` slices;
@@ -238,6 +241,12 @@ from `modules/core/`):
 | C strings are read up to the NUL, and a missing one is an error | `readCString` and its limit. |
 | a dword read remembers its region and forgets it when the map changes | The read cache and `version`. |
 | a read of bytes remembers its region the way a dword read does | The same cache on `readBytes`. |
+| readU32sInto validates the whole span once and reads without an intermediate view | One `assert` for a multi-word read. |
+| readU32sInto writes into the array at the given offset, for a call's ecx already there | The `at` parameter, for `thisFirst`. |
+| readU32sInto falls back to per-word reads across a region boundary, answering the same words the whole-span path would | The rare case a thread's stack straddling two regions needs. |
+| readU32sInto refuses an unmapped word with the same error readU32 gives | Same errors, one call or many. |
+| readF32sInto decodes floats through raw.readF32 with one span check | The float form of the same read. |
+| readF32sInto falls back without raw.readF32, decoding the same bits readU32 would | A build with no `cpu.readF32`. |
 
 The tests drive the accessors against an in-memory `RawMemory` and need no emulator. The
 layer's behaviour under a running guest is exercised indirectly by every integration test

@@ -215,6 +215,32 @@ export const memoryModule = {
                 live() ? state.accessors.readU16(address) : 0,
             readU32: (/** @type {number} */ address)=>
                 live() ? state.accessors.readU32(address) : 0,
+            readU32sInto: (/** @type {number} */ address, /** @type {number} */ count,
+                /** @type {number[]} */ into, /** @type {number} */ at = 0)=>
+            {
+                if (live())
+                {
+                    state.accessors.readU32sInto(address, count, into, at);
+                    return;
+                }
+                for (let word = 0; word < count; word++)
+                {
+                    into[at + word] = 0;
+                }
+            },
+            readF32sInto: (/** @type {number} */ address, /** @type {number} */ count,
+                /** @type {number[]} */ into)=>
+            {
+                if (live())
+                {
+                    state.accessors.readF32sInto(address, count, into);
+                    return;
+                }
+                for (let word = 0; word < count; word++)
+                {
+                    into[word] = 0;
+                }
+            },
             writeU8: (/** @type {number} */ address, /** @type {number} */ value)=>{
                 if (live())
                 {
