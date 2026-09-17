@@ -325,6 +325,40 @@ test('a texture\'s sampler is rebuilt only when its filter or wrap parameters ch
         'the parameters version moved, so the cached sampler was not reused');
 });
 
+test('a sampled texture\'s id string is built only for a skip filter or a dump', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE,
+        new Uint8Array(4 * 4 * 4).fill(0x80));
+    context.glEnable(GL.TEXTURE_2D);
+    const draw = ()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+    };
+    // The first draw creates the GPU texture record, whose label reads the
+    // name once; only reads after that are the ones this test pins.
+    draw();
+    const texture = context.shareGroup.textures.objects.get(1);
+    const value = texture.name;
+    let reads = 0;
+    Object.defineProperty(texture, 'name', {
+        get(){
+            reads++;
+            return value;
+        },
+        configurable: true,
+    });
+    draw();
+    assert.equal(reads, 0,
+        'no skip filter and no dump were asked for: the id string was never built');
+});
+
 test('a DXT5 level reaches the upload decoded, its alpha per texel intact', async()=>{
     // The bump map of a per-light interaction program is an rxgb S3TC image:
     // the normal's x lives in the alpha block, so a decode or an upload that

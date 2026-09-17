@@ -1288,9 +1288,12 @@ export function createGpuRenderer(services){
             entry,
             texture: textureForBinding(scene, entry, plan.fragmentBlock),
         }));
-        const ids = sampled.map(({ entry, texture })=>
-            `t${texture.name}${entry.cube ? 'c' : ''}`);
-        if (skipTextures.size > 0 && ids.some(id=>skipTextures.has(id)))
+        // The id strings are read only by the skip filter and the dump; a
+        // frame that asks for neither never needs to build one, per draw.
+        const ids = skipTextures.size > 0 || dumpDraws
+            ? sampled.map(({ entry, texture })=>`t${texture.name}${entry.cube ? 'c' : ''}`)
+            : null;
+        if (ids && skipTextures.size > 0 && ids.some(id=>skipTextures.has(id)))
         {
             stats.skipped++;
             recording.counts.skipped++;
@@ -1326,6 +1329,8 @@ export function createGpuRenderer(services){
         let probe = -1;
         if (dumpDraws)
         {
+            // `dumpDraws` is one of the two conditions that built `ids` above.
+            const dumpIds = /** @type {string[]} */ (ids);
             recording.dump.push(`draw ${recording.counts.draws - 1}: ${topology}`
                 + ` count=${count} first=${first} base=${baseVertex}`
                 + ` blend=${state.blend
@@ -1356,7 +1361,8 @@ export function createGpuRenderer(services){
                         : ''}`
                     + `:gen[${unit.generation
                         .map(g=>(g === null ? '-' : hex(g))).join('.')}]`).join(' ')}]`
-                + ` tex=[${sampled.map(({ entry }, i)=>`${entry.binding}:${ids[i]}`).join(' ')}]`
+                + ` tex=[${sampled.map(({ entry }, i)=>`${entry.binding}:${dumpIds[i]}`)
+                    .join(' ')}]`
                 + dumpPrograms(recording, state)
                 + dumpBound(scene)
                 + ` uni=${describeBlock(uniforms)}`
@@ -1366,7 +1372,7 @@ export function createGpuRenderer(services){
             // adds are entries of their own, ahead of this line. Every draw
             // sampling the probed texture is a candidate; which of them the
             // replay reads around is decided there, where the frame is whole.
-            probe = probeSpec !== null && ids.includes(probeSpec.id)
+            probe = probeSpec !== null && dumpIds.includes(probeSpec.id)
                 ? recording.dump.length - 1 : -1;
         }
         recording.pipelines.push(pipeline);
