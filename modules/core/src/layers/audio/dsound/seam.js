@@ -982,6 +982,23 @@ export function createDirectSound(
         /** For tests and for whoever wants to look at a buffer without a guest. */
         buffers: ()=>buffers,
 
+        /**
+         * Drops every buffer the program has fully released (`references`
+         * reached zero) from the walk. Without this, a buffer a program
+         * created, played and released stays in this array for the rest of
+         * the session -- harmless on its own, but every caller that walks
+         * `buffers()` once a turn was walking a list that only ever grew.
+         */
+        pruneReleased(){
+            for (let at = buffers.length - 1; at >= 0; at--)
+            {
+                if (!buffers[at].primary && buffers[at].references <= 0)
+                {
+                    buffers.splice(at, 1);
+                }
+            }
+        },
+
         /** What a program last asked for, for whoever is measuring. */
         cooperativeLevel: ()=>cooperativeLevel,
 

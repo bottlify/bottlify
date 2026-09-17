@@ -18,7 +18,10 @@ import assert from 'node:assert/strict';
 import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
 import { createRing } from './output/ring.js';
-import { slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN } from './output/mix.js';
+import {
+    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN,
+    createSeam, resampleInto,
+} from './output/mix.js';
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
@@ -163,7 +166,7 @@ async function playing({ silent = false, drained = true, shared = false, memory 
     {
         f.bytes.fill(0x40, held.address, held.address + BUFFER_BYTES);
     }
-    return { ...f, api, buffer, held, signalled };
+    return { ...f, api, root, buffer, held, signalled };
 }
 
 test('a playing sound buffer reaches the ring', async()=>{
@@ -368,6 +371,47 @@ test('with shared memory, a backlog past the depth also counts behind', async()=
     f.advance(10);
     f.api.pump();
     assert.ok(f.api.behind() > 0, 'this is the turn it fell behind');
+});
+
+test('with shared memory, a released DirectSound buffer frees its slot: 40 over a session '
+    + 'never fall back', async()=>{
+    // The seam never called track.close() when a buffer's references reached
+    // zero, and neither `resampleInto` nor anything else ever freed a slot on
+    // its own -- so the ceiling was not "32 buffers open at once" but "32
+    // buffers played, ever, in the session": the ordinary DirectSound idiom of
+    // creating and releasing a buffer per sound effect exhausted every slot
+    // permanently the first time 32 had ever been played.
+    const f = await playing({ shared: true });
+    for (let i = 0; i < 40; i++)
+    {
+        assert.equal(f.call(f.root, 'CreateSoundBuffer', [DESC_AT, OUT_AT + 4, 0]), DS_OK);
+        const pointer = f.view.getUint32(OUT_AT + 4, true);
+        // f.objectAt() answers the publisher's adapter, not the raw buffer;
+        // the raw buffer -- with `.address` and a plain, non-COM `.release()`
+        // a test can call directly -- is the adapter's own `.api`.
+        const raw = f.objectAt(pointer).api;
+        f.bytes.fill(0x40, raw.address, raw.address + BUFFER_BYTES);
+
+        f.call(pointer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+        f.advance(50);
+        f.api.pump(); // opens the track and feeds it
+
+        raw.release(); // the program is done with it
+        f.api.pump(); // feedBuffers notices the release and closes the track
+
+        // Only the reader (resampleInto, standing in for the worklet) frees
+        // the slot back to STATE_FREE; every track in this test lands on
+        // slot 0, the sole free slot each time.
+        const table = f.api.output().table;
+        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        resampleInto({
+            block: new Float32Array(2), blockFrames: 1, header, pcm,
+            outputRate: f.api.output().sampleRate, seam: createSeam(),
+        });
+    }
+    assert.equal(f.api.output().diagnostics().fallbackTracks, 0,
+        'no fallback after releasing every buffer before the next one opened');
 });
 
 /** Somewhere to put a DSBPOSITIONNOTIFY the guest would have filled in. */

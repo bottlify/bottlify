@@ -599,6 +599,23 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             pcm: new Uint8Array(buffer, slotPcmOffset(slot), SLOT_BYTES),
         });
     }
+    if (!isFresh)
+    {
+        // A process replacement, not a device replacement: the parent's track
+        // objects are gone with it, but their slots are still STATE_OPEN with
+        // nothing left to ever mark them CLOSING. This machine is that slot's
+        // only writer now, so every slot it did not itself open is closed
+        // here, and the reader frees it at its next block -- the same handoff
+        // a released track gets.
+        for (const { header } of slots)
+        {
+            if (Atomics.load(header, STATE) !== STATE_FREE)
+            {
+                Atomics.add(header, GENERATION, 1);
+                Atomics.store(header, STATE, STATE_CLOSING);
+            }
+        }
+    }
 
     /** @type {Set<any>} */
     const openTracks = new Set();
@@ -689,6 +706,13 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
         Atomics.add(header, GENERATION, 1);
         Atomics.store(header, STATE, STATE_OPEN);
 
+        // Reset() restarts what playedBytes()/played() report without moving
+        // READ/MIXED_FRAMES themselves -- both are reader-owned and monotonic
+        // over the slot's whole life, including a track this slot held before
+        // a previous reset. The bases below are what gets subtracted back off.
+        let bytesBase = 0;
+        let framesBase = 0;
+
         const track = {
             format,
             slot,
@@ -717,26 +741,33 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
              * fit. A short write is not an error, the same contract the ring
              * always had: the caller offers the rest again next turn.
              *
+             * Room is sized against `READ` alone, never `DROP_TO`: `DROP_TO`
+             * is only the reader's next instruction and takes effect a whole
+             * block later, so sizing against it lets a write land on bytes
+             * the reader is still mid-block on -- a torn block, heard as a
+             * click, once per drop. The real room reappears only once the
+             * reader has actually caught up.
+             *
              * @param {Uint8Array} data
-             * @returns {number} bytes actually written
+             * @returns {number} output frames the guest's bytes became -- the
+             *          same unit `played()`/`pending()` count in, not bytes
              */
             write(data){
                 const written = Atomics.load(header, WRITTEN);
-                const effectiveRead =
-                    Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
-                const room = Math.max(0, SLOT_BYTES - (written - effectiveRead));
+                const read = Atomics.load(header, READ);
+                const room = Math.max(0, SLOT_BYTES - ((written - read) | 0));
                 const take = Math.min(data.length, room);
                 for (let i = 0; i < take; i++)
                 {
                     pcm[(written + i) & PCM_MASK] = data[i];
                 }
                 Atomics.store(header, WRITTEN, written + take);
-                return take;
+                return Math.round(take / stride * sampleRate / format.sampleRate);
             },
 
             /** Output frames the audio thread has actually mixed from this slot. */
             played(){
-                return Atomics.load(header, MIXED_FRAMES);
+                return Math.max(0, (Atomics.load(header, MIXED_FRAMES) - framesBase) | 0);
             },
 
             /**
@@ -745,9 +776,15 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
              * folded into its seam, so a program waiting for one small buffer
              * back is credited it whole the moment the audio thread has
              * looked at it, not when a ledger decides to retire an entry.
+             *
+             * Less `bytesBase`, which `reset()` moves up to `WRITTEN` at the
+             * moment it is called: `READ` itself stays monotonic over the
+             * slot's whole life, including whatever this track played before
+             * a previous reset, and a caller like `waveOutReset` expects the
+             * cursor to restart at zero, the way its own `trackBytes` does.
              */
             playedBytes(){
-                return Atomics.load(header, READ);
+                return Math.max(0, (Atomics.load(header, READ) - bytesBase) | 0);
             },
 
             /** Guest frames of this track still queued, by its own rate. */
@@ -755,7 +792,7 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
                 const written = Atomics.load(header, WRITTEN);
                 const effectiveRead =
                     Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
-                return Math.max(0, Math.floor((written - effectiveRead) / stride));
+                return Math.max(0, Math.floor(((written - effectiveRead) | 0) / stride));
             },
 
             /**
@@ -765,7 +802,9 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
              * and a caller that wants the same thing use this.
              */
             reset(){
-                Atomics.store(header, DROP_TO, Atomics.load(header, WRITTEN));
+                bytesBase = Atomics.load(header, WRITTEN);
+                framesBase = Atomics.load(header, MIXED_FRAMES);
+                Atomics.store(header, DROP_TO, bytesBase);
                 Atomics.add(header, GENERATION, 1);
             },
 
@@ -797,6 +836,8 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
         let writtenBytes = 0;
         let localGain = 1;
         let localPaused = false;
+        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const stride = bytesPerSample * format.channels;
         return {
             format,
             slot: -1,
@@ -814,10 +855,14 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
             set paused(value){
                 localPaused = value;
             },
-            /** @param {Uint8Array} data */
+            /**
+             * @param {Uint8Array} data
+             * @returns {number} output frames the guest's bytes became, the
+             *          same unit the real slot track's `write()` answers in
+             */
             write(data){
                 writtenBytes += data.length;
-                return data.length;
+                return Math.round(data.length / stride * sampleRate / format.sampleRate);
             },
             played: ()=>0,
             playedBytes: ()=>writtenBytes,

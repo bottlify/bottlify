@@ -10,7 +10,7 @@ import assert from 'node:assert/strict';
 import { createMixer } from './mixer.js';
 import { createRing } from './ring.js';
 import {
-    WRITTEN, DROP_TO, READ, STATE, STATE_FREE, slotHeaderOffset, slotPcmOffset,
+    WRITTEN, DROP_TO, READ, STATE, STATE_FREE, SLOTS, MIXED_FRAMES, slotHeaderOffset, slotPcmOffset,
     SLOT_HEADER_INT32, SLOT_BYTES, createSeam, resampleInto,
 } from './mix.js';
 
@@ -341,11 +341,14 @@ test('with a shared table, write puts the guest\'s own bytes into the slot', ()=
     const track = mixer.open(DIRECT);
     const written = pcm16([1234, -1234, 5678, -5678]);
 
+    // The return value is output frames, not bytes taken -- `DIRECT` is the
+    // output's own rate, so two stereo input frames are two output frames.
     const taken = track.write(written);
-    assert.equal(taken, written.length, 'the whole buffer fit');
+    assert.equal(taken, 2, 'the whole buffer fit, as output frames');
 
     const { header, pcm } = slotView(mixer, track.slot);
-    assert.equal(Atomics.load(header, WRITTEN), written.length);
+    assert.equal(Atomics.load(header, WRITTEN), written.length,
+        'WRITTEN moved by the guest\'s own bytes, unrounded');
     assert.deepEqual([...pcm.subarray(0, written.length)], [...written],
         'byte-equal: nothing converted it');
 });
@@ -438,3 +441,148 @@ test('with a shared table, a closed slot is freed by the reader and reused', ()=
     const reused = mixer.open(DIRECT);
     assert.equal(reused.slot, closedSlot, 'the next open() reuses the freed slot');
 });
+
+test('with a shared table, write() returns output frames, the same unit the engine backend uses',
+    ()=>{
+    // Confirmed by running both backends on the same bytes: engine `write()`
+    // answered 4798 (frames) and shared answered 8820 (bytes) for 100 ms of
+    // 22,050 Hz stereo 16-bit -- a caller that carries the figure into an
+    // arithmetic built on frames (the DirectShow film sync, `PlaySound`'s
+    // loop) gets a number nearly double what it means.
+        const format = { sampleRate: 22050, channels: 2, bitsPerSample: 16 };
+        const pcm = pcm16(new Array(2205 * 2).fill(1000)); // 100 ms, stereo
+
+        const engineTrack = createMixer().open(format);
+        const engineFrames = engineTrack.write(pcm);
+
+        const sharedTrack = createMixer({ shared: true }).open(format);
+        const sharedFrames = sharedTrack.write(pcm);
+
+        // A flat ratio, not the real resampler: it does not hold a fractional
+        // frame back at the tail for a seam the way `convert()`/`resampleInto` do,
+        // so a single one-shot buffer comes out a handful of frames higher. Before
+        // this fix the two units differed by nearly a factor of `bytesPerFrame`
+        // (4798 frames vs 8820 bytes here) -- what matters is that they now agree
+        // to within a fraction of a percent, not bytes read as frames.
+        assert.ok(Math.abs(sharedFrames - engineFrames) <= 5,
+            `engine backend said ${engineFrames} frames, shared said ${sharedFrames}`);
+    });
+
+test('with a shared table, a fallback track\'s write() also answers in output frames', ()=>{
+    const mixer = createMixer({ shared: true });
+    for (let i = 0; i < SLOTS; i++)
+    {
+        mixer.open(DIRECT);
+    }
+    const format = { sampleRate: 22050, channels: 2, bitsPerSample: 16 };
+    const fallback = mixer.open(format);
+    assert.equal(fallback.slot, -1, 'the assumption under this test: no free slot left');
+
+    const pcm = pcm16(new Array(2205 * 2).fill(1000));
+    const frames = fallback.write(pcm);
+    const expected = Math.round(pcm.length / 4 * mixer.sampleRate / format.sampleRate);
+    assert.equal(frames, expected,
+        `a fallback track counted in bytes rather than frames: ${frames}`);
+});
+
+test('a mixer that attaches to a table it did not open sweeps every inherited slot', ()=>{
+    // A process replacement, not a device replacement: the parent's track
+    // objects are gone, but nothing else was ever going to mark their slots
+    // CLOSING. Without the sweep, every slot the parent had open is
+    // permanently lost -- the child can never reuse it, however many
+    // buffers the program that survives the replacement opens and closes.
+    const parent = createMixer({ shared: true });
+    for (let i = 0; i < SLOTS; i++)
+    {
+        parent.open(DIRECT);
+    }
+
+    const child = createMixer({ shared: true, memory: parent.memory });
+    assert.equal(child.open(DIRECT).slot, -1,
+        'the sweep marks the inherited slots CLOSING, not FREE yet');
+
+    // Only the reader (resampleInto, standing in for the worklet) frees a
+    // CLOSING slot, exactly as it does for a track this same machine closed.
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        const { header, pcm } = slotView(child, slot);
+        resampleInto({
+            block: new Float32Array(2), blockFrames: 1, header, pcm,
+            outputRate: child.sampleRate, seam: createSeam(),
+        });
+    }
+
+    const reused = child.open(DIRECT);
+    assert.notEqual(reused.slot, -1,
+        'the reader freed an inherited slot, and the child reused it');
+});
+
+test('with a shared table, a backlog drop does not let write() overrun what the reader has not '
+    + 'read', ()=>{
+    // write()'s room must be sized against READ alone. DROP_TO is only the
+    // reader's next instruction and does not take effect until the reader's
+    // next block, so sizing room against it (as if the ring were already
+    // empty) lets a write land on bytes the reader may still be mid-block
+    // on -- a torn block, heard as a click, once per drop.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open(DIRECT); // the direct-copy path: 4 bytes/frame
+
+    const quarter = SLOT_BYTES / 4;
+    track.write(pcm16(new Array(3 * quarter / 2).fill(1000))); // three quarters full
+    track.reset(); // DROP_TO catches up to WRITTEN; READ (the reader's own) does not move
+
+    // Sized as though the ring were now empty, this would fit whole.
+    track.write(pcm16(new Array(quarter / 2 + 100).fill(2000)));
+
+    const { header } = slotView(mixer, track.slot);
+    const written = Atomics.load(header, WRITTEN);
+    const read = Atomics.load(header, READ);
+    assert.ok(written - read <= SLOT_BYTES,
+        `write() let the ring hold ${written - read} bytes queued, more than its `
+                + `${SLOT_BYTES}`);
+});
+
+test('with a shared table, a film\'s owed-ms arithmetic does not inflate: write() and played() '
+    + 'agree in one unit', ()=>{
+    // app.js's film sync computes `owed = written - track.played()` in output
+    // frames and turns it into milliseconds. Before this fix `write()`
+    // answered in bytes: for a 22,050 Hz stereo film, `owed` grew by roughly
+    // `bytesPerFrame * filmRate / outputRate` per real second (about 837 ms/s)
+    // and the picture crawled at a fraction of real speed for the whole
+    // cinematic. One second of sound, fully played, must leave `owed` near 0.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open({ sampleRate: 22050, channels: 2, bitsPerSample: 16 });
+
+    let written = 0;
+    // Ten 100 ms buffers, as app.js's showVideoFrame hands over one per tick.
+    for (let i = 0; i < 10; i++)
+    {
+        written += track.write(pcm16(new Array(2205 * 2).fill(1000)));
+    }
+    // Stand in for the audio thread having genuinely played all of it: one
+    // second of sound resampled to the output's 48 kHz is 48,000 output
+    // frames, the true figure `played()` would show -- computed here from the
+    // output rate, not from `written`, so this does not tautologically agree
+    // with whatever unit `write()` happens to be using.
+    const { header } = slotView(mixer, track.slot);
+    Atomics.store(header, MIXED_FRAMES, mixer.sampleRate);
+
+    const owed = Math.max(0, written - track.played());
+    assert.ok(owed <= 5, `owed ${owed} output frames after a second fully played -- ` +
+        'the film and its sound would be running at different speeds');
+});
+
+test('with a shared table, reset() restarts playedBytes() at zero, the way waveOutReset expects',
+    ()=>{
+        const mixer = createMixer({ shared: true });
+        const track = mixer.open(DIRECT);
+        track.write(pcm16([1000, 1000, 2000, 2000]));
+
+        const { header } = slotView(mixer, track.slot);
+        Atomics.store(header, READ, Atomics.load(header, WRITTEN)); // the reader consumed it
+        assert.ok(track.playedBytes() > 0, 'the assumption under this test');
+
+        track.reset();
+        assert.equal(track.playedBytes(), 0,
+            'what played before the reset is not owed to whatever comes after it');
+    });

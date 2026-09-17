@@ -165,3 +165,28 @@ test('a mixer over the table stays within TABLE_BYTES', ()=>{
     const mixer = createMixer({ shared: true, sampleRate: 48000 });
     assert.equal(mixer.table.byteLength, TABLE_BYTES);
 });
+
+test('WRITTEN/READ crossing 2^31 bytes does not stall the ring', ()=>{
+    // At 44.1 kHz stereo 16-bit (176,400 B/s) a slot's byte indices cross
+    // 2^31 after about 3.4 hours of continuous play -- a night-long session.
+    // Formed as plain doubles, `written - read` after the crossing subtracts
+    // a negative Int32 load from a positive one and reads as a span far
+    // larger than the ring, so `availableFrames` floors to 0 for ever.
+    const s = slot();
+    Atomics.store(s.header, RATE, 48000); // the direct-copy path
+    Atomics.store(s.header, CHANNELS, 2);
+    Atomics.store(s.header, BITS, 16);
+
+    const near = 2147483642; // 2^31 - 6: writing two stereo frames crosses it
+    Atomics.store(s.header, WRITTEN, near);
+    Atomics.store(s.header, READ, near);
+    feed(s, pcm16([1000, -1000, 2000, -2000])); // 8 bytes; WRITTEN wraps negative
+
+    const seam = createSeam();
+    const block = new Float32Array(4);
+    const produced = resampleInto({
+        block, blockFrames: 2, header: s.header, pcm: s.pcm, outputRate: 48000, seam,
+    });
+    assert.equal(produced, 2,
+        'the two frames written across the wrap are read, not lost to a stalled span');
+});

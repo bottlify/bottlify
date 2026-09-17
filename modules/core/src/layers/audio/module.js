@@ -234,6 +234,18 @@ export const audioModule = {
                 {
                     continue;
                 }
+                // The program let this buffer go. A track's slot in the
+                // shared backend is spent for as long as it is STATE_OPEN,
+                // not for as long as its queue is non-empty -- so a track
+                // that outlives its buffer is a slot the engine can never get
+                // back, and the ceiling becomes every buffer *ever* played in
+                // the session rather than every buffer open at once.
+                if (buffer.references <= 0)
+                {
+                    tracks.get(buffer)?.close();
+                    tracks.delete(buffer);
+                    continue;
+                }
                 let track = tracks.get(buffer);
                 const ranges = buffer.drainPlayed();
                 if (ranges.length === 0)
@@ -281,6 +293,11 @@ export const audioModule = {
                     track.write(memory.window(buffer.address + range.from, range.bytes));
                 }
             }
+            // Drops whatever was just released above from the seam's own
+            // walk too, so a session that opens and releases many buffers
+            // keeps this loop to the ones still reachable rather than
+            // growing it for as long as the program runs.
+            dsound.pruneReleased();
         };
 
         current = {

@@ -170,7 +170,12 @@ function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
 
     const written = Atomics.load(header, WRITTEN);
     const read0 = Atomics.load(header, READ);
-    const availableFrames = Math.max(0, Math.floor((written - read0) / stride));
+    // Formed as a wrapped 32-bit difference, not a plain subtraction of two
+    // doubles: WRITTEN and READ are bytes and cross 2^31 in 3.4 hours of
+    // continuous play at 44.1 kHz stereo, and past that point one of the two
+    // loads is negative while the other is not, which a plain subtraction
+    // reads as a huge span rather than the true, small one.
+    const availableFrames = Math.max(0, Math.floor(((written - read0) | 0) / stride));
     if (availableFrames === 0)
     {
         return 0;

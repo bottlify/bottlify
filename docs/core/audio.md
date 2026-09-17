@@ -34,7 +34,8 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | option | type | default | meaning |
 |---|---|---|---|
 | `drained` | boolean | `false` | Whether something is reading the far end of the ring. `false` means the mixer is never fed from DirectSound buffers (`refusedFills` counts each refusal), `available()` is false, and a program's cursors advance against the clock alone. |
-| `memory` | `{ control, samples }` | absent | The storage of an existing ring. Given, the mixer's output is that ring rather than a new one, continuing its written/read counts. Set by `createApp` on a rebuilt machine so a process replacement mixes into the sound output its reader already holds. |
+| `memory` | `{ control, samples }` without `shared`, `{ table }` with it | absent | The storage of an existing mixer output. Given, the mixer's output is that storage rather than a new one, continuing its written/read counts. Set by `createApp` on a rebuilt machine so a process replacement mixes into the sound output its reader already holds. |
+| `shared` | boolean | `false` | Which backend: the engine mixer (`createEngineMixer`) or the shared track table (`createSharedMixer`), read by a worklet on a page with `SharedArrayBuffer`. An environment question the assembling caller answers, never guessed here. |
 | `sampleRate` | number | `48000` | The mixer's output rate. Every track is resampled to it. |
 | `allocate` | `(bytes) => address` | page-aligned addresses from `0x50000000`, never written | Guest memory for a sound buffer's samples and the provider's tables. The default lets the model run with no guest at all. |
 | `now` | `() => ms` | `Date.now` | The guest's clock; cursors advance against it. |
@@ -53,7 +54,7 @@ Source: `src/layers/audio/module.js`. The DirectSound seam imports `IUNKNOWN_MET
 | member | what it is |
 |---|---|
 | `libraries()` | `{ 'DSOUND.dll', 'Mp3dec.asi' }` (the second only when `mp3 !== false`), shaped like a `win32` library's tables. |
-| `output()` | The mixer: `open(format)`, `pump(frames?)`, `ring`, `sampleRate`, `channels`, `capacityFrames`, `consumed()`, `diagnostics()`. Handed down to `win32` by the assembling caller because `win32` sits below this layer. |
+| `output()` | The mixer: `open(format)`, `pump(frames?)`, `sampleRate`, `channels`, `capacityFrames`, `consumed()`, `diagnostics()`, plus `ring`/`memory` (engine backend) or `table`/`memory` (shared backend). Handed down to `win32` by the assembling caller because `win32` sits below this layer. |
 | `pump(frames?)` | Mixes ahead into the ring; called once a scheduler turn by whoever drives the machine, before the turn yields. |
 | `available()` | `config.drained`. |
 | `feeding()` | `{ sink, fills, refusedFills, notified, fedRanges, fedBytes, tracksOpen }`. |
@@ -133,11 +134,17 @@ credited it once the reader has looked at those bytes at all, not when a ledger 
 an entry). A slot's header also carries `RATE`, `CHANNELS`, `BITS` (the format `open` was called
 with), `PAUSED`, `STATE` (`STATE_FREE`/`STATE_OPEN`/`STATE_CLOSING`) and `GENERATION` (bumped on
 open and on a backlog drop; the reader resets its resampler seam when it changes) and `DROP_TO`
-(see below); every field has exactly one writer -- the engine or the reader, never both -- and
-every access is `Atomics.load`/`store`, with neither side ever waiting on the other. A track opened
-when every slot is already taken -- not expected in practice, a game of this era opens a handful of
-buffers -- gets a silent fallback track instead: writes are accepted and immediately credited so
-the program is never held up, but nothing is heard, and `diagnostics().fallbackTracks` counts it.
+(see below); every field has exactly one writer per phase of the slot's life -- `STATE` is the one
+exception stated as a handoff rather than a single owner: the engine writes `OPEN`/`CLOSING`, the
+reader alone writes `FREE`, and a slot the engine has closed is never reused until the reader has
+made that move -- and every access is `Atomics.load`/`store`, with neither side ever waiting on the
+other. A track opened when every slot is already taken -- not "already open"; a track's slot is
+spent for as long as it is `STATE_OPEN`, which lasts until its buffer is both released and freed by
+the reader, so the real ceiling is every buffer *ever* played in the session, not every buffer open
+at once -- gets a silent fallback track instead: writes are accepted and immediately credited so the
+program is never held up, but nothing is heard, and `diagnostics().fallbackTracks` counts it. A
+buffer's DirectSound seam closes its track and drops the buffer from its own walk once the program
+has released it, so the slot returns to the pool the moment nothing can reach the buffer any more.
 
 **The backlog policy** is the same 200 ms this layer always allowed, built on different machinery
 per backend: the engine backend's `track.pending() > mixer.capacityFrames` still calls `reset()`,
@@ -189,7 +196,9 @@ really there. `SetFormat` succeeds on the primary and is refused on a secondary.
 then one device -- and stop early if the callback returns FALSE; without `callGuest` they succeed
 having named nothing. The module's `feedBuffers` runs before every mix: it drains every buffer's
 notifications and signals them whether or not anything is listening (a program that waits on a
-position must be woken even in a silent build), then, when `drained`, opens a mixer track per
+position must be woken even in a silent build); closes and drops the track of any buffer the
+program has fully released (`references` at zero) before anything else, so a released buffer's
+slot is not held for the rest of the session; then, when `drained`, opens a mixer track per
 secondary buffer on first play and writes the drained byte ranges from guest memory into it,
 resetting a track whose backlog exceeds the ring's capacity and counting that under `behind`.
 
@@ -246,10 +255,11 @@ throws, and the open fails with a message `ASI_error` returns.
 - **A page without shared memory mixes on the engine thread**, in the one float ring
   `output/ring.js` still keeps: nothing else can read an ordinary `ArrayBuffer`, so this is not a
   choice this layer makes but the ceiling a page without `SharedArrayBuffer` has.
-- **A 33rd simultaneous track on a page with shared memory is silent.** `SLOTS = 32` is a generous
-  ceiling for a title of this era, and a track opened past it gets a fallback that accepts writes
-  and credits them so the program is never held up, but mixes nothing; counted in
-  `diagnostics().fallbackTracks`.
+- **A 33rd DirectSound buffer open at once on a page with shared memory is silent.** `SLOTS = 32` is
+  a generous ceiling for a title of this era, and a track opened past it gets a fallback that
+  accepts writes and credits them so the program is never held up, but mixes nothing; counted in
+  `diagnostics().fallbackTracks`. A released buffer's slot returns to the pool once the reader has
+  freed it, so the ceiling is buffers open at the same time, not buffers played over a session.
 - **The provider's requests block the guest** when the decoder falls more than the lead behind.
 - **A stream's fetch callback is read serially through guest calls**, one chunk per crossing.
 
@@ -264,9 +274,9 @@ All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring (or the slot, with shared memory) with its own bytes at its own gain; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider; a shared-memory backlog past 200 ms also counts `behind`. |
-| `src/layers/audio/output/mixer.test.js` | Unit | The engine backend, unchanged: format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting. The shared backend: `write` puts the guest's own bytes into the slot and calls no conversion, `pump()` allocates no `Float32Array`, `playedBytes()` credits a probe once `READ` passes it, a backlog sets `DROP_TO`. |
-| `src/layers/audio/output/mix.test.js` | Unit | `resampleInto` over a byte ring matches `convert()` sample for sample across three buffers; a `GENERATION` change resets the seam; a `DROP_TO` ahead of `READ` is honoured; gain and pause. |
+| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring (or the slot, with shared memory) with its own bytes at its own gain; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider; a shared-memory backlog past 200 ms also counts `behind`; a released DirectSound buffer frees its slot, 40 over a session, none falling back. |
+| `src/layers/audio/output/mixer.test.js` | Unit | The engine backend, unchanged: format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting. The shared backend: `write` puts the guest's own bytes into the slot and calls no conversion, in output frames agreeing with the engine backend's own unit; `pump()` allocates no `Float32Array`; `playedBytes()` credits a probe once `READ` passes it and restarts at zero after `reset()`; a backlog sets `DROP_TO` without letting a write overrun what the reader has not read; a closed slot is freed by the reader and reused; a machine attaching to an inherited table sweeps every slot the previous one left open. |
+| `src/layers/audio/output/mix.test.js` | Unit | `resampleInto` over a byte ring matches `convert()` sample for sample across three buffers; a `GENERATION` change resets the seam; a `DROP_TO` ahead of `READ` is honoured; gain and pause; `WRITTEN`/`READ` crossing 2^31 bytes does not stall the ring. |
 | `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
 | `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds, notifications, duplicates, `drainPlayed` ranges. |

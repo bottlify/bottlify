@@ -335,17 +335,22 @@ the first one's history and poll are gone with it.
   B12 superseded by the measurement below); still on the engine thread: the DirectSound cursor walk
   and its notifications (`feedBuffers`, run before every mix so a program waiting on a position is
   woken whether or not anything is listening), waveOut's own queue draining, and the hosted MPEG
-  provider's decoder callbacks (`ASI_stream_process` and the WebCodecs path). Measured on Doom 3's
-  `lights` window (the fold `dbg/opengl/report-perdraw-remeasure.md` §2 used, on a
-  cross-origin-isolated page): the `pump` phase inclusive of the DirectSound feed and one copy went
-  from 526 ms of a 19.4 s window (2.7 % of the worker) to 397.6 ms of a 20.7 s window (1.9 %) --
-  `dbg/opengl/report-next-2.md`. Short of the < 200 ms / < 1.0 % this was designed for: the harness
-  that took this measurement runs entirely inside the profiled engine worker (its `?worker=1`
-  mode), with no separate audio-rendering thread to hand the mixing to, so its stand-in reader
+  provider's decoder callbacks (`ASI_stream_process` and the WebCodecs path). Measured on a title's
+  heaviest window, on a cross-origin-isolated page: the `pump` phase inclusive of the DirectSound
+  feed and one copy went from 526 ms of a 19.4 s window (2.7 % of the worker) to 397.6 ms of a
+  20.7 s window (1.9 %) -- a real improvement, but short of the < 200 ms / < 1.0 % this was designed
+  for, and not for the reason a first read of the number suggests: the harness's stand-in reader
   (`test/page/game/harness.js`'s `drainTable`, standing in for the worklet this test harness never
-  creates) still resamples and mixes on that same thread -- moved off the per-turn `pump()` call,
-  not off the profile. What a real worklet on its own thread would show needs the launcher, not
-  verified this session.
+  creates) runs in its own timer callback, outside the `pump` phase entirely, so it inflates the
+  audio layer's overall self-time share (measured 2.1 %, down from 2.7 %) rather than the `pump`
+  figure itself. What the design removed from `pump` (`convert`, `mixInto`/`ring.write`, the
+  `readBytes` slice) leaves an expected residue of roughly 130-160 ms; the measured 397.6 ms is
+  still about twice that, for a reason not yet named -- candidates include the byte-at-a-time masked
+  copy in `write()`, whether `memory.window` is a plain subarray, and the span arithmetic feeding it,
+  each measurable on a held profile. A genuine worklet on the browser's own audio-rendering thread --
+  what the < 200 ms / < 1.0 % target assumes -- would separately show the layer's self-time share
+  lower by roughly the reader's own cost (about 116 ms in this measurement); neither figure is
+  verified through the launcher yet.
 - **A page without shared memory has no audio worker at all**, not yet and not only-not-yet: a
   worklet needs shared memory to read anything, so a page that is not cross-origin isolated mixes
   on the engine thread the way this whole layer did before this split, in the one ring
