@@ -15,7 +15,9 @@ import assert from 'node:assert/strict';
 import { graphicsModule } from './module.js';
 import { createPresenter } from './webgpu/internal/presenter.js';
 import { createFakeDevice } from './webgpu/internal/fake-device.js';
-import { D3DERR_NOTAVAILABLE, D3DFMT, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
+import { FVF } from './webgpu/internal/vertexformat.js';
+import { D3DFMT, D3DPOOL, D3DRTYPE, D3D_OK } from './d3d9/constants.js';
+import { D3DPT, D3DTA, D3DTOP, D3DTSS } from './d3d8/constants.js';
 
 /** A host that hands over only what the module declares it requires. */
 function hostWith(/** @type {any} */ memory){
@@ -119,53 +121,144 @@ test('a Direct3D 9 object made by the module can write guest memory', async()=>{
     await graphicsModule.dispose();
 });
 
-/** @param {boolean} blocks */
-const makeCompressibleDevice = blocks=>({
-    device: {
-        features: new Set(blocks ? ['texture-compression-bc'] : []),
-        createBuffer: ()=>({ destroy(){} }),
-        createBindGroupLayout: ()=>({}),
-        createCommandEncoder: ()=>({ finish: ()=>({}) }),
-    },
-    queue: { submit(){}, writeBuffer(){} },
-    presentTo: ()=>{},
-});
+/** Where a texture's locked bytes are written to and its surface reads from. */
+const RAM_BASE = 0x40000000;
+const RAM_SIZE = 1 << 16;
 
-test('compressedTextures defaults to false, whatever the adapter offers', async()=>{
-    // A change that is faster on paper and jams the GPU process on some
-    // hardware is not a fix until it is measured and asked for -- so the
-    // feature bit alone no longer turns this on; the configuration has to
-    // ask too (module.js, `compressedTextures`).
-    const api = await graphicsModule.create({ device: makeCompressibleDevice(true) },
-        hostWith(fakeMemory()));
-    const refused = api.create('d3d9');
-    assert.equal(refused.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
-        D3DERR_NOTAVAILABLE, 'the adapter can sample blocks, but nothing asked for it');
+/** @returns {{ ram: Uint8Array, readBytes: any, writeBytes: any }} */
+function ramMemory(){
+    const ram = new Uint8Array(RAM_SIZE);
+    return {
+        ram,
+        readBytes: (/** @type {number} */ address, /** @type {number} */ length)=>
+            ram.slice(address - RAM_BASE, address - RAM_BASE + length),
+        writeBytes: (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>
+            ram.set(bytes, address - RAM_BASE),
+    };
+}
+
+const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
+
+/** A pre-transformed, textured quad spanning a 4x4 target exactly once. */
+function texturedQuad(){
+    const stride = 28;
+    const corners = [
+        [0, 0, 0, 0], [4, 0, 1, 0], [0, 4, 0, 1],
+        [0, 4, 0, 1], [4, 0, 1, 0], [4, 4, 1, 1],
+    ];
+    const out = new Uint8Array(stride * corners.length);
+    corners.forEach(([x, y, u, v], index)=>{
+        const bytes = new DataView(new ArrayBuffer(stride));
+        bytes.setFloat32(0, x, true);
+        bytes.setFloat32(4, y, true);
+        bytes.setFloat32(8, 0.5, true);
+        bytes.setFloat32(12, 1, true);
+        bytes.setUint32(16, 0xffffffff, true);
+        bytes.setFloat32(20, u, true);
+        bytes.setFloat32(24, v, true);
+        out.set(new Uint8Array(bytes.buffer), index * stride);
+    });
+    return out;
+}
+
+/**
+ * A Direct3D 9 device over a recording GPU double, with a 4x4 (one block)
+ * DXT1 texture created, drawn once and presented -- so what the renderer
+ * chose to upload it as can be read off the GPU double afterwards.
+ *
+ * @param {{ blocks: boolean, compressedTextures?: boolean }} options
+ *        `blocks`: whether the adapter double reports `texture-compression-bc`.
+ * @returns {Promise<{ gpu: any, formatResult: number }>}
+ */
+async function drawDxtTexture({ blocks, compressedTextures }){
+    const gpu = createFakeDevice();
+    const gpuDevice = /** @type {any} */ (gpu.device);
+    gpuDevice.features = new Set(blocks ? ['texture-compression-bc'] : []);
+    gpuDevice.createSampler = (/** @type {any} */ descriptor)=>({ kind: 'sampler', descriptor });
+    const memory = ramMemory();
+    /** @type {any} */
+    const config = { device: { device: gpu.device, queue: gpu.queue, presentTo: ()=>{} } };
+    if (compressedTextures !== undefined)
+    {
+        config.compressedTextures = compressedTextures;
+    }
+    const api = await graphicsModule.create(config, hostWith(memory));
+    const d3d9 = api.create('d3d9');
+    const formatResult = d3d9.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1);
+
+    /** @type {{ device?: any }} */
+    const out = {};
+    assert.equal(d3d9.CreateDevice({
+        swapEffect: 1, backBufferCount: 1, backBufferWidth: 4, backBufferHeight: 4,
+        backBufferFormat: D3DFMT.X8R8G8B8,
+    }, out), D3D_OK);
+    const { device } = out;
+
+    /** @type {{ texture?: any }} */
+    const texture = {};
+    assert.equal(device.CreateTexture(4, 4, 1, 0, D3DFMT.DXT1, D3DPOOL.MANAGED, texture), D3D_OK,
+        'a DXT1 texture is always creatable');
+    /** @type {{ pBits?: number }} */
+    const locked = {};
+    assert.equal(await texture.texture.LockRect(0, locked, null, 0), D3D_OK);
+    memory.ram.set(new Uint8Array(8).fill(3), /** @type {number} */ (locked.pBits) - RAM_BASE);
+    assert.equal(texture.texture.UnlockRect(0), D3D_OK);
+
+    assert.equal(device.SetTexture(0, texture.texture), D3D_OK);
+    device.SetTextureStageState(0, D3DTSS.COLOROP, D3DTOP.SELECTARG1);
+    device.SetTextureStageState(0, D3DTSS.COLORARG1, D3DTA.TEXTURE);
+    device.SetTextureStageState(0, D3DTSS.ALPHAOP, D3DTOP.SELECTARG1);
+    device.SetTextureStageState(0, D3DTSS.ALPHAARG1, D3DTA.TEXTURE);
+    assert.equal(device.SetFVF(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(device.BeginScene(), D3D_OK);
+    assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2, texturedQuad(), 28), D3D_OK);
+    assert.equal(device.EndScene(), D3D_OK);
+    assert.equal(device.Present(), D3D_OK);
+    await device.idle();
+
+    return { gpu, formatResult };
+}
+
+test('compressedTextures off decodes a DXT texture to bgra8unorm, whatever the adapter offers',
+    async()=>{
+        // A change that is faster on paper and jams the GPU process on some
+        // hardware is not a fix until it is measured and asked for -- so the
+        // adapter's own feature bit alone must not turn BC blocks on; the
+        // configuration has to ask too (module.js, `compressedTextures`). But
+        // whether the format exists is a different question from how it
+        // uploads: a DXT texture is legal on every device of the era, and a
+        // device that keeps the flag off decodes it instead of refusing it.
+        const { gpu, formatResult } = await drawDxtTexture(
+            { blocks: true, compressedTextures: false });
+        assert.equal(formatResult, D3D_OK, 'DXT1 is a legal format whatever the flag says');
+        const uploaded = gpu.of('createTexture').find((/** @type {any} */ c)=>
+            c.descriptor.label === 'texture');
+        assert.equal(uploaded.descriptor.format, 'bgra8unorm',
+            'the flag is off, so the surface decodes even though the adapter can sample blocks');
+        assert.equal(gpu.of('copyBufferToTexture').length, 0, 'no BC blocks were staged');
+        await graphicsModule.dispose();
+    });
+
+test('the adapter\'s block-compression capability and the configuration together decide'
+    + ' BC blocks vs a decode -- never whether DXT exists', async()=>{
+    const withBlocks = await drawDxtTexture({ blocks: true, compressedTextures: true });
+    assert.equal(withBlocks.formatResult, D3D_OK);
+    const bc = withBlocks.gpu.of('createTexture').find((/** @type {any} */ c)=>
+        c.descriptor.label === 'texture');
+    assert.equal(bc.descriptor.format, 'bc1-rgba-unorm',
+        'asked for, and a device whose adapter samples blocks keeps them');
+    assert.ok(withBlocks.gpu.of('copyBufferToTexture')
+        .some((/** @type {any} */ c)=>c.destination.texture === bc.texture),
+    'the level travelled through staging, undecoded');
     await graphicsModule.dispose();
-});
 
-test('the adapter\'s block-compression capability reaches a Direct3D 9 device'
-    + ' only when the configuration asks for it', async()=>{
-    // The launcher asks its adapter for block compression, because the art of
-    // this era is DXT (host/serve.js). Direct3D 9 put the question in
-    // CheckDeviceFormat rather than in a capability bit, and a title that
-    // assumes DXT creates it without asking -- so a device told no loads none
-    // of its art. A factory that reads the configuration and the adapter
-    // answers the same way Direct3D 8's already does.
-    const withBlocks = await graphicsModule.create(
-        { device: makeCompressibleDevice(true), compressedTextures: true },
-        hostWith(fakeMemory()));
-    const accepted = withBlocks.create('d3d9');
-    assert.equal(accepted.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
-        'asked for, and a device whose adapter samples blocks offers DXT');
-    await graphicsModule.dispose();
-
-    const without = await graphicsModule.create(
-        { device: makeCompressibleDevice(false), compressedTextures: true },
-        hostWith(fakeMemory()));
-    const refused = without.create('d3d9');
-    assert.equal(refused.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
-        D3DERR_NOTAVAILABLE, 'asked for, but the feature bit still gates it');
+    const withoutFeature = await drawDxtTexture({ blocks: false, compressedTextures: true });
+    assert.equal(withoutFeature.formatResult, D3D_OK,
+        'still legal: the format never depended on the adapter feature');
+    const decoded = withoutFeature.gpu.of('createTexture').find((/** @type {any} */ c)=>
+        c.descriptor.label === 'texture');
+    assert.equal(decoded.descriptor.format, 'bgra8unorm',
+        'asked for, but the adapter cannot sample blocks: the surface decodes');
     await graphicsModule.dispose();
 });
 

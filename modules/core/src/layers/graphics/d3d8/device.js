@@ -65,7 +65,9 @@ export { DEVICE_STATE, LIGHT_ENABLED };
 /**
  * @typedef {Object} DeviceCaps
  * @property {number} maxPointSize     Decides the POINTSIZE_MAX default.
- * @property {boolean} [compressedTextures]  Whether the backend samples DXT blocks.
+ * @property {boolean} [compressedTextures]  Whether an upload keeps DXT blocks as BC
+ *           on the GPU (true) or decodes them to `bgra8unorm` (false); every DXT
+ *           format is creatable either way.
  * @property {boolean} depthTexture2d  Whether depth formats are usable as textures,
  * @property {boolean} depthCube       as cube maps,
  * @property {boolean} depthPlain      and as image surfaces.
@@ -600,6 +602,7 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
             probeTexture: services.probeTexture ?? null,
             fog: services.fog,
             mips: services.mips,
+            compressedTextures: caps.compressedTextures,
         })
         : null;
 

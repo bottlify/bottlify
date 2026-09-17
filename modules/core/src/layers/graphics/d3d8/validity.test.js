@@ -142,26 +142,21 @@ test('each half of the pair needs its own usage', ()=>{
 
 // --- the block-compressed formats ---
 
-test('a compressed texture is refused unless the backend can sample blocks', ()=>{
-    const without = { depthTexture2d: false, depthCube: false, depthPlain: false };
-    const with_ = { ...without, compressedTextures: true };
+test('a compressed texture is created whatever compressedTextures says -- the flag chooses'
+    + ' only how its bytes travel to the GPU, never whether the format exists', ()=>{
+    const support = { depthTexture2d: false, depthCube: false, depthPlain: false };
 
     for (const format of [D3DFMT.DXT1, D3DFMT.DXT2, D3DFMT.DXT3, D3DFMT.DXT4, D3DFMT.DXT5])
     {
         assert.equal(
-            createResult(SURFACE_TYPE.TEXTURE_2D, format, D3DPOOL.MANAGED, 0, without),
-            D3DERR_INVALIDCALL,
-            'offering a format we cannot create is worse than refusing it');
-        assert.equal(
-            createResult(SURFACE_TYPE.TEXTURE_2D, format, D3DPOOL.MANAGED, 0, with_),
-            D3D_OK);
+            createResult(SURFACE_TYPE.TEXTURE_2D, format, D3DPOOL.MANAGED, 0, support),
+            D3D_OK,
+            'legal on every Direct3D 8 device of the era, whatever the adapter offers');
     }
 });
 
 test('nothing may be rendered into a compressed surface, however capable the adapter', ()=>{
-    const support = {
-        depthTexture2d: true, depthCube: true, depthPlain: true, compressedTextures: true,
-    };
+    const support = { depthTexture2d: true, depthCube: true, depthPlain: true };
     assert.equal(
         createResult(SURFACE_TYPE.RENDER_TARGET, D3DFMT.DXT1, D3DPOOL.DEFAULT,
             D3DUSAGE.RENDERTARGET, support),

@@ -1462,6 +1462,49 @@ test('recorded: a DXT1 base narrower than one block decodes, a whole-block one t
             'the level travelled through staging, undecoded');
     });
 
+test('recorded: a block-aligned DXT5 surface decodes with compressedTextures off and takes'
+    + ' the BC path with it on', async()=>{
+    const block = new Uint8Array(16).fill(9); // one 4x4 DXT5 (BC3) block
+
+    const off = harness({ compressedTextures: false });
+    const decodedTexture = textureFrom(off, 4, 4, D3DFMT.DXT5, block);
+    assert.equal(off.device.SetTexture(0, decodedTexture), D3D_OK);
+    selectTexture(off.device);
+    assert.equal(off.device.BeginScene(), D3D_OK);
+    assert.equal(off.device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(off.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    assert.equal(off.device.EndScene(), D3D_OK);
+    await off.present();
+
+    const decodedSurface = off.gpu.of('createTexture')
+        .find(c=>c.descriptor.label === 'texture');
+    assert.equal(decodedSurface.descriptor.format, 'bgra8unorm',
+        'the flag is off, so a block-aligned base decodes too');
+    assert.equal(off.gpu.of('copyBufferToTexture').length, 0, 'no BC blocks were staged');
+    assert.ok(
+        off.gpu.of('writeTexture').some(w=>w.destination.texture === decodedSurface.texture),
+        'the level travelled decoded');
+
+    const on = harness({ compressedTextures: true });
+    const bcTexture = textureFrom(on, 4, 4, D3DFMT.DXT5, block);
+    assert.equal(on.device.SetTexture(0, bcTexture), D3D_OK);
+    selectTexture(on.device);
+    assert.equal(on.device.BeginScene(), D3D_OK);
+    assert.equal(on.device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+    assert.equal(on.device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+        quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+    assert.equal(on.device.EndScene(), D3D_OK);
+    await on.present();
+
+    const bcSurface = on.gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
+    assert.equal(bcSurface.descriptor.format, 'bc3-rgba-unorm',
+        'the flag is on and the base is block-aligned: it keeps the blocks');
+    assert.ok(
+        on.gpu.of('copyBufferToTexture').some(c=>c.destination.texture === bcSurface.texture),
+        'the level travelled through staging, undecoded');
+});
+
 // --- transform and lighting ---
 
 /** @param {object} over @returns {any} a D3DLIGHT8 with every field written */

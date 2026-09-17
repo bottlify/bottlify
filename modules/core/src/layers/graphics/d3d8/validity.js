@@ -60,7 +60,6 @@ export function validityRow(format, pool, usage){
  * @property {boolean} depthTexture2d
  * @property {boolean} depthCube
  * @property {boolean} depthPlain
- * @property {boolean} [compressedTextures]  Whether DXT blocks can be sampled.
  */
 
 /**
@@ -80,13 +79,12 @@ export function createResult(surfaceType, format, pool, usage, support){
     }
     if (isCompressed(format))
     {
-        // Offered only when the backend can sample the blocks. Advertising a
-        // format we would then fail to create is worse than refusing it: the
-        // program has a fallback for a refusal and none for a broken texture.
-        // Nothing may be drawn into a compressed surface either, whatever the
-        // adapter supports -- the blocks are not writable by the pipeline.
-        if (!support.compressedTextures
-            || surfaceType === SURFACE_TYPE.RENDER_TARGET
+        // Legal on every device of the era regardless of `compressedTextures`
+        // -- that flag only chooses how the surface's bytes reach the GPU
+        // (blocks or a decode), never whether the format exists. Nothing may
+        // be drawn into a compressed surface, whatever the adapter supports --
+        // the blocks are not writable by the pipeline.
+        if (surfaceType === SURFACE_TYPE.RENDER_TARGET
             || surfaceType === SURFACE_TYPE.DEPTH_STENCIL)
         {
             return D3DERR_INVALIDCALL;

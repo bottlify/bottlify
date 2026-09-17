@@ -612,9 +612,11 @@ const decodeCompressed = (bytes, format, width, height)=>{
 /**
  * @param {number} format  D3DFMT
  * @param {number} width @param {number} height  the surface's base level
+ * @param {boolean} compressedTextures  whether the device keeps BC blocks at all;
+ *           off, every level decodes to `COLOR_FORMAT` regardless of alignment
  * @returns {string} the WebGPU format a surface of it is created as
  */
-export function gpuFormatOf(format, width, height){
+export function gpuFormatOf(format, width, height, compressedTextures){
     const info = FORMAT_INFO[format];
     if (!info)
     {
@@ -623,7 +625,9 @@ export function gpuFormatOf(format, width, height){
     if (!info.depth)
     {
         const compressed = COMPRESSED_FORMAT[format];
-        return compressed && blockAligned(width, height) ? compressed : COLOR_FORMAT;
+        return compressed && compressedTextures && blockAligned(width, height)
+            ? compressed
+            : COLOR_FORMAT;
     }
     const depth = DEPTH_FORMAT[format];
     if (!depth)
@@ -1418,6 +1422,10 @@ const CLEAR_STRIDE = 20;
  *     position in a frame moves between runs and its bound texture does not,
  *     so this is what lets the same draw be removed from two runs and the
  *     frames compared -- which is the only way to see what one draw paints.
+ * @property {boolean} [compressedTextures]
+ *     Whether a DXT surface uploads as BC blocks (true, when its base is also
+ *     block-aligned) or decodes to `bgra8unorm` (false, the default). Never
+ *     whether a DXT surface may be created -- that is always legal.
  */
 
 /**
@@ -1435,6 +1443,7 @@ export function createRenderer(options){
     // draws is only removed by removing the family.
     const skipTextures = new Set((options.skipTexture ?? '').split(',').filter(Boolean));
     const probeTexture = options.probeTexture ?? null;
+    const compressedTextures = options.compressedTextures === true;
     const fogApplied = options.fog !== false;
     const mipsApplied = options.mips !== false;
     const { LockFlags, BufferUsage, TextureUsage } = backend;
@@ -2579,7 +2588,7 @@ export function createRenderer(options){
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,
-                format: gpuFormatOf(desc.Format, desc.Width, desc.Height),
+                format: gpuFormatOf(desc.Format, desc.Width, desc.Height, compressedTextures),
                 label: depth ? 'depth' : 'target',
                 // A colour target is copied into as well as out of: a program
                 // that blits a decoded frame onto its target, or locks the
@@ -2597,7 +2606,8 @@ export function createRenderer(options){
             const desc = describe(surface);
             const bytes = readMemory(surface.base,
                 surfaceBytes(desc.Format, desc.Width, desc.Height));
-            const keepsBlocks = isCompressed(desc.Format) && blockAligned(desc.Width, desc.Height);
+            const keepsBlocks = isCompressed(desc.Format) && compressedTextures
+                && blockAligned(desc.Width, desc.Height);
             uploadTexels(made, {
                 format: made.format,
                 mipLevel: 0,
@@ -2827,7 +2837,7 @@ export function createRenderer(options){
             record.gpu = backend.createSurface({
                 width: record.width,
                 height: record.height,
-                format: gpuFormatOf(record.format, record.width, record.height),
+                format: gpuFormatOf(record.format, record.width, record.height, compressedTextures),
                 mipLevelCount: record.levels,
                 label: 'texture',
                 // Copied out of as well as into: a dumping run reads a
@@ -2843,12 +2853,13 @@ export function createRenderer(options){
         {
             frameStats.uploads++;
             record.uploads = (record.uploads || 0) + 1;
-            const gpuFormat = gpuFormatOf(record.format, record.width, record.height);
+            const gpuFormat = gpuFormatOf(record.format, record.width, record.height,
+                compressedTextures);
             // The base level's size, not each mip's, decides the whole
             // texture's path: WebGPU already refused (and gpuFormatOf already
             // fell back) on the base alone, so every level -- mips round down
             // further still -- follows the same choice.
-            const keepsBlocks = isCompressed(record.format)
+            const keepsBlocks = isCompressed(record.format) && compressedTextures
                 && blockAligned(record.width, record.height);
             for (const level of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
