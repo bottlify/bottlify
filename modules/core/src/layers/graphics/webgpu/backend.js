@@ -215,6 +215,10 @@ export function createBackend(options){
      * @type {{ buffer: any, size: number } | null}
      */
     let spareStaging = null;
+    // Read by a snapshot that is still in flight when `dispose()` runs: its
+    // buffer must be destroyed on arrival rather than parked into
+    // `spareStaging`, which nothing will ever drain again.
+    let disposed = false;
 
     const uploadTexture = createTextureUploader({
         device,
@@ -711,7 +715,10 @@ export function createBackend(options){
                                 row * bytesPerRow + surface.width * 4), row * surface.width * 4);
                         }
                         staging.unmap();
-                        if (spareStaging)
+                        // A snapshot that was in flight when `dispose()` ran has
+                        // nowhere left to park a buffer: `spareStaging` will never
+                        // be drained again once this instance is closed.
+                        if (disposed || spareStaging)
                         {
                             staging.destroy();
                         }
@@ -823,12 +830,31 @@ export function createBackend(options){
         },
 
         dispose(){
+            disposed = true;
             dynamicBuffers.length = 0;
+            // Staged between frames but never encoded: their buffers are not on
+            // any frame's list, so dropping the queue without destroying them
+            // first would leak one per queued copy.
+            for (const copy of pendingCopies)
+            {
+                copy.source.buffer.destroy();
+            }
             pendingCopies.length = 0;
             spareStaging?.buffer.destroy();
             spareStaging = null;
             pipelines.clear();
             fixedFunctionLayouts.clear();
+            // A frame opened and never ended -- a fault mid-frame, the machine
+            // rebuilt -- already has its copies' staging buffers on its list;
+            // `end()` is what normally destroys them, so an ended-less frame
+            // has to have this do it instead.
+            if (openFrame && !openFrame.ended)
+            {
+                for (const staging of openFrame.stagingBuffers)
+                {
+                    staging.destroy();
+                }
+            }
             openFrame = null;
             lastPresented = null;
         },

@@ -300,6 +300,36 @@ test('a staging buffer for an upload between frames waits for the frame that enc
             'freed once this frame -- the one that encoded it -- submits');
     });
 
+test('dispose() destroys the staging buffers of copies queued but never encoded into a frame',
+    ()=>{
+        const { gpu, backend } = harness();
+        const texture = gpu.device.createTexture({ label: 'atlas' });
+
+        backend.uploadTexture({
+            texture, format: 'bc1-rgba-unorm', width: 16, height: 16, data: new Uint8Array(128),
+        });
+        assert.equal(gpu.count('destroy'), 0, 'queued between frames, nothing has encoded it yet');
+
+        backend.dispose();
+        assert.equal(gpu.count('destroy'), 1,
+            'a process replacement with copies still queued does not leak their buffers');
+    });
+
+test('dispose() destroys the staging buffers of a frame that was opened and never ended', ()=>{
+    const { gpu, backend } = harness();
+    const texture = gpu.device.createTexture({ label: 'atlas' });
+
+    backend.beginFrame();
+    backend.uploadTexture({
+        texture, format: 'bc1-rgba-unorm', width: 16, height: 16, data: new Uint8Array(128),
+    });
+    assert.equal(gpu.count('destroy'), 0, 'the frame has not submitted yet');
+
+    backend.dispose();
+    assert.equal(gpu.count('destroy'), 1,
+        'a fault mid-frame does not leak the open frame\'s staging buffer');
+});
+
 test('the snapshot is deep enough to find a regression that is not in the top rows', ()=>{
     const { backend } = harness();
     const vertices = backend.createDynamicBuffer({ size: 4096, usage: 0, label: 'vertices' });
@@ -552,3 +582,25 @@ test('a snapshot keeps its staging buffer for the next one of the same size, and
     await sixth();
     assert.equal(stagings().length, 3);
 });
+
+test('a snapshot still in flight at dispose() destroys its buffer instead of parking it',
+    async()=>{
+        // spareStaging is a place the *next* snapshot's buffer is served from;
+        // once this instance is disposed nothing will ever read it again, so a
+        // buffer parked there after dispose() is a leak for the rest of the run.
+        const { gpu, backend } = harness();
+        const a = target(backend, 64);
+
+        const frame = backend.beginFrame();
+        frame.beginPass({ target: a });
+        const read = frame.snapshot(a);
+        frame.end();
+
+        const before = gpu.count('destroy');
+        const pending = read();
+        backend.dispose();
+        await pending;
+
+        assert.equal(gpu.count('destroy'), before + 1,
+            'the in-flight snapshot destroys its buffer rather than parking it into spareStaging');
+    });
