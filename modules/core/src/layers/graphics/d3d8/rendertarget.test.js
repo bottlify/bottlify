@@ -542,6 +542,38 @@ for (const version of /** @type {const} */ ([9, 8]))
     });
 }
 
+/** `D3DLOCK_READONLY`: the program says it will not write. */
+const READONLY = 0x10;
+
+for (const version of /** @type {const} */ ([9, 8]))
+{
+    test(`byte-exact (D3D${version}): a read-only lock of a lockable back buffer reads the GPU`
+        + ' back, and its unlock uploads nothing', async()=>{
+        const h = harness(version, { lockableBackBuffer: true });
+        const backBuffer = h.backBuffer();
+        h.clear(argb(0x12, 0x34, 0x56));
+        /** @type {{ pBits?: number, Pitch?: number }} */
+        const locked = {};
+        assert.equal(await backBuffer.LockRect(locked, null, READONLY), D3D_OK);
+        assert.deepEqual([...h.read(/** @type {number} */ (locked.pBits), 4)],
+            [0x56, 0x34, 0x12, 0xff],
+            'the pixels are there to read the moment the program has the pointer');
+        // A program that promised not to write and wrote anyway: the promise
+        // is what the runtime goes by, so the bytes stay in guest memory.
+        h.write(/** @type {number} */ (locked.pBits), Uint8Array.from([0x65, 0x43, 0x21, 0xff]));
+        assert.equal(backBuffer.UnlockRect(), D3D_OK);
+        await h.present();
+
+        const kinds = h.device.diagnostics().lastFrame.map(
+            (/** @type {any} */ command)=>command.kind);
+        assert.deepEqual(kinds, [], 'nothing travels up at the unlock');
+        assert.equal(h.gpu.count('copyBufferToTexture'), 0);
+        assert.equal(h.gpu.count('copyTextureToBuffer'), 1, 'one read-back, for the lock');
+        assert.equal(h.presented.length, 1);
+        assert.equal(h.reports.length, 0);
+    });
+}
+
 test('a lock of a render target made without lockable is refused, as the real API refuses it',
     ()=>{
         const h = harness(9);

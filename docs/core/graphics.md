@@ -327,9 +327,12 @@ the GPU also writes is a frame command, replayed in order through the staged pat
 copies between GPU surfaces (`StretchRect`, `CopyRects`, both from a render target or a texture
 level into another). `GetRenderTargetData`, and a lock of a lockable render target or back buffer,
 read the GPU back into the guest's bytes first: the frame recorded so far is submitted without a
-present, the surface is copied out, and the caller is suspended on the promise. A lock write to a
-render target uploads at the unlock. A `StretchRect` from a plain surface still moves guest bytes
-and marks the destination for upload. Two limits of the rule: a move in guest memory into a level
+present, the surface is copied out, and the caller is suspended on the promise. The read-back is
+owed to every such lock, `D3DLOCK_READONLY` or not: the flag is the program's promise not to
+write, and nothing tells the runtime whether the program reads, so the bytes are there before it
+has the pointer. A lock write to a render target uploads at the unlock; a read-only lock's unlock
+uploads nothing, whatever the program put in the bytes. A `StretchRect` from a plain surface still
+moves guest bytes and marks the destination for upload. Two limits of the rule: a move in guest memory into a level
 the GPU has drawn (`UpdateSurface`, `UpdateTexture`, a `StretchRect` or `CopyRects` from a plain
 surface) replaces the whole level with the guest bytes, which the draw was never read back into,
 so a partial blit onto a drawn target reverts the rest of it; and a mip-chained render-target
