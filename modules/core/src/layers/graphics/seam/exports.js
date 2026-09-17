@@ -173,6 +173,10 @@ export function createGraphicsLibraries(
         {
             openglTable[name] = {
                 argBytes: Number(words) * 4,
+                // GL reports through glGetError and touches nothing of
+                // Win32's; only the wgl half of this library is a Windows
+                // API and may set the thread's last error.
+                ...(name.startsWith('gl') ? { lastError: false } : {}),
                 /** @param {number[]} args */
                 handler: args=>openglRuntime().table[name].handler(args),
             };
