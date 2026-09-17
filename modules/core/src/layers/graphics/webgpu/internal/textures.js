@@ -183,9 +183,14 @@ export function createTextureUploader(options){
             origin,
             aspect: 'all',
         };
+        // The copy's extent, not the level's logical size: WebGPU's texture-copy
+        // validation compares against the physical size of a compressed
+        // subresource, which is the logical size rounded up to a whole block,
+        // and a tail mip smaller than one block is refused otherwise
+        // ("copySize.width is not a multiple of ... block width").
         const size = {
-            width: request.width,
-            height: request.height,
+            width: info.compressed ? columns * info.blockWidth : request.width,
+            height: info.compressed ? rows * info.blockHeight : request.height,
             depthOrArrayLayers: request.depthOrArrayLayers === undefined
                 ? 1
                 : request.depthOrArrayLayers,

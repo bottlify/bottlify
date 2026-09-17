@@ -345,6 +345,41 @@ test('a DXT5 texture with the device compressed and every level kept travels as 
         assert.deepEqual(copy.size, { width: 4, height: 4, depthOrArrayLayers: 1 });
     });
 
+test('a DXT5 tail mip copies its block-rounded extent, not its own 2x2 or 1x1 size',
+    async()=>{
+        const r = rig({ compressedTextures: true });
+        const { context } = r;
+        const block = new Uint8Array(16).fill(7);
+        context.glGenTextures(1);
+        context.glBindTexture(GL.TEXTURE_2D, 1);
+        context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+        context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 0,
+            GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 4, 4, 0, 16, block);
+        context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 1,
+            GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 2, 2, 0, 16, block);
+        context.glCompressedTexImage2DARB(GL.TEXTURE_2D, 2,
+            GL.COMPRESSED_RGBA_S3TC_DXT5_EXT, 1, 1, 0, 16, block);
+        context.glEnable(GL.TEXTURE_2D);
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+        await r.swap();
+
+        const surface = r.gpu.of('createTexture')
+            .find(c=>/gl-texture:1/.test(c.descriptor.label));
+        const copies = r.gpu.of('copyBufferToTexture')
+            .filter(c=>c.destination.texture === surface.texture);
+        assert.equal(copies.length, 3, 'all three levels travelled through staging');
+        const level1 = copies.find(c=>c.destination.mipLevel === 1);
+        const level2 = copies.find(c=>c.destination.mipLevel === 2);
+        assert.deepEqual(level1.size, { width: 4, height: 4, depthOrArrayLayers: 1 },
+            'a 2x2 level\'s copySize is the block it physically occupies');
+        assert.deepEqual(level2.size, { width: 4, height: 4, depthOrArrayLayers: 1 },
+            'and a 1x1 level\'s likewise');
+    });
+
 test('a sub-image write into a kept level falls that texture back to the decoded path',
     async()=>{
         const r = rig({ compressedTextures: true });

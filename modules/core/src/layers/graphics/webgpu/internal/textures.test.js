@@ -137,6 +137,33 @@ test('a partial upload carries its origin and mip level through to the copy', ()
         { width: 8, height: 8, depthOrArrayLayers: 1 });
 });
 
+test('a compressed copy\'s extent is rounded up to the block, never the level\'s logical size',
+    ()=>{
+        const { copies, upload } = uploader();
+        const texture = /** @type {any} */ ({ kind: 'texture' });
+        // One DXT1 block, whatever the logical size below it asks for.
+        const data = new Uint8Array(8).fill(3);
+
+        upload({ texture, format: 'bc1-rgba-unorm', width: 2, height: 2, data });
+        assert.deepEqual(copies[0].size, { width: 4, height: 4, depthOrArrayLayers: 1 },
+            'a 2x2 level copies the whole block WebGPU\'s validation compares against');
+
+        upload({ texture, format: 'bc1-rgba-unorm', width: 1, height: 1, data });
+        assert.deepEqual(copies[1].size, { width: 4, height: 4, depthOrArrayLayers: 1 },
+            'and so does a 1x1 tail mip');
+    });
+
+test('an uncompressed copy\'s extent is untouched', ()=>{
+    const { copies, upload } = uploader();
+    const texture = /** @type {any} */ ({ kind: 'texture' });
+
+    upload({
+        texture, format: 'rgba8unorm', width: 3, height: 5, data: new Uint8Array(3 * 5 * 4),
+        staging: true,
+    });
+    assert.deepEqual(copies[0].size, { width: 3, height: 5, depthOrArrayLayers: 1 });
+});
+
 test('a size that does not match the data is refused before it reaches the driver', ()=>{
     const { gpu, upload } = uploader();
     const texture = gpu.device.createTexture({});
