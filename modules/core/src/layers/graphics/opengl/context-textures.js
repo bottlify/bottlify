@@ -674,6 +674,7 @@ export function installTextureCalls(context, kernel){
             return;
         }
         texture.parameters.set(parameter, value);
+        texture.parametersVersion++;
     }
 
     /**

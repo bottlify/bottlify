@@ -636,8 +636,23 @@ export function createGpuRenderer(services){
         return showSampler;
     };
 
+    /**
+     * The sampler a texture's filter and wrap parameters describe, read off
+     * the texture itself while its parameters version has not moved since
+     * the last draw that asked -- a descriptor object and its `JSON.stringify`
+     * key are only built again when `glTexParameter*` actually changed
+     * something, not once per unit per draw.
+     *
+     * @type {WeakMap<import('./objects.js').TextureObject, { version: number, sampler: any }>}
+     */
+    const samplerByTexture = new WeakMap();
     /** @param {import('./objects.js').TextureObject} texture */
     const samplerFor = texture=>{
+        const cached = samplerByTexture.get(texture);
+        if (cached && cached.version === texture.parametersVersion)
+        {
+            return cached.sampler;
+        }
         const parameters = texture.parameters;
         const mag = FILTERS[parameters.get(GL.TEXTURE_MAG_FILTER) ?? GL.LINEAR]
             ?? FILTERS[GL.LINEAR];
@@ -656,14 +671,14 @@ export function createGpuRenderer(services){
             addressModeW: wrap(GL.TEXTURE_WRAP_R),
         };
         const key = JSON.stringify(descriptor);
-        const existing = samplers.get(key);
-        if (existing)
+        let sampler = samplers.get(key);
+        if (!sampler)
         {
-            return existing;
+            sampler = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
+            samplers.set(key, sampler);
         }
-        const made = createSampler({ label: `gl-sampler:${key}`, ...descriptor });
-        samplers.set(key, made);
-        return made;
+        samplerByTexture.set(texture, { version: texture.parametersVersion, sampler });
+        return sampler;
     };
 
     /**

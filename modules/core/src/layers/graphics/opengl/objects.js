@@ -88,6 +88,9 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} name
  * @property {number} target
  * @property {Map<number, number>} parameters
+ * @property {number} parametersVersion  bumped by every `glTexParameter*` write,
+ *           so a cache keyed on the texture can tell a stale sampler from a
+ *           current one without re-deriving it
  * @property {number[]} borderColour
  * @property {Map<number, TextureLevel>} levels  keyed by `levelKey`
  * @property {Map<number, DirtyRect | null>} dirty   the level keys written
@@ -188,6 +191,7 @@ export function createTextureObject(name, target){
         name,
         target,
         parameters: new Map(DEFAULT_TEXTURE_PARAMETERS),
+        parametersVersion: 0,
         borderColour: [0, 0, 0, 0],
         levels: new Map(),
         dirty: new Map(),

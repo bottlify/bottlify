@@ -256,6 +256,75 @@ test('a texture is uploaded once per version, a cube map face by face', async()=
     assert.equal(layout.descriptor.entries[1].texture.viewDimension, 'cube');
 });
 
+test('a sampler is read off the texture, not rebuilt from a descriptor every draw', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    const texels = new Uint8Array(4 * 4 * 4).fill(0x80);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, texels);
+    context.glEnable(GL.TEXTURE_2D);
+    const draw = ()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+    };
+    // The first draw with this texture builds and caches the sampler; the
+    // repeats below are what the test pins.
+    draw();
+    const stringify = JSON.stringify;
+    let calls = 0;
+    JSON.stringify = /** @type {typeof JSON.stringify} */ ((value, replacer, space)=>{
+        calls++;
+        return stringify(value, /** @type {any} */ (replacer), space);
+    });
+    try
+    {
+        draw();
+        draw();
+        draw();
+    }
+    finally
+    {
+        JSON.stringify = stringify;
+    }
+    await r.swap();
+    assert.equal(calls, 0,
+        'the sampler comes from the texture\'s own cache, not a JSON key built per draw');
+});
+
+test('a texture\'s sampler is rebuilt only when its filter or wrap parameters change', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, 1);
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.NEAREST);
+    const texels = new Uint8Array(4 * 4 * 4).fill(0x80);
+    context.glTexImage2D(GL.TEXTURE_2D, 0, GL.RGBA, 4, 4, 0, GL.RGBA, GL.UNSIGNED_BYTE, texels);
+    context.glEnable(GL.TEXTURE_2D);
+    const draw = ()=>{
+        context.glBegin(GL.TRIANGLES);
+        context.glVertex2f(0, 0);
+        context.glVertex2f(8, 0);
+        context.glVertex2f(8, 8);
+        context.glEnd();
+    };
+    draw();
+    await r.swap();
+    const samplerOf = ()=>r.gpu.of('createBindGroup').at(-1).descriptor.entries
+        .find((/** @type {any} */ e)=>e.binding === 2).resource;
+    const first = samplerOf();
+    context.glTexParameteri(GL.TEXTURE_2D, GL.TEXTURE_MIN_FILTER, GL.LINEAR);
+    draw();
+    await r.swap();
+    const second = samplerOf();
+    assert.notEqual(first, second,
+        'the parameters version moved, so the cached sampler was not reused');
+});
+
 test('a DXT5 level reaches the upload decoded, its alpha per texel intact', async()=>{
     // The bump map of a per-light interaction program is an rxgb S3TC image:
     // the normal's x lives in the alpha block, so a decode or an upload that
