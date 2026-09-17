@@ -20,6 +20,7 @@ const MEM_FREE = 0x10000;
 const PAGE_NOACCESS = 0x01;
 /** `lpMaximumApplicationAddress`: where a free gap with nothing above it ends. */
 const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
+const ERROR_INVALID_PARAMETER = 87;
 /** Offsets into MEMORY_BASIC_INFORMATION, matching heap.js's own layout. */
 const MBI = {
     BaseAddress: 0, AllocationBase: 4, AllocationProtect: 8, RegionSize: 12,
@@ -818,10 +819,12 @@ test('VirtualQuery above the last region answers up to the top of user address s
     assert.equal(view.getUint32(buffer + MBI.State, true), MEM_FREE);
 });
 
-test('a free-space walker crosses three regions in a bounded number of queries, not one per page',
+test('a free-space walker crosses three regions and stops at the top, never with a RegionSize of 0',
     ()=>{
         // The §13.8 regression: `for (a = 0; a < top; a += mbi.RegionSize)`
-        // must step over each gap once, not 4 KiB at a time across it.
+        // must step over each gap once, not 4 KiB at a time across it -- and,
+        // at the real top of user address space, must be refused outright
+        // rather than answered a free region it can never step across.
         const regions = [
             { base: 0x2000, size: 0x1000 },
             { base: 0x8000, size: 0x2000 },
@@ -831,19 +834,41 @@ test('a free-space walker crosses three regions in a bounded number of queries, 
         const fns = createHeapFunctions(host);
         const buffer = host.arena.base;
         const view = new DataView(host.bytes.buffer);
-        const top = 0x30000;
 
         let address = 0;
         let calls = 0;
-        while (address < top)
+        let ret;
+        for (;;)
         {
-            fns.VirtualQuery.handler([address, buffer, MBI.SIZE]);
-            const regionSize = view.getUint32(buffer + MBI.RegionSize, true);
-            assert.ok(regionSize > 0, 'every answer advances the walk');
-            address += regionSize;
+            ret = fns.VirtualQuery.handler([address, buffer, MBI.SIZE]);
             calls++;
-            assert.ok(calls <= 2 * regions.length + 1,
-                `not top / PAGE_SIZE (${top / PAGE_SIZE}) calls`);
+            assert.ok(calls <= 2 * regions.length + 2,
+                `not one page at a time (${calls} calls)`);
+            if (ret === 0)
+                break;
+            const regionSize = view.getUint32(buffer + MBI.RegionSize, true);
+            assert.ok(regionSize > 0, 'every answer advances the walk, never stalls at 0');
+            address += regionSize;
         }
-        assert.equal(calls, 2 * regions.length + 1);
+
+        assert.equal(ret, 0,
+            'the walker is refused at the top of address space, never left spinning there');
+    });
+
+test('VirtualQuery at or above the top of user address space is refused, not answered as free',
+    ()=>{
+        // Windows: NtQueryVirtualMemory refuses an address at or above
+        // lpMaximumApplicationAddress; VirtualQueryEx turns that into
+        // 0 / ERROR_INVALID_PARAMETER, which is what stops a walker there.
+        /** @type {number[]} */
+        const errors = [];
+        /** @param {number} e */
+        const setLastError = e=>{ errors.push(e); };
+        const host = { ...regionHost([]), setLastError };
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+
+        assert.equal(fns.VirtualQuery.handler([0x80001000, buffer, MBI.SIZE]), 0,
+            'an address above the limit is refused outright, not answered as a huge free region');
+        assert.deepEqual(errors, [ERROR_INVALID_PARAMETER]);
     });

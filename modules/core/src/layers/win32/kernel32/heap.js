@@ -1238,6 +1238,14 @@ export function createHeapFunctions(host){
                     return 0;
                 }
                 const at = address >>> 0;
+                if (at >= USER_ADDRESS_SPACE_TOP)
+                {
+                    // Windows refuses a query at or above lpMaximumApplicationAddress
+                    // outright, which is what stops a walker there; answering a free
+                    // region here would give it a RegionSize of 0 and no way to advance.
+                    host.setLastError(ERROR_INVALID_PARAMETER);
+                    return 0;
+                }
                 const region = host.regionAt ? host.regionAt(at) : null;
                 const data = new Uint8Array(MEMORY_BASIC_INFORMATION.SIZE);
                 const view = new DataView(data.buffer);
