@@ -196,6 +196,10 @@ function parse(argv){
         graphics: argv.includes('--graphics-config')
             ? JSON.parse(argv[argv.indexOf('--graphics-config') + 1])
             : null,
+        // Peeks every pointer argument of every call for a string. Off unless
+        // asked for: a title's draws pay for it, and a measurement run should
+        // not without asking.
+        trace: argv.includes('--trace'),
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -697,6 +701,7 @@ export async function game(options){
             probeTexture: options.probeTexture,
             fog: options.fog,
             graphics: options.graphics,
+            trace: options.trace,
             pointer: options.pointer,
             clicks: options.clicks,
             keys: options.keys,

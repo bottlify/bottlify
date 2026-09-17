@@ -940,8 +940,12 @@ export function createHarness(canvas, how = {}){
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.
             graphics: request.graphics ?? undefined,
-            // A run is read afterwards, which is exactly when a stack string is gone.
-            traceStrings: request.trace !== false,
+            // Peeks every pointer argument on every call -- measured at over
+            // a percent of the worker on a title's own draws, none of which
+            // the launcher pays. A run that wants the strings (read
+            // afterwards, which is exactly when a stack one is gone) asks
+            // for them; a measurement run should not pay for them unasked.
+            traceStrings: request.trace === true,
             profileCalls: request.profileCalls === true,
             // Every call, not the last two hundred. What a program decided is
             // decided early, and by the time it stops the ring that would have
