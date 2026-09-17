@@ -509,3 +509,59 @@ test('the swap interval is remembered', ()=>{
     assert.equal(table.wglGetSwapIntervalEXT.handler([]), 0);
     assert.equal(table.wglSwapIntervalEXT.handler([-1]), 0);
 });
+
+test('a vector argument is decoded from the window over guest memory, not from a copy', ()=>{
+    // The `*v` entry points read a handful of floats the guest points at --
+    // four for a program parameter, sixteen for a matrix -- and consume them
+    // before the handler returns, so nothing about them outlives the guest's
+    // next instruction. A copy buys nothing there, and a title's frame makes
+    // thousands of these: four program parameters and a matrix per draw.
+    const box = machine();
+    let copies = 0;
+    let windows = 0;
+    // The window is the graphics module's own service for exactly this (a
+    // block read on every call); the library does not take it yet.
+    /** @type {any} */
+    const services = {
+        readMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            copies++;
+            return box.readMemory(at, length);
+        },
+        windowMemory: (/** @type {number} */ at, /** @type {number} */ length)=>{
+            windows++;
+            return box.readMemory(at, length);
+        },
+        writeMemory: box.writeMemory,
+        screen: ()=>({ width: 4, height: 4 }),
+        scratch: box.scratch,
+    };
+    const { table } = createOpengl(services);
+    startDrawing(table);
+    const view = new DataView(box.bytes.buffer);
+    [1.5, -2, 0.25, 8].forEach((value, i)=>view.setFloat32(0x3000 + i * 4, value, true));
+    for (let i = 0; i < 16; i++)
+    {
+        view.setFloat32(0x3100 + i * 4, i + 1, true);
+    }
+    [0.5, 0.25, 1, 0].forEach((value, i)=>view.setFloat32(0x3200 + i * 4, value, true));
+    copies = 0;
+    windows = 0;
+
+    table.glProgramEnvParameter4fvARB.handler([GL.VERTEX_PROGRAM_ARB, 3, 0x3000]);
+    table.glMatrixMode.handler([GL.MODELVIEW]);
+    table.glLoadMatrixf.handler([0x3100]);
+    table.glColor4fv.handler([0x3200]);
+    assert.equal(table.glGetError.handler([]), GL.NO_ERROR);
+    assert.equal(copies, 0, 'no vector argument was copied out of guest memory');
+    assert.equal(windows, 3, 'each was read through the window, once');
+
+    // And the values arrived whole, which is what the window has to keep true.
+    const out = 0x4000;
+    table.glGetProgramEnvParameterfvARB.handler([GL.VERTEX_PROGRAM_ARB, 3, out]);
+    assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [1.5, -2, 0.25, 8]);
+    table.glGetFloatv.handler([GL.MODELVIEW_MATRIX, out]);
+    assert.deepEqual([...Array(16).keys()].map(i=>view.getFloat32(out + i * 4, true)),
+        [...Array(16).keys()].map(i=>i + 1));
+    table.glGetFloatv.handler([GL.CURRENT_COLOR, out]);
+    assert.deepEqual([0, 1, 2, 3].map(i=>view.getFloat32(out + i * 4, true)), [0.5, 0.25, 1, 0]);
+});
