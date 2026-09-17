@@ -158,6 +158,47 @@ test('indices are scanned for their range and widened to a GPU format', ()=>{
     assert.deepEqual([...half.indices], [9, 4]);
 });
 
+test('a 4-aligned uint32 index list is scanned with a typed view, not a DataView per index', ()=>{
+    const words = new Uint8Array(new Uint32Array([5, 2, 9, 3]).buffer);
+    assert.equal(words.byteOffset % 4, 0, 'the fixture is 4-aligned, the case this cut covers');
+    const RealDataView = globalThis.DataView;
+    let calls = 0;
+    globalThis.DataView = /** @type {any} */ (class extends RealDataView {
+        constructor(/** @type {any[]} */ ...args){
+            calls++;
+            super(.../** @type {[ArrayBufferLike, number?, number?]} */ (args));
+        }
+    });
+    /** @type {ReturnType<typeof scanIndices>} */
+    let scanned;
+    try
+    {
+        scanned = scanIndices(words, GL.UNSIGNED_INT, 4);
+    }
+    finally
+    {
+        globalThis.DataView = RealDataView;
+    }
+    assert.equal(calls, 0, 'an aligned uint32 span is read through a typed view, no DataView');
+    assert.deepEqual([...scanned.indices], [5, 2, 9, 3]);
+    assert.deepEqual([scanned.min, scanned.max], [2, 9]);
+});
+
+test('an unaligned uint32 index list still scans correctly, through the byte-exact fallback',
+    ()=>{
+        // One pad byte, then four indices: a span one byte off the word
+        // boundary, which the DataView fallback must still read correctly.
+        const buffer = new ArrayBuffer(17);
+        const view = new DataView(buffer);
+        const values = [5, 2, 9, 3];
+        values.forEach((value, i)=>view.setUint32(1 + i * 4, value, true));
+        const words = new Uint8Array(buffer, 1, 16);
+        assert.equal(words.byteOffset % 4, 1);
+        const scanned = scanIndices(words, GL.UNSIGNED_INT, 4);
+        assert.deepEqual([...scanned.indices], values);
+        assert.deepEqual([scanned.min, scanned.max], [2, 9]);
+    });
+
 test('coordinate sets to the seventh are named and packed canonically', ()=>{
     for (const name of ['texCoord4', 'texCoord5', 'texCoord6', 'texCoord7'])
     {

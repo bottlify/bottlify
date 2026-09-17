@@ -394,11 +394,27 @@ export function scanIndices(bytes, type, count){
     if (type === GL.UNSIGNED_INT)
     {
         const indices = new Uint32Array(count);
-        const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        // A 4-aligned span reads straight into the copy through a typed view
+        // of the same bytes -- no `DataView` and no per-index byte-swap call,
+        // just the platform's own little-endian layout, which is what every
+        // engine target this runs on already uses. An unaligned span (not
+        // promised by the API, but not refused either) falls back to the
+        // byte-exact read.
+        if (bytes.byteOffset % 4 === 0)
+        {
+            indices.set(new Uint32Array(bytes.buffer, bytes.byteOffset, count));
+        }
+        else
+        {
+            const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+            for (let i = 0; i < count; i++)
+            {
+                indices[i] = view.getUint32(i * 4, true);
+            }
+        }
         for (let i = 0; i < count; i++)
         {
-            const index = view.getUint32(i * 4, true);
-            indices[i] = index;
+            const index = indices[i];
             min = index < min ? index : min;
             max = index > max ? index : max;
         }
