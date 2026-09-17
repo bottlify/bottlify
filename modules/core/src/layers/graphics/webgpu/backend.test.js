@@ -503,3 +503,52 @@ test('a texture copy closes the pass it interrupts and records on the frame enco
     assert.deepEqual(ops, ['beginRenderPass', 'endPass', 'copyTextureToTexture']);
     assert.equal(gpu.count('createCommandEncoder'), 1);
 });
+
+test('a snapshot keeps its staging buffer for the next one of the same size, and two in flight'
+    + ' do not share it', async()=>{
+    const { gpu, backend } = harness();
+    const a = target(backend, 64);
+    const stagings = ()=>gpu.calls.filter((/** @type {any} */ c)=>
+        c.op === 'createBuffer' && c.descriptor.label === 'snapshot');
+
+    // One after the other: the second read reuses the buffer the first
+    // unmapped, so a program that reads its target back every frame does not
+    // allocate a surface's worth of mappable memory every frame.
+    let frame = backend.beginFrame();
+    frame.beginPass({ target: a });
+    const first = frame.snapshot(a);
+    frame.end();
+    await first();
+    frame = backend.beginFrame();
+    frame.beginPass({ target: a });
+    const second = frame.snapshot(a);
+    frame.end();
+    await second();
+    assert.equal(stagings().length, 1);
+
+    // In flight together: the kept buffer is busy, so the second gets its own,
+    // and whichever finishes second gives its buffer up.
+    frame = backend.beginFrame();
+    frame.beginPass({ target: a });
+    const third = frame.snapshot(a);
+    const fourth = frame.snapshot(a);
+    frame.end();
+    assert.equal(stagings().length, 2);
+    await third();
+    await fourth();
+    frame = backend.beginFrame();
+    frame.beginPass({ target: a });
+    const fifth = frame.snapshot(a);
+    frame.end();
+    await fifth();
+    assert.equal(stagings().length, 2, 'the kept one served the fifth');
+
+    // A different size is a different buffer.
+    const b = target(backend, 32);
+    frame = backend.beginFrame();
+    frame.beginPass({ target: b });
+    const sixth = frame.snapshot(b);
+    frame.end();
+    await sixth();
+    assert.equal(stagings().length, 3);
+});

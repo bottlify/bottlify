@@ -205,6 +205,16 @@ export function createBackend(options){
     /** @type {any} */
     let lastPresented = null;
     let frameIndex = 0;
+    /**
+     * The staging buffer of the last snapshot to finish, kept for the next
+     * one of the same size. A program that reads its target back every frame
+     * would otherwise allocate and free a surface's worth of mappable memory
+     * every frame; a second snapshot in flight while this one is busy gets a
+     * buffer of its own, and whichever finishes second gives its buffer up.
+     *
+     * @type {{ buffer: any, size: number } | null}
+     */
+    let spareStaging = null;
 
     const uploadTexture = createTextureUploader({
         device,
@@ -672,11 +682,21 @@ export function createBackend(options){
                 snapshot(surface){
                     closeCurrentPass();
                     const bytesPerRow = Math.ceil(surface.width * 4 / 256) * 256;
-                    const staging = device.createBuffer({
-                        label: 'snapshot',
-                        size: bytesPerRow * surface.height,
-                        usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST,
-                    });
+                    const size = bytesPerRow * surface.height;
+                    let staging;
+                    if (spareStaging && spareStaging.size === size)
+                    {
+                        staging = spareStaging.buffer;
+                        spareStaging = null;
+                    }
+                    else
+                    {
+                        staging = device.createBuffer({
+                            label: 'snapshot',
+                            size,
+                            usage: BufferUsage.MAP_READ | BufferUsage.COPY_DST,
+                        });
+                    }
                     encoder.copyTextureToBuffer(
                         { texture: surface.texture, mipLevel: surface.mipLevel ?? 0 },
                         { buffer: staging, bytesPerRow, rowsPerImage: surface.height },
@@ -691,7 +711,14 @@ export function createBackend(options){
                                 row * bytesPerRow + surface.width * 4), row * surface.width * 4);
                         }
                         staging.unmap();
-                        staging.destroy();
+                        if (spareStaging)
+                        {
+                            staging.destroy();
+                        }
+                        else
+                        {
+                            spareStaging = { buffer: staging, size };
+                        }
                         return { width: surface.width, height: surface.height, data };
                     };
                 },
@@ -798,6 +825,8 @@ export function createBackend(options){
         dispose(){
             dynamicBuffers.length = 0;
             pendingCopies.length = 0;
+            spareStaging?.buffer.destroy();
+            spareStaging = null;
             pipelines.clear();
             fixedFunctionLayouts.clear();
             openFrame = null;
