@@ -137,12 +137,15 @@ import { createBlockCache, resolveBlockStore }
  *           machine is made to stand still at the point of the request with the
  *           evidence still in it.
  * @property {any} [device]          The GPU to draw on, when there is one.
- * @property {{ presenter?: any }} [graphics]     What the graphics layer draws into, when the
- *           assembling caller has a presenter of its own. `graphics.presenter`
- *           is the run's presenter: the canvas, its configured format, the
- *           pacer and the texture the primary is copied into. Absent, one is
- *           made from `device` and handed to every machine; set by `createApp`
- *           on a rebuilt machine and not something a caller supplies.
+ * @property {{ presenter?: any, compressedTextures?: boolean }} [graphics]
+ *           The graphics layer's configuration (docs/core/graphics.md, the
+ *           Configuration table), forwarded to it as given: `compressedTextures`
+ *           turns the block-compressed upload path on where the device has the
+ *           feature. `graphics.presenter` is the run's presenter -- the canvas,
+ *           its configured format, the pacer and the texture the primary is
+ *           copied into. Absent, one is made from `device` and handed to every
+ *           machine; set by `createApp` on a rebuilt machine and not something
+ *           a caller supplies.
  * @property {{ width: number, height: number, bitsPerPixel: number }} [screen]
  *           What the program is told its display is.
  * @property {any} [storage]
@@ -2422,6 +2425,11 @@ async function buildApp(options){
             },
         },
         graphics: {
+            // The layer's own configuration fields, as the caller set them
+            // (`compressedTextures` and whatever the layer adds); what this
+            // build composes below -- the device, the presenter, the screen --
+            // is the run's and wins over a caller's value of the same name.
+            ...options.graphics,
             // Where a COM interface goes when a program asks for one. Without
             // it the drawing entry points refuse rather than publishing into
             // nowhere, which is what a build with no bridge should do.

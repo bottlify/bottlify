@@ -59,6 +59,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--no-video` | video on | assemble the engine without a decoder, so a run is not measured through a cinematic |
 | `--no-fog`, `--no-mips` | on | render as if fog, or mipmaps, were off, so a run differs from an ordinary one by that and nothing else |
+| `--graphics-config JSON` | none | fields of the graphics layer's configuration (`docs/core/graphics.md`, the Configuration table) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits -- a look every few milliseconds, or sleep until something happens |
 

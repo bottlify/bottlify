@@ -937,6 +937,9 @@ export function createHarness(canvas, how = {}){
             system,
             imagePath: request.imagePath,
             screen: request.screen ?? undefined,
+            // The graphics layer's own configuration, whatever fields the run
+            // names: a switch the layer defaults off is turned on per run here.
+            graphics: request.graphics ?? undefined,
             // A run is read afterwards, which is exactly when a stack string is gone.
             traceStrings: request.trace !== false,
             profileCalls: request.profileCalls === true,
@@ -1129,6 +1132,15 @@ export function createHarness(canvas, how = {}){
                 }
                 : null,
             presenter: graphics.presenter ?? null,
+            // How the textures travelled: a staged upload is a block-compressed
+            // one, so this count is what says the configured path was taken.
+            uploads: graphics.backend?.counters
+                ? {
+                    textures: graphics.backend.counters.textureUploads ?? 0,
+                    staged: graphics.backend.counters.stagedTextureUploads ?? 0,
+                    bytes: graphics.backend.counters.textureUploadBytes ?? 0,
+                }
+                : null,
         };
 
         // What the program wrote. A game of this age keeps its own log, and it says

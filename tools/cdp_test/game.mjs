@@ -190,6 +190,12 @@ function parse(argv){
         }),
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
+        // Fields of the graphics layer's configuration, as `createApp` takes
+        // them: `--graphics-config {"compressedTextures":true}`. Generic, so a
+        // run can turn on any switch the layer has without a flag of its own.
+        graphics: argv.includes('--graphics-config')
+            ? JSON.parse(argv[argv.indexOf('--graphics-config') + 1])
+            : null,
         // Guest instructions per scheduler turn when a profile is asked for.
         // Lowering it is what makes a sample a measurement rather than a
         // rumour: a sample lands at a turn boundary, so the turn is the
@@ -358,6 +364,11 @@ function describe(result, context, calls){
     if (graphics)
     {
         say(`  graphics: created=[${graphics.created.join(' ')}]`);
+        if (graphics.uploads)
+        {
+            say(`    texture uploads=${graphics.uploads.textures}`
+                + ` staged=${graphics.uploads.staged} bytes=${graphics.uploads.bytes}`);
+        }
         const device = graphics.device;
         if (device)
         {
@@ -685,6 +696,7 @@ export async function game(options){
             skipTexture: options.skipTexture,
             probeTexture: options.probeTexture,
             fog: options.fog,
+            graphics: options.graphics,
             pointer: options.pointer,
             clicks: options.clicks,
             keys: options.keys,
