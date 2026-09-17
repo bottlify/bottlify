@@ -1075,15 +1075,26 @@ export function createGpuRenderer(services){
      * per-unit constants, in the layout the shader declares.
      *
      * @param {import('./pipeline.js').Scene} scene
+     * @param {Float64Array} mvp   the projection-times-modelview product, the
+     *          draw's own so it is not multiplied out a second time for a
+     *          program stage that reads the same matrix (see `stateMatrixRow`)
      */
-    const uniformsOf = scene=>{
+    const uniformsOf = (scene, mvp)=>{
         const block = new Float32Array(UNIFORM.floats);
-        block.set(multiply(scene.projection, scene.modelview), UNIFORM.modelViewProjection);
+        block.set(mvp, UNIFORM.modelViewProjection);
         block.set(scene.modelview, UNIFORM.modelView);
         const nm = normalMatrix(scene.modelview);
-        block.set([
-            nm[0], nm[1], nm[2], 0, nm[3], nm[4], nm[5], 0, nm[6], nm[7], nm[8], 0, 0, 0, 0, 1,
-        ], UNIFORM.normalMatrix);
+        const nmAt = UNIFORM.normalMatrix;
+        block[nmAt] = nm[0];
+        block[nmAt + 1] = nm[1];
+        block[nmAt + 2] = nm[2];
+        block[nmAt + 4] = nm[3];
+        block[nmAt + 5] = nm[4];
+        block[nmAt + 6] = nm[5];
+        block[nmAt + 8] = nm[6];
+        block[nmAt + 9] = nm[7];
+        block[nmAt + 10] = nm[8];
+        block[nmAt + 15] = 1;
         for (const unit of scene.units)
         {
             if (unit.index >= UNITS)
@@ -1108,16 +1119,29 @@ export function createGpuRenderer(services){
         const current = scene.current;
         block.set(current.color, UNIFORM.color);
         block.set(current.secondary, UNIFORM.secondary);
-        block.set([current.normal[0], current.normal[1], current.normal[2], 0], UNIFORM.normal);
-        current.texCoords.slice(0, VARYING_TEXCOORDS).forEach((coords, unit)=>{
-            block.set([coords[0], coords[1] ?? 0, coords[2] ?? 0, coords[3] ?? 1],
-                UNIFORM.texCoord + unit * 4);
-        });
+        const normalAt = UNIFORM.normal;
+        block[normalAt] = current.normal[0];
+        block[normalAt + 1] = current.normal[1];
+        block[normalAt + 2] = current.normal[2];
+        const texCoords = current.texCoords;
+        const texCoordCount = Math.min(texCoords.length, VARYING_TEXCOORDS);
+        for (let unit = 0; unit < texCoordCount; unit++)
+        {
+            const coords = texCoords[unit];
+            const tcAt = UNIFORM.texCoord + unit * 4;
+            block[tcAt] = coords[0];
+            block[tcAt + 1] = coords[1] ?? 0;
+            block[tcAt + 2] = coords[2] ?? 0;
+            block[tcAt + 3] = coords[3] ?? 1;
+        }
         if (scene.fog)
         {
             block.set(scene.fog.colour, UNIFORM.fogColor);
-            block.set([scene.fog.density, scene.fog.start, scene.fog.end, current.fogCoord],
-                UNIFORM.fogParams);
+            const fogAt = UNIFORM.fogParams;
+            block[fogAt] = scene.fog.density;
+            block[fogAt + 1] = scene.fog.start;
+            block[fogAt + 2] = scene.fog.end;
+            block[fogAt + 3] = current.fogCoord;
         }
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
         return block;
@@ -1131,9 +1155,10 @@ export function createGpuRenderer(services){
      *
      * @param {import('./pipeline.js').Scene} scene
      * @param {import('./arb-wgsl.js').ParamSlot} slot
+     * @param {Float64Array} mvp   the draw's own projection-times-modelview product
      * @returns {number[]}
      */
-    const stateMatrixRow = (scene, slot)=>{
+    const stateMatrixRow = (scene, slot, mvp)=>{
         let m;
         switch (slot.matrix)
         {
@@ -1144,7 +1169,7 @@ export function createGpuRenderer(services){
                 m = scene.projection;
                 break;
             case 'mvp':
-                m = multiply(scene.projection, scene.modelview);
+                m = mvp;
                 break;
             default:
                 m = scene.textureMatrices[slot.number ?? 0] ?? IDENTITY;
@@ -1170,9 +1195,10 @@ export function createGpuRenderer(services){
      * @param {import('./arb-wgsl.js').StageNeeds} needs
      * @param {import('./pipeline.js').SceneProgram} program
      * @param {import('./pipeline.js').Scene} scene
+     * @param {Float64Array} mvp   the draw's own projection-times-modelview product
      * @returns {Float32Array}
      */
-    const programUniforms = (needs, program, scene)=>{
+    const programUniforms = (needs, program, scene, mvp)=>{
         const parameterCount = Math.max(1, needs.params.length);
         const block = new Float32Array((parameterCount + needs.genericFallbacks.length) * 4);
         needs.params.forEach((slot, index)=>{
@@ -1189,7 +1215,7 @@ export function createGpuRenderer(services){
                     block.set(/** @type {readonly number[]} */ (slot.values), index * 4);
                     break;
                 case 'matrix':
-                    block.set(stateMatrixRow(scene, slot), index * 4);
+                    block.set(stateMatrixRow(scene, slot, mvp), index * 4);
                     break;
                 default:
                     break;
@@ -1284,12 +1310,15 @@ export function createGpuRenderer(services){
             texture,
         }));
         const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
-        const uniforms = uniformsOf(scene);
+        // One draw, one MVP: shared with any program stage that reads the
+        // same state matrix, instead of each reader multiplying it out again.
+        const mvp = multiply(scene.projection, scene.modelview);
+        const uniforms = uniformsOf(scene, mvp);
         const vertexUniforms = generated.programs?.vertex && state.vertexProgram
-            ? programUniforms(generated.programs.vertex, state.vertexProgram, scene)
+            ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
             : null;
         const fragmentUniforms = generated.programs?.fragment && state.fragmentProgram
-            ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene)
+            ? programUniforms(generated.programs.fragment, state.fragmentProgram, scene, mvp)
             : null;
         stats.draws++;
         recording.counts.draws++;

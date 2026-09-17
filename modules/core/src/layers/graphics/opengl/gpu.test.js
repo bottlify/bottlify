@@ -915,6 +915,41 @@ test('a draw under both programs runs the emitted stages and fills their blocks'
     assert.deepEqual(r.gpu.of('drawIndexed')[0].args, [3, 1, 0, 0]);
 });
 
+test('the MVP product is computed once per draw and shared with a program that reads it',
+    async()=>{
+        // The vertex program above binds all four rows of state.matrix.mvp;
+        // the fixed block's own modelViewProjection uniform needs the same
+        // product. `new Float64Array(16)` with no source is what `multiply`
+        // (and only `multiply`, on this path) allocates its result into, so
+        // counting those across one draw counts the multiplies.
+        const r = rig();
+        programRig(r);
+        const { context } = r;
+        const RealFloat64Array = globalThis.Float64Array;
+        let mvpSizedAllocations = 0;
+        globalThis.Float64Array = /** @type {any} */ (class extends RealFloat64Array {
+            constructor(/** @type {any[]} */ ...args){
+                // @ts-ignore -- a spread onto the real constructor's overloads
+                super(...args);
+                if (args.length === 1 && args[0] === 16)
+                {
+                    mvpSizedAllocations++;
+                }
+            }
+        });
+        try
+        {
+            context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        }
+        finally
+        {
+            globalThis.Float64Array = RealFloat64Array;
+        }
+        await r.swap();
+        assert.equal(mvpSizedAllocations, 1,
+            'one MVP product per draw, shared with the vertex program\'s four mvp rows');
+    });
+
 test('a repeated draw state generates its source once and reuses it', async()=>{
     // A frame repeats one state for a hundred shadow-volume draws. The
     // pipeline cache already keyed the built pipeline by that state; the
