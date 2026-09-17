@@ -69,7 +69,8 @@ modules/core/src/
     ├── win32/             # one directory per guest-visible library
     │   ├── kernel32/      #   process, threading, sync, heap, files, vfs, mapping, modules,
     │   │                  #   resources, seh, exceptions, iocp, console, locale, environment, spawn
-    │   ├── user32/        #   windows, messages, paint, dialogs, display, objects, system
+    │   ├── user32/        #   windows, messages, paint, dialogs, display, objects, system, keys
+    │   │                  #   (keys.js: the physical-key table input's router and dom also use)
     │   ├── gdi32/         #   objects, drawing (the ABI in front of an injected drawing service), structs
     │   ├── advapi32/      #   the registry and the rest
     │   ├── ole32/  oleaut32/
@@ -104,7 +105,6 @@ modules/core/src/
     └── input/             # requires win32, bridge, memory
         ├── router.js      #   one event stream into the message queue and the polled state
         ├── dom.js         #   keyboard and mouse captured on a canvas (runs on the page)
-        ├── keys.js
         └── dinput/        #   devices.js seam.js — DirectInput and DirectInput8
 ```
 

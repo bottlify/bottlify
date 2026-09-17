@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createInputRouter, WM } from './router.js';
-import { keyFor, dikOf } from './keys.js';
+import { keyFor, dikOf } from '../win32/user32/keys.js';
 import { createInputDevice, KEY_DOWN, DIMOUSE_OFS } from './dinput/devices.js';
 
 const HWND = 0x1234;

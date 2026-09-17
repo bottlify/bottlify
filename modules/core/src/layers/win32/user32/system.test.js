@@ -732,6 +732,77 @@ test('the keyboard is the enhanced one, and anything else asked of it is nothing
     assert.equal(fns.GetKeyboardType.argBytes, 4);
 });
 
+test('GetKeyboardLayout answers the one supported layout for any thread, including zero', ()=>{
+    const { fns } = setup();
+    const layout = fns.GetKeyboardLayout.handler([0]);
+    assert.notEqual(layout, 0, 'never nothing for a live thread');
+    assert.equal(layout, fns.GetKeyboardLayout.handler([4321]),
+        'GetKeyboardLayout(0) equals GetKeyboardLayout(GetCurrentThreadId()) -- one layout');
+    assert.equal(layout >>> 16, layout & 0xffff,
+        'the default layout: device handle equals the language id');
+    assert.equal(layout & 0xffff, 0x0409, 'en-US');
+});
+
+test('MapVirtualKeyA maps a virtual key to its scan code and back, and a scan code to the '
+    + 'sided virtual key', ()=>{
+    const { fns } = setup();
+    const MAPVK_VK_TO_VSC = 0;
+    const MAPVK_VSC_TO_VK = 1;
+    const MAPVK_VK_TO_CHAR = 2;
+    const MAPVK_VSC_TO_VK_EX = 3;
+
+    assert.equal(fns.MapVirtualKeyA.handler([0x41, MAPVK_VK_TO_VSC]), 0x1e,
+        'VK_A -> its scan code');
+    assert.equal(fns.MapVirtualKeyA.handler([0x1e, MAPVK_VSC_TO_VK]), 0x41, 'and back');
+    assert.equal(fns.MapVirtualKeyA.handler([0x41, MAPVK_VK_TO_CHAR]), 0x41,
+        'the unshifted char of a letter key is its own uppercase code, as before this change');
+
+    // The scan code 0x1d names both control keys; VSC_TO_VK answers the generic (paired) VK,
+    // VSC_TO_VK_EX the side that owns that scan code.
+    assert.equal(fns.MapVirtualKeyA.handler([0x1d, MAPVK_VSC_TO_VK]), 0x11,
+        'VK_CONTROL, not a side');
+    assert.equal(fns.MapVirtualKeyA.handler([0x1d, MAPVK_VSC_TO_VK_EX]), 0xa2, 'VK_LCONTROL');
+
+    assert.equal(fns.MapVirtualKeyA.handler([0xff, MAPVK_VK_TO_VSC]), 0,
+        'no key at that code: nothing');
+});
+
+test('MapVirtualKeyExA behaves as MapVirtualKeyA for the one layout this build has', ()=>{
+    const { fns } = setup();
+    const MAPVK_VK_TO_VSC = 0;
+    const hkl = fns.GetKeyboardLayout.handler([0]);
+    assert.equal(
+        fns.MapVirtualKeyExA.handler([0x41, MAPVK_VK_TO_VSC, hkl]),
+        fns.MapVirtualKeyA.handler([0x41, MAPVK_VK_TO_VSC]),
+    );
+});
+
+test('ToUnicode reads the shift and caps-lock bits out of the caller\'s key-state array', ()=>{
+    const { memory, fns } = setup();
+    const KEY_STATE = 0x11e00;
+    const CHAR_BUFFER = 0x11f00;
+
+    memory.writeMemory(KEY_STATE, new Uint8Array(256));
+    assert.equal(fns.ToUnicode.handler([0x41, 0x1e, KEY_STATE, CHAR_BUFFER, 1, 0]), 1,
+        'one character translated');
+    assert.equal(memory.bytes[CHAR_BUFFER], 'a'.charCodeAt(0),
+        'no shift, no caps lock: lowercase');
+
+    const shifted = new Uint8Array(256);
+    shifted[0x10] = 0x80; // VK_SHIFT held
+    memory.writeMemory(KEY_STATE, shifted);
+    assert.equal(fns.ToUnicode.handler([0x41, 0x1e, KEY_STATE, CHAR_BUFFER, 1, 0]), 1);
+    assert.equal(memory.bytes[CHAR_BUFFER], 'A'.charCodeAt(0), 'shift held: uppercase');
+
+    assert.equal(fns.ToUnicode.handler([0x31, 0x02, KEY_STATE, CHAR_BUFFER, 1, 0]), 1);
+    assert.equal(memory.bytes[CHAR_BUFFER], '!'.charCodeAt(0),
+        'a digit key with shift is its symbol');
+
+    memory.writeMemory(KEY_STATE, new Uint8Array(256));
+    assert.equal(fns.ToUnicode.handler([0x26, 0x48, KEY_STATE, CHAR_BUFFER, 1, 0]), 0,
+        'a key with no character, such as an arrow, translates to nothing');
+});
+
 test('capture is a pair: releasing clears what setting recorded', ()=>{
     const { memory, fns } = setup();
     const hwnd = makeWindow(memory, fns);

@@ -49,7 +49,7 @@
  *   back.
  */
 
-import { keyFor } from './keys.js';
+import { keyFor } from '../win32/user32/keys.js';
 
 /**
  * Keys the browser has already claimed. Preventing their default either does

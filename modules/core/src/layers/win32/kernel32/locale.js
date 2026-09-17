@@ -99,7 +99,7 @@ const CP437_HIGH = [
  * describe. A build claiming a locale whose code page it does not carry would
  * convert text one way and format it another.
  */
-const LANGID_EN_US = 0x0409;
+export const LANGID_EN_US = 0x0409;
 const LCID_EN_US = 0x0409;
 const LOCALE_USER_DEFAULT = 0x0400;
 const LOCALE_SYSTEM_DEFAULT = 0x0800;

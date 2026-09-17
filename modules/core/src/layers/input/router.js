@@ -21,7 +21,7 @@
  * browser, which is where its correctness is actually established.
  */
 
-import { keyFor, dikOf, codeForVk, codeForScan } from './keys.js';
+import { keyFor, dikOf, codeForVk, codeForScan } from '../win32/user32/keys.js';
 
 /** The messages this layer produces. */
 export const WM = Object.freeze({
@@ -184,7 +184,7 @@ export function createInputRouter({ post, device, now, target, bounds, compose, 
      * and the read is what clears it.
      */
     const pressedSinceRead = new Uint8Array(256);
-    /** @type {Map<string, import('./keys.js').KeyMapping>} */
+    /** @type {Map<string, import('../win32/user32/keys.js').KeyMapping>} */
     const held = new Map();
     /** @type {Set<string>} */
     const pressed = new Set();

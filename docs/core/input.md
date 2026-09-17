@@ -143,10 +143,11 @@ beside the viewport is a fact about the page, not the mouse.
 `src/layers/input/router.js` turns each event into the messages above and a DirectInput event.
 It keeps the 256-entry virtual-key array (both the paired key such as `VK_SHIFT` and the sided
 one such as `VK_LSHIFT`; releasing one shift with the other held keeps `VK_SHIFT` down), the set
-of held physical keys, the pressed buttons, and the cursor. `src/layers/input/keys.js` maps 105
-`KeyboardEvent.code` values to a set-1 scan code, its E0 prefix, the virtual key and the sided
+of held physical keys, the pressed buttons, and the cursor. `src/layers/win32/user32/keys.js` maps
+105 `KeyboardEvent.code` values to a set-1 scan code, its E0 prefix, the virtual key and the sided
 virtual key, from which both the message lParam and the DirectInput code (scan code with E0 folded
-into bit 7) are derived.
+into bit 7) are derived; it lives under `win32` rather than `input` because `MapVirtualKeyA` needs
+the same table and `win32` cannot import a layer that itself requires `win32`.
 
 `WM_SETCURSOR` is posted when the answer could have changed -- focus arriving, a button either way
 -- rather than on every move, because this queue posts rather than sends and one per move would
