@@ -18,7 +18,7 @@
  *
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video]
- *                                  [--click x,y[,after]] [--key Code[,after]]
+ *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -213,6 +213,10 @@ function parse(argv){
         // How the loop waits in the worker: `page` (a look every few
         // milliseconds) or `event` (sleep until something happens).
         pacing: argv.includes('--pacing') ? argv[argv.indexOf('--pacing') + 1] : 'page',
+        // Cross-origin isolation headers, so the page comes up
+        // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
+        // table audio backend and its worklet need to run at all.
+        coi: argv.includes('--coi'),
     };
 }
 
@@ -643,6 +647,7 @@ export async function game(options){
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
         extra: [{ prefix: '/bundle/', root: directory }],
+        coi: options.coi,
     });
     const browser = await launchWithGpu();
     mkdirSync(REPORTS_DIR, { recursive: true });

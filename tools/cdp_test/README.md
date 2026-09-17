@@ -37,7 +37,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
     [--dump-draws] [--max-draws N] [--skip-texture tN] [--probe tN]
     [--pointer x,y[,down]] [--click x,y[,after]] [--screen WxH] [--run-seconds N]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
-    [--worker [--pacing page|event]]
+    [--worker [--pacing page|event]] [--coi]
 ```
 
 | flag | default | what it does |
@@ -63,6 +63,7 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--trace` | off | peek every pointer argument of every host call for a string. Off by default: a title's draws pay for it and a measurement run should not without asking |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |
 | `--pacing page\|event` | `page` | with `--worker`: how the loop waits -- a look every few milliseconds, or sleep until something happens |
+| `--coi` | off | serve with the cross-origin isolation headers, so the page comes up `crossOriginIsolated` and `SharedArrayBuffer` exists -- what the shared-table audio backend and its worklet need |
 
 The run is headless and always on a fresh profile. The browser flags it needs
 are in `browser.mjs` (below).
