@@ -166,11 +166,13 @@ function texturedQuad(){
  * DXT1 texture created, drawn once and presented -- so what the renderer
  * chose to upload it as can be read off the GPU double afterwards.
  *
- * @param {{ blocks: boolean, compressedTextures?: boolean }} options
+ * @param {{ blocks: boolean, compressedTextures?: boolean, createOptions?: any }} options
  *        `blocks`: whether the adapter double reports `texture-compression-bc`.
+ *        `createOptions`: passed to `api.create('d3d9', ...)` itself, as
+ *        opposed to `compressedTextures`, which is the module's own config.
  * @returns {Promise<{ gpu: any, formatResult: number }>}
  */
-async function drawDxtTexture({ blocks, compressedTextures }){
+async function drawDxtTexture({ blocks, compressedTextures, createOptions }){
     const gpu = createFakeDevice();
     const gpuDevice = /** @type {any} */ (gpu.device);
     gpuDevice.features = new Set(blocks ? ['texture-compression-bc'] : []);
@@ -183,7 +185,7 @@ async function drawDxtTexture({ blocks, compressedTextures }){
         config.compressedTextures = compressedTextures;
     }
     const api = await graphicsModule.create(config, hostWith(memory));
-    const d3d9 = api.create('d3d9');
+    const d3d9 = api.create('d3d9', createOptions);
     const formatResult = d3d9.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1);
 
     /** @type {{ device?: any }} */
@@ -261,6 +263,22 @@ test('the adapter\'s block-compression capability and the configuration together
         'asked for, but the adapter cannot sample blocks: the surface decodes');
     await graphicsModule.dispose();
 });
+
+test('a per-call compressedTextures override cannot turn BC on for a device without the feature',
+    async()=>{
+        // graphics.create('d3d9', { compressedTextures: true }) is a second,
+        // per-call way to ask for BC blocks, independent of the module's own
+        // configuration; the device's feature bit has to gate that path too,
+        // or a caller can force blocks onto a device that cannot sample them.
+        const { gpu, formatResult } = await drawDxtTexture(
+            { blocks: false, createOptions: { compressedTextures: true } });
+        assert.equal(formatResult, D3D_OK, 'still legal: the format never depended on the feature');
+        const decoded = gpu.of('createTexture').find((/** @type {any} */ c)=>
+            c.descriptor.label === 'texture');
+        assert.equal(decoded.descriptor.format, 'bgra8unorm',
+            'the override asked for blocks, but the adapter cannot sample them: it decodes');
+        await graphicsModule.dispose();
+    });
 
 test('an API is made by name, and an unknown one says so', async()=>{
     const api = await graphicsModule.create({}, hostWith(fakeMemory()));

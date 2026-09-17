@@ -206,8 +206,11 @@ export const graphicsModule = {
         // a change that is faster on paper and jams the GPU process on some
         // hardware is not a fix until it is asked for. The feature bit still
         // has the final say either way: a device without it never samples BC.
-        const compressedTextures = config?.compressedTextures === true
-            && device?.device?.features?.has('texture-compression-bc') === true;
+        const hasBcFeature = device?.device?.features?.has('texture-compression-bc') === true;
+        const compressedTextures = config?.compressedTextures === true && hasBcFeature;
+        /** A factory's own override still cannot ask for BC on a device that cannot sample it. */
+        const gatedCompressedTextures = (/** @type {any} */ caps)=>
+            (caps?.compressedTextures ?? compressedTextures) && hasBcFeature;
 
         /** Everything an API needs from outside itself, in one place. */
         const services = {
@@ -254,7 +257,7 @@ export const graphicsModule = {
                 // less to upload, and it spares the program decompressing every
                 // texture in its own code -- once the configuration says the
                 // path is safe to take on this build.
-                compressedTextures: caps?.compressedTextures ?? compressedTextures,
+                compressedTextures: gatedCompressedTextures(caps),
                 backend: api.backend(),
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
@@ -297,7 +300,7 @@ export const graphicsModule = {
                 // a cap bit, and a title that never asks still expects its DXT
                 // art to load. A device told no decompresses on its own CPU, in
                 // emulated x86, and hands over surfaces four times the size.
-                compressedTextures: caps?.compressedTextures ?? compressedTextures,
+                compressedTextures: gatedCompressedTextures(caps),
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
                 // The copies between surfaces (UpdateSurface, StretchRect,
