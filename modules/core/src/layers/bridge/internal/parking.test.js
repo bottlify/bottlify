@@ -98,19 +98,15 @@ test('parking a caller tells the kernel where the stub leaves the stack', ()=>{
     assert.deepEqual(parked, [[main, 0x2ffed8]]);
 });
 
-test('a resting stack is offered only for the thread whose call is in flight', ()=>{
+test('parking a thread other than the one whose call is in flight is refused', ()=>{
     const main = thread('main');
     const worker = thread('thread-3');
-    /** @type {any[]} */
-    const parked = [];
     const made = createParking({
         kernel: {
             currentThread: ()=>worker,
-            /** @param {any} which @param {number} [resting] */
-            parkThread: (which, resting)=>parked.push([which, resting]),
+            parkThread: ()=>assert.fail('nothing may be parked'),
         },
     });
     made.beginCall(frame('KERNEL32.dll!ReadFile', 0x1ff000));
-    made.park(main);
-    assert.deepEqual(parked, [[main, undefined]]);
+    assert.throws(()=>made.park(main), /parks the thread whose call is in flight/);
 });

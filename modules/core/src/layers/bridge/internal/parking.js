@@ -116,8 +116,14 @@ export function createParking({ kernel, onBegin }){
             }
             const which = thread ?? kernel.currentThread();
             const frame = inFlight[inFlight.length - 1];
-            kernel.parkThread(which,
-                frame.thread === which ? frame.restingStack : undefined);
+            // Only the thread on the processor can be parked here: the kernel
+            // overwrites the return slot at the processor's ESP, so parking
+            // any other thread would corrupt this one's stack.
+            if (frame.thread !== which)
+            {
+                throw new Error('bridge: park() parks the thread whose call is in flight');
+            }
+            kernel.parkThread(which, frame.restingStack);
             parked++;
             return PARKED;
         },

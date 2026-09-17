@@ -264,7 +264,7 @@ export const kernelModule = {
              * both want.
              *
              * @param {any} thread
-             * @param {number} [restingStack]
+             * @param {number} restingStack
              *   Where the stub's `ret` leaves ESP. Given, the resume sets ESP
              *   there rather than trusting the saved context, which may have
              *   been taken before that `ret` ran.
@@ -272,7 +272,7 @@ export const kernelModule = {
             parkThread(thread, restingStack){
                 const esp = cpu.readReg32('esp');
                 thread.parkedReturn = memory.readU32(esp);
-                thread.resumeStack = restingStack ?? null;
+                thread.resumeStack = restingStack;
                 memory.writeU32(esp, cpu.parkAddress());
             },
 

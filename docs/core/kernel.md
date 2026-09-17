@@ -55,7 +55,7 @@ Threads and turns:
 |--------|-----------|---------|
 | `createThread` | `({ entry, parameter?, stackTop?, stackLimit?, tebAddress?, name?, returnTo? }) => Thread` | A ready thread with a primed stack (parameter above a return address). Stack from the pool unless `stackTop` is given. `returnTo` defaults to the park loop. Opens a `'thread'` handle on it. |
 | `holdThread` | `() => number` | Replaces the return address at ESP with the park loop and returns what it was. For a stub about to `ret`. |
-| `parkThread` | `(thread, restingStack?) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. `restingStack` — where the stub's `ret` leaves ESP — is kept on `thread.resumeStack`, so the resume does not depend on whether that `ret` ran before the switch. |
+| `parkThread` | `(thread, restingStack) => void` | The same, but remembers the address on `thread.parkedReturn` so the thread resumes where it left off. `restingStack` — where the stub's `ret` leaves ESP — is kept on `thread.resumeStack`, so the resume does not depend on whether that `ret` ran before the switch. |
 | `scheduleResume` | `(thread, { eip, esp?, returnValue? }) => void` | Where a stopped thread continues on its next turn; applied inside the switch. |
 | `currentThread` / `threads` | `() => Thread \| null` / `() => Thread[]` | The thread on the CPU; every thread ever created. |
 | `writeThreadId` | `(address, id) => void` | Writes a thread id into guest memory (an out-parameter helper). |

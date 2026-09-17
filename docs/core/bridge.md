@@ -162,9 +162,9 @@ keeps the array and frame it was given, and the next call is given new ones.
 
 A host function that cannot answer yet — it is waiting, or it has ended the thread that called
 it — must not return a number, because the guest would take it as the answer. `park()` calls
-`kernel.parkThread` with the in-flight frame's `restingStack` (when the frame is the parked
-thread's own) and returns a module-private immutable token; `isParkedCall` compares by
-identity. Nothing else produces the token, so "returned an asynchronous result without parking"
+`kernel.parkThread` with the in-flight frame's `restingStack` (parking any thread but the one
+whose call is in flight is refused, since the kernel writes the return slot at the processor's
+ESP) and returns a module-private immutable token; `isParkedCall` compares by identity. Nothing else produces the token, so "returned an asynchronous result without parking"
 is not something a handler can say. `park` throws with no call in flight.
 
 The same object keeps the stack of calls in flight (`beginCall`/`endCall`; depth rather than a
