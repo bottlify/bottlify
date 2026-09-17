@@ -327,47 +327,55 @@ export function createSurface(options){
 }
 
 /**
+ * One pixel of a D3DCOLOR in a format's own layout, as the little-endian
+ * number its bytes spell: the format's width decides how many of them count.
+ *
+ * @param {number} format @param {number} colour
+ * @returns {number}
+ */
+export function packBits(format, colour){
+    const a = (colour >>> 24) & 0xff;
+    const r = (colour >>> 16) & 0xff;
+    const g = (colour >>> 8) & 0xff;
+    const b = colour & 0xff;
+    switch (format)
+    {
+        case D3DFMT.R5G6B5:
+            return ((r >>> 3) << 11) | ((g >>> 2) << 5) | (b >>> 3);
+        case D3DFMT.X1R5G5B5:
+        case D3DFMT.A1R5G5B5:
+            return ((a >>> 7) << 15) | ((r >>> 3) << 10) | ((g >>> 3) << 5) | (b >>> 3);
+        case D3DFMT.A4R4G4B4:
+        case D3DFMT.X4R4G4B4:
+            return ((a >>> 4) << 12) | ((r >>> 4) << 8) | ((g >>> 4) << 4) | (b >>> 4);
+        case D3DFMT.A8:
+            return a;
+        // Luminance is the colour: the red byte stands in for it, the same
+        // way a sample replicates it into the channels it fills.
+        case D3DFMT.L8:
+            return r;
+        case D3DFMT.A8L8:
+            return r | (a << 8);
+        case D3DFMT.A4L4:
+            return ((a >>> 4) << 4) | (r >>> 4);
+        // The 32-bit layouts, and a format with no layout here, which still
+        // gets a pixel of its own width so that a row packed from it is the
+        // row's length and nothing else.
+        default:
+            return ((a << 24) | (r << 16) | (g << 8) | b) >>> 0;
+    }
+}
+
+/**
  * One pixel of a D3DCOLOR in a format's own layout, little-endian.
  *
  * @param {number} format @param {number} colour
  * @returns {Uint8Array}
  */
 export function packColour(format, colour){
-    const a = (colour >>> 24) & 0xff;
-    const r = (colour >>> 16) & 0xff;
-    const g = (colour >>> 8) & 0xff;
-    const b = colour & 0xff;
-    /** @param {number} bits */
-    const word = bits=>Uint8Array.from([bits & 0xff, (bits >>> 8) & 0xff]);
-    switch (format)
-    {
-        case D3DFMT.A8R8G8B8:
-        case D3DFMT.X8R8G8B8:
-            return Uint8Array.from([b, g, r, a]);
-        case D3DFMT.R5G6B5:
-            return word(((r >>> 3) << 11) | ((g >>> 2) << 5) | (b >>> 3));
-        case D3DFMT.X1R5G5B5:
-        case D3DFMT.A1R5G5B5:
-            return word(((a >>> 7) << 15) | ((r >>> 3) << 10) | ((g >>> 3) << 5) | (b >>> 3));
-        case D3DFMT.A4R4G4B4:
-        case D3DFMT.X4R4G4B4:
-            return word(((a >>> 4) << 12) | ((r >>> 4) << 8) | ((g >>> 4) << 4) | (b >>> 4));
-        case D3DFMT.A8:
-            return Uint8Array.from([a]);
-        // Luminance is the colour: the red byte stands in for it, the same
-        // way a sample replicates it into the channels it fills.
-        case D3DFMT.L8:
-            return Uint8Array.from([r]);
-        case D3DFMT.A8L8:
-            return Uint8Array.from([r, a]);
-        case D3DFMT.A4L4:
-            return Uint8Array.from([((a >>> 4) << 4) | (r >>> 4)]);
-        // A format with no layout here still gets a pixel of its own width,
-        // so that a row packed from it is the row's length and nothing else.
-        default:
-            return Uint8Array.from([b, g, r, a])
-                .subarray(0, FORMAT_INFO[format]?.bytesPerPixel ?? 4);
-    }
+    const width = FORMAT_INFO[format]?.bytesPerPixel ?? 4;
+    const bits = packBits(format, colour);
+    return Uint8Array.from({ length: width }, (_, index)=>(bits >>> (index * 8)) & 0xff);
 }
 
 /**
@@ -386,19 +394,25 @@ export function writePixels(surface, pixels, writeMemory){
     const desc = /** @type {SurfaceDesc} */ (out.desc);
     const bytesPerPixel = FORMAT_INFO[desc.Format].bytesPerPixel;
     const pitch = surfacePitch(desc.Format, desc.Width);
-    const row = new Uint8Array(desc.Width * bytesPerPixel);
+    // A four-byte surface is laid out exactly as the read-back is, rows at
+    // the pitch and pixels blue first, so the read-back is written as it is.
+    if (bytesPerPixel === 4 && pitch === desc.Width * 4)
+    {
+        writeMemory(surface.base, pixels);
+        return;
+    }
+    const row = new Uint8Array(pitch);
     for (let y = 0; y < desc.Height; y++)
     {
         for (let x = 0; x < desc.Width; x++)
         {
             const at = (y * desc.Width + x) * 4;
-            if (bytesPerPixel === 4)
+            const bits = packBits(desc.Format, ((pixels[at + 3] << 24) | (pixels[at + 2] << 16)
+                | (pixels[at + 1] << 8) | pixels[at]) >>> 0);
+            for (let byte = 0; byte < bytesPerPixel; byte++)
             {
-                row.set(pixels.subarray(at, at + 4), x * 4);
-                continue;
+                row[x * bytesPerPixel + byte] = (bits >>> (byte * 8)) & 0xff;
             }
-            row.set(packColour(desc.Format, ((pixels[at + 3] << 24) | (pixels[at + 2] << 16)
-                | (pixels[at + 1] << 8) | pixels[at]) >>> 0), x * bytesPerPixel);
         }
         writeMemory(surface.base + y * pitch, row);
     }

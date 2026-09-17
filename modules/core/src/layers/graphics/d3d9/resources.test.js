@@ -11,7 +11,9 @@ import {
     surfaceBytes, surfacePitch,
 } from './constants.js';
 import { createDirect3D9 } from './device.js';
-import { createReferenceCount, createSurface, createTexture, packColour } from './resources.js';
+import {
+    createReferenceCount, createSurface, createTexture, packColour, writePixels,
+} from './resources.js';
 import { SURFACE_TYPE } from './validity.js';
 
 const SIZE = 128;
@@ -446,4 +448,87 @@ test("packColour gives a pixel of a format's width, listed layout or not", ()=>{
     assert.equal(packColour(D3DFMT.D16, 0xff123456).length, 2, 'a two-byte format packColour'
         + ' has no layout for still packs to two bytes');
     assert.equal(packColour(D3DFMT.A2R10G10B10, 0xff123456).length, 4);
+});
+
+/**
+ * A read-back's rows land in guest memory in the surface's own layout: the
+ * four-byte case byte for byte as the GPU handed them over, the packed cases
+ * one pixel at a time through the format's bit layout.
+ */
+for (const { format, name, pack } of [
+    {
+        format: D3DFMT.A8R8G8B8, name: 'A8R8G8B8',
+        /** @param {number[]} bgra */
+        pack: bgra=>bgra,
+    },
+    {
+        format: D3DFMT.R5G6B5, name: 'R5G6B5',
+        /** @param {number[]} bgra */
+        pack: ([b, g, r])=>{
+            const bits = ((r >>> 3) << 11) | ((g >>> 2) << 5) | (b >>> 3);
+            return [bits & 0xff, bits >>> 8];
+        },
+    },
+    {
+        format: D3DFMT.A1R5G5B5, name: 'A1R5G5B5',
+        /** @param {number[]} bgra */
+        pack: ([b, g, r, a])=>{
+            const bits = ((a >>> 7) << 15) | ((r >>> 3) << 10) | ((g >>> 3) << 5) | (b >>> 3);
+            return [bits & 0xff, bits >>> 8];
+        },
+    },
+])
+{
+    test(`writePixels lays a read-back out in guest memory as ${name}`, ()=>{
+        const width = 5;
+        const height = 3;
+        const base = 0x4000;
+        const surface = createSurface({
+            type: SURFACE_TYPE.RENDER_TARGET, width, height, format,
+            pool: D3DPOOL.DEFAULT, usage: 0, base, lockable: true,
+            count: createReferenceCount(),
+        });
+        // Every channel distinct in every pixel, so a swapped byte or a row
+        // written at the wrong pitch changes what arrives.
+        const pixels = Uint8Array.from({ length: width * height * 4 },
+            (_, i)=>(i * 37 + 11) & 0xff);
+        /** @type {{ address: number, bytes: Uint8Array }[]} */
+        const writes = [];
+        writePixels(surface, pixels,
+            (address, bytes)=>writes.push({ address, bytes: bytes.slice() }));
+
+        const pitch = surfacePitch(format, width);
+        const arrived = new Uint8Array(pitch * height);
+        for (const { address, bytes } of writes)
+        {
+            arrived.set(bytes, address - base);
+        }
+        /** @type {number[]} */
+        const expected = [];
+        for (let y = 0; y < height; y++)
+        {
+            for (let x = 0; x < width; x++)
+            {
+                const at = (y * width + x) * 4;
+                expected.push(...pack([...pixels.subarray(at, at + 4)]));
+            }
+        }
+        assert.deepEqual([...arrived], expected);
+    });
+}
+
+test('writePixels hands a four-byte read-back to guest memory whole, not a view per pixel', ()=>{
+    const surface = createSurface({
+        type: SURFACE_TYPE.RENDER_TARGET, width: 4, height: 2, format: D3DFMT.X8R8G8B8,
+        pool: D3DPOOL.DEFAULT, usage: 0, base: 0x4000, lockable: true,
+        count: createReferenceCount(),
+    });
+    const pixels = new Uint8Array(4 * 2 * 4);
+    /** @type {Uint8Array[]} */
+    const handed = [];
+    writePixels(surface, pixels, (_address, bytes)=>handed.push(bytes));
+    // The rows are contiguous at the surface's pitch, so the read-back is the
+    // surface's bytes already: one write of it, and nothing copied in between.
+    assert.equal(handed.length, 1);
+    assert.equal(handed[0], pixels);
 });
