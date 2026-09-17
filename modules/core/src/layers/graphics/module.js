@@ -200,6 +200,15 @@ export const graphicsModule = {
          */
         const device = config?.device ?? null;
 
+        // Data, not code: whether a title's kept-block-compressed art travels as
+        // BC blocks is a configuration decision, not something the adapter's
+        // feature bit alone should switch on for every title on this build --
+        // a change that is faster on paper and jams the GPU process on some
+        // hardware is not a fix until it is asked for. The feature bit still
+        // has the final say either way: a device without it never samples BC.
+        const compressedTextures = config?.compressedTextures === true
+            && device?.device?.features?.has('texture-compression-bc') === true;
+
         /** Everything an API needs from outside itself, in one place. */
         const services = {
             /** @param {number} address @param {number} length */
@@ -238,13 +247,14 @@ export const graphicsModule = {
             /** @returns {any} */
             d3d8: (/** @type {any} */ caps)=>createDirect3D8({
                 ...caps,
-                // What the adapter actually offers, rather than a default that
-                // says no on every machine. A device that can sample compressed
-                // blocks lets a program keep its art compressed: four to eight
-                // times less to upload, and it spares the program decompressing
-                // every texture in its own code.
-                compressedTextures: caps?.compressedTextures
-                    ?? device?.device?.features?.has('texture-compression-bc') === true,
+                // What the configuration asks for and the adapter actually
+                // offers, rather than a default that says yes on every machine
+                // with the feature. A device that can sample compressed blocks
+                // lets a program keep its art compressed: four to eight times
+                // less to upload, and it spares the program decompressing every
+                // texture in its own code -- once the configuration says the
+                // path is safe to take on this build.
+                compressedTextures: caps?.compressedTextures ?? compressedTextures,
                 backend: api.backend(),
                 readMemory: services.readMemory,
                 windowMemory: services.windowMemory,
@@ -282,13 +292,12 @@ export const graphicsModule = {
             /** @returns {any} */
             d3d9: (/** @type {any} */ caps)=>createDirect3D9({
                 ...caps,
-                // The same adapter-derived answer Direct3D 8 gets: Direct3D 9
-                // put the question in CheckDeviceFormat rather than a cap bit,
-                // and a title that never asks still expects its DXT art to
-                // load. A device told no decompresses on its own CPU, in
+                // The same configuration-and-adapter answer Direct3D 8 gets:
+                // Direct3D 9 put the question in CheckDeviceFormat rather than
+                // a cap bit, and a title that never asks still expects its DXT
+                // art to load. A device told no decompresses on its own CPU, in
                 // emulated x86, and hands over surfaces four times the size.
-                compressedTextures: caps?.compressedTextures
-                    ?? device?.device?.features?.has('texture-compression-bc') === true,
+                compressedTextures: caps?.compressedTextures ?? compressedTextures,
                 backend: device ? api.backend() : undefined,
                 readMemory: services.readMemory,
                 // The copies between surfaces (UpdateSurface, StretchRect,
@@ -315,12 +324,11 @@ export const graphicsModule = {
                 createSampler: device
                     ? (/** @type {any} */ descriptor)=>device.device.createSampler(descriptor)
                     : undefined,
-                // The same adapter-derived answer the other APIs get: kept
-                // blocks are four to eight times fewer bytes to upload, and
-                // spare the processor decoding every S3TC texture in the
+                // The same configuration-and-adapter answer the other APIs get:
+                // kept blocks are four to eight times fewer bytes to upload,
+                // and spare the processor decoding every S3TC texture in the
                 // guest's own code.
-                compressedTextures: device?.device?.features?.has('texture-compression-bc')
-                    === true,
+                compressedTextures,
                 presenter: ()=>state.presenter,
                 // The same per-draw account the Direct3D 8 device takes, on
                 // the device handle for the same reason: only the assembling
@@ -356,8 +364,7 @@ export const graphicsModule = {
                 writeMemory: services.writeMemory,
                 backend: ()=>api.backend(),
                 screen: ()=>services.screen,
-                compressedTextures:
-                    device?.device?.features?.has('texture-compression-bc') === true,
+                compressedTextures,
                 adapter: ()=>api.adapter(),
                 divergence: config?.divergence,
                 ...options,

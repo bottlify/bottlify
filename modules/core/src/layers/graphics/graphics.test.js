@@ -119,37 +119,53 @@ test('a Direct3D 9 object made by the module can write guest memory', async()=>{
     await graphicsModule.dispose();
 });
 
-test('the adapter\'s block-compression capability reaches a Direct3D 9 device', async()=>{
+/** @param {boolean} blocks */
+const makeCompressibleDevice = blocks=>({
+    device: {
+        features: new Set(blocks ? ['texture-compression-bc'] : []),
+        createBuffer: ()=>({ destroy(){} }),
+        createBindGroupLayout: ()=>({}),
+        createCommandEncoder: ()=>({ finish: ()=>({}) }),
+    },
+    queue: { submit(){}, writeBuffer(){} },
+    presentTo: ()=>{},
+});
+
+test('compressedTextures defaults to false, whatever the adapter offers', async()=>{
+    // A change that is faster on paper and jams the GPU process on some
+    // hardware is not a fix until it is measured and asked for -- so the
+    // feature bit alone no longer turns this on; the configuration has to
+    // ask too (module.js, `compressedTextures`).
+    const api = await graphicsModule.create({ device: makeCompressibleDevice(true) },
+        hostWith(fakeMemory()));
+    const refused = api.create('d3d9');
+    assert.equal(refused.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
+        D3DERR_NOTAVAILABLE, 'the adapter can sample blocks, but nothing asked for it');
+    await graphicsModule.dispose();
+});
+
+test('the adapter\'s block-compression capability reaches a Direct3D 9 device'
+    + ' only when the configuration asks for it', async()=>{
     // The launcher asks its adapter for block compression, because the art of
     // this era is DXT (host/serve.js). Direct3D 9 put the question in
     // CheckDeviceFormat rather than in a capability bit, and a title that
     // assumes DXT creates it without asking -- so a device told no loads none
-    // of its art. A factory that reads the adapter answers the same way
-    // Direct3D 8's already does.
-    /** @param {boolean} blocks */
-    const makeDevice = blocks=>({
-        device: {
-            features: new Set(blocks ? ['texture-compression-bc'] : []),
-            createBuffer: ()=>({ destroy(){} }),
-            createBindGroupLayout: ()=>({}),
-            createCommandEncoder: ()=>({ finish: ()=>({}) }),
-        },
-        queue: { submit(){}, writeBuffer(){} },
-        presentTo: ()=>{},
-    });
-
-    const withBlocks = await graphicsModule.create({ device: makeDevice(true) },
+    // of its art. A factory that reads the configuration and the adapter
+    // answers the same way Direct3D 8's already does.
+    const withBlocks = await graphicsModule.create(
+        { device: makeCompressibleDevice(true), compressedTextures: true },
         hostWith(fakeMemory()));
     const accepted = withBlocks.create('d3d9');
     assert.equal(accepted.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1), D3D_OK,
-        'a device whose adapter samples blocks offers DXT');
+        'asked for, and a device whose adapter samples blocks offers DXT');
     await graphicsModule.dispose();
 
-    const without = await graphicsModule.create({ device: makeDevice(false) },
+    const without = await graphicsModule.create(
+        { device: makeCompressibleDevice(false), compressedTextures: true },
         hostWith(fakeMemory()));
     const refused = without.create('d3d9');
     assert.equal(refused.CheckDeviceFormat(0, D3DRTYPE.TEXTURE, D3DFMT.DXT1),
-        D3DERR_NOTAVAILABLE, 'and one whose adapter does not, does not');
+        D3DERR_NOTAVAILABLE, 'asked for, but the feature bit still gates it');
     await graphicsModule.dispose();
 });
 

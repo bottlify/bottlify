@@ -36,6 +36,7 @@ allows because `win32` is declared.
 | `device` | `{ device, queue, adapter?, canvas?, screen?, presentTo?, onFrame?, onPresented?, onPresentFailed?, dumpDraws?, maxDraws?, skipTexture?, probeTexture?, fog?, mips? }` or absent | absent | The GPU. `device` and `queue` are the WebGPU objects; `presentTo(frame)` receives a finished frame in a build that did not supply a presenter; `canvas`/`screen` and the three frame callbacks are what the run's presenter is made from. Absent, `available()` is false, `backend()` throws on first use, and every API still answers state questions. |
 | `presenter` | a presenter made by the run, or absent | made from `device` | The canvas, its configured format, the pacer and the texture the primary is copied into. It is a service of the run rather than of a machine, so the assembling caller makes one and hands the same object to every machine the run is rebuilt on; the layer attaches its own backend to it and never disposes it. The last frame one process presented stays on the canvas until the next presents. |
 | `device.adapter` | `{ vendor?, architecture?, description? }` | absent | What `GetAdapterIdentifier` and `vkGetPhysicalDeviceProperties` describe. |
+| `compressedTextures` | boolean | `false` | Whether a kept S3TC texture travels to the device as BC blocks instead of decoded `rgba8unorm` (DirectDraw/Direct3D 8/9, OpenGL, Vulkan alike). The device's own `texture-compression-bc` feature still gates it either way: `true` here without the feature is `false`. Off by default because the block-compressed upload path (a staging buffer and a `copyBufferToTexture` per level) is unmeasured on some GPUs; a build turns it on once that is checked on its own hardware. |
 | `screen` | `{ width, height, bitsPerPixel }` | `{ 640, 480, 32 }` | The display a program is told about until `resolution` changes it. |
 | `maxFps` | number | `60` | Frame-delivery cap for the pacer; `0` means whatever the scheduler offers. |
 | `schedule`, `now` | `(tick) => void`, `() => number` | absent | A display-rate scheduler and a clock. Both present enables the pacer; a headless build delivers on a microtask. |
@@ -168,8 +169,12 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
 - **Textures** (`internal/textures.js`). Block-compressed formats (`bc1`, `bc2`, `bc3`) always go
   through a staging buffer plus a buffer-to-texture copy with rows repacked to the copy alignment;
   a direct `writeTexture` is used for uncompressed formats and either path can be forced. Row
-  geometry is counted in blocks, never pixels. A copy issued between frames waits for the next
-  encoder rather than opening a second one.
+  geometry is counted in blocks, never pixels; the copy's extent is rounded up to the block too,
+  because WebGPU's texture-copy validation compares it against the subresource's physical size, not
+  a tail mip's own (possibly sub-block) width and height. A copy issued between frames waits for
+  the next encoder rather than opening a second one. Each staging buffer is destroyed once the
+  frame whose encoder recorded its copy has been submitted (`backend.js`'s `end()`), never reused
+  and never left to leak: it is tracked on that frame, not the caller.
 - **Viewport** (`internal/viewport.js`). Setting a viewport does two things that travel as one
   value: the hardware rectangle and scissor, and the vertex stage's inverse offset and scale, which
   is what puts a pre-transformed vertex on the pixel it names.
@@ -301,8 +306,8 @@ returns synchronously, so the frame is a command list replayed onto one backend 
 pipeline exists, and each recorded draw captures the buffer generation it was issued against.
 Guest memory is the boundary -- bytes are read back at unlock under the lock's flags and nowhere
 else. Every texture format is expanded to `bgra8unorm` on upload in integer arithmetic, except
-`DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the adapter has
-`texture-compression-bc`. The luminance formats expand the same way: `L8` replicates its one byte
+`DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration asks for it and the
+adapter has `texture-compression-bc`. The luminance formats expand the same way: `L8` replicates its one byte
 across the three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with
 its own alpha byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a
 font atlas stored in one of them draws as glyphs, because the grey and the coverage each land in
@@ -418,8 +423,12 @@ alpha. Textures are uploaded from the texels the context decoded, in `rgba8unorm
 `glTexSubImage2D` rewrote (the union of every rectangle since the last upload; a full redefine is
 the whole level), level by level as the context marks them written; a cube map is six layers with
 a cube view. An S3TC texture whose every level still holds the blocks it arrived in uploads them
-as `bc1`/`bc2`/`bc3` blocks instead, on a device with `texture-compression-bc`; one level rewritten
-decoded (`glTexSubImage2D` into it) falls the whole texture back to `rgba8unorm`. A copy from the
+as `bc1`/`bc2`/`bc3` blocks instead, when the configuration asks for it and the device has
+`texture-compression-bc`; one level rewritten decoded (`glTexSubImage2D` into it) falls the whole
+texture back to `rgba8unorm`. A level smaller than one block (a tail mip) still copies the whole
+block its data physically occupies -- WebGPU's texture-copy validation compares a compressed
+copy's extent against the subresource's *physical* size, the logical size rounded up to the block,
+not against the level's own width and height. A copy from the
 framebuffer into a texture level is a render pass into a view of that level, sampling the back
 buffer with the row order GL's bottom-up framebuffer implies -- never into a BC surface, which
 WebGPU refuses a render-attachment usage on.
