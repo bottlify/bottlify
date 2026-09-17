@@ -35,6 +35,9 @@
  */
 
 import { GL } from './constants.js';
+import {
+    compressedBytes as s3tcCompressedBytes, decodeS3tc as decodeS3tcOf,
+} from '../webgpu/internal/s3tc.js';
 
 /**
  * @typedef {Object} UnpackState
@@ -440,10 +443,19 @@ export function conformTexels(texels, baseFormat){
     }
 }
 
-/** @param {number} value @returns {number} a 5-bit field as a byte */
-const from5 = value=>(value << 3) | (value >> 2);
-/** @param {number} value @returns {number} a 6-bit field as a byte */
-const from6 = value=>(value << 2) | (value >> 4);
+/**
+ * The GL S3TC enum, mapped to the format-neutral kind the decoder in
+ * `webgpu/internal/s3tc.js` takes: the block layout is the API-neutral part,
+ * and this table is the whole of what is GL-specific about reading it.
+ *
+ * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
+ */
+const S3TC_KIND = Object.freeze({
+    [GL.COMPRESSED_RGB_S3TC_DXT1_EXT]: 'dxt1',
+    [GL.COMPRESSED_RGBA_S3TC_DXT1_EXT]: 'dxt1',
+    [GL.COMPRESSED_RGBA_S3TC_DXT3_EXT]: 'dxt3',
+    [GL.COMPRESSED_RGBA_S3TC_DXT5_EXT]: 'dxt5',
+});
 
 /**
  * How many bytes an S3TC image of this shape takes: one block per 4x4, with
@@ -455,108 +467,36 @@ const from6 = value=>(value << 2) | (value >> 4);
  * @returns {number} zero for a format that is not S3TC
  */
 export function compressedBytes(format, width, height){
-    const blocks = Math.ceil(width / 4) * Math.ceil(height / 4);
-    switch (format)
-    {
-        case GL.COMPRESSED_RGB_S3TC_DXT1_EXT:
-        case GL.COMPRESSED_RGBA_S3TC_DXT1_EXT:
-            return blocks * 8;
-        case GL.COMPRESSED_RGBA_S3TC_DXT3_EXT:
-        case GL.COMPRESSED_RGBA_S3TC_DXT5_EXT:
-            return blocks * 16;
-        default:
-            return 0;
-    }
+    const kind = S3TC_KIND[format];
+    return kind === undefined ? 0 : s3tcCompressedBytes(kind, width, height);
 }
 
 /**
  * Decodes an S3TC image into RGBA texels.
  *
+ * `GL_RGB_S3TC_DXT1` has no alpha channel at all, unlike its RGBA sibling: the
+ * decoder always answers DXT1's punch-through index as transparent black, so
+ * every texel's alpha is forced back to opaque here for the format that never
+ * had one -- the only palette entry that can differ from opaque already.
+ *
  * @param {Uint8Array} bytes
  * @param {number} format
  * @param {number} width
  * @param {number} height
- * @returns {Uint8Array | null} null when the bytes are too few
+ * @returns {Uint8Array | null} null when the bytes are too few, or not S3TC at all
  */
 export function decodeS3tc(bytes, format, width, height){
-    const needed = compressedBytes(format, width, height);
-    if (needed === 0 || bytes.byteLength < needed)
+    const kind = S3TC_KIND[format];
+    if (kind === undefined)
     {
         return null;
     }
-    const dxt1 = format === GL.COMPRESSED_RGB_S3TC_DXT1_EXT
-        || format === GL.COMPRESSED_RGBA_S3TC_DXT1_EXT;
-    const blockBytes = dxt1 ? 8 : 16;
-    const texels = new Uint8Array(width * height * 4);
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    const blocksAcross = Math.ceil(width / 4);
-    const blocksDown = Math.ceil(height / 4);
-    const alpha = new Array(16).fill(255);
-    for (let by = 0; by < blocksDown; by++)
+    const texels = decodeS3tcOf(bytes, kind, width, height);
+    if (texels && format === GL.COMPRESSED_RGB_S3TC_DXT1_EXT)
     {
-        for (let bx = 0; bx < blocksAcross; bx++)
+        for (let at = 3; at < texels.length; at += 4)
         {
-            const block = (by * blocksAcross + bx) * blockBytes;
-            const colourAt = dxt1 ? block : block + 8;
-            const c0 = view.getUint16(colourAt, true);
-            const c1 = view.getUint16(colourAt + 2, true);
-            const indices = view.getUint32(colourAt + 4, true);
-            const rgb0 = [from5(c0 >> 11), from6((c0 >> 5) & 0x3f), from5(c0 & 0x1f)];
-            const rgb1 = [from5(c1 >> 11), from6((c1 >> 5) & 0x3f), from5(c1 & 0x1f)];
-            // Only DXT1 has the two-colour-plus-transparent mode; DXT3 and
-            // DXT5 always interpolate four colours, whatever the order.
-            const fourColours = !dxt1 || c0 > c1;
-            const palette = [
-                [...rgb0, 255],
-                [...rgb1, 255],
-                fourColours
-                    ? [0, 1, 2].map(k=>Math.round((2 * rgb0[k] + rgb1[k]) / 3)).concat(255)
-                    : [0, 1, 2].map(k=>Math.round((rgb0[k] + rgb1[k]) / 2)).concat(255),
-                fourColours
-                    ? [0, 1, 2].map(k=>Math.round((rgb0[k] + 2 * rgb1[k]) / 3)).concat(255)
-                    : [0, 0, 0, format === GL.COMPRESSED_RGBA_S3TC_DXT1_EXT ? 0 : 255],
-            ];
-            if (format === GL.COMPRESSED_RGBA_S3TC_DXT3_EXT)
-            {
-                for (let i = 0; i < 16; i++)
-                {
-                    const row = view.getUint16(block + (i >> 2) * 2, true);
-                    alpha[i] = ((row >> ((i & 3) * 4)) & 0xf) * 17;
-                }
-            }
-            else if (format === GL.COMPRESSED_RGBA_S3TC_DXT5_EXT)
-            {
-                const a0 = view.getUint8(block);
-                const a1 = view.getUint8(block + 1);
-                const table = a0 > a1
-                    ? [a0, a1,
-                        ...[6, 5, 4, 3, 2, 1].map(k=>Math.round((k * a0 + (7 - k) * a1) / 7))]
-                    : [a0, a1, ...[4, 3, 2, 1].map(k=>Math.round((k * a0 + (5 - k) * a1) / 5)),
-                        0, 255];
-                // 48 bits of 3-bit indices, low bits first.
-                for (let i = 0; i < 16; i++)
-                {
-                    const bit = i * 3;
-                    const at = block + 2 + (bit >> 3);
-                    const pair = view.getUint8(at) | (view.getUint8(at + 1) << 8);
-                    alpha[i] = table[(pair >> (bit & 7)) & 7];
-                }
-            }
-            for (let i = 0; i < 16; i++)
-            {
-                const x = bx * 4 + (i & 3);
-                const y = by * 4 + (i >> 2);
-                if (x >= width || y >= height)
-                {
-                    continue;
-                }
-                const colour = palette[(indices >>> (i * 2)) & 3];
-                const at = (y * width + x) * 4;
-                texels[at] = colour[0];
-                texels[at + 1] = colour[1];
-                texels[at + 2] = colour[2];
-                texels[at + 3] = dxt1 ? colour[3] : alpha[i];
-            }
+            texels[at] = 255;
         }
     }
     return texels;

@@ -48,8 +48,7 @@ import {
     constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
-import { GL } from '../opengl/constants.js';
-import { decodeS3tc } from '../opengl/texture.js';
+import { decodeS3tc } from '../webgpu/internal/s3tc.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -561,20 +560,20 @@ export const COMPRESSED_FORMAT = Object.freeze({
 });
 
 /**
- * The GL S3TC constant whose block layout a DXTn format shares, for
- * `decodeS3tc` (an OpenGL-layer decoder, reused as-is: the block bits DXTn and
- * S3TC name are identical). DXT2/DXT4 decode as their unmultiplied siblings
- * DXT3/DXT5, the same substitution `COMPRESSED_FORMAT` already makes for the
- * kept-compressed path.
+ * The S3TC block kind a DXTn format shares, for the layer's shared decoder
+ * (`webgpu/internal/s3tc.js`): the block bits DXTn and S3TC name are
+ * identical. DXT2/DXT4 decode as their unmultiplied siblings DXT3/DXT5, the
+ * same substitution `COMPRESSED_FORMAT` already makes for the kept-compressed
+ * path.
  *
- * @type {Readonly<Record<number, number>>}
+ * @type {Readonly<Record<number, import('../webgpu/internal/s3tc.js').S3tcKind>>}
  */
 const S3TC_OF = Object.freeze({
-    [D3DFMT.DXT1]: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT,
-    [D3DFMT.DXT2]: GL.COMPRESSED_RGBA_S3TC_DXT3_EXT,
-    [D3DFMT.DXT3]: GL.COMPRESSED_RGBA_S3TC_DXT3_EXT,
-    [D3DFMT.DXT4]: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
-    [D3DFMT.DXT5]: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
+    [D3DFMT.DXT1]: 'dxt1',
+    [D3DFMT.DXT2]: 'dxt3',
+    [D3DFMT.DXT3]: 'dxt3',
+    [D3DFMT.DXT4]: 'dxt5',
+    [D3DFMT.DXT5]: 'dxt5',
 });
 
 /** @type {Readonly<Record<number, string>>} */
@@ -601,11 +600,13 @@ const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
  * which cannot happen here: every caller reads exactly `surfaceBytes` worth,
  * the same block-rounded count `decodeS3tc` requires.
  *
- * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} height
+ * @param {Uint8Array} bytes
+ * @param {import('../webgpu/internal/s3tc.js').S3tcKind} kind
+ * @param {number} width @param {number} height
  * @returns {Uint8Array}
  */
-const decodeCompressed = (bytes, format, width, height)=>{
-    const decoded = decodeS3tc(bytes, format, width, height);
+const decodeCompressed = (bytes, kind, width, height)=>{
+    const decoded = decodeS3tc(bytes, kind, width, height);
     return /** @type {Uint8Array} */ (decoded);
 };
 

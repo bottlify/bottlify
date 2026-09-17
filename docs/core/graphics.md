@@ -309,8 +309,8 @@ else. Every texture format is expanded to `bgra8unorm` on upload in integer arit
 `DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration asks for it, the
 adapter has `texture-compression-bc`, and the surface's base level is a whole number of blocks
 (WebGPU validates a compressed texture's own size against the block width and height; a base level
-narrower or shorter than one block decodes instead, through the same S3TC decoder OpenGL's texture
-layer uses). The luminance formats expand the same way: `L8` replicates its one byte
+narrower or shorter than one block decodes instead, through the layer's shared S3TC decoder). The
+luminance formats expand the same way: `L8` replicates its one byte
 across the three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with
 its own alpha byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a
 font atlas stored in one of them draws as glyphs, because the grey and the coverage each land in
