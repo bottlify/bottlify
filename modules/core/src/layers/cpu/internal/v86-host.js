@@ -119,7 +119,7 @@ const X87_SITE_NAMES = [
     'kept', 'wide', 'arith', 'fst.sti', 'fxch', 'fcmovcc',
     'fild.m16', 'fild.m32', 'fild.m64', 'fld.m32', 'fld.m64', 'fld.m80',
     'push.other', 'frndint', 'fscale', 'fprem', 'fsqrt', 'fchs.fabs',
-    'transcendental', 'frstor', 'fxrstor', 'mmx', '', '',
+    'transcendental', 'frstor', 'fxrstor', 'mmx', 'arm.binop.int', '',
     'arm.binop.m32', 'arm.binop.m64', 'arm.binop.sti', 'arm.fld.sti',
     'arm.fst.m32', 'arm.fst.m64', 'arm.fxch', 'arm.fchs.fabs', 'arm.fsqrt',
     'arm.fst.sti', 'arm.fcom.sti', 'arm.fcom.mem', 'arm.fist', 'interp.inline',
