@@ -586,3 +586,26 @@ test('with a shared table, reset() restarts playedBytes() at zero, the way waveO
         assert.equal(track.playedBytes(), 0,
             'what played before the reset is not owed to whatever comes after it');
     });
+
+test('with a shared table, a short write drops what does not fit rather than queuing it '
+    + 'for later', ()=>{
+    // Unlike the engine ring's write(), whose only caller re-offers exactly
+    // what a short write left over, this slot's only caller (`module.js`'s
+    // `feedBuffers`) does not: a range drainPlayed() hands over is already in
+    // the past by the time it is offered, so there is nothing later to offer
+    // it again to. SLOT_BYTES is a second, harder cap behind the 200 ms
+    // backlog policy, and what does not fit past it is dropped, not queued.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open(DIRECT);
+
+    const almostFull = pcm16(new Array((SLOT_BYTES - 8) / 2).fill(1000));
+    const firstTaken = track.write(almostFull);
+    assert.ok(firstTaken > 0, 'the assumption under this test');
+
+    // Only 8 bytes of room are left; this offers 20.
+    track.write(pcm16([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]));
+
+    const { header } = slotView(mixer, track.slot);
+    assert.equal(Atomics.load(header, WRITTEN), almostFull.length + 8,
+        'only the room available fit; the remainder was dropped, not queued for a later write');
+});

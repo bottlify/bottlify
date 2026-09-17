@@ -252,6 +252,12 @@ throws, and the open fails with a message `ASI_error` returns.
   word on quality.
 - **One buffer's backlog past 200 ms is dropped**, not delayed: the program's current sound is the
   one meant to be heard.
+- **A slot's `SLOT_BYTES` (65,536 bytes) is a second, harder cap behind the 200 ms policy, on the
+  shared backend.** `feedBuffers` (`module.js`) does not re-offer what a short `write()` left over
+  the way the engine ring's own caller does; a range is already in DirectSound's past by the time it
+  is drained, so there is nothing later to offer it to. Reached only when a turn's backlog is
+  already near the 200 ms policy's own limit, and bounded to what that policy would have dropped a
+  turn later regardless.
 - **A page without shared memory mixes on the engine thread**, in the one float ring
   `output/ring.js` still keeps: nothing else can read an ordinary `ArrayBuffer`, so this is not a
   choice this layer makes but the ceiling a page without `SharedArrayBuffer` has.

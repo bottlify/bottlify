@@ -738,8 +738,13 @@ function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = 
 
             /**
              * Copies the guest's own bytes into the slot's ring, as many as
-             * fit. A short write is not an error, the same contract the ring
-             * always had: the caller offers the rest again next turn.
+             * fit. A short write is not an error -- but unlike the engine
+             * ring's `write()`, whose caller re-offers exactly what a short
+             * write left over, this slot's only caller (`module.js`'s
+             * `feedBuffers`) does not: what does not fit here is dropped, not
+             * queued. The slot's `SLOT_BYTES` (65,536) is a second, harder cap
+             * behind the 200 ms backlog policy, reached only when a turn's
+             * backlog is already near that policy's own limit.
              *
              * Room is sized against `READ` alone, never `DROP_TO`: `DROP_TO`
              * is only the reader's next instruction and takes effect a whole
