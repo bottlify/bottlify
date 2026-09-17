@@ -110,7 +110,11 @@ export function restoreContext(cpu, context){
     cpu.fpu_st.set(context.fpuSt);
     cpu.fpu_stack_ptr[0] = context.fpuStackPtr;
     cpu.fpu_stack_empty[0] = context.fpuStackEmpty;
-    cpu.fpu_control_word[0] = context.fpuControlWord;
+    // Not a plain field write: the emulator's fast arithmetic path reads its own
+    // rounding-precision byte, derived from the control word by this export, not
+    // the control word itself -- a direct write here would leave that byte at
+    // whatever the previous thread's own fldcw last set it to.
+    cpu.wm.exports.set_control_word(context.fpuControlWord);
     cpu.fpu_status_word[0] = context.fpuStatusWord;
     cpu.fpu_opcode[0] = context.fpuOpcode;
     cpu.fpu_ip[0] = context.fpuIp;

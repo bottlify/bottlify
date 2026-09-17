@@ -162,3 +162,69 @@ test('pending arithmetic flags survive a switch', async()=>{
     assert.equal(restored.lastResult, saved.lastResult);
     assert.equal(restored.lastOpSize, saved.lastOpSize);
 });
+
+test('a restored control word governs arithmetic before the thread\'s own fldcw', async()=>{
+    const host = await boot();
+    const cpu = host.cpu();
+
+    const CW_ADDR = 0x9000;      // scratch: two bytes, the control word fldcw reads
+    const X_ADDR = 0x9020;       // scratch: eight bytes, the operand faddp reads
+    const RESULT_ADDR = 0x9030;  // scratch: eight bytes, the operand fstp writes
+
+    const PC24 = 0x007f; // exceptions masked, RC=nearest, PC=00 (single, 24-bit)
+    const PC53 = 0x027f; // same, PC=10 (double, 53-bit)
+
+    // 2^-30 as a double: exact at 53 bits, and far enough below 1.0's 24-bit ULP
+    // (2^-23) that adding it at PC=24 rounds clean back to 1.0.
+    const X = Buffer.alloc(8);
+    X.writeDoubleLE(2 ** -30, 0);
+    const EXACT_53 = Buffer.alloc(8);
+    EXACT_53.writeDoubleLE(1 + 2 ** -30, 0);
+    const EXACT_24 = Buffer.alloc(8);
+    EXACT_24.writeDoubleLE(1, 0);
+
+    /** @param {number} word */
+    const writeControlWord = word=>host.writePhysical(
+        CW_ADDR, new Uint8Array([word & 0xff, (word >>> 8) & 0xff]));
+
+    // Thread A: PC=24, then leave 1.0 on the x87 stack.
+    writeControlWord(PC24);
+    await run(host, [
+        0xd9, 0x2d, ...u32(CW_ADDR), // fldcw [CW_ADDR]
+        0xd9, 0xe8,                  // fld1
+        0xb8, ...u32(0xa24),         // mov eax, marker
+        ...TRAP_AND_HALT,
+    ]);
+    const threadA = captureContext(cpu);
+    assert.equal(threadA.fpuControlWord, PC24);
+
+    // Thread B: PC=53, for real, through the guest's own fldcw -- this is what
+    // leaves the emulator's fast arithmetic path primed for 53-bit results.
+    writeControlWord(PC53);
+    await run(host, [
+        0xd9, 0x2d, ...u32(CW_ADDR), // fldcw [CW_ADDR]
+        0xb8, ...u32(0xb53),         // mov eax, marker
+        ...TRAP_AND_HALT,
+    ], GUEST_CODE + 0x200);
+
+    // Switch back to thread A. No guest instruction runs between this and the
+    // arithmetic below -- so whatever the switch leaves the fast path primed
+    // with is exactly what the addition below will use.
+    restoreContext(cpu, threadA);
+
+    host.writePhysical(X_ADDR, X);
+    await run(host, [
+        0xdd, 0x05, ...u32(X_ADDR),      // fld qword [X_ADDR]
+        0xde, 0xc1,                      // faddp st(1), st(0)  -> st(0) = 1.0 + 2^-30
+        0xdd, 0x1d, ...u32(RESULT_ADDR), // fstp qword [RESULT_ADDR]
+        0xb8, ...u32(0xc001),            // mov eax, marker
+        ...TRAP_AND_HALT,
+    ], GUEST_CODE + 0x400);
+
+    const result = Buffer.from(host.readPhysical(RESULT_ADDR, 8));
+    assert.notEqual(result.toString('hex'), EXACT_53.toString('hex'),
+        'not ok: the addition ran at the leftover PC=53 from thread B, ' +
+        'not thread A\'s restored PC=24');
+    assert.equal(result.toString('hex'), EXACT_24.toString('hex'),
+        'thread A\'s restored control word rounded 1.0 + 2^-30 back to exactly 1.0');
+});

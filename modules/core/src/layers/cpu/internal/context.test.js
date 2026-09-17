@@ -16,7 +16,8 @@ import {
  * one. The emulator itself is exercised separately, in the integration tests.
  */
 function fakeCpu(){
-    return {
+    /** @type {any} */
+    const cpu = {
         reg32: new Int32Array(8),
         instruction_pointer: new Int32Array(1),
         previous_ip: new Int32Array(1),
@@ -44,6 +45,10 @@ function fakeCpu(){
         mxcsr: new Int32Array(1),
         in_hlt: new Uint8Array(1),
     };
+    // restoreContext writes the control word through this export, not the
+    // typed array directly -- see context.js for why.
+    cpu.wm = { exports: { set_control_word: (/** @type {number} */ word)=>{ cpu.fpu_control_word[0] = word; } } };
+    return cpu;
 }
 
 /**
