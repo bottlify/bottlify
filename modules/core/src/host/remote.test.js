@@ -63,9 +63,9 @@ after(()=>{
  * `ArrayBuffer`, which is what an origin without cross-origin isolation gets
  * and what puts the page back on the request path.
  *
- * @param {{ capacity?: number, shared?: boolean }} [how]
+ * @param {{ capacity?: number, shared?: boolean, audioShared?: boolean }} [how]
  */
-function fakeApp({ capacity = 4096, shared = true } = {}){
+function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
     /** @type {Map<string, ((payload: any) => void)[]>} */
     const listeners = new Map();
     const journal = createJournal({ now: ()=>0, capacity, shared });
@@ -132,7 +132,9 @@ function fakeApp({ capacity = 4096, shared = true } = {}){
             },
         },
         audio: {
-            memory: ()=>({ control: new ArrayBuffer(16), samples: new ArrayBuffer(64) }),
+            memory: ()=>(audioShared
+                ? { table: new ArrayBuffer(64) }
+                : { control: new ArrayBuffer(16), samples: new ArrayBuffer(64) }),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
         /** How many times the log's memory has been asked for. */
@@ -273,11 +275,11 @@ function openTestKeeper(){
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
- *     journal?: { capacity?: number, shared?: boolean } }} [deps]
+ *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean }} [deps]
  */
-async function connect(options = {}, { journal, ...deps } = {}){
+async function connect(options = {}, { journal, audioShared, ...deps } = {}){
     const channel = new MessageChannel();
-    const app = fakeApp(journal);
+    const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
     const { gpu, canvas, screen } = fakeGpu();
     /** @type {any} */
@@ -352,6 +354,23 @@ test('the sound output\'s storage crosses once, at start', async()=>{
     assert.equal(app.attached.length, 1);
     assert.deepEqual(app.attached[0].options, { listen: false });
     await remote.dispose();
+});
+
+test('the sound output\'s shape follows the engine\'s own backend, not a fixed contract', async()=>{
+    // The whole surface a page has for its worklet is `memory()`/`format()`;
+    // there is no `ring()` here for a caller to fall back to (see host.md's
+    // `audio.memory()` row) -- a caller written against the engine backend's
+    // `{ control, samples }` shape breaks outright on a page that turns out
+    // to have shared memory, rather than reading something merely wrong.
+    const shared = await connect({}, { audioShared: true });
+    assert.deepEqual(Object.keys(shared.remote.audio.memory()), ['table']);
+    assert.equal(typeof (/** @type {any} */ (shared.remote.audio)).ring, 'undefined',
+        'no ring() to fall back to -- a stale caller must be updated, not silently degraded');
+    await shared.remote.dispose();
+
+    const unshared = await connect({}, { audioShared: false });
+    assert.deepEqual(Object.keys(unshared.remote.audio.memory()).sort(), ['control', 'samples']);
+    await unshared.remote.dispose();
 });
 
 test('an input event arrives at the router as it left the page', async()=>{

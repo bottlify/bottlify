@@ -193,7 +193,7 @@ page relaying the engine's `log.drain` answers (4000 records a look, every 200 m
 views — frames, profile, counters, threads, guest attribution — are answered by the engine instead;
 `table` and `word` and `memory` answer nothing. `log.reading()` says which it is, and the launcher's
 settings panel prints it.
-| `audio.ring()` | `{ memory }` | The ring's shared buffers, handed over at start. Throws `this run has no sound ring` without a mixer. Synchronous. |
+| `audio.memory()` | `{ table }` with shared memory, `{ control, samples }` without | What crossed at `start`, for an `AudioWorkletNode`'s `processorOptions` (§1's snippet). Throws `this run has no sound output` without a mixer. Synchronous. There is no `ring()`/`table()` here: those are `src/app.js`'s own direct surface, reachable only by a caller that holds the engine itself rather than `createApp`'s controller (a test, `replace.itest.js`) -- `createApp` always crosses the port protocol, worker or not, and `memory()` is the only shape it hands over either way. |
 | `audio.format()` | `{ sampleRate, channels }` | Synchronous. |
 | `input.attach(viewport)` | `DomInput` | Captures keyboard and mouse on `viewport` and posts them. The canvas's own `width`/`height` are stale once transferred, so positions are scaled by the last `frame` event. |
 | `input.detach()`, `input.send(event)`, `input.poll()` | synchronous | |
