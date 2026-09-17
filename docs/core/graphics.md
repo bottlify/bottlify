@@ -306,8 +306,11 @@ returns synchronously, so the frame is a command list replayed onto one backend 
 pipeline exists, and each recorded draw captures the buffer generation it was issued against.
 Guest memory is the boundary -- bytes are read back at unlock under the lock's flags and nowhere
 else. Every texture format is expanded to `bgra8unorm` on upload in integer arithmetic, except
-`DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration asks for it and the
-adapter has `texture-compression-bc`. The luminance formats expand the same way: `L8` replicates its one byte
+`DXT1`-`DXT5`, which are uploaded as `bc1`-`bc3` blocks when the configuration asks for it, the
+adapter has `texture-compression-bc`, and the surface's base level is a whole number of blocks
+(WebGPU validates a compressed texture's own size against the block width and height; a base level
+narrower or shorter than one block decodes instead, through the same S3TC decoder OpenGL's texture
+layer uses). The luminance formats expand the same way: `L8` replicates its one byte
 across the three colour channels and reads opaque, `A8L8` pairs a replicated luminance byte with
 its own alpha byte, and `A4L4` widens each 4-bit nibble to 8 bits before doing the same -- so a
 font atlas stored in one of them draws as glyphs, because the grey and the coverage each land in

@@ -73,7 +73,7 @@ const FVF_TEXTURED_QUAD = FVF.XYZRHW | FVF.DIFFUSE | (1 << FVF.TEXCOUNT_SHIFT);
  *           dumpDraws?: boolean, maxDraws?: number, fog?: boolean, mips?: boolean,
  *           probeTexture?: string,
  *           divergence?: (api: string, detail: string)=>void,
- *           skipTexture?: string }} [options]
+ *           skipTexture?: string, compressedTextures?: boolean }} [options]
  */
 function harness(options = {}){
     const gpu = createFakeDevice();
@@ -109,6 +109,7 @@ function harness(options = {}){
         probeTexture: options.probeTexture,
         fog: options.fog,
         mips: options.mips,
+        compressedTextures: options.compressedTextures,
     });
     /** @type {{ device?: any }} */
     const out = {};
@@ -1418,6 +1419,48 @@ test('recorded: a textured draw without a sampler factory fails loudly, not whit
         /sampler factory/);
     assert.throws(()=>createDirect3D8({ backend }), /readMemory/);
 });
+
+test('recorded: a DXT1 base narrower than one block decodes, a whole-block one takes the BC path',
+    async()=>{
+        const h = harness({ compressedTextures: true });
+        const { device, gpu } = h;
+        // Both a 2-wide and a 4-wide base round up to one column of blocks,
+        // so both need the same 16 rows-of-blocks worth of compressed bytes.
+        const block = new Uint8Array(128).fill(7);
+        const narrow = textureFrom(h, 2, 64, D3DFMT.DXT1, block);
+        assert.equal(device.SetTexture(0, narrow), D3D_OK);
+        selectTexture(device);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const narrowSurface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture');
+        assert.equal(narrowSurface.descriptor.format, 'bgra8unorm',
+            'a 2-wide base is narrower than one block, so WebGPU refuses it as compressed');
+        assert.equal(gpu.of('copyBufferToTexture').length, 0, 'no staged, undecoded copy happened');
+        assert.ok(gpu.of('writeTexture').some(w=>w.destination.texture === narrowSurface.texture),
+            'the level travelled decoded instead');
+
+        const wide = textureFrom(h, 4, 64, D3DFMT.DXT1, block);
+        assert.equal(device.SetTexture(0, wide), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF_TEXTURED_QUAD), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 2,
+            quad([0, 0, 2, 2], argb(255, 255, 255), true), 28), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const wideSurface = gpu.of('createTexture').find(c=>c.descriptor.label === 'texture'
+            && c.texture !== narrowSurface.texture);
+        assert.equal(wideSurface.descriptor.format, 'bc1-rgba-unorm',
+            'a 4-wide base is a whole block: it still takes the BC path');
+        assert.ok(
+            gpu.of('copyBufferToTexture').some(c=>c.destination.texture === wideSurface.texture),
+            'the level travelled through staging, undecoded');
+    });
 
 // --- transform and lighting ---
 

@@ -48,6 +48,8 @@ import {
     constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
 import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
+import { GL } from '../opengl/constants.js';
+import { decodeS3tc } from '../opengl/texture.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -558,6 +560,23 @@ export const COMPRESSED_FORMAT = Object.freeze({
     [D3DFMT.DXT5]: 'bc3-rgba-unorm',
 });
 
+/**
+ * The GL S3TC constant whose block layout a DXTn format shares, for
+ * `decodeS3tc` (an OpenGL-layer decoder, reused as-is: the block bits DXTn and
+ * S3TC name are identical). DXT2/DXT4 decode as their unmultiplied siblings
+ * DXT3/DXT5, the same substitution `COMPRESSED_FORMAT` already makes for the
+ * kept-compressed path.
+ *
+ * @type {Readonly<Record<number, number>>}
+ */
+const S3TC_OF = Object.freeze({
+    [D3DFMT.DXT1]: GL.COMPRESSED_RGBA_S3TC_DXT1_EXT,
+    [D3DFMT.DXT2]: GL.COMPRESSED_RGBA_S3TC_DXT3_EXT,
+    [D3DFMT.DXT3]: GL.COMPRESSED_RGBA_S3TC_DXT3_EXT,
+    [D3DFMT.DXT4]: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
+    [D3DFMT.DXT5]: GL.COMPRESSED_RGBA_S3TC_DXT5_EXT,
+});
+
 /** @type {Readonly<Record<number, string>>} */
 const DEPTH_FORMAT = Object.freeze({
     [D3DFMT.D16]: 'depth16unorm',
@@ -567,10 +586,35 @@ const DEPTH_FORMAT = Object.freeze({
 });
 
 /**
+ * Whether a compressed surface of this base size can be created as a BC
+ * texture. WebGPU validates a compressed texture's own (base level) size
+ * against the block size -- unlike a copy's tail mip, the base level itself
+ * does not round up -- so a base narrower or shorter than one block (legal in
+ * Direct3D, whose data is one block wide) must decode instead.
+ *
+ * @param {number} width @param {number} height
+ */
+const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
+
+/**
+ * `decodeS3tc` answers null only when the bytes are too few for the shape,
+ * which cannot happen here: every caller reads exactly `surfaceBytes` worth,
+ * the same block-rounded count `decodeS3tc` requires.
+ *
+ * @param {Uint8Array} bytes @param {number} format @param {number} width @param {number} height
+ * @returns {Uint8Array}
+ */
+const decodeCompressed = (bytes, format, width, height)=>{
+    const decoded = decodeS3tc(bytes, format, width, height);
+    return /** @type {Uint8Array} */ (decoded);
+};
+
+/**
  * @param {number} format  D3DFMT
+ * @param {number} width @param {number} height  the surface's base level
  * @returns {string} the WebGPU format a surface of it is created as
  */
-export function gpuFormatOf(format){
+export function gpuFormatOf(format, width, height){
     const info = FORMAT_INFO[format];
     if (!info)
     {
@@ -578,7 +622,8 @@ export function gpuFormatOf(format){
     }
     if (!info.depth)
     {
-        return COMPRESSED_FORMAT[format] ?? COLOR_FORMAT;
+        const compressed = COMPRESSED_FORMAT[format];
+        return compressed && blockAligned(width, height) ? compressed : COLOR_FORMAT;
     }
     const depth = DEPTH_FORMAT[format];
     if (!depth)
@@ -2534,7 +2579,7 @@ export function createRenderer(options){
             made = backend.createSurface({
                 width: desc.Width,
                 height: desc.Height,
-                format: gpuFormatOf(desc.Format),
+                format: gpuFormatOf(desc.Format, desc.Width, desc.Height),
                 label: depth ? 'depth' : 'target',
                 // A colour target is copied into as well as out of: a program
                 // that blits a decoded frame onto its target, or locks the
@@ -2552,14 +2597,17 @@ export function createRenderer(options){
             const desc = describe(surface);
             const bytes = readMemory(surface.base,
                 surfaceBytes(desc.Format, desc.Width, desc.Height));
+            const keepsBlocks = isCompressed(desc.Format) && blockAligned(desc.Width, desc.Height);
             uploadTexels(made, {
                 format: made.format,
                 mipLevel: 0,
                 width: desc.Width,
                 height: desc.Height,
-                texels: isCompressed(desc.Format)
+                texels: keepsBlocks
                     ? bytes
-                    : expandTexels(desc.Format, bytes, desc.Width * desc.Height),
+                    : isCompressed(desc.Format)
+                        ? decodeCompressed(bytes, S3TC_OF[desc.Format], desc.Width, desc.Height)
+                        : expandTexels(desc.Format, bytes, desc.Width * desc.Height),
             }, true);
         }
         return made;
@@ -2779,7 +2827,7 @@ export function createRenderer(options){
             record.gpu = backend.createSurface({
                 width: record.width,
                 height: record.height,
-                format: gpuFormatOf(record.format),
+                format: gpuFormatOf(record.format, record.width, record.height),
                 mipLevelCount: record.levels,
                 label: 'texture',
                 // Copied out of as well as into: a dumping run reads a
@@ -2795,7 +2843,13 @@ export function createRenderer(options){
         {
             frameStats.uploads++;
             record.uploads = (record.uploads || 0) + 1;
-            const gpuFormat = gpuFormatOf(record.format);
+            const gpuFormat = gpuFormatOf(record.format, record.width, record.height);
+            // The base level's size, not each mip's, decides the whole
+            // texture's path: WebGPU already refused (and gpuFormatOf already
+            // fell back) on the base alone, so every level -- mips round down
+            // further still -- follows the same choice.
+            const keepsBlocks = isCompressed(record.format)
+                && blockAligned(record.width, record.height);
             for (const level of [...record.dirtyLevels].sort((left, right)=>left - right))
             {
                 const width = levelExtent(record.width, level);
@@ -2812,11 +2866,17 @@ export function createRenderer(options){
                 held.surface.release();
                 const bytes = readMemory(held.surface.base,
                     surfaceBytes(record.format, width, height));
-                // Compressed blocks go as they lie; everything else is widened
-                // to the one uncompressed format the backend samples.
-                const texels = isCompressed(record.format)
+                // Compressed blocks go as they lie when the surface stayed a
+                // BC texture; a compressed base too narrow or short for a
+                // whole block has none of that (there is no decoder for a
+                // format expandTexels does not know), so it is decompressed
+                // instead of expanded; everything else is widened to the one
+                // uncompressed format the backend samples.
+                const texels = keepsBlocks
                     ? bytes
-                    : expandTexels(record.format, bytes, width * height);
+                    : isCompressed(record.format)
+                        ? decodeCompressed(bytes, S3TC_OF[record.format], width, height)
+                        : expandTexels(record.format, bytes, width * height);
                 uploadTexels(record.gpu,
                     { format: gpuFormat, mipLevel: level, width, height, texels },
                     record.ordered);
@@ -2824,11 +2884,11 @@ export function createRenderer(options){
                 // ones hold: a surface sampled far away comes out of those,
                 // and a level the program never wrote is sampled all the same.
                 (record.written ??= new Set()).add(level);
-                if (width * height <= 16 && !isCompressed(record.format))
+                if (width * height <= 16 && !keepsBlocks)
                 {
                     (record.tails ??= {})[level] = [...texels];
                 }
-                if (level === 0 && dumpDraws && !isCompressed(record.format))
+                if (level === 0 && dumpDraws && !keepsBlocks)
                 {
                     record.census = censusOf(texels);
                     if (uploaded.has(record.id) || uploaded.size < TEXTURE_DUMP_LIMIT)
