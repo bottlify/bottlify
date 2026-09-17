@@ -636,6 +636,8 @@ export const win32Module = {
                     divergence: config?.divergence,
                     /** @param {number} address */
                     regionAt: address=>memory.find(address),
+                    /** @param {number} address */
+                    nextRegionAfter: address=>memory.nextRegionAfter(address) ?? null,
                 }),
                 ...createProcessFunctions({
                     readMemory,

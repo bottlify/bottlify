@@ -78,6 +78,13 @@ const MEM_FREE = 0x10000;
 const MEM_PRIVATE = 0x20000;
 
 /**
+ * `lpMaximumApplicationAddress`: where 32-bit user address space ends. A free
+ * gap that nothing maps above runs to here, not to `0xffffffff` -- the top
+ * 64 KiB before the 2 GiB boundary is reserved and never handed out.
+ */
+const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
+
+/**
  * MEMORY_BASIC_INFORMATION, as the 32-bit guest compiled it. Seven fields, all
  * four bytes, and the order matters more than the size: a caller reads State to
  * decide whether the address is usable at all.
@@ -477,6 +484,11 @@ export function createHeapAllocator({ base, size }){
  * @property {(address: number) => { base: number, size: number } | null} [regionAt]
  *           The memory layer's region map, when the assembling caller wired one.
  *           Without it VirtualQuery reports every address as free.
+ * @property {(address: number) => { base: number, size: number } | null} [nextRegionAfter]
+ *           The mapped region with the lowest base above an address, when the
+ *           assembling caller wired one. VirtualQuery uses it to coalesce a
+ *           free gap into one answer instead of one page; without it a free
+ *           gap is reported as running to the top of user address space.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a refused allocation is reported: a program that is told it
  *           has run out of memory says so in its own words and exits, and
@@ -1208,9 +1220,13 @@ export function createHeapFunctions(host){
          *
          * Answered from the memory layer's own region map when the assembling
          * caller supplied one, so that what is reported mapped is what actually
-         * is. A build without it answers that the address is free, which is the
-         * honest form of not knowing -- inventing a committed region would have
-         * a caller write into memory nothing backs.
+         * is. An address outside any region is free space, and the whole free
+         * run is reported as one answer -- from the query address's own page
+         * down to the next mapped region's base (or the top of user address
+         * space with nothing above) -- because a guest that walks its address
+         * space with `address += RegionSize` (a crash reporter, a heap
+         * manager) would otherwise step one page at a time across every free
+         * gigabyte.
          */
         VirtualQuery: {
             argBytes: 12,
@@ -1241,7 +1257,11 @@ export function createHeapFunctions(host){
                 }
                 else
                 {
-                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, PAGE_SIZE, true);
+                    const base = (at & ~(PAGE_SIZE - 1)) >>> 0;
+                    const next = host.nextRegionAfter ? host.nextRegionAfter(at) : null;
+                    const limit = next ? next.base : USER_ADDRESS_SPACE_TOP;
+                    view.setUint32(MEMORY_BASIC_INFORMATION.BaseAddress, base, true);
+                    view.setUint32(MEMORY_BASIC_INFORMATION.RegionSize, limit - base, true);
                     view.setUint32(MEMORY_BASIC_INFORMATION.State, MEM_FREE, true);
                     view.setUint32(MEMORY_BASIC_INFORMATION.Protect, PAGE_NOACCESS, true);
                 }

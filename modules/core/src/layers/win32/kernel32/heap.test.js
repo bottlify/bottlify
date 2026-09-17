@@ -16,6 +16,15 @@ const MEM_DECOMMIT = 0x4000;
 const MEM_RELEASE = 0x8000;
 const INVALID_SIZE = 0xffffffff;
 const PAGE_SIZE = 4096;
+const MEM_FREE = 0x10000;
+const PAGE_NOACCESS = 0x01;
+/** `lpMaximumApplicationAddress`: where a free gap with nothing above it ends. */
+const USER_ADDRESS_SPACE_TOP = 0x7fff0000;
+/** Offsets into MEMORY_BASIC_INFORMATION, matching heap.js's own layout. */
+const MBI = {
+    BaseAddress: 0, AllocationBase: 4, AllocationProtect: 8, RegionSize: 12,
+    State: 16, Protect: 20, Type: 24, SIZE: 28,
+};
 /** Where Windows may begin a reservation, and so where this one may too. */
 const GRANULARITY = 64 * 1024;
 const GMEM_MOVEABLE = 0x0002;
@@ -81,6 +90,36 @@ function fakeHost(arena = ARENA){
 function setup(arena = ARENA){
     const host = fakeHost(arena);
     return { host, fns: createHeapFunctions(host) };
+}
+
+/**
+ * A host whose `regionAt`/`nextRegionAfter` answer from a fixed list of
+ * mapped spans -- the shape VirtualQuery needs from the memory layer,
+ * without pulling that layer in.
+ *
+ * @param {{ base: number, size: number }[]} regions
+ */
+function regionHost(regions){
+    return {
+        ...fakeHost(),
+        /** @param {number} address */
+        regionAt: address=>
+            regions.find(region=>address >= region.base && address < region.base + region.size)
+                ?? null,
+        /** @param {number} address */
+        nextRegionAfter: address=>{
+            /** @type {{ base: number, size: number } | null} */
+            let closest = null;
+            for (const region of regions)
+            {
+                if (region.base > address && (!closest || region.base < closest.base))
+                {
+                    closest = region;
+                }
+            }
+            return closest;
+        },
+    };
 }
 
 /** @param {Uint8Array} bytes @param {number} value */
@@ -741,3 +780,70 @@ test('FlushInstructionCache succeeds, because a program that has written code ch
     assert.equal(fns.FlushInstructionCache.handler(), 1);
     assert.equal(fns.FlushInstructionCache.argBytes, 12);
 });
+
+test('VirtualQuery on a free gap answers the whole run up to the next region, page-aligned', ()=>{
+    // A crash reporter or heap manager walking free space with
+    // `addr += RegionSize` must see the whole gap, not one page of it.
+    const host = regionHost([
+        { base: 0x10000, size: 0x1000 },
+        { base: 0x20000, size: 0x1000 },
+    ]);
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+
+    assert.equal(fns.VirtualQuery.handler([0x11234, buffer, MBI.SIZE]), MBI.SIZE);
+
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x11000,
+        'BaseAddress rounded down to the page the query address is in');
+    assert.equal(view.getUint32(buffer + MBI.AllocationBase, true), 0);
+    assert.equal(view.getUint32(buffer + MBI.AllocationProtect, true), 0);
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), 0x20000 - 0x11000,
+        'the gap coalesced into one region, up to the next mapped base');
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_FREE);
+    assert.equal(view.getUint32(buffer + MBI.Protect, true), PAGE_NOACCESS);
+    assert.equal(view.getUint32(buffer + MBI.Type, true), 0);
+});
+
+test('VirtualQuery above the last region answers up to the top of user address space', ()=>{
+    const host = regionHost([{ base: 0x10000, size: 0x1000 }]);
+    const fns = createHeapFunctions(host);
+    const buffer = host.arena.base;
+
+    assert.equal(fns.VirtualQuery.handler([0x50000, buffer, MBI.SIZE]), MBI.SIZE);
+
+    const view = new DataView(host.bytes.buffer);
+    assert.equal(view.getUint32(buffer + MBI.BaseAddress, true), 0x50000);
+    assert.equal(view.getUint32(buffer + MBI.RegionSize, true), USER_ADDRESS_SPACE_TOP - 0x50000);
+    assert.equal(view.getUint32(buffer + MBI.State, true), MEM_FREE);
+});
+
+test('a free-space walker crosses three regions in a bounded number of queries, not one per page',
+    ()=>{
+        // The §13.8 regression: `for (a = 0; a < top; a += mbi.RegionSize)`
+        // must step over each gap once, not 4 KiB at a time across it.
+        const regions = [
+            { base: 0x2000, size: 0x1000 },
+            { base: 0x8000, size: 0x2000 },
+            { base: 0x20000, size: 0x1000 },
+        ];
+        const host = regionHost(regions);
+        const fns = createHeapFunctions(host);
+        const buffer = host.arena.base;
+        const view = new DataView(host.bytes.buffer);
+        const top = 0x30000;
+
+        let address = 0;
+        let calls = 0;
+        while (address < top)
+        {
+            fns.VirtualQuery.handler([address, buffer, MBI.SIZE]);
+            const regionSize = view.getUint32(buffer + MBI.RegionSize, true);
+            assert.ok(regionSize > 0, 'every answer advances the walk');
+            address += regionSize;
+            calls++;
+            assert.ok(calls <= 2 * regions.length + 1,
+                `not top / PAGE_SIZE (${top / PAGE_SIZE}) calls`);
+        }
+        assert.equal(calls, 2 * regions.length + 1);
+    });
