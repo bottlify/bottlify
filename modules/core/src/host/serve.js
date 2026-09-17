@@ -504,7 +504,7 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             let audio = null;
             try
             {
-                audio = { memory: app.audio.ring().memory, ...app.audio.format() };
+                audio = { memory: app.audio.memory(), ...app.audio.format() };
             }
             catch {
                 // No mixer in this build: a run without sound is a run.

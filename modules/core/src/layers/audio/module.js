@@ -98,6 +98,12 @@ export const audioModule = {
             // already handed whoever reads its far end. Absent on the first
             // process, which makes its own.
             memory: config?.memory,
+            // Told from outside because only the assembling caller knows
+            // whether shared memory reaches a worklet on the other end: a
+            // reader without it -- the test-page harness, any page that is
+            // not cross-origin isolated -- can only read on this thread, and
+            // the engine mixer is the only backend that thread can drive.
+            shared: config?.shared ?? false,
         });
 
         const dsound = createDirectSound({
@@ -256,7 +262,7 @@ export const audioModule = {
                 // the machine plays a fixed lateness for ever and never catches
                 // up -- and the sound a program is making *now* is the one it
                 // meant to be heard.
-                if (track.pending() > mixer.capacityFrames)
+                if (track.pending() > track.capacityFrames)
                 {
                     track.reset();
                     behind++;
@@ -266,7 +272,13 @@ export const audioModule = {
                 {
                     fedBytes += range.bytes;
                     fedRanges++;
-                    track.write(memory.readBytes(buffer.address + range.from, range.bytes));
+                    // A window, not a copy: the shared backend copies these
+                    // bytes into its own ring on `write` regardless, and the
+                    // engine backend's `convert` only ever reads them
+                    // synchronously within this call, so a second copy here
+                    // first -- what `readBytes` used to hand over -- bought
+                    // nothing.
+                    track.write(memory.window(buffer.address + range.from, range.bytes));
                 }
             }
         };

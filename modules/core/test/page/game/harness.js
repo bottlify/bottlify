@@ -24,6 +24,10 @@
  */
 
 import { createApp } from '../../../src/app.js';
+import {
+    SLOTS, GLOBAL_HEADER_INT32, SLOT_HEADER_INT32, SLOT_BYTES,
+    slotHeaderOffset, slotPcmOffset, createSeam, mixBlock,
+} from '../../../src/layers/audio/output/mix.js';
 
 /** How much of each unbounded collection survives the trip back out. */
 const LIMITS = {
@@ -508,20 +512,50 @@ function show(canvas, image){
         new ImageData(new Uint8ClampedArray(image.pixels), image.width, image.height), 0, 0);
 }
 
+/** Frames of slack a drain may fall behind by before it starts dropping the
+ * backlog rather than trying to catch up in one giant block -- the same 200
+ * ms depth the ring's own default capacity was. */
+const DRAIN_CAP_FRAMES = 16384;
+
 /**
- * Reads the other end of the sound ring, at the rate a device would.
+ * Reads the other end of the sound output, at the rate a device would.
  *
- * A real page hands the ring to an audio worklet, which needs shared memory and
- * therefore a cross-origin-isolated page; this one is not, so the samples are
- * read here and dropped. What matters for a measurement is that they are read
- * on the clock: a play cursor is what the device consumed, so with nothing
- * consuming, every number about sound in a report is zero and a film that paces
- * itself by its own sound has no clock at all.
+ * A real page on shared memory hands the far end to an audio worklet running
+ * on the browser's own audio-rendering thread; this harness has no `<audio>`
+ * a person is meant to hear, so rather than create a real one it stands in
+ * for it here instead -- which is deliberately not a no-op: `READ` only ever
+ * moves inside `resampleInto`, so with nothing ever calling it a track's
+ * backlog policy (`DROP_TO`) would mark where to skip to but `playedBytes()`
+ * would stay at zero forever, and a program waiting on a buffer position
+ * would wait forever with it. Unlike a real worklet it is not audible, and
+ * unlike a real worklet it is not what a shipped page does -- the launcher's
+ * own page creates the real one, on its own thread. This one is not: in the
+ * harness's own worker mode this file runs *inside* the engine worker, the
+ * same thread a profile of the engine measures, so a run through this stand-
+ * in still carries `resampleInto`/`mixBlock`'s cost in that profile, just
+ * moved off the per-turn `pump()` call into this timer instead of gone --
+ * see `dbg/opengl/report-next-2.md` for what that costs in practice.
+ *
+ * Without shared memory there is no worklet this engine could ever hand a
+ * ring to, so the ring is read here and dropped instead: what matters for a
+ * measurement is that it is read on the clock, because a play cursor is what
+ * the device consumed and a film that paces itself by its own sound has no
+ * clock at all without one.
  *
  * @param {any} app
  */
 function drainSound(app){
-    const ring = app.audio.ring();
+    const table = app.audio.table?.();
+    if (table)
+    {
+        drainTable(app, table);
+        return;
+    }
+    const ring = app.audio.ring?.();
+    if (!ring)
+    {
+        return;
+    }
     const { sampleRate, channels } = app.audio.format();
     const block = new Float32Array(ring.capacity * channels);
     let readAt = performance.now();
@@ -542,6 +576,43 @@ function drainSound(app){
         // is indistinguishable, in a report, from an engine that cannot feed
         // one.
         readAt += ring.read(block.subarray(0, frames * channels)) * 1000 / sampleRate;
+    }, 20);
+}
+
+/**
+ * Stands in for the worklet this harness never creates, over the shared
+ * track table: the same `mixBlock` a real `worklet.js` runs, called on a
+ * timer on the page's own thread instead of the audio-rendering thread. See
+ * {@link drainSound}.
+ *
+ * @param {any} app @param {ArrayBufferLike} table
+ */
+function drainTable(app, table){
+    const { sampleRate } = app.audio.format();
+    const global = new Int32Array(table, 0, GLOBAL_HEADER_INT32);
+    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
+    const slots = [];
+    /** @type {ReturnType<typeof createSeam>[]} */
+    const seams = [];
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        slots.push({
+            header: new Int32Array(table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(table, slotPcmOffset(slot), SLOT_BYTES),
+        });
+        seams.push(createSeam());
+    }
+    const block = new Float32Array(DRAIN_CAP_FRAMES * 2);
+    let readAt = performance.now();
+    setInterval(()=>{
+        const owed = Math.floor((performance.now() - readAt) * sampleRate / 1000);
+        const blockFrames = Math.min(DRAIN_CAP_FRAMES, owed);
+        if (blockFrames <= 0)
+        {
+            return;
+        }
+        mixBlock({ global, slots, seams, block, blockFrames, outputRate: sampleRate });
+        readAt += blockFrames * 1000 / sampleRate;
     }, 20);
 }
 

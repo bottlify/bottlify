@@ -550,17 +550,18 @@ export async function createRemoteApp(wiring){
         },
 
         audio: {
-            ring: ()=>{
+            /** `{ table }` or `{ control, samples }`; see `Started` in messages.js. */
+            memory: ()=>{
                 if (!started.audio)
                 {
-                    throw new Error('this run has no sound ring');
+                    throw new Error('this run has no sound output');
                 }
-                return { memory: started.audio.memory };
+                return started.audio.memory;
             },
             format: ()=>{
                 if (!started.audio)
                 {
-                    throw new Error('this run has no sound ring');
+                    throw new Error('this run has no sound output');
                 }
                 return { sampleRate: started.audio.sampleRate, channels: started.audio.channels };
             },

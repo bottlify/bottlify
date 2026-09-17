@@ -5,6 +5,13 @@
  */
 
 import { createRing } from './ring.js';
+import {
+    SLOTS, SLOT_BYTES, PCM_MASK, SLOT_HEADER_INT32, GLOBAL_HEADER_INT32, TABLE_BYTES,
+    STATE, GENERATION, RATE, CHANNELS, BITS, GAIN, PAUSED, WRITTEN, READ, DROP_TO, MIXED_FRAMES,
+    STATE_FREE, STATE_OPEN, STATE_CLOSING, GAIN_SCALE,
+    OUTPUT_RATE, BLOCKS, STARVED_BLOCKS, STARVED_FRAMES,
+    slotHeaderOffset, slotPcmOffset,
+} from './mix.js';
 
 /**
  * Several programs' worth of sound, made into one stream.
@@ -14,22 +21,36 @@ import { createRing } from './ring.js';
  * them together. There is exactly one device underneath, so the adding happens
  * here.
  *
- * Each track keeps its own queue of frames already converted to the output's
- * format. Converting on write rather than on mix is deliberate: a write happens
- * once per buffer a program hands over, and a mix happens for every block the
- * device asks for, so the expensive half belongs on the rarer path.
+ * Two backends share one surface (`open`, `pump`, `consumed`, `diagnostics`,
+ * a track's `write`, `played`, `playedBytes`, `pending`, `reset`, `close`,
+ * `gain`, `paused`), chosen by `shared`:
  *
- * There is no clock here. A track's position is what the ring says was consumed
- * and nothing else, so a program's cursor and the sound a person hears are the
- * same number rather than two numbers that agree at first.
+ * - Without it (the default, and what every caller that does not ask
+ *   otherwise gets): `createEngineMixer`, unchanged from before this file grew
+ *   a second backend. Every source converts to float on write and is mixed
+ *   into one ring on the engine thread; a reader without shared memory -- the
+ *   test-page harness, any page that is not cross-origin isolated -- can only
+ *   read on that same thread, so this is the only backend it can use.
+ * - With it: `createSharedMixer`. Every source's raw guest PCM goes into its
+ *   own ring inside one shared "track table"; converting and mixing happen on
+ *   the audio thread instead, in `worklet.js`, which is the only place that
+ *   was ever measured costing anything (B12, superseded by the measurement
+ *   this file was built for).
+ *
+ * Which one an assembling caller gets is an environment question -- shared
+ * memory is what a worklet needs to read the far end at all -- not a mixer
+ * question, so it is asked for explicitly rather than guessed from
+ * `typeof SharedArrayBuffer`: guessing would flip every existing test in this
+ * file onto the new backend the moment it ran somewhere `SharedArrayBuffer`
+ * happens to exist, such as Node.
  */
 
 /** What comes out: the rate a browser's audio graph runs at anyway. */
-const OUTPUT_RATE = 48000;
+const OUTPUT_RATE_DEFAULT = 48000;
 const OUTPUT_CHANNELS = 2;
 
 /** Two hundred milliseconds of slack before a write is refused. */
-const CAPACITY_FRAMES = OUTPUT_RATE / 5;
+const CAPACITY_FRAMES = OUTPUT_RATE_DEFAULT / 5;
 
 /**
  * @typedef {Object} PcmFormat
@@ -39,23 +60,56 @@ const CAPACITY_FRAMES = OUTPUT_RATE / 5;
  */
 
 /**
+ * @overload
  * @param {Object} [options]
  * @param {number} [options.sampleRate]
  * @param {number} [options.capacityFrames]
  * @param {() => void} [options.fill]
- *        Asked for more sound before each mix. A wave device pushes its audio
- *        in when the program hands a buffer over, but a DirectSound buffer is a
- *        region the program wrote into long ago and plays out of at its own
- *        pace: somebody has to read out the part its cursor has just passed,
- *        and the only moment that makes sense is just before mixing.
  * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
- *        The storage of the output an earlier machine made. Given, this
- *        mixer's ring is that same output rather than a new one: the process
- *        was replaced, not the device, and whoever reads the far end -- a
- *        worklet, a person's own sound card -- still holds it.
+ * @param {false} [options.shared]
+ * @returns {ReturnType<typeof createEngineMixer>}
  */
-export function createMixer(
-    { sampleRate = OUTPUT_RATE, capacityFrames = CAPACITY_FRAMES, fill, memory } = {})
+/**
+ * @overload
+ * @param {Object} options
+ * @param {number} [options.sampleRate]
+ * @param {() => void} [options.fill]
+ * @param {{ table: ArrayBufferLike }} [options.memory]
+ * @param {true} options.shared
+ * @returns {ReturnType<typeof createSharedMixer>}
+ */
+/**
+ * Picks a backend by `options.shared` (default `false`) -- see the file
+ * comment above for what each one is and why the choice is made here rather
+ * than guessed from `typeof SharedArrayBuffer`.
+ *
+ * `fill` is asked for more sound before each mix in both backends. A wave
+ * device pushes its audio in when the program hands a buffer over, but a
+ * DirectSound buffer is a region the program wrote into long ago and plays
+ * out of at its own pace: somebody has to read out the part its cursor has
+ * just passed, and the only moment that makes sense is just before mixing.
+ *
+ * `memory` is the storage of the output an earlier machine made -- `{
+ * control, samples }` for the engine backend, `{ table }` for the shared one.
+ * Given, this mixer's output is that same storage rather than a new one: the
+ * process was replaced, not the device, and whoever reads the far end -- a
+ * worklet, a person's own sound card, this same thread -- still holds it.
+ *
+ * @param {any} [options]
+ */
+export function createMixer(options = {}){
+    return options.shared ? createSharedMixer(options) : createEngineMixer(options);
+}
+
+/**
+ * @param {Object} [options]
+ * @param {number} [options.sampleRate]
+ * @param {number} [options.capacityFrames]
+ * @param {() => void} [options.fill]
+ * @param {{ control: ArrayBufferLike, samples: ArrayBufferLike }} [options.memory]
+ */
+function createEngineMixer(
+    { sampleRate = OUTPUT_RATE_DEFAULT, capacityFrames = CAPACITY_FRAMES, fill, memory } = {})
 {
     const ring = createRing({
         channels: OUTPUT_CHANNELS,
@@ -87,6 +141,7 @@ export function createMixer(
         sampleRate,
         channels: OUTPUT_CHANNELS,
         ring,
+        memory: ring.memory,
         /**
          * How far ahead a track may run before what it is handing over is worth
          * less than the memory it occupies.
@@ -111,6 +166,7 @@ export function createMixer(
             }
             const track = {
                 format,
+                capacityFrames,
                 /**
                  * Output frames waiting to be mixed. A flat array of
                  * interleaved stereo, appended to and consumed from the front.
@@ -412,11 +468,16 @@ function mixInto(block, track, frames){
  * boundary, because a click is audible where a slightly soft high end is not --
  * and free of them across a boundary too, which is what `state` carries.
  *
+ * Exported for `mix.test.js`: the shared backend's `resampleInto` resamples
+ * the same signal off a byte ring instead of a flat buffer, and is checked
+ * against this, sample for sample, rather than against a second hand-written
+ * expectation.
+ *
  * @param {Uint8Array} pcm @param {PcmFormat} format @param {number} rate
  * @param {ResampleState} state  Read and advanced; the seam lives here.
  * @returns {Float32Array}
  */
-function convert(pcm, format, rate, state){
+export function convert(pcm, format, rate, state){
     const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
     const stride = bytesPerSample * format.channels;
     const inputFrames = Math.floor(pcm.length / stride);
@@ -508,4 +569,272 @@ function convert(pcm, format, rate, state){
         state.tail[channel] = sample(inputFrames - 1, Math.min(channel, format.channels - 1));
     }
     return out.subarray(0, frame * OUTPUT_CHANNELS);
+}
+
+/**
+ * The shared-table backend: the engine writes raw guest PCM into a per-track
+ * ring inside one `SharedArrayBuffer`, and does no converting or mixing at
+ * all -- `worklet.js` does both, on the audio thread, from the same table.
+ *
+ * @param {Object} [options]
+ * @param {number} [options.sampleRate]
+ * @param {() => void} [options.fill]
+ * @param {{ table: ArrayBufferLike }} [options.memory]
+ */
+function createSharedMixer({ sampleRate = OUTPUT_RATE_DEFAULT, fill, memory } = {}){
+    const buffer = memory?.table ?? allocateTable();
+    const isFresh = !memory?.table;
+    const global = new Int32Array(buffer, 0, GLOBAL_HEADER_INT32);
+    if (isFresh)
+    {
+        Atomics.store(global, OUTPUT_RATE, sampleRate);
+    }
+
+    /** @type {{ header: Int32Array, pcm: Uint8Array }[]} */
+    const slots = [];
+    for (let slot = 0; slot < SLOTS; slot++)
+    {
+        slots.push({
+            header: new Int32Array(buffer, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+            pcm: new Uint8Array(buffer, slotPcmOffset(slot), SLOT_BYTES),
+        });
+    }
+
+    /** @type {Set<any>} */
+    const openTracks = new Set();
+    let fallbackTracks = 0;
+    let pumps = 0;
+    let idlePumps = 0;
+
+    const capacityFrames = Math.round(sampleRate / 5);
+
+    return {
+        sampleRate,
+        channels: OUTPUT_CHANNELS,
+        table: buffer,
+        memory: { table: buffer },
+        capacityFrames,
+
+        /** @param {PcmFormat} format */
+        open(format){
+            if (!(format.sampleRate > 0) || !(format.channels > 0))
+            {
+                throw new Error('audio: a track needs a rate and a channel count');
+            }
+            const slot = slots.findIndex(s=>Atomics.load(s.header, STATE) === STATE_FREE);
+            const track = slot === -1
+                ? createFallbackTrack(format)
+                : createSlotTrack(format, slot, slots[slot]);
+            if (slot === -1)
+            {
+                fallbackTracks++;
+            }
+            openTracks.add(track);
+            return track;
+        },
+
+        /** Not meaningful for a table with no single output cursor. */
+        consumed: ()=>Atomics.load(global, BLOCKS),
+
+        /**
+         * Calls `fill` -- the DirectSound feed -- and nothing else: no
+         * converting, no mixing, no `Float32Array` allocated. `worklet.js`
+         * does all of that now, on the audio thread, from this same table.
+         */
+        pump(){
+            fill?.();
+            pumps++;
+            if (openTracks.size === 0)
+            {
+                idlePumps++;
+            }
+            return 0;
+        },
+
+        diagnostics: ()=>({
+            tracks: openTracks.size,
+            queuedFrames: [...openTracks].reduce((sum, track)=>sum + track.pending(), 0),
+            ringFilled: [...openTracks].reduce((sum, track)=>sum + track.pending(), 0),
+            produced: [...openTracks].reduce((sum, track)=>sum + track.played(), 0),
+            consumed: [...openTracks].reduce((sum, track)=>sum + track.played(), 0),
+            deviceBlocks: Atomics.load(global, BLOCKS),
+            starvedBlocks: Atomics.load(global, STARVED_BLOCKS),
+            starvedFrames: Atomics.load(global, STARVED_FRAMES),
+            shortfall: 0,
+            perTrack: [...openTracks].map(t=>`pending=${t.pending()} played=${t.played()}`),
+            idlePumps,
+            pumps,
+            fallbackTracks,
+        }),
+    };
+
+    /**
+     * @param {PcmFormat} format @param {number} slot
+     * @param {{ header: Int32Array, pcm: Uint8Array }} view
+     */
+    function createSlotTrack(format, slot, view){
+        const { header, pcm } = view;
+        const bytesPerSample = format.bitsPerSample === 8 ? 1 : 2;
+        const stride = bytesPerSample * format.channels;
+
+        Atomics.store(header, RATE, format.sampleRate);
+        Atomics.store(header, CHANNELS, format.channels);
+        Atomics.store(header, BITS, format.bitsPerSample);
+        Atomics.store(header, GAIN, GAIN_SCALE);
+        Atomics.store(header, PAUSED, 0);
+        Atomics.store(header, WRITTEN, 0);
+        Atomics.store(header, READ, 0);
+        Atomics.store(header, DROP_TO, 0);
+        Atomics.store(header, MIXED_FRAMES, 0);
+        Atomics.add(header, GENERATION, 1);
+        Atomics.store(header, STATE, STATE_OPEN);
+
+        const track = {
+            format,
+            slot,
+            // In this backend `pending()` counts guest frames at the track's
+            // own rate, not the output's, so the 200 ms the policy allows is
+            // 200 ms of that rate -- the mixer-wide `capacityFrames` above is
+            // in output frames and would be the wrong unit to compare it to.
+            capacityFrames: Math.round(format.sampleRate / 5),
+            rate: sampleRate,
+
+            get gain(){
+                return Atomics.load(header, GAIN) / GAIN_SCALE;
+            },
+            set gain(value){
+                Atomics.store(header, GAIN, Math.round(value * GAIN_SCALE));
+            },
+            get paused(){
+                return Atomics.load(header, PAUSED) !== 0;
+            },
+            set paused(value){
+                Atomics.store(header, PAUSED, value ? 1 : 0);
+            },
+
+            /**
+             * Copies the guest's own bytes into the slot's ring, as many as
+             * fit. A short write is not an error, the same contract the ring
+             * always had: the caller offers the rest again next turn.
+             *
+             * @param {Uint8Array} data
+             * @returns {number} bytes actually written
+             */
+            write(data){
+                const written = Atomics.load(header, WRITTEN);
+                const effectiveRead =
+                    Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
+                const room = Math.max(0, SLOT_BYTES - (written - effectiveRead));
+                const take = Math.min(data.length, room);
+                for (let i = 0; i < take; i++)
+                {
+                    pcm[(written + i) & PCM_MASK] = data[i];
+                }
+                Atomics.store(header, WRITTEN, written + take);
+                return take;
+            },
+
+            /** Output frames the audio thread has actually mixed from this slot. */
+            played(){
+                return Atomics.load(header, MIXED_FRAMES);
+            },
+
+            /**
+             * Guest bytes played. `READ` is exactly that by construction: the
+             * audio thread only advances it over bytes it has resampled or
+             * folded into its seam, so a program waiting for one small buffer
+             * back is credited it whole the moment the audio thread has
+             * looked at it, not when a ledger decides to retire an entry.
+             */
+            playedBytes(){
+                return Atomics.load(header, READ);
+            },
+
+            /** Guest frames of this track still queued, by its own rate. */
+            pending(){
+                const written = Atomics.load(header, WRITTEN);
+                const effectiveRead =
+                    Math.max(Atomics.load(header, READ), Atomics.load(header, DROP_TO));
+                return Math.max(0, Math.floor((written - effectiveRead) / stride));
+            },
+
+            /**
+             * Drops the backlog: the audio thread skips ahead to what is
+             * written now rather than working through what is behind. The
+             * track stays open on its slot; only the automatic policy below
+             * and a caller that wants the same thing use this.
+             */
+            reset(){
+                Atomics.store(header, DROP_TO, Atomics.load(header, WRITTEN));
+                Atomics.add(header, GENERATION, 1);
+            },
+
+            /**
+             * Marks the slot closing; the audio thread is the only one that
+             * may free it (`STATE_FREE`), once it has seen the mark and
+             * stopped touching the slot's bytes, so the engine can never
+             * reuse a slot the reader has not caught up on.
+             */
+            close(){
+                Atomics.add(header, GENERATION, 1);
+                Atomics.store(header, STATE, STATE_CLOSING);
+                openTracks.delete(track);
+            },
+        };
+        return track;
+    }
+
+    /**
+     * Every slot already taken. A game of this era opens a handful of
+     * buffers, so this is not expected to be reached; when it is, this
+     * track's sound is silently dropped rather than mixed, which is the same
+     * choice a build with nothing draining the ring makes -- a program is
+     * never held up by a device that is not really there.
+     *
+     * @param {PcmFormat} format
+     */
+    function createFallbackTrack(format){
+        let writtenBytes = 0;
+        let localGain = 1;
+        let localPaused = false;
+        return {
+            format,
+            slot: -1,
+            capacityFrames: Math.round(format.sampleRate / 5),
+            rate: sampleRate,
+            get gain(){
+                return localGain;
+            },
+            set gain(value){
+                localGain = value;
+            },
+            get paused(){
+                return localPaused;
+            },
+            set paused(value){
+                localPaused = value;
+            },
+            /** @param {Uint8Array} data */
+            write(data){
+                writtenBytes += data.length;
+                return data.length;
+            },
+            played: ()=>0,
+            playedBytes: ()=>writtenBytes,
+            pending: ()=>0,
+            reset(){
+                writtenBytes = 0;
+            },
+            close(){
+                openTracks.delete(this);
+            },
+        };
+    }
+}
+
+/** @returns {ArrayBufferLike} a fresh, zeroed track table. */
+function allocateTable(){
+    return typeof SharedArrayBuffer === 'function'
+        ? new SharedArrayBuffer(TABLE_BYTES)
+        : new ArrayBuffer(TABLE_BYTES);
 }

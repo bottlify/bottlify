@@ -99,14 +99,17 @@ import { createBlockCache, resolveBlockStore }
  *     decides while starting up, so a category switched on once the engine
  *     exists is switched on too late to see any of it. `sequenceBase` is set by
  *     `createApp` on a rebuilt machine and is not something a caller supplies.
- * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean,
- *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike } }} [audio]
- *     Sound leaves through a ring in shared memory. `drained` says that
- *     something on the other side of it is really reading -- a WebAudio
- *     worklet, usually -- which is what decides whether a program's play cursor
- *     follows the sound or a clock. `memory` is set by `createApp` on a rebuilt
- *     machine so the ring outlives the process that made it, and is not
- *     something a caller supplies.
+ * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
+ *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
+ *         | { table: ArrayBufferLike } }} [audio]
+ *     Sound leaves through a shared track table a worklet reads, or -- with no
+ *     shared memory to hand one -- a ring the engine thread mixes into itself.
+ *     `drained` says that something on the other side is really reading, which
+ *     is what decides whether a program's play cursor follows the sound or a
+ *     clock. `shared` picks the backend; default `typeof SharedArrayBuffer ===
+ *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
+ *     storage outlives the process that made it, and is not something a caller
+ *     supplies.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -2345,10 +2348,16 @@ async function buildApp(options){
             // follows the sound or the clock.
             drained: options.audio?.drained ?? false,
             // The storage of the output an earlier machine made, so a process
-            // replacement mixes into the ring its reader already holds instead
-            // of orphaning it on a buffer nothing reads. Absent on the first
-            // process, which makes its own.
+            // replacement mixes into the same storage its reader already
+            // holds instead of orphaning it on a buffer nothing reads. Absent
+            // on the first process, which makes its own.
             memory: options.audio?.memory,
+            // Shared memory is what a worklet needs to read the far end at
+            // all, so this is an environment question answered here rather
+            // than guessed inside the mixer: without it (a page that is not
+            // cross-origin isolated) only this thread can ever read the
+            // output, and the engine mixer is the only backend built for that.
+            shared: options.audio?.shared ?? (typeof SharedArrayBuffer === 'function'),
             // Whose call a sound provider is answering, read before it awaits
             // anything: a callback into the guest after an await has to name
             // the thread whose call it continues.
@@ -4763,12 +4772,18 @@ async function buildApp(options){
         /**
          * The sound this process is making, for whoever is playing it.
          *
-         * `ring.memory` is what goes to an audio worklet: it is shared memory,
-         * so the two sides never wait for each other. `pump` fills it and is
-         * called once a scheduler turn by `run` below.
+         * `memory()` is what goes to an audio worklet: shared memory, so the
+         * two sides never wait for each other -- `{ table }` when this
+         * process has a shared table, `{ control, samples }` when it has the
+         * engine backend's ring instead. `ring()`/`table()` are the live
+         * object itself, for a caller on this same thread (this process's own
+         * `run` below calls `pump` once a scheduler turn; a test harness
+         * without shared memory reads `ring()` directly).
          */
         audio: {
             ring: ()=>core.api('audio').output().ring,
+            table: ()=>core.api('audio').output().table,
+            memory: ()=>core.api('audio').output().memory,
             format: ()=>{
                 const mixer = core.api('audio').output();
                 return { sampleRate: mixer.sampleRate, channels: mixer.channels };
@@ -4928,11 +4943,13 @@ export async function createApp(options){
     let logDefaultLevel = null;
     let logSequence = 0;
     // The sound output's storage outlives the process for the same reason, and
-    // for one more: the page was handed the ring before any of this ran and
-    // builds its audio graph over that memory once. A rebuilt machine has to
-    // mix into the ring that already exists rather than make one nobody reads.
-    /** @type {{ control: ArrayBufferLike, samples: ArrayBufferLike } | null} */
-    let ringMemory = null;
+    // for one more: the page was handed it before any of this ran and builds
+    // its audio graph over that memory once. A rebuilt machine has to mix into
+    // the same storage rather than make new storage nobody reads --
+    // `{ table }` with a shared track table, `{ control, samples }` with the
+    // engine backend's ring.
+    /** @type {any} */
+    let audioMemory = null;
     // The decoded binary's instance outlives the process too: a machine is a
     // process, the decoder is a service of the run. The child attaches to the
     // parent's compiled module and linear memory, so the first cinematic after
@@ -4973,7 +4990,7 @@ export async function createApp(options){
         logSinks,
         namedObjects,
         log: { ...options.log, sequenceBase: logSequence },
-        audio: { ...options.audio, memory: ringMemory },
+        audio: { ...options.audio, memory: audioMemory },
         media: { ...options.media, instance: mediaInstance },
         graphics: { ...options.graphics, presenter },
         ...extra,
@@ -4986,12 +5003,12 @@ export async function createApp(options){
     // every rebuild from here on.
     try
     {
-        ringMemory = current.audio.ring().memory;
+        audioMemory = current.audio.memory();
     }
     catch {
-        // A build with no sound layer has no ring to carry, and that is not a
-        // fault: the rebuilt machine runs without one too.
-        ringMemory = null;
+        // A build with no sound layer has no storage to carry, and that is
+        // not a fault: the rebuilt machine runs without one too.
+        audioMemory = null;
     }
 
     /** What a caller holds. Rebound to the live process on every replacement. */

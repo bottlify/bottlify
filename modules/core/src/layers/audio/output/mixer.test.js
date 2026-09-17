@@ -9,6 +9,10 @@ import assert from 'node:assert/strict';
 
 import { createMixer } from './mixer.js';
 import { createRing } from './ring.js';
+import {
+    WRITTEN, DROP_TO, READ, STATE, STATE_FREE, slotHeaderOffset, slotPcmOffset,
+    SLOT_HEADER_INT32, SLOT_BYTES, createSeam, resampleInto,
+} from './mix.js';
 
 /** Sixteen-bit stereo at the output's own rate: no conversion in the way. */
 const DIRECT = { sampleRate: 48000, channels: 2, bitsPerSample: 16 };
@@ -316,4 +320,121 @@ test('silence written for an idle track is counted against that track', ()=>{
 
     assert.equal(playing.short, 0, 'the track carrying the block is never short');
     assert.equal(idle.short, 3, 'the idle track was short the whole block');
+});
+
+// The shared-table backend below. `createMixer()` with no options is every
+// test above, unchanged -- `shared: true` is what reaches this backend at
+// all.
+
+/** @param {any} mixer @param {number} slot */
+const slotView = (mixer, slot)=>({
+    header: new Int32Array(mixer.table, slotHeaderOffset(slot), SLOT_HEADER_INT32),
+    pcm: new Uint8Array(mixer.table, slotPcmOffset(slot), SLOT_BYTES),
+});
+
+test('with a shared table, write puts the guest\'s own bytes into the slot', ()=>{
+    // There is no `convert` in this backend's own module for a spy to catch --
+    // its absence is the point -- so the assertion is on the observable
+    // instead: the bytes that land in the slot are the bytes that went in,
+    // unrounded, and `WRITTEN` moved by exactly that many.
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open(DIRECT);
+    const written = pcm16([1234, -1234, 5678, -5678]);
+
+    const taken = track.write(written);
+    assert.equal(taken, written.length, 'the whole buffer fit');
+
+    const { header, pcm } = slotView(mixer, track.slot);
+    assert.equal(Atomics.load(header, WRITTEN), written.length);
+    assert.deepEqual([...pcm.subarray(0, written.length)], [...written],
+        'byte-equal: nothing converted it');
+});
+
+test('with a shared table, pump() allocates no Float32Array', ()=>{
+    const seen = { count: 0 };
+    class CountingFloat32Array extends Float32Array {
+        /** @param {ConstructorParameters<typeof Float32Array>} args */
+        constructor(...args){
+            super(...args);
+            seen.count++;
+        }
+    }
+    const realFloat32Array = globalThis.Float32Array;
+    globalThis.Float32Array = /** @type {any} */ (CountingFloat32Array);
+    try
+    {
+        const mixer = createMixer({ shared: true });
+        const track = mixer.open(DIRECT);
+        track.write(pcm16([1000, 1000]));
+        seen.count = 0;
+        mixer.pump();
+        assert.equal(seen.count, 0, 'no Float32Array was allocated by pump()');
+    }
+    finally
+    {
+        globalThis.Float32Array = realFloat32Array;
+    }
+});
+
+test('with a shared table, playedBytes() credits a one-frame probe whole '
+    + 'once the reader\'s READ passes it', ()=>{
+    const mixer = createMixer({ shared: true });
+    const track = mixer.open(DIRECT); // the output's own rate: no resampling in the way
+    const probe = pcm16([1000, -1000]);
+    track.write(probe);
+    assert.equal(track.playedBytes(), 0, 'not played until the reader has looked at it');
+
+    // Stand in for the audio thread: advance READ the way resampleInto does.
+    const { header } = slotView(mixer, track.slot);
+    Atomics.store(header, READ, probe.length);
+
+    assert.equal(track.playedBytes(), probe.length, 'credited whole once READ passed it');
+});
+
+test('with a shared table, a backlog past the depth sets DROP_TO', ()=>{
+    const mixer = createMixer({ shared: true, sampleRate: 48000 });
+    const track = mixer.open(DIRECT);
+    // 12,000 frames (48,000 samples, stereo) -- past capacityFrames (9,600, 200
+    // ms at 48 kHz) and still under one slot's 65,536-byte ring.
+    track.write(pcm16(new Array(24000).fill(1000)));
+
+    assert.ok(track.pending() > track.capacityFrames, 'the assumption under this test');
+    track.reset();
+
+    const { header } = slotView(mixer, track.slot);
+    assert.equal(Atomics.load(header, DROP_TO), Atomics.load(header, WRITTEN),
+        'DROP_TO caught up to WRITTEN');
+    assert.equal(track.pending(), 0, 'and the track\'s own view agrees');
+});
+
+test('with a shared table, a closed slot is freed by the reader and reused', ()=>{
+    // 32 slots (SLOTS in mix.js): fill them all, close one, and the next
+    // open() must reuse it -- otherwise a game that opens and closes many
+    // short-lived buffers over a session exhausts every slot and falls back
+    // permanently.
+    const mixer = createMixer({ shared: true });
+    const tracks = [];
+    for (let i = 0; i < 32; i++)
+    {
+        tracks.push(mixer.open(DIRECT));
+    }
+    assert.equal(mixer.open(DIRECT).slot, -1, 'the 33rd track falls back: no free slot');
+
+    const closing = tracks[5];
+    const closedSlot = closing.slot;
+    closing.close();
+
+    // Only the reader (resampleInto, here standing in for the worklet) may
+    // free the slot -- closing it alone must not make it reusable yet.
+    assert.equal(mixer.open(DIRECT).slot, -1, 'still no free slot before the reader has run');
+
+    const { header, pcm } = slotView(mixer, closedSlot);
+    const block = new Float32Array(2);
+    resampleInto({
+        block, blockFrames: 1, header, pcm, outputRate: mixer.sampleRate, seam: createSeam(),
+    });
+    assert.equal(Atomics.load(header, STATE), STATE_FREE, 'the reader freed it');
+
+    const reused = mixer.open(DIRECT);
+    assert.equal(reused.slot, closedSlot, 'the next open() reuses the freed slot');
 });

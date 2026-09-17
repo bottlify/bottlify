@@ -20,6 +20,10 @@ import { readFile } from 'node:fs/promises';
 import { createApp } from './app.js';
 import { createFakeDevice } from './layers/graphics/webgpu/internal/fake-device.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
+import {
+    slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, PCM_MASK,
+    STATE, STATE_OPEN, RATE, CHANNELS, BITS, GAIN, GAIN_SCALE, WRITTEN, READ,
+} from './layers/audio/output/mix.js';
 
 const PREBUILT = new URL('../vendor/prebuilt/', import.meta.url);
 
@@ -217,14 +221,24 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         app.attachLog(sink);
 
         // The sound output the parent's machine made, and what a reader on the
-        // page was handed for its worklet. A little of the parent's sound is put
-        // in and taken out, so the cursor the reader holds is not at zero.
-        const ring = app.audio.ring();
-        const before = ring.memory;
-        ring.write(new Float32Array([1, 1, 2, 2]));
-        assert.equal(ring.read(new Float32Array(4)), 2, 'the reader took the parent\'s sound');
-        const consumed = ring.consumed();
-        assert.ok(consumed > 0, 'the reader is not at the start of the ring');
+        // page was handed for its worklet: a shared track table, this run has
+        // one because Node has `SharedArrayBuffer`. A little of the parent's
+        // sound is put in and taken out -- standing in for the audio thread,
+        // the way `worklet.js`'s `resampleInto` would -- so the cursor the
+        // reader holds is not at zero.
+        const table = app.audio.table();
+        const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+        Atomics.store(header, STATE, STATE_OPEN);
+        Atomics.store(header, RATE, 48000);
+        Atomics.store(header, CHANNELS, 2);
+        Atomics.store(header, BITS, 16);
+        Atomics.store(header, GAIN, GAIN_SCALE);
+        pcm.set([0, 4, 0, 4, 0, 8, 0, 8], 0); // two stereo 16-bit frames; the values do not matter
+        Atomics.store(header, WRITTEN, 8);
+        Atomics.store(header, READ, 8); // the reader took both frames
+        const consumed = Atomics.load(header, READ);
+        assert.ok(consumed > 0, 'the reader is not at the start of the table');
 
         // The presenter is a service of the run: made once, above both machines,
         // and the same object after the swap. The parent's frame is presented
@@ -282,16 +296,21 @@ test('the reader keeps its level, its cursor and its sink across a replacement',
         assert.deepEqual(output, ['A'],
             'detaching after the replacement stopped the sink receiving');
 
-        // The child's machine mixes into the output the reader already holds,
-        // rather than making a ring of its own that nobody would read.
-        const childRing = app.audio.ring();
-        assert.equal(childRing.memory.control, before.control, 'the same control block');
-        assert.equal(childRing.memory.samples, before.samples, 'the same samples');
-        assert.equal(childRing.consumed(), consumed, 'the read cursor continued, not reset');
+        // The child's machine writes into the table the reader already holds,
+        // rather than making one of its own that nobody would read.
+        const childTable = app.audio.table();
+        assert.equal(childTable, table, 'the same table');
+        const childHeader = new Int32Array(childTable, slotHeaderOffset(0), SLOT_HEADER_INT32);
+        assert.equal(Atomics.load(childHeader, READ), consumed,
+            'the read cursor continued, not reset');
 
-        childRing.write(new Float32Array([3, 3]));
-        assert.equal(childRing.read(new Float32Array(2)), 1, 'the child writes into the same ring');
-        assert.equal(childRing.consumed(), consumed + 1, 'and the reader keeps counting');
+        const childPcm = new Uint8Array(childTable, slotPcmOffset(0), SLOT_BYTES);
+        const writtenBefore = Atomics.load(childHeader, WRITTEN);
+        childPcm.set([0, 12, 0, 12], writtenBefore & PCM_MASK);
+        Atomics.store(childHeader, WRITTEN, writtenBefore + 4);
+        Atomics.store(childHeader, READ, consumed + 4);
+        assert.equal(Atomics.load(childHeader, READ), consumed + 4,
+            'and the reader keeps counting');
 
         // The decoder is a service of the run, not of the process: the child
         // attaches to the instance the parent made instead of compiling the binary

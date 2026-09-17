@@ -35,7 +35,7 @@ const app = await createApp({
 app.on('frame', ({ width, height }) => {});
 app.input.attach(canvas);
 const speaker = new AudioWorkletNode(context, 'bottlify-output', {
-    processorOptions: { ...app.audio.ring().memory, channels: app.audio.format().channels },
+    processorOptions: { ...app.audio.memory(), channels: app.audio.format().channels },
 });
 const code = await app.run();
 ```
@@ -63,7 +63,7 @@ system described in [`system.md`](./system.md). Each has a document of its own:
 | `filesystem` | A virtual volume with a bundle behind it, read on demand block by block, with an OPFS block cache, and the session overlay a program writes into. | [`filesystem.md`](./filesystem.md) |
 | `win32` | The guest-facing system libraries: `kernel32`, `user32`, `gdi32`'s bookkeeping half, `advapi32` with the registry, `ole32`, `oleaut32`, `msvcrt`, `ntdll`, `winmm`, `wsock32`/`ws2_32`, `shell32`, `comctl32`, `comdlg32`, `imm32`, `version`, `wininet`, and a DirectShow filter graph (`quartz`). | [`win32.md`](./win32.md) |
 | `graphics` | Every drawing API over one WebGPU backend: GDI's drawing half, DirectDraw, Direct3D 7, 8, 9 and 10 with DXGI, OpenGL 1.x with WGL, Vulkan; each published through a seam that is the library's own exports and vtables. | [`graphics.md`](./graphics.md) |
-| `audio` | A mixer that writes ahead into a ring in shared memory read by an `AudioWorklet`; DirectSound buffers and cursors on top of it; the MPEG provider a sound middleware loads, hosted. | [`audio.md`](./audio.md) |
+| `audio` | A mixer over a shared track table an `AudioWorklet` resamples and sums, or -- without shared memory -- a ring the engine thread mixes into itself; DirectSound buffers and cursors on top of it; the MPEG provider a sound middleware loads, hosted. | [`audio.md`](./audio.md) |
 | `input` | Keyboard, mouse and gamepad from the page, routed into both readings a program takes: the window message queue and DirectInput's polled state. | [`input.md`](./input.md) |
 | `media` | Video and picture decoding for what a program plays: an FFmpeg build compiled to WebAssembly behind open/decode/pull, and a hosted JPEG library. Its own layer because a clip is both picture and sound. | [`media.md`](./media.md) |
 

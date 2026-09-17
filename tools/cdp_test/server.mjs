@@ -47,9 +47,16 @@ const MIME = {
  * @param {string} roots.sandboxDir
  * @param {string} roots.srcDir
  * @param {{ prefix: string, root: string }[]} [roots.extra]
+ * @param {boolean} [roots.coi]
+ *        Cross-Origin-Opener-Policy/Cross-Origin-Embedder-Policy on every
+ *        response, so the page comes up `crossOriginIsolated` and
+ *        `SharedArrayBuffer` exists -- what the shared-table audio backend
+ *        and its worklet need, which this server does not offer by default
+ *        because the game bundle route often serves another origin's ranges
+ *        that would need `Cross-Origin-Resource-Policy` of their own.
  * @returns {Promise<StaticServer>}
  */
-export async function serveStatic({ sandboxDir, srcDir, extra = [] }){
+export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false }){
     const routes = [
         { prefix: '/sandbox/', root: sandboxDir },
         { prefix: '/src/', root: srcDir },
@@ -57,6 +64,11 @@ export async function serveStatic({ sandboxDir, srcDir, extra = [] }){
     ];
 
     const server = createServer(async(req, res)=>{
+        if (coi)
+        {
+            res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+            res.setHeader('Cross-Origin-Embedder-Policy', 'require-corp');
+        }
         const url = new URL(req.url ?? '/', 'http://localhost');
         const route = routes.find(entry=>url.pathname.startsWith(entry.prefix));
         if (!route)

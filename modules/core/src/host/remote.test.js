@@ -132,7 +132,7 @@ function fakeApp({ capacity = 4096, shared = true } = {}){
             },
         },
         audio: {
-            ring: ()=>({ memory: { control: new ArrayBuffer(16), samples: new ArrayBuffer(64) } }),
+            memory: ()=>({ control: new ArrayBuffer(16), samples: new ArrayBuffer(64) }),
             format: ()=>({ sampleRate: 48000, channels: 2 }),
         },
         /** How many times the log's memory has been asked for. */
@@ -344,10 +344,10 @@ test('start rebuilds on the worker what could not cross: fetch, device, watch, s
     await remote.dispose();
 });
 
-test('the sound ring crosses once, at start', async()=>{
+test('the sound output\'s storage crosses once, at start', async()=>{
     const { remote, app } = await connect();
-    const ring = remote.audio.ring();
-    assert.equal(ring.memory.samples.byteLength, 64);
+    const memory = remote.audio.memory();
+    assert.equal(memory.samples.byteLength, 64);
     assert.deepEqual(remote.audio.format(), { sampleRate: 48000, channels: 2 });
     assert.equal(app.attached.length, 1);
     assert.deepEqual(app.attached[0].options, { listen: false });

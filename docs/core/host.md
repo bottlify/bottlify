@@ -23,7 +23,7 @@ const app = await createApp({
 app.input.attach(canvas);
 app.on('frame', ({ width, height }) => {});
 const speaker = new AudioWorkletNode(context, 'bottlify-output', {
-    processorOptions: { ...app.audio.ring().memory, channels: app.audio.format().channels },
+    processorOptions: { ...app.audio.memory(), channels: app.audio.format().channels },
 });
 const code = await app.run();
 await app.dispose();
@@ -67,7 +67,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `storage` | `'opfs' \| 'local' \| { files: { path, bytes }[] } \| null` | Where the session — files the program wrote plus the registry — is loaded from and saved to. `'opfs'` persists in the origin's private file system. `'local'` means `localStorage`, which a worker does not have (see section 9). An object seeds the volume and saves nothing. |
 | `id` | `string` | Names the session and the bundle cache when neither option does. |
 | `screen` | `{ width, height, bitsPerPixel }` | What the program is told its display is. |
-| `audio` | `{ drained?, sampleRate?, mp3? }` | `drained: true` says something reads the far end of the sound ring — a program's play cursor then follows the sound rather than the clock. `mp3` (default true) offers the hosted MPEG provider to a program's sound middleware. |
+| `audio` | `{ drained?, sampleRate?, mp3?, shared? }` | `drained: true` says something reads the far end of the sound output — a program's play cursor then follows the sound rather than the clock. `mp3` (default true) offers the hosted MPEG provider to a program's sound middleware. `shared` (default `typeof SharedArrayBuffer === 'function'`) picks the mixer backend: a shared track table for a worklet to read, or the engine's own float ring when there is no `SharedArrayBuffer` to hand one. |
 | `device` | `{ fog?, mips?, skipTexture?, probeTexture?, dumpDraws?, maxDraws? }` | Diagnostic knobs for the GPU device the worker opens; there is no device object to pass. |
 | `graphics` | `{ compressedTextures?: boolean }` | Forwarded to the graphics layer as given (`docs/core/graphics.md`, the Configuration table). `AppOptions.graphics` also carries `presenter`, but nothing that builds `StartOptions` for a real caller ever sets one -- a presenter holds functions and cannot survive `postMessage` -- so in practice only `compressedTextures` crosses. |
 | `maxFps` | `number` | Most frames a second that reach the screen. Default 60; `0` presents at whatever rate the loop offers. |
@@ -97,7 +97,7 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 | **The page** (`src/host/create.js`, `src/host/remote.js`) | Creates the worker, transfers the canvas as an `OffscreenCanvas`, captures keyboard and mouse on the canvas and posts them, posts `document.hidden` on every change, relays the log between the caller and the keeper, hands the sound ring's shared memory to the audio worklet the page creates. The page does nothing per frame. |
 | **The log keeper** (`src/host/log.worker.js` → `src/host/keeper.js`) | Owns the log. Handed the journal's block, it polls it before the ring laps, keeps the history, works out the frames, the profile and the module attribution, and answers the page's reads. A `recent` or `drain` read polls the block first, so a tail right after an exit is not a tick stale. A process replacement hands it the next block rather than restarting it. The page's thread never keeps the log. |
 | **The engine** (`src/host/engine.worker.js` → `src/host/serve.js` → `src/app.js`) | Everything else: the emulator, the Win32 layer, the mixer's pump, the GPU device — opened here because a `GPUDevice` is neither transferable nor cloneable — and the copy of every frame into the transferred canvas, one `copyTextureToTexture` per frame. |
-| **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | The `bottlify-output` `AudioWorkletProcessor` reads the ring in shared memory; its read index is what a program's play cursor is built on when `audio.drained` is true. |
+| **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | With shared memory, the `bottlify-output` `AudioWorkletProcessor` resamples, scales and sums every open track's own PCM out of a shared track table -- converting and mixing both happen here now, not on the engine thread; its own count of what it consumed and produced is what a program's play cursor is built on when `audio.drained` is true. Without shared memory there is no worklet to read anything: the engine mixes into its own ring on its own thread instead, and only that thread can read it (`docs/core/audio.md`'s Mixer section). |
 
 The device is requested with `texture-compression-bc` when the adapter offers it. An uncaptured
 WebGPU validation error is written to the worker's console.
@@ -330,14 +330,26 @@ the first one's history and poll are gone with it.
   pointer.
 - **`storage: 'local'` does not work in a worker.** `localStorage` does not exist there and the
   session provider throws saying so. Use `'opfs'`, or seed with `{ files }`.
-- **No audio worker yet.** Output already runs on the audio thread (the worklet), but the mixer's
-  pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's decoder callbacks
-  run on the engine's thread. Measured on a harness run over 60 000 scheduler turns with
-  the engine in a worker, the pump's self time was 921 ms of a 186 s run (0.5 %, 11 µs a turn); a
-  device drawing under one percent of the thread is not what to move first. The seam a split would
-  need — buffer writes copied into a block the audio worker owns, cursors in a shared control block
-  read with `Atomics` — is recorded in `roadmap/decisions.md` (B12) and waits for a measurement
-  that says the pump has become material.
+- **Converting and mixing moved to the audio thread; the rest has not.** With shared memory the
+  worklet resamples, scales and sums every track itself (`docs/core/audio.md`'s Mixer section,
+  B12 superseded by the measurement below); still on the engine thread: the DirectSound cursor walk
+  and its notifications (`feedBuffers`, run before every mix so a program waiting on a position is
+  woken whether or not anything is listening), waveOut's own queue draining, and the hosted MPEG
+  provider's decoder callbacks (`ASI_stream_process` and the WebCodecs path). Measured on Doom 3's
+  `lights` window (the fold `dbg/opengl/report-perdraw-remeasure.md` §2 used, on a
+  cross-origin-isolated page): the `pump` phase inclusive of the DirectSound feed and one copy went
+  from 526 ms of a 19.4 s window (2.7 % of the worker) to 397.6 ms of a 20.7 s window (1.9 %) --
+  `dbg/opengl/report-next-2.md`. Short of the < 200 ms / < 1.0 % this was designed for: the harness
+  that took this measurement runs entirely inside the profiled engine worker (its `?worker=1`
+  mode), with no separate audio-rendering thread to hand the mixing to, so its stand-in reader
+  (`test/page/game/harness.js`'s `drainTable`, standing in for the worklet this test harness never
+  creates) still resamples and mixes on that same thread -- moved off the per-turn `pump()` call,
+  not off the profile. What a real worklet on its own thread would show needs the launcher, not
+  verified this session.
+- **A page without shared memory has no audio worker at all**, not yet and not only-not-yet: a
+  worklet needs shared memory to read anything, so a page that is not cross-origin isolated mixes
+  on the engine thread the way this whole layer did before this split, in the one ring
+  `output/ring.js` still keeps.
 - **`pacing: 'event'` is slower today** (section 6).
 - **The engine's shared-memory signal needs a cross-origin-isolated page.** Without
   `SharedArrayBuffer` the worker still runs; a message waits for the next timed yield, at most

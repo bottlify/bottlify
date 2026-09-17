@@ -80,9 +80,14 @@
  */
 
 /**
- * What `start` answers with: the sound ring, if the run has one, in the shared
- * memory the page hands to its audio worklet, the log's memory for a reader on
- * the page, and who made the adapter.
+ * What `start` answers with: the sound output's storage, if the run has one,
+ * in the memory the page hands to its audio worklet, the log's memory for a
+ * reader on the page, and who made the adapter.
+ *
+ * `audio.memory` is `{ table }` -- one shared track table, resampled and
+ * mixed on the audio thread -- on an origin with shared memory, and
+ * `{ control, samples }` -- the engine mixer's own float ring, mixed on this
+ * thread -- where there is none to hand a worklet at all.
  *
  * `log` is null where the origin has no shared memory: the block would cross
  * as a copy that never moves again, so the page asks the engine for what it
@@ -90,7 +95,8 @@
  * never half on each.
  *
  * @typedef {Object} Started
- * @property {{ memory: { control: ArrayBufferLike, samples: ArrayBufferLike },
+ * @property {{ memory: { table: ArrayBufferLike }
+ *         | { control: ArrayBufferLike, samples: ArrayBufferLike },
  *     sampleRate: number, channels: number } | null} audio
  * @property {import('../layers/log/internal/reader.js').LogMemory | null} log
  * @property {{ vendor: string, architecture: string, description: string }} adapter

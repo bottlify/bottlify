@@ -10,10 +10,13 @@ A program of this era plays music through one API and effects through another, a
 machine to add them together. This layer owns DirectSound (`DSOUND.dll`), hosts the MPEG Layer 3
 provider a sound middleware loads beside a program (`Mp3dec.asi`), and provides the mixer that
 `win32`'s wave-out surface (`WINMM.dll`, `src/layers/win32/winmm/functions.js`) also writes into.
-Every source becomes 48 kHz stereo float, is added into one block, and is written ahead into a
-ring; a WebAudio worklet on the page reads the other end. The ring's read index is the only
-feedback channel, and a program's play cursor is built on it rather than on a clock, so what the
-program believes has played and what a person has heard are the same number.
+On a page with shared memory every source's own PCM is written, unconverted, into a per-track ring
+in a shared track table; the audio worklet resamples, scales and sums the tracks on the audio
+thread and reports what it consumed per track. Without shared memory the engine converts and mixes
+into one float ring itself and whoever drives the page reads it. Either way a reader's own count of
+what it consumed is the only feedback channel, and a program's play cursor is built on it rather
+than on a clock, so what the program believes has played and what a person has heard are the same
+number.
 
 ## Contract
 
@@ -86,46 +89,81 @@ ends after `IUnknown`.
 
 ## How it works
 
-### Mixer and ring
+### Mixer
 
-`src/layers/audio/output/mixer.js` keeps one track per open source. A track converts on write:
-8-bit unsigned or 16-bit signed PCM, mono or stereo, at any rate, becomes interleaved stereo
-float at the output rate through a linear resampler whose state (`pos`, `tail`) carries across
-buffer boundaries, so a stream delivered in thousands of small pieces joins without a
-discontinuity; at the output's own rate the path is an exact copy. Each track keeps a ledger of
-`{ frames, bytes }` per buffer written so `playedBytes()` credits whole buffers exactly rather
-than reconstructing bytes from a rate ratio, and retires ledger entries behind the cursor so the
-walk does not grow with the run. `pump()` first calls `fill` (the DirectSound feed), then mixes the
-longest pending block among unpaused tracks into the ring, adding each track scaled by its
-`gain`; a track short of the block is counted under `shortfall` and its own `short`. A track's
-`played()` is what it mixed less what still sits in the ring, held monotonic.
+`src/layers/audio/output/mixer.js` keeps one track per open source, behind one surface --
+`open(format)`, `pump()`, `consumed()`, `diagnostics()`, a track's `write(pcm)`, `played()`,
+`playedBytes()`, `pending()`, `reset()`, `close()`, `gain`, `paused` -- and two backends behind
+that surface, chosen by `createMixer({ shared })`. `shared` is an environment question, not a
+mixer one: shared memory is what a worklet needs to read the far end at all, so the assembling
+caller answers it (`src/app.js` with `typeof SharedArrayBuffer === 'function'`) rather than the
+mixer guessing; `createMixer()` with no options is always the engine backend, which is what every
+test that does not ask for `shared: true` keeps exercising.
 
-`src/layers/audio/output/ring.js` is the one place sound crosses out. A ring of interleaved
-float32 frames with a five-slot `Int32Array` control block -- `WRITTEN`, `READ`,
-`STARVED_BLOCKS`, `STARVED_FRAMES`, `BLOCKS` -- allocated as `SharedArrayBuffer` where the
-environment allows and ordinary memory where it does not. Indices are monotonic; the difference
-is the fill; capacity rounds up to a power of two. `write` takes as many frames as fit and never
-blocks, because holding a guest thread is the one cost this engine will not pay for sound. `read`
-fills what is not there with silence and counts only real frames as consumed, so a play cursor
-never runs through a gap nobody filled. Default capacity is `sampleRate / 5`: two hundred
-milliseconds at 48 kHz, 9,600 frames, rounded to 16,384.
+**Without shared memory** (`createEngineMixer`, unchanged from before this backend split): a track
+converts on write -- 8-bit unsigned or 16-bit signed PCM, mono or stereo, at any rate, becomes
+interleaved stereo float at the output rate through a linear resampler whose state (`pos`, `tail`)
+carries across buffer boundaries, so a stream delivered in thousands of small pieces joins without
+a discontinuity; at the output's own rate the path is an exact copy. Each track keeps a ledger of
+`{ frames, bytes }` per buffer written so `playedBytes()` credits whole buffers exactly rather than
+reconstructing bytes from a rate ratio, and retires ledger entries behind the cursor so the walk
+does not grow with the run. `pump()` first calls `fill` (the DirectSound feed), then mixes the
+longest pending block among unpaused tracks into `src/layers/audio/output/ring.js` -- the one place
+sound crosses out on this path, a ring of interleaved float32 frames with a five-slot `Int32Array`
+control block (`WRITTEN`, `READ`, `STARVED_BLOCKS`, `STARVED_FRAMES`, `BLOCKS`) -- adding each
+track scaled by its `gain`; a track short of the block is counted under `shortfall` and its own
+`short`. A track's `played()` is what it mixed less what still sits in the ring, held monotonic.
+This is the only backend a reader without shared memory can use at all -- the test-page harness,
+any page that is not cross-origin isolated -- because nothing but this thread can read an ordinary
+`ArrayBuffer`; `test/page/game/harness.js`'s `drainSound` reads this ring on the engine thread for
+exactly that reason, and a measurement taken through it still carries this backend's own
+converting-and-mixing cost.
 
-`src/layers/audio/output/worklet.js` is the far end, an `AudioWorkletProcessor` registered as
-`bottlify-output`. It is loaded by URL rather than imported (the build copies it to
-`dist/worklet.js`) and duplicates the ring's twenty lines of read logic knowingly, because
-importing across the worklet boundary is not possible; the five control-slot constants are the
-whole of what has to stay in step. Per block it adds one to `BLOCKS`, copies what is there, fills
-the rest with silence, advances `READ` by the real frames only, and on a short block adds to
-`STARVED_BLOCKS` and `STARVED_FRAMES`. A mono graph over the stereo ring takes the left channel.
-The page does: `audioWorklet.addModule(<worklet url>)`, then
-`new AudioWorkletNode(context, 'bottlify-output', { outputChannelCount: [channels], processorOptions: { control, samples, channels } })`
-with `control` and `samples` from `app.audio.ring().memory` and `channels` from
-`app.audio.format()`, and assembles the engine with `audio.drained: true`. A post of `'stop'` to
-the node's port ends the processor.
+**With shared memory** (`createSharedMixer`): the engine writes each track's own guest PCM,
+unconverted, into a per-track byte ring inside one `SharedArrayBuffer` "track table"
+(`SLOTS = 32` slots of `SLOT_BYTES = 65536` bytes each, one 64-byte header per slot ahead of it, a
+32-byte global header ahead of all of them -- `output/mix.js`'s `TABLE_BYTES`); `write` copies as
+many bytes as fit into the slot's ring and advances `WRITTEN`, and nothing here converts or mixes
+at all, so `pump()` only calls `fill` and touches no `Float32Array`. `output/worklet.js` --
+the audio thread -- resamples, scales by `GAIN` and sums every slot into each output block from
+that same table; `played()` is `MIXED_FRAMES`, the reader's own count of output frames it has
+produced from a slot; `playedBytes()` is `READ`, the reader's own count of guest bytes it has
+consumed, exact by construction (no ledger: a program waiting for one small buffer back is
+credited it once the reader has looked at those bytes at all, not when a ledger decides to retire
+an entry). A slot's header also carries `RATE`, `CHANNELS`, `BITS` (the format `open` was called
+with), `PAUSED`, `STATE` (`STATE_FREE`/`STATE_OPEN`/`STATE_CLOSING`) and `GENERATION` (bumped on
+open and on a backlog drop; the reader resets its resampler seam when it changes) and `DROP_TO`
+(see below); every field has exactly one writer -- the engine or the reader, never both -- and
+every access is `Atomics.load`/`store`, with neither side ever waiting on the other. A track opened
+when every slot is already taken -- not expected in practice, a game of this era opens a handful of
+buffers -- gets a silent fallback track instead: writes are accepted and immediately credited so
+the program is never held up, but nothing is heard, and `diagnostics().fallbackTracks` counts it.
+
+**The backlog policy** is the same 200 ms this layer always allowed, built on different machinery
+per backend: the engine backend's `track.pending() > mixer.capacityFrames` still calls `reset()`,
+which still drops the queue; the shared backend's `track.reset()` sets `DROP_TO` to the slot's
+current `WRITTEN` and bumps `GENERATION`, and the reader skips ahead to `DROP_TO` before its next
+read of that slot. Either way the caller -- `module.js`'s `feedBuffers` -- counts the drop under
+`behind`.
+
+`output/mix.js` is the arithmetic both backends' readers need: the table's layout constants,
+`resampleInto` (one slot, one output block) and `mixBlock` (every slot, one output block, the
+starvation counters). No imports, because `output/worklet.js` -- the audio thread -- cannot import
+across the worklet boundary and duplicates this file's `WORKLET-SHARED`-marked region verbatim
+instead (`export` stripped, the one difference); `worklet.test.js` asserts the two copies match, so
+a change to the arithmetic that is not carried to both is a failing test rather than silent drift.
+A mono graph over a stereo mix takes the left channel. The page does:
+`audioWorklet.addModule(<worklet url>)`, then
+`new AudioWorkletNode(context, 'bottlify-output', { outputChannelCount: [channels], processorOptions: { ...app.audio.memory(), channels } })`
+with `channels` also from `app.audio.format()`, and assembles the engine with `audio.drained: true`.
+`app.audio.memory()` is `{ table }` with shared memory, `{ control, samples }` without -- the
+`Started.audio.memory` union `src/host/messages.js` and `src/host/serve.js` carry across a worker,
+unchanged either way. A post of `'stop'` to the node's port ends the processor.
 
 Pump timing is the assembling caller's: `src/app.js` calls `sound.pump()` once per scheduler
-turn, before the turn yields to the browser, so the ring is topped up before the thread may be
-taken for composition or garbage collection.
+turn, before the turn yields to the browser, so the engine backend's ring is topped up (and the
+shared backend's DirectSound feed runs) before the thread may be taken for composition or garbage
+collection.
 
 ### DirectSound
 
@@ -205,6 +243,13 @@ throws, and the open fails with a message `ASI_error` returns.
   word on quality.
 - **One buffer's backlog past 200 ms is dropped**, not delayed: the program's current sound is the
   one meant to be heard.
+- **A page without shared memory mixes on the engine thread**, in the one float ring
+  `output/ring.js` still keeps: nothing else can read an ordinary `ArrayBuffer`, so this is not a
+  choice this layer makes but the ceiling a page without `SharedArrayBuffer` has.
+- **A 33rd simultaneous track on a page with shared memory is silent.** `SLOTS = 32` is a generous
+  ceiling for a title of this era, and a track opened past it gets a fallback that accepts writes
+  and credits them so the program is never held up, but mixes nothing; counted in
+  `diagnostics().fallbackTracks`.
 - **The provider's requests block the guest** when the decoder falls more than the lead behind.
 - **A stream's fetch callback is read serially through guest calls**, one chunk per crossing.
 
@@ -215,17 +260,19 @@ Reported at runtime: `starvedBlocks`/`starvedFrames` (holes a person heard), `sh
 
 ## Tests
 
-All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`); 132 `test()` cases.
+All under `npm test` from `modules/core` (`node --test "src/**/*.test.js"`).
 
 | file | kind | what it pins |
 |---|---|---|
-| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring with its own bytes at its own gain; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider. |
-| `src/layers/audio/output/mixer.test.js` | Unit | Format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting. |
+| `src/layers/audio/module.test.js` | Wiring | A sound a program plays actually reaches the ring (or the slot, with shared memory) with its own bytes at its own gain; nothing is read out with no sink; a stall costs time rather than unread sound; a program waiting on a position is woken even with nothing listening; `mp3: false` withholds the provider; a shared-memory backlog past 200 ms also counts `behind`. |
+| `src/layers/audio/output/mixer.test.js` | Unit | The engine backend, unchanged: format conversion, resampling across seams, the ledger's exact byte credit, pausing, `played()` monotonic, shortfall counting. The shared backend: `write` puts the guest's own bytes into the slot and calls no conversion, `pump()` allocates no `Float32Array`, `playedBytes()` credits a probe once `READ` passes it, a backlog sets `DROP_TO`. |
+| `src/layers/audio/output/mix.test.js` | Unit | `resampleInto` over a byte ring matches `convert()` sample for sample across three buffers; a `GENERATION` change resets the seam; a `DROP_TO` ahead of `READ` is honoured; gain and pause. |
+| `src/layers/audio/output/worklet.test.js` | Unit, over a loaded copy of the real `worklet.js` | The `WORKLET-SHARED` region is textually identical to `mix.js`'s, `export` aside; two tracks at different gains come out summed; a silent block counts `STARVED_BLOCKS`/`STARVED_FRAMES`; `MIXED_FRAMES` and `READ` advance by exactly what was mixed. |
 | `src/layers/audio/output/ring.test.js` | Unit | Fill and room, short writes, silence on a short read, starvation counters, `clear`. |
 | `src/layers/audio/dsound/buffers.test.js` | Contract | Cursor motion against the clock, write lead and stopped margin, wrapped locks, volume/pan bounds, notifications, duplicates, `drainPlayed` ranges. |
 | `src/layers/audio/dsound/seam.test.js` | Contract, over a flat guest memory | Every slot's argument count, structure layouts (`WAVEFORMATEX`, `DSBUFFERDESC` in both sizes, `DSCAPS` at 96 bytes), caps flags, refusals, enumeration through a guest callback, identity through the publisher. |
 | `src/layers/audio/asi/provider.test.js` | Contract, with a substitute decoder | Table registration through `RIB`, chunked continuing fetch, lead decoding, immediate answers, seek forward and back, preferences, a frameless stream, a failing decoder, a platform with none. |
 | `src/layers/audio/asi/mp3.test.js` | Unit | Frame-header parsing for each MPEG version, ID3 skipping, frame scanning, `interleave16` over planar and interleaved `AudioData`. |
 
-Whether sound is audible on a real page is not covered by the unit suite; the ring's starvation
-counters are what a browser run reports.
+Whether sound is audible on a real page is not covered by the unit suite; the starvation counters
+either backend reports are what a browser run reports.

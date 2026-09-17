@@ -1,0 +1,321 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * The track table's layout and the arithmetic that reads it: resampling and
+ * mixing, on whichever thread ends up doing it.
+ *
+ * No imports, on purpose, inside the marked region below. `mixer.js` (the
+ * engine side, which writes into the table) imports this whole file normally;
+ * `worklet.js` (the audio thread, which reads it) cannot import across the
+ * worklet boundary, so the marked region's text -- everything a reader needs
+ * and nothing an engine-only writer needs -- is duplicated into `worklet.js`
+ * instead, `export ` stripped from each declaration. `worklet.test.js` reads
+ * both files and asserts the regions match once that one, unavoidable,
+ * difference is normalised away, so the two copies cannot drift apart
+ * unnoticed.
+ */
+
+/** A game of this era opens a handful of buffers; more than this falls back. */
+export const SLOTS = 32;
+
+/* WORKLET-SHARED:BEGIN */
+
+/**
+ * PCM ring per slot, in bytes. A power of two, so a byte offset wraps with a
+ * mask rather than a modulo. 1.5 s of 22 kHz mono, 0.37 s of 44.1 kHz stereo --
+ * comfortably past the 200 ms of backlog the policy below allows to build up.
+ */
+export const SLOT_BYTES = 65536;
+export const PCM_MASK = SLOT_BYTES - 1;
+
+/**
+ * Ints in one slot's header. Eleven are named below; the rest are unused
+ * padding that rounds the header to 64 bytes -- one cache line -- so two
+ * adjacent slots' headers, written by different threads, never share one.
+ */
+export const SLOT_HEADER_INT32 = 16;
+export const SLOT_HEADER_BYTES = SLOT_HEADER_INT32 * 4;
+
+/** Slot header fields. STATE and GENERATION and the format are engine-owned. */
+export const STATE = 0;
+export const GENERATION = 1;
+export const RATE = 2;
+export const CHANNELS = 3;
+export const BITS = 4;
+/** Fixed point, ×`GAIN_SCALE` -- an integer so it reads and writes atomically
+ * the same way every other field here does, rather than through a second,
+ * non-atomic `Float32Array` view over the same bytes. */
+export const GAIN = 5;
+export const PAUSED = 6;
+/** Bytes, engine-owned, monotonic: guest PCM written into the slot's ring. */
+export const WRITTEN = 7;
+/** Bytes, reader-owned, monotonic: guest PCM the audio thread has consumed. */
+export const READ = 8;
+/** Bytes, engine-owned: the backlog policy's "skip to here" instruction. */
+export const DROP_TO = 9;
+/** Output frames, reader-owned: this slot's contribution so far. */
+export const MIXED_FRAMES = 10;
+
+export const STATE_FREE = 0;
+export const STATE_OPEN = 1;
+/** Closed by the engine; the reader frees it (back to `STATE_FREE`) once it
+ * has seen the mark, so the engine can never reuse a slot the reader has not
+ * caught up on. */
+export const STATE_CLOSING = 2;
+
+export const GAIN_SCALE = 65536;
+
+/** Ints in the global header, ahead of the first slot. */
+export const GLOBAL_HEADER_INT32 = 8;
+export const GLOBAL_HEADER_BYTES = GLOBAL_HEADER_INT32 * 4;
+
+export const OUTPUT_RATE = 0;
+export const BLOCKS = 1;
+export const STARVED_BLOCKS = 2;
+export const STARVED_FRAMES = 3;
+
+export const SLOT_STRIDE = SLOT_HEADER_BYTES + SLOT_BYTES;
+
+/** @param {number} slot @returns {number} byte offset of that slot's header */
+export function slotHeaderOffset(slot){
+    return GLOBAL_HEADER_BYTES + slot * SLOT_STRIDE;
+}
+
+/** @param {number} slot @returns {number} byte offset of that slot's PCM ring */
+export function slotPcmOffset(slot){
+    return slotHeaderOffset(slot) + SLOT_HEADER_BYTES;
+}
+
+/**
+ * The resampler's seam between one output block and the next, kept per slot
+ * by whoever calls {@link resampleInto} across many blocks.
+ *
+ * @typedef {Object} Seam
+ * @property {number} pos          Next read position, in input frames from
+ *                                  the slot's current `READ`. Negative reaches
+ *                                  into `tail`.
+ * @property {Float32Array | null} tail  The last input frame read before the
+ *                                  ring ran dry, per output channel.
+ * @property {number} generation   The slot `GENERATION` this seam was built
+ *                                  against; a mismatch means start over.
+ */
+
+/** @returns {Seam} */
+export function createSeam(){
+    return { pos: 0, tail: null, generation: -1 };
+}
+
+/**
+ * Resamples one slot's queued PCM into an output block of interleaved stereo
+ * float, adding into whatever is already there, and advances the slot's
+ * `READ` and `MIXED_FRAMES` by exactly what it consumed and produced.
+ *
+ * A slot with less queued than the block needs contributes what it has and
+ * leaves the rest of the block untouched -- silence, or another slot's sound.
+ * A slot that is not open, or is paused, contributes nothing and touches
+ * nothing.
+ *
+ * @param {Object} p
+ * @param {Float32Array} p.block        Interleaved stereo, added into.
+ * @param {number} p.blockFrames        Frames of `block` to fill, from 0.
+ * @param {Int32Array} p.header         This slot's `SLOT_HEADER_INT32` ints.
+ * @param {Uint8Array} p.pcm            This slot's `SLOT_BYTES` PCM ring.
+ * @param {number} p.outputRate
+ * @param {Seam} p.seam
+ * @returns {number} output frames this slot produced
+ */
+export function resampleInto({ block, blockFrames, header, pcm, outputRate, seam }){
+    const state = Atomics.load(header, STATE);
+    if (state === STATE_CLOSING)
+    {
+        // The engine is done feeding this slot; free it here, on the reader's
+        // side, so the engine can never reuse a slot before the reader has
+        // stopped touching its bytes.
+        Atomics.store(header, STATE, STATE_FREE);
+        return 0;
+    }
+    if (state !== STATE_OPEN || Atomics.load(header, PAUSED) !== 0)
+    {
+        return 0;
+    }
+
+    const generation = Atomics.load(header, GENERATION);
+    if (generation !== seam.generation)
+    {
+        seam.generation = generation;
+        seam.pos = 0;
+        seam.tail = null;
+        const dropTo = Atomics.load(header, DROP_TO);
+        const read = Atomics.load(header, READ);
+        if (dropTo > read)
+        {
+            Atomics.store(header, READ, dropTo);
+        }
+    }
+
+    const rate = Atomics.load(header, RATE);
+    const channels = Atomics.load(header, CHANNELS);
+    const bits = Atomics.load(header, BITS);
+    const gain = Atomics.load(header, GAIN) / GAIN_SCALE;
+    const bytesPerSample = bits === 8 ? 1 : 2;
+    const stride = bytesPerSample * channels;
+
+    const written = Atomics.load(header, WRITTEN);
+    const read0 = Atomics.load(header, READ);
+    const availableFrames = Math.max(0, Math.floor((written - read0) / stride));
+    if (availableFrames === 0)
+    {
+        return 0;
+    }
+
+    /** @param {number} frame @param {number} channel @returns {number} */
+    const readSample = (frame, channel)=>{
+        if (frame < 0)
+        {
+            return seam.tail ? seam.tail[channel] : readSample(0, channel);
+        }
+        const clamped = Math.min(frame, availableFrames - 1);
+        const at = (read0 + clamped * stride + channel * bytesPerSample) & PCM_MASK;
+        if (bytesPerSample === 1)
+        {
+            return (pcm[at] - 128) / 128;
+        }
+        const low = pcm[at];
+        const high = pcm[(at + 1) & PCM_MASK];
+        let value = low | (high << 8);
+        if (value >= 0x8000)
+        {
+            value -= 0x10000;
+        }
+        return value / 32768;
+    };
+
+    /** @type {number} */
+    let produced;
+    /** @type {number} */
+    let consumedFrames;
+
+    if (rate === outputRate)
+    {
+        // No seam to carry: consecutive blocks already concatenate exactly.
+        consumedFrames = Math.min(availableFrames, blockFrames);
+        for (let frame = 0; frame < consumedFrames; frame++)
+        {
+            for (let channel = 0; channel < 2; channel++)
+            {
+                block[frame * 2 + channel] +=
+                    readSample(frame, Math.min(channel, channels - 1)) * gain;
+            }
+        }
+        produced = consumedFrames;
+        seam.pos = 0;
+        seam.tail = null;
+    }
+    else
+    {
+        const step = rate / outputRate;
+        let pos = seam.pos;
+        let frame = 0;
+        while (frame < blockFrames && pos < availableFrames - 1)
+        {
+            const left = Math.floor(pos);
+            const blend = pos - left;
+            for (let channel = 0; channel < 2; channel++)
+            {
+                const which = Math.min(channel, channels - 1);
+                block[frame * 2 + channel] +=
+                    (readSample(left, which) * (1 - blend) + readSample(left + 1, which) * blend)
+                    * gain;
+            }
+            pos += step;
+            frame++;
+        }
+        produced = frame;
+
+        if (pos < availableFrames - 1)
+        {
+            // The block filled before the ring ran dry: only the whole input
+            // frames behind the read position are done with, so the fraction
+            // in front of it stays in the ring for the next block to read.
+            consumedFrames = Math.floor(pos);
+            seam.pos = pos - consumedFrames;
+        }
+        else
+        {
+            // The ring ran dry before the block filled: everything available
+            // is retired, and the last frame carries into the seam so the
+            // interpolation across it is not lost.
+            consumedFrames = availableFrames;
+            seam.pos = pos - availableFrames;
+            if (!seam.tail || seam.tail.length !== 2)
+            {
+                seam.tail = new Float32Array(2);
+            }
+            for (let channel = 0; channel < 2; channel++)
+            {
+                seam.tail[channel] =
+                    readSample(availableFrames - 1, Math.min(channel, channels - 1));
+            }
+        }
+    }
+
+    if (consumedFrames > 0)
+    {
+        Atomics.store(header, READ, read0 + consumedFrames * stride);
+    }
+    if (produced > 0)
+    {
+        Atomics.add(header, MIXED_FRAMES, produced);
+    }
+    return produced;
+}
+
+/**
+ * One output block: every slot resampled and summed into it, the block and
+ * starvation counters advanced.
+ *
+ * A block is starved -- the artifact a person hears as a click -- when no
+ * slot had enough to fill it, exactly as the ring counted it before: an idle
+ * title with nothing open counts too, because that is what the reader really
+ * found.
+ *
+ * @param {Object} p
+ * @param {Int32Array} p.global          The table's `GLOBAL_HEADER_INT32` ints.
+ * @param {{ header: Int32Array, pcm: Uint8Array }[]} p.slots
+ * @param {Seam[]} p.seams                One per slot, same order.
+ * @param {Float32Array} p.block          Zeroed by the caller or not yet used.
+ * @param {number} p.blockFrames
+ * @param {number} p.outputRate
+ * @returns {number} the most any one slot produced
+ */
+export function mixBlock({ global, slots, seams, block, blockFrames, outputRate }){
+    block.fill(0, 0, blockFrames * 2);
+    Atomics.add(global, BLOCKS, 1);
+    let maxProduced = 0;
+    for (let slot = 0; slot < slots.length; slot++)
+    {
+        const produced = resampleInto({
+            block, blockFrames, header: slots[slot].header, pcm: slots[slot].pcm,
+            outputRate, seam: seams[slot],
+        });
+        if (produced > maxProduced)
+        {
+            maxProduced = produced;
+        }
+    }
+    if (maxProduced < blockFrames)
+    {
+        Atomics.add(global, STARVED_BLOCKS, 1);
+        Atomics.add(global, STARVED_FRAMES, blockFrames - maxProduced);
+    }
+    return maxProduced;
+}
+
+/* WORKLET-SHARED:END */
+
+/** Engine-only: the whole table's byte size, to allocate it. */
+export const TABLE_BYTES = GLOBAL_HEADER_BYTES + SLOTS * SLOT_STRIDE;

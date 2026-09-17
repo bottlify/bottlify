@@ -18,6 +18,7 @@ import assert from 'node:assert/strict';
 import { audioModule } from './module.js';
 import { DSBPLAY_LOOPING } from './dsound/buffers.js';
 import { createRing } from './output/ring.js';
+import { slotHeaderOffset, slotPcmOffset, SLOT_HEADER_INT32, SLOT_BYTES, WRITTEN } from './output/mix.js';
 import {
     WAVEFORMATEX, DSBUFFERDESC, DS_OK, IID_IDirectSoundNotify,
 } from './dsound/seam.js';
@@ -51,6 +52,8 @@ function fixture(){
     const memory = {
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>bytes.subarray(address, address + length),
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>bytes.subarray(address, address + length),
         /** @param {number} address @param {Uint8Array} data */
         writeBytes: (address, data)=>bytes.set(data, address),
     };
@@ -110,16 +113,17 @@ function fixture(){
 /**
  * A module with one playing sound buffer full of something to hear.
  *
- * @param {{ silent?: boolean, drained?: boolean,
+ * @param {{ silent?: boolean, drained?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike } }} [options]
  */
-async function playing({ silent = false, drained = true, memory } = {}){
+async function playing({ silent = false, drained = true, shared = false, memory } = {}){
     const f = fixture();
     /** @type {number[]} */
     const signalled = [];
     const api = await audioModule.create({
         ...f.config,
         drained,
+        shared,
         memory,
         /** @param {number} handle */
         signal: handle=>signalled.push(handle),
@@ -223,6 +227,25 @@ test('what reaches the ring is the buffer\'s own bytes, not silence', async()=>{
 
     const frames = loud.api.output().ring.read(new Float32Array(64 * 2));
     assert.ok(frames > 0, 'the ring had something in it');
+});
+
+test('with shared memory, what reaches the slot is the buffer\'s own bytes', async()=>{
+    // The table replaces the ring, but the same claim holds: this is the
+    // buffer's own bytes, not converted, not silence.
+    const loud = await playing({ shared: true });
+    loud.call(loud.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    loud.advance(50);
+    loud.api.pump();
+
+    assert.equal(loud.api.output().diagnostics().tracks, 1, 'the buffer opened a track');
+    // The only track this fixture ever opens, so it is the first free slot.
+    const table = loud.api.output().table;
+    const header = new Int32Array(table, slotHeaderOffset(0), SLOT_HEADER_INT32);
+    const pcm = new Uint8Array(table, slotPcmOffset(0), SLOT_BYTES);
+    const written = Atomics.load(header, WRITTEN);
+    assert.ok(written > 0, 'bytes reached the slot');
+    assert.ok([...pcm.subarray(0, written)].every(byte=>byte === 0x40),
+        'byte-equal to what the guest wrote, not converted or silent');
 });
 
 test('a silenced buffer is mixed at its own gain, not at full', async()=>{
@@ -331,6 +354,20 @@ test('the span read on the turn the machine falls behind is the one it plays', (
             `the backlog went, and did not grow: ${before} -> ${after}`);
         assert.ok(after > 0, 'and the span just read stayed, rather than being the one dropped');
     });
+});
+
+test('with shared memory, a backlog past the depth also counts behind', async()=>{
+    // The same policy as the ring backend, now built on DROP_TO instead of
+    // dropping the queue: this is the observable it must still produce.
+    const f = await playing({ shared: true });
+    f.call(f.buffer, 'Play', [0, 0, DSBPLAY_LOOPING]);
+    f.advance(300); // well past the 200 ms depth, in one span
+    f.api.pump();
+    assert.equal(f.api.behind(), 0, 'nothing refused yet -- the check runs before this write');
+
+    f.advance(10);
+    f.api.pump();
+    assert.ok(f.api.behind() > 0, 'this is the turn it fell behind');
 });
 
 /** Somewhere to put a DSBPOSITIONNOTIFY the guest would have filled in. */
