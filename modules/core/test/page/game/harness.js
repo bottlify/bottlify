@@ -904,6 +904,9 @@ export function createHarness(canvas, how = {}){
                 instructions: layers.cpu?.instructions ?? 0,
 
                 traps: layers.cpu?.traps ?? 0,
+                // Host calls so far: a per-call cost is only per call if a run
+                // can count them, and a sampling profile cannot.
+                calls: layers.bridge?.calls ?? 0,
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
                 presents: presentState.presents,
