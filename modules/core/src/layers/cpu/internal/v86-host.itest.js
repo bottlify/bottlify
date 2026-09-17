@@ -1348,10 +1348,13 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
     // was, and the call writes the 80-bit form back, so the registers it
     // touches lose their tag and every later inline operation on them takes
     // its helper arm too. The same program is run compiled both ways and every
-    // result compared word for word: a NaN on both sides of a compare, a
-    // negative zero through the sign changes, halves rounded in each of the
-    // four modes the control word names, a chain of exchanges, roots that are
-    // exact and roots that are not, and the integers at either end of a word.
+    // result compared word for word: a negative zero through the sign
+    // changes, halves rounded in each of the four modes the control word
+    // names, a chain of exchanges, roots that are exact and roots that are
+    // not, an ordinary compare of two tagged operands, and the integers at
+    // either end of a word. A compare against a NaN is its own test below: a
+    // NaN is never tagged, so it always takes the helper arm and does not
+    // belong to this test's "keeps its tag" threshold.
     //
     // A root that is not exact is stored as a single: rounded to a double
     // through the 80-bit format and rounded to a double directly can differ in
@@ -1359,7 +1362,7 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
     const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
     const bits = (/** @type {number} */ v)=>new Uint32Array(Float32Array.of(v).buffer)[0];
     const DATA = 0x9000;
-    const [A, B, NEGZERO, NAN32] = [0x9000, 0x9004, 0x9008, 0x900c];
+    const [A, B, NEGZERO] = [0x9000, 0x9004, 0x9008];
     const [HALF, NEGHALF, SQUARE, TWO] = [0x9010, 0x9014, 0x9018, 0x901c];
     const [IMAX, IMIN, CW, CWBASE] = [0x9020, 0x9024, 0x9028, 0x902c];
     const RESULTS = 0x9100;
@@ -1403,18 +1406,6 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
         0xdb, 0x1d, ...abs(RESULTS + 0x18),     //       fistp dword
         0xdb, 0x05, ...abs(IMIN),               //       fild dword [0x80000000]
         0xdb, 0x1d, ...abs(RESULTS + 0x1c),     //       fistp dword
-        // a NaN on one side of a compare, signalling and quiet
-        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
-        0xd9, 0x05, ...abs(NAN32),              //       fld dword [nan]
-        0x31, 0xc0,                             //       xor eax, eax
-        0xd8, 0xd1,                             //       fcom st1
-        0xdf, 0xe0,                             //       fnstsw ax
-        0xa3, ...abs(RESULTS + 0x20),           //       mov [.], eax
-        0x31, 0xc0,                             //       xor eax, eax
-        0xdd, 0xe9,                             //       fucomp st1
-        0xdf, 0xe0,                             //       fnstsw ax
-        0xa3, ...abs(RESULTS + 0x24),           //       mov [.], eax
-        0xdd, 0xd8,                             //       fstp st0
         // an ordinary compare that pops both registers
         0xd9, 0x05, ...abs(A),                  //       fld dword [1.5]
         0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
@@ -1506,12 +1497,6 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
     assert.equal(word(r, 0x1c), 0x80000000, 'and the most negative');
     assert.equal(word(r, 0x2c), bits(Math.PI), 'pi times one');
 
-    // A NaN on either side is unordered: C3, C2 and C0 all set. The signalling
-    // compare calls it an invalid operation as well; the quiet one does not,
-    // and the flag it finds set is the one the signalling compare left.
-    assert.equal(word(r, 0x20) & 0x4500, 0x4500, 'a signalling compare of a NaN is unordered');
-    assert.equal(word(r, 0x20) & 1, 1, 'and an invalid operation');
-    assert.equal(word(r, 0x24) & 0x4500, 0x4500, 'the quiet compare is unordered too');
     assert.equal(word(r, 0x28) & 0x4500, 0, 'st(0) above the other register: none of the three');
 
     assert.deepEqual(
@@ -1531,6 +1516,106 @@ test('an x87 value that keeps its tag computes what the helpers compute', async(
         `${inline.tagLost} helper arms taken for want of a tag over ${N} iterations`);
     assert.ok(helpers.tagLost > 10000,
         `${helpers.tagLost} with the group off, against ${inline.tagLost} with it on`);
+});
+
+test('a compare against a NaN takes the helper arm by contract', async()=>{
+    // A NaN is neither a normal nor a zero, so it is never tagged and a
+    // compare against it is the library's: the compiled arm cannot assume a
+    // tag it will never see, so it takes its helper every time, on both the
+    // signalling and the quiet form. This is the outcome the tag-keeping test
+    // above deliberately excludes, pinned here on its own so a future change
+    // that makes NaN compares inline again is as visible as one that stops
+    // tagging a value that should stay tagged.
+    const f32 = (/** @type {number} */ v)=>[...new Uint8Array(Float32Array.of(v).buffer)];
+    const DATA = 0x9000;
+    const [B, NAN32] = [0x9000, 0x9004];
+    const RESULTS = 0x9100;
+    // A larger count than the other tests': this program's loop body is only
+    // two compares, so it takes far more iterations running interpreted
+    // before the JIT compiles it than the mixed-instruction programs above
+    // do; N needs to be large enough that the interpreted warm-up is a small
+    // fraction of it, or the per-iteration ratio below is too noisy to pin.
+    const N = 200000;
+
+    /** @param {number} at */
+    const abs = at=>u32(at);
+    const program = [
+        0xb9, ...u32(N),                        //       mov ecx, N
+        0xdb, 0xe3,                             // loop: fninit
+        // a NaN on one side of a compare, signalling and quiet
+        0xd9, 0x05, ...abs(B),                  //       fld dword [2.25]
+        0xd9, 0x05, ...abs(NAN32),              //       fld dword [nan]
+        0x31, 0xc0,                             //       xor eax, eax
+        0xd8, 0xd1,                             //       fcom st1
+        0xdf, 0xe0,                             //       fnstsw ax
+        0xa3, ...abs(RESULTS + 0x00),           //       mov [.], eax
+        0x31, 0xc0,                             //       xor eax, eax
+        0xdd, 0xe9,                             //       fucomp st1
+        0xdf, 0xe0,                             //       fnstsw ax
+        0xa3, ...abs(RESULTS + 0x04),           //       mov [.], eax
+        0xdd, 0xd8,                             //       fstp st0
+    ];
+    program.push(0x49);                                             // dec ecx
+    const jnzAt = GUEST_CODE + program.length;
+    program.push(0x0f, 0x85, ...u32((GUEST_CODE + 5) - (jnzAt + 6)));  // jnz loop
+    program.push(0xf4);                                                 // hlt
+
+    /** @param {number} tagged */
+    const run = async tagged=>{
+        const host = await boot();
+        host.cpu().wm.exports.set_jit_config(12, tagged);
+        host.cpu().wm.exports.jit_clear_cache_js();
+        host.writePhysical(DATA, new Uint8Array([...f32(2.25), 0x00, 0x00, 0xc0, 0x7f]));
+        host.writePhysical(RESULTS, new Uint8Array(0x08));
+        host.writePhysical(GUEST_CODE, new Uint8Array(program));
+        host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+        host.cpu().in_hlt[0] = 0;
+        host.cpu().instruction_pointer[0] = GUEST_CODE;
+        host.writeReg32('esp', INITIAL_STACK);
+        for (let slice = 0; slice < 5000 && !host.cpu().in_hlt[0]; slice++)
+        {
+            host.cpu().run_slice(10000);
+            if (slice % 10 === 0)
+            {
+                await new Promise(resolve=>setTimeout(resolve, 0));
+            }
+        }
+        assert.ok(host.cpu().in_hlt[0], 'the program ran to its end');
+        const state = host.jitState();
+        assert.ok(state !== -1 && state.compiledSteps > 0, 'and was compiled');
+        const results = host.readPhysical(RESULTS, 0x08);
+        const sites = state.x87Sites;
+        host.stop();
+        return { results, sites };
+    };
+
+    const helpers = await run(0);
+    const inline = await run(1);
+    assert.deepEqual([...inline.results], [...helpers.results], 'the same results either way');
+
+    const word = (/** @type {Uint8Array} */ r, /** @type {number} */ at)=>
+        (r[at] | r[at + 1] << 8 | r[at + 2] << 16 | r[at + 3] << 24) >>> 0;
+    const r = inline.results;
+
+    // A NaN on either side is unordered: C3, C2 and C0 all set. The signalling
+    // compare calls it an invalid operation as well; the quiet one does not.
+    assert.equal(word(r, 0x00) & 0x4500, 0x4500, 'a signalling compare of a NaN is unordered');
+    assert.equal(word(r, 0x00) & 1, 1, 'and an invalid operation');
+    assert.equal(word(r, 0x04) & 0x4500, 0x4500, 'the quiet compare is unordered too');
+
+    /** @param {string} name */
+    const siteCount = name=>{
+        const match = inline.sites.match(new RegExp(`(?:^| )${name.replace(/\./g, '\\.')}:(\\d+)`));
+        return match ? Number(match[1]) : 0;
+    };
+    const compares = siteCount('arm.fcom.sti');
+    // Two NaN compares run every iteration once the block is compiled; a few
+    // of the first iterations still run interpreted, before the JIT compiles
+    // it, so the count falls short of 2 * N rather than landing on it.
+    assert.ok(compares >= N,
+        `${compares} arm.fcom.sti events over ${N} iterations, ${inline.sites}`);
+    assert.ok(compares <= 2 * N,
+        `${compares} arm.fcom.sti events, more than the two NaN compares per iteration allow`);
 });
 
 test('an x87 value a double holds keeps its tag through the helpers', async()=>{
