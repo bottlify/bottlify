@@ -81,6 +81,16 @@ async function bridge(){
             /** @param {number} at @param {number} value */
             writeU32: (at, value)=>cells.set(at >>> 0, value >>> 0),
             readBytes: ()=>new Uint8Array(0),
+            /** @param {number} at @param {number} length */
+            window: (at, length)=>{
+                const bytes = new Uint8Array(length);
+                const view = new DataView(bytes.buffer);
+                for (let i = 0; i < length; i += 4)
+                {
+                    view.setUint32(i, (cells.get((at + i) >>> 0) ?? 0) >>> 0, true);
+                }
+                return bytes;
+            },
         },
         log: { begin: ()=>{}, end: ()=>{} },
     };

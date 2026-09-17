@@ -46,6 +46,8 @@ function machine(){
         },
         /** @param {number} address @param {number} length */
         readBytes: (address, length)=>new Uint8Array(words.buffer, address, length),
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>new Uint8Array(words.buffer, address, length),
     };
     const thread = { name: 'main' };
     const parking = createParking({

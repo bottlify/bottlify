@@ -444,9 +444,17 @@ export function createDispatcher(deps){
             {
                 args[at++] = cpu.readReg32('ecx') | 0;
             }
-            for (let word = 0; word < entry.stackWords; word++)
+            if (entry.stackWords > 0)
             {
-                args[at++] = memory.readU32(esp + 4 + word * 4) | 0;
+                // One window over the whole span rather than a read per word:
+                // each of those cost its own region check and cache lookup,
+                // and a call takes several words at once.
+                const stack = memory.window(esp + 4, entry.stackWords * 4);
+                const view = new DataView(stack.buffer, stack.byteOffset, stack.byteLength);
+                for (let word = 0; word < entry.stackWords; word++)
+                {
+                    args[at++] = view.getInt32(word * 4, true);
+                }
             }
 
             calls++;

@@ -57,6 +57,21 @@ function machine(options = {}){
         },
         /** @param {number} address @param {number} value */
         writeU32: (address, value)=>cells.set(address, value),
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>{
+            const bytes = new Uint8Array(length);
+            const view = new DataView(bytes.buffer);
+            for (let at = 0; at < length; at += 4)
+            {
+                const value = cells.get(address + at);
+                if (value === undefined)
+                {
+                    throw new Error(`Unmapped read at ${(address + at).toString(16)}`);
+                }
+                view.setUint32(at, value >>> 0, true);
+            }
+            return bytes;
+        },
     };
 
     /** @type {any[]} */
@@ -538,6 +553,13 @@ test('tracing peeks through the region map and never through a read that throws'
             : undefined),
         /** @param {number} address @param {number} length */
         window: (address, length)=>{
+            // The argument marshalling's own window, over the stack this
+            // test's base machine already answers for -- distinct from the
+            // peek below, which is what this test counts.
+            if (address < 0x7000)
+            {
+                return m.memory.window(address, length);
+            }
             windows++;
             assert.ok(address + length <= 0x8000, 'a peek never runs past its region');
             return bytes.subarray(address - 0x7000, address - 0x7000 + length);
@@ -656,4 +678,49 @@ test('a write into guest memory is charged to the call in flight, however it nes
         A: [11, 2],
         B: [100, 1],
     });
+});
+
+test('a five-argument stdcall makes one window call and zero per-word reads', ()=>{
+    // Five reads with a region check and a cache lookup each, against one
+    // window over the whole span: a title's frame makes this crossing
+    // thousands of times. The frame's own read of the return address at ESP
+    // is not an argument word and is not counted.
+    const esp = 0x3000;
+    const m = machine({ esp, args: [10, 20, 30, 40, 50] });
+    let windows = 0;
+    let argumentReads = 0;
+    /** @type {any} */
+    const memory = {
+        ...m.memory,
+        /** @param {number} address */
+        readU32: address=>{
+            if (address > esp)
+            {
+                argumentReads++;
+            }
+            return m.memory.readU32(address);
+        },
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>{
+            windows++;
+            return m.memory.window(address, length);
+        },
+    };
+    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, {
+        name: 'X.dll!Five', ...STDCALL, argBytes: 20,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen.push(args.slice());
+            return 0;
+        },
+    });
+
+    dispatcher.dispatch(1);
+
+    assert.deepEqual(seen, [[10, 20, 30, 40, 50]], 'the arguments arrive in order');
+    assert.equal(windows, 1, 'one window call for the whole span');
+    assert.equal(argumentReads, 0, 'zero per-word reads');
 });
