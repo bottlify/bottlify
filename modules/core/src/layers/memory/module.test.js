@@ -133,6 +133,25 @@ test('a second instance in one realm does not take the first one\'s state', asyn
     await memoryModule.dispose();
 });
 
+test('nextRegionAfter answers the lowest region above an address, or nothing past the last one',
+    async()=>{
+        const memory = await open({});
+        memory.register({ name: 'a', base: 0x1000, size: 0x1000, kind: 'stack', access: 'rw' });
+        memory.register({ name: 'c', base: 0x5000, size: 0x1000, kind: 'stack', access: 'rw' });
+        memory.register({ name: 'b', base: 0x3000, size: 0x1000, kind: 'stack', access: 'rw' });
+
+        assert.equal(memory.nextRegionAfter(0)?.base, 0x1000,
+            'the lowest region, from before anything is mapped');
+        assert.equal(memory.nextRegionAfter(0x1000)?.base, 0x3000,
+            'the next one above a region\'s own base, not itself');
+        assert.equal(memory.nextRegionAfter(0x4000)?.base, 0x5000,
+            'the nearer of two candidates above, regardless of registration order');
+        assert.equal(memory.nextRegionAfter(0x5fff), undefined,
+            'nothing maps above the last region');
+
+        await memoryModule.dispose();
+    });
+
 test('a disposed memory answers harmlessly rather than throwing', async()=>{
     const bytes = new Uint8Array(0x2000);
     const memory = await open({}, {
@@ -151,6 +170,7 @@ test('a disposed memory answers harmlessly rather than throwing', async()=>{
         null);
     memory.protect('data', 'rwx');
     assert.equal(memory.find(0x1000), undefined);
+    assert.equal(memory.nextRegionAfter(0), undefined);
     assert.deepEqual(memory.list(), []);
     assert.equal(memory.assert(0x1000, 4, 'read'), undefined);
     assert.equal(memory.writer('x'), -1);

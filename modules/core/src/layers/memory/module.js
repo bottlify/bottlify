@@ -166,6 +166,8 @@ export const memoryModule = {
             },
             /** @param {number} address */
             find: address=>live() ? state.regions.find(address) : undefined,
+            /** @param {number} address */
+            nextRegionAfter: address=>live() ? state.regions.nextRegionAfter(address) : undefined,
             list: ()=>live() ? state.regions.list() : [],
             /**
              * @param {number} address

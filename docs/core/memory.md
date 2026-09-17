@@ -48,6 +48,7 @@ Region map:
 | `register` | `({ name, base, size, kind, access }) => Region` | Records a region. Throws on non-positive size, unknown access, or overlap with anything already mapped. |
 | `protect` | `(name, access) => void` | Changes what a named region permits, the way `VirtualProtect` does. Throws for an unknown name or access. |
 | `find` | `(address) => Region \| undefined` | The region containing an address. |
+| `nextRegionAfter` | `(address) => Region \| undefined` | The mapped region with the lowest base strictly above an address, or `undefined` past the last one. Answers how far a free gap runs; a linear scan, unasked on the hot read/write path. |
 | `list` | `() => Region[]` | Every region, lowest address first (a copy). |
 | `assert` | `(address, length, 'read' \| 'write' \| 'execute') => Region` | Throws unless the whole span sits inside **one** region that permits the mode. A span across two adjacent regions is refused. |
 
@@ -75,7 +76,7 @@ process replacement runs it again; the plan for two machines in one worker needs
 the region map, the accessors and the writer account live in the instance the api closes over,
 and a second `create()` cannot take the first one's layout; `diagnostics()` answers for the most
 recently created instance. After `dispose()`, a call that was in flight answers harmlessly rather
-than throwing: `register` answers `null`, `find` answers `undefined`, `list` answers `[]`,
+than throwing: `register` answers `null`, `find` and `nextRegionAfter` answer `undefined`, `list` answers `[]`,
 `assert` answers `undefined` instead of validating, `writer`/`charging` answer `-1`, `readBytes`/
 `window` answer an empty `Uint8Array`, `readU8`/`readU16`/`readU32` answer `0`, `readCString`/
 `readWideString` answer `''`, `scanCString` answers `{ index: -1, byte: 0 }`, and
@@ -109,6 +110,8 @@ caller that cached a region can tell when the cache is stale.
 
 `find` is asked on every host read and write, thousands of times a frame, nearly always in the
 region the last one hit, so the last hit is tried first and the fallback walk allocates nothing.
+`nextRegionAfter` has no such cache: it is asked only when a `VirtualQuery` has already fallen
+through `find` to the free branch, once per query rather than once per byte.
 
 `executable(address)` (internal, not on the API) answers whether anything at an address could
 be executed — `true` when nothing is known, which is the safe answer. The accessors use it to

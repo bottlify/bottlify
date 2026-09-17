@@ -190,6 +190,31 @@ export function createRegionMap(){
         },
 
         /**
+         * The mapped region with the lowest base above an address, for
+         * answering how far a free gap runs: `VirtualQuery` on an
+         * unmapped address needs where the *next* thing starts, not what
+         * contains it. Uncached and a linear scan, unlike `find` above --
+         * asked only when a query already fell through to the free branch,
+         * never on the hot read/write path.
+         *
+         * @param {number} address
+         * @returns {Region | undefined}
+         */
+        nextRegionAfter(address){
+            /** @type {Region | undefined} */
+            let closest;
+            for (let index = 0; index < regions.length; index++)
+            {
+                const region = regions[index];
+                if (region.base > address && (!closest || region.base < closest.base))
+                {
+                    closest = region;
+                }
+            }
+            return closest;
+        },
+
+        /**
          * Throws unless the whole span sits inside one region that permits `mode`.
          *
          * A span crossing two adjacent regions is rejected on purpose: adjacency
