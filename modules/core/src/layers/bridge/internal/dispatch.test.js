@@ -724,3 +724,47 @@ test('a five-argument stdcall makes one window call and zero per-word reads', ()
     assert.equal(windows, 1, 'one window call for the whole span');
     assert.equal(argumentReads, 0, 'zero per-word reads');
 });
+
+test('arguments straddling a region boundary fall back to per-word reads', ()=>{
+    // A stack is one region on every guest this project has run so far, but
+    // nothing guarantees it: a thread's stack crossing two adjacent regions
+    // is legal layout, and `window` refuses a span crossing one on purpose
+    // (memory.md). The call still has to be answered, not refused outright.
+    const esp = 0x3000;
+    const m = machine({ esp, args: [10, 20, 30, 40, 50] });
+    let argumentReads = 0;
+    /** @type {any} */
+    const memory = {
+        ...m.memory,
+        /** @param {number} address */
+        readU32: address=>{
+            if (address > esp)
+            {
+                argumentReads++;
+            }
+            return m.memory.readU32(address);
+        },
+        /** @param {number} address @param {number} length */
+        window: (address, length)=>{
+            throw new Error(
+                `read of ${length} bytes at 0x${address.toString(16)}`
+                + ' runs past the end of region "stack-low"');
+        },
+    };
+    const dispatcher = createDispatcher({ cpu: m.cpu, memory, parking: m.parking });
+    /** @type {number[][]} */
+    const seen = [];
+    dispatcher.register(1, {
+        name: 'X.dll!Five', ...STDCALL, argBytes: 20,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen.push(args.slice());
+            return 0;
+        },
+    });
+
+    dispatcher.dispatch(1);
+
+    assert.deepEqual(seen, [[10, 20, 30, 40, 50]], 'the arguments still arrive, and in order');
+    assert.equal(argumentReads, 5, 'one per-word read per argument, the fallback');
+});

@@ -135,7 +135,11 @@ uses `THISCALL` today; it exists for a C++ runtime library's real member exports
 
 `dispatch(id)` reads ESP (plus `forwardSave` for a forwarding stub), reads the arguments off
 the stack into the function's own array (the convention was worked out once, at registration),
-records the name in a ring and a detail record in another, fills the `frame` for this depth of
+through one `memory.window` call over the whole span rather than a read per word; a stack that
+straddles two adjacent regions (legal guest layout, though no guest here reaches it today) makes
+`window` refuse the span, and dispatch falls back to reading each argument word on its own rather
+than refusing the call. It records the name in a ring and a detail record in another, fills the
+`frame` for this depth of
 nesting — everything a handler might need about where it was called from, read **before** it
 runs because a handler that calls the guest back overwrites that part of the stack — brackets
 the handler with `parking.beginCall/endCall`, and then places the result:

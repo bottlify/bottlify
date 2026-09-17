@@ -448,12 +448,34 @@ export function createDispatcher(deps){
             {
                 // One window over the whole span rather than a read per word:
                 // each of those cost its own region check and cache lookup,
-                // and a call takes several words at once.
-                const stack = memory.window(esp + 4, entry.stackWords * 4);
-                const view = new DataView(stack.buffer, stack.byteOffset, stack.byteLength);
-                for (let word = 0; word < entry.stackWords; word++)
+                // and a call takes several words at once. A stack is one
+                // region on every guest this engine has run, but nothing
+                // guarantees it: a thread's stack straddling two adjacent
+                // regions is legal layout, and `window` refuses a span that
+                // crosses one, so that rare call falls back to reading each
+                // word on its own rather than refusing the whole call.
+                let stack;
+                try
                 {
-                    args[at++] = view.getInt32(word * 4, true);
+                    stack = memory.window(esp + 4, entry.stackWords * 4);
+                }
+                catch {
+                    stack = null;
+                }
+                if (stack !== null)
+                {
+                    const view = new DataView(stack.buffer, stack.byteOffset, stack.byteLength);
+                    for (let word = 0; word < entry.stackWords; word++)
+                    {
+                        args[at++] = view.getInt32(word * 4, true);
+                    }
+                }
+                else
+                {
+                    for (let word = 0; word < entry.stackWords; word++)
+                    {
+                        args[at++] = memory.readU32(esp + 4 + word * 4) | 0;
+                    }
                 }
             }
 
