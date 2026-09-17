@@ -940,11 +940,10 @@ export function createHarness(canvas, how = {}){
             // The graphics layer's own configuration, whatever fields the run
             // names: a switch the layer defaults off is turned on per run here.
             graphics: request.graphics ?? undefined,
-            // Peeks every pointer argument on every call -- measured at over
-            // a percent of the worker on a title's own draws, none of which
-            // the launcher pays. A run that wants the strings (read
-            // afterwards, which is exactly when a stack one is gone) asks
-            // for them; a measurement run should not pay for them unasked.
+            // Peeks every pointer argument on every call, which the launcher
+            // never pays for. A run that wants the strings (read afterwards,
+            // which is exactly when a stack one is gone) asks for them; a
+            // measurement run should not pay for them unasked.
             traceStrings: request.trace === true,
             profileCalls: request.profileCalls === true,
             // Every call, not the last two hundred. What a program decided is
@@ -1137,7 +1136,9 @@ export function createHarness(canvas, how = {}){
                 : null,
             presenter: graphics.presenter ?? null,
             // How the textures travelled: a staged upload is a block-compressed
-            // one, so this count is what says the configured path was taken.
+            // one or a render-target-ordered one on the Direct3D path, so this
+            // count alone does not say the BC path was taken -- read it beside
+            // `compressedTextures` in the run's own configuration.
             uploads: graphics.backend?.counters
                 ? {
                     textures: graphics.backend.counters.textureUploads ?? 0,

@@ -1329,7 +1329,7 @@ export function createGpuRenderer(services){
         let probe = -1;
         if (dumpDraws)
         {
-            // `dumpDraws` is one of the two conditions that built `ids` above.
+            // Reaching here means `dumpDraws` was true above, so `ids` was built.
             const dumpIds = /** @type {string[]} */ (ids);
             recording.dump.push(`draw ${recording.counts.draws - 1}: ${topology}`
                 + ` count=${count} first=${first} base=${baseVertex}`
