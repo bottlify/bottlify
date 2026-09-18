@@ -945,7 +945,7 @@ test('a site hook reads all eight registers off the pushad block into a plain ob
     m.dispatcher.register(1, {
         name: 'loop.faces', site: true, saved: 32,
         trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
-        /** @param {any} registers */
+        /** @param {import('./dispatch.js').SiteRegisters} registers */
         handler: registers=>{
             seen.push({ ...registers });
             return false;
@@ -976,7 +976,7 @@ test('a site hook that answers writes back every edited register, ESP by stackAd
     m.dispatcher.register(1, {
         name: 'loop.faces', site: true, saved: 32,
         trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
-        /** @param {any} registers */
+        /** @param {import('./dispatch.js').SiteRegisters} registers */
         handler: registers=>{
             // The kernel's own answer: only EBP (the count) and EDX (what the
             // resume point's own next instruction would have loaded) are
@@ -1020,7 +1020,7 @@ test('a site hook that falls through restores every register to what the site he
     m.dispatcher.register(1, {
         name: 'loop.faces', site: true, saved: 32,
         trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
-        /** @param {any} registers */
+        /** @param {import('./dispatch.js').SiteRegisters} registers */
         handler: registers=>{
             // A kernel that decided partway through to fall through -- its
             // guard fired after it had already started editing -- must leave

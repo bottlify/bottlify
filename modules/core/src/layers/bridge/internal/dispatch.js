@@ -55,6 +55,13 @@ import { isParkedCall } from './parking.js';
  */
 
 /**
+ * The eight general registers a site hook's handler sees and may edit.
+ *
+ * @typedef {{ eax: number, ecx: number, edx: number, ebx: number, esp: number,
+ *     ebp: number, esi: number, edi: number }} SiteRegisters
+ */
+
+/**
  * A registered function with everything the crossing needs worked out once:
  * what the convention means in words and bytes, and the array a call fills.
  *
@@ -75,8 +82,7 @@ import { isParkedCall } from './parking.js';
  * @property {number} trampoline
  * @property {number} resume
  * @property {number} stackAdjust
- * @property {{ eax: number, ecx: number, edx: number, ebx: number, esp: number,
- *     ebp: number, esi: number, edi: number } | null} registers
+ * @property {SiteRegisters | null} registers
  *     A site hook's mutable register view, reused like `args`; null otherwise.
  * @property {{ calls: number, handled: number, fellThrough: number,
  *     mismatches: number } | null} hookStats
