@@ -221,9 +221,10 @@ export const loaderModule = {
              * @param {{ hooks: import('./internal/hooks.js').HookEntry[] }} spec
              * @param {import('./internal/hooks.js').LoadedImage} image
              * @param {(options: { name: string, argBytes: number, target: number,
-             *     handler: Function }) => { address: number }} register
+             *     handler: Function }) => number} register
              *     Bound to the bridge by whoever assembles the process; this
-             *     layer has no bridge of its own to call.
+             *     layer has no bridge of its own to call. Answers the stub's
+             *     guest address, as `bridge.hook` does -- or 0 for none.
              * @param {(entry: import('./internal/hooks.js').HookEntry) =>
              *     Function | null} resolveHandler
              *     What a hook actually does, keyed off the sidecar's own
@@ -254,10 +255,19 @@ export const loaderModule = {
                         refused.push(`${entry.kernel}: no kernel provides it`);
                         continue;
                     }
-                    const { address } = register({
+                    const address = register({
                         name: entry.kernel, argBytes: plan.argBytes,
                         target: plan.targetAddress, handler,
                     });
+                    // The slot write is the one thing here a guest cannot
+                    // recover from: a word that is not a stub's address sends
+                    // every caller of the function into it. Nothing but a
+                    // real address goes in.
+                    if (!Number.isInteger(address) || address === 0)
+                    {
+                        refused.push(`${entry.kernel}: no stub address was registered`);
+                        continue;
+                    }
                     memory.writeU32(plan.slotAddress, address);
                     bound.push(entry.kernel);
                 }

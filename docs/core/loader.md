@@ -185,8 +185,10 @@ today. A refused entry's kernel is named in the reason string, in `hooksRefused`
 A bound entry calls `resolveHandler(entry)` for what the hook actually does -- typically a lookup
 into the bundle's `hooks.mjs` module by `entry.kernel` -- and, given a handler, `register({ name,
 argBytes, target, handler })`, which the assembler wires to `bridge.hook`. The stub address
-`register` returns is written into the slot with `memory.writeU32`; the bundle's own image is
-never touched, only the one data word the sidecar named.
+`register` returns -- a number, exactly what `bridge.hook` answers -- is written into the slot
+with `memory.writeU32`; an answer that is not a nonzero integer (`bridge.hook` answers 0 once
+disposed) is refused and named, and the slot keeps the guest's own function. The bundle's own
+image is never touched, only the one data word the sidecar named.
 
 ### Thread-local storage and process start (`internal/tls.js`, `internal/init.js`)
 

@@ -50,9 +50,12 @@ test('a good sidecar entry writes the registered stub address into the slot', as
     const registered = [];
     const { bound, refused } = loader.bindHooks(
         { hooks: [GOOD_HOOK] }, IMAGE,
+        // Answers the way `bridge.hook` does: the stub's guest address as a
+        // number, nothing wrapped around it. A stub here shaped any other way
+        // would pass a slot write the real bridge never makes.
         /** @param {any} options */ options=>{
             registered.push(options);
-            return { address: 0x00900010 };
+            return 0x00900010;
         },
         /** @param {any} entry */ entry=>()=>{
             void entry;
@@ -70,6 +73,20 @@ test('a good sidecar entry writes the registered stub address into the slot', as
         'the slot now points at the registered stub, not the original function');
 });
 
+test('a registration that yields no address is refused and the slot stays as it was', async()=>{
+    // `bridge.hook` answers 0 once the bridge is disposed; written into the
+    // slot, 0 sends every caller of the hooked function into address zero,
+    // which is exactly the fault a slot must never be able to cause.
+    const { host, memory } = machine(IMAGE.base + TARGET_RVA);
+    const loader = await loaderModule.create({}, host);
+    const { bound, refused } = loader.bindHooks(
+        { hooks: [GOOD_HOOK] }, IMAGE, ()=>0, ()=>()=>true);
+    assert.deepEqual(bound, []);
+    assert.deepEqual(refused, ['idSIMD.dotPlaneDrawVert: no stub address was registered']);
+    assert.equal(memory.readU32(IMAGE.base + SLOT_RVA), IMAGE.base + TARGET_RVA,
+        'the slot still points at the guest function');
+});
+
 test('a check mismatch is refused and counted, and nothing is registered', async()=>{
     const { host, memory } = machine(IMAGE.base + TARGET_RVA);
     const loader = await loaderModule.create({}, host);
@@ -78,7 +95,7 @@ test('a check mismatch is refused and counted, and nothing is registered', async
     const { bound, refused } = loader.bindHooks(
         { hooks: [stale] }, IMAGE, ()=>{
             registrations++;
-            return { address: 0 };
+            return 0x00900010;
         }, ()=>()=>true);
 
     assert.deepEqual(bound, []);
@@ -97,7 +114,7 @@ test('a slot not pointing at the target is refused and counted', async()=>{
     const { bound, refused } = loader.bindHooks(
         { hooks: [GOOD_HOOK] }, IMAGE, ()=>{
             registrations++;
-            return { address: 0 };
+            return 0x00900010;
         }, ()=>()=>true);
 
     assert.deepEqual(bound, []);
@@ -111,7 +128,7 @@ test('an entry for another image is silently not this image\'s business', async(
     const loader = await loaderModule.create({}, host);
     const { bound, refused } = loader.bindHooks(
         { hooks: [{ ...GOOD_HOOK, image: 'Quake3.exe' }] }, IMAGE,
-        ()=>({ address: 0 }), ()=>()=>true);
+        ()=>0x00900010, ()=>()=>true);
     assert.deepEqual(bound, []);
     assert.deepEqual(refused, [], 'not refused -- just not addressed to this image');
 });
@@ -120,7 +137,7 @@ test('a kernel nothing provides is refused by name, after the sidecar checks pas
     const { host } = machine(IMAGE.base + TARGET_RVA);
     const loader = await loaderModule.create({}, host);
     const { bound, refused } = loader.bindHooks(
-        { hooks: [GOOD_HOOK] }, IMAGE, ()=>({ address: 0 }), ()=>null);
+        { hooks: [GOOD_HOOK] }, IMAGE, ()=>0x00900010, ()=>null);
     assert.deepEqual(bound, []);
     assert.deepEqual(refused, ['idSIMD.dotPlaneDrawVert: no kernel provides it']);
 });
