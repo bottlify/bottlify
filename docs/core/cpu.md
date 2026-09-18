@@ -218,7 +218,12 @@ which is how a TEB travels with the thread.
 offsets taken from the emulator's global-pointer table (`STACK_EMPTY`, `STACK_PTR`,
 `CONTROL_WORD`, `ST`). A `double` is converted to and from 80-bit extended precision by hand.
 `setResult` pushes like the processor would, refusing to overwrite an occupied register (it
-leaves an indefinite value, as a real overflow does).
+leaves an indefinite value, as a real overflow does). Inside a compiled block the pinned build
+keeps the stack top and the empty-register mask in that module's own locals rather than these
+globals, writing them back together with the general registers at every point JS can next run
+(chaining to another module, the fault/exit exits, and the port-write trap the engine's context
+switch goes through), so this file's reads always see the current thread's values; `emms` resets
+the stack top to zero along with the tag word.
 
 ### Host writes and the compiler
 
