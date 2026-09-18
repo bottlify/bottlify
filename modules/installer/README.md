@@ -98,9 +98,9 @@ Two routes, both `POST` and both authenticated:
 `publish()`'s own `manifest` option passes straight through to that file, field
 for field, so a title's own launch arguments travel with it: `commandLine` is
 the arguments the program is started with, appended after the quoted image
-path (`docs/core/host.md`'s `commandLine` option). Doom 3's is
-`"commandLine": "+set s_realTimeDecoding 0"` — a cvar the game only reads from
-its command line, set there instead of by editing the bundle.
+path (`docs/core/host.md`'s `commandLine` option), for example
+`"commandLine": "+set s_realTimeDecoding 0"` — a setting a program only reads
+from its command line, set there instead of by editing the bundle.
 
 ## Turning it on
 
