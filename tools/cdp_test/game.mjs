@@ -22,6 +22,7 @@
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
  *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
+ *                                  [--exact]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -264,6 +265,11 @@ function parse(argv){
         // `crossOriginIsolated` with `SharedArrayBuffer` -- what the shared-
         // table audio backend and its worklet need to run at all.
         coi: argv.includes('--coi'),
+        // Keeps the emulator's own account of every block it ran, by address,
+        // for the whole run rather than a sampled guess -- what `profile-
+        // lights.mjs` asks a live route for, here asked of a demo playback
+        // instead. Costs a call per block, so only on request.
+        exact: argv.includes('--exact'),
     };
 }
 
@@ -781,6 +787,7 @@ export async function game(options){
             store: options.store ?? undefined,
             prefetch: options.prefetch,
             bundleId: options.id,
+            exact: options.exact,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
@@ -873,6 +880,18 @@ export async function game(options){
             drawsPath = join(REPORTS_DIR, `game-${stamp}-draws.txt`);
             writeFileSync(drawsPath, `${drawn.join('\n')}\n`);
         }
+        // The exact account, in `funcs-lights.py fold`'s own shape: a demo's
+        // run is one window, so `windowInstr`/`dt` are the whole run's.
+        let hotPath = null;
+        if (result.exact)
+        {
+            hotPath = join(REPORTS_DIR, `game-${stamp}.hot.json`);
+            writeFileSync(hotPath, JSON.stringify({
+                phase: 'demo', windowInstr: result.exact.retired,
+                dt: result.elapsedMs / 1000, blocks: result.exact.hot,
+            }));
+        }
+
         // The texels behind those draws, as images. A rectangle in a frame is
         // either something a draw put there or something already in what it
         // sampled, and only the texture itself tells those apart.
@@ -896,6 +915,7 @@ export async function game(options){
             report: text,
             reportPath,
             drawsPath,
+            hotPath,
             screenshot: shotPath,
             events: thrown,
         };
@@ -927,6 +947,10 @@ try
     if (answer.drawsPath)
     {
         console.log(`draws:      ${answer.drawsPath}`);
+    }
+    if (answer.hotPath)
+    {
+        console.log(`hot:        ${answer.hotPath}`);
     }
     console.log(`screenshot: ${answer.screenshot ?? '-'}`);
     for (const line of answer.events ?? [])
