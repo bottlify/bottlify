@@ -176,7 +176,7 @@ JSON cost the engine's thread tens of milliseconds per call.
 | `guestProfile.stop()` | `Promise<void>` | |
 | `guestProfile.instructionStats()` | `Promise<{ counters, opcodes } \| null>` | A profiler build's own counters and retired instructions by opcode; counts only grow, so a window is two readings. `null` without such a build. |
 | `adapter` | `{ vendor, architecture, description }` | Who made the GPU adapter; empty strings without a device. |
-| `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it. Handlers observe only — a handler across a port cannot answer. |
+| `on(name, handler)` | `() => void` | Subscribes; the first subscription to a name asks the engine to forward it, and is replayed everything already emitted under that name — up to the last 32 — before it sees anything live; a second subscription to the same name only ever sees what is live from then on. Handlers observe only — a handler across a port cannot answer. |
 | `attachLog(sink)`, `detachLog(sink)` | synchronous | `sink(handle, text)` for what the program writes to its standard handles (the `output` event). |
 | `log.recent(count?)`, `log.drain(since?, limit?)` | `Promise` | Answered by the keeper out of its history, which spans a process replacement. Each polls the current block first, so a read right after an exit sees the tail. A drain's `lost` counts every sequence asked for that cannot be handed over. |
 | `log.frames(count?)`, `log.profile(worst?)` | `Promise` | The keeper's derived views of the profiler's frame and phase tables. |
@@ -216,6 +216,22 @@ and refusal reasons by name; a consumer that does not subscribe never sees a ref
 `hook-error` (`{ kernel, message }`, a sidecar kernel threw -- the call falls through to the
 guest's own function, no rate limit), `debug` (the full list is
 what `events.emit` is called with in `src/app.js`).
+
+### Construction-time events are not lost to a late subscriber
+
+`buildApp` emits several of the names above -- `hooks-bound`, `libraries`, `bundle`,
+`bundle-unbacked`, `process-create` and others -- before `createApp`'s own promise settles, which
+in the host protocol is before the `start` request's answer is even posted back. The documented
+pattern, `const app = await createApp(options); app.on(name, handler)`, therefore always calls
+`on()` after those events already fired, in a worker, on a thread, or in-process.
+
+`src/events.js`'s registry (`createEvents()`) closes that gap generically, with no event name
+built into the mechanism: an emission for a name with no subscriber yet is kept, up to the last 32
+for that name, and handed to the name's first subscriber, in order, before anything live -- then
+never buffered again for that name, so a second subscriber to the same name sees only what is
+live from then on. This is what the `on(name, handler)` row above promises, and it holds whether
+the engine runs in a worker, on the calling thread, or is used directly by importing `src/app.js`,
+because all three route `on`/`emit` through the same registry.
 
 ### What became asynchronous, and why
 

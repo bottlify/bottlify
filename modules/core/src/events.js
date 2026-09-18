@@ -27,6 +27,19 @@
  * @typedef {(payload: any) => any} EventHandler
  */
 
+/**
+ * How many past emissions of a name are kept for a subscriber that has not
+ * arrived yet.
+ *
+ * `emit` has no way to know when "construction" ends, so what it keeps is
+ * bounded by count rather than by a window closing at some later moment --
+ * enough for the handful of one-shot events `buildApp` fires before a
+ * consumer's first `on()` can run (`hooks-bound`, `libraries`, `bundle`,
+ * `process-create`...), and never unbounded for a name that keeps firing and
+ * that nobody ever subscribes to.
+ */
+export const REPLAY_LIMIT = 32;
+
 export function createEvents(){
     /** @type {Map<string, EventHandler[]>} */
     const handlers = new Map();
@@ -35,6 +48,17 @@ export function createEvents(){
     /** Watchers of every event, in the order they were added. */
     /** @type {((name: string, payload: any) => void)[]} */
     const watchers = [];
+    /**
+     * Payloads emitted for a name nobody has subscribed to yet, so its first
+     * subscriber sees what it missed. Cleared, and never refilled, the moment
+     * a name gets that first subscriber: a later subscriber to the same name
+     * sees only what is live from then on.
+     *
+     * @type {Map<string, any[]>}
+     */
+    const unheard = new Map();
+    /** Names that have had at least one subscriber, ever. @type {Set<string>} */
+    const heard = new Set();
 
     /** @param {string} name */
     const listeners = name=>{
@@ -55,6 +79,16 @@ export function createEvents(){
          */
         on(name, handler){
             listeners(name).push(handler);
+            if (!heard.has(name))
+            {
+                heard.add(name);
+                const missed = unheard.get(name);
+                unheard.delete(name);
+                for (const payload of missed ?? [])
+                {
+                    handler(payload);
+                }
+            }
             return ()=>this.off(name, handler);
         },
 
@@ -110,6 +144,16 @@ export function createEvents(){
                 catch (e){
                     void e;
                 }
+            }
+            if (!heard.has(name))
+            {
+                const kept = unheard.get(name) ?? [];
+                kept.push(payload);
+                if (kept.length > REPLAY_LIMIT)
+                {
+                    kept.shift();
+                }
+                unheard.set(name, kept);
             }
             for (const handler of [...listeners(name)])
             {

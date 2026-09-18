@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createEvents } from './events.js';
+import { createEvents, REPLAY_LIMIT } from './events.js';
 
 test('handlers run in registration order until one answers', ()=>{
     const events = createEvents();
@@ -140,4 +140,62 @@ test('a watcher can be removed', ()=>{
     stop();
     events.emit('exit', {});
     assert.equal(count, 1);
+});
+
+test('an event emitted before anyone subscribed still reaches the first subscriber, '
+    + 'in order with a live one', ()=>{
+    // What `buildApp` does to `hooks-bound` and the rest: emit before a
+    // caller's `createApp(...)` promise has even settled, so the caller's
+    // first `on()` for that name always arrives after the fact.
+    const events = createEvents();
+    /** @type {any[]} */
+    const seen = [];
+
+    events.emit('hooks-bound', { bound: ['a'], refused: [] });
+    events.on('hooks-bound', payload=>seen.push(payload));
+    events.emit('hooks-bound', { bound: ['b'], refused: [] });
+
+    assert.deepEqual(seen, [
+        { bound: ['a'], refused: [] },
+        { bound: ['b'], refused: [] },
+    ], 'the missed emission arrives first, then the live one, in order');
+});
+
+test('a second subscriber to the same name gets only what is live from then on', ()=>{
+    const events = createEvents();
+    /** @type {any[]} */
+    const first = [];
+    /** @type {any[]} */
+    const second = [];
+
+    events.emit('libraries', { loaded: ['a'], missing: [] });
+    // `push`'s return (the new length) is not `undefined`, and this registry's
+    // `emit` treats a handler's non-`undefined` return as "handled, stop
+    // here" -- so a block body is used, not an arrow expression, to keep the
+    // handler a watcher rather than an accidental interceptor.
+    events.on('libraries', payload=>{ first.push(payload); });
+    events.on('libraries', payload=>{ second.push(payload); });
+    events.emit('libraries', { loaded: ['b'], missing: [] });
+
+    assert.deepEqual(first, [
+        { loaded: ['a'], missing: [] },
+        { loaded: ['b'], missing: [] },
+    ], 'the first subscriber got the replay');
+    assert.deepEqual(second, [{ loaded: ['b'], missing: [] }],
+        'the second subscriber, to the same name, only ever sees the live one');
+});
+
+test('what nobody has subscribed to yet is kept only up to REPLAY_LIMIT per name', ()=>{
+    const events = createEvents();
+    for (let at = 0; at < REPLAY_LIMIT + 1; at++)
+    {
+        events.emit('library-loaded', { name: `dll${at}` });
+    }
+    /** @type {any[]} */
+    const seen = [];
+    events.on('library-loaded', payload=>seen.push(payload));
+
+    assert.equal(seen.length, REPLAY_LIMIT, 'the oldest one, past the bound, was dropped');
+    assert.equal(seen[0].name, 'dll1', 'dll0 is the one the bound dropped');
+    assert.equal(seen[seen.length - 1].name, `dll${REPLAY_LIMIT}`);
 });

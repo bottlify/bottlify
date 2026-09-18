@@ -35,6 +35,18 @@ test('hello.exe runs through the package entry, headless, on this thread',
         assert.equal(app.host, 'thread');
         assert.equal(app.canvas, null);
 
+        // `libraries` is one of `buildApp`'s construction-time events: emitted
+        // before `createApp`'s own promise settles, so a handler registered
+        // the documented way -- after `await createApp(...)` -- always
+        // subscribes after the fact. Through the real engine and the real
+        // host protocol (no fake in the middle), not just the wire's fake
+        // transport in `remote.test.js`.
+        const librariesSeen = await new Promise(resolve=>{
+            app.on('libraries', (/** @type {any} */ payload)=>resolve(payload));
+        });
+        assert.ok(Array.isArray(librariesSeen.loaded),
+            'the construction-time emission reached a handler registered after createApp resolved');
+
         /** @type {string[]} */
         const output = [];
         app.attachLog((/** @type {number} */ _handle, /** @type {string} */ text)=>

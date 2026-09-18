@@ -10,6 +10,7 @@ import { createRemoteApp } from './remote.js';
 import { serveEngine, watchFrom, workerPacing, WORKER_YIELD_MS } from './serve.js';
 import { serveKeeper } from './keeper.js';
 import { PAGE_YIELD_MS } from '../app.js';
+import { createEvents } from '../events.js';
 import { createJournal, Level } from '../layers/log/internal/journal.js';
 import { createMetrics } from '../layers/log/internal/metrics.js';
 import {
@@ -66,8 +67,11 @@ after(()=>{
  * @param {{ capacity?: number, shared?: boolean, audioShared?: boolean }} [how]
  */
 function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
-    /** @type {Map<string, ((payload: any) => void)[]>} */
-    const listeners = new Map();
+    // The real registry, not a hand-rolled stand-in: the whole point of the
+    // events tests below is that a late `on()` still catches what an early
+    // `emit()` fired, and that is `events.js`'s contract to keep, not this
+    // fake's to reimplement.
+    const events = createEvents();
     const journal = createJournal({ now: ()=>0, capacity, shared });
     const registry = createMetrics({ shared });
     const own = registry.counters('log', ['rejected']);
@@ -89,10 +93,7 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
         exitWith: /** @type {number | Error} */ (7),
         /** @param {string} name @param {any} payload */
         emit(name, payload){
-            for (const handler of listeners.get(name) ?? [])
-            {
-                handler(payload);
-            }
+            events.emit(name, payload);
         },
         /** @param {string} text */
         write(text){
@@ -108,9 +109,8 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             registry.sample();
             return closed;
         },
-        on: (/** @type {string} */ name, /** @type {(payload: any) => void} */ handler)=>{
-            listeners.set(name, [...listeners.get(name) ?? [], handler]);
-        },
+        on: (/** @type {string} */ name, /** @type {(payload: any) => void} */ handler)=>
+            events.on(name, handler),
         async run(){
             if (app.exitWith instanceof Error)
             {
@@ -275,9 +275,10 @@ function openTestKeeper(){
 /**
  * @param {Partial<import('./messages.js').StartOptions>} [options]
  * @param {{ threaded?: boolean, now?: () => number, gpu?: any,
- *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean }} [deps]
+ *     journal?: { capacity?: number, shared?: boolean }, audioShared?: boolean,
+ *     duringBuild?: (app: any) => void }} [deps]
  */
-async function connect(options = {}, { journal, audioShared, ...deps } = {}){
+async function connect(options = {}, { journal, audioShared, duringBuild, ...deps } = {}){
     const channel = new MessageChannel();
     const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
@@ -292,6 +293,10 @@ async function connect(options = {}, { journal, audioShared, ...deps } = {}){
         createApp: async appOptions=>{
             built = appOptions;
             app.options = appOptions;
+            // What `buildApp` does for real: emit before the `start` request's
+            // answer is even posted back, let alone before a page's `on()` for
+            // that name can run.
+            duringBuild?.(app);
             return app;
         },
     });
@@ -433,6 +438,53 @@ test('a subscribed event reaches the page with its bytes intact', async()=>{
     await settled();
     assert.equal(seen.length, 1);
     assert.deepEqual(seen[0].bgra, Uint8Array.of(1, 2, 3, 4, 5, 6, 7, 8));
+    await remote.dispose();
+});
+
+test('an event the engine emitted before the start answer still reaches a handler '
+    + 'registered on the returned controller, in order with a live one', async()=>{
+    // The documented pattern is `const app = await createApp(...); app.on(...)`,
+    // and `createRemoteApp`'s own `start` request has already resolved by the
+    // time this function returns -- so a name `buildApp` emits before that,
+    // like `hooks-bound`, is always "early" from the controller's point of view.
+    const { remote, app } = await connect({}, {
+        duringBuild: theApp=>theApp.emit('hooks-bound', { bound: ['idSIMD.dotPlaneDrawVert'],
+            refused: [] }),
+    });
+    /** @type {any[]} */
+    const seen = [];
+    remote.on('hooks-bound', (/** @type {any} */ payload)=>seen.push(payload));
+    await settled();
+    assert.deepEqual(seen, [{ bound: ['idSIMD.dotPlaneDrawVert'], refused: [] }],
+        'the construction-time emission was not lost');
+
+    app.emit('hooks-bound', { bound: [], refused: ['idSIMD.cmpLTBit'] });
+    await settled();
+    assert.deepEqual(seen[1], { bound: [], refused: ['idSIMD.cmpLTBit'] },
+        'and a live one after still arrives, in order behind the replayed one');
+    await remote.dispose();
+});
+
+test('a handler registered after a first one already claimed a name only sees '
+    + 'what is live from then on', async()=>{
+    const { remote, app } = await connect({}, {
+        duringBuild: theApp=>theApp.emit('hooks-bound', { bound: ['idSIMD.dotPlaneDrawVert'],
+            refused: [] }),
+    });
+    /** @type {any[]} */
+    const early = [];
+    remote.on('hooks-bound', (/** @type {any} */ payload)=>early.push(payload));
+    await settled();
+    /** @type {any[]} */
+    const late = [];
+    remote.on('hooks-bound', (/** @type {any} */ payload)=>late.push(payload));
+    await settled();
+    app.emit('hooks-bound', { bound: [], refused: [] });
+    await settled();
+
+    assert.equal(early.length, 2, 'the first subscriber got the replay, then the live one');
+    assert.deepEqual(late, [{ bound: [], refused: [] }],
+        'the later subscriber to the same name got no replay, only the live one');
     await remote.dispose();
 });
 
