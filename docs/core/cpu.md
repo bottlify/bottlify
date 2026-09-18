@@ -66,7 +66,7 @@ otherwise.
 | `readU32` | `(address) => number` | One dword, with nothing allocated. |
 | `writeData` | `(address, bytes) => void` | Writes straight into RAM without telling the compiler. Only for memory the guest can never execute; the caller is responsible for that being true. |
 | `readReg32` / `writeReg32` | `(name[, value])` | `eax ecx edx ebx esp ebp esi edi`, plus `eip` and `eflags` (the latter read through the emulator's accessor so lazy arithmetic flags are folded in). Unknown names throw. |
-| `registerTrap` | `(name, popBytes, { preserveResult?, forwardTo? }) => { id, address }` | Takes a stub slot; written into guest memory immediately if the table has already been laid down. Throws when the table is full. |
+| `registerTrap` | `(name, popBytes, { preserveResult?, forwardTo?, saveRegisters?, pushEdx?, holdEip? }) => { id, address }` | Takes a stub slot; written into guest memory immediately if the table has already been laid down. Throws when the table is full. `saveRegisters` (`pushad`) or `pushEdx` (just EDX) run before the trap even without `forwardTo`; `holdEip` emits neither `ret` nor a jump, for a caller that decides EIP itself while handling the trap (the bridge's `hook`). |
 | `thunkImage` | `() => Uint8Array` | The stub table so far, to be written at `layout.thunkBase`. Marks the table as written. |
 | `parkAddress` | `() => number` | Slot 0 of the table: `hlt; jmp` — where a terminating or blocking call returns to. |
 | `onTrap` | `(handler: (id) => void) => void` | Who gets non-fault trap ids. The bridge claims this. |
@@ -284,7 +284,7 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 |------|--------|
 | `internal/boot-rom.test.js` | ROM size and placement, reset vector, GDT/IDT contents, the indirect jump, every fault stub reporting its own vector and stopping, the retired boot code ending exactly at the guest jump. |
 | `internal/faults.test.js` | A host-raised fault reads as its sentence, a stand-in for an undeliverable exception keeps its vector, a breakpoint in the retired boot code is an excursion, the live guest jump is not, processor exceptions read as before. |
-| `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, refusal when the table is full, the default capacity. |
+| `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, a hook stub's single `push edx` and its held EIP (no `ret`, no `jmp`), refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |
 

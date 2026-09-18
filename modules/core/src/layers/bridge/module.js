@@ -281,6 +281,71 @@ export const bridgeModule = {
             },
 
             /**
+             * A place to stand in front of a guest call whose slot -- not its
+             * code -- is what redirected it here: idTech4's SIMD dispatch, for
+             * instance, is one vtable slot per kernel, so overwriting one word
+             * of `.rdata` covers every caller with no code-page write and no
+             * displaced-prologue trampoline, and the guest's own function
+             * stays intact for the fallback below.
+             *
+             * `handler` answers `true` when it computed the call itself, or
+             * `false` to run the guest's own function at `target` instead --
+             * decided fresh on every call, which is why neither a `ret` nor a
+             * `jmp` can be part of the stub the way `watch`'s is: this layer
+             * writes EIP itself once the handler has answered.
+             *
+             * @param {string} name
+             * @param {Object} fn
+             * @param {string} [fn.convention]  Only `Convention.FASTCALL` is
+             *     supported today -- `this` in ECX, the first argument in EDX,
+             *     the rest on the stack; the one convention idTech4's kernels
+             *     use and the one whose live argument the trap sequence would
+             *     otherwise clobber.
+             * @param {number} fn.argBytes
+             * @param {number} fn.target  The guest's own function.
+             * @param {Function} fn.handler
+             * @returns {number} the guest address to write into the slot, or 0
+             *     once this instance is disposed.
+             */
+            hook(name, { convention = Convention.FASTCALL, argBytes, target, handler }){
+                if (!live())
+                {
+                    return 0;
+                }
+                state.callbacks.reserve();
+                const { id, address } = cpu.registerTrap(
+                    name, calleeCleanup(convention, argBytes),
+                    { pushEdx: true, holdEip: true });
+                state.dispatcher.register(id, {
+                    name, convention, argBytes, handler, hook: true, target,
+                    // Only EDX needs saving (see `pushEdx`), so only 4 bytes
+                    // separate the trap from the caller's own frame -- not the
+                    // 32 `forwardSave` costs, which a hook running on
+                    // whatever stack depth the guest's own call reached
+                    // cannot spend freely.
+                    saved: 4,
+                });
+                state.dispatcher.placed(address, name);
+                return address;
+            },
+
+            /**
+             * Counts one of a hook's own comparisons against the guest as
+             * having disagreed -- what an `oracle`-mode kernel calls once it
+             * has checked the guest's output against what it computed itself.
+             * This layer does not know what was compared; it only counts it,
+             * the way it counts everything else at this seam.
+             *
+             * @param {string} name
+             */
+            reportHookMismatch(name){
+                if (live())
+                {
+                    state.dispatcher.reportMismatch(name);
+                }
+            },
+
+            /**
              * Parks the calling thread and returns the only value a handler may
              * return in place of an answer.
              *
@@ -517,6 +582,11 @@ export const bridgeModule = {
                 // else: the histogram below says what it did, this says
                 // what it was doing.
                 sequence: instance.dispatcher.recent(80),
+                // Per-hook, not folded into `hot`: a hook's own share of the
+                // trace is one line among thousands, and whether it is
+                // answering the call or falling through to the guest is
+                // exactly the number a hook's own report reads.
+                hooks: instance.dispatcher.hooks(),
                 ...instance.parking.diagnostics(),
                 ...instance.callbacks.diagnostics(),
                 ...instance.vtables ? instance.vtables.diagnostics() : {},

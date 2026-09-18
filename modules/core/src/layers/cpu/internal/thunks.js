@@ -54,13 +54,38 @@ export const DEFAULT_THUNK_CAPACITY = 16384 * STUB_SIZE;
  * @param {boolean} [options.preserveResult]  Keep whatever EAX held on entry, in ECX.
  * @param {number} [options.forwardTo]  Guest address to jump to instead of returning.
  * @param {number} [options.address]    Where this stub will live; needed to reach it.
+ * @param {boolean} [options.saveRegisters]
+ *     `pushad` before the trap even when nothing forwards afterwards. Implied
+ *     by `forwardTo`. Costs 32 bytes of the caller's stack, which is fine for
+ *     a forwarding stub (rare, one per watched import) but too much to ask of
+ *     every call a hot slot hook intercepts -- see `pushEdx`.
+ * @param {boolean} [options.pushEdx]
+ *     `push edx` alone before the trap: enough to protect FASTCALL's one
+ *     register argument from the trap sequence's own `mov dx, port`, which
+ *     would otherwise overwrite half of it before the host ever reads it.
+ *     ECX needs no such protection -- nothing in the trap sequence touches
+ *     it -- so this costs 4 bytes of stack rather than `saveRegisters`' 32,
+ *     which matters for a hook: it runs on whatever stack depth the guest's
+ *     own call already reached, and 32 extra bytes is 32 bytes a call near
+ *     its thread's limit does not have to give.
+ * @param {boolean} [options.holdEip]
+ *     Emit neither `ret` nor a jump: the host decides where this call goes
+ *     next -- back to the caller, or on into a second guest function -- by
+ *     writing EIP itself while the trap is being handled, a decision a fixed
+ *     byte pattern cannot make. For a slot hook, whose fallback target is not
+ *     known until the handler has run.
  * @returns {Uint8Array}
  */
 export function buildStub(
-    { trapId, port, popBytes, preserveResult = false, forwardTo = 0, address = 0 })
+    {
+        trapId, port, popBytes, preserveResult = false, forwardTo = 0, address = 0,
+        saveRegisters = false, pushEdx = false, holdEip = false,
+    })
 {
     const u16 = (/** @type {number} */ v)=>[v & 0xff, v >>> 8 & 0xff];
     const u32 = (/** @type {number} */ v)=>[...u16(v), v >>> 16 & 0xff, v >>> 24 & 0xff];
+
+    const saves = forwardTo !== 0 || saveRegisters;
 
     // A forwarding stub is a place to watch a call from, not a place to answer
     // it: it traps so the host can see the arguments and then jumps into the
@@ -80,13 +105,15 @@ export function buildStub(
         // aside first costs two bytes; ECX is caller-saved under every
         // convention here, so nothing was counting on it either.
         ...preserveResult ? [0x89, 0xc1] : [], // mov ecx, eax
-        ...forwardTo !== 0 ? [0x60] : [], //   pushad: the host pops it again
+        ...saves ? [0x60] : pushEdx ? [0x52] : [], // pushad, or just push edx
         0x66, 0xba, ...u16(port), // mov dx, port
         0xb8, ...u32(trapId), //     mov eax, trapId
         0xef, //                     out dx, eax   -> host handles it, leaves the result in EAX
         ...jump.length > 0
             ? jump
-            : popBytes > 0 ? [0xc2, ...u16(popBytes)] : [0xc3], // ret popBytes / ret
+            // Nothing follows the trap: whatever the host wrote into EIP while
+            // handling it is where this resumes, not the next byte here.
+            : holdEip ? [] : popBytes > 0 ? [0xc2, ...u16(popBytes)] : [0xc3], // ret popBytes / ret
     ];
     if (bytes.length > STUB_SIZE)
     {
@@ -109,6 +136,7 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
      * @type {{
      *   id: number, name: string, popBytes: number,
      *   address: number, preserveResult?: boolean, forwardTo?: number,
+     *   saveRegisters?: boolean, pushEdx?: boolean, holdEip?: boolean,
      * }[]}
      */
     const entries = [];
@@ -136,6 +164,9 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
          * @param {Object} [options]
          * @param {boolean} [options.preserveResult]
          * @param {number} [options.forwardTo]
+         * @param {boolean} [options.saveRegisters]
+         * @param {boolean} [options.pushEdx]
+         * @param {boolean} [options.holdEip]
          * @returns {{ id: number, address: number }}
          * @throws when the table is full: the slot after the last one is not in
          *         the region reserved for the table, and what follows it is the
@@ -147,7 +178,13 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
          *         failure, the COM vtable publisher, catches this and answers
          *         the guest with an out-of-memory result.
          */
-        register(name, popBytes, { preserveResult = false, forwardTo = 0 } = {}){
+        register(
+            name, popBytes,
+            {
+                preserveResult = false, forwardTo = 0, saveRegisters = false, pushEdx = false,
+                holdEip = false,
+            } = {})
+        {
             const id = entries.length;
             if (id >= slots)
             {
@@ -156,7 +193,8 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                     + ` ${name}`);
             }
             const address = base + id * STUB_SIZE;
-            entries.push({ id, name, popBytes, address, preserveResult, forwardTo });
+            entries.push({ id, name, popBytes, address, preserveResult, forwardTo,
+                saveRegisters, pushEdx, holdEip });
             return { id, address };
         },
 
@@ -185,6 +223,9 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                 preserveResult: entry.preserveResult,
                 forwardTo: entry.forwardTo,
                 address: entry.address,
+                saveRegisters: entry.saveRegisters,
+                pushEdx: entry.pushEdx,
+                holdEip: entry.holdEip,
             });
         },
 
@@ -220,6 +261,9 @@ export function createThunkTable({ base, port, capacity = DEFAULT_THUNK_CAPACITY
                         preserveResult: entry.preserveResult,
                         forwardTo: entry.forwardTo,
                         address: entry.address,
+                        saveRegisters: entry.saveRegisters,
+                        pushEdx: entry.pushEdx,
+                        holdEip: entry.holdEip,
                     }),
                     entry.id * STUB_SIZE);
             }

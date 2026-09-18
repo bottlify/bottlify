@@ -45,9 +45,11 @@ marshalling whatever bytes live at it.
 
 | member | signature | meaning |
 |--------|-----------|---------|
-| `Convention` | `{ STDCALL, CDECL, THISCALL }` | |
+| `Convention` | `{ STDCALL, CDECL, THISCALL, FASTCALL }` | |
 | `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult?, lastError = true }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. `lastError: false` says the function never sets the thread's error, so the trace does not read it afterwards; COM methods are registered so, and OPENGL32's gl* entry points. |
-| `watch` | `(name, { argBytes, target, convention?, handler }) => number` | A forwarding stub: `handler` sees the marshalled arguments, then the call goes on into `target`. For observing calls between guest modules. |
+| `watch` | `(name, { argBytes, target, convention?, handler }) => number` | A forwarding stub: `handler` sees the marshalled arguments, then the call goes on into `target`, always. For observing calls between guest modules. |
+| `hook` | `(name, { convention = FASTCALL, argBytes, target, handler }) => number` | A slot hook: `handler` answers `true` (it computed the call itself) or `false` (run `target`, the guest's own function, instead) -- decided fresh on every call, unlike `watch`'s unconditional forward. Returns the guest address to write into whatever data word (a vftable slot, typically) a caller wants redirected; the caller writes it, this layer only builds the stub and the dispatch. |
+| `reportHookMismatch` | `(name) => void` | Counts one of a hook's own comparisons against the guest as having disagreed. This layer does not know what was compared -- an oracle-mode kernel calls it once it has checked the guest's output against its own -- it only keeps the count, in `diagnostics().hooks`. |
 | `park` | `(thread?) => ParkedToken` | Parks the calling thread and returns the only value a handler may return instead of an answer. Throws outside a call. |
 | `callGuest` | `({ entry, args?, thread? }) => Promise<number>` | Runs a guest routine and resolves with EAX. A handler that awaited before calling must pass `thread`. |
 | `useHeap` | `({ allocate, free? }) => Vtables` | Wires COM publishing to a guest arena. |
@@ -105,6 +107,7 @@ gets its arguments the same way.
 | `callbacks`, `deepestCallback` | Guest callbacks started, and the deepest nesting seen. | Each `callGuest`. |
 | `suspended`, `suspendedCalls` | Host calls waiting, and `{ thread, name, forMs }` for each. | Suspend / finish. |
 | `comInterfaces`, `comMethods`, `comInterfacesRefused`, `comRefusedBecause` | Published interface pointers, stubs in shared tables, refusals and why. | `publishInterface`, `Release` to zero. |
+| `hooks` | `{ name, calls, handled, fellThrough, mismatches }[]`, one row per `hook`. | Every hook call; `mismatches` on `reportHookMismatch`. |
 | `failure` | Message of the first unawaited handler error. | Once. |
 
 ## 3. How it works
@@ -130,6 +133,52 @@ convention throws.
 COM methods are **stdcall**, not thiscall: the interface pointer is the first stack argument,
 which is what makes the C bindings binary-compatible with the C++ call. Nothing in the tree
 uses `THISCALL` today; it exists for a C++ runtime library's real member exports.
+
+`FASTCALL` carries `this` in ECX and one more argument in EDX, the rest on the stack, callee
+cleans the stack part -- MSVC's `__fastcall` with a leading receiver, which is `hook`'s own
+convention (below) and the one every `idSIMDProcessor`-style vtable method in the wild compiles
+to. `registerArgumentCount` (`internal/conventions.js`) is the one place that knows how many of a
+convention's arguments arrive in registers -- zero for stdcall/cdecl, one for thiscall, two for
+fastcall -- and both `calleeCleanup` and the dispatcher's own marshalling read it rather than
+each carrying the count of their own.
+
+### Slot hooks (`hook`)
+
+A hook stands in front of a call whose *slot* -- a data word somewhere a program reads a function
+pointer from, a vtable most often -- was overwritten to point at the stub instead of the real
+function; the real function is never touched and stays callable at `target`. Overwriting a slot
+needs no code-page write, so nothing here has to invalidate compiled code or build a
+displaced-prologue trampoline the way a code patch would; a caller writes the address `hook`
+returns into the slot, this layer only builds the stub and the dispatch behind it.
+
+Because the outcome is decided per call, a hook's stub cannot end in a fixed `ret` or `jmp` the
+way every other stub does: it traps and stops, and this layer writes EIP itself once `handler` has
+answered. `handler(args, frame)` returning `true` means it computed the call itself -- EDX is
+restored to what the guest's call actually set (the trap sequence's own `mov dx, port` spent half
+of it getting here; ECX is untouched and needs no restoring) and the dispatcher simulates the
+callee's own `ret cleanup`: EIP becomes the return address, ESP advances past it and the cleanup
+bytes. Returning `false` means "run the guest's own function instead": EDX is restored the same
+way, but ESP is left exactly as the call arrived (return address and stack arguments untouched)
+and EIP is redirected to `target`, which then runs precisely as though the original slot had never
+been touched.
+
+Because `FASTCALL`'s EDX carries a live argument that the trap sequence's own `mov dx, port`
+would otherwise clobber before any handler runs, a hook's stub pushes it (`push edx`, four bytes)
+before it traps -- `cpu`'s thunks call this `pushEdx`, distinct from `watch`'s `saveRegisters`
+(`pushad`, thirty-two bytes): a hook runs on whatever stack depth the guest's own call already
+reached, and the four bytes are the most that discipline can spend without asking a call already
+near its thread's limit for room it does not have. `holdEip` is the other half: no `ret`, no
+`jmp`, just the trap, so a fixed byte pattern is never asked to make a decision that has to be
+made per call.
+
+A hook's own counters (`calls`, `handled`, `fellThrough`) are kept automatically, from which
+branch a call took; `mismatches` is not -- it exists for a differential ("oracle") kernel that
+computes the answer into a scratch copy, lets the guest's own function run too, and checks the
+guest's output against its own at the *next* call it sees (its own previous output is not
+clobbered by anything else in between, which is what makes the comparison meaningful); it calls
+`reportHookMismatch(name)` when the two disagree. Whether that comparison is even attempted, and
+against what, is entirely the kernel's own code -- this layer never reads a guest byte for a
+hook's sake beyond the arguments it marshals.
 
 ### Dispatch (`internal/dispatch.js`)
 
@@ -255,9 +304,14 @@ in `sessions/` and checks the refusals are exactly those the file lists.
 
 ## 4. Limitations and divergences
 
-- **Three conventions**: `fastcall`, and anything passing arguments in registers other than
-  thiscall's ECX, are not marshalled. A forwarding stub preserves all registers for its target
-  but the handler only sees stack arguments (and ECX under thiscall).
+- **Four conventions.** Anything passing arguments in registers other than thiscall's ECX or
+  fastcall's ECX/EDX is not marshalled. A forwarding stub (`watch`) preserves all registers for
+  its target but the handler only sees stack arguments (and ECX under thiscall, ECX/EDX under
+  fastcall).
+- **A hook's fallback is a redirect, not a call.** `target` runs with the registers and stack the
+  guest's own call set, but nothing about *this* call -- the trap, the marshalled arguments, the
+  frame -- is visible to whatever the guest's function does next; a hook sees a call before the
+  guest's own code does, never after it returns.
 - **Results are 32-bit integers.** A 64-bit result (EDX:EAX) or a floating-point result has to
   be placed by the handler through `cpu.writeReg32`/`cpu.fpu`; the bridge writes EAX only.
 - **At most six arguments** are kept per detail record, and `peekString` guesses at pointers
@@ -286,8 +340,8 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 
 | file | kind | covers |
 |------|------|--------|
-| `internal/conventions.test.js` | contract | Cleanup per convention, unknown convention refused, stack and ECX argument reads, signed arguments. |
-| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink. |
+| `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
+| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object. |

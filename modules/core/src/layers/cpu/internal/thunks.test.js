@@ -95,6 +95,33 @@ test('a full table refuses a slot rather than laying one outside its region', ()
     assert.equal(table.image().length, capacity, 'and the image still fits the region');
 });
 
+test('a hook stub pushes only EDX, not the whole register file, and holds EIP', ()=>{
+    // A hook whose convention (fastcall) carries a live argument in EDX needs
+    // it saved before `mov dx, port` clobbers half of it -- but only EDX, not
+    // the 32 bytes `pushad` costs: a hook runs on whatever stack depth the
+    // guest's own call already reached, and has nowhere to jump to since the
+    // host decides the destination only once the handler has run.
+    const stub = buildStub({
+        trapId: 9, port: PORT, popBytes: 0, pushEdx: true, holdEip: true,
+    });
+    assert.equal(stub[0], 0x52, 'push edx, not pushad');
+    assert.deepEqual([...stub.subarray(1, 11)],
+        [0x66, 0xba, PORT & 0xff, PORT >>> 8, 0xb8, 9, 0, 0, 0, 0xef],
+        'then the trap, eleven bytes total');
+    assert.deepEqual([...stub.subarray(11)], new Array(STUB_SIZE - 11).fill(0xcc),
+        'nothing after the trap: no ret, no jump -- the host writes EIP itself');
+});
+
+test('a stub that saves every register without forwarding still traps with them intact', ()=>{
+    const stub = buildStub({
+        trapId: 9, port: PORT, popBytes: 0, saveRegisters: true, holdEip: true,
+    });
+    assert.equal(stub[0], 0x60, 'pushad first, same as a forwarding stub');
+    assert.deepEqual([...stub.subarray(1, 11)],
+        [0x66, 0xba, PORT & 0xff, PORT >>> 8, 0xb8, 9, 0, 0, 0, 0xef],
+        'then the trap, eleven bytes total');
+});
+
 test('the table defaults to the capacity the module reserves for it', ()=>{
     const table = createThunkTable({ base: 0x100000, port: PORT });
     assert.equal(DEFAULT_THUNK_CAPACITY % STUB_SIZE, 0);

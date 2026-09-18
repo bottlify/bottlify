@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { Convention, calleeCleanup } from './conventions.js';
+import { Convention, calleeCleanup, registerArgumentCount } from './conventions.js';
 import { isParkedCall } from './parking.js';
 
 /**
@@ -31,6 +31,12 @@ import { isParkedCall } from './parking.js';
  * @property {boolean} [lastError]  Whether the function can leave a thread
  *     error behind, so the trace reads it afterwards. Default true; a COM
  *     method answers with an HRESULT and never touches it.
+ * @property {boolean} [hook]
+ *     A slot hook: `handler` answers `true` (it computed the call itself) or
+ *     `false` (run the guest's own code, at `target`). Which of the two
+ *     happens is decided per call, so neither a `ret` nor a `jmp` can be
+ *     baked into the stub -- see `holdEip` in `cpu`'s thunks.
+ * @property {number} [target]  Where a hook's call goes when not handled.
  */
 
 /**
@@ -41,11 +47,21 @@ import { isParkedCall } from './parking.js';
  * @property {HostFunction} fn
  * @property {string} name
  * @property {Function} handler
- * @property {boolean} thisFirst    `this` comes from ECX, ahead of the stack.
+ * @property {number} registerArgs
+ *     How many logical arguments arrive in registers ahead of the stack: 0,
+ *     1 (`this`, thiscall) or 2 (`this` and one more, fastcall).
+ * @property {boolean} edxOnStack
+ *     Fastcall only: the trap sequence's own `mov dx, port` spends half of
+ *     EDX before a handler ever runs, so the stub pushes it first and this
+ *     is read from there rather than live. ECX needs no such care.
  * @property {number} stackWords
  * @property {number} cleanup       What the stub's `ret` pops.
  * @property {number} saved
  * @property {boolean} forwards
+ * @property {boolean} hook
+ * @property {number} target
+ * @property {{ calls: number, handled: number, fellThrough: number,
+ *     mismatches: number } | null} hookStats
  * @property {boolean} readsError
  * @property {number[]} args        The argument array, reused while answers are prompt.
  * @property {number} writer
@@ -336,6 +352,9 @@ export function createDispatcher(deps){
     /** @type {Map<number, string>} */
     const byAddress = new Map();
     let calls = 0;
+    /** A hook's name to its trap id, for `reportMismatch`. */
+    /** @type {Map<string, number>} */
+    const hooksByName = new Map();
 
     return {
         /**
@@ -347,24 +366,38 @@ export function createDispatcher(deps){
             {
                 throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
             }
-            const thisFirst = fn.convention === Convention.THISCALL;
+            const registerArgs = registerArgumentCount(fn.convention);
             // Validates the convention and the byte count here, once, rather
             // than on every call.
             const cleanup = calleeCleanup(fn.convention, fn.argBytes);
-            const stackWords = (thisFirst ? fn.argBytes - 4 : fn.argBytes) >>> 2;
+            const stackWords = (fn.argBytes - registerArgs * 4) >>> 2;
+            const hook = fn.hook === true;
             functions[id] = {
                 fn,
                 name: fn.name,
                 handler: fn.handler,
-                thisFirst,
+                registerArgs,
+                // Fastcall's EDX is what the trap sequence's own `mov dx,
+                // port` spends getting here, so a fastcall entry's stub
+                // pushes it first (see `bridge.hook`) -- it is read back from
+                // there rather than live. ECX needs no such care: nothing in
+                // the trap sequence touches it.
+                edxOnStack: fn.convention === Convention.FASTCALL,
                 stackWords,
                 cleanup,
                 saved: fn.saved ?? 0,
                 forwards: fn.forwards === true,
+                hook,
+                target: fn.target ?? 0,
+                hookStats: hook ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0 } : null,
                 readsError: deps.lastError !== undefined && fn.lastError !== false,
-                args: new Array(stackWords + (thisFirst ? 1 : 0)),
+                args: new Array(stackWords + registerArgs),
                 writer: typeof memory?.writer === 'function' ? memory.writer(fn.name) : -1,
             };
+            if (hook)
+            {
+                hooksByName.set(fn.name, id);
+            }
             implemented++;
         },
 
@@ -440,9 +473,19 @@ export function createDispatcher(deps){
             // parked thread -- keeps the array: see below.
             const args = entry.args;
             let at = 0;
-            if (entry.thisFirst)
+            if (entry.registerArgs >= 1)
             {
+                // Live: nothing in the trap sequence touches ECX.
                 args[at++] = cpu.readReg32('ecx') | 0;
+            }
+            if (entry.registerArgs >= 2)
+            {
+                // Fastcall's EDX is not live by this point: `mov dx, port`
+                // spends the low half of the very register the argument is
+                // in, so the stub pushed it first and this reads it from
+                // there -- the one word between `pushed` and the caller's own
+                // frame at `esp`.
+                args[at++] = memory.readU32(pushed) | 0;
             }
             if (entry.stackWords > 0)
             {
@@ -536,6 +579,14 @@ export function createDispatcher(deps){
                 {
                     record.kind = 'forwarded';
                 }
+                else if (entry.hook)
+                {
+                    // A hook's handler answers synchronously with whether it
+                    // computed the call itself; there is no guest to park or
+                    // wait for on this side of the decision.
+                    record.kind = result === true ? 'answered' : 'fellThrough';
+                    record.answer = record.kind === 'answered' ? 1 : 0;
+                }
                 else if (isParkedCall(result))
                 {
                     record.kind = 'parked';
@@ -579,6 +630,19 @@ export function createDispatcher(deps){
                     // not read the strings cost more than the whole dispatch:
                     // measured at 1.6 of 2.3 microseconds per call.
                     onCall(record);
+                }
+            }
+
+            if (entry.hookStats !== null)
+            {
+                entry.hookStats.calls++;
+                if (record.kind === 'answered')
+                {
+                    entry.hookStats.handled++;
+                }
+                else
+                {
+                    entry.hookStats.fellThrough++;
                 }
             }
 
@@ -627,6 +691,35 @@ export function createDispatcher(deps){
                     });
                 }
                 suspend(result, frame);
+                return;
+            }
+            if (entry.hook)
+            {
+                // Whichever way this goes, EDX reads exactly as the guest's
+                // own call set it: the trap sequence's `mov dx, port` spent
+                // half of it getting here, and the pushed word is the only
+                // place that still holds it. ECX was never touched.
+                cpu.writeReg32('edx', memory.readU32(pushed));
+                if (record.kind === 'answered')
+                {
+                    // The kernel computed the call itself: return to the
+                    // caller as the guest function's own `ret cleanup` would,
+                    // since no such instruction is baked into this stub for
+                    // the CPU to run on its own.
+                    const returnTo = memory.readU32(esp);
+                    cpu.writeReg32('eax', 0);
+                    cpu.writeReg32('esp', esp + 4 + entry.cleanup);
+                    cpu.writeReg32('eip', returnTo);
+                }
+                else
+                {
+                    // Not handled: drop the saved block and hand the call to
+                    // the guest's own function exactly as its caller made it
+                    // -- the return address and stack arguments untouched,
+                    // now that ECX/EDX are restored.
+                    cpu.writeReg32('esp', esp);
+                    cpu.writeReg32('eip', entry.target);
+                }
                 return;
             }
             if (entry.saved !== 0)
@@ -682,5 +775,43 @@ export function createDispatcher(deps){
 
         /** @param {number} count @returns {string[]} the last few, oldest first */
         recent: count=>history(Math.min(count, CALL_RING)),
+
+        /**
+         * A kernel's own comparison against the guest failed. Named rather
+         * than aimed at an id, because whoever built the kernel only ever
+         * knew the hook by its name -- the oracle's own differential check is
+         * the kernel's business, not this dispatcher's; this only counts it.
+         *
+         * @param {string} name
+         */
+        reportMismatch(name){
+            const id = hooksByName.get(name);
+            const entry = id === undefined ? undefined : functions[id];
+            if (entry?.hookStats)
+            {
+                entry.hookStats.mismatches++;
+            }
+        },
+
+        /**
+         * Every hook's own counters, for a frame report: how often it ran,
+         * how often it answered the call itself, how often the guest's own
+         * code ran instead, and -- in oracle mode -- how often the two
+         * disagreed.
+         */
+        hooks(){
+            /** @type {{ name: string, calls: number, handled: number,
+             *   fellThrough: number, mismatches: number }[]} */
+            const out = [];
+            for (const [name, id] of hooksByName)
+            {
+                const stats = functions[id]?.hookStats;
+                if (stats)
+                {
+                    out.push({ name, ...stats });
+                }
+            }
+            return out;
+        },
     };
 }

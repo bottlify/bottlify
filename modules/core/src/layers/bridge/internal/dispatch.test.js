@@ -695,6 +695,96 @@ test('a write into guest memory is charged to the call in flight, however it nes
     });
 });
 
+test('fastcall reads this live and the first argument from the pushed word', ()=>{
+    // The trap sequence's own `mov dx, port` spends the low half of EDX
+    // before any handler runs, so a plain live read would hand a fastcall
+    // handler a stomped second argument -- it comes from what the stub's
+    // `push edx` saved first instead, the marshalling this test pins. ECX
+    // needs no such care: nothing in the trap sequence touches it.
+    const esp = 0x3000;
+    // Three stack words behind the registers.
+    const m = machine({ esp, args: [7, 8, 9], ecx: 0x1111 });
+    const pushed = esp - 4; // where a push-edx stub traps from
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222); // EDX as the stub pushed it (dst)
+    m.registers.edx = 0xb077; // what the trap sequence left behind: not this
+    /** @type {number[][]} */
+    const seen = [];
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        /** @param {number[]} args */
+        handler: args=>{
+            seen.push(args.slice());
+            return true;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(seen, [[0x1111, 0x2222, 7, 8, 9]],
+        'this, then dst, then the three stack words, in declaration order');
+});
+
+test('a hook that answers the call returns to the caller as `ret cleanup` would', ()=>{
+    const esp = 0x3000;
+    const m = machine({ esp, args: [7, 8, 9], ecx: 0x1111 });
+    const pushed = esp - 4;
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222);
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        handler: ()=>true,
+    });
+    m.dispatcher.dispatch(1);
+    assert.equal(m.registers.ecx, 0x1111, 'never touched, so still what the guest passed');
+    assert.equal(m.registers.edx, 0x2222, 'restored to what the guest actually passed');
+    assert.equal(m.registers.esp, esp + 4 + 12,
+        'the return address and the 12-byte cleanup, both popped');
+    assert.equal(m.registers.eip, 0x401234, 'the return address `readU32sInto`\'s stub cell holds');
+});
+
+test('a hook that does not handle the call falls through to the original target', ()=>{
+    const esp = 0x3000;
+    const m = machine({ esp, args: [7, 8, 9], ecx: 0x1111 });
+    const pushed = esp - 4;
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222);
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        handler: ()=>false,
+    });
+    m.dispatcher.dispatch(1);
+    assert.equal(m.registers.ecx, 0x1111, 'the guest function sees its own call, unmarred');
+    assert.equal(m.registers.edx, 0x2222);
+    assert.equal(m.registers.esp, esp, 'not popped: the target function will do its own `ret`');
+    assert.equal(m.registers.eip, 0x24e450, 'redirected into the guest\'s own function');
+});
+
+test('a hook\'s own counters and a reported mismatch land in its diagnostics', ()=>{
+    const esp = 0x3000;
+    const m = machine({ esp, args: [1, 2, 3], ecx: 0x1111 });
+    const pushed = esp - 4;
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222);
+    let answer = false;
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        handler: ()=>answer,
+    });
+    m.dispatcher.dispatch(1); // fell through
+    answer = true;
+    m.registers.esp = pushed; // the previous call moved it; a fresh guest call would too
+    m.dispatcher.dispatch(1); // handled
+    m.dispatcher.reportMismatch('idSIMD.dotPlaneDrawVert');
+    assert.deepEqual(m.dispatcher.hooks(), [
+        { name: 'idSIMD.dotPlaneDrawVert', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
+    ]);
+    // A name nothing registered is a question nobody can answer to, not a throw.
+    m.dispatcher.reportMismatch('nothing.here');
+});
+
 test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' +
     'and constructs zero DataViews', ()=>{
     // The old path was five reads with a region check and a cache lookup
