@@ -698,7 +698,8 @@ export async function game(options){
             // Where createApp mounts a bundle, so the program is told it was
             // loaded from inside its own installation.
             imagePath: `C:\\App\\${manifest.entry}`,
-            commandLine: options.commandLine ?? undefined,
+            // The bundle's own launch arguments, unless `--command-line` overrides them.
+            commandLine: options.commandLine ?? manifest.commandLine ?? undefined,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             screen: options.screen,

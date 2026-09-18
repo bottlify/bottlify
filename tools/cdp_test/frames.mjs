@@ -488,7 +488,8 @@ try
         exe: Buffer.from(executable).toString('base64'),
         bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
         imagePath: `C:\\App\\${manifest.entry}`,
-        commandLine: options.commandLine ?? undefined,
+        // The bundle's own launch arguments, unless `--command-line` overrides them.
+        commandLine: options.commandLine ?? manifest.commandLine ?? undefined,
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,
