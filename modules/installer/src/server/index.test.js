@@ -96,7 +96,10 @@ test('a prefix becomes a bundle the engine can open, and a manifest beside it', 
             prefix,
             endpoint: host.endpoint,
             id: 'a-title',
-            manifest: { title: 'A Title' },
+            // A title's own launch arguments (a bundle-side cvar, say) are not a
+            // field this package knows about; they must still reach the file
+            // unchanged, the same way `title` and `entry` do.
+            manifest: { title: 'A Title', commandLine: '+set s_realTimeDecoding 0' },
         });
 
         // What was seeded before the run is not part of what came out of it.
@@ -116,6 +119,7 @@ test('a prefix becomes a bundle the engine can open, and a manifest beside it', 
         assert.equal(manifest.id, 'a-title');
         assert.equal(manifest.title, 'A Title');
         assert.equal(manifest.entry, 'title.exe');
+        assert.equal(manifest.commandLine, '+set s_realTimeDecoding 0');
         assert.equal(manifest.bundle.format, 'btl/2');
         // Computed on this side, because a browser cannot hash incrementally.
         assert.match(manifest.bundle.sha256, /^[0-9a-f]{64}$/);
