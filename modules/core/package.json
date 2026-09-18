@@ -55,7 +55,7 @@
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:package": "node scripts/check-package.mjs",
     "typecheck": "tsc --project jsconfig.json",
-    "test": "node --test \"src/**/*.test.js\" \"scripts/**/*.test.js\"",
+    "test": "node --test \"src/**/*.test.js\" \"scripts/**/*.test.js\" \"test/**/*.test.js\"",
     "test:integration": "node --test \"src/**/*.itest.js\"",
     "prepublishOnly": "npm run build && npm run check:package"
   }

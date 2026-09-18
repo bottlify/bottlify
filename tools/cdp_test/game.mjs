@@ -125,6 +125,10 @@ function parse(argv){
                 return [];
             }
             const at = argv[index + 1].indexOf('=');
+            if (at < 0)
+            {
+                throw new Error(`--file wants HOST=GUEST, got ${argv[index + 1]}`);
+            }
             return [{
                 path: argv[index + 1].slice(at + 1),
                 base64: readFileSync(argv[index + 1].slice(0, at)).toString('base64'),
