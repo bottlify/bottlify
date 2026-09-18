@@ -7,6 +7,7 @@
 import { bindDelayImports } from './internal/delayload.js';
 import { bindImports, buildImage, mapImage } from './internal/image.js';
 import { synthesiseModule } from './internal/synth.js';
+import { planHook } from './internal/hooks.js';
 
 /**
  * loader — turning an executable file into something the guest can run.
@@ -22,6 +23,8 @@ import { synthesiseModule } from './internal/synth.js';
 
 /** @type {{ base: number, entryPoint: number, unresolved: string[] }[]} */
 let loaded = [];
+/** @type {{ bound: string[], refused: string[] }} */
+let hookResults = { bound: [], refused: [] };
 
 export const loaderModule = {
     name: 'loader',
@@ -205,6 +208,62 @@ export const loaderModule = {
             },
 
             list: ()=>[...loaded],
+
+            /**
+             * Binds a bundle's sidecar hooks against an image already placed
+             * here. The engine names nothing about a title in this function:
+             * `spec` carries the image name, the RVAs and the kernel name from
+             * the sidecar, `image` is what was actually loaded, and what a
+             * kernel does is entirely `register`'s caller's business -- this
+             * only validates the sidecar against reality, writes the slot,
+             * and reports which entries it could not trust.
+             *
+             * @param {{ hooks: import('./internal/hooks.js').HookEntry[] }} spec
+             * @param {import('./internal/hooks.js').LoadedImage} image
+             * @param {(options: { name: string, argBytes: number, target: number,
+             *     handler: Function }) => { address: number }} register
+             *     Bound to the bridge by whoever assembles the process; this
+             *     layer has no bridge of its own to call.
+             * @param {(entry: import('./internal/hooks.js').HookEntry) =>
+             *     Function | null} resolveHandler
+             *     What a hook actually does, keyed off the sidecar's own
+             *     entry -- typically a lookup into the bundle's `hooks.mjs`.
+             * @returns {{ bound: string[], refused: string[] }}
+             */
+            bindHooks(spec, image, register, resolveHandler){
+                /** @type {string[]} */
+                const bound = [];
+                /** @type {string[]} */
+                const refused = [];
+                for (const entry of spec.hooks ?? [])
+                {
+                    if (entry.image.toLowerCase() !== image.name.toLowerCase())
+                    {
+                        continue; // Not for this image; nothing to say about it here.
+                    }
+                    const slotAddress = (image.base + Number(entry.slot.rva)) >>> 0;
+                    const plan = planHook(entry, image, memory.readU32(slotAddress));
+                    if (!plan.ok)
+                    {
+                        refused.push(plan.reason);
+                        continue;
+                    }
+                    const handler = resolveHandler(entry);
+                    if (!handler)
+                    {
+                        refused.push(`${entry.kernel}: no kernel provides it`);
+                        continue;
+                    }
+                    const { address } = register({
+                        name: entry.kernel, argBytes: plan.argBytes,
+                        target: plan.targetAddress, handler,
+                    });
+                    memory.writeU32(plan.slotAddress, address);
+                    bound.push(entry.kernel);
+                }
+                hookResults = { bound, refused };
+                return { bound, refused };
+            },
         };
     },
 
@@ -219,11 +278,14 @@ export const loaderModule = {
                 // An import nothing implements is not fatal at load time, so the
                 // list is the only place it surfaces before the guest calls it.
                 unresolved: loaded.flatMap(image=>image.unresolved),
+                hooksBound: hookResults.bound,
+                hooksRefused: hookResults.refused,
             },
         };
     },
 
     async dispose(){
         loaded = [];
+        hookResults = { bound: [], refused: [] };
     },
 };

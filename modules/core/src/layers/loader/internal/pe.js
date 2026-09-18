@@ -43,6 +43,7 @@ const SECTION_MEM_WRITE = 0x80000000;
  * @typedef {Object} PeImage
  * @property {number} imageBase        Preferred load address.
  * @property {number} entryPointRva
+ * @property {number} timeDateStamp    The linker's build timestamp, from the COFF header.
  * @property {number} sizeOfImage
  * @property {number} sectionAlignment
  * @property {number} sizeOfHeaders
@@ -120,6 +121,9 @@ export function parsePe(bytes){
     return {
         imageBase: view.getUint32(optional + 28, true),
         entryPointRva: view.getUint32(optional + 16, true),
+        // Fourth COFF field, right after the two the machine check already
+        // read: machine (2 bytes), section count (2), then this.
+        timeDateStamp: view.getUint32(coff + 4, true),
         sizeOfImage: view.getUint32(optional + 56, true),
         sectionAlignment: view.getUint32(optional + 32, true),
         sizeOfHeaders: view.getUint32(optional + 60, true),

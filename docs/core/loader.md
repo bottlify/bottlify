@@ -52,6 +52,7 @@ hook of the same shape that says where a call to an unclaimed import should land
 | `bindDelayed` | `(mapped, resolveImport, missing?) => string[]` | The same for the delay-load directory; appended to the record's `unresolved`. |
 | `synthesise` | `({ name, base, exports, entryPoint? }) => { base, size, entryPoint, addressOf, ordinalOf }` | Put a system module into guest memory: a PE32 image whose exports jump to the given targets. `exports` is `{ name, target, ordinal? }[]`; `entryPoint` names the export that is its `DllMain`. |
 | `list` | `() => { base, entryPoint, unresolved, name? }[]` | Every image this instance placed, in order. |
+| `bindHooks` | `(spec, image, register, resolveHandler) => { bound, refused }` | Binds a bundle's sidecar hooks (`internal/hooks.js`) against an image already placed. See "Sidecar hooks" below. |
 
 ### Diagnostics
 
@@ -61,6 +62,7 @@ hook of the same shape that says where a call to an unclaimed import should land
 |--------|---------|---------------|
 | `images` | Images placed (`load`, `map`, `synthesise`). | Each placement. |
 | `unresolved` | Every unclaimed import across all images. | Each `load`, `bind`, `bindDelayed`. An import nothing implements is not fatal at load time, so this is the only place it surfaces before the guest calls it. |
+| `hooksBound`, `hooksRefused` | Kernel names bound, and refusal reasons, from the last `bindHooks`. | Each `bindHooks`. |
 
 ## 3. How it works
 
@@ -161,6 +163,31 @@ library's is, so an export a program declares for itself binds and resolves by n
 ordinal, whether the caller is `GetProcAddress(GetModuleHandle(NULL), ...)` or another module's
 import of the program that loads it (`src/app.js`, `buildApp`).
 
+### Sidecar hooks (`internal/hooks.js`)
+
+A bundle may carry `hooks.json` (and a matching `hooks.mjs`) next to its `manifest.json`,
+outside the bundle itself. `bindHooks(spec, image, register, resolveHandler)` binds each entry
+of `spec.hooks` against `image` -- the name, base, `sizeOfImage` and `timeDateStamp` of what was
+actually loaded, from whoever assembles the process -- and reports what it bound and what it
+refused; this layer names no title and knows nothing of what a hook computes.
+
+An entry not addressed to `image.name` (case-insensitively) is silently none of this call's
+business. One addressed here is checked, in order, and refused with a reason the moment any of
+these does not hold, each a former silent corruption were it not: the loaded image's
+`timeDateStamp`/`sizeOfImage` must equal the entry's `check` (`planHook`, `internal/hooks.js`) --
+a hook for a build this is not is refused rather than patched blind; the guest word currently at
+`image.base + entry.slot.rva` must equal `image.base + entry.target.rva` -- the slot must still
+point at the function the sidecar disassembled, or something already changed it and a second
+change would compound on top of an assumption nobody checked; and `entry.convention.registers`
+must have exactly two entries -- FASTCALL with `this`, the one convention `bridge.hook` marshals
+today. A refused entry's kernel is named in the reason string, in `hooksRefused`.
+
+A bound entry calls `resolveHandler(entry)` for what the hook actually does -- typically a lookup
+into the bundle's `hooks.mjs` module by `entry.kernel` -- and, given a handler, `register({ name,
+argBytes, target, handler })`, which the assembler wires to `bridge.hook`. The stub address
+`register` returns is written into the slot with `memory.writeU32`; the bundle's own image is
+never touched, only the one data word the sidecar named.
+
 ### Thread-local storage and process start (`internal/tls.js`, `internal/init.js`)
 
 `readTls` reads the TLS directory: the template bytes and zero-fill size every thread's block
@@ -210,6 +237,11 @@ is a counted UTF-16 string with no terminator. Strings live in bundles of sixtee
   must be a positive integer and unique.
 - **TLS callbacks are capped at 64** per image — a guard against a missing terminator, not a
   real limit.
+- **One convention per hook.** `bindHooks` refuses any `convention.registers` other than exactly
+  two; a stack-only or single-register hook is not built today.
+- **A hook's fallback is a redirect, not a call frame `bindHooks` builds.** `register`'s caller
+  (the bridge) decides what happens at `target`; this layer only validates the sidecar and moves
+  the one guest word.
 
 ## 5. Tests
 
@@ -224,7 +256,9 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |
 | `internal/resources.test.js` | contract | Lookup by type and id, the leaf offset being an RVA, counted names, string bundles, absent slots and types, language selection, listing. |
+| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is untouched, a kernel `resolveHandler` does not provide is refused by name. |
 | `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
+| `internal/hooks.test.js` | contract | `planHook`'s decision: a good entry resolves the slot and target against the loaded base, a wrong image name, a `timeDateStamp`/`sizeOfImage` mismatch, a slot not holding the target, an unsupported convention. |
 | `internal/init.test.js` | unit | Attach order, the final jump into the program, libraries without an entry point skipped, `DllMain`'s three arguments. |
 
 Integration (`npm run test:integration`): every `src/*.itest.js` maps a real fixture

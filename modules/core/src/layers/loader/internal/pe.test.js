@@ -27,6 +27,12 @@ test('headers of a real 32-bit console executable', ()=>{
     assert.equal(image.sectionAlignment, 0x1000);
     assert.ok(image.entryPointRva > 0);
     assert.ok(image.sizeOfImage >= 0x2000);
+    // The COFF header's own build timestamp, read alongside the fields
+    // already fetched from it (machine, section count) rather than assumed:
+    // a hook's sidecar checks this against the image it hopes to patch. This
+    // fixture's is zero -- a reproducible build zeroing it is legitimate, not
+    // a parsing failure -- so only that it was actually read is pinned here.
+    assert.equal(typeof image.timeDateStamp, 'number');
     // The stack the linker reserved. Read rather than assumed, because a
     // program given less than it was built for fails as a read below its own
     // stack, at whichever call was crossing the boundary.
