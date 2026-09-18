@@ -18,7 +18,7 @@
  * frame rather than anything this tool imposes.
  *
  *     node tools/cdp_test/frames.mjs <bundle-id> [--seconds 60] [--settle 20]
- *                                    [--video] [--no-trace]
+ *                                    [--video] [--no-trace] [--command-line STRING]
  */
 
 import { existsSync } from 'node:fs';
@@ -44,6 +44,11 @@ function parse(argv){
     };
     return {
         id: argv.find(argument=>!argument.startsWith('--')),
+        // The arguments the title believes it was started with, so a run can
+        // set one cvar (`+set logFile 1`) without editing its files.
+        commandLine: argv.includes('--command-line')
+            ? argv[argv.indexOf('--command-line') + 1]
+            : null,
         /** How long to watch once the title is up. */
         seconds: number('--seconds', 60),
         // How long to let it start first. Measuring through loading measures
@@ -483,6 +488,7 @@ try
         exe: Buffer.from(executable).toString('base64'),
         bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
         imagePath: `C:\\App\\${manifest.entry}`,
+        commandLine: options.commandLine ?? undefined,
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,

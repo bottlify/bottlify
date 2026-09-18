@@ -874,6 +874,7 @@ export function createHarness(canvas, how = {}){
      * Runs one title and reports what came out of it.
      *
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
+     *           commandLine?: string,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -1003,6 +1004,9 @@ export function createHarness(canvas, how = {}){
         const app = await createApp({
             pacing: how.pacing,
             executable: fromBase64(request.exe),
+            // What the program believes it was started with, so a run can set
+            // a command-line-only cvar without touching the bundle.
+            commandLine: request.commandLine,
             v86: {
                 moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
                 wasmBytes: wasm,

@@ -19,6 +19,7 @@
  *     node tools/cdp_test/game.mjs <bundle-id> [--turns N] [--wait SECONDS] [--run-seconds N]
  *                                  [--dump-draws] [--skip-texture tN] [--no-video]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
+ *                                  [--command-line STRING]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -110,6 +111,11 @@ function parse(argv){
     return {
         id,
         turns: number('--turns', 200000),
+        // The arguments the title believes it was started with, so a run can
+        // set one cvar (`+set logFile 1`) without editing its files.
+        commandLine: argv.includes('--command-line')
+            ? argv[argv.indexOf('--command-line') + 1]
+            : null,
         // How long the engine itself runs before it stops and reports, for a
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
@@ -692,6 +698,7 @@ export async function game(options){
             // Where createApp mounts a bundle, so the program is told it was
             // loaded from inside its own installation.
             imagePath: `C:\\App\\${manifest.entry}`,
+            commandLine: options.commandLine ?? undefined,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             screen: options.screen,
