@@ -49,6 +49,7 @@ marshalling whatever bytes live at it.
 | `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult?, lastError = true }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. `lastError: false` says the function never sets the thread's error, so the trace does not read it afterwards; COM methods are registered so, and OPENGL32's gl* entry points. Throws for `Convention.FASTCALL`: only `hook`'s stub pushes EDX before it traps, so a `register` stub built for it would hand a handler the return address as its second argument. |
 | `watch` | `(name, { argBytes, target, convention?, handler }) => number` | A forwarding stub: `handler` sees the marshalled arguments, then the call goes on into `target`, always. For observing calls between guest modules. |
 | `hook` | `(name, { convention = FASTCALL, argBytes, target, handler }) => number` | A slot hook: `handler` answers `true` (it computed the call itself) or `false` (run `target`, the guest's own function, instead) -- decided fresh on every call, unlike `watch`'s unconditional forward. Returns the guest address to write into whatever data word (a vftable slot, typically) a caller wants redirected; the caller writes it, this layer only builds the stub and the dispatch. |
+| `siteHook` | `(name, { trampoline, resume, stackAdjust?, handler }) => number` | A site hook: `handler(registers, frame)` sees all eight general registers as a plain object and answers `true` (moves EIP to `resume`, ESP to `registers.esp + stackAdjust`) or `false` (restores every register to what the site held, moves EIP to `trampoline`) -- see "Site hooks" below. Returns the guest address a code patch at the site should jump to; the caller (the loader's `bindHooks`) writes the patch, this layer only builds the stub and the dispatch. |
 | `reportHookMismatch` | `(name) => void` | Counts one of a hook's own comparisons against the guest as having disagreed. This layer does not know what was compared -- an oracle-mode kernel calls it once it has checked the guest's output against its own -- it only keeps the count, in `diagnostics().hooks`. |
 | `park` | `(thread?) => ParkedToken` | Parks the calling thread and returns the only value a handler may return instead of an answer. Throws outside a call. |
 | `callGuest` | `({ entry, args?, thread? }) => Promise<number>` | Runs a guest routine and resolves with EAX. A handler that awaited before calling must pass `thread`. |
@@ -198,6 +199,51 @@ EIP write, with the branch taken (`answered` or `fellThrough`) and the EIP/ESP t
 at. The first is written before the handler, so a handler that never returns still leaves the
 frame it was handed on the record.
 
+### Site hooks (`siteHook`)
+
+A site hook stands not in front of a call but *inside* a function: a code patch at one point in
+it (`site`), resuming at another (`resume`), for a loop or a span of work a slot can never reach
+-- a static function taken by `call rel32` from inside its own module, under a compiler-private
+register convention no vtable or import ever names. The loader's `bindHooks` builds the patch
+(the displaced instructions moved to a trampoline, a jump written at the site) once the sidecar's
+three byte pins hold (see [`loader.md`](./loader.md) "Sidecar hooks"); this layer only builds the
+stub and the dispatch behind it, exactly as `hook` does for a slot.
+
+`handler(registers, frame)` sees all eight general registers as a plain object --
+`{ eax, ecx, edx, ebx, esp, ebp, esi, edi }`, exactly as the site's own code held them when the
+stub trapped -- and may edit any of them; unlike a slot hook's `args`, which only carries what a
+call's own convention marshals, a site hook has no convention at all, because there was no call to
+marshal. Answering `true` means the handler computed the site's own work itself: every register is
+written back exactly as the object holds it, ESP becomes `registers.esp + stackAdjust` (so a
+handler may move the stack itself -- what the instructions between the site and the resume point
+would otherwise have popped), and EIP moves to `resume`. Answering `false` means "run the displaced
+instructions instead": every register is restored to what the site's own call site held (not to
+whatever the handler's object holds by then, if it edited before deciding to fall through), ESP is
+left at the site's own value, and EIP moves to `trampoline` -- the instructions the patch displaced,
+ending in a jump back into the function right after the site, as though it had never been patched.
+**EFLAGS are never restored either way** -- a `pushad`/`popad` pair does not touch them either --
+so a resume point that depends on flags a branch between the site and it would have set is not
+safe to use. A sidecar's own kernel is responsible for loading whatever compare it needs before
+such a branch, since this mechanism gives it none.
+
+A handler that throws is treated as `false`: every register restored, EIP to `trampoline`, the
+same guard a slot hook's handler gets -- a bug in a sidecar's own code is not a reason to bring
+the run down when the guest's own function is right there to fall back on.
+
+The stub is `cpu`'s thunks' `saveRegisters` (`pushad`, the same as `watch`'s forwarding stub)
+together with `holdEip` (the same as a slot hook's): every register saved, because the whole point
+is to read and possibly rewrite all eight, and neither a `ret` nor a `jmp` baked in, because which
+of the two exits above this takes is decided only once the handler has run. Each flag already
+existed on its own; a site hook is the first stub to need both together.
+
+A site hook's own counters (`calls`, `handled`, `fellThrough`, `mismatches`) and the journal's
+`call.hook` records work exactly as a slot hook's do -- a site record's "arguments" are the eight
+registers, in the same declaration order the object exposes them. There is no in-browser oracle
+for a site hook: the "compare at the next crossing" trick a slot hook's kernel may attempt (see
+above) has no analogue here, because there is no return value and no single write target to
+compare -- a site kernel is checked offline instead, against the real function in the real
+emulator, before it is ever bound in `replace` mode.
+
 ### Dispatch (`internal/dispatch.js`)
 
 `dispatch(id)` reads ESP (plus `forwardSave` for a forwarding stub), reads the arguments off
@@ -334,7 +380,12 @@ in `sessions/` and checks the refusals are exactly those the file lists.
   be placed by the handler through `cpu.writeReg32`/`cpu.fpu`; the bridge writes EAX only.
 - **At most six arguments** are kept per detail record, and `peekString` guesses at pointers
   (printable ASCII under 96 bytes, address ≥ 0x1000); a trace line may name a value that only
-  looks like a string.
+  looks like a string. For a site hook's eight registers this caps the detail ring at the first
+  six (`eax, ecx, edx, ebx, esp, ebp`); the `call.hook` trace's own `args=` field is the same six.
+- **A site hook's `ret=` in a `call.hook` trace is not a return address.** The field is read the
+  same way for every hook, off whatever word sits at the site's own ESP; a site hook was never
+  reached by a call, so that word is ordinary guest data, not an address -- harmless in a trace
+  line, but not meaningful the way a slot hook's `ret=` is.
 - **Rings are bounded** at 4096 names and 4096 detail records; `calls()` is only complete until
   the ring wraps. A sink (`onCall`) is the way to keep everything.
 - **Stub slots are never freed**; `comInterfacesRefused` rising is the sign a run is spending
@@ -359,7 +410,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/bridge/internal/<fil
 | file | kind | covers |
 |------|------|--------|
 | `internal/conventions.test.js` | contract | Cleanup per convention including fastcall, unknown convention refused, stack and ECX argument reads, signed arguments. |
-| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink. |
+| `internal/dispatch.test.js` | unit | Marshal/invoke/EAX, negative results, forwarding stubs, fastcall's registers read from the saved block, a hook that answers vs. one that falls through (EIP/ESP either way), a hook's counters and a reported mismatch, parked calls leaving EAX, the parked token's identity, unimplemented/duplicate traps, a throwing handler, the bounded rings, the sampled `trap` phase, record reuse, the sink; a site hook: all eight registers read off the pushad block into a plain object, an answer writing back every edited register with ESP by `stackAdjust` and EIP to `resume`, a fallthrough restoring every register to the pristine reading even after the handler edited the object, counters and diagnostics shared with a slot hook, and the `call.hook` trace unchanged. |
 | `internal/parking.test.js` | unit | `freeStackFor` per thread, nothing in flight, the token only inside a call. |
 | `internal/callback.test.js` | unit | Suspended-call naming, `answered()`, nested frames below the stack in use, no call in flight, the right thread, address zero refused, `recentlyStarted`. |
 | `internal/vtable.test.js` | unit | Refusal when stubs or arena run out, pointer identity, guest-code slots, shared tables finding their object. |

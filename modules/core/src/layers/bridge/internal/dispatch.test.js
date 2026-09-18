@@ -908,3 +908,204 @@ test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' 
     assert.equal(readU32sIntoCalls, 1, 'one readU32sInto call for the whole span');
     assert.equal(dataViews, 0, 'no DataView constructed by the crossing');
 });
+
+/**
+ * A site hook's stub trapped with a full `pushad`: `saved: 32`, so the
+ * dispatcher's own `esp` local (`pushed + entry.saved`) lands back at the
+ * site's own ESP, the value pushad itself recorded at `pushed + 12`.
+ *
+ * @param {number} siteEsp
+ * @param {{ eax?: number, ecx?: number, edx?: number, ebx?: number,
+ *     ebp?: number, esi?: number, edi?: number }} [values]
+ */
+function pushSiteRegisters(siteEsp, values = {}){
+    const {
+        eax = 0x7000, ecx = 0x6000, edx = 0x5000, ebx = 0x4000,
+        ebp = 0x3000, esi = 0x2000, edi = 0x1000,
+    } = values;
+    const pushed = siteEsp - 32;
+    return { pushed, eax, ecx, edx, ebx, ebp, esi, edi };
+}
+
+test('a site hook reads all eight registers off the pushad block into a plain object', ()=>{
+    const siteEsp = 0x3000;
+    const { pushed, eax, ecx, edx, ebx, ebp, esi, edi } = pushSiteRegisters(siteEsp);
+    const m = machine({ esp: siteEsp });
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed + 0, edi);
+    m.memory.writeU32(pushed + 4, esi);
+    m.memory.writeU32(pushed + 8, ebp);
+    m.memory.writeU32(pushed + 12, siteEsp); // esp, as pushad itself recorded it
+    m.memory.writeU32(pushed + 16, ebx);
+    m.memory.writeU32(pushed + 20, edx);
+    m.memory.writeU32(pushed + 24, ecx);
+    m.memory.writeU32(pushed + 28, eax);
+    /** @type {any[]} */
+    const seen = [];
+    m.dispatcher.register(1, {
+        name: 'loop.faces', site: true, saved: 32,
+        trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
+        /** @param {any} registers */
+        handler: registers=>{
+            seen.push({ ...registers });
+            return false;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(seen, [{ eax, ecx, edx, ebx, esp: siteEsp, ebp, esi, edi }]);
+});
+
+test('a site hook that answers writes back every edited register, ESP by stackAdjust, '
+    + 'EIP to resume', ()=>{
+    const siteEsp = 0x3000;
+    const { pushed, eax, ecx, ebx, esi, edi } = pushSiteRegisters(siteEsp);
+    const m = machine({ esp: siteEsp });
+    m.registers.esp = pushed;
+    // Seeded non-zero, unlike the registers the handler below edits: a
+    // register the handler never touches must still be written back with
+    // exactly the value the pushad block held, which zero-filling this block
+    // could not have told apart from the write-back being deleted entirely.
+    m.memory.writeU32(pushed + 0, edi);
+    m.memory.writeU32(pushed + 4, esi);
+    m.memory.writeU32(pushed + 8, 0);
+    m.memory.writeU32(pushed + 12, siteEsp);
+    m.memory.writeU32(pushed + 16, ebx);
+    m.memory.writeU32(pushed + 20, 0);
+    m.memory.writeU32(pushed + 24, ecx);
+    m.memory.writeU32(pushed + 28, eax);
+    m.dispatcher.register(1, {
+        name: 'loop.faces', site: true, saved: 32,
+        trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
+        /** @param {any} registers */
+        handler: registers=>{
+            // The kernel's own answer: only EBP (the count) and EDX (what the
+            // resume point's own next instruction would have loaded) are
+            // meaningful for this loop, but every register is still written
+            // back -- the mechanism does not know which ones a kernel cares
+            // about.
+            registers.ebp = 42;
+            registers.edx = 0x12345678;
+            registers.esp += 4; // a handler may move the stack itself
+            return true;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.equal(m.registers.ebp, 42);
+    assert.equal(m.registers.edx, 0x12345678);
+    assert.equal(m.registers.eax, eax,
+        'a register the handler never touched is still written back with its seeded value');
+    assert.equal(m.registers.ecx, ecx);
+    assert.equal(m.registers.ebx, ebx);
+    assert.equal(m.registers.esi, esi);
+    assert.equal(m.registers.edi, edi);
+    assert.equal(m.registers.esp, siteEsp + 4 + 8,
+        'the handler\'s own esp edit, then stackAdjust on top of it');
+    assert.equal(m.registers.eip, 0x901000, 'moved to resume');
+});
+
+test('a site hook that falls through restores every register to what the site held, '
+    + 'even if the handler edited the object it was given', ()=>{
+    const siteEsp = 0x3000;
+    const { pushed, eax, ecx, edx, ebx, ebp, esi, edi } = pushSiteRegisters(siteEsp);
+    const m = machine({ esp: siteEsp });
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed + 0, edi);
+    m.memory.writeU32(pushed + 4, esi);
+    m.memory.writeU32(pushed + 8, ebp);
+    m.memory.writeU32(pushed + 12, siteEsp);
+    m.memory.writeU32(pushed + 16, ebx);
+    m.memory.writeU32(pushed + 20, edx);
+    m.memory.writeU32(pushed + 24, ecx);
+    m.memory.writeU32(pushed + 28, eax);
+    m.dispatcher.register(1, {
+        name: 'loop.faces', site: true, saved: 32,
+        trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
+        /** @param {any} registers */
+        handler: registers=>{
+            // A kernel that decided partway through to fall through -- its
+            // guard fired after it had already started editing -- must leave
+            // nothing behind: the mechanism restores from the pristine
+            // reading, not from whatever this object now holds.
+            registers.ebp = 999999;
+            registers.esp = 0;
+            return false;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(
+        { eax: m.registers.eax, ecx: m.registers.ecx, edx: m.registers.edx,
+            ebx: m.registers.ebx, ebp: m.registers.ebp, esi: m.registers.esi,
+            edi: m.registers.edi },
+        { eax, ecx, edx, ebx, ebp, esi, edi });
+    assert.equal(m.registers.esp, siteEsp, 'the site\'s own esp, not the handler\'s edit');
+    assert.equal(m.registers.eip, 0x900000, 'moved to the trampoline');
+});
+
+test('a site hook shares a slot hook\'s counters and diagnostics', ()=>{
+    const siteEsp = 0x3000;
+    const { pushed } = pushSiteRegisters(siteEsp);
+    const m = machine({ esp: siteEsp });
+    m.registers.esp = pushed;
+    for (let at = 0; at < 32; at += 4)
+    {
+        m.memory.writeU32(pushed + at, 0);
+    }
+    let answer = false;
+    m.dispatcher.register(1, {
+        name: 'loop.faces', site: true, saved: 32,
+        trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
+        handler: ()=>answer,
+    });
+    m.dispatcher.dispatch(1); // fell through
+    answer = true;
+    m.registers.esp = pushed; // the previous call moved it; a fresh site call would too
+    m.dispatcher.dispatch(1); // handled
+    m.dispatcher.reportMismatch('loop.faces');
+    assert.deepEqual(m.dispatcher.hooks(), [
+        { name: 'loop.faces', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
+    ]);
+});
+
+test('with call.hook on, a site hook writes the frame before its handler and the '
+    + 'redirect after', ()=>{
+    const siteEsp = 0x3000;
+    const { pushed } = pushSiteRegisters(siteEsp);
+    /** @type {string[]} */
+    const written = [];
+    const journal = {
+        Level: { TRACE: 5 },
+        /** @param {string} category @param {number} level */
+        enabled: (category, level)=>category === 'call.hook' && level === 5,
+        /**
+         * @param {number} level @param {string} category @param {string} message
+         * @param {...any} args
+         */
+        write: (level, category, message, ...args)=>{
+            written.push(message.replace(/\{(\d)\}/g, (_, i)=>String(args[Number(i)])));
+        },
+    };
+    const m = machine({ esp: siteEsp, journal });
+    m.registers.esp = pushed;
+    for (let at = 0; at < 32; at += 4)
+    {
+        m.memory.writeU32(pushed + at, 0);
+    }
+    m.dispatcher.register(1, {
+        name: 'loop.faces', site: true, saved: 32,
+        trampoline: 0x900000, resume: 0x901000, stackAdjust: 8,
+        handler: ()=>{
+            assert.equal(written.length, 1);
+            return false;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.equal(written.length, 2);
+    // The trace's `esp=` is the dispatcher's own `esp` local -- the site's own
+    // ESP, `pushed + saved` -- the same field a slot hook's trace uses; `ret=`
+    // is whatever the guest's own stack held at that address, which for a
+    // site hook is not a return address at all (there was no call), just a
+    // number the trace carries unchanged.
+    assert.match(written[0], /^loop\.faces entry esp=0x3000 /);
+    assert.deepEqual(written[1],
+        'loop.faces fellThrough eip=0x900000 esp=0x3000');
+});

@@ -20,8 +20,8 @@ import { isParkedCall } from './parking.js';
 /**
  * @typedef {Object} HostFunction
  * @property {string} name
- * @property {string} convention
- * @property {number} argBytes
+ * @property {string} [convention]  Unused, and may be omitted, by a `site` entry.
+ * @property {number} [argBytes]    Unused, and may be omitted, by a `site` entry.
  * @property {Function} handler
  * @property {boolean} [forwards]  The call goes on into guest code afterwards,
  *     so the handler's answer is not the call's answer.
@@ -37,6 +37,21 @@ import { isParkedCall } from './parking.js';
  *     happens is decided per call, so neither a `ret` nor a `jmp` can be
  *     baked into the stub -- see `holdEip` in `cpu`'s thunks.
  * @property {number} [target]  Where a hook's call goes when not handled.
+ * @property {boolean} [site]
+ *     A site hook: a code patch inside a function rather than a slot in
+ *     front of one. `handler(registers, frame)` sees all eight general
+ *     registers as a plain object and may edit any of them; answering `true`
+ *     moves EIP to `resume` (ESP becomes `registers.esp + stackAdjust`, so
+ *     the handler may move the stack itself), `false` restores every
+ *     register to what the site's own call site held and moves EIP to
+ *     `trampoline` -- the displaced instructions, running as though the site
+ *     had never been patched.
+ * @property {number} [trampoline]  Where a site hook's fallthrough resumes.
+ * @property {number} [resume]      Where a site hook's handled path resumes.
+ * @property {number} [stackAdjust]
+ *     Added to the handler's own `registers.esp` before EIP moves to
+ *     `resume` -- what the instructions between the site and the resume
+ *     point would have popped, had they run.
  */
 
 /**
@@ -56,6 +71,13 @@ import { isParkedCall } from './parking.js';
  * @property {boolean} forwards
  * @property {boolean} hook
  * @property {number} target
+ * @property {boolean} site
+ * @property {number} trampoline
+ * @property {number} resume
+ * @property {number} stackAdjust
+ * @property {{ eax: number, ecx: number, edx: number, ebx: number, esp: number,
+ *     ebp: number, esi: number, edi: number } | null} registers
+ *     A site hook's mutable register view, reused like `args`; null otherwise.
  * @property {{ calls: number, handled: number, fellThrough: number,
  *     mismatches: number } | null} hookStats
  * @property {boolean} readsError
@@ -373,12 +395,25 @@ export function createDispatcher(deps){
             {
                 throw new Error(`bridge: trap ${id} is already implemented by ${fn.name}`);
             }
-            const registerArgs = registerArgumentCount(fn.convention);
+            const site = fn.site === true;
+            // A site hook marshals nothing through a convention: its eight
+            // registers come straight off the pushad block, not off a
+            // calling convention nobody chose -- the call was never a call.
+            // `convention`/`argBytes` are optional only for a `site` entry;
+            // every other caller still provides them, checked at `register`'s
+            // own call sites (`bridge/module.js`).
+            const convention = /** @type {string} */ (fn.convention);
+            const argBytes = /** @type {number} */ (fn.argBytes);
+            const registerArgs = site ? 0 : registerArgumentCount(convention);
             // Validates the convention and the byte count here, once, rather
             // than on every call.
-            const cleanup = calleeCleanup(fn.convention, fn.argBytes);
-            const stackWords = (fn.argBytes - registerArgs * 4) >>> 2;
-            const hook = fn.hook === true;
+            const cleanup = site ? 0 : calleeCleanup(convention, argBytes);
+            const stackWords = site ? 0 : (argBytes - registerArgs * 4) >>> 2;
+            // A site hook shares a slot hook's counters and journal record --
+            // both are "a guest call this engine decided by a sidecar word,
+            // rather than by declaration" -- so it is a `hook` for every
+            // purpose downstream except how its registers are marshalled.
+            const hook = fn.hook === true || site;
             functions[id] = {
                 fn,
                 name: fn.name,
@@ -390,9 +425,16 @@ export function createDispatcher(deps){
                 forwards: fn.forwards === true,
                 hook,
                 target: fn.target ?? 0,
+                site,
+                trampoline: fn.trampoline ?? 0,
+                resume: fn.resume ?? 0,
+                stackAdjust: fn.stackAdjust ?? 0,
+                registers: site
+                    ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
+                    : null,
                 hookStats: hook ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0 } : null,
                 readsError: deps.lastError !== undefined && fn.lastError !== false,
-                args: new Array(stackWords + registerArgs),
+                args: new Array(site ? 8 : stackWords + registerArgs),
                 writer: typeof memory?.writer === 'function' ? memory.writer(fn.name) : -1,
             };
             if (hook)
@@ -473,30 +515,62 @@ export function createDispatcher(deps){
             // handler that answers later than it returns -- a promise, a
             // parked thread -- keeps the array: see below.
             const args = entry.args;
-            let at = 0;
-            if (entry.registerArgs >= 1)
+            if (entry.site)
             {
-                // Live: nothing in the trap sequence touches ECX.
-                args[at++] = cpu.readReg32('ecx') | 0;
+                // The stub's own `pushad` before it trapped: pushed lowest to
+                // highest is edi, esi, ebp, the original esp, ebx, edx, ecx,
+                // eax -- so eax is the last one pushed, at `pushed + 28`.
+                // Read into `args` in declaration order rather than straight
+                // into `entry.registers` so a fallthrough can restore exactly
+                // what the site's own call site held even if the handler
+                // edited the mutable object it was given.
+                args[0] = memory.readU32(pushed + 28) | 0; // eax
+                args[1] = memory.readU32(pushed + 24) | 0; // ecx
+                args[2] = memory.readU32(pushed + 20) | 0; // edx
+                args[3] = memory.readU32(pushed + 16) | 0; // ebx
+                args[4] = esp | 0;                          // esp: the site's own
+                args[5] = memory.readU32(pushed + 8) | 0;  // ebp
+                args[6] = memory.readU32(pushed + 4) | 0;  // esi
+                args[7] = memory.readU32(pushed + 0) | 0;  // edi
+                // Non-null: `entry.registers` is only null for a non-site
+                // entry, and this branch runs only when `entry.site` is true.
+                const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
+                r.eax = args[0];
+                r.ecx = args[1];
+                r.edx = args[2];
+                r.ebx = args[3];
+                r.esp = args[4];
+                r.ebp = args[5];
+                r.esi = args[6];
+                r.edi = args[7];
             }
-            if (entry.registerArgs >= 2)
+            else
             {
-                // Fastcall's EDX is not live by this point: `mov dx, port`
-                // spends the low half of the very register the argument is
-                // in, so the stub pushed it first and this reads it from
-                // there -- the one word between `pushed` and the caller's own
-                // frame at `esp`.
-                args[at++] = memory.readU32(pushed) | 0;
-            }
-            if (entry.stackWords > 0)
-            {
-                // One call for the whole span rather than a read per word:
-                // each of those cost its own region check and cache lookup,
-                // and a call takes several words at once. The memory layer
-                // validates the span once and falls back to per-word reads
-                // itself when a stack straddles two adjacent regions (legal
-                // layout, if rare), so there is nothing to catch here.
-                memory.readU32sInto(esp + 4, entry.stackWords, args, at);
+                let at = 0;
+                if (entry.registerArgs >= 1)
+                {
+                    // Live: nothing in the trap sequence touches ECX.
+                    args[at++] = cpu.readReg32('ecx') | 0;
+                }
+                if (entry.registerArgs >= 2)
+                {
+                    // Fastcall's EDX is not live by this point: `mov dx, port`
+                    // spends the low half of the very register the argument is
+                    // in, so the stub pushed it first and this reads it from
+                    // there -- the one word between `pushed` and the caller's
+                    // own frame at `esp`.
+                    args[at++] = memory.readU32(pushed) | 0;
+                }
+                if (entry.stackWords > 0)
+                {
+                    // One call for the whole span rather than a read per word:
+                    // each of those cost its own region check and cache lookup,
+                    // and a call takes several words at once. The memory layer
+                    // validates the span once and falls back to per-word reads
+                    // itself when a stack straddles two adjacent regions (legal
+                    // layout, if rare), so there is nothing to catch here.
+                    memory.readU32sInto(esp + 4, entry.stackWords, args, at);
+                }
             }
 
             calls++;
@@ -583,7 +657,10 @@ export function createDispatcher(deps){
             }
             try
             {
-                result = entry.handler(args, frame);
+                // A site kernel edits registers, not stack arguments: it sees
+                // the mutable object built above, not `args` (which stays the
+                // pristine reading a fallthrough restores from).
+                result = entry.handler(entry.site ? entry.registers : args, frame);
                 // A promise is neither a value nor the parked token: it is a
                 // call that has not finished, and the thread is about to be
                 // parked on it. Rendering it as a number turns every such call
@@ -705,6 +782,56 @@ export function createDispatcher(deps){
                     });
                 }
                 suspend(result, frame);
+                return;
+            }
+            if (entry.hook && entry.site)
+            {
+                if (record.kind === 'answered')
+                {
+                    // The kernel may have edited any of the eight; every one
+                    // is written back, ESP last of the registers (it may have
+                    // moved) and EIP last of all. EFLAGS are not restored --
+                    // a `pushad`/`popad` pair does not touch them either --
+                    // so the resume point must not depend on flags a branch
+                    // between the site and it would have set.
+                    const r = /** @type {NonNullable<Entry['registers']>} */ (entry.registers);
+                    cpu.writeReg32('eax', r.eax >>> 0);
+                    cpu.writeReg32('ecx', r.ecx >>> 0);
+                    cpu.writeReg32('edx', r.edx >>> 0);
+                    cpu.writeReg32('ebx', r.ebx >>> 0);
+                    cpu.writeReg32('ebp', r.ebp >>> 0);
+                    cpu.writeReg32('esi', r.esi >>> 0);
+                    cpu.writeReg32('edi', r.edi >>> 0);
+                    cpu.writeReg32('esp', (r.esp + entry.stackAdjust) >>> 0);
+                    cpu.writeReg32('eip', entry.resume);
+                }
+                else
+                {
+                    // Not handled: every register restored to exactly what
+                    // the site's own call site held -- `args`, never
+                    // `entry.registers`, so a handler that fell through after
+                    // editing the object it was given leaves nothing behind
+                    // -- and EIP goes to the trampoline: the displaced
+                    // instructions, then a jump back into the function right
+                    // after the site, as though it had never been patched.
+                    cpu.writeReg32('eax', args[0] >>> 0);
+                    cpu.writeReg32('ecx', args[1] >>> 0);
+                    cpu.writeReg32('edx', args[2] >>> 0);
+                    cpu.writeReg32('ebx', args[3] >>> 0);
+                    cpu.writeReg32('ebp', args[5] >>> 0);
+                    cpu.writeReg32('esi', args[6] >>> 0);
+                    cpu.writeReg32('edi', args[7] >>> 0);
+                    cpu.writeReg32('esp', esp);
+                    cpu.writeReg32('eip', entry.trampoline);
+                }
+                if (hookTraced)
+                {
+                    journal.write(journal.Level.TRACE, HOOK_AREA,
+                        '{0} {1} eip={2} esp={3}',
+                        entry.name, record.kind,
+                        `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
+                        `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
+                }
                 return;
             }
             if (entry.hook)

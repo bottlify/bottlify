@@ -113,6 +113,12 @@ test('a hook stub pushes only EDX, not the whole register file, and holds EIP', 
 });
 
 test('a stub that saves every register without forwarding still traps with them intact', ()=>{
+    // A site hook's own stub: every register saved, because the whole point
+    // is to read and possibly rewrite all eight, and neither a `ret` nor a
+    // `jmp` baked in -- the outcome (which of the eight change, and where
+    // EIP goes) is decided only once the handler has run, the same reason a
+    // slot hook's `pushEdx`+`holdEip` stub holds EIP. Each flag already
+    // existed on its own; this is the first stub to need both together.
     const stub = buildStub({
         trapId: 9, port: PORT, popBytes: 0, saveRegisters: true, holdEip: true,
     });
@@ -120,6 +126,8 @@ test('a stub that saves every register without forwarding still traps with them 
     assert.deepEqual([...stub.subarray(1, 11)],
         [0x66, 0xba, PORT & 0xff, PORT >>> 8, 0xb8, 9, 0, 0, 0, 0xef],
         'then the trap, eleven bytes total');
+    assert.deepEqual([...stub.subarray(11)], new Array(STUB_SIZE - 11).fill(0xcc),
+        'nothing after the trap: no ret, no jump -- the host writes EIP itself');
 });
 
 test('the table defaults to the capacity the module reserves for it', ()=>{

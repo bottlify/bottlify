@@ -52,7 +52,7 @@ hook of the same shape that says where a call to an unclaimed import should land
 | `bindDelayed` | `(mapped, resolveImport, missing?) => string[]` | The same for the delay-load directory; appended to the record's `unresolved`. |
 | `synthesise` | `({ name, base, exports, entryPoint? }) => { base, size, entryPoint, addressOf, ordinalOf }` | Put a system module into guest memory: a PE32 image whose exports jump to the given targets. `exports` is `{ name, target, ordinal? }[]`; `entryPoint` names the export that is its `DllMain`. |
 | `list` | `() => { base, entryPoint, unresolved, name? }[]` | Every image this instance placed, in order. |
-| `bindHooks` | `(spec, image, register, resolveHandler) => { bound, refused }` | Binds a bundle's sidecar hooks (`internal/hooks.js`) against an image already placed. See "Sidecar hooks" below. |
+| `bindHooks` | `(spec, image, register, resolveHandler, allocate?) => { bound, refused }` | Binds a bundle's sidecar hooks (`internal/hooks.js`) against an image already placed. `allocate` is guest heap room for a `site` entry's trampoline; omit it when `spec` holds only `slot` entries. See "Sidecar hooks" below. |
 
 ### Diagnostics
 
@@ -192,6 +192,47 @@ with `memory.writeU32`; an answer that is not a nonzero integer (`bridge.hook` a
 disposed) is refused and named, and the slot keeps the guest's own function. The bundle's own
 image is never touched, only the one data word the sidecar named.
 
+**A `site` entry**, the second form, replaces one loop or span inside a function rather than a
+whole function reached through a slot -- for a static function taken by `call rel32` from inside
+its own module, under a compiler-private register convention no vtable or import ever names:
+
+```json
+{
+    "image": "program.exe",
+    "check": { "timeDateStamp": "0x414221a3", "sizeOfImage": "0x271f000" },
+    "site": { "rva": "0x73676", "bytes": "8b 57 04 8b 07 8b 4b 30", "lengths": [3, 2, 3] },
+    "resume": { "rva": "0x737a3", "bytes": "8b 0d d8 82 a5 02", "stackAdjust": 8 },
+    "function": { "rva": "0x734f0", "bytes": "83 ec 3c 8b 15 40 0e 2e" },
+    "kernel": "loop.faces",
+    "mode": "replace"
+}
+```
+
+`bindHooks` checks a `site` entry (`planSiteHook`, `internal/hooks.js`) the same way as a `slot`
+entry -- the image name and the `check` -- plus three byte pins rather than one, since a site is
+mid-function and depends on the compiler's own register allocation there, unlike a slot's data
+word: the bytes at `image.base + site.rva` must equal `site.bytes`, the bytes at `resume.rva` must
+equal `resume.bytes`, and the bytes at `function.rva` must equal `function.bytes` -- a pin on the
+function the site sits inside of, since the same site bytes could in principle recur elsewhere.
+`site.lengths` must sum to `site.bytes`' own length and be at least five (the minimum a near jump
+needs to replace), and the displaced instructions it describes must hold no relative branch (a
+near call or jump, a short jump, a two-byte conditional jump) -- none of these can be moved to a
+trampoline. Any failure refuses the entry by kernel name, naming which pin or check failed.
+
+A bound `site` entry allocates a trampoline through the `allocate` callback -- the displaced bytes
+plus a jump back to `site.rva + displacedLength`, the same shape a diagnostic watch's own
+trampoline takes (`app.js`'s `debug.hook`) -- then `register({ name, site: true, trampoline,
+resume: image.base + resume.rva, stackAdjust: resume.stackAdjust, handler })`, which the assembler
+wires to `bridge.siteHook`. The site itself is then patched: a near jump to the stub address
+`register` answered, padded with `nop` out to `displacedLength`, written through
+`memory.protect`/`memory.writeBytes`/`memory.protect` -- the same discipline a diagnostic watch's
+code patch uses, even though the program image is already `rwx` today and the protect toggle is a
+no-op. Since the image is executable, the write routes through the emulator's own physical-memory
+path and invalidates whatever was compiled from the bytes underneath; binding happens once, before
+the program's first instruction runs, so nothing is compiled yet to discard. `allocate` may be
+omitted by a caller whose spec holds only `slot` entries; a `site` entry bound with no `allocate`
+is refused by name rather than throwing.
+
 ### Thread-local storage and process start (`internal/tls.js`, `internal/init.js`)
 
 `readTls` reads the TLS directory: the template bytes and zero-fill size every thread's block
@@ -246,6 +287,19 @@ is a counted UTF-16 string with no terminator. Strings live in bundles of sixtee
 - **A hook's fallback is a redirect, not a call frame `bindHooks` builds.** `register`'s caller
   (the bridge) decides what happens at `target`; this layer only validates the sidecar and moves
   the one guest word.
+- **A site entry's trampoline and patch are `bindHooks`' own, not the bridge's.** Only the guest
+  word write is common between the two forms; a site entry additionally allocates a trampoline and
+  writes a code patch here, before ever calling `register`.
+- **No in-browser oracle for a site hook.** A slot hook's kernel may compare its own answer against
+  the guest's *at the next crossing it sees* (unsound for some write targets; see
+  [`bridge.md`](./bridge.md) "Slot hooks"); a site hook has no return value and no single write
+  target to compare that way. A site kernel is checked offline instead, against the real function
+  in the real emulator, before it is ever bound in `replace` mode.
+- **A `site` patch and a `debug.hook` watch must not overlap.** `debug.hook` relocates a routine's
+  opening bytes off a disassembly supplied when it is called, and a site's patch changes what is
+  actually there; a watch whose displaced span ends inside a site's eight patched bytes would
+  relocate part of the site's own jump. The hazard is the same one self-modified code already
+  poses to any watch — a stale disassembly — and is not guarded against in code.
 
 ## 5. Tests
 
@@ -260,9 +314,9 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |
 | `internal/resources.test.js` | contract | Lookup by type and id, the leaf offset being an RVA, counted names, string bundles, absent slots and types, language selection, listing. |
-| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is refused by name, a kernel `resolveHandler` does not provide is refused by name. |
+| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is refused by name, a kernel `resolveHandler` does not provide is refused by name; a `site` entry (a three-`mov`, no-branch fixture): a good one allocates a trampoline and patches the site with a jump to the registered stub, a byte-pin mismatch leaves the site untouched and refused by name, a kernel nothing provides and a registration answering no address are each refused, an entry with no `allocate` is refused rather than throwing, and one wired to the real `bridge.siteHook` writes the address the bridge itself answered. |
 | `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
-| `internal/hooks.test.js` | contract | `planHook`'s decision: a good entry resolves the slot and target against the loaded base, a wrong image name, a `timeDateStamp`/`sizeOfImage` mismatch, a slot not holding the target, an unsupported convention. |
+| `internal/hooks.test.js` | contract | `planHook`'s decision: a good entry resolves the slot and target against the loaded base, a wrong image name, a `timeDateStamp`/`sizeOfImage` mismatch, a slot not holding the target, an unsupported convention; `planSiteHook`'s decision on the same real bytes: a good entry resolves the site and resume addresses, a wrong image name, a stale build, each of the three byte pins failing named, `site.lengths` not summing to the site bytes, a sum under five bytes, a relative branch among the displaced instructions; `parseHexBytes` round-trips a hex string. |
 | `internal/init.test.js` | unit | Attach order, the final jump into the program, libraries without an entry point skipped, `DllMain`'s three arguments. |
 
 Integration (`npm run test:integration`): every `src/*.itest.js` maps a real fixture

@@ -340,6 +340,70 @@ export const bridgeModule = {
             },
 
             /**
+             * A place to stand inside a guest function -- a code patch at one
+             * point in it, resuming at another -- rather than in front of a
+             * call to it: for a function a vtable slot or an import never
+             * reaches, one taken by `call rel32` from inside its own module
+             * with a compiler-private register convention, where the part
+             * worth replacing is not the whole function but one loop in the
+             * middle of it.
+             *
+             * `handler(registers, frame)` sees all eight general registers as
+             * a plain object -- `{ eax, ecx, edx, ebx, esp, ebp, esi, edi }`,
+             * exactly as the site's own code held them -- and may edit any of
+             * them. Answering `true` means it computed the site's own work
+             * itself: every register is written back as the object holds it,
+             * ESP becomes `registers.esp + stackAdjust` (so a handler may
+             * move the stack itself) and EIP moves to `resume`. Answering
+             * `false` means "run the displaced instructions instead": every
+             * register is restored to what the site's own call site held,
+             * ESP is untouched and EIP moves to `trampoline` -- the
+             * instructions the patch displaced, ending in a jump back into
+             * the function right after the site, as though it had never been
+             * patched. Neither a `ret` nor a `jmp` is part of the stub, for
+             * the same reason as `hook`'s: the outcome is decided per call.
+             *
+             * @param {string} name
+             * @param {Object} fn
+             * @param {number} fn.trampoline
+             *     Guest address of the displaced instructions plus the jump
+             *     back, built by whoever calls this (the loader's `bindHooks`
+             *     today).
+             * @param {number} fn.resume  Guest address the handled path moves EIP to.
+             * @param {number} [fn.stackAdjust]
+             *     Added to the handler's own `registers.esp` before EIP moves
+             *     to `resume` -- what the instructions between the site and
+             *     the resume point would have popped, had they run.
+             * @param {(registers: { eax: number, ecx: number, edx: number, ebx: number,
+             *     esp: number, ebp: number, esi: number, edi: number }, frame: any) =>
+             *     boolean} fn.handler
+             * @returns {number} the guest address to patch the site to jump
+             *     to, or 0 once this instance is disposed.
+             */
+            siteHook(name, { trampoline, resume, stackAdjust = 0, handler }){
+                if (!live())
+                {
+                    return 0;
+                }
+                state.callbacks.reserve();
+                // `saveRegisters` and `holdEip` each already existed for a
+                // forwarding stub and a slot hook respectively; a site hook
+                // is the first to need both together -- every register saved,
+                // because the whole point is to read and possibly rewrite all
+                // eight, and no fixed `ret`/`jmp` baked in, because which of
+                // the two exits above this takes is decided only once the
+                // handler has run.
+                const { id, address } = cpu.registerTrap(
+                    name, 0, { saveRegisters: true, holdEip: true });
+                state.dispatcher.register(id, {
+                    name, handler, site: true, trampoline, resume, stackAdjust,
+                    saved: cpu.forwardSave,
+                });
+                state.dispatcher.placed(address, name);
+                return address;
+            },
+
+            /**
              * Counts one of a hook's own comparisons against the guest as
              * having disagreed -- what an `oracle`-mode kernel calls once it
              * has checked the guest's output against what it computed itself.

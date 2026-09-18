@@ -16,6 +16,7 @@ import { parsePe, readExports, readImports, rvaToFileOffset } from './layers/loa
 import { planDependencies } from './layers/loader/internal/dependencies.js';
 import { findResource, listResources, loadString } from './layers/loader/internal/resources.js';
 import { readTls } from './layers/loader/internal/tls.js';
+import { jumpBytes, relocatablePrefix } from './layers/loader/internal/hooks.js';
 import { createProcessBlocks } from './layers/win32/kernel32/teb.js';
 import { searchesBesideProgram } from './layers/win32/kernel32/modules.js';
 import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
@@ -181,13 +182,17 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [bundle.retry.maxDelayMs]   Ceiling for that. Default 10000.
  * @property {Object} [sidecarHooks]
  *           A bundle's sidecar, next to `manifest.json` and never inside the
- *           bundle itself: replaces one or more guest functions with host
- *           code through the bridge's slot-hook mechanism (`bridge.hook`; not
- *           `hooks` above, which rewrites a routine's code as a diagnostic --
- *           this replaces a data pointer and never touches guest code).
- *           Nothing here names a title; what a hook does is entirely
- *           `sidecarHooks.source`'s.
- * @property {{ hooks: import('./layers/loader/internal/hooks.js').HookEntry[] }}
+ *           bundle itself: replaces one or more guest functions, or one loop
+ *           inside one, with host code -- a `slot` entry through the
+ *           bridge's slot-hook mechanism (`bridge.hook`, a data pointer
+ *           rewrite that never touches guest code) or a `site` entry through
+ *           its site-hook mechanism (`bridge.siteHook`, a code patch at a
+ *           point inside a function nothing else can reach, resuming at
+ *           another point in it). Not `hooks` above, which rewrites a
+ *           routine's code as a diagnostic. Nothing here names a title; what
+ *           a hook does is entirely `sidecarHooks.source`'s.
+ * @property {{ hooks: (import('./layers/loader/internal/hooks.js').HookEntry
+ *           | import('./layers/loader/internal/hooks.js').SiteHookEntry)[] }}
  *           sidecarHooks.spec  The parsed `hooks.json`.
  * @property {string} sidecarHooks.source
  *           The text of `hooks.mjs`, loaded as an ES module from a blob URL
@@ -917,49 +922,12 @@ export function moduleKeyOf(name){
     return file.toLowerCase().replace(/\.dll$/, '');
 }
 
-/**
- * Whether the first `length` bytes of a routine can run from somewhere else.
- *
- * A watch on a routine nothing imports moves its opening bytes to a
- * trampoline, which only works when they are whole instructions with no
- * relative branch among them. The instruction boundaries come from the
- * caller's disassembly; at each one this reads just enough of the encoding
- * to refuse a branch (near calls and jumps, short jumps, and the two-byte
- * conditional jumps). An operand byte is never mistaken for an opcode.
- *
- * @param {Uint8Array} bytes      Exactly the bytes to be moved.
- * @param {number[]} lengths      The length of each instruction in them, in order.
- */
-export function relocatablePrefix(bytes, lengths){
-    if (bytes.length < 5 || lengths.reduce((sum, n)=>sum + n, 0) !== bytes.length)
-    {
-        return false;
-    }
-    let at = 0;
-    for (const length of lengths)
-    {
-        const op = bytes[at];
-        if (op === 0xe8 || op === 0xe9 || op === 0xeb || (op >= 0x70 && op <= 0x7f)
-            || (op === 0x0f && bytes[at + 1] >= 0x80 && bytes[at + 1] <= 0x8f))
-        {
-            return false;
-        }
-        at += length;
-    }
-    return true;
-}
-
-/**
- * A near jump from `from` to `to`, as the five bytes of it.
- *
- * @param {number} from  The address the jump instruction itself sits at.
- * @param {number} to
- */
-export function jumpBytes(from, to){
-    const rel = (to - (from + 5)) >>> 0;
-    return Uint8Array.of(0xe9, rel & 0xff, (rel >>> 8) & 0xff, (rel >>> 16) & 0xff,
-        (rel >>> 24) & 0xff);
-}
+// `relocatablePrefix` and `jumpBytes` live in `layers/loader/internal/hooks.js`
+// now -- `bindSiteHook` needs the same two functions, and `check:boundaries`
+// allows a root file to import a layer's `internal/` (this file already does
+// it for pe, dependencies, resources and tls) but not the reverse. Re-exported
+// so this module stays what a caller of `debug.hook` imports them from.
+export { jumpBytes, relocatablePrefix };
 
 /**
  * Where the address space above the program begins: the system modules, the
@@ -3702,6 +3670,35 @@ async function buildApp(options){
         });
     }
 
+    // Somewhere to put what a process needs before it starts: thread-local
+    // blocks, and the stub that sets them up -- and, ahead of that, a site
+    // hook's trampoline, which needs guest heap room before TLS does. Its own
+    // span rather than the guest heap, because the heap is the program's and
+    // this is written before the program exists to allocate from it.
+    const STARTUP_ARENA = 0x100000;
+    const startupArena = nextLibraryBase;
+    memory.register({
+        name: 'process-startup', base: startupArena, size: STARTUP_ARENA,
+        // Executable because the stub that runs before the program lives here
+        // too, and it is guest code.
+        kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
+    });
+    nextLibraryBase += STARTUP_ARENA;
+
+    let scratch = startupArena;
+    /** @param {number} size */
+    const allocateFromHeap = size=>{
+        const at = scratch;
+        // Aligned, because a thread-local block holds whatever the compiler put
+        // in it and some of that wants alignment the program never restates.
+        scratch += size + 15 & ~15;
+        if (scratch > startupArena + STARTUP_ARENA)
+        {
+            throw new Error('process startup needs more room than it was given');
+        }
+        return at;
+    };
+
     // A bundle's sidecar, applied once the image it targets is at its real
     // address. The engine names nothing here: `hooks.json` carries the image,
     // the RVAs and the kernel name, and `hooks.mjs` -- the bundle's own code
@@ -3726,8 +3723,15 @@ async function buildApp(options){
                 sizeOfImage: mainModule.image.sizeOfImage,
                 timeDateStamp: mainModule.image.timeDateStamp,
             },
-            /** @param {any} hookOptions */ hookOptions=>bridge.hook(hookOptions.name, hookOptions),
-            /** @param {import('./layers/loader/internal/hooks.js').HookEntry} entry */ entry=>{
+            /** @param {{ name: string, argBytes: number, target: number, handler: Function,
+             *   site?: undefined }
+             *   | { name: string, site: true, trampoline: number, resume: number,
+             *   stackAdjust: number, handler: Function }} hookOptions */
+            hookOptions=>hookOptions.site
+                ? bridge.siteHook(hookOptions.name, hookOptions)
+                : bridge.hook(hookOptions.name, hookOptions),
+            /** @param {import('./layers/loader/internal/hooks.js').HookEntry
+             *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry */ entry=>{
                 const kernelFn = kernels[entry.kernel];
                 if (!kernelFn)
                 {
@@ -3736,7 +3740,8 @@ async function buildApp(options){
                 const guest = {
                     ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
                 };
-                return (/** @type {number[]} */ args)=>{
+                const site = Boolean(entry.site);
+                return (/** @type {number[] | Record<string, number>} */ argsOrRegisters)=>{
                     // Guard and fall through, the discipline every guest-code
                     // replacement in this engine keeps: a kernel is the
                     // bundle's own code, on the bundle's own data, and a bug
@@ -3745,7 +3750,14 @@ async function buildApp(options){
                     let handled;
                     try
                     {
-                        handled = kernelFn(guest, args);
+                        // A site kernel gets a third argument, `frame`, with
+                        // the image base -- so it can follow a data pointer
+                        // the sidecar gave it as an RVA -- distinct from the
+                        // dispatcher's own call frame, which a site hook has
+                        // no real use for (there was no call to marshal).
+                        handled = site
+                            ? kernelFn(guest, argsOrRegisters, { base: image.base })
+                            : kernelFn(guest, argsOrRegisters);
                     }
                     catch (e){
                         events.emit('hook-error', {
@@ -3757,9 +3769,12 @@ async function buildApp(options){
                     // `oracle` never skips the guest's own code, whatever the
                     // kernel decided: that is the whole of the differential
                     // guard, and it is the sidecar's flag, not the kernel's.
+                    // A site hook has no in-browser oracle (see loader.md);
+                    // its `mode` is always `replace`.
                     return entry.mode === 'oracle' ? false : handled;
                 };
-            });
+            },
+            allocateFromHeap);
         events.emit('hooks-bound', { bound, refused });
     }
 
@@ -3778,39 +3793,6 @@ async function buildApp(options){
     // which does not go through this permission -- so a guest writing here is
     // still corruption and is still refused.
     memory.protect('thunks', memory.Access.READ_EXECUTE);
-
-    // Every library the program brought with it is attached before the program
-    // runs, on the process's first thread, in dependency order -- which is what
-    // a real loader does and where a library expects to build the state its
-    // exports assume. It is guest code because the calls belong on a guest
-    // stack; the stub's last instruction enters the program.
-    // Somewhere to put what a process needs before it starts: thread-local
-    // blocks, and the stub that sets them up. Its own span rather than the
-    // guest heap, because the heap is the program's and this is written before
-    // the program exists to allocate from it.
-    const STARTUP_ARENA = 0x100000;
-    const startupArena = nextLibraryBase;
-    memory.register({
-        name: 'process-startup', base: startupArena, size: STARTUP_ARENA,
-        // Executable because the stub that runs before the program lives here
-        // too, and it is guest code.
-        kind: memory.RegionKind.THUNK_CODE, access: memory.Access.READ_WRITE_EXECUTE,
-    });
-    nextLibraryBase += STARTUP_ARENA;
-
-    let scratch = startupArena;
-    /** @param {number} size */
-    const allocateFromHeap = size=>{
-        const at = scratch;
-        // Aligned, because a thread-local block holds whatever the compiler put
-        // in it and some of that wants alignment the program never restates.
-        scratch += size + 15 & ~15;
-        if (scratch > startupArena + STARTUP_ARENA)
-        {
-            throw new Error('process startup needs more room than it was given');
-        }
-        return at;
-    };
 
     // Thread-local storage, for every image that declares any.
     //
@@ -3839,6 +3821,11 @@ async function buildApp(options){
         };
     });
 
+    // Every library the program brought with it is attached before the program
+    // runs, on the process's first thread, in dependency order -- which is what
+    // a real loader does and where a library expects to build the state its
+    // exports assume. It is guest code because the calls belong on a guest
+    // stack; the stub's last instruction enters the program.
     const kernel32 = findModule('kernel32');
     const startup = synthesiseProcessInit({
         libraries: withTls.filter(held=>held !== mainModule || held.tls),

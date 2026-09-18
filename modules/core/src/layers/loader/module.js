@@ -7,7 +7,127 @@
 import { bindDelayImports } from './internal/delayload.js';
 import { bindImports, buildImage, mapImage } from './internal/image.js';
 import { synthesiseModule } from './internal/synth.js';
-import { planHook } from './internal/hooks.js';
+import { jumpBytes, parseHexBytes, planHook, planSiteHook } from './internal/hooks.js';
+
+/**
+ * The slice of the `memory` api a bind needs: typed guest access plus the
+ * region map, the same surface `layers/memory/module.js` hands every other
+ * layer.
+ *
+ * @typedef {Object} LoaderMemory
+ * @property {(address: number, length: number) => Uint8Array} readBytes
+ * @property {(address: number, bytes: Uint8Array) => void} writeBytes
+ * @property {(address: number) => number} readU32
+ * @property {(address: number, value: number) => void} writeU32
+ * @property {(address: number) => { name: string, access: string } | undefined} find
+ * @property {(name: string, access: string) => void} protect
+ * @property {Record<string, string>} Access
+ */
+
+/**
+ * Binds one `site` sidecar entry: validates the three byte pins, allocates a
+ * trampoline for the displaced instructions, and patches the site with a jump
+ * into the registered stub. Kept apart from `bindHooks`' own loop because a
+ * site entry needs guest-code surgery a slot entry never does -- a
+ * trampoline, a code-page write -- and folding both shapes into one body was
+ * harder to read than naming the difference.
+ *
+ * @param {import('./internal/hooks.js').SiteHookEntry} entry
+ * @param {import('./internal/hooks.js').LoadedImage} image
+ * @param {LoaderMemory} memory
+ * @param {(options: { name: string, site: true, trampoline: number, resume: number,
+ *     stackAdjust: number, handler: Function }) => number} register
+ * @param {(entry: import('./internal/hooks.js').SiteHookEntry) => Function | null} resolveHandler
+ * @param {((size: number) => number) | undefined} allocate
+ * @param {string[]} bound
+ * @param {string[]} refused
+ */
+function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, bound, refused){
+    const siteLength = parseHexBytes(entry.site.bytes).length;
+    const resumeLength = parseHexBytes(entry.resume.bytes).length;
+    const functionLength = parseHexBytes(entry.function.bytes).length;
+    /** @type {{ siteBytes: number[], resumeBytes: number[], functionBytes: number[] }} */
+    let reads;
+    try
+    {
+        reads = {
+            siteBytes: [...memory.readBytes(
+                (image.base + Number(entry.site.rva)) >>> 0, siteLength)],
+            resumeBytes: [...memory.readBytes(
+                (image.base + Number(entry.resume.rva)) >>> 0, resumeLength)],
+            functionBytes: [...memory.readBytes(
+                (image.base + Number(entry.function.rva)) >>> 0, functionLength)],
+        };
+    }
+    catch (e){
+        // An unmapped or unreadable RVA -- a typo'd sidecar -- refuses the
+        // entry by name instead of failing the whole `buildApp`, the same
+        // discipline every other check in this function already keeps.
+        refused.push(`${entry.kernel}: ${e instanceof Error ? e.message : String(e)}`);
+        return;
+    }
+    const plan = planSiteHook(entry, image, reads);
+    if (!plan.ok)
+    {
+        refused.push(plan.reason);
+        return;
+    }
+    const handler = resolveHandler(entry);
+    if (!handler)
+    {
+        refused.push(`${entry.kernel}: no kernel provides it`);
+        return;
+    }
+    if (!allocate)
+    {
+        refused.push(`${entry.kernel}: no allocator provided for a site hook`);
+        return;
+    }
+
+    const displaced = memory.readBytes(plan.siteAddress, plan.displacedLength);
+    const trampoline = allocate(plan.displacedLength + 5);
+    memory.writeBytes(trampoline, displaced);
+    memory.writeBytes(trampoline + plan.displacedLength,
+        jumpBytes(trampoline + plan.displacedLength, plan.siteAddress + plan.displacedLength));
+
+    const address = register({
+        name: entry.kernel, site: true, trampoline,
+        resume: plan.resumeAddress, stackAdjust: plan.stackAdjust, handler,
+    });
+    // The same discipline as a slot's write: nothing but a real stub address
+    // goes into guest code.
+    if (!Number.isInteger(address) || address === 0)
+    {
+        refused.push(`${entry.kernel}: no stub address was registered`);
+        return;
+    }
+
+    // A code-page write: the region is executable, so this routes through the
+    // emulator's own physical write and invalidates whatever was compiled
+    // from the bytes underneath -- it happens once, at bind time, before the
+    // program's first instruction, so nothing is compiled yet to discard. The
+    // same protect/write/protect discipline `app.js`'s `debug.hook` uses, even
+    // though the program image is already `rwx` and the toggle is a no-op
+    // today: a region that ever stops being `rwx` must not silently start
+    // refusing this write.
+    const region = memory.find(plan.siteAddress);
+    if (!region)
+    {
+        // Not reachable today: the three reads above already proved the site
+        // is mapped. Guarded anyway so a future reordering fails by refusal,
+        // not by reading `.access` off `undefined`.
+        refused.push(`${entry.kernel}: nothing is mapped at the site`);
+        return;
+    }
+    const before = region.access;
+    memory.protect(region.name, memory.Access.READ_WRITE_EXECUTE);
+    const patch = new Uint8Array(plan.displacedLength).fill(0x90);
+    patch.set(jumpBytes(plan.siteAddress, address));
+    memory.writeBytes(plan.siteAddress, patch);
+    memory.protect(region.name, before);
+
+    bound.push(entry.kernel);
+}
 
 /**
  * loader — turning an executable file into something the guest can run.
@@ -218,20 +338,27 @@ export const loaderModule = {
              * only validates the sidecar against reality, writes the slot,
              * and reports which entries it could not trust.
              *
-             * @param {{ hooks: import('./internal/hooks.js').HookEntry[] }} spec
+             * @param {{ hooks: (import('./internal/hooks.js').HookEntry
+             *     | import('./internal/hooks.js').SiteHookEntry)[] }} spec
              * @param {import('./internal/hooks.js').LoadedImage} image
              * @param {(options: { name: string, argBytes: number, target: number,
-             *     handler: Function }) => number} register
+             *     handler: Function } | { name: string, site: true, trampoline: number,
+             *     resume: number, stackAdjust: number, handler: Function }) => number} register
              *     Bound to the bridge by whoever assembles the process; this
              *     layer has no bridge of its own to call. Answers the stub's
-             *     guest address, as `bridge.hook` does -- or 0 for none.
-             * @param {(entry: import('./internal/hooks.js').HookEntry) =>
-             *     Function | null} resolveHandler
+             *     guest address, as `bridge.hook`/`bridge.siteHook` do -- or 0
+             *     for none.
+             * @param {(entry: import('./internal/hooks.js').HookEntry
+             *     | import('./internal/hooks.js').SiteHookEntry) => Function | null} resolveHandler
              *     What a hook actually does, keyed off the sidecar's own
              *     entry -- typically a lookup into the bundle's `hooks.mjs`.
+             * @param {(size: number) => number} [allocate]
+             *     Guest heap room for a site hook's trampoline. Only a `site`
+             *     entry needs it; a spec of slot entries alone never calls it,
+             *     so a caller with nothing but slot hooks may omit it.
              * @returns {{ bound: string[], refused: string[] }}
              */
-            bindHooks(spec, image, register, resolveHandler){
+            bindHooks(spec, image, register, resolveHandler, allocate){
                 /** @type {string[]} */
                 const bound = [];
                 /** @type {string[]} */
@@ -247,8 +374,24 @@ export const loaderModule = {
                             + 'only the program image is bound');
                         continue;
                     }
+                    if (entry.site)
+                    {
+                        bindSiteHook(entry, image, /** @type {LoaderMemory} */ (memory),
+                            register, resolveHandler, allocate, bound, refused);
+                        continue;
+                    }
                     const slotAddress = (image.base + Number(entry.slot.rva)) >>> 0;
-                    const plan = planHook(entry, image, memory.readU32(slotAddress));
+                    let slotValue;
+                    try
+                    {
+                        slotValue = memory.readU32(slotAddress);
+                    }
+                    catch (e){
+                        refused.push(
+                            `${entry.kernel}: ${e instanceof Error ? e.message : String(e)}`);
+                        continue;
+                    }
+                    const plan = planHook(entry, image, slotValue);
                     if (!plan.ok)
                     {
                         refused.push(plan.reason);
