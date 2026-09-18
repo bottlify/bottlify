@@ -35,7 +35,8 @@ Reports land in `tools/cdp_test/reports/` (gitignored).
 node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 40]
     [--log FILE [--log-lines N]] [--profile [QUANTUM]]
     [--dump-draws] [--max-draws N] [--skip-texture tN] [--probe tN]
-    [--pointer x,y[,down]] [--click x,y[,after]] [--screen WxH] [--run-seconds N]
+    [--pointer x,y[,down]] [--click x,y[,after]] [--key Code[,after]] [--screen WxH]
+    [--run-seconds N] [--command-line STRING] [--file HOST=GUEST] [--save-files]
     [--profile-calls] [--no-video] [--no-fog] [--no-mips] [--trace]
     [--worker [--pacing page|event]] [--coi]
 ```
@@ -59,6 +60,10 @@ node tools/cdp_test/game.mjs <bundle-id> [--wait 900] [--turns 200000] [--calls 
 | `--profile-calls` | off | every host call timed as a phase of its own, so the phase table says which API a frame's host time went to rather than only that it went to the crossing |
 | `--no-video` | video on | assemble the engine without a decoder, so a run is not measured through a cinematic |
 | `--no-fog`, `--no-mips` | on | render as if fog, or mipmaps, were off, so a run differs from an ordinary one by that and nothing else |
+| `--key Code[,after]` | off | a key tap in `KeyboardEvent.code` names (`Enter`, `Escape`, `KeyA`) after that many presented frames: pressed on one frame, released on the next. Repeatable |
+| `--command-line STRING` | the bundle's manifest | what the program believes it was started with, image path first: `'"C:\App\Game.exe" +set r_mode 3'`. The manifest's `commandLine` is the default, so a title's usual arguments need not be repeated |
+| `--file HOST=GUEST` | none | a file put on the volume before the program's first instruction, from a host path to a guest one (`dbg/bench.demo=C:\App\base\demos\bench.demo`): what one run wrote, handed to the next. Repeatable |
+| `--save-files` | text | keep every file the program wrote as the bytes it wrote, whole, beside the report. Without it a file is saved as text and capped at a megabyte, which reads a log and ruins anything binary |
 | `--graphics-config JSON` | none | fields of the graphics layer's configuration (`docs/core/graphics.md`, the Configuration table) merged into `createApp`'s `graphics` option: `--graphics-config '{"compressedTextures":true}'` turns the block-compressed upload path on for one run |
 | `--trace` | off | peek every pointer argument of every host call for a string. Off by default: a title's draws pay for it and a measurement run should not without asking |
 | `--worker` | page thread | run the engine in a worker with the page's canvas transferred to it, which is how the launcher runs it |

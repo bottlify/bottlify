@@ -20,10 +20,11 @@
  *                                  [--dump-draws] [--skip-texture tN] [--no-video]
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--command-line STRING]
+ *                                  [--file HOST=GUEST] [--save-files]
  */
 
 import { deflateSync } from 'node:zlib';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +117,22 @@ function parse(argv){
         commandLine: argv.includes('--command-line')
             ? argv[argv.indexOf('--command-line') + 1]
             : null,
+        // Files put on the volume before the program starts, as `HOST=GUEST`:
+        // what one run wrote, handed to the next.
+        files: argv.flatMap((flag, index)=>{
+            if (flag !== '--file')
+            {
+                return [];
+            }
+            const at = argv[index + 1].indexOf('=');
+            return [{
+                path: argv[index + 1].slice(at + 1),
+                base64: readFileSync(argv[index + 1].slice(0, at)).toString('base64'),
+            }];
+        }),
+        // Keep what the program wrote as the bytes it wrote, whole, rather
+        // than as text: a file meant to be fed back in must survive the trip.
+        saveFiles: argv.includes('--save-files'),
         // How long the engine itself runs before it stops and reports, for a
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
@@ -734,6 +751,8 @@ export async function game(options){
             pointer: options.pointer,
             clicks: options.clicks,
             keys: options.keys,
+            files: options.files,
+            wholeFiles: options.saveFiles,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,
@@ -804,7 +823,8 @@ export async function game(options){
         {
             const name = `game-${stamp}-${file.path.replace(/[\\/:]+/g, '_')}`;
             const saved = join(REPORTS_DIR, name);
-            writeFileSync(saved, file.text, 'latin1');
+            writeFileSync(saved, file.base64 ? Buffer.from(file.base64, 'base64') : file.text,
+                file.base64 ? undefined : 'latin1');
             file.saved = saved;
         }
 

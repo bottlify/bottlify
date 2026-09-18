@@ -16,6 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, presentFrame, recordSample, resetSamples, profile, byModule,
+    seedFiles,
 } from './harness.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
@@ -149,4 +150,14 @@ test('byModule folds addresses into shares of the whole', ()=>{
     {
         assert.equal(entry.share, entry.count / 10);
     }
+});
+
+test('a seeded file reaches the volume as the bytes it was, at the path it was given', ()=>{
+    const bytes = new Uint8Array([0, 0x80, 0x9d, 0xff, 0x41]);
+    const [file] = seedFiles([{
+        path: 'C:\\App\\base\\demos\\bench.demo',
+        base64: Buffer.from(bytes).toString('base64'),
+    }]);
+    assert.equal(file.path, 'C:\\App\\base\\demos\\bench.demo');
+    assert.deepEqual([...file.bytes], [...bytes]);
 });

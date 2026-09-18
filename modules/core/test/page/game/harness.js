@@ -351,6 +351,19 @@ function fromBase64(text){
 }
 
 /**
+ * Files a run puts on the volume before the program's first instruction, in
+ * the shape `createApp`'s `storage` loader answers with: what an earlier run
+ * wrote (a recorded demo, a saved profile) handed to the next one, so a title
+ * can be started on something only it knows how to produce.
+ *
+ * @param {{ path: string, base64: string }[]} files
+ * @returns {{ path: string, bytes: Uint8Array }[]}
+ */
+export function seedFiles(files){
+    return files.map(file=>({ path: file.path, bytes: fromBase64(file.base64) }));
+}
+
+/**
  * The DirectX runtime this checkout has fetched, as the engine's own volume.
  *
  * The lock names every DLL; each is optional, because a checkout that never ran
@@ -882,7 +895,9 @@ export function createHarness(canvas, how = {}){
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
      *           keys?: { code: string, after: number }[],
-     *           keyTimes?: { code: string, atMs: number, holdMs?: number }[] }} request
+     *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
+     *           files?: { path: string, base64: string }[],
+     *           wholeFiles?: boolean }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1096,7 +1111,9 @@ export function createHarness(canvas, how = {}){
                 store: null,
                 prefetch: false,
             },
-            storage: null,
+            // Seeded from the request when it carries files; nothing goes
+            // back out either way, the result carries what was written.
+            storage: request.files?.length ? ()=>seedFiles(request.files) : null,
             // This page has a device, in the only sense the engine cares about:
             // something reads the other end of the ring at the rate a device would.
             audio: { drained: true },
@@ -1253,6 +1270,9 @@ export function createHarness(canvas, how = {}){
             truncated: file.bytes.length > LIMITS.file,
             text: new TextDecoder('latin1')
                 .decode(file.bytes.subarray(0, LIMITS.file)),
+            // The bytes themselves, whole, for a run that will feed a file
+            // back in: the text above is a reading of it, not the file.
+            base64: request.wholeFiles ? toBase64(file.bytes) : undefined,
         }));
 
         result.failures = collected.failures;
