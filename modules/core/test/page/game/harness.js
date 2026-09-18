@@ -877,6 +877,7 @@ export function createHarness(canvas, how = {}){
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           commandLine?: string,
      *           sidecarHooks?: { spec: any, source: string },
+     *           logCategories?: Record<string, string>,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -1022,6 +1023,9 @@ export function createHarness(canvas, how = {}){
             // started this run from beside the bundle -- never from the
             // bundle itself.
             sidecarHooks: request.sidecarHooks,
+            // Journal categories on from the first instruction -- a call area
+            // a run wants to read back afterwards through `journalRecent`.
+            log: request.logCategories ? { categories: request.logCategories } : undefined,
             v86: {
                 moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
                 wasmBytes: wasm,
@@ -1252,6 +1256,10 @@ export function createHarness(canvas, how = {}){
         }));
 
         result.failures = collected.failures;
+        // The journal's tail, taken before the layer is disposed with the
+        // rest of the machine: a category a run switched on has its last
+        // records here and nowhere else once the run is over.
+        result.journal = app.log.recent(200);
         result.missing = [...new Set(collected.missing)];
         result.output = collected.output;
         result.events = collected.events;
@@ -1259,6 +1267,10 @@ export function createHarness(canvas, how = {}){
         result.presentGaps = presentState.gaps.slice();
 
         await app.dispose();
+        // Nothing is running any more, and a report asked for now must say
+        // so: left set, `frameReport` reaches into a disposed machine and
+        // throws, which a driver polling it reads as a page that hangs.
+        running = null;
         return result;
     }
 
@@ -1279,6 +1291,10 @@ export function createHarness(canvas, how = {}){
             return true;
         },
         frameReport: ()=>frameReport ? frameReport() : JSON.stringify({ ready: false }),
+        // The tail of the engine's journal, formatted: what a category a run
+        // switched on has recorded, read while the run is still going.
+        /** @param {number} [count] */
+        journalRecent: count=>running ? running.log.recent(count) : [],
         exactRestart: ()=>{
             // The sampled account is cleared with the emulator's own, so a
             // window that begins here is measured by itself and not by the

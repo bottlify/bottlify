@@ -180,6 +180,13 @@ clobbered by anything else in between, which is what makes the comparison meanin
 against what, is entirely the kernel's own code -- this layer never reads a guest byte for a
 hook's sake beyond the arguments it marshals.
 
+With the journal's `call.hook` category on (off by default, like every call area), each crossing
+of a hook writes two trace records: one before the handler runs -- the caller's ESP, the return
+address and the marshalled arguments, as the guest's own call site left them -- and one after the
+EIP write, with the branch taken (`answered` or `fellThrough`) and the EIP/ESP the guest resumes
+at. The first is written before the handler, so a handler that never returns still leaves the
+frame it was handed on the record.
+
 ### Dispatch (`internal/dispatch.js`)
 
 `dispatch(id)` reads ESP (plus `forwardSave` for a forwarding stub), reads the arguments off

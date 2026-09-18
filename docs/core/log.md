@@ -257,7 +257,9 @@ is already misbehaving has destroyed the evidence.
 
 The layer has no fixed category list; a category is whatever string a writer passes. The engine
 (`src/app.js`) establishes the convention that a host call is filed under a `call.<area>` category
-— `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com` — and
+— `call.cpu`, `call.gpu`, `call.audio`, `call.video`, `call.input`, `call.net`, `call.com`,
+`call.hook` (a slot hook's crossings, written by the bridge: the frame at entry, and where the
+call was sent afterwards) — and
 configures every one of them `off` at creation, because a short run makes tens of thousands of host
 calls and a reader who has not asked for them should pay a lookup, not a formatted line. The
 `log.categories` option of `createApp` is spread over those defaults, so an area can be on from the

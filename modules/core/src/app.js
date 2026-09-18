@@ -2330,7 +2330,7 @@ async function buildApp(options){
             categories: {
                 'call.cpu': 'off', 'call.gpu': 'off', 'call.audio': 'off',
                 'call.video': 'off', 'call.input': 'off', 'call.net': 'off',
-                'call.com': 'off',
+                'call.com': 'off', 'call.hook': 'off',
                 ...options.log?.categories,
             },
             // Likewise the ring: a run whose interesting part is its first
@@ -4681,7 +4681,7 @@ async function buildApp(options){
              * arrived from outside, as against what the program asked.
              */
             areas: ()=>[
-                ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
+                ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com', 'hook']
                     .map(area=>`call.${area}`),
                 'input.press',
             ],

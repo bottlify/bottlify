@@ -124,9 +124,20 @@ const PEEK_LIMIT = 96;
  *        of guest memory per pointer argument on every recorded call. On, it
  *        is the only way to see a string a program built on its own stack,
  *        which by the end of a run is somebody else's stack.
+ * @param {{ enabled: (category: string, level: number) => boolean,
+ *            write: (level: number, category: string, message: string,
+ *                a?: any, b?: any, c?: any, d?: any) => void,
+ *            Level: { TRACE: number } }} [deps.journal]
+ *        Where a slot hook's crossings are written when `call.hook` is on:
+ *        the frame as the guest's own call site left it, and where the
+ *        call was sent afterwards. A hook stands in front of a call the
+ *        engine did not marshal by declaration but by a sidecar's word, and
+ *        this record is the only account of whether that word held.
  */
 export function createDispatcher(deps){
     const { cpu, memory, parking, suspend } = deps;
+    const journal = deps.journal ?? null;
+    const HOOK_AREA = 'call.hook';
     /**
      * Whose writes into guest memory these are.
      *
@@ -557,6 +568,19 @@ export function createDispatcher(deps){
             record.kind = 'threw';
             record.error = 0;
 
+            // Written before the handler runs, so a handler that never comes
+            // back still leaves the frame it was handed on the record.
+            const hookTraced = entry.hook && journal !== null
+                && journal.enabled(HOOK_AREA, journal.Level.TRACE);
+            if (hookTraced)
+            {
+                journal.write(journal.Level.TRACE, HOOK_AREA,
+                    '{0} entry esp={1} ret={2} args={3}',
+                    entry.name, `0x${esp.toString(16)}`,
+                    `0x${(frame.hostReturn >>> 0).toString(16)}`,
+                    args.map(value=>`0x${(value >>> 0).toString(16)}`).join(','));
+            }
+
             parking.beginCall(frame);
             depth++;
             const charged = charging !== null && entry.writer >= 0
@@ -719,6 +743,14 @@ export function createDispatcher(deps){
                     // now that ECX/EDX are restored.
                     cpu.writeReg32('esp', esp);
                     cpu.writeReg32('eip', entry.target);
+                }
+                if (hookTraced)
+                {
+                    journal.write(journal.Level.TRACE, HOOK_AREA,
+                        '{0} {1} eip={2} esp={3}',
+                        entry.name, record.kind,
+                        `0x${(cpu.readReg32('eip') >>> 0).toString(16)}`,
+                        `0x${(cpu.readReg32('esp') >>> 0).toString(16)}`);
                 }
                 return;
             }

@@ -27,9 +27,12 @@ import { createTable, readTable } from '../../log/internal/table.js';
  * @param {Record<string, Function>} [options.memoryExtras]
  *     What the memory layer answers beyond reads and writes -- the writer
  *     account, where a test is about attribution.
+ * @param {any} [options.journal]  Where a hook's crossings are written.
  */
 function machine(options = {}){
-    const { esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0 } = options;
+    const {
+        esp = 0x3000, args = [], profiler, callPhases = false, lastError, ecx = 0, journal,
+    } = options;
     /** @type {Map<number, number>} */
     const cells = new Map([[esp, 0x401234]]);
     args.forEach((value, index)=>cells.set(esp + 4 + index * 4, value));
@@ -100,7 +103,7 @@ function machine(options = {}){
 
     const parking = createParking({ kernel });
     const dispatcher = createDispatcher({
-        cpu, memory, parking, profiler, callPhases, lastError,
+        cpu, memory, parking, profiler, callPhases, lastError, journal,
         suspend: ()=>{},
     });
     return { cpu, memory, registers, parking, dispatcher, parkedThreads, current };
@@ -783,6 +786,64 @@ test('a hook\'s own counters and a reported mismatch land in its diagnostics', (
     ]);
     // A name nothing registered is a question nobody can answer to, not a throw.
     m.dispatcher.reportMismatch('nothing.here');
+});
+
+test('with call.hook on, a hook writes the frame before its handler and the redirect after', ()=>{
+    const esp = 0x3000;
+    /** @type {string[]} */
+    const written = [];
+    const journal = {
+        Level: { TRACE: 5 },
+        /** @param {string} category @param {number} level */
+        enabled: (category, level)=>category === 'call.hook' && level === 5,
+        /**
+         * @param {number} level @param {string} category @param {string} message
+         * @param {...any} args
+         */
+        write: (level, category, message, ...args)=>{
+            written.push(message.replace(/\{(\d)\}/g, (_, i)=>String(args[Number(i)])));
+        },
+    };
+    const m = machine({ esp, args: [7, 8, 9], ecx: 0x1111, journal });
+    const pushed = esp - 4;
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222);
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        // The entry record must already be there when the handler runs: it is
+        // the account of a handler that never comes back.
+        handler: ()=>{
+            assert.equal(written.length, 1);
+            return false;
+        },
+    });
+    m.dispatcher.dispatch(1);
+    assert.deepEqual(written, [
+        'idSIMD.dotPlaneDrawVert entry esp=0x3000 ret=0x401234 args=0x1111,0x2222,0x7,0x8,0x9',
+        'idSIMD.dotPlaneDrawVert fellThrough eip=0x24e450 esp=0x3000',
+    ]);
+});
+
+test('with call.hook off, a hook writes nothing', ()=>{
+    const esp = 0x3000;
+    let written = 0;
+    const journal = {
+        Level: { TRACE: 5 },
+        enabled: ()=>false,
+        write: ()=>{
+            written++;
+        },
+    };
+    const m = machine({ esp, args: [7, 8, 9], ecx: 0x1111, journal });
+    m.registers.esp = esp - 4;
+    m.memory.writeU32(esp - 4, 0x2222);
+    m.dispatcher.register(1, {
+        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450, handler: ()=>true,
+    });
+    m.dispatcher.dispatch(1);
+    assert.equal(written, 0);
 });
 
 test('a five-argument stdcall makes zero window calls, one readU32sInto call, ' +

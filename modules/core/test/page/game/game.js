@@ -130,6 +130,7 @@ if (inWorker)
         callLog.slice(from, from + count).join(NEWLINE);
     namespace.logLines = ()=>callLog.length;
     namespace.frameReport = ()=>ask('frameReport');
+    namespace.journalRecent = ()=>ask('journalRecent');
     namespace.exactRestart = ()=>ask('exactRestart');
     namespace.exactStop = ()=>ask('exactStop');
     namespace.clearLog = ()=>{
@@ -145,6 +146,7 @@ else
     namespace.drainLog = harness.drainLog;
     namespace.logLines = harness.logLines;
     namespace.frameReport = harness.frameReport;
+    namespace.journalRecent = harness.journalRecent;
     namespace.exactRestart = harness.exactRestart;
     namespace.exactStop = harness.exactStop;
     namespace.clearLog = harness.clearLog;

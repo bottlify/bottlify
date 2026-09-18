@@ -165,6 +165,9 @@ export const bridgeModule = {
             // self time is the emulator executing and this is our code -- which
             // is the only division that answers a question about speed.
             profiler: /** @type {any} */ (host.requireApi('log')),
+            // The same journal, for the record of a slot hook's crossings
+            // under `call.hook` -- off by default like every call area.
+            journal: /** @type {any} */ (host.requireApi('log')),
         });
 
         /**
