@@ -484,12 +484,16 @@ try
         }
     }
 
+    const imagePath = `C:\\App\\${manifest.entry}`;
     await evaluate(`window.__bottlify__.start(${JSON.stringify({
         exe: Buffer.from(executable).toString('base64'),
         bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
-        imagePath: `C:\\App\\${manifest.entry}`,
-        // The bundle's own launch arguments, unless `--command-line` overrides them.
-        commandLine: options.commandLine ?? manifest.commandLine ?? undefined,
+        imagePath,
+        // The bundle's own launch arguments, appended after the quoted image
+        // path the same way createApp's own default is built, unless
+        // `--command-line` overrides them.
+        commandLine: options.commandLine
+            ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
         maxTurns: Number.MAX_SAFE_INTEGER,
         video: options.video,
         quantum: options.quantum || undefined,

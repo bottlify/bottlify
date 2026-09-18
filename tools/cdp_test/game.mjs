@@ -692,14 +692,18 @@ export async function game(options){
             };
         }
 
+        // Where createApp mounts a bundle, so the program is told it was
+        // loaded from inside its own installation.
+        const imagePath = `C:\\App\\${manifest.entry}`;
         const request = JSON.stringify({
             exe: Buffer.from(executable).toString('base64'),
             bundleUrl: `http://127.0.0.1:${server.port}/bundle/bundle.btl`,
-            // Where createApp mounts a bundle, so the program is told it was
-            // loaded from inside its own installation.
-            imagePath: `C:\\App\\${manifest.entry}`,
-            // The bundle's own launch arguments, unless `--command-line` overrides them.
-            commandLine: options.commandLine ?? manifest.commandLine ?? undefined,
+            imagePath,
+            // The bundle's own launch arguments, appended after the quoted
+            // image path the same way createApp's own default is built,
+            // unless `--command-line` overrides them.
+            commandLine: options.commandLine
+                ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             screen: options.screen,

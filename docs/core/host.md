@@ -76,7 +76,7 @@ replaced by what it is built from. The worker rebuilds the object it needs.
 | `hooks` | `HookSpec[]` | `{ module, offset, label, argBytes, lengths, strings? }` — a watch in front of a routine inside a program's own module, installed when that module loads. Rewrites the program's code; a diagnostic. |
 | `collectOnExit` | `boolean` | Whether `run()` carries the volume's files back with the exit, for `session.export()`. |
 | `pacing` | `'page' \| 'event'` | How the run loop waits in a worker. See section 6. |
-| `imagePath`, `commandLine` | `string` | What the program believes it was loaded from and started with. Default `C:\app.exe`, quoted. A bundle's `manifest.json` may carry its own `commandLine` (arguments following the quoted image path, e.g. Doom 3's `+set s_realTimeDecoding 0`); a caller that reads a manifest passes that value through unchanged. |
+| `imagePath`, `commandLine` | `string` | What the program believes it was loaded from and started with; this `commandLine` is the whole thing, `kernel32.GetCommandLineA`'s own answer, image path included. Default `C:\app.exe`, quoted. A bundle's `manifest.json` may carry its own `commandLine` (only the arguments, e.g. Doom 3's `+set s_realTimeDecoding 0`); a caller that reads a manifest builds `createApp`'s option as `"${imagePath}" ${manifest.commandLine}`, the quoted image path first. |
 | `refuseReplacement` | `boolean` | Stop rather than replace the process with a child it asks for. |
 | `memorySize`, `heapSize`, `stackSize` | `number` | Guest RAM (a power of two), the heap's ceiling, the main thread's stack. |
 | `quantum` | `number` | Guest instructions per scheduler turn. |
