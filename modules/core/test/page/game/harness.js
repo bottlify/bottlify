@@ -630,6 +630,24 @@ function drainTable(app, table){
 }
 
 /**
+ * How a request's warm-store fields become the bundle option `createApp`
+ * reads. Nothing durable by default: the page is thrown away with the
+ * browser, and a cache here would only measure how fast this machine writes.
+ * A run measuring a warm store asks for `store: 'local'` itself, in a browser
+ * profile that survives the shutdown that would otherwise throw the cache
+ * away with everything else.
+ *
+ * @param {{ store?: string, prefetch?: boolean, bundleId?: string }} request
+ */
+export function bundleStoreOptions(request){
+    return {
+        store: request.store ?? null,
+        prefetch: request.prefetch === true,
+        id: request.bundleId ?? undefined,
+    };
+}
+
+/**
  * Everything the engine will say about itself while it runs, kept bounded.
  *
  * @param {any} app
@@ -897,7 +915,8 @@ export function createHarness(canvas, how = {}){
      *           keys?: { code: string, after: number }[],
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
-     *           wholeFiles?: boolean }} request
+     *           wholeFiles?: boolean,
+     *           store?: string, prefetch?: boolean, bundleId?: string }} request
      * @returns {Promise<any>}
      */
     async function run(request){
@@ -1106,10 +1125,7 @@ export function createHarness(canvas, how = {}){
             },
             bundle: {
                 fetch: rangeFetcher(request.bundleUrl),
-                // Nothing durable: the page is thrown away with the browser, and a
-                // cache here would only measure how fast this machine writes.
-                store: null,
-                prefetch: false,
+                ...bundleStoreOptions(request),
             },
             // Seeded from the request when it carries files; nothing goes
             // back out either way, the result carries what was written.

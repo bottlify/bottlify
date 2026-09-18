@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, presentFrame, recordSample, resetSamples, profile, byModule,
-    seedFiles,
+    seedFiles, bundleStoreOptions,
 } from './harness.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
@@ -150,6 +150,14 @@ test('byModule folds addresses into shares of the whole', ()=>{
     {
         assert.equal(entry.share, entry.count / 10);
     }
+});
+
+test('a plain request keeps no bundle store, and a warm-store request names one', ()=>{
+    assert.deepEqual(bundleStoreOptions({}), { store: null, prefetch: false, id: undefined },
+        'unset means no cache, same as before this request field existed');
+    assert.deepEqual(
+        bundleStoreOptions({ store: 'local', prefetch: true, bundleId: 'doom-3' }),
+        { store: 'local', prefetch: true, id: 'doom-3' });
 });
 
 test('a seeded file reaches the volume as the bytes it was, at the path it was given', ()=>{

@@ -54,9 +54,15 @@ const MIME = {
  *        and its worklet need, which this server does not offer by default
  *        because the game bundle route often serves another origin's ranges
  *        that would need `Cross-Origin-Resource-Policy` of their own.
+ * @param {number} [roots.port]
+ *        Fixed rather than the default random one, for the one case a random
+ *        port breaks: a warm OPFS store is scoped to the origin, and
+ *        `127.0.0.1:<port>` is a different origin every time the port moves --
+ *        so a store meant to survive between separate runs of this tool needs
+ *        the same port each time, in the same persistent browser profile.
  * @returns {Promise<StaticServer>}
  */
-export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false }){
+export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false, port = 0 }){
     const routes = [
         { prefix: '/sandbox/', root: sandboxDir },
         { prefix: '/src/', root: srcDir },
@@ -132,12 +138,12 @@ export async function serveStatic({ sandboxDir, srcDir, extra = [], coi = false 
         createReadStream(abs, { start, end }).pipe(res);
     });
 
-    const port = await new Promise(resolvePort=>{
-        server.listen(0, '127.0.0.1', ()=>resolvePort(server.address().port));
+    const boundPort = await new Promise(resolvePort=>{
+        server.listen(port, '127.0.0.1', ()=>resolvePort(server.address().port));
     });
 
     return {
-        port,
+        port: boundPort,
         // The browser's renderers outlive the process that was killed and keep
         // their keep-alive sockets open, and close() waits for every one of
         // them: measured at four minutes after a report that took two. The

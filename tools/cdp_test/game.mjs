@@ -21,6 +21,7 @@
  *                                  [--click x,y[,after]] [--key Code[,after]] [--coi]
  *                                  [--command-line STRING]
  *                                  [--file HOST=GUEST] [--save-files]
+ *                                  [--user-data-dir DIR] [--port N] [--store local] [--prefetch]
  */
 
 import { deflateSync } from 'node:zlib';
@@ -137,6 +138,25 @@ function parse(argv){
         // Keep what the program wrote as the bytes it wrote, whole, rather
         // than as text: a file meant to be fed back in must survive the trip.
         saveFiles: argv.includes('--save-files'),
+        // A browser profile of the caller's own, kept after shutdown rather
+        // than a fresh temporary one thrown away with it: the OPFS block
+        // store `--store local` asks for lives in the profile, and a warm run
+        // needs the same profile the run that warmed it used.
+        userDataDir: argv.includes('--user-data-dir')
+            ? argv[argv.indexOf('--user-data-dir') + 1] : null,
+        // Fixed rather than a random one, because `127.0.0.1:<port>` is the
+        // origin OPFS is scoped to: a warm store from an earlier run is only
+        // there to find if this run serves the bundle from the same port.
+        port: number('--port', 0),
+        // Where fetched bundle blocks are kept: `'local'` is OPFS, which only
+        // a worker can open synchronously (`--worker` is then required too),
+        // in the browser profile named by `--user-data-dir`. Unset keeps the
+        // old behaviour -- nothing durable, thrown away with the browser.
+        store: argv.includes('--store') ? argv[argv.indexOf('--store') + 1] : null,
+        // Fills the rest of the cache from the bundle in the background,
+        // beyond whatever the run itself reads -- a fuller warm-up between
+        // runs, at the cost of the bandwidth to do it.
+        prefetch: argv.includes('--prefetch'),
         // How long the engine itself runs before it stops and reports, for a
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
@@ -686,8 +706,9 @@ export async function game(options){
         srcDir: join(PACKAGE_DIR, 'src'),
         extra: [{ prefix: '/bundle/', root: directory }],
         coi: options.coi,
+        port: options.port,
     });
-    const browser = await launchWithGpu();
+    const browser = await launchWithGpu({ profileDir: options.userDataDir ?? undefined });
     mkdirSync(REPORTS_DIR, { recursive: true });
 
     const pageUrl = `http://127.0.0.1:${server.port}/sandbox/test/page/game/index.html`
@@ -757,6 +778,9 @@ export async function game(options){
             keys: options.keys,
             files: options.files,
             wholeFiles: options.saveFiles,
+            store: options.store ?? undefined,
+            prefetch: options.prefetch,
+            bundleId: options.id,
         });
         await cdp.send('Runtime.evaluate',
             { expression: `window.__bottlify__.start(${request}); null`,

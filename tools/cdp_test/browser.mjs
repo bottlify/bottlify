@@ -46,7 +46,9 @@ export function findBrowser(){
  * @typedef {Object} BrowserHandle
  * @property {import("node:child_process").ChildProcess} proc
  * @property {string} browserWs    Browser-level CDP WebSocket URL.
- * @property {string} profileRoot  Temporary user-data dir, removed on shutdown.
+ * @property {string} profileRoot  The user-data dir in use.
+ * @property {boolean} ownProfile  Whether it is a temporary dir this call made
+ *     (removed on shutdown) rather than one the caller named (kept).
  */
 
 /**
@@ -80,9 +82,13 @@ export function launch({ browser = findBrowser() } = {}){
  * @param {Object} [options]
  * @param {string} [options.browser]
  * @param {boolean} [options.headed]  A window a person can watch, for a run they asked to see.
+ * @param {string} [options.profileDir]  A user-data dir of the caller's own,
+ *     kept rather than removed on shutdown -- what a warm-store measurement
+ *     needs, since OPFS is scoped to the profile and a fresh one starts cold
+ *     every time.
  * @returns {Promise<BrowserHandle>}
  */
-export function launchWithGpu({ browser = findBrowser(), headed = false } = {}){
+export function launchWithGpu({ browser = findBrowser(), headed = false, profileDir } = {}){
     return start(browser, [
         '--enable-unsafe-webgpu',
         '--enable-unsafe-swiftshader',
@@ -91,7 +97,7 @@ export function launchWithGpu({ browser = findBrowser(), headed = false } = {}){
         // launcher switches sound off, and a run that was meant to measure
         // sound measures its absence. Nobody sits at this browser to click.
         '--autoplay-policy=no-user-gesture-required',
-    ], headed);
+    ], headed, profileDir);
 }
 
 /**
@@ -100,10 +106,12 @@ export function launchWithGpu({ browser = findBrowser(), headed = false } = {}){
  * @param {string} browser
  * @param {string[]} flags   What this scenario needs on top of the common set.
  * @param {boolean} [headed]
+ * @param {string} [profileDir]
  * @returns {Promise<BrowserHandle>}
  */
-function start(browser, flags, headed = false){
-    const profileRoot = mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'));
+function start(browser, flags, headed = false, profileDir){
+    const ownProfile = !profileDir;
+    const profileRoot = profileDir ?? mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'));
     const proc = spawn(
         browser,
         [
@@ -166,7 +174,7 @@ function start(browser, flags, headed = false){
         });
 
     /** @type {BrowserHandle} */
-    const handle = { proc, browserWs: '', profileRoot };
+    const handle = { proc, browserWs: '', profileRoot, ownProfile };
     return waitForEndpoint().then(ws=>{
         handle.browserWs = ws;
         return handle;
@@ -174,13 +182,19 @@ function start(browser, flags, headed = false){
 }
 
 /**
- * Stops the browser and removes its temporary profile.
+ * Stops the browser and removes its profile, unless the caller named it --
+ * a profile passed in for a warm-store run is the caller's to keep.
  * @param {BrowserHandle} handle
  * @returns {Promise<void>}
  */
 export async function shutdown(handle){
     handle.proc.kill();
     await new Promise(resolve=>handle.proc.once('exit', resolve));
+
+    if (!handle.ownProfile)
+    {
+        return;
+    }
 
     // The parent exiting is not the browser being gone: its renderer and zygote
     // children outlive it and go on writing the profile, so a recursive remove
