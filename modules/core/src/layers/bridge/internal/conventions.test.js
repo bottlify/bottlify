@@ -20,7 +20,7 @@ test('who pops the arguments is not how many there are', ()=>{
 
 test('fastcall carries this and one argument in registers, and cleans the rest', ()=>{
     // ECX = this, EDX = the first ordinary argument, three stack words behind
-    // them -- idTech4's VPCALL kernels, `Dot(plane, drawVert*)` among them:
+    // them -- a `vector.dot(plane, verts*, count)` kernel is exactly this shape:
     // 5 logical arguments (20 bytes), 2 in registers, 12 bytes on the stack.
     assert.equal(registerArgumentCount(Convention.FASTCALL), 2);
     assert.equal(calleeCleanup(Convention.FASTCALL, 20), 12);

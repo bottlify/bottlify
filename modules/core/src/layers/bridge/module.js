@@ -228,6 +228,13 @@ export const bridgeModule = {
                     preserveResult = false, lastError = true,
                 })
             {
+                if (convention === Convention.FASTCALL)
+                {
+                    // Only `hook`'s stub pushes EDX before it traps; a
+                    // `register` stub built for FASTCALL would hand a handler
+                    // the return address as its second argument instead.
+                    throw new Error('bridge: register does not support FASTCALL, use hook');
+                }
                 if (!live())
                 {
                     return 0;
@@ -285,11 +292,11 @@ export const bridgeModule = {
 
             /**
              * A place to stand in front of a guest call whose slot -- not its
-             * code -- is what redirected it here: idTech4's SIMD dispatch, for
-             * instance, is one vtable slot per kernel, so overwriting one word
-             * of `.rdata` covers every caller with no code-page write and no
-             * displaced-prologue trampoline, and the guest's own function
-             * stays intact for the fallback below.
+             * code -- is what redirected it here: a compiled SIMD dispatch
+             * table, for instance, is one vtable slot per kernel, so
+             * overwriting one word of `.rdata` covers every caller with no
+             * code-page write and no displaced-prologue trampoline, and the
+             * guest's own function stays intact for the fallback below.
              *
              * `handler` answers `true` when it computed the call itself, or
              * `false` to run the guest's own function at `target` instead --
@@ -301,9 +308,9 @@ export const bridgeModule = {
              * @param {Object} fn
              * @param {string} [fn.convention]  Only `Convention.FASTCALL` is
              *     supported today -- `this` in ECX, the first argument in EDX,
-             *     the rest on the stack; the one convention idTech4's kernels
-             *     use and the one whose live argument the trap sequence would
-             *     otherwise clobber.
+             *     the rest on the stack; the one convention a hooked SIMD
+             *     kernel uses and the one whose live argument the trap
+             *     sequence would otherwise clobber.
              * @param {number} fn.argBytes
              * @param {number} fn.target  The guest's own function.
              * @param {Function} fn.handler

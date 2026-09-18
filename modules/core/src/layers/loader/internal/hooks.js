@@ -17,7 +17,7 @@
 
 /**
  * @typedef {Object} HookEntry
- * @property {string} image                                   e.g. `"Doom3.exe"`.
+ * @property {string} image                                   e.g. `"program.exe"`.
  * @property {{ timeDateStamp: number | string, sizeOfImage: number | string }} check
  * @property {{ rva: number | string }} slot    The vftable (or other) word to overwrite.
  * @property {{ rva: number | string }} target  What the slot currently points at.
@@ -31,7 +31,7 @@
 
 /**
  * @typedef {Object} LoadedImage
- * @property {string} name          As the sidecar names it, e.g. `"Doom3.exe"`.
+ * @property {string} name          As the sidecar names it, e.g. `"program.exe"`.
  * @property {number} base
  * @property {number} sizeOfImage
  * @property {number} timeDateStamp

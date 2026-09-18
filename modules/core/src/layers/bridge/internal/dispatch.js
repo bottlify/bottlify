@@ -4,7 +4,7 @@
  * See LICENSE for details
  */
 
-import { Convention, calleeCleanup, registerArgumentCount } from './conventions.js';
+import { calleeCleanup, registerArgumentCount } from './conventions.js';
 import { isParkedCall } from './parking.js';
 
 /**
@@ -50,10 +50,6 @@ import { isParkedCall } from './parking.js';
  * @property {number} registerArgs
  *     How many logical arguments arrive in registers ahead of the stack: 0,
  *     1 (`this`, thiscall) or 2 (`this` and one more, fastcall).
- * @property {boolean} edxOnStack
- *     Fastcall only: the trap sequence's own `mov dx, port` spends half of
- *     EDX before a handler ever runs, so the stub pushes it first and this
- *     is read from there rather than live. ECX needs no such care.
  * @property {number} stackWords
  * @property {number} cleanup       What the stub's `ret` pops.
  * @property {number} saved
@@ -388,12 +384,6 @@ export function createDispatcher(deps){
                 name: fn.name,
                 handler: fn.handler,
                 registerArgs,
-                // Fastcall's EDX is what the trap sequence's own `mov dx,
-                // port` spends getting here, so a fastcall entry's stub
-                // pushes it first (see `bridge.hook`) -- it is read back from
-                // there rather than live. ECX needs no such care: nothing in
-                // the trap sequence touches it.
-                edxOnStack: fn.convention === Convention.FASTCALL,
                 stackWords,
                 cleanup,
                 saved: fn.saved ?? 0,

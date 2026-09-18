@@ -171,8 +171,10 @@ of `spec.hooks` against `image` -- the name, base, `sizeOfImage` and `timeDateSt
 actually loaded, from whoever assembles the process -- and reports what it bound and what it
 refused; this layer names no title and knows nothing of what a hook computes.
 
-An entry not addressed to `image.name` (case-insensitively) is silently none of this call's
-business. One addressed here is checked, in order, and refused with a reason the moment any of
+Only the program image is bound today: an entry addressed to any other image name (a shipped
+DLL, or a mismatched `imagePath` basename) is refused by name, `"<kernel>: image <name> is not
+loaded; only the program image is bound"`, rather than silently dropped. One addressed to
+`image.name` (case-insensitively) is checked, in order, and refused with a reason the moment any of
 these does not hold, each a former silent corruption were it not: the loaded image's
 `timeDateStamp`/`sizeOfImage` must equal the entry's `check` (`planHook`, `internal/hooks.js`) --
 a hook for a build this is not is refused rather than patched blind; the guest word currently at
@@ -258,7 +260,7 @@ Unit tests (`npm test`; filter with `node --test src/layers/loader/internal/<fil
 | `internal/delayload.test.js` | contract | RVA versus VA descriptors reading the same, the report shaped like an ordinary import, slots as RVAs, ordinal imports, the terminator, images without the directory, binding both storage forms alike, unclaimed entries left as written or pointed by `missing`, bound/unload tables, multiple descriptors, the module-handle slot untouched. |
 | `internal/tls.test.js` | contract | The four addresses come back as RVAs, template and zero-fill, callbacks in order to their terminator, images without callbacks or without TLS, an uninitialised template. |
 | `internal/resources.test.js` | contract | Lookup by type and id, the leaf offset being an RVA, counted names, string bundles, absent slots and types, language selection, listing. |
-| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is untouched, a kernel `resolveHandler` does not provide is refused by name. |
+| `module.test.js` | unit | `bindHooks` on a stub machine: a good entry writes the registered stub address into the slot, a check mismatch and a wrong slot value are each refused and counted with nothing registered, an entry for another image is refused by name, a kernel `resolveHandler` does not provide is refused by name. |
 | `internal/dependencies.test.js` | unit | KnownDLL names skipped even with a file beside the program, a non-KnownDLL the engine has a table for loaded from its file, that name not recorded missing when no file exists, shipped libraries found with dependencies first, cycles terminating, a missing library recorded not thrown, one load per library, case-insensitive names. |
 | `internal/hooks.test.js` | contract | `planHook`'s decision: a good entry resolves the slot and target against the loaded base, a wrong image name, a `timeDateStamp`/`sizeOfImage` mismatch, a slot not holding the target, an unsupported convention. |
 | `internal/init.test.js` | unit | Attach order, the final jump into the program, libraries without an entry point skipped, `DllMain`'s three arguments. |

@@ -9,16 +9,16 @@ import assert from 'node:assert/strict';
 import { planHook } from './hooks.js';
 
 const IMAGE = {
-    name: 'Doom3.exe', base: 0x400000, sizeOfImage: 0x271f000, timeDateStamp: 0x414221a3,
+    name: 'program.exe', base: 0x400000, sizeOfImage: 0x271f000, timeDateStamp: 0x414221a3,
 };
 
 /** @type {import('./hooks.js').HookEntry} */
 const ENTRY = {
-    image: 'Doom3.exe',
+    image: 'program.exe',
     check: { timeDateStamp: '0x414221a3', sizeOfImage: '0x271f000' },
     slot: { rva: '0x303190' },
     target: { rva: '0x24e450' },
-    kernel: 'idSIMD.dotPlaneDrawVert',
+    kernel: 'vector.dot',
     convention: { registers: ['ecx', 'edx'], stackArgs: 3, cleanup: 12 },
     mode: 'oracle',
 };
@@ -35,9 +35,9 @@ test('a good entry resolves the slot and target against the base actually loaded
 });
 
 test('an entry for a different image is refused without touching the check', ()=>{
-    const plan = planHook({ ...ENTRY, image: 'Quake3.exe' }, IMAGE, IMAGE.base + 0x24e450);
+    const plan = planHook({ ...ENTRY, image: 'other.exe' }, IMAGE, IMAGE.base + 0x24e450);
     assert.equal(plan.ok, false);
-    assert.match(plan.reason, /for Quake3\.exe, not Doom3\.exe/);
+    assert.match(plan.reason, /for other\.exe, not program\.exe/);
 });
 
 test('a stale build is refused rather than patching bytes it has not seen', ()=>{

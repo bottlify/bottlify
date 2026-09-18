@@ -240,7 +240,12 @@ export const loaderModule = {
                 {
                     if (entry.image.toLowerCase() !== image.name.toLowerCase())
                     {
-                        continue; // Not for this image; nothing to say about it here.
+                        // Only the program image is ever bound today (see
+                        // loader.md): a shipped DLL or a mismatched `imagePath`
+                        // basename must not look bound when it never was.
+                        refused.push(`${entry.kernel}: image ${entry.image} is not loaded; `
+                            + 'only the program image is bound');
+                        continue;
                     }
                     const slotAddress = (image.base + Number(entry.slot.rva)) >>> 0;
                     const plan = planHook(entry, image, memory.readU32(slotAddress));

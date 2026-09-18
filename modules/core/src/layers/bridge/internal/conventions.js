@@ -39,14 +39,17 @@ export const Convention = {
      * with the mistake. A real compiled program pushes the interface pointer
      * even when it already holds it in ECX.
      *
-     * Nothing else in the tree uses this. It stays because a C++ runtime --
-     * one of the `msvcp` libraries -- exports real member functions that do.
+     * `win32/msvcrt/cxx.js` registers two THISCALL exports of its own; no
+     * title in the tree is known to exercise them. This stays regardless,
+     * because a C++ runtime -- one of the `msvcp` libraries -- exports real
+     * member functions that do.
      */
     THISCALL: 'thiscall',
     /**
      * MSVC's `__fastcall` with a leading `this`: the receiver in ECX, the
      * first ordinary argument in EDX, the rest on the stack, callee pops the
-     * stack part. idTech4's `VPCALL` SIMD kernels are declared this way.
+     * stack part. A compiled C++ SIMD kernel with a leading `this` is
+     * declared this way.
      *
      * A stub reaching for this convention has to save every register before
      * it traps: the trap sequence itself writes the port number into DX,

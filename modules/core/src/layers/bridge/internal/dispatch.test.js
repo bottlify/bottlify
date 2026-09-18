@@ -714,7 +714,7 @@ test('fastcall reads this live and the first argument from the pushed word', ()=
     /** @type {number[][]} */
     const seen = [];
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450,
         /** @param {number[]} args */
         handler: args=>{
@@ -734,7 +734,7 @@ test('a hook that answers the call returns to the caller as `ret cleanup` would'
     m.registers.esp = pushed;
     m.memory.writeU32(pushed, 0x2222);
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450,
         handler: ()=>true,
     });
@@ -753,7 +753,7 @@ test('a hook that does not handle the call falls through to the original target'
     m.registers.esp = pushed;
     m.memory.writeU32(pushed, 0x2222);
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450,
         handler: ()=>false,
     });
@@ -772,7 +772,7 @@ test('a hook\'s own counters and a reported mismatch land in its diagnostics', (
     m.memory.writeU32(pushed, 0x2222);
     let answer = false;
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450,
         handler: ()=>answer,
     });
@@ -780,9 +780,9 @@ test('a hook\'s own counters and a reported mismatch land in its diagnostics', (
     answer = true;
     m.registers.esp = pushed; // the previous call moved it; a fresh guest call would too
     m.dispatcher.dispatch(1); // handled
-    m.dispatcher.reportMismatch('idSIMD.dotPlaneDrawVert');
+    m.dispatcher.reportMismatch('vector.dot');
     assert.deepEqual(m.dispatcher.hooks(), [
-        { name: 'idSIMD.dotPlaneDrawVert', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
+        { name: 'vector.dot', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
     ]);
     // A name nothing registered is a question nobody can answer to, not a throw.
     m.dispatcher.reportMismatch('nothing.here');
@@ -809,7 +809,7 @@ test('with call.hook on, a hook writes the frame before its handler and the redi
     m.registers.esp = pushed;
     m.memory.writeU32(pushed, 0x2222);
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450,
         // The entry record must already be there when the handler runs: it is
         // the account of a handler that never comes back.
@@ -820,8 +820,8 @@ test('with call.hook on, a hook writes the frame before its handler and the redi
     });
     m.dispatcher.dispatch(1);
     assert.deepEqual(written, [
-        'idSIMD.dotPlaneDrawVert entry esp=0x3000 ret=0x401234 args=0x1111,0x2222,0x7,0x8,0x9',
-        'idSIMD.dotPlaneDrawVert fellThrough eip=0x24e450 esp=0x3000',
+        'vector.dot entry esp=0x3000 ret=0x401234 args=0x1111,0x2222,0x7,0x8,0x9',
+        'vector.dot fellThrough eip=0x24e450 esp=0x3000',
     ]);
 });
 
@@ -839,7 +839,7 @@ test('with call.hook off, a hook writes nothing', ()=>{
     m.registers.esp = esp - 4;
     m.memory.writeU32(esp - 4, 0x2222);
     m.dispatcher.register(1, {
-        name: 'idSIMD.dotPlaneDrawVert', convention: Convention.FASTCALL, argBytes: 20,
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
         saved: 4, hook: true, target: 0x24e450, handler: ()=>true,
     });
     m.dispatcher.dispatch(1);

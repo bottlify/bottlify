@@ -7,20 +7,21 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loaderModule } from './module.js';
+import { bridgeModule } from '../bridge/module.js';
 
 const IMAGE = {
-    name: 'Doom3.exe', base: 0x400000, sizeOfImage: 0x271f000, timeDateStamp: 0x414221a3,
+    name: 'program.exe', base: 0x400000, sizeOfImage: 0x271f000, timeDateStamp: 0x414221a3,
 };
 const SLOT_RVA = 0x303190;
 const TARGET_RVA = 0x24e450;
 
 /** @type {import('./internal/hooks.js').HookEntry} */
 const GOOD_HOOK = {
-    image: 'Doom3.exe',
+    image: 'program.exe',
     check: { timeDateStamp: '0x414221a3', sizeOfImage: '0x271f000' },
     slot: { rva: `0x${SLOT_RVA.toString(16)}` },
     target: { rva: `0x${TARGET_RVA.toString(16)}` },
-    kernel: 'idSIMD.dotPlaneDrawVert',
+    kernel: 'vector.dot',
     convention: { registers: ['ecx', 'edx'], stackArgs: 3, cleanup: 12 },
     mode: 'oracle',
 };
@@ -62,13 +63,13 @@ test('a good sidecar entry writes the registered stub address into the slot', as
             return true;
         });
 
-    assert.deepEqual(bound, ['idSIMD.dotPlaneDrawVert']);
+    assert.deepEqual(bound, ['vector.dot']);
     assert.deepEqual(refused, []);
     assert.equal(registered.length, 1);
     const { name, argBytes, target } = registered[0];
     assert.deepEqual(
         { name, argBytes, target },
-        { name: 'idSIMD.dotPlaneDrawVert', argBytes: 20, target: IMAGE.base + TARGET_RVA });
+        { name: 'vector.dot', argBytes: 20, target: IMAGE.base + TARGET_RVA });
     assert.equal(memory.readU32(IMAGE.base + SLOT_RVA), 0x00900010,
         'the slot now points at the registered stub, not the original function');
 });
@@ -82,7 +83,7 @@ test('a registration that yields no address is refused and the slot stays as it 
     const { bound, refused } = loader.bindHooks(
         { hooks: [GOOD_HOOK] }, IMAGE, ()=>0, ()=>()=>true);
     assert.deepEqual(bound, []);
-    assert.deepEqual(refused, ['idSIMD.dotPlaneDrawVert: no stub address was registered']);
+    assert.deepEqual(refused, ['vector.dot: no stub address was registered']);
     assert.equal(memory.readU32(IMAGE.base + SLOT_RVA), IMAGE.base + TARGET_RVA,
         'the slot still points at the guest function');
 });
@@ -123,14 +124,15 @@ test('a slot not pointing at the target is refused and counted', async()=>{
     assert.equal(registrations, 0);
 });
 
-test('an entry for another image is silently not this image\'s business', async()=>{
+test('an entry for another image is refused by name, not silently dropped', async()=>{
     const { host } = machine(IMAGE.base + TARGET_RVA);
     const loader = await loaderModule.create({}, host);
     const { bound, refused } = loader.bindHooks(
-        { hooks: [{ ...GOOD_HOOK, image: 'Quake3.exe' }] }, IMAGE,
+        { hooks: [{ ...GOOD_HOOK, image: 'other.exe' }] }, IMAGE,
         ()=>0x00900010, ()=>()=>true);
     assert.deepEqual(bound, []);
-    assert.deepEqual(refused, [], 'not refused -- just not addressed to this image');
+    assert.deepEqual(refused, ['vector.dot: image other.exe is not loaded; '
+        + 'only the program image is bound']);
 });
 
 test('a kernel nothing provides is refused by name, after the sidecar checks pass', async()=>{
@@ -139,5 +141,65 @@ test('a kernel nothing provides is refused by name, after the sidecar checks pas
     const { bound, refused } = loader.bindHooks(
         { hooks: [GOOD_HOOK] }, IMAGE, ()=>0x00900010, ()=>null);
     assert.deepEqual(bound, []);
-    assert.deepEqual(refused, ['idSIMD.dotPlaneDrawVert: no kernel provides it']);
+    assert.deepEqual(refused, ['vector.dot: no kernel provides it']);
+});
+
+test('bindHooks wired to the real bridge.hook writes the address the bridge actually '
+    + 'answers, not a mock shaped to fit', async()=>{
+    // The slot-zero fault was exactly a return-shape mismatch between what
+    // `bridge.hook` answers and what a mock stood in for it; this seam --
+    // `app.js`'s `hookOptions=>bridge.hook(hookOptions.name, hookOptions)` --
+    // stayed typed `any`, so only the real modules on both sides catch a
+    // future divergence of the same class.
+    const { host, memory } = machine(IMAGE.base + TARGET_RVA);
+    const loader = await loaderModule.create({}, host);
+
+    let nextTrap = 1;
+    /** @type {any} */
+    const bridgeApis = {
+        cpu: {
+            readReg32: ()=>0,
+            writeReg32: ()=>{},
+            registerTrap: ()=>{
+                const id = nextTrap++;
+                return { id, address: 0x00900000 + id * 16 };
+            },
+            onTrap: ()=>{},
+        },
+        kernel: {
+            currentThread: ()=>({ name: 'main' }),
+            threads: ()=>[],
+            holdThread: ()=>{},
+            parkThread: ()=>{},
+            scheduleResume: ()=>{},
+        },
+        memory,
+        log: { begin: ()=>{}, end: ()=>{} },
+    };
+    const bridge = await bridgeModule.create({}, /** @type {any} */ ({
+        /** @param {string} name */ requireApi: name=>bridgeApis[name],
+    }));
+
+    /** @type {number[]} */
+    const answered = [];
+    const { bound, refused } = loader.bindHooks(
+        { hooks: [GOOD_HOOK] }, IMAGE,
+        /** @param {any} options */ options=>{
+            const address = bridge.hook(options.name, options);
+            answered.push(address);
+            return address;
+        },
+        /** @param {any} entry */ entry=>()=>{
+            void entry;
+            return true;
+        });
+
+    assert.deepEqual(refused, []);
+    assert.deepEqual(bound, ['vector.dot']);
+    assert.equal(answered.length, 1);
+    assert.notEqual(answered[0], 0, 'the bridge placed a real stub');
+    assert.equal(memory.readU32(IMAGE.base + SLOT_RVA), answered[0],
+        'the slot holds exactly the address the bridge itself answered');
+
+    await bridgeModule.dispose();
 });

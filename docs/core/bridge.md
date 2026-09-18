@@ -46,7 +46,7 @@ marshalling whatever bytes live at it.
 | member | signature | meaning |
 |--------|-----------|---------|
 | `Convention` | `{ STDCALL, CDECL, THISCALL, FASTCALL }` | |
-| `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult?, lastError = true }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. `lastError: false` says the function never sets the thread's error, so the trace does not read it afterwards; COM methods are registered so, and OPENGL32's gl* entry points. |
+| `register` | `(name, { convention = STDCALL, argBytes, handler, preserveResult?, lastError = true }) => number` | Makes a host function callable; returns the guest address of its stub. `argBytes` counts every argument including `this`. `lastError: false` says the function never sets the thread's error, so the trace does not read it afterwards; COM methods are registered so, and OPENGL32's gl* entry points. Throws for `Convention.FASTCALL`: only `hook`'s stub pushes EDX before it traps, so a `register` stub built for it would hand a handler the return address as its second argument. |
 | `watch` | `(name, { argBytes, target, convention?, handler }) => number` | A forwarding stub: `handler` sees the marshalled arguments, then the call goes on into `target`, always. For observing calls between guest modules. |
 | `hook` | `(name, { convention = FASTCALL, argBytes, target, handler }) => number` | A slot hook: `handler` answers `true` (it computed the call itself) or `false` (run `target`, the guest's own function, instead) -- decided fresh on every call, unlike `watch`'s unconditional forward. Returns the guest address to write into whatever data word (a vftable slot, typically) a caller wants redirected; the caller writes it, this layer only builds the stub and the dispatch. |
 | `reportHookMismatch` | `(name) => void` | Counts one of a hook's own comparisons against the guest as having disagreed. This layer does not know what was compared -- an oracle-mode kernel calls it once it has checked the guest's output against its own -- it only keeps the count, in `diagnostics().hooks`. |
@@ -131,12 +131,13 @@ and prepends ECX for thiscall. `argBytes` must be a non-negative multiple of fou
 convention throws.
 
 COM methods are **stdcall**, not thiscall: the interface pointer is the first stack argument,
-which is what makes the C bindings binary-compatible with the C++ call. Nothing in the tree
-uses `THISCALL` today; it exists for a C++ runtime library's real member exports.
+which is what makes the C bindings binary-compatible with the C++ call. `win32/msvcrt/cxx.js`
+registers two `THISCALL` exports of a C++ runtime library's real member functions; no title in
+the tree is known to exercise them.
 
 `FASTCALL` carries `this` in ECX and one more argument in EDX, the rest on the stack, callee
 cleans the stack part -- MSVC's `__fastcall` with a leading receiver, which is `hook`'s own
-convention (below) and the one every `idSIMDProcessor`-style vtable method in the wild compiles
+convention (below) and the one a compiled SIMD-dispatch vtable method in the wild compiles
 to. `registerArgumentCount` (`internal/conventions.js`) is the one place that knows how many of a
 convention's arguments arrive in registers -- zero for stdcall/cdecl, one for thiscall, two for
 fastcall -- and both `calleeCleanup` and the dispatcher's own marshalling read it rather than
@@ -162,6 +163,10 @@ way, but ESP is left exactly as the call arrived (return address and stack argum
 and EIP is redirected to `target`, which then runs precisely as though the original slot had never
 been touched.
 
+**A hook stands in only for a `void` function.** On `answered`, EAX is always written as `0`; a
+handler has no way to place a value there for the caller to read as a return. A kernel that hooks
+a non-void function (one whose callers use EAX) must fall through instead.
+
 Because `FASTCALL`'s EDX carries a live argument that the trap sequence's own `mov dx, port`
 would otherwise clobber before any handler runs, a hook's stub pushes it (`push edx`, four bytes)
 before it traps -- `cpu`'s thunks call this `pushEdx`, distinct from `watch`'s `saveRegisters`
@@ -180,8 +185,8 @@ against the guest's *at the next call it sees* is sound only when what it wrote 
 untouched until then -- a heap buffer the guest does not reuse, say. It is unsound against a
 write target the guest owns and reuses, such as a caller's own stack temporary: a *different*
 invocation reaching the same stack depth before the next crossing overwrites it first, so the
-comparison reads memory nothing here wrote, not the guest's answer (found against
-`idSIMD.dotPlaneDrawVert`'s `dst`, a `_alloca16` local -- see `dbg/opengl/report-hooks-2.md`).
+comparison reads memory nothing here wrote, not the guest's answer (found against a kernel's
+`dst`, an `_alloca16` caller-stack local reused by the next call at the same depth).
 A sound oracle for that case needs a *return* watch instead: redirect to `target` with the
 return address swapped for a trampoline that traps on the way back, compare while the write is
 still live, then hand control to the real caller -- a mechanism this layer does not build today.

@@ -318,6 +318,15 @@ test('a disposed bridge answers harmlessly rather than throwing', async()=>{
     assert.deepEqual(machine.api.calls(), []);
 });
 
+test('register refuses FASTCALL -- only hook builds a stub that saves EDX', async()=>{
+    const machine = await bridge();
+    assert.throws(
+        ()=>machine.api.register('TEST.dll!Fast', {
+            convention: machine.api.Convention.FASTCALL, argBytes: 8, handler: ()=>0,
+        }),
+        /FASTCALL/);
+});
+
 test('diagnostics answers for the live instance', async()=>{
     await bridge();
     const second = await bridge();
