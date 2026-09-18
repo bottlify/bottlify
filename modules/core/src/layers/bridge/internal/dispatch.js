@@ -85,7 +85,7 @@ import { isParkedCall } from './parking.js';
  * @property {SiteRegisters | null} registers
  *     A site hook's mutable register view, reused like `args`; null otherwise.
  * @property {{ calls: number, handled: number, fellThrough: number,
- *     mismatches: number } | null} hookStats
+ *     mismatches: number, ms: number } | null} hookStats
  * @property {boolean} readsError
  * @property {number[]} args        The argument array, reused while answers are prompt.
  * @property {number} writer
@@ -124,6 +124,18 @@ const DETAIL_RING = 4096;
 
 /** How far a pointer argument is read for the text it may point at. */
 const PEEK_LIMIT = 96;
+
+/**
+ * The clock a hook's own `ms` is measured against.
+ *
+ * `performance.now` where there is one, the same choice the phase profiler
+ * makes for the same reason (`layers/log/module.js`'s `createProfiler`
+ * clock): `Date.now` moves in whole milliseconds, which reads as a column of
+ * zeroes for a kernel that costs a few microseconds a call. `Date.now` only
+ * where `performance` is not a global -- true of every environment this runs
+ * in today, so this is a guard rather than a live fallback.
+ */
+const hookClock = typeof performance === 'undefined' ? Date.now : ()=>performance.now();
 
 /**
  * @param {Object} deps
@@ -438,7 +450,8 @@ export function createDispatcher(deps){
                 registers: site
                     ? { eax: 0, ecx: 0, edx: 0, ebx: 0, esp: 0, ebp: 0, esi: 0, edi: 0 }
                     : null,
-                hookStats: hook ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0 } : null,
+                hookStats: hook
+                    ? { calls: 0, handled: 0, fellThrough: 0, mismatches: 0, ms: 0 } : null,
                 readsError: deps.lastError !== undefined && fn.lastError !== false,
                 args: new Array(site ? 8 : stackWords + registerArgs),
                 writer: typeof memory?.writer === 'function' ? memory.writer(fn.name) : -1,
@@ -657,6 +670,12 @@ export function createDispatcher(deps){
                 ? charging(entry.writer) : -1;
             let result;
             let late = false;
+            // A hook's `ms` times only the handler call itself, every time --
+            // unlike the `trap` phase above (sampled one call in eight,
+            // weighted back up), this is the number a kernel's own cost is
+            // read from, so it is not sampled.
+            const timeHook = entry.hookStats !== null;
+            const hookStart = timeHook ? hookClock() : 0;
             if (phased)
             {
                 profiler.begin(entry.name, 'host');
@@ -667,6 +686,10 @@ export function createDispatcher(deps){
                 // the mutable object built above, not `args` (which stays the
                 // pristine reading a fallthrough restores from).
                 result = entry.handler(entry.site ? entry.registers : args, frame);
+                if (entry.hookStats !== null)
+                {
+                    entry.hookStats.ms += hookClock() - hookStart;
+                }
                 // A promise is neither a value nor the parked token: it is a
                 // call that has not finished, and the thread is about to be
                 // parked on it. Rendering it as a number turns every such call
@@ -951,12 +974,13 @@ export function createDispatcher(deps){
         /**
          * Every hook's own counters, for a frame report: how often it ran,
          * how often it answered the call itself, how often the guest's own
-         * code ran instead, and -- in oracle mode -- how often the two
-         * disagreed.
+         * code ran instead, how often -- in oracle mode -- the two
+         * disagreed, and the wall time spent inside the handler call itself
+         * (every call, not sampled -- unlike the `trap` phase).
          */
         hooks(){
             /** @type {{ name: string, calls: number, handled: number,
-             *   fellThrough: number, mismatches: number }[]} */
+             *   fellThrough: number, mismatches: number, ms: number }[]} */
             const out = [];
             for (const [name, id] of hooksByName)
             {

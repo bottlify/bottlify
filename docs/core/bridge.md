@@ -108,7 +108,7 @@ gets its arguments the same way.
 | `callbacks`, `deepestCallback` | Guest callbacks started, and the deepest nesting seen. | Each `callGuest`. |
 | `suspended`, `suspendedCalls` | Host calls waiting, and `{ thread, name, forMs }` for each. | Suspend / finish. |
 | `comInterfaces`, `comMethods`, `comInterfacesRefused`, `comRefusedBecause` | Published interface pointers, stubs in shared tables, refusals and why. | `publishInterface`, `Release` to zero. |
-| `hooks` | `{ name, calls, handled, fellThrough, mismatches }[]`, one row per `hook`. | Every hook call; `mismatches` on `reportHookMismatch`. |
+| `hooks` | `{ name, calls, handled, fellThrough, mismatches, ms }[]`, one row per `hook`. | Every hook call; `mismatches` on `reportHookMismatch`; `ms` is the wall time inside the handler call itself, every call. |
 | `failure` | Message of the first unawaited handler error. | Once. |
 
 ## 3. How it works
@@ -179,7 +179,13 @@ made per call.
 
 A hook's own counters (`calls`, `handled`, `fellThrough`) are kept automatically, from which
 branch a call took; `mismatches` is not -- `reportHookMismatch(name)` only increments it, for
-whichever kernel calls it and whatever it decided to compare. Whether that comparison is even
+whichever kernel calls it and whatever it decided to compare. `ms` is also kept automatically:
+the wall time between `performance.now()` readings taken immediately before and after the
+`handler(...)` call, added up call by call -- a fallthrough accrues it exactly as an answered
+call does, since the clock brackets the call itself and not which branch it took. Unlike the
+`trap` phase (sampled one call in eight and weighted back up, timing the whole crossing), `ms`
+times every call and only the handler's own work, which is what a kernel's per-call cost has to
+be read from. Whether that comparison is even
 attempted, and against what, is entirely the kernel's own code -- this layer never reads a guest
 byte for a hook's sake beyond the arguments it marshals. A kernel that compares its own answer
 against the guest's *at the next call it sees* is sound only when what it wrote survives
@@ -236,8 +242,8 @@ is to read and possibly rewrite all eight, and neither a `ret` nor a `jmp` baked
 of the two exits above this takes is decided only once the handler has run. Each flag already
 existed on its own; a site hook is the first stub to need both together.
 
-A site hook's own counters (`calls`, `handled`, `fellThrough`, `mismatches`) and the journal's
-`call.hook` records work exactly as a slot hook's do -- a site record's "arguments" are the eight
+A site hook's own counters (`calls`, `handled`, `fellThrough`, `mismatches`, `ms`) and the
+journal's `call.hook` records work exactly as a slot hook's do -- a site record's "arguments" are the eight
 registers, in the same declaration order the object exposes them. There is no in-browser oracle
 for a site hook: the "compare at the next crossing" trick a slot hook's kernel may attempt (see
 above) has no analogue here, because there is no return value and no single write target to

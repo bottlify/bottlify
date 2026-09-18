@@ -781,11 +781,52 @@ test('a hook\'s own counters and a reported mismatch land in its diagnostics', (
     m.registers.esp = pushed; // the previous call moved it; a fresh guest call would too
     m.dispatcher.dispatch(1); // handled
     m.dispatcher.reportMismatch('vector.dot');
-    assert.deepEqual(m.dispatcher.hooks(), [
-        { name: 'vector.dot', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
-    ]);
+    const [hook] = m.dispatcher.hooks();
+    assert.ok(hook.ms >= 0, `two prompt handler calls read as ${hook.ms}ms`);
+    assert.deepEqual({ ...hook, ms: undefined }, {
+        name: 'vector.dot', calls: 2, handled: 1, fellThrough: 1, mismatches: 1, ms: undefined,
+    });
     // A name nothing registered is a question nobody can answer to, not a throw.
     m.dispatcher.reportMismatch('nothing.here');
+});
+
+test('a hook\'s `ms` times the handler call itself, and a fallthrough still accrues it', ()=>{
+    const esp = 0x3000;
+    const m = machine({ esp, args: [1, 2, 3], ecx: 0x1111 });
+    const pushed = esp - 4;
+    // Long enough to be measurable, far shorter than the tick `Date.now`
+    // moves in -- the same margin `layers/log/module.test.js` spins for.
+    const spin = ()=>{
+        const until = performance.now() + 0.2;
+        while (performance.now() < until)
+        {
+            // Deliberately empty: the point is the wall time, not the work.
+        }
+    };
+    let answer = false;
+    m.dispatcher.register(1, {
+        name: 'vector.dot', convention: Convention.FASTCALL, argBytes: 20,
+        saved: 4, hook: true, target: 0x24e450,
+        handler: ()=>{
+            spin();
+            return answer;
+        },
+    });
+    m.registers.esp = pushed;
+    m.memory.writeU32(pushed, 0x2222);
+    m.dispatcher.dispatch(1); // fell through, and still spent the 0.2ms
+    const [afterFallthrough] = m.dispatcher.hooks();
+    assert.ok(afterFallthrough.ms >= 0.2,
+        `a fellThrough call that spun 0.2ms read as ${afterFallthrough.ms}ms`);
+
+    answer = true;
+    m.registers.esp = pushed; // the previous call moved it; a fresh guest call would too
+    m.memory.writeU32(pushed, 0x2222);
+    m.dispatcher.dispatch(1); // handled, another 0.2ms on top
+    const [afterHandled] = m.dispatcher.hooks();
+    assert.ok(afterHandled.ms >= afterFallthrough.ms + 0.2,
+        `a second, handled call should add its own 0.2ms; read ${afterFallthrough.ms}ms `
+        + `then ${afterHandled.ms}ms`);
 });
 
 test('with call.hook on, a hook writes the frame before its handler and the redirect after', ()=>{
@@ -1061,9 +1102,11 @@ test('a site hook shares a slot hook\'s counters and diagnostics', ()=>{
     m.registers.esp = pushed; // the previous call moved it; a fresh site call would too
     m.dispatcher.dispatch(1); // handled
     m.dispatcher.reportMismatch('loop.faces');
-    assert.deepEqual(m.dispatcher.hooks(), [
-        { name: 'loop.faces', calls: 2, handled: 1, fellThrough: 1, mismatches: 1 },
-    ]);
+    const [hook] = m.dispatcher.hooks();
+    assert.ok(hook.ms >= 0, `two prompt handler calls read as ${hook.ms}ms`);
+    assert.deepEqual({ ...hook, ms: undefined }, {
+        name: 'loop.faces', calls: 2, handled: 1, fellThrough: 1, mismatches: 1, ms: undefined,
+    });
 });
 
 test('with call.hook on, a site hook writes the frame before its handler and the '

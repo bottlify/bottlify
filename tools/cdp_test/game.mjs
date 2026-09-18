@@ -588,8 +588,10 @@ function describe(result, context, calls){
         say('  sidecar hooks:');
         for (const hook of result.bridge.hooks)
         {
+            const perCall = hook.calls > 0 ? (hook.ms * 1000) / hook.calls : 0;
             say(`    ${hook.name}  calls=${hook.calls} handled=${hook.handled} `
-                + `fellThrough=${hook.fellThrough} mismatches=${hook.mismatches}`);
+                + `fellThrough=${hook.fellThrough} mismatches=${hook.mismatches} `
+                + `ms=${hook.ms.toFixed(2)} µs/call=${perCall.toFixed(2)}`);
         }
         say('');
     }
