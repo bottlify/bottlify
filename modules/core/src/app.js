@@ -179,6 +179,21 @@ import { createBlockCache, resolveBlockStore }
  * @property {number} [bundle.retry.attempts]     Including the first. Default 6.
  * @property {number} [bundle.retry.baseDelayMs]  Doubled each attempt. Default 250.
  * @property {number} [bundle.retry.maxDelayMs]   Ceiling for that. Default 10000.
+ * @property {Object} [sidecarHooks]
+ *           A bundle's sidecar, next to `manifest.json` and never inside the
+ *           bundle itself: replaces one or more guest functions with host
+ *           code through the bridge's slot-hook mechanism (`bridge.hook`; not
+ *           `hooks` above, which rewrites a routine's code as a diagnostic --
+ *           this replaces a data pointer and never touches guest code).
+ *           Nothing here names a title; what a hook does is entirely
+ *           `sidecarHooks.source`'s.
+ * @property {{ hooks: import('./layers/loader/internal/hooks.js').HookEntry[] }}
+ *           sidecarHooks.spec  The parsed `hooks.json`.
+ * @property {string} sidecarHooks.source
+ *           The text of `hooks.mjs`, loaded as an ES module from a blob URL
+ *           inside this worker -- the bundle's own code, run on the bundle's
+ *           own data, with no engine object other than a bounds-checked view
+ *           of guest memory reaching it.
  */
 
 /**
@@ -3618,6 +3633,80 @@ async function buildApp(options){
             refused: refused.map(patch=>
                 `${patch.address.toString(16)}+${patch.bytes.length}`),
         });
+    }
+
+    // A bundle's sidecar, applied once the image it targets is at its real
+    // address. The engine names nothing here: `hooks.json` carries the image,
+    // the RVAs and the kernel name, and `hooks.mjs` -- the bundle's own code
+    // -- is what a kernel does. This layer only loads the module, gives it a
+    // bounds-checked view of guest memory, and wires a hook's outcome to the
+    // bridge's own EIP redirect.
+    if (options.sidecarHooks)
+    {
+        const kernelModule = await import(
+            /* webpackIgnore: true */
+            URL.createObjectURL(
+                new Blob([options.sidecarHooks.source], { type: 'text/javascript' })));
+        const kernels = kernelModule.kernels ?? {};
+        const imagePath = options.imagePath ?? 'C:\\app.exe';
+        const imageName = imagePath.slice(
+            Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
+        const floatScratch = new Float32Array(1);
+        const floatBits = new DataView(floatScratch.buffer);
+        const guestView = {
+            u8: (/** @type {number} */ at)=>memory.readU8(at),
+            i32: (/** @type {number} */ at)=>memory.readU32(at) | 0,
+            f32: (/** @type {number} */ at)=>{
+                memory.readF32sInto(at, 1, floatScratch);
+                return floatScratch[0];
+            },
+            writeF32: (/** @type {number} */ at, /** @type {number} */ value)=>{
+                floatScratch[0] = value;
+                memory.writeU32(at, floatBits.getUint32(0, true));
+            },
+        };
+        const { bound, refused } = loader.bindHooks(
+            options.sidecarHooks.spec,
+            {
+                name: imageName, base: image.base,
+                sizeOfImage: mainModule.image.sizeOfImage,
+                timeDateStamp: mainModule.image.timeDateStamp,
+            },
+            /** @param {any} hookOptions */ hookOptions=>bridge.hook(hookOptions.name, hookOptions),
+            /** @param {import('./layers/loader/internal/hooks.js').HookEntry} entry */ entry=>{
+                const kernelFn = kernels[entry.kernel];
+                if (!kernelFn)
+                {
+                    return null;
+                }
+                const guest = {
+                    ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
+                };
+                return (/** @type {number[]} */ args)=>{
+                    // Guard and fall through, the discipline every guest-code
+                    // replacement in this engine keeps: a kernel is the
+                    // bundle's own code, on the bundle's own data, and a bug
+                    // in it is not a reason to bring the run down when the
+                    // guest's own function is right there to fall back on.
+                    let handled;
+                    try
+                    {
+                        handled = kernelFn(guest, args);
+                    }
+                    catch (e){
+                        events.emit('hook-error', {
+                            kernel: entry.kernel,
+                            message: e instanceof Error ? e.message : String(e),
+                        });
+                        return false;
+                    }
+                    // `oracle` never skips the guest's own code, whatever the
+                    // kernel decided: that is the whole of the differential
+                    // guard, and it is the sidecar's flag, not the kernel's.
+                    return entry.mode === 'oracle' ? false : handled;
+                };
+            });
+        events.emit('hooks-bound', { bound, refused });
     }
 
     const stubs = cpu.thunkImage();

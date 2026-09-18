@@ -650,7 +650,8 @@ export function listen(app, collected){
     // looks like one process throughout, which is the one thing it was not.
     for (const name of ['libraries', 'libraries-missing', 'libraries-attached',
         'library-loaded', 'library-missing', 'unimplemented', 'warning', 'debug',
-        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace'])
+        'bundle', 'bundle-unavailable', 'divergence', 'process-started', 'process-replace',
+        'hooks-bound', 'hook-error'])
     {
         app.on(name, (/** @type {any} */ payload)=>{
             if (collected.events.length < LIMITS.events)
@@ -875,6 +876,7 @@ export function createHarness(canvas, how = {}){
      *
      * @param {{ exe: string, bundleUrl: string, imagePath: string,
      *           commandLine?: string,
+     *           sidecarHooks?: { spec: any, source: string },
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -927,6 +929,10 @@ export function createHarness(canvas, how = {}){
                 // is still going: a tool driving the page needs to know at the step
                 // that caused a failure, not when the whole run finally answers.
                 failure: collected.failures.at(-1) ?? null,
+                // A hook's own bugs are a fall-through, not a failure, so they
+                // do not belong in `failure` above; a run watching one still
+                // wants to see them as they happen.
+                recentEvents: collected.events.slice(-5),
                 frames: seen.frames,
                 averageFrameMs: seen.averageFrameMs,
                 hostShare: seen.hostShare,
@@ -979,6 +985,11 @@ export function createHarness(canvas, how = {}){
                 // Host calls so far: a per-call cost is only per call if a run
                 // can count them, and a sampling profile cannot.
                 calls: layers.bridge?.calls ?? 0,
+                // A slot hook's own counters, when a sidecar bound one: how
+                // often it ran, how often it answered the call itself versus
+                // the guest's own code, and -- in oracle mode -- how often the
+                // two disagreed.
+                hooks: layers.bridge?.hooks ?? [],
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
                 presents: presentState.presents,
@@ -1007,6 +1018,10 @@ export function createHarness(canvas, how = {}){
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
             commandLine: request.commandLine,
+            // A bundle's own hooks.json/hooks.mjs, read by the tool that
+            // started this run from beside the bundle -- never from the
+            // bundle itself.
+            sidecarHooks: request.sidecarHooks,
             v86: {
                 moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
                 wasmBytes: wasm,

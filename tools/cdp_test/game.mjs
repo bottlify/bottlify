@@ -642,6 +642,17 @@ export async function game(options){
     const manifest = JSON.parse(
         await readFile(join(directory, 'manifest.json'), 'utf8'));
 
+    // A bundle's own hooks.json/hooks.mjs, beside its manifest.json and never
+    // inside the bundle: read here, the same way this driver already reads
+    // the manifest, and handed to createApp as `sidecarHooks`.
+    const hooksJsonPath = join(directory, 'hooks.json');
+    const sidecarHooks = existsSync(hooksJsonPath)
+        ? {
+            spec: JSON.parse(await readFile(hooksJsonPath, 'utf8')),
+            source: await readFile(join(directory, 'hooks.mjs'), 'utf8'),
+        }
+        : undefined;
+
     // The tools-side reader takes a path and does its own reading, which is how
     // the entry image is lifted out here; the engine's takes a byte range and
     // gets one over HTTP, which is how the page reads everything else.
@@ -704,6 +715,7 @@ export async function game(options){
             // unless `--command-line` overrides them.
             commandLine: options.commandLine
                 ?? (manifest.commandLine ? `"${imagePath}" ${manifest.commandLine}` : undefined),
+            sidecarHooks,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
             screen: options.screen,

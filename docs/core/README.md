@@ -14,7 +14,11 @@ image and synthesises a real in-guest module for every system library, and the e
 executes the program's own code. A call that leaves the program for `kernel32`, `user32`, `gdi32`,
 `ddraw`, `d3d8`, `dsound` or any other system library traps into the host and is answered by one of
 the layers below. Rendering goes out through WebGPU, sound through WebAudio, the program's files
-come from a bundle read by byte range and its writes persist in OPFS.
+come from a bundle read by byte range and its writes persist in OPFS. A bundle may carry
+`hooks.json` and `hooks.mjs` beside its `manifest.json` -- never inside the bundle itself -- for
+the bridge's slot-hook mechanism ([`bridge.md`](./bridge.md), [`loader.md`](./loader.md)'s
+"Sidecar hooks"): a way to replace a guest function's implementation with host code without
+naming a title anywhere in this package.
 
 The engine runs in a Web Worker. The page keeps the canvas, the keyboard and mouse, and the audio
 context; everything else — emulator, HLE, GPU device, mixer — is on a thread of its own.
