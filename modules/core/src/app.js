@@ -2011,6 +2011,97 @@ export function areaOf(call, cache){
 }
 
 /**
+ * @typedef {Object} GuestMemory
+ * @property {(address: number) => number} readU8
+ * @property {(address: number, value: number) => void} writeU8
+ * @property {(address: number) => number} readU32
+ * @property {(address: number, value: number) => void} writeU32
+ * @property {(address: number, count: number, into: number[] | Float32Array) => void} readF32sInto
+ * @property {(address: number, length: number) => Uint8Array} window
+ */
+
+/**
+ * A kernel's view of guest memory: the scalar accessors a hook has always
+ * had, plus `u8s`/`i32s`/`f32s`, a typed-array view over a span rather than
+ * one call per element. `memory.window` already hands back a live subarray
+ * of the emulator's own RAM, bounds-checked once for the whole span (the
+ * same primitive `audio` and `graphics` already read through) -- this only
+ * adds the `Int32Array`/`Float32Array` reinterpretation on top of it, so
+ * nothing new needed to be added to the memory layer itself.
+ *
+ * `Int32Array`/`Float32Array` need a 4-byte-aligned byte offset into the
+ * backing buffer. Every span this engine hands a kernel today is aligned (a
+ * `idDrawVert`'s 60-byte stride, an `_alloca16` block's 16-byte one), but
+ * nothing guarantees a future one is, so an unaligned span falls back to a
+ * `DataView`-backed proxy rather than a copy: a copy's writes would never
+ * reach the guest at all, silently, while the proxy stays live and correct,
+ * only slower -- the fallback a kernel is not expected to ever actually hit.
+ *
+ * @param {GuestMemory} memory
+ */
+export function createGuestView(memory){
+    const floatScratch = new Float32Array(1);
+    const floatBits = new DataView(floatScratch.buffer);
+
+    /**
+     * @param {number} at @param {number} count @param {number} bytesPerElement
+     * @param {Float32ArrayConstructor | Int32ArrayConstructor} Ctor
+     * @param {(view: DataView, byteOffset: number) => number} getElement
+     * @param {(view: DataView, byteOffset: number, value: number) => void} setElement
+     */
+    const typedView = (at, count, bytesPerElement, Ctor, getElement, setElement)=>{
+        const span = memory.window(at, count * bytesPerElement);
+        if (span.byteOffset % bytesPerElement === 0)
+        {
+            return new Ctor(/** @type {ArrayBuffer} */ (span.buffer), span.byteOffset, count);
+        }
+        const view = new DataView(span.buffer, span.byteOffset, span.byteLength);
+        return new Proxy(/** @type {any} */ ({ length: count }), {
+            get: (target, prop)=>typeof prop === 'string' && /^\d+$/.test(prop)
+                ? getElement(view, Number(prop) * bytesPerElement)
+                : target[prop],
+            set: (target, prop, value)=>{
+                if (typeof prop === 'string' && /^\d+$/.test(prop))
+                {
+                    setElement(view, Number(prop) * bytesPerElement, value);
+                    return true;
+                }
+                target[prop] = value;
+                return true;
+            },
+        });
+    };
+
+    return {
+        u8: (/** @type {number} */ at)=>memory.readU8(at),
+        writeU8: (/** @type {number} */ at, /** @type {number} */ value)=>{
+            memory.writeU8(at, value);
+        },
+        i32: (/** @type {number} */ at)=>memory.readU32(at) | 0,
+        f32: (/** @type {number} */ at)=>{
+            memory.readF32sInto(at, 1, floatScratch);
+            return floatScratch[0];
+        },
+        writeF32: (/** @type {number} */ at, /** @type {number} */ value)=>{
+            floatScratch[0] = value;
+            memory.writeU32(at, floatBits.getUint32(0, true));
+        },
+        /** A `Uint8Array` window over `count` bytes at `at`, bounds-checked once. */
+        u8s: (/** @type {number} */ at, /** @type {number} */ count)=>memory.window(at, count),
+        /** An `Int32Array` view over `count` dwords at `at`, bounds-checked once. */
+        i32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(
+            at, count, 4, Int32Array,
+            (view, byteOffset)=>view.getInt32(byteOffset, true),
+            (view, byteOffset, value)=>view.setInt32(byteOffset, value, true)),
+        /** A `Float32Array` view over `count` floats at `at`, bounds-checked once. */
+        f32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(
+            at, count, 4, Float32Array,
+            (view, byteOffset)=>view.getFloat32(byteOffset, true),
+            (view, byteOffset, value)=>view.setFloat32(byteOffset, value, true)),
+    };
+}
+
+/**
  * One machine, running one image.
  *
  * `createApp` below is what a caller reaches for; this is what it builds, once
@@ -3651,23 +3742,7 @@ async function buildApp(options){
         const imagePath = options.imagePath ?? 'C:\\app.exe';
         const imageName = imagePath.slice(
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
-        const floatScratch = new Float32Array(1);
-        const floatBits = new DataView(floatScratch.buffer);
-        const guestView = {
-            u8: (/** @type {number} */ at)=>memory.readU8(at),
-            writeU8: (/** @type {number} */ at, /** @type {number} */ value)=>{
-                memory.writeU8(at, value);
-            },
-            i32: (/** @type {number} */ at)=>memory.readU32(at) | 0,
-            f32: (/** @type {number} */ at)=>{
-                memory.readF32sInto(at, 1, floatScratch);
-                return floatScratch[0];
-            },
-            writeF32: (/** @type {number} */ at, /** @type {number} */ value)=>{
-                floatScratch[0] = value;
-                memory.writeU32(at, floatBits.getUint32(0, true));
-            },
-        };
+        const guestView = createGuestView(/** @type {GuestMemory} */ (memory));
         const { bound, refused } = loader.bindHooks(
             options.sidecarHooks.spec,
             {

@@ -268,7 +268,7 @@ export function createAccessors({ raw, regions, charge = null }){
      *
      * @param {number} address
      * @param {number} count
-     * @param {number[]} into
+     * @param {number[] | Float32Array} into
      */
     const readF32sInto = (address, count, into)=>{
         if (raw.readF32)

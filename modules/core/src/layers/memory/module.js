@@ -229,7 +229,7 @@ export const memoryModule = {
                 }
             },
             readF32sInto: (/** @type {number} */ address, /** @type {number} */ count,
-                /** @type {number[]} */ into)=>
+                /** @type {number[] | Float32Array} */ into)=>
             {
                 if (live())
                 {

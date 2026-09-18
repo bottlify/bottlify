@@ -23,11 +23,14 @@ import {
     createMissingImports,
     shippedLibraryReader,
     areaOf,
+    createGuestView,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { planDependencies } from './layers/loader/internal/dependencies.js';
+import { createAccessors } from './layers/memory/internal/accessors.js';
+import { Access, RegionKind, createRegionMap } from './layers/memory/internal/regions.js';
 import { buildExe } from '../../../tools/make-pe.mjs';
 
 /** Fast enough that a test does not pay for the backoff it is checking. */
@@ -887,4 +890,68 @@ test('a call area is memoised by name, computed once for every call site', ()=>{
     cache.set('D3D8.dll!Present', 'call.stale');
     assert.equal(areaOf({ name: 'D3D8.dll!Present' }, cache), 'call.stale');
     assert.equal(cache.size, 3, 'no new entry was made for a name already cached');
+});
+
+/** The real region-checked accessors over a plain byte array, so the view's aliasing is real. */
+function guestMemoryHarness(){
+    const bytes = new Uint8Array(0x2000);
+    const raw = {
+        /** @param {number} address @param {number} length */
+        readPhysical: (address, length)=>bytes.subarray(address, address + length),
+        /** @param {number} address @param {Uint8Array} data */
+        writePhysical: (address, data)=>bytes.set(data, address),
+    };
+    const regions = createRegionMap();
+    regions.register({ name: 'heap', base: 0x1000, size: 0x1000,
+        kind: RegionKind.THUNK_DATA, access: Access.READ_WRITE });
+    const accessors = createAccessors({ raw, regions });
+    return { bytes, accessors, guest: createGuestView(accessors) };
+}
+
+test('f32s/i32s/u8s are live, bounds-checked-once views: a view sees a scalar write and vice versa',
+    ()=>{
+        const { accessors, guest } = guestMemoryHarness();
+        accessors.writeU32(0x1000, 0x3f800000); // 1.0f
+        accessors.writeU32(0x1004, 0x40000000); // 2.0f
+
+        const floats = guest.f32s(0x1000, 2);
+        assert.equal(floats[0], 1);
+        assert.equal(floats[1], 2);
+
+        // A write through the view lands in guest memory ...
+        floats[0] = 3;
+        assert.equal(accessors.readU32(0x1000), 0x40400000, 'bit pattern of 3.0f');
+        // ... and a scalar write after the view was built is visible through it,
+        // the way only a real alias -- not a copy -- can be.
+        accessors.writeU32(0x1004, 0x40800000); // 4.0f
+        assert.equal(floats[1], 4);
+
+        const ints = guest.i32s(0x1008, 1);
+        ints[0] = -1;
+        assert.equal(accessors.readU32(0x1008), 0xffffffff);
+
+        const octets = guest.u8s(0x1010, 2);
+        octets[0] = 9;
+        assert.equal(accessors.readU8(0x1010), 9);
+        accessors.writeU8(0x1011, 7);
+        assert.equal(octets[1], 7);
+    });
+
+test('an out-of-region f32s/i32s/u8s view is refused, the way any guest memory access is', ()=>{
+    const { guest } = guestMemoryHarness();
+    assert.throws(()=>guest.f32s(0x5000, 4), /Unmapped/);
+    assert.throws(()=>guest.i32s(0x1ffc, 4), /runs past the end/);
+    assert.throws(()=>guest.u8s(0x5000, 4), /Unmapped/);
+});
+
+test('an unaligned f32s/i32s view still lives -- a DataView proxy, not a silently lost copy', ()=>{
+    const { accessors, guest } = guestMemoryHarness();
+    accessors.writeU32(0x1001, 0x3f800000); // 1.0f, deliberately at an odd byte offset
+
+    const floats = guest.f32s(0x1001, 1);
+    assert.equal(floats.length, 1);
+    assert.equal(floats[0], 1);
+
+    floats[0] = 2;
+    assert.equal(accessors.readU32(0x1001), 0x40000000, 'the write reached guest memory');
 });
