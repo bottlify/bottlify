@@ -583,6 +583,17 @@ function describe(result, context, calls){
         say('');
     }
 
+    if ((result.bridge?.hooks ?? []).length > 0)
+    {
+        say('  sidecar hooks:');
+        for (const hook of result.bridge.hooks)
+        {
+            say(`    ${hook.name}  calls=${hook.calls} handled=${hook.handled} `
+                + `fellThrough=${hook.fellThrough} mismatches=${hook.mismatches}`);
+        }
+        say('');
+    }
+
     say(`  frames presented: ${result.presents ?? 0}`);
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.

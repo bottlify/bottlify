@@ -1215,6 +1215,12 @@ export function createHarness(canvas, how = {}){
             hot: metrics('bridge').hot ?? [],
             recent: (metrics('bridge').recentDetailed ?? []).slice(-LIMITS.calls)
                 .map((/** @type {any} */ call)=>({ ...call, fromName: where(call.from >>> 0) })),
+            // Named rather than left to `scalars`, which keeps only numbers and
+            // strings and drops an array of objects whole: a sidecar hook's own
+            // counters (calls, handled, fellThrough, mismatches) are exactly
+            // that shape, and without this a bound hook's report says only that
+            // it bound, never whether it did anything once it was running.
+            hooks: metrics('bridge').hooks ?? [],
         };
         result.profile = profile(layout);
         result.exact = exactProfile(running, layout);
