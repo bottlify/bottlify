@@ -2030,12 +2030,9 @@ export function areaOf(call, cache){
  * nothing new needed to be added to the memory layer itself.
  *
  * `Int32Array`/`Float32Array` need a 4-byte-aligned byte offset into the
- * backing buffer. Every span this engine hands a kernel today is aligned (a
- * `idDrawVert`'s 60-byte stride, an `_alloca16` block's 16-byte one), but
- * nothing guarantees a future one is, so an unaligned span falls back to a
- * `DataView`-backed proxy rather than a copy: a copy's writes would never
- * reach the guest at all, silently, while the proxy stays live and correct,
- * only slower -- the fallback a kernel is not expected to ever actually hit.
+ * backing buffer, so an unaligned span throws -- the same outcome as any bad
+ * address: the call falls through to the guest's own function. A copy would
+ * be the alternative, and a copy's writes would never reach the guest.
  *
  * @param {GuestMemory} memory
  */
@@ -2046,30 +2043,15 @@ export function createGuestView(memory){
     /**
      * @param {number} at @param {number} count @param {number} bytesPerElement
      * @param {Float32ArrayConstructor | Int32ArrayConstructor} Ctor
-     * @param {(view: DataView, byteOffset: number) => number} getElement
-     * @param {(view: DataView, byteOffset: number, value: number) => void} setElement
      */
-    const typedView = (at, count, bytesPerElement, Ctor, getElement, setElement)=>{
+    const typedView = (at, count, bytesPerElement, Ctor)=>{
         const span = memory.window(at, count * bytesPerElement);
-        if (span.byteOffset % bytesPerElement === 0)
+        if (span.byteOffset % bytesPerElement !== 0)
         {
-            return new Ctor(/** @type {ArrayBuffer} */ (span.buffer), span.byteOffset, count);
+            throw new RangeError(
+                `${Ctor.name} view at 0x${at.toString(16)} is not ${bytesPerElement}-byte aligned`);
         }
-        const view = new DataView(span.buffer, span.byteOffset, span.byteLength);
-        return new Proxy(/** @type {any} */ ({ length: count }), {
-            get: (target, prop)=>typeof prop === 'string' && /^\d+$/.test(prop)
-                ? getElement(view, Number(prop) * bytesPerElement)
-                : target[prop],
-            set: (target, prop, value)=>{
-                if (typeof prop === 'string' && /^\d+$/.test(prop))
-                {
-                    setElement(view, Number(prop) * bytesPerElement, value);
-                    return true;
-                }
-                target[prop] = value;
-                return true;
-            },
-        });
+        return new Ctor(/** @type {ArrayBuffer} */ (span.buffer), span.byteOffset, count);
     };
 
     return {
@@ -2089,15 +2071,9 @@ export function createGuestView(memory){
         /** A `Uint8Array` window over `count` bytes at `at`, bounds-checked once. */
         u8s: (/** @type {number} */ at, /** @type {number} */ count)=>memory.window(at, count),
         /** An `Int32Array` view over `count` dwords at `at`, bounds-checked once. */
-        i32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(
-            at, count, 4, Int32Array,
-            (view, byteOffset)=>view.getInt32(byteOffset, true),
-            (view, byteOffset, value)=>view.setInt32(byteOffset, value, true)),
+        i32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(at, count, 4, Int32Array),
         /** A `Float32Array` view over `count` floats at `at`, bounds-checked once. */
-        f32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(
-            at, count, 4, Float32Array,
-            (view, byteOffset)=>view.getFloat32(byteOffset, true),
-            (view, byteOffset, value)=>view.setFloat32(byteOffset, value, true)),
+        f32s: (/** @type {number} */ at, /** @type {number} */ count)=>typedView(at, count, 4, Float32Array),
     };
 }
 

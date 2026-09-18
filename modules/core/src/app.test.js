@@ -944,14 +944,8 @@ test('an out-of-region f32s/i32s/u8s view is refused, the way any guest memory a
     assert.throws(()=>guest.u8s(0x5000, 4), /Unmapped/);
 });
 
-test('an unaligned f32s/i32s view still lives -- a DataView proxy, not a silently lost copy', ()=>{
-    const { accessors, guest } = guestMemoryHarness();
-    accessors.writeU32(0x1001, 0x3f800000); // 1.0f, deliberately at an odd byte offset
-
-    const floats = guest.f32s(0x1001, 1);
-    assert.equal(floats.length, 1);
-    assert.equal(floats[0], 1);
-
-    floats[0] = 2;
-    assert.equal(accessors.readU32(0x1001), 0x40000000, 'the write reached guest memory');
+test('an unaligned f32s/i32s view is refused, so the call falls through to the guest', ()=>{
+    const { guest } = guestMemoryHarness();
+    assert.throws(()=>guest.f32s(0x1001, 1), /not 4-byte aligned/);
+    assert.throws(()=>guest.i32s(0x1002, 1), /not 4-byte aligned/);
 });
