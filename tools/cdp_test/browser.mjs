@@ -7,7 +7,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 
 /**
  * Finds and launches a Chromium-based browser with a CDP endpoint.
@@ -111,7 +111,13 @@ export function launchWithGpu({ browser = findBrowser(), headed = false, profile
  */
 function start(browser, flags, headed = false, profileDir){
     const ownProfile = !profileDir;
-    const profileRoot = profileDir ?? mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'));
+    // Chrome on Windows does not reliably start a relative `--user-data-dir`
+    // -- observed as a launch that never writes a byte to stderr and never
+    // exits, rather than a clean error. Absolute is what both branches were
+    // already handing it: `mkdtempSync` always answers one.
+    const profileRoot = ownProfile
+        ? mkdtempSync(join(tmpdir(), 'bottlify-cdp_test-'))
+        : resolvePath(profileDir);
     const proc = spawn(
         browser,
         [
