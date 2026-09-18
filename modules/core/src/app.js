@@ -3655,6 +3655,9 @@ async function buildApp(options){
         const floatBits = new DataView(floatScratch.buffer);
         const guestView = {
             u8: (/** @type {number} */ at)=>memory.readU8(at),
+            writeU8: (/** @type {number} */ at, /** @type {number} */ value)=>{
+                memory.writeU8(at, value);
+            },
             i32: (/** @type {number} */ at)=>memory.readU32(at) | 0,
             f32: (/** @type {number} */ at)=>{
                 memory.readF32sInto(at, 1, floatScratch);

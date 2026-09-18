@@ -172,13 +172,19 @@ near its thread's limit for room it does not have. `holdEip` is the other half: 
 made per call.
 
 A hook's own counters (`calls`, `handled`, `fellThrough`) are kept automatically, from which
-branch a call took; `mismatches` is not -- it exists for a differential ("oracle") kernel that
-computes the answer into a scratch copy, lets the guest's own function run too, and checks the
-guest's output against its own at the *next* call it sees (its own previous output is not
-clobbered by anything else in between, which is what makes the comparison meaningful); it calls
-`reportHookMismatch(name)` when the two disagree. Whether that comparison is even attempted, and
-against what, is entirely the kernel's own code -- this layer never reads a guest byte for a
-hook's sake beyond the arguments it marshals.
+branch a call took; `mismatches` is not -- `reportHookMismatch(name)` only increments it, for
+whichever kernel calls it and whatever it decided to compare. Whether that comparison is even
+attempted, and against what, is entirely the kernel's own code -- this layer never reads a guest
+byte for a hook's sake beyond the arguments it marshals. A kernel that compares its own answer
+against the guest's *at the next call it sees* is sound only when what it wrote survives
+untouched until then -- a heap buffer the guest does not reuse, say. It is unsound against a
+write target the guest owns and reuses, such as a caller's own stack temporary: a *different*
+invocation reaching the same stack depth before the next crossing overwrites it first, so the
+comparison reads memory nothing here wrote, not the guest's answer (found against
+`idSIMD.dotPlaneDrawVert`'s `dst`, a `_alloca16` local -- see `dbg/opengl/report-hooks-2.md`).
+A sound oracle for that case needs a *return* watch instead: redirect to `target` with the
+return address swapped for a trampoline that traps on the way back, compare while the write is
+still live, then hand control to the real caller -- a mechanism this layer does not build today.
 
 With the journal's `call.hook` category on (off by default, like every call area), each crossing
 of a hook writes two trace records: one before the handler runs -- the caller's ESP, the return
