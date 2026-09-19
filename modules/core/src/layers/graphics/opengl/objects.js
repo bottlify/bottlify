@@ -132,6 +132,8 @@ export function levelKey(level, face = 0){
  * @property {number} version  raised on every successful load, so a pipeline
  *           keyed on the object is rebuilt when its string is replaced
  * @property {Float32Array} local   the local parameters, four floats each
+ * @property {number} localVersion  raised only when a local parameter write
+ *           actually changes a value, never on one that repeats it
  */
 
 /**
@@ -152,6 +154,11 @@ export function createProgramObject(name, target, localParameters){
         parsed: null,
         version: 0,
         local: new Float32Array(localParameters * 4),
+        // Bumped only when a glProgramLocalParameter4fARB write actually
+        // changes a value, never on a call that repeats it -- the uniform
+        // cache in gpu.js reads this to skip a rebuild that would land the
+        // same bytes it already has.
+        localVersion: 0,
     };
 }
 

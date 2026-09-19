@@ -208,6 +208,42 @@ test('the uniform block carries the matrices, the current colour and the unit co
     assert.equal(block[UNIFORM.misc], 0.5);
 });
 
+test('two draws with unchanged state share the fixed uniform block; a changed one rebuilds it',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        const draw = ()=>{
+            context.glBegin(GL.TRIANGLES);
+            context.glVertex2f(0, 0);
+            context.glVertex2f(8, 0);
+            context.glVertex2f(8, 8);
+            context.glEnd();
+        };
+        context.glColor4f(0.25, 0.5, 0.75, 1);
+        draw();
+        draw();
+        await r.swap();
+        let diag = r.renderer.diagnostics();
+        assert.equal(diag.uniformsBuilt, 1, 'the first draw builds the block');
+        assert.equal(diag.uniformsReused, 1, 'the second, unchanged, reuses it');
+
+        context.glColor4f(0, 1, 0, 1);
+        draw();
+        await r.swap();
+        diag = r.renderer.diagnostics();
+        assert.equal(diag.uniformsBuilt, 2, 'a changed current colour rebuilds it');
+        assert.equal(diag.uniformsReused, 1, 'unchanged from the rebuild');
+
+        const uniforms = r.gpu.of('writeBuffer')
+            .filter(w=>/uniforms/.test(w.buffer.descriptor.label));
+        // The show copy's block is the last write of each swap; the draw's is
+        // the one before it.
+        const last = new Float32Array(uniforms[uniforms.length - 2].bytes.buffer,
+            uniforms[uniforms.length - 2].bytes.byteOffset, UNIFORM.floats);
+        assert.deepEqual([...last.subarray(UNIFORM.color, UNIFORM.color + 4)], [0, 1, 0, 1],
+            'the rendered draw record carries the new colour, not a stale reused one');
+    });
+
 test('a texture is uploaded once per version, a cube map face by face', async()=>{
     const r = rig();
     const { context } = r;
@@ -1171,6 +1207,34 @@ END
     assert.deepEqual([...floats.subarray(8, 12)], [4, 4, 4, 4],
         'and slot two the one named last, env[4]');
 });
+
+test('a program block is reused when a redundant env-parameter write repeats the same value',
+    async()=>{
+        // Doom 3 sets a light's environment parameters before every
+        // interaction draw, whether or not they moved since the last one:
+        // the cache must tell the two apart by value, not by "a setter ran".
+        const r = rig();
+        programRig(r);
+        const { context } = r;
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 2, [1, 0.5, 0.25, 1]);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        await r.swap();
+
+        let diag = r.renderer.diagnostics();
+        assert.equal(diag.programUniformsBuilt, 2, 'the vertex and fragment blocks, built once');
+        assert.equal(diag.programUniformsReused, 2,
+            'the redundant write repeated the value, so the second draw reused both');
+
+        context.glProgramEnvParameter4fARB(GL.VERTEX_PROGRAM_ARB, 2, [0, 1, 0, 1]);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0x2000);
+        await r.swap();
+        diag = r.renderer.diagnostics();
+        assert.equal(diag.programUniformsBuilt, 3,
+            'the vertex block, whose env parameter actually moved, rebuilt');
+        assert.equal(diag.programUniformsReused, 3,
+            'the fragment block, untouched, still reused');
+    });
 
 test('a re-specified program is a new pipeline', async()=>{
     const r = rig();

@@ -389,7 +389,16 @@ the build.
 
 With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is
 recorded as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has
-compiled. A buffer object is a dynamic backend buffer whose writes pick their own lock flag from
+compiled. Each recorded draw's fixed uniform block and, under a program, each stage's own block
+are handed back the previous draw's identical array rather than a fresh one when nothing they
+read has moved since -- the model-view-projection product (recomputed only when the modelview or
+projection matrix has actually changed, which its own recorded reference already tells), every
+active unit's texture matrix and environment colour, the current vertex attributes, the fog and
+alpha-test state for the fixed block, and a program's environment and local parameter files for a
+program stage's, each tracked by a version raised only when a write actually changes a value, not
+by one that repeats it -- because a title sets a light's whole parameter cast before every
+interaction draw whether or not any value moved. A buffer object is a dynamic backend buffer
+whose writes pick their own lock flag from
 the byte ranges the unflushed frames' draws read -- a write over a read range renames the buffer,
 any other travels as a range. Vertex arrays are bound as they lie (one slot per buffer and stride,
 an attribute per array; `gpu-layout.js` decides which shapes the GPU can read) and only the index

@@ -114,7 +114,11 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {string} text  the program string, for a dump to print once
  * @property {import('./arb-program.js').ParsedProgram} ir
  * @property {Float32Array} local   the object's local parameters
+ * @property {number} localVersion  raised only when a local parameter write
+ *           actually changes a value, never on one that repeats it
  * @property {Float32Array} env     the target's environment parameters
+ * @property {number} envVersion    raised only when an environment parameter
+ *           write actually changes a value, never on one that repeats it
  */
 
 /**

@@ -83,6 +83,14 @@ export function installProgramCalls(context, kernel){
         [GL.VERTEX_PROGRAM_ARB, new Float32Array(PROGRAM_LIMITS.vertex.envParameters * 4)],
         [GL.FRAGMENT_PROGRAM_ARB, new Float32Array(PROGRAM_LIMITS.fragment.envParameters * 4)],
     ]);
+    /**
+     * target -> how many times its env file actually changed value. A
+     * program sets its whole cast of env parameters before most draws
+     * whether or not any of them moved -- this is what lets a reader tell
+     * the two apart in one comparison instead of rereading every slot.
+     * @type {Map<number, number>}
+     */
+    const envVersions = new Map([[GL.VERTEX_PROGRAM_ARB, 0], [GL.FRAGMENT_PROGRAM_ARB, 0]]);
     /** The default object of each target: what a binding of zero draws with. */
     /** @type {Map<number, import('./objects.js').ProgramObject>} */
     const defaults = new Map([
@@ -121,6 +129,11 @@ export function installProgramCalls(context, kernel){
             env,
             attribValues,
             attribArrays,
+
+            /** @param {number} target @returns {number} */
+            envVersion(target){
+                return envVersions.get(target) ?? 0;
+            },
 
             /**
              * The generic attribute arrays a draw reads, as the named arrays
@@ -412,7 +425,19 @@ export function installProgramCalls(context, kernel){
                 // `values` is already exactly four wide, whether it came from
                 // the four immediate words or the reused vector scratch: the
                 // set below is the copy out of it the scratch's reuse relies on.
-                /** @type {Float32Array} */ (env.get(target)).set(values, index * 4);
+                const file = /** @type {Float32Array} */ (env.get(target));
+                const at = index * 4;
+                // A program sets its whole parameter file before most draws
+                // whether or not a light's own values moved since the last
+                // one; the version below is what tells the uniform cache in
+                // gpu.js the two apart, so it must move only on an actual
+                // change, never on a call that repeats what is already there.
+                if (file[at] !== values[0] || file[at + 1] !== values[1]
+                    || file[at + 2] !== values[2] || file[at + 3] !== values[3])
+                {
+                    file.set(values, at);
+                    envVersions.set(target, (envVersions.get(target) ?? 0) + 1);
+                }
             }
         },
 
@@ -428,8 +453,14 @@ export function installProgramCalls(context, kernel){
             {
                 // `values` is already exactly four wide; see the env
                 // parameter setter above for why the copy is no longer sliced.
-                /** @type {import('./objects.js').ProgramObject} */ (program).local
-                    .set(values, index * 4);
+                const object = /** @type {import('./objects.js').ProgramObject} */ (program);
+                const at = index * 4;
+                if (object.local[at] !== values[0] || object.local[at + 1] !== values[1]
+                    || object.local[at + 2] !== values[2] || object.local[at + 3] !== values[3])
+                {
+                    object.local.set(values, at);
+                    object.localVersion++;
+                }
             }
         },
 

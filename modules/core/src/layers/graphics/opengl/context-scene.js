@@ -221,7 +221,9 @@ export function createSceneBuilder(kernel){
                 text: program.text,
                 ir: program.parsed,
                 local: program.local,
+                localVersion: program.localVersion,
                 env: /** @type {Float32Array} */ (programsSide.env.get(target)),
+                envVersion: programsSide.envVersion(target),
             };
         };
         const programs = {

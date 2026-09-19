@@ -397,6 +397,11 @@ export function createGpuRenderer(services){
         // that, the same shape the Direct3D 8 path counts: a frame of identical
         // shadow-volume draws is one generation, not one per draw.
         prepared: 0, preparedReused: 0,
+        // The fixed and per-program-stage uniform blocks, counted the same
+        // way: built fresh, or the previous draw's block handed back because
+        // nothing it depends on has moved.
+        uniformsBuilt: 0, uniformsReused: 0,
+        programUniformsBuilt: 0, programUniformsReused: 0,
     };
 
     /**
@@ -1098,15 +1103,183 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The projection-times-modelview product, recomputed only when either
+     * factor has actually moved since the context's last draw. Both stacks
+     * replace `.current` with a fresh matrix on every push, pop or multiply
+     * (`matrix.js` never mutates one in place), so the identity of the two
+     * factors is already a value comparison, not a call-was-made one: a
+     * light re-drawn with the view and object it had last time reads the
+     * very Float64Arrays it read then.
+     *
+     * @type {WeakMap<object, { modelview: any, projection: any, mvp: Float64Array }>}
+     */
+    const mvpCache = new WeakMap();
+    /**
+     * @param {object} context
+     * @param {import('./pipeline.js').Scene} scene
+     * @returns {Float64Array}
+     */
+    const mvpFor = (context, scene)=>{
+        const cached = mvpCache.get(context);
+        if (cached && cached.modelview === scene.modelview
+            && cached.projection === scene.projection)
+        {
+            return cached.mvp;
+        }
+        const mvp = multiply(scene.projection, scene.modelview);
+        mvpCache.set(context, { modelview: scene.modelview, projection: scene.projection, mvp });
+        return mvp;
+    };
+
+    /** @param {readonly number[]} a @param {readonly number[]} b */
+    const sameNumbers = (a, b)=>{
+        if (a.length !== b.length)
+        {
+            return false;
+        }
+        for (let i = 0; i < a.length; i++)
+        {
+            if (a[i] !== b[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * Whether two scenes' active units read the same into the fixed block:
+     * the same units, in the same order, each with the same matrix and
+     * environment colour reference -- both replaced wholesale on an actual
+     * change (`matrix.js`'s stacks; `env.colour = [...]` in
+     * `context-textures.js`), never mutated in place, so identity already
+     * means "unchanged". A unit with texture-coordinate generation active is
+     * always read as changed: the plane arrays are stable but the generated
+     * `modes` array is rebuilt fresh every `scene()` call, and the feature is
+     * rare enough that comparing it is not worth its own tracking here.
+     *
+     * @param {readonly import('./pipeline.js').SceneUnit[]} a
+     * @param {readonly import('./pipeline.js').SceneUnit[]} b
+     */
+    const sameUnits = (a, b)=>{
+        if (a.length !== b.length)
+        {
+            return false;
+        }
+        for (let i = 0; i < a.length; i++)
+        {
+            const ua = a[i];
+            const ub = b[i];
+            if (ua.index !== ub.index || ua.matrix !== ub.matrix
+                || ua.env.colour !== ub.env.colour || ua.generation !== null
+                || ub.generation !== null)
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * @param {import('./pipeline.js').Scene['current']} a
+     * @param {import('./pipeline.js').Scene['current']} b
+     */
+    const sameCurrent = (a, b)=>{
+        if (a === b)
+        {
+            return true;
+        }
+        if (!sameNumbers(a.color, b.color) || !sameNumbers(a.secondary, b.secondary)
+            || !sameNumbers(a.normal, b.normal) || a.fogCoord !== b.fogCoord
+            || a.texCoords.length !== b.texCoords.length)
+        {
+            return false;
+        }
+        for (let i = 0; i < a.texCoords.length; i++)
+        {
+            if (!sameNumbers(a.texCoords[i], b.texCoords[i]))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * @param {import('./pipeline.js').Scene['fog']} a
+     * @param {import('./pipeline.js').Scene['fog']} b
+     */
+    const sameFog = (a, b)=>{
+        if (a === b)
+        {
+            return true;
+        }
+        if (a === null || b === null)
+        {
+            return false;
+        }
+        return a.mode === b.mode && a.density === b.density && a.start === b.start
+            && a.end === b.end && a.fromCoordinate === b.fromCoordinate && a.colour === b.colour;
+    };
+
+    /**
+     * @param {import('./pipeline.js').Scene['alphaTest']} a
+     * @param {import('./pipeline.js').Scene['alphaTest']} b
+     */
+    const sameAlphaTest = (a, b)=>{
+        if (a === b)
+        {
+            return true;
+        }
+        if (a === null || b === null)
+        {
+            return false;
+        }
+        return a.func === b.func && a.reference === b.reference;
+    };
+
+    /**
+     * The fixed uniform block of the last draw a context recorded, kept only
+     * to be reused when nothing it was built from has moved.
+     *
+     * @type {WeakMap<object, { mvp: Float64Array,
+     *           units: readonly import('./pipeline.js').SceneUnit[],
+     *           current: import('./pipeline.js').Scene['current'],
+     *           fog: import('./pipeline.js').Scene['fog'],
+     *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
+     *           block: Float32Array }>}
+     */
+    const fixedUniformsCache = new WeakMap();
+
+    /**
      * The uniform block of a draw: the matrices, the current values and the
      * per-unit constants, in the layout the shader declares.
      *
+     * Doom 3 sets sixteen environment parameters before every interaction
+     * draw, but most repeat between consecutive draws of one light, and this
+     * block depends on none of them directly -- it is the matrices, the
+     * per-unit texture environment and the current vertex attributes that
+     * move, and every one of those already carries a value-comparable
+     * identity (see `sameUnits`, `sameCurrent`, `sameFog`, `sameAlphaTest`),
+     * so a draw that repeats every one of them gets back the very block the
+     * previous draw built, with no `normalMatrix` call and no allocation.
+     *
+     * @param {object} context
      * @param {import('./pipeline.js').Scene} scene
      * @param {Float64Array} mvp   the projection-times-modelview product, the
      *          draw's own so it is not multiplied out a second time for a
      *          program stage that reads the same matrix (see `stateMatrixRow`)
      */
-    const uniformsOf = (scene, mvp)=>{
+    const uniformsOf = (context, scene, mvp)=>{
+        const cached = fixedUniformsCache.get(context);
+        if (cached && cached.mvp === mvp && sameUnits(cached.units, scene.units)
+            && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
+            && sameAlphaTest(cached.alphaTest, scene.alphaTest))
+        {
+            stats.uniformsReused++;
+            return cached.block;
+        }
+        stats.uniformsBuilt++;
         const block = new Float32Array(UNIFORM.floats);
         block.set(mvp, UNIFORM.modelViewProjection);
         block.set(scene.modelview, UNIFORM.modelView);
@@ -1171,6 +1344,10 @@ export function createGpuRenderer(services){
             block[fogAt + 3] = current.fogCoord;
         }
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
+        fixedUniformsCache.set(context, {
+            mvp, units: scene.units, current: scene.current, fog: scene.fog,
+            alphaTest: scene.alphaTest, block,
+        });
         return block;
     };
 
@@ -1215,6 +1392,47 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The state matrix a `'matrix'`-sourced slot reads, before its modifier:
+     * the same selection `stateMatrixRow` makes, kept separate so a cache can
+     * ask "is the input the same" without inverting or transposing it.
+     *
+     * @param {import('./pipeline.js').Scene} scene
+     * @param {import('./arb-wgsl.js').ParamSlot} slot
+     * @param {Float64Array} mvp
+     * @returns {ArrayLike<number>}
+     */
+    const matrixRefFor = (scene, slot, mvp)=>{
+        switch (slot.matrix)
+        {
+            case 'modelview':
+                return slot.number === 0 ? scene.modelview : IDENTITY;
+            case 'projection':
+                return scene.projection;
+            case 'mvp':
+                return mvp;
+            default:
+                return scene.textureMatrices[slot.number ?? 0] ?? IDENTITY;
+        }
+    };
+
+    /**
+     * A stage's uniform block, kept per `needs` object -- itself already
+     * cached per generated draw state (`generatedFor`), so the same `needs`
+     * comes back for every draw that shares a pipeline. Reused when the
+     * program is the same load, its local and environment files have not
+     * changed value since (`localVersion`/`envVersion`, bumped only on an
+     * actual write -- see `context-programs.js`), every `'matrix'`-sourced
+     * slot reads the same matrix reference as last time, and every generic
+     * attribute fallback still reads the same four floats.
+     *
+     * @type {WeakMap<import('./arb-wgsl.js').StageNeeds, { programName: number,
+     *           programVersion: number, envVersion: number, localVersion: number,
+     *           matrixRefs: (ArrayLike<number> | undefined)[],
+     *           generic: (readonly number[] | null)[], block: Float32Array }>}
+     */
+    const programUniformsCache = new WeakMap();
+
+    /**
      * A program stage's uniform block: its materialised parameters in slot
      * order, then the current values of the generic attributes that have no
      * array behind them.
@@ -1226,8 +1444,46 @@ export function createGpuRenderer(services){
      * @returns {Float32Array}
      */
     const programUniforms = (needs, program, scene, mvp)=>{
+        const cached = programUniformsCache.get(needs);
+        if (cached && cached.programName === program.name
+            && cached.programVersion === program.version
+            && cached.envVersion === program.envVersion
+            && cached.localVersion === program.localVersion)
+        {
+            let same = true;
+            for (let i = 0; same && i < needs.params.length; i++)
+            {
+                const slot = needs.params[i];
+                if (slot.source === 'matrix'
+                    && matrixRefFor(scene, slot, mvp) !== cached.matrixRefs[i])
+                {
+                    same = false;
+                }
+            }
+            for (let i = 0; same && i < needs.genericFallbacks.length; i++)
+            {
+                const value = scene.genericAttribs[needs.genericFallbacks[i]];
+                const previous = cached.generic[i];
+                if ((value ?? null) === null && previous === null)
+                {
+                    continue;
+                }
+                if (!value || !previous || !sameNumbers(value, previous))
+                {
+                    same = false;
+                }
+            }
+            if (same)
+            {
+                stats.programUniformsReused++;
+                return cached.block;
+            }
+        }
+        stats.programUniformsBuilt++;
         const parameterCount = Math.max(1, needs.params.length);
         const block = new Float32Array((parameterCount + needs.genericFallbacks.length) * 4);
+        /** @type {(ArrayLike<number> | undefined)[]} */
+        const matrixRefs = new Array(needs.params.length);
         needs.params.forEach((slot, index)=>{
             const at = (/** @type {number} */ (slot.index)) * 4;
             switch (slot.source)
@@ -1241,12 +1497,20 @@ export function createGpuRenderer(services){
                 case 'constant':
                     block.set(/** @type {readonly number[]} */ (slot.values), index * 4);
                     break;
-                case 'matrix':
+                case 'matrix': {
+                    const ref = matrixRefFor(scene, slot, mvp);
+                    matrixRefs[index] = ref;
                     block.set(stateMatrixRow(scene, slot, mvp), index * 4);
                     break;
+                }
                 default:
                     break;
             }
+        });
+        /** @type {(readonly number[] | null)[]} */
+        const generic = needs.genericFallbacks.map(attrib=>{
+            const value = scene.genericAttribs[attrib];
+            return value ? [...value] : null;
         });
         needs.genericFallbacks.forEach((attrib, k)=>{
             const value = scene.genericAttribs[attrib];
@@ -1254,6 +1518,11 @@ export function createGpuRenderer(services){
             {
                 block.set(value, (parameterCount + k) * 4);
             }
+        });
+        programUniformsCache.set(needs, {
+            programName: program.name, programVersion: program.version,
+            envVersion: program.envVersion, localVersion: program.localVersion,
+            matrixRefs, generic, block,
         });
         return block;
     };
@@ -1351,9 +1620,11 @@ export function createGpuRenderer(services){
         }));
         const pipeline = pipelineFor(key, generated, drawDescriptor(state), plan);
         // One draw, one MVP: shared with any program stage that reads the
-        // same state matrix, instead of each reader multiplying it out again.
-        const mvp = multiply(scene.projection, scene.modelview);
-        const uniforms = uniformsOf(scene, mvp);
+        // same state matrix, instead of each reader multiplying it out again
+        // -- and, when the view and the object are both what the previous
+        // draw had, the one that draw already computed.
+        const mvp = mvpFor(context, scene);
+        const uniforms = uniformsOf(context, scene, mvp);
         const vertexUniforms = generated.programs?.vertex && state.vertexProgram
             ? programUniforms(generated.programs.vertex, state.vertexProgram, scene, mvp)
             : null;
