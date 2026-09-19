@@ -415,6 +415,29 @@ export function createStartupFunctions(host){
             handler: ()=>cell('fmode', 0),
         },
 
+        /**
+         * int *_errno(void) / unsigned long *__doserrno(void)
+         *
+         * The runtime's error cells, reached the same way: a library that
+         * resolves them by name at load time (a packed one restoring its
+         * import table) must get an address, or the call it later makes
+         * through the table goes nowhere. One cell for the process rather
+         * than one per thread: what is read after a failing call is the
+         * failing call's own, on the thread that made it, and nothing here
+         * sets it from another.
+         */
+        _errno: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>cell('errno', 0),
+        },
+
+        __doserrno: {
+            convention: 'cdecl',
+            argBytes: 0,
+            handler: ()=>cell('doserrno', 0),
+        },
+
         /** int *__p___argc(void) */
         __p___argc: {
             convention: 'cdecl',
@@ -482,6 +505,14 @@ export function createStartupFunctions(host){
          * division the program does.
          */
         _adjust_fdiv: { data: ()=>new Uint8Array(4) },
+
+        /**
+         * int __mb_cur_max
+         *
+         * One: the widest multibyte character of the runtime's locale is a
+         * single byte, the "C" locale a program starts in.
+         */
+        __mb_cur_max: { data: ()=>new Uint8Array([1, 0, 0, 0]) },
 
         /**
          * _onexit_t _onexit(_onexit_t func)

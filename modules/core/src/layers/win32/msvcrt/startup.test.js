@@ -278,6 +278,15 @@ test('the runtime\'s globals are reachable and stay at one address', ()=>{
     assert.notEqual(commode, fmode, 'two globals, two addresses');
     assert.equal(fns.__p__commode.handler([]), commode);
     assert.equal(machine.u32(commode), 0);
+
+    // The error cells too: a library resolving `_errno` by name must get an
+    // address, and the same one on every call.
+    const errno = fns._errno.handler([]);
+    assert.notEqual(errno, 0);
+    assert.equal(fns._errno.handler([]), errno);
+    assert.notEqual(fns.__doserrno.handler([]), errno);
+    assert.equal(machine.u32(errno), 0);
+    assert.deepEqual([...fns.__mb_cur_max.data()], [1, 0, 0, 0], 'the C locale: one byte');
 });
 
 test('exit ends the process and does not come back', ()=>{

@@ -174,6 +174,9 @@ const TIME_BYTES = 0x0004;
  *           cursor falls back to the clock.
  * @property {(api: string, detail: string) => void} [divergence]
  *           Where a call that answers differently from Windows says so.
+ * @property {ReturnType<typeof import('./timers.js').createTimerService>} [timers]
+ *           The multimedia timer service (`timers.js`). Absent in a build
+ *           that cannot run a thread: `timeSetEvent` then answers no timer.
  */
 
 
@@ -533,6 +536,27 @@ export function createWinmmFunctions(host){
          * do -- which is also what happens on a machine already at that period.
          */
         timeBeginPeriod: { argBytes: 4, handler: ()=>MMSYSERR_NOERROR },
+
+        /**
+         * MMRESULT timeSetEvent(UINT uDelay, UINT uResolution, LPTIMECALLBACK lpTimeProc,
+         *                       DWORD_PTR dwUser, UINT fuEvent)
+         * MMRESULT timeKillEvent(UINT uTimerID)
+         *
+         * The timer's routine runs on the timer thread (`timers.js`), never
+         * on the caller; the resolution is accepted and not honoured beyond
+         * the clock's own millisecond.
+         */
+        timeSetEvent: {
+            argBytes: 20,
+            /** @param {number[]} args */
+            handler: ([delay, , proc, user, flags])=>
+                host.timers ? host.timers.set(delay >>> 0, proc >>> 0, user >>> 0, flags >>> 0) : 0,
+        },
+        timeKillEvent: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([id])=>(host.timers ? host.timers.kill(id >>> 0) : MMSYSERR_INVALPARAM),
+        },
         timeEndPeriod: { argBytes: 4, handler: ()=>MMSYSERR_NOERROR },
 
         /** MMRESULT timeGetSystemTime(LPMMTIME pmmt, UINT cbmmt) */
@@ -839,6 +863,7 @@ export function createWinmmFunctions(host){
          * handle nothing ever opened.
          */
         waveInGetNumDevs: { argBytes: 0, handler: ()=>0 },
+        waveInGetDevCapsA: noDevice(12, MMSYSERR_BADDEVICEID),
         waveInOpen: noDevice(24, MMSYSERR_BADDEVICEID),
         waveInPrepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
         waveInUnprepareHeader: noDevice(12, MMSYSERR_INVALHANDLE),
@@ -874,6 +899,8 @@ export function createWinmmFunctions(host){
 
         /** MCI, which drives CD audio and video among other things. */
         mciSendCommandA: { argBytes: 16, handler: ()=>MCIERR_INVALID_DEVICE_ID },
+        /** BOOL mciGetErrorStringA(MCIERROR, LPSTR, UINT): no text for a code, so FALSE. */
+        mciGetErrorStringA: { argBytes: 12, handler: ()=>0 },
 
         /**
          * Joysticks. The input layer is a stub, so there are none -- and a

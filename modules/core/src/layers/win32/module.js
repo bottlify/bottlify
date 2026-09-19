@@ -47,6 +47,7 @@ import { createWinmmFunctions } from './winmm/functions.js';
 import { createMmioFunctions } from './winmm/mmio.js';
 import { createWaveNotifier } from './winmm/notify.js';
 import { createNoticeThread } from './winmm/thread.js';
+import { createTimerService } from './winmm/timers.js';
 import { COMCTL32_ORDINALS, createComctlFunctions } from './comctl32/functions.js';
 import { createCommonControls } from './comctl32/controls.js';
 import { createShellFunctions } from './shell32/functions.js';
@@ -60,6 +61,7 @@ import { createShlwapiFunctions } from './shlwapi/functions.js';
 import { createD3dxFunctions } from './d3dx9/functions.js';
 import { createSpoolerFunctions } from './winspool/functions.js';
 import { createNetworkFunctions } from './mpr/functions.js';
+import { createAcmFunctions } from './msacm32/functions.js';
 import { createWininetFunctions } from './wininet/functions.js';
 import { createOleFunctions, createTaskAllocator } from './ole32/functions.js';
 import { createAutomationFunctions, OLEAUT32_ORDINALS } from './oleaut32/functions.js';
@@ -473,10 +475,58 @@ export const win32Module = {
             park: thread=>bridge.park(thread),
         });
 
+        // Multimedia timers fire on a thread of their own, like the notices
+        // above, but the kernel's clock is what wakes it.
+        const mmTimers = createTimerService({
+            /** @param {number} bytes */
+            allocate: bytes=>heap.allocate(bytes),
+            writeMemory,
+            register: (name, fn)=>bridge.register(name, fn),
+            /** @param {{ entry: number, name: string }} options */
+            createThread: options=>{
+                const thread = kernel.createThread(options);
+                config?.threadBlock?.(thread);
+                return thread;
+            },
+            currentThread: ()=>kernel.currentThread(),
+            /** @param {any} thread @param {string} reason
+             *  @param {{ deadline: number, result: number }} [timed] */
+            block: (thread, reason, timed)=>kernel.block(thread, reason, timed),
+            /** @param {any} thread @param {number} result */
+            wake: (thread, result)=>kernel.wake(thread, result),
+            /** @param {any} thread */
+            park: thread=>bridge.park(thread),
+            now: ()=>kernel.clock.virtualTime(),
+            // A stale handle is the program's mistake, as for the notices.
+            /** @param {number} handle */
+            setEvent: handle=>{
+                try
+                {
+                    kernel.setEvent(kernel.handles.resolve(handle, 'event'));
+                }
+                catch (e){
+                    void e;
+                }
+            },
+            /** @param {number} handle */
+            pulseEvent: handle=>{
+                try
+                {
+                    const event = kernel.handles.resolve(handle, 'event');
+                    kernel.setEvent(event);
+                    kernel.resetEvent(event);
+                }
+                catch (e){
+                    void e;
+                }
+            },
+        });
+
         // Built here rather than with the other tables because two things need
         // it: the library a program links against, and whoever drives the
         // machine, which has to move the play cursor from outside a guest call.
         const winmm = createWinmmFunctions({
+            timers: mmTimers,
             readMemory,
             writeMemory,
             // The guest's clock, never the host's. A frame loop that timed an
@@ -1006,6 +1056,11 @@ export const win32Module = {
             'WINSPOOL.DRV': createSpoolerFunctions({ setLastError: setError }),
 
             'MPR.dll': createNetworkFunctions({ setLastError: setError }),
+
+            // Audio middleware links against the codec manager statically;
+            // with no drivers installed it answers "not possible" and the
+            // middleware decodes on its own.
+            'MSACM32.dll': createAcmFunctions(),
 
             // The transport is the assembling caller's to supply and is absent
             // by default: this build has no network, and the entry points say

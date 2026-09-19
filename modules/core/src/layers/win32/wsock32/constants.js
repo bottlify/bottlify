@@ -200,6 +200,8 @@ export const WSOCK32_ORDINALS = Object.freeze({
     56: 'getservbyport',
     57: 'gethostname',
     101: 'WSAAsyncSelect',
+    103: 'WSAAsyncGetHostByName',
+    108: 'WSACancelAsyncRequest',
     111: 'WSAGetLastError',
     112: 'WSASetLastError',
     115: 'WSAStartup',

@@ -488,6 +488,10 @@ test('an ordinal whose function does not exist is not offered at all', ()=>{
         < Object.keys(WSOCK32_ORDINALS).length, 'something was filtered out');
     assert.equal(fx.winsock.ordinals.wsock32[52], 'gethostbyname',
         'while what does exist survives');
+    // The 1.1 window-message resolver is imported by number by audio
+    // middleware of the era, so its two ordinals are offered.
+    assert.equal(fx.winsock.ordinals.wsock32[103], 'WSAAsyncGetHostByName');
+    assert.equal(fx.winsock.ordinals.wsock32[108], 'WSACancelAsyncRequest');
 });
 
 test('the two libraries disagree about three ordinals, and only those three', ()=>{
