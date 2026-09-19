@@ -75,7 +75,7 @@ The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
 | `libraries()` | `{ 'OPENGL32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
-| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`. …and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary. |
+| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`; and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary. |
 
 An instance owns its GPU work. `create()` may run more than once in the same realm (a process
 replacement runs it again; the plan for two machines in one worker needs two at once), so the

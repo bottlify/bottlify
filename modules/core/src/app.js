@@ -2049,6 +2049,41 @@ export function createGuestView(memory){
 }
 
 /**
+ * The lazy, remembered resolve of the OpenGL seam `frame.gl` needs:
+ * `graphics.opengl()` is not called until a kernel's first `entry()` call,
+ * and a seam that throws (a build with no OpenGL layer) is remembered rather
+ * than retried on every later call, so a Direct3D title still binds its
+ * kernels with `entry` answering `null` for every name.
+ * @param {{ opengl: () => {
+ *   entry: (name: string) => ((args: number[]) => number) | null } }} graphics
+ * @returns {{ entry: (name: string) => ((args: number[]) => number) | null }}
+ */
+export function resolveOpenglEntry(graphics){
+    let openglLayer = /** @type {ReturnType<typeof graphics.opengl> | null} */ (null);
+    let openglSeamFailed = false;
+    return {
+        entry(name){
+            if (openglSeamFailed)
+            {
+                return null;
+            }
+            if (!openglLayer)
+            {
+                try
+                {
+                    openglLayer = graphics.opengl();
+                }
+                catch {
+                    openglSeamFailed = true;
+                    return null;
+                }
+            }
+            return openglLayer.entry(name);
+        },
+    };
+}
+
+/**
  * The OpenGL handle a site kernel gets as `frame.gl`.
  *
  * `entry(name)` resolves one OPENGL32 entry point to a function the kernel
@@ -2084,8 +2119,12 @@ export function createKernelGl(opengl, journalCall, traced, counters){
             }
             const label = `OPENGL32.dll!${name}`;
             return args=>{
-                const result = handler(args);
+                // Counted before the call, not after: a handler that throws
+                // still issued the call (its GL side effect, if any, already
+                // happened), and `kernelGlCalls` must match what the
+                // `hook-error` payload's `glCalls` counts against it.
                 counters.calls++;
+                const result = handler(args);
                 if (traced())
                 {
                     journalCall({ name: label, args, result: `0x${(result >>> 0).toString(16)}` });
@@ -3780,32 +3819,13 @@ async function buildApp(options){
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
         const guestView = createGuestView(/** @type {GuestMemory} */ (memory));
         // Resolved against the graphics seam the first time a kernel actually
-        // asks, not at bind time: a build with no OpenGL layer (a Direct3D
-        // title) still binds every kernel, and the failure -- once seen -- is
-        // remembered rather than retried on every call.
-        /** @type {ReturnType<typeof import('./layers/graphics/opengl/exports.js').createOpengl> | null} */
-        let openglLayer = null;
-        let openglSeamFailed = false;
-        const kernelGl = createKernelGl({
-            entry(name){
-                if (openglSeamFailed)
-                {
-                    return null;
-                }
-                if (!openglLayer)
-                {
-                    try
-                    {
-                        openglLayer = core.api('graphics').opengl();
-                    }
-                    catch {
-                        openglSeamFailed = true;
-                        return null;
-                    }
-                }
-                return /** @type {NonNullable<typeof openglLayer>} */ (openglLayer).entry(name);
-            },
-        }, journalCall, ()=>journal.enabled('call.gpu', journal.Level.TRACE), glCounters);
+        // asks, not at bind time (`resolveOpenglEntry`): a build with no
+        // OpenGL layer (a Direct3D title) still binds every kernel.
+        const kernelGl = createKernelGl(
+            resolveOpenglEntry(/** @type {{ opengl: () => ReturnType<
+                typeof import('./layers/graphics/opengl/exports.js').createOpengl> }} */ (
+                    core.api('graphics'))),
+            journalCall, ()=>journal.enabled('call.gpu', journal.Level.TRACE), glCounters);
         const { bound, refused } = loader.bindHooks(
             options.sidecarHooks.spec,
             {
@@ -3842,6 +3862,12 @@ async function buildApp(options){
                     // in it is not a reason to bring the run down when the
                     // guest's own function is right there to fall back on.
                     let handled;
+                    // A GL call the kernel already issued through `frame.gl`
+                    // before it threw is not undone -- the guest's own
+                    // function then runs the whole pass again on top of it --
+                    // so `hook-error`'s payload says how many, rather than
+                    // leaving that silent.
+                    const glCallsBefore = glCounters.calls;
                     try
                     {
                         // A site kernel gets a third argument, `frame`, with
@@ -3857,6 +3883,7 @@ async function buildApp(options){
                         events.emit('hook-error', {
                             kernel: entry.kernel,
                             message: e instanceof Error ? e.message : String(e),
+                            glCalls: glCounters.calls - glCallsBefore,
                         });
                         return false;
                     }

@@ -25,6 +25,7 @@ import {
     areaOf,
     createGuestView,
     createKernelGl,
+    resolveOpenglEntry,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -968,7 +969,7 @@ test('createKernelGl resolves a name to a closure, and null for one the library 
 
 test('a call through createKernelGl counts, and journals only when traced() is true', ()=>{
     const counters = { calls: 0 };
-    /** @type {any[]} */
+    /** @type {{ name: string, args: number[], result: string }[]} */
     const journalled = [];
     let traced = false;
     const gl = createKernelGl(
@@ -996,4 +997,16 @@ test('a seam that throws makes every entry answer null rather than throwing', ()
         },
     }, ()=>{}, ()=>true, { calls: 0 });
     assert.equal(gl.entry('glEnable'), null);
+});
+
+test('resolveOpenglEntry remembers a seam that throws once, and reuses one that resolves', ()=>{
+    let calls = 0;
+    const throwing = resolveOpenglEntry({ opengl(){ calls++; throw new Error('no seam'); } });
+    assert.equal(throwing.entry('glEnable'), null);
+    assert.equal(throwing.entry('glEnable'), null);
+    assert.equal(calls, 1, 'the failure is remembered, not retried');
+
+    const layer = fakeOpengl({ glEnable: ()=>0 });
+    const resolving = resolveOpenglEntry({ opengl: ()=>layer });
+    assert.equal(resolving.entry('glEnable'), layer.entry('glEnable'));
 });

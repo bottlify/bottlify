@@ -674,14 +674,14 @@ test('entry(name), with no current context, answers 0', ()=>{
 });
 
 /** `entry(name)`, asserted non-null: every name used below this line is implemented. */
-function mustEntry(/** @type {any} */ opengl, /** @type {string} */ name){
+function mustEntry(/** @type {ReturnType<typeof library>['opengl']} */ opengl, /** @type {string} */ name){
     const found = opengl.entry(name);
     assert.ok(found, `${name} is implemented`);
     return found;
 }
 
 /** A device context, format and current context, the way "the whole path" test makes one. */
-function contextOn(/** @type {any} */ lib){
+function contextOn(/** @type {ReturnType<typeof library>} */ lib){
     const hdc = 0x900d;
     const request = 0x1000;
     lib.box.writeMemory(request, encodePixelFormat(/** @type {any} */ ({
