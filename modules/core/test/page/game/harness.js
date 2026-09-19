@@ -1026,6 +1026,9 @@ export function createHarness(canvas, how = {}){
                 // the guest's own code, and -- in oracle mode -- how often the
                 // two disagreed.
                 hooks: layers.bridge?.hooks ?? [],
+                // Calls a site kernel issued through `frame.gl`: never a bridge
+                // crossing, so not one of the rows above -- read next to them.
+                kernelGlCalls: layers.app?.kernelGlCalls ?? 0,
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
                 // Which guest address belongs to which module, so a driver
@@ -1234,6 +1237,10 @@ export function createHarness(canvas, how = {}){
             // that shape, and without this a bound hook's report says only that
             // it bound, never whether it did anything once it was running.
             hooks: metrics('bridge').hooks ?? [],
+            // Calls a site kernel issued through `frame.gl`: these never cross
+            // the bridge, so they are not one of the rows above -- read next
+            // to them, from the app layer's own diagnostics.
+            kernelGlCalls: metrics('app').kernelGlCalls ?? 0,
         };
         result.profile = profile(layout);
         result.exact = exactProfile(running, layout);

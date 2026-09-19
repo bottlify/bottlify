@@ -1667,6 +1667,19 @@ export function createOpengl(services){
         implemented: Object.keys(implemented),
 
         /**
+         * A named entry point for a caller already on this side of the boundary
+         * (a bundle's site kernel, through the assembling caller): the same handler
+         * the trap table binds, taking the same raw dwords a guest call pushes --
+         * a GLfloat as its bits, a GLdouble as two words low first, a pointer as a
+         * guest address -- so a kernel that reads a pointer out of guest memory hands
+         * it straight through. Null for a name this library does not implement.
+         *
+         * @param {string} name
+         * @returns {((args: number[]) => number) | null}
+         */
+        entry: name=>implemented[name] ?? null,
+
+        /**
          * Presenting a frame, for gdi32's spelling of it.
          *
          * `SwapBuffers` lives in GDI32 and `wglSwapBuffers` in OPENGL32, and

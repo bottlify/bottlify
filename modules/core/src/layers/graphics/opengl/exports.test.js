@@ -660,3 +660,68 @@ test('glDeleteBuffersARB still answers two independent lists, not a shared scrat
     assert.equal(table.glIsBufferARB.handler([b0]), GL.FALSE);
     assert.equal(table.glIsBufferARB.handler([b1]), GL.FALSE);
 });
+
+test('entry(name) is the very function the trap table binds, and null for an unknown name', ()=>{
+    const { opengl, table } = library();
+    assert.equal(opengl.entry('glStencilOp'), table.glStencilOp.handler,
+        'same handler, same dwords');
+    assert.equal(opengl.entry('glNoSuchThing'), null);
+});
+
+test('entry(name), with no current context, answers 0', ()=>{
+    const { opengl } = library();
+    assert.equal(mustEntry(opengl, 'glEnable')([GL.BLEND]), 0);
+});
+
+/** `entry(name)`, asserted non-null: every name used below this line is implemented. */
+function mustEntry(/** @type {any} */ opengl, /** @type {string} */ name){
+    const found = opengl.entry(name);
+    assert.ok(found, `${name} is implemented`);
+    return found;
+}
+
+/** A device context, format and current context, the way "the whole path" test makes one. */
+function contextOn(/** @type {any} */ lib){
+    const hdc = 0x900d;
+    const request = 0x1000;
+    lib.box.writeMemory(request, encodePixelFormat(/** @type {any} */ ({
+        nSize: PIXELFORMATDESCRIPTOR.SIZE,
+        nVersion: 1,
+        dwFlags: PFD.DRAW_TO_WINDOW | PFD.SUPPORT_OPENGL | PFD.DOUBLEBUFFER,
+        iPixelType: PFD.TYPE_RGBA,
+        cColorBits: 32,
+        cDepthBits: 16,
+        cStencilBits: 0,
+        cAlphaBits: 0,
+        cAccumBits: 0,
+        cAuxBuffers: 0,
+        iLayerType: PFD.MAIN_PLANE,
+    })));
+    const format = lib.table.wglChoosePixelFormat.handler([hdc, request]);
+    lib.table.wglSetPixelFormat.handler([hdc, format, request]);
+    const context = lib.table.wglCreateContext.handler([hdc]);
+    lib.table.wglMakeCurrent.handler([hdc, context]);
+    return hdc;
+}
+
+test('through entry, the same two calls leave the framebuffer the table path leaves it', ()=>{
+    const byEntry = library();
+    const hdc1 = contextOn(byEntry);
+    mustEntry(byEntry.opengl, 'glClearColor')(
+        [floatBits(0.5), 0, 0, floatBits(1)]);
+    mustEntry(byEntry.opengl, 'glClear')([GL.COLOR_BUFFER_BIT]);
+    byEntry.table.wglSwapBuffers.handler([hdc1]);
+
+    const byTable = library();
+    const hdc2 = contextOn(byTable);
+    byTable.table.glClearColor.handler(
+        [floatBits(0.5), 0, 0, floatBits(1)]);
+    byTable.table.glClear.handler([GL.COLOR_BUFFER_BIT]);
+    byTable.table.wglSwapBuffers.handler([hdc2]);
+
+    assert.equal(byEntry.presented.length, 1);
+    assert.equal(byTable.presented.length, 1);
+    const pixel = (/** @type {any} */ lib)=>[...lib.box.bytes.subarray(
+        lib.presented[0].buffer, lib.presented[0].buffer + 4)];
+    assert.deepEqual(pixel(byEntry), pixel(byTable));
+});

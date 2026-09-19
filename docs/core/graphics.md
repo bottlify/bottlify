@@ -75,7 +75,7 @@ The six `device.*` diagnostic knobs reach the Direct3D 8 renderer
 | `create(name, options?)` | Makes one API object by name: `ddraw`, `d3d8`, `d3d9`, `opengl`, `d3d10`, `vulkan`. Direct3D 7 has no factory of its own; it is reached from a DirectDraw object. |
 | `apis()` | The six names above. |
 | `libraries()` | `{ 'OPENGL32.dll', 'D3D8.dll', 'D3D9.dll', 'D3D10.dll', 'DXGI.dll', 'vulkan-1.dll', 'DDRAW.dll' }`, each a `{ Name: { argBytes, handler } }` table shaped like a `win32` library's, for the loader. |
-| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`. |
+| `opengl()` | The pixel-format negotiation (`size`, `count`, `choose`, `describe`) and `swapBuffers(hdc)` whose entry points `gdi32` exports; the assembling caller hands these down to `win32`. …and `entry(name)`, one named `OPENGL32.dll` handler with its raw-dword convention, for a caller already on this side of the boundary. |
 
 An instance owns its GPU work. `create()` may run more than once in the same realm (a process
 replacement runs it again; the plan for two machines in one worker needs two at once), so the
@@ -385,7 +385,9 @@ renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.j
 string is a promise that every function it defines is obtainable, and the test checks the list,
 the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
 and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
-the build.
+the build. A handler is reachable without the trap through `entry(name)` -- the same function,
+the same dwords, the same current-context rule -- which is how a bundle's kernel issues GL work
+the guest's own function would have issued (`host.md`'s `frame.gl`).
 
 With a device, every draw goes to the GPU through the one backend (`gpu.js`): the frame is
 recorded as the program draws and replayed at `SwapBuffers`, once every pipeline it needs has

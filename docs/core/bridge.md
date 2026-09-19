@@ -232,6 +232,10 @@ so a resume point that depends on flags a branch between the site and it would h
 safe to use. A sidecar's own kernel is responsible for loading whatever compare it needs before
 such a branch, since this mechanism gives it none.
 
+The assembling caller may hand a site kernel more than the image base in `frame` --
+`host.md`'s `sidecarHooks` names `frame.gl` -- but nothing here changes: work a kernel issues
+through it does not cross this layer and is not counted as a call.
+
 A handler that throws is treated as `false`: every register restored, EIP to `trampoline`, the
 same guard a slot hook's handler gets -- a bug in a sidecar's own code is not a reason to bring
 the run down when the guest's own function is right there to fall back on.

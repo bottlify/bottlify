@@ -2049,6 +2049,54 @@ export function createGuestView(memory){
 }
 
 /**
+ * The OpenGL handle a site kernel gets as `frame.gl`.
+ *
+ * `entry(name)` resolves one OPENGL32 entry point to a function the kernel
+ * keeps and calls with raw dwords; each call is written to the journal under
+ * `call.gpu` exactly as a trapped call is (same name, same category), so a
+ * trace of the run stays honest when a kernel issues the work the guest would
+ * have issued. Nothing else of the engine reaches the kernel through this.
+ *
+ * A build with no OpenGL seam (a Direct3D title) has an `opengl.entry` that
+ * throws or is otherwise unusable; that answers `null` for every name rather
+ * than taking the run down, so a title with no OpenGL still binds its kernels.
+ *
+ * @param {{ entry: (name: string) => ((args: number[]) => number) | null }} opengl
+ * @param {(call: { name: string, args: number[], result: string }) => void} journalCall
+ * @param {() => boolean} traced   whether `call.gpu` is on at TRACE right now
+ * @param {{ calls: number }} counters
+ */
+export function createKernelGl(opengl, journalCall, traced, counters){
+    return {
+        /** @param {string} name @returns {((args: number[]) => number) | null} */
+        entry(name){
+            let handler;
+            try
+            {
+                handler = opengl.entry(name);
+            }
+            catch {
+                return null;
+            }
+            if (!handler)
+            {
+                return null;
+            }
+            const label = `OPENGL32.dll!${name}`;
+            return args=>{
+                const result = handler(args);
+                counters.calls++;
+                if (traced())
+                {
+                    journalCall({ name: label, args, result: `0x${(result >>> 0).toString(16)}` });
+                }
+                return result;
+            };
+        },
+    };
+}
+
+/**
  * One machine, running one image.
  *
  * `createApp` below is what a caller reaches for; this is what it builds, once
@@ -3709,6 +3757,11 @@ async function buildApp(options){
         return at;
     };
 
+    // How many calls a site kernel issued through `frame.gl` -- read by the
+    // diagnostics below whether or not this run binds any sidecar at all, so
+    // it always answers a number rather than being missing from the report.
+    const glCounters = { calls: 0 };
+
     // A bundle's sidecar, applied once the image it targets is at its real
     // address. The engine names nothing here: `hooks.json` carries the image,
     // the RVAs and the kernel name, and `hooks.mjs` -- the bundle's own code
@@ -3726,6 +3779,33 @@ async function buildApp(options){
         const imageName = imagePath.slice(
             Math.max(imagePath.lastIndexOf('\\'), imagePath.lastIndexOf('/')) + 1);
         const guestView = createGuestView(/** @type {GuestMemory} */ (memory));
+        // Resolved against the graphics seam the first time a kernel actually
+        // asks, not at bind time: a build with no OpenGL layer (a Direct3D
+        // title) still binds every kernel, and the failure -- once seen -- is
+        // remembered rather than retried on every call.
+        /** @type {ReturnType<typeof import('./layers/graphics/opengl/exports.js').createOpengl> | null} */
+        let openglLayer = null;
+        let openglSeamFailed = false;
+        const kernelGl = createKernelGl({
+            entry(name){
+                if (openglSeamFailed)
+                {
+                    return null;
+                }
+                if (!openglLayer)
+                {
+                    try
+                    {
+                        openglLayer = core.api('graphics').opengl();
+                    }
+                    catch {
+                        openglSeamFailed = true;
+                        return null;
+                    }
+                }
+                return /** @type {NonNullable<typeof openglLayer>} */ (openglLayer).entry(name);
+            },
+        }, journalCall, ()=>journal.enabled('call.gpu', journal.Level.TRACE), glCounters);
         const { bound, refused } = loader.bindHooks(
             options.sidecarHooks.spec,
             {
@@ -3751,6 +3831,10 @@ async function buildApp(options){
                     ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
                 };
                 const site = Boolean(entry.site);
+                // Built once per bound entry rather than once per call: the
+                // base and the GL handle are the same on every call a given
+                // site makes, so only the kernel's own arguments change.
+                const frame = site ? { base: image.base, gl: kernelGl } : undefined;
                 return (/** @type {number[] | Record<string, number>} */ argsOrRegisters)=>{
                     // Guard and fall through, the discipline every guest-code
                     // replacement in this engine keeps: a kernel is the
@@ -3766,7 +3850,7 @@ async function buildApp(options){
                         // dispatcher's own call frame, which a site hook has
                         // no real use for (there was no call to marshal).
                         handled = site
-                            ? kernelFn(guest, argsOrRegisters, { base: image.base })
+                            ? kernelFn(guest, argsOrRegisters, frame)
                             : kernelFn(guest, argsOrRegisters);
                     }
                     catch (e){
@@ -4997,6 +5081,10 @@ async function buildApp(options){
                     unimplementedCalls: Object.fromEntries(missingCalls),
                     // The guest-to-guest calls a watch was put in front of, by label.
                     watches: [...watches.keys()],
+                    // How many calls a site kernel issued through `frame.gl`,
+                    // read beside the bridge's own per-hook rows: these calls
+                    // never cross the bridge, so they are not in `hooks` at all.
+                    kernelGlCalls: glCounters.calls,
                 },
             },
         ],

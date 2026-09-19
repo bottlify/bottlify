@@ -593,6 +593,7 @@ function describe(result, context, calls){
                 + `fellThrough=${hook.fellThrough} mismatches=${hook.mismatches} `
                 + `ms=${hook.ms.toFixed(2)} µs/call=${perCall.toFixed(2)}`);
         }
+        say(`    kernelGlCalls=${result.bridge.kernelGlCalls ?? 0}`);
         say('');
     }
 

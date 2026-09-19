@@ -24,6 +24,7 @@ import {
     shippedLibraryReader,
     areaOf,
     createGuestView,
+    createKernelGl,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -948,4 +949,51 @@ test('an unaligned f32s/i32s view is refused, so the call falls through to the g
     const { guest } = guestMemoryHarness();
     assert.throws(()=>guest.f32s(0x1001, 1), /not 4-byte aligned/);
     assert.throws(()=>guest.i32s(0x1002, 1), /not 4-byte aligned/);
+});
+
+/**
+ * A fake OpenGL layer: `entry(name)` answers a handler for one name and null for the rest.
+ *
+ * @param {Record<string, (args: number[]) => number>} handlers
+ */
+function fakeOpengl(handlers){
+    return { entry: (/** @type {string} */ name)=>handlers[name] ?? null };
+}
+
+test('createKernelGl resolves a name to a closure, and null for one the library has not', ()=>{
+    const gl = createKernelGl(fakeOpengl({ glEnable: ()=>0 }), ()=>{}, ()=>false, { calls: 0 });
+    assert.equal(typeof gl.entry('glEnable'), 'function');
+    assert.equal(gl.entry('glNoSuchThing'), null);
+});
+
+test('a call through createKernelGl counts, and journals only when traced() is true', ()=>{
+    const counters = { calls: 0 };
+    /** @type {any[]} */
+    const journalled = [];
+    let traced = false;
+    const gl = createKernelGl(
+        fakeOpengl({ glEnable: args=>(args[0], 0) }),
+        call=>journalled.push(call),
+        ()=>traced,
+        counters);
+
+    const entry = gl.entry('glEnable');
+    assert.ok(entry);
+    entry([0xb90]);
+    assert.equal(counters.calls, 1);
+    assert.equal(journalled.length, 0, 'not traced: nothing written');
+
+    traced = true;
+    entry([0xb90]);
+    assert.equal(counters.calls, 2);
+    assert.deepEqual(journalled, [{ name: 'OPENGL32.dll!glEnable', args: [0xb90], result: '0x0' }]);
+});
+
+test('a seam that throws makes every entry answer null rather than throwing', ()=>{
+    const gl = createKernelGl({
+        entry(){
+            throw new Error('no OpenGL seam in this build');
+        },
+    }, ()=>{}, ()=>true, { calls: 0 });
+    assert.equal(gl.entry('glEnable'), null);
 });
