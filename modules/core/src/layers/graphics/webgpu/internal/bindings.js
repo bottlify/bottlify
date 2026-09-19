@@ -99,8 +99,19 @@ export function createBindingCache(options){
             {
                 throw new Error('A bind group needs an explicit layout object');
             }
-            const key = `${resourceId(layout)}|`
-                + entries.map(entry=>`${entry.binding}:${resourceKey(entry.resource)}`).join(',');
+            // A plain loop rather than `.map().join()`: this key is built on
+            // every draw to ask the cache below, hit or miss, so the array
+            // `.map()` would allocate here is thrown away before the lookup
+            // it fed ever runs.
+            let key = `${resourceId(layout)}|`;
+            for (let i = 0; i < entries.length; i++)
+            {
+                if (i > 0)
+                {
+                    key += ',';
+                }
+                key += `${entries[i].binding}:${resourceKey(entries[i].resource)}`;
+            }
             const cached = groups.get(key);
             if (cached)
             {

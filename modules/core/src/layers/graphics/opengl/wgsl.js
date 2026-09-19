@@ -181,23 +181,54 @@ function lookUp(table, value, what){
  * The key a pipeline is cached under. A string, compared by value on every
  * draw and readable in a diagnostic.
  *
+ * Built with plain loops and `+=` rather than `.map().join()`: this runs on
+ * every draw regardless of whether the pipeline it names is already cached
+ * (the key is what the cache is looked up by), so the array `.map()` would
+ * have allocated for `attributes` and `units` -- thrown away the instant
+ * `.join()` read it -- is real per-draw garbage a state that repeats a
+ * hundred times a frame pays for nothing.
+ *
  * @param {DrawState} state
  * @returns {string}
  */
 export function drawKey(state){
-    const attributes = state.attributes
-        .map(a=>`${a.name}:${a.slot}:${a.offset}:${a.format}`).join(',');
-    const units = state.units.map(unit=>{
+    let attributes = '';
+    for (let i = 0; i < state.attributes.length; i++)
+    {
+        if (i > 0)
+        {
+            attributes += ',';
+        }
+        const a = state.attributes[i];
+        attributes += `${a.name}:${a.slot}:${a.offset}:${a.format}`;
+    }
+    let units = '';
+    for (let i = 0; i < state.units.length; i++)
+    {
+        if (i > 0)
+        {
+            units += ';';
+        }
+        const unit = state.units[i];
         const c = unit.combine;
         const combined = unit.mode === GL.COMBINE
             ? `${c.rgb},${c.alpha},${c.sourceRgb.join('.')},${c.sourceAlpha.join('.')},`
                 + `${c.operandRgb.join('.')},${c.operandAlpha.join('.')},${c.rgbScale},`
                 + `${c.alphaScale}`
             : '';
-        return `${unit.index}${unit.cube ? 'c' : ''}:${unit.mode}:${combined}:`
+        let generation = '';
+        for (let k = 0; k < unit.generation.length; k++)
+        {
+            if (k > 0)
+            {
+                generation += '.';
+            }
+            generation += unit.generation[k] === null ? '-' : String(unit.generation[k]);
+        }
+        units += `${unit.index}${unit.cube ? 'c' : ''}:${unit.mode}:${combined}:`
             + `${unit.hasColour ? 1 : 0}${unit.hasAlpha ? 1 : 0}${unit.intensity ? 1 : 0}`
-            + `${unit.rgbOnly ? 1 : 0}:${unit.generation.map(g=>(g === null ? '-' : g)).join('.')}`;
-    }).join(';');
+            + `${unit.rgbOnly ? 1 : 0}:${generation}`;
+    }
     /** @param {DrawState['stencil']} face */
     const stencilFace = face=>(face
         ? `${face.func},${face.fail},${face.zfail},${face.zpass},${face.readMask},`

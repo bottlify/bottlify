@@ -445,8 +445,19 @@ export function createGpuRenderer(services){
         textures.sort((a, b)=>a.binding - b.binding);
         const vertexBlock = programs?.vertex != null;
         const fragmentBlock = programs?.fragment != null;
-        const key = `${textures.map(t=>`${t.binding}${t.cube ? 'c' : '2'}`).join(',')}|`
-            + `${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
+        // Built the same way drawKey is (see wgsl.js): a plain loop rather
+        // than `.map().join()`, since this runs on every draw whether or not
+        // the plan it names is already in `layouts`.
+        let textureKey = '';
+        for (let i = 0; i < textures.length; i++)
+        {
+            if (i > 0)
+            {
+                textureKey += ',';
+            }
+            textureKey += `${textures[i].binding}${textures[i].cube ? 'c' : '2'}`;
+        }
+        const key = `${textureKey}|${vertexBlock ? 'v' : ''}${fragmentBlock ? 'f' : ''}`;
         return { key, textures, vertexBlock, fragmentBlock };
     };
 
