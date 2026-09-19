@@ -113,6 +113,7 @@ export const GL_EXTENSIONS = Object.freeze({
         'glGetVertexAttribdvARB', 'glGetVertexAttribfvARB', 'glGetVertexAttribivARB',
         'glGetVertexAttribPointervARB',
     ],
+    GL_EXT_stencil_two_side: ['glActiveStencilFaceEXT'],
     GL_ARB_fragment_program: [
         'glGenProgramsARB', 'glDeleteProgramsARB', 'glIsProgramARB', 'glBindProgramARB',
         'glProgramStringARB',
@@ -145,6 +146,7 @@ export const WGL_EXTENSIONS = Object.freeze({
 export const EXTENSION_WORDS = Object.freeze({
     0: ['glUnlockArraysEXT', 'wglGetExtensionsStringEXT', 'wglGetSwapIntervalEXT'],
     1: [
+        'glActiveStencilFaceEXT',
         'glActiveTextureARB', 'glClientActiveTextureARB', 'glIsBufferARB', 'glUnmapBufferARB',
         'glSecondaryColor3bvEXT', 'glSecondaryColor3dvEXT', 'glSecondaryColor3fvEXT',
         'glSecondaryColor3ivEXT', 'glSecondaryColor3svEXT', 'glSecondaryColor3ubvEXT',

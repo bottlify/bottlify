@@ -381,7 +381,7 @@ held and leaves the description untouched). `render.js` keeps a host copy of eve
 and replays a record onto one backend frame at present.
 
 **OpenGL** (`src/layers/graphics/opengl/`). Reports `GL_VERSION` 1.1, vendor `Bottlify Project`,
-renderer `Bottlify OpenGL`, 24 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
+renderer `Bottlify OpenGL`, 25 GL extensions and 4 WGL extensions (`extensions.js`; a name in the
 string is a promise that every function it defines is obtainable, and the test checks the list,
 the context and the marshalling agree). The context records state (`context*.js`, `state.js`)
 and reads it into one `Scene` per draw (`context-scene.js`); where that scene is drawn depends on
@@ -399,7 +399,17 @@ a type the GPU has no format for -- is packed into one canonical layout. `wgsl.j
 fixed-function formula as a shader per draw state (texture environment per base format, combine
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
-colour mask, polygon offset); every field either reads is in the cache key. A translator for
+colour mask, polygon offset); every field either reads is in the cache key.
+`GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or `GL_BACK`; with
+`GL_STENCIL_TEST_TWO_SIDE_EXT` enabled, `glStencilFunc`/`Op`/`Mask` write only the active face's
+record, and both when it is disabled -- the byte-identical single-state behaviour every earlier
+title still gets) maps directly onto the pipeline descriptor's independent `stencilFront` and
+`stencilBack`, with the back record folded into the cache key so a two-sided draw and a one-sided
+draw sharing a front state get different pipelines; `glGet` of the unsuffixed stencil queries
+always answers the front face's values, and `GL_STENCIL_BACK_*` answers the back's. WebGPU has one
+stencil reference and one read and write mask shared by both faces, so a program whose two faces
+disagree on those has the front's applied to the back's test too, reported once as a divergence
+(see *Limitations*). A translator for
 `GL_ARB_vertex_program` and `GL_ARB_fragment_program` exists, is tested, and both names are
 advertised -- `arb-program.js` parses program text into an IR with byte-exact error positions,
 `arb-wgsl.js` emits one literal WGSL stage per program with its parameters materialised into one
@@ -595,7 +605,10 @@ Accepted and reported through `divergence`:
   and a fifth is only what a program samples it as; a program stage binding a value the GPU path
   cannot answer (a non-matrix state parameter, a 3D texture target) is refused by name and its
   draw does not run; a texture rewritten
-  between two draws of one frame is seen by both as rewritten.
+  between two draws of one frame is seen by both as rewritten; `GL_EXT_stencil_two_side` with a
+  reference or a read or write mask that differs between the two faces has the front face's value
+  applied to the back face's test and write as well, because WebGPU's stencil reference and masks
+  are not per-face.
 
 Counted rather than reported (`seam.device.skipped`): Direct3D 8 draws skipped for `vertexShader`,
 `pixelShader`, `stride` (the stream's stride disagrees with the FVF), `indexFormat`, `stencilRect`

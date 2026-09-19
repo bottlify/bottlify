@@ -87,6 +87,12 @@ test('every field the descriptor or the shader reads changes the key', ()=>{
         { depth: { test: true, func: GL.LESS, write: false } },
         { stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
             readMask: 0xff, writeMask: 0xff } },
+        {
+            stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.DECR,
+                readMask: 0xff, writeMask: 0xff },
+            stencilBack: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
+                readMask: 0xff, writeMask: 0xff },
+        },
         { cull: 'back' },
         { frontIsCcw: false },
         { colourMask: 0x8 },
@@ -231,6 +237,24 @@ test('the descriptor maps GL state onto WebGPU\'s, with the stencil on both face
     assert.equal(descriptor.depthStencil.depthBias, -600);
     assert.deepEqual(descriptor.vertexBuffers[0].attributes[1],
         { shaderLocation: 1, offset: 16, format: 'float32x4' });
+});
+
+test('GL_EXT_stencil_two_side gives WebGPU\'s stencilFront and stencilBack their own ops', ()=>{
+    const descriptor = drawDescriptor(state({
+        stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR_WRAP,
+            readMask: 0xff, writeMask: 0xff },
+        stencilBack: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.DECR_WRAP,
+            readMask: 0xff, writeMask: 0xff },
+    })).depthStencil;
+    assert.equal(descriptor.stencilFront.passOp, 'increment-wrap');
+    assert.equal(descriptor.stencilBack.passOp, 'decrement-wrap');
+    // A stencilBack absent altogether (every caller before the extension
+    // existed) still mirrors the front, unchanged from before.
+    const oneSided = drawDescriptor(state({
+        stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
+            readMask: 0xff, writeMask: 0xff },
+    })).depthStencil;
+    assert.deepEqual(oneSided.stencilBack, oneSided.stencilFront);
 });
 
 test('a stencil-shadowed light\'s three passes get the descriptor their state names', ()=>{

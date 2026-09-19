@@ -275,6 +275,21 @@ export function createSceneBuilder(kernel){
                     zpass: record(GL.STENCIL_PASS_DEPTH_PASS).values[0],
                 }
                 : null,
+            // GL_EXT_stencil_two_side's back-face record. Mirrored onto the
+            // front one whenever the extension is off (`context.js`), so this
+            // is never anything but the front's own values under a title that
+            // never enables it.
+            stencilBack: on(GL.STENCIL_TEST)
+                ? {
+                    func: record(GL.STENCIL_BACK_FUNC).values[0],
+                    reference: record(GL.STENCIL_BACK_REF).values[0],
+                    readMask: record(GL.STENCIL_BACK_VALUE_MASK).values[0] & 0xff,
+                    writeMask: record(GL.STENCIL_BACK_WRITEMASK).values[0] & 0xff,
+                    fail: record(GL.STENCIL_BACK_FAIL).values[0],
+                    zfail: record(GL.STENCIL_BACK_PASS_DEPTH_FAIL).values[0],
+                    zpass: record(GL.STENCIL_BACK_PASS_DEPTH_PASS).values[0],
+                }
+                : null,
             polygonOffset: on(GL.POLYGON_OFFSET_FILL)
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],

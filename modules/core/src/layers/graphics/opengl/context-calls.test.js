@@ -613,6 +613,43 @@ test('a call that is accepted and not honoured reports a divergence, once', ()=>
     assert.match(reported[2], /selection/);
 });
 
+test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask, and glGet always '
+    + 'answers the front', ()=>{
+    const { context } = drawing();
+    assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.FRONT],
+        'a fresh context starts on the front face');
+
+    // With the extension disabled, every setter still writes both records --
+    // the byte-identical single-state behaviour a title that never enables
+    // it always had.
+    context.glStencilFunc(GL.GEQUAL, 3, 0xf0);
+    context.glStencilOp(GL.INCR, GL.DECR, GL.REPLACE);
+    context.glStencilMask(0x0f);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.GEQUAL]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [3]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FAIL), [GL.INCR]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0x0f]);
+
+    context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
+    context.glActiveStencilFaceEXT(GL.BACK);
+    assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
+    context.glStencilFunc(GL.ALWAYS, 9, 0xff);
+    context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
+    context.glStencilMask(0xaa);
+
+    // Only the back face moved; the front is exactly what glGet answers.
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.GEQUAL]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [3]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0x0f]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [9]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0xaa]);
+
+    context.glActiveStencilFaceEXT(0x1234);
+    assert.equal(context.glGetError(), GL.INVALID_ENUM, 'not a face');
+});
+
 test('a program\'s texture units reach the eighth, and the limits say so', ()=>{
     const { context } = drawing();
     // The selector takes every unit a program can sample or write coordinates

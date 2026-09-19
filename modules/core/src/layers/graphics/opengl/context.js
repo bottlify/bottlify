@@ -727,9 +727,9 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            setState(GL.STENCIL_FUNC, [func]);
-            setState(GL.STENCIL_REF, [ref | 0]);
-            setState(GL.STENCIL_VALUE_MASK, [mask >>> 0]);
+            setStencilFace(GL.STENCIL_FUNC, GL.STENCIL_BACK_FUNC, [func]);
+            setStencilFace(GL.STENCIL_REF, GL.STENCIL_BACK_REF, [ref | 0]);
+            setStencilFace(GL.STENCIL_VALUE_MASK, GL.STENCIL_BACK_VALUE_MASK, [mask >>> 0]);
         },
 
         /** @param {number} fail @param {number} zfail @param {number} zpass */
@@ -743,17 +743,36 @@ export function createGlContext(options = {}){
                 setError(GL.INVALID_ENUM);
                 return;
             }
-            setState(GL.STENCIL_FAIL, [fail]);
-            setState(GL.STENCIL_PASS_DEPTH_FAIL, [zfail]);
-            setState(GL.STENCIL_PASS_DEPTH_PASS, [zpass]);
+            setStencilFace(GL.STENCIL_FAIL, GL.STENCIL_BACK_FAIL, [fail]);
+            setStencilFace(GL.STENCIL_PASS_DEPTH_FAIL, GL.STENCIL_BACK_PASS_DEPTH_FAIL, [zfail]);
+            setStencilFace(GL.STENCIL_PASS_DEPTH_PASS, GL.STENCIL_BACK_PASS_DEPTH_PASS, [zpass]);
         },
 
         /** @param {number} mask */
         glStencilMask(mask){
             if (enter('glStencilMask', [mask]))
             {
-                setState(GL.STENCIL_WRITEMASK, [mask >>> 0]);
+                setStencilFace(GL.STENCIL_WRITEMASK, GL.STENCIL_BACK_WRITEMASK, [mask >>> 0]);
             }
+        },
+
+        /**
+         * GL_EXT_stencil_two_side: which face `glStencilFunc`/`glStencilOp`/
+         * `glStencilMask` write to while GL_STENCIL_TEST_TWO_SIDE_EXT is on.
+         *
+         * @param {number} face
+         */
+        glActiveStencilFaceEXT(face){
+            if (!enter('glActiveStencilFaceEXT', [face]))
+            {
+                return;
+            }
+            if (face !== GL.FRONT && face !== GL.BACK)
+            {
+                setError(GL.INVALID_ENUM);
+                return;
+            }
+            setState(GL.ACTIVE_STENCIL_FACE_EXT, [face]);
         },
 
         /** @param {number} face @param {number} mode */
@@ -1483,6 +1502,28 @@ export function createGlContext(options = {}){
             return;
         }
         setState(query, [value]);
+    }
+
+    /**
+     * `glStencilFunc`/`glStencilOp`/`glStencilMask` write one record while
+     * GL_EXT_stencil_two_side is enabled -- the active face's -- and both
+     * while it is disabled, which is the specification's rule and what keeps
+     * a title that never enables the extension byte-identical to the single-
+     * state behaviour it always had.
+     *
+     * @param {number} frontQuery
+     * @param {number} backQuery
+     * @param {number[]} values
+     */
+    function setStencilFace(frontQuery, backQuery, values){
+        if (record(GL.STENCIL_TEST_TWO_SIDE_EXT).values[0] === 0)
+        {
+            setState(frontQuery, values);
+            setState(backQuery, values);
+            return;
+        }
+        setState(record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK
+            ? backQuery : frontQuery, values);
     }
 
     /** @param {string} name @param {number} query @param {number} value */

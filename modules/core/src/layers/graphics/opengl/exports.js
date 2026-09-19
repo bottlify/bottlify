@@ -1243,6 +1243,10 @@ export function createOpengl(services){
         glStencilOp: ([fail, zfail, zpass])=>
             call(context=>context.glStencilOp(fail >>> 0, zfail >>> 0, zpass >>> 0)),
         glStencilMask: ([mask])=>call(context=>context.glStencilMask(mask >>> 0)),
+
+        // --- GL_EXT_stencil_two_side ---
+        glActiveStencilFaceEXT: ([face])=>
+            call(context=>context.glActiveStencilFaceEXT(face >>> 0)),
         glPolygonMode: ([face, mode])=>
             call(context=>context.glPolygonMode(face >>> 0, mode >>> 0)),
         glPolygonOffset: ([factor, units])=>

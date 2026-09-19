@@ -97,6 +97,10 @@ export const DEFAULT_ENABLES = Object.freeze([
     { query: GL.POLYGON_SMOOTH, name: 'GL_POLYGON_SMOOTH', kind: 'bool', value: [0] },
     { query: GL.SCISSOR_TEST, name: 'GL_SCISSOR_TEST', kind: 'bool', value: [0] },
     { query: GL.STENCIL_TEST, name: 'GL_STENCIL_TEST', kind: 'bool', value: [0] },
+    {
+        query: GL.STENCIL_TEST_TWO_SIDE_EXT, name: 'GL_STENCIL_TEST_TWO_SIDE_EXT', kind: 'bool',
+        value: [0],
+    },
     { query: GL.TEXTURE_1D, name: 'GL_TEXTURE_1D', kind: 'bool', value: [0] },
     { query: GL.TEXTURE_2D, name: 'GL_TEXTURE_2D', kind: 'bool', value: [0] },
     { query: GL.LIGHT1, name: 'GL_LIGHT1', kind: 'bool', value: [0] },
@@ -244,6 +248,32 @@ export const DEFAULT_STATE = Object.freeze([
     {
         query: GL.STENCIL_PASS_DEPTH_PASS, name: 'GL_STENCIL_PASS_DEPTH_PASS', kind: 'enum',
         value: [GL.KEEP],
+    },
+
+    // --- GL_EXT_stencil_two_side: the back face's own copy of the six
+    // records above, and which face glStencilFunc/Op/Mask write to. ---
+    {
+        query: GL.ACTIVE_STENCIL_FACE_EXT, name: 'GL_ACTIVE_STENCIL_FACE_EXT', kind: 'enum',
+        value: [GL.FRONT],
+    },
+    { query: GL.STENCIL_BACK_FUNC, name: 'GL_STENCIL_BACK_FUNC', kind: 'enum', value: [GL.ALWAYS] },
+    { query: GL.STENCIL_BACK_REF, name: 'GL_STENCIL_BACK_REF', kind: 'int', value: [0] },
+    {
+        query: GL.STENCIL_BACK_VALUE_MASK, name: 'GL_STENCIL_BACK_VALUE_MASK', kind: 'int',
+        value: [0xffffffff],
+    },
+    {
+        query: GL.STENCIL_BACK_WRITEMASK, name: 'GL_STENCIL_BACK_WRITEMASK', kind: 'int',
+        value: [0xffffffff],
+    },
+    { query: GL.STENCIL_BACK_FAIL, name: 'GL_STENCIL_BACK_FAIL', kind: 'enum', value: [GL.KEEP] },
+    {
+        query: GL.STENCIL_BACK_PASS_DEPTH_FAIL, name: 'GL_STENCIL_BACK_PASS_DEPTH_FAIL',
+        kind: 'enum', value: [GL.KEEP],
+    },
+    {
+        query: GL.STENCIL_BACK_PASS_DEPTH_PASS, name: 'GL_STENCIL_BACK_PASS_DEPTH_PASS',
+        kind: 'enum', value: [GL.KEEP],
     },
     { query: GL.COLOR_WRITEMASK, name: 'GL_COLOR_WRITEMASK', kind: 'bool', value: [1, 1, 1, 1] },
     { query: GL.LOGIC_OP_MODE, name: 'GL_LOGIC_OP_MODE', kind: 'enum', value: [GL.COPY] },

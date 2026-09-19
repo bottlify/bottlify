@@ -66,6 +66,11 @@ import { FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, ne
  * @property {{ test: boolean, func: number, write: boolean }} depth
  * @property {{ func: number, fail: number, zfail: number, zpass: number,
  *              readMask: number, writeMask: number } | null} stencil
+ * @property {{ func: number, fail: number, zfail: number, zpass: number,
+ *              readMask: number, writeMask: number } | null} [stencilBack]
+ *           GL_EXT_stencil_two_side's back-face ops; absent or equal to
+ *           `stencil` gets WebGPU's `stencilBack` the front's own record, as
+ *           it always had before the extension existed
  * @property {'none' | 'front' | 'back'} cull
  * @property {boolean} frontIsCcw
  * @property {number} viewportHeight  the render target's rows; fragment.position reads it
@@ -191,10 +196,13 @@ export function drawKey(state){
             + `${unit.hasColour ? 1 : 0}${unit.hasAlpha ? 1 : 0}${unit.intensity ? 1 : 0}`
             + `${unit.rgbOnly ? 1 : 0}:${unit.generation.map(g=>(g === null ? '-' : g)).join('.')}`;
     }).join(';');
-    const stencil = state.stencil
-        ? `${state.stencil.func},${state.stencil.fail},${state.stencil.zfail},`
-            + `${state.stencil.zpass},${state.stencil.readMask},${state.stencil.writeMask}`
-        : '-';
+    /** @param {DrawState['stencil']} face */
+    const stencilFace = face=>(face
+        ? `${face.func},${face.fail},${face.zfail},${face.zpass},${face.readMask},`
+            + `${face.writeMask}`
+        : '-');
+    const stencil = stencilFace(state.stencil);
+    const stencilBack = stencilFace(state.stencilBack ?? state.stencil);
     return [
         attributes,
         state.strides.join(','),
@@ -209,6 +217,7 @@ export function drawKey(state){
         state.blend ? `${state.blend.src},${state.blend.dst}` : '-',
         `${state.depth.test ? 1 : 0}${state.depth.write ? 1 : 0},${state.depth.func}`,
         stencil,
+        stencilBack,
         state.cull,
         state.frontIsCcw ? 'ccw' : 'cw',
         state.colourMask,
@@ -827,14 +836,20 @@ export function drawDescriptor(state){
             },
         }
         : undefined;
-    const face = state.stencil
+    /** @param {DrawState['stencil']} sideState */
+    const stencilFace = sideState=>(sideState
         ? {
-            compare: lookUp(COMPARE, state.stencil.func, 'stencil function'),
-            failOp: lookUp(STENCIL_OP, state.stencil.fail, 'stencil operation'),
-            depthFailOp: lookUp(STENCIL_OP, state.stencil.zfail, 'stencil operation'),
-            passOp: lookUp(STENCIL_OP, state.stencil.zpass, 'stencil operation'),
+            compare: lookUp(COMPARE, sideState.func, 'stencil function'),
+            failOp: lookUp(STENCIL_OP, sideState.fail, 'stencil operation'),
+            depthFailOp: lookUp(STENCIL_OP, sideState.zfail, 'stencil operation'),
+            passOp: lookUp(STENCIL_OP, sideState.zpass, 'stencil operation'),
         }
-        : { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'keep' };
+        : { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'keep' });
+    const face = stencilFace(state.stencil);
+    // `stencilBack` is absent for a caller that never heard of the extension
+    // (this file's own tests, and every pipeline built before it existed):
+    // that state is the front's applied to both faces, exactly as before.
+    const backFace = stencilFace(state.stencilBack ?? state.stencil);
     return {
         vertexBuffers: buffers,
         target: {
@@ -854,7 +869,10 @@ export function drawDescriptor(state){
                 : 'always',
             depthWriteEnabled: state.depth.write,
             stencilFront: face,
-            stencilBack: face,
+            stencilBack: backFace,
+            // WebGPU has one read mask and one write mask for both faces; the
+            // front's own are what a title that never diverges the two faces
+            // always had, and `gpu.js` reports it once when they do diverge.
             stencilReadMask: state.stencil ? state.stencil.readMask : 0xff,
             stencilWriteMask: state.stencil ? state.stencil.writeMask : 0,
             // GL's units are multiples of the smallest resolvable difference,

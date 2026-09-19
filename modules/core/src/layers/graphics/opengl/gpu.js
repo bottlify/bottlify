@@ -1059,6 +1059,7 @@ export function createGpuRenderer(services){
                 write: operations.depthWrite,
             },
             stencil: scene.stencil,
+            stencilBack: scene.stencilBack,
             cull: cullMode === undefined ? 'none' : cullMode === GL.FRONT ? 'front' : 'back',
             frontIsCcw: scene.frontIsCcw,
             viewportHeight: scene.framebuffer.height,
@@ -1267,6 +1268,15 @@ export function createGpuRenderer(services){
             diverge('a colour logic operation was enabled and the fragments were written as'
                 + ' they are: the GPU path has no logic operations');
         }
+        if (scene.stencilBack && scene.stencil
+            && (scene.stencilBack.readMask !== scene.stencil.readMask
+                || scene.stencilBack.writeMask !== scene.stencil.writeMask
+                || scene.stencilBack.reference !== scene.stencil.reference))
+        {
+            diverge('GL_EXT_stencil_two_side set a different reference or mask on each face:'
+                + ' WebGPU has one stencil reference and one read and write mask shared by'
+                + ' both, so the front face\'s were applied to the back face\'s test too');
+        }
         const state = drawStateOf(scene, layout, topology);
         const key = drawKey(state);
         const generated = generatedFor(key, state);
@@ -1342,6 +1352,14 @@ export function createGpuRenderer(services){
                         + `rm${hex(state.stencil.readMask)},wm${hex(state.stencil.writeMask)},`
                         + `${hex(state.stencil.fail)},${hex(state.stencil.zfail)},`
                         + `${hex(state.stencil.zpass)}`
+                        + (state.stencilBack && (state.stencilBack.func !== state.stencil.func
+                            || state.stencilBack.fail !== state.stencil.fail
+                            || state.stencilBack.zfail !== state.stencil.zfail
+                            || state.stencilBack.zpass !== state.stencil.zpass)
+                            ? `/back:${hex(state.stencilBack.func)},`
+                                + `${hex(state.stencilBack.fail)},${hex(state.stencilBack.zfail)},`
+                                + `${hex(state.stencilBack.zpass)}`
+                            : '')
                     : 'off'}`
                 + ` cull=${state.cull}${state.frontIsCcw ? '/ccw' : '/cw'}`
                 + ` mask=${hex(state.colourMask)}`
