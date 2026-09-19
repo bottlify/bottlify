@@ -204,6 +204,25 @@ test('glCopyTexImage2D takes the framebuffer, rows counted from the bottom', ()=
     assert.deepEqual([...texels.subarray(8, 12)], [0, 0, 255, 255], 'the one above is blue');
 });
 
+test('a copy reads the framebuffer as it stood at the call, not after later draws', ()=>{
+    // The shape a mirror or a "currentRender" effect relies on: render A,
+    // copy A into a texture, then clear and render B over the same
+    // framebuffer -- the texture a later surface samples must still hold A,
+    // never B, whatever runs after the copy.
+    const { context } = drawing();
+    const [name] = context.glGenTextures(1);
+    context.glBindTexture(GL.TEXTURE_2D, name);
+    context.glClearColor(1, 0, 0, 1);
+    context.glClear(GL.COLOR_BUFFER_BIT);
+    context.glCopyTexImage2D(GL.TEXTURE_2D, 0, GL.RGB, 0, 0, 8, 8, 0);
+    context.glClearColor(0, 0, 1, 1);
+    context.glClear(GL.COLOR_BUFFER_BIT);
+    assert.equal(context.glGetError(), GL.NO_ERROR);
+    const texels = context.glGetTexImage(GL.TEXTURE_2D, 0, GL.RGBA, GL.UNSIGNED_BYTE);
+    assert.deepEqual([...texels.subarray(0, 4)], [255, 0, 0, 255],
+        'the texture holds the red frame the copy read, not the blue one drawn after it');
+});
+
 test('the texture environment validates its combine parameters', ()=>{
     const { context } = drawing();
     assert.deepEqual(context.glGetTexEnviv(GL.TEXTURE_ENV, GL.TEXTURE_ENV_MODE), [GL.MODULATE]);
