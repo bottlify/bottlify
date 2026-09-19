@@ -1027,6 +1027,11 @@ export function createHarness(canvas, how = {}){
                 hooks: layers.bridge?.hooks ?? [],
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
+                // Which guest address belongs to which module, so a driver
+                // can name `jit.published`'s own addresses without waiting
+                // for the final result (`result.bridge.recent` already does
+                // this resolution itself, but only after the run ends).
+                memoryLayout: layers.memory?.layout ?? [],
                 presents: presentState.presents,
                 // What we send to the card against what the program actually
                 // wrote. A buffer uploaded whole for a lock of a few hundred bytes
