@@ -86,9 +86,15 @@ export function launch({ browser = findBrowser() } = {}){
  *     kept rather than removed on shutdown -- what a warm-store measurement
  *     needs, since OPFS is scoped to the profile and a fresh one starts cold
  *     every time.
+ * @param {string[]} [options.extraFlags]  Extra Chrome flags a scenario needs on
+ *     top of the common GPU set, e.g. `--js-flags=--no-liftoff` for a V8-tiering
+ *     diagnostic run.
  * @returns {Promise<BrowserHandle>}
  */
-export function launchWithGpu({ browser = findBrowser(), headed = false, profileDir } = {}){
+export function launchWithGpu(
+    { browser = findBrowser(), headed = false, profileDir, extraFlags = [] } = {},
+)
+{
     return start(browser, [
         '--enable-unsafe-webgpu',
         '--enable-unsafe-swiftshader',
@@ -97,6 +103,7 @@ export function launchWithGpu({ browser = findBrowser(), headed = false, profile
         // launcher switches sound off, and a run that was meant to measure
         // sound measures its absence. Nobody sits at this browser to click.
         '--autoplay-policy=no-user-gesture-required',
+        ...extraFlags,
     ], headed, profileDir);
 }
 
