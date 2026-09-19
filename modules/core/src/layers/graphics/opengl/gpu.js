@@ -1254,22 +1254,51 @@ export function createGpuRenderer(services){
      *           current: import('./pipeline.js').Scene['current'],
      *           fog: import('./pipeline.js').Scene['fog'],
      *           alphaTest: import('./pipeline.js').Scene['alphaTest'],
+     *           modelview: ArrayLike<number>,
      *           block: Float32Array }>}
      */
     const fixedUniformsCache = new WeakMap();
 
     /**
+     * Sixteen numbers compared as numbers: a matrix a program reloads with
+     * the same values is a new array on the stack and the same matrix here.
+     *
+     * @param {ArrayLike<number>} a @param {ArrayLike<number>} b
+     */
+    const sameMatrix = (a, b)=>{
+        if (a === b)
+        {
+            return true;
+        }
+        if (a.length !== b.length)
+        {
+            return false;
+        }
+        for (let i = 0; i < a.length; i++)
+        {
+            if (a[i] !== b[i])
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+
+    /**
      * The uniform block of a draw: the matrices, the current values and the
      * per-unit constants, in the layout the shader declares.
      *
-     * Doom 3 sets sixteen environment parameters before every interaction
-     * draw, but most repeat between consecutive draws of one light, and this
-     * block depends on none of them directly -- it is the matrices, the
-     * per-unit texture environment and the current vertex attributes that
-     * move, and every one of those already carries a value-comparable
-     * identity (see `sameUnits`, `sameCurrent`, `sameFog`, `sameAlphaTest`),
-     * so a draw that repeats every one of them gets back the very block the
-     * previous draw built, with no `normalMatrix` call and no allocation.
+     * A program may set a dozen environment parameters before every draw,
+     * but most repeat between consecutive draws, and this block depends on
+     * none of them directly -- it is the matrices, the per-unit texture
+     * environment and the current vertex attributes that move, and every one
+     * of those is compared by value (see `sameMatrix`, `sameUnits`,
+     * `sameCurrent`, `sameFog`, `sameAlphaTest`): a `glLoadMatrixf` of the
+     * same sixteen numbers, which a program drawing a screen's text does
+     * once per glyph, is not a change. A draw that repeats every one of them
+     * gets back the very block the previous draw built, with no
+     * `normalMatrix` call and no allocation -- and `joinLastDraw` can then
+     * fold it into the draw before it.
      *
      * @param {object} context
      * @param {import('./pipeline.js').Scene} scene
@@ -1279,7 +1308,8 @@ export function createGpuRenderer(services){
      */
     const uniformsOf = (context, scene, mvp)=>{
         const cached = fixedUniformsCache.get(context);
-        if (cached && cached.mvp === mvp && sameUnits(cached.units, scene.units)
+        if (cached && sameMatrix(cached.mvp, mvp) && sameMatrix(cached.modelview, scene.modelview)
+            && sameUnits(cached.units, scene.units)
             && sameCurrent(cached.current, scene.current) && sameFog(cached.fog, scene.fog)
             && sameAlphaTest(cached.alphaTest, scene.alphaTest))
         {
@@ -1352,8 +1382,8 @@ export function createGpuRenderer(services){
         }
         block[UNIFORM.misc] = scene.alphaTest ? scene.alphaTest.reference : 0;
         fixedUniformsCache.set(context, {
-            mvp, units: scene.units, current: scene.current, fog: scene.fog,
-            alphaTest: scene.alphaTest, block,
+            mvp, modelview: scene.modelview, units: scene.units, current: scene.current,
+            fog: scene.fog, alphaTest: scene.alphaTest, block,
         });
         return block;
     };

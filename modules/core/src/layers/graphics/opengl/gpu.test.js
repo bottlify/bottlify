@@ -299,6 +299,16 @@ test('two draws with unchanged state share the fixed uniform block; a changed on
         assert.equal(diag.uniformsBuilt, 2, 'a changed current colour rebuilds it');
         assert.equal(diag.uniformsReused, 1, 'unchanged from the rebuild');
 
+        // A matrix reloaded with the same sixteen values is the same matrix:
+        // a program drawing a screen's text loads one per glyph.
+        const same = Float32Array.from(context.glGetFloatv(GL.MODELVIEW_MATRIX));
+        context.glLoadMatrixf(same);
+        draw();
+        await r.swap();
+        diag = r.renderer.diagnostics();
+        assert.equal(diag.uniformsBuilt, 2, 'the same matrix reloaded rebuilds nothing');
+        assert.equal(diag.uniformsReused, 2, 'and the block is reused');
+
         const uniforms = r.gpu.of('writeBuffer')
             .filter(w=>/uniforms/.test(w.buffer.descriptor.label));
         // The show copy's block is the last write of each swap; the draw's is
