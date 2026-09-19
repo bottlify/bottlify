@@ -74,11 +74,11 @@ if (inWorker)
     let nextId = 1;
     /** @type {Map<number, (value: any) => void>} */
     const waiting = new Map();
-    /** @param {string} method */
-    const ask = method=>new Promise(resolve=>{
+    /** @param {string} method @param {Record<string, any>} [extra] */
+    const ask = (method, extra)=>new Promise(resolve=>{
         const id = nextId++;
         waiting.set(id, resolve);
-        worker.postMessage({ type: method, id });
+        worker.postMessage({ type: method, id, ...extra });
     });
     /** @type {(gpu: any) => void} */
     let gpuAnswered = ()=>{};
@@ -130,7 +130,7 @@ if (inWorker)
         callLog.slice(from, from + count).join(NEWLINE);
     namespace.logLines = ()=>callLog.length;
     namespace.frameReport = ()=>ask('frameReport');
-    namespace.journalRecent = ()=>ask('journalRecent');
+    namespace.journalRecent = (/** @type {number} */ count)=>ask('journalRecent', { count });
     namespace.exactRestart = ()=>ask('exactRestart');
     namespace.exactStop = ()=>ask('exactStop');
     namespace.clearLog = ()=>{

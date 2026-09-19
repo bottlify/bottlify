@@ -106,7 +106,7 @@ self.onmessage = ({ data })=>{
             break;
         case 'journalRecent':
             self.postMessage({ type: 'answer', id: data.id,
-                value: harness?.journalRecent() ?? [] });
+                value: harness?.journalRecent(data.count) ?? [] });
             break;
         case 'exactRestart':
             self.postMessage({ type: 'answer', id: data.id,

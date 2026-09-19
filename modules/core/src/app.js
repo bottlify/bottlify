@@ -94,12 +94,15 @@ import { createBlockCache, resolveBlockStore }
  *     A frame shown faster than a display can show it is a read of the surface
  *     and an upload that nobody sees.
  * @property {{ categories?: Record<string, string>, capacity?: number,
- *     sequenceBase?: number }} [log]
+ *     bytes?: number, sequenceBase?: number }} [log]
  *     Which call areas are recorded from the first instruction, and how much of
- *     the journal is kept. Everything a program decides about a device it
- *     decides while starting up, so a category switched on once the engine
- *     exists is switched on too late to see any of it. `sequenceBase` is set by
- *     `createApp` on a rebuilt machine and is not something a caller supplies.
+ *     the journal is kept -- `capacity` records in the index, `bytes` for the
+ *     records themselves (default 1 MiB; a call area logging every argument as
+ *     a string fills it far sooner than `capacity`'s own default assumes).
+ *     Everything a program decides about a device it decides while starting
+ *     up, so a category switched on once the engine exists is switched on too
+ *     late to see any of it. `sequenceBase` is set by `createApp` on a rebuilt
+ *     machine and is not something a caller supplies.
  * @property {{ drained?: boolean, sampleRate?: number, mp3?: boolean, shared?: boolean,
  *     memory?: { control: ArrayBufferLike, samples: ArrayBufferLike }
  *         | { table: ArrayBufferLike } }} [audio]
@@ -2372,6 +2375,13 @@ async function buildApp(options){
             // second needs it no bigger, and one that has to hold a whole
             // startup needs it much bigger.
             capacity: options.log?.capacity,
+            // The record count above bounds how many entries the index holds;
+            // this is the byte budget the entries themselves are packed into,
+            // and a category logging strings on every host call (a call area,
+            // every argument as hex) fills it far faster than `capacity`'s own
+            // default assumes. Left at the layer's default for a caller that
+            // never asks.
+            bytes: options.log?.bytes,
             // A machine rebuilt on a child's image continues the sequence
             // numbering of the one it replaced, so a reader holding a cursor
             // from that journal keeps reading rather than falling behind a

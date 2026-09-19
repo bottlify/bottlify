@@ -909,6 +909,7 @@ export function createHarness(canvas, how = {}){
      *           commandLine?: string,
      *           sidecarHooks?: { spec: any, source: string },
      *           logCategories?: Record<string, string>,
+     *           logCapacity?: number, logBytes?: number,
      *           maxTurns?: number, maxMs?: number | null, trace?: boolean,
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
@@ -1064,7 +1065,14 @@ export function createHarness(canvas, how = {}){
             sidecarHooks: request.sidecarHooks,
             // Journal categories on from the first instruction -- a call area
             // a run wants to read back afterwards through `journalRecent`.
-            log: request.logCategories ? { categories: request.logCategories } : undefined,
+            // `logCapacity`/`logBytes` raise the ring above its default when
+            // the category asked for is one a frame makes thousands of calls
+            // under (`call.gpu`, `call.cpu`): the default (4096 records, 1 MiB)
+            // is sized for occasional diagnostics, not a dense capture.
+            log: request.logCategories
+                ? { categories: request.logCategories, capacity: request.logCapacity,
+                    bytes: request.logBytes }
+                : undefined,
             v86: {
                 moduleUrl: new URL('../../../vendor/prebuilt/libv86.mjs', import.meta.url).href,
                 wasmBytes: wasm,
