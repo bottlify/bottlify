@@ -145,15 +145,24 @@ test('a slot rva nothing backs is refused by name rather than throwing out of bi
         assert.match(refused[0], /vector\.dot: Unmapped read/);
     });
 
-test('an entry for another image is refused by name, not silently dropped', async()=>{
+test('an entry for another image is pending, then bound when that image is placed', async()=>{
     const { host } = machine(IMAGE.base + TARGET_RVA);
     const loader = await loaderModule.create({}, host);
-    const { bound, refused } = loader.bindHooks(
-        { hooks: [{ ...GOOD_HOOK, image: 'other.exe' }] }, IMAGE,
+    const spec = { hooks: [{ ...GOOD_HOOK, image: 'other.dll' }] };
+    const first = loader.bindHooks(spec, IMAGE, ()=>0x00900010, ()=>()=>true);
+    assert.deepEqual(first.bound, []);
+    assert.deepEqual(first.refused, []);
+    assert.deepEqual(first.pending, ['vector.dot'], 'neither bound nor refused: waiting');
+    assert.deepEqual(loaderModule.diagnostics().metrics?.hooksPending, ['vector.dot']);
+
+    // The library is placed at the same address this fixture's image sits
+    // at, so the slot and target the entry names hold what they must.
+    const second = loader.bindHooks(spec, { ...IMAGE, name: 'other.dll' },
         ()=>0x00900010, ()=>()=>true);
-    assert.deepEqual(bound, []);
-    assert.deepEqual(refused, ['vector.dot: image other.exe is not loaded; '
-        + 'only the program image is bound']);
+    assert.deepEqual(second.bound, ['vector.dot']);
+    assert.deepEqual(second.pending, [], 'bound now, so no longer pending');
+    assert.deepEqual(loaderModule.diagnostics().metrics?.hooksBound, ['vector.dot'],
+        'the results accumulate across images');
 });
 
 test('a kernel nothing provides is refused by name, after the sidecar checks pass', async()=>{

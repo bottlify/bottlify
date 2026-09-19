@@ -143,8 +143,8 @@ function bindSiteHook(entry, image, memory, register, resolveHandler, allocate, 
 
 /** @type {{ base: number, entryPoint: number, unresolved: string[] }[]} */
 let loaded = [];
-/** @type {{ bound: string[], refused: string[] }} */
-let hookResults = { bound: [], refused: [] };
+/** @type {{ bound: string[], refused: string[], pending: string[] }} */
+let hookResults = { bound: [], refused: [], pending: [] };
 
 export const loaderModule = {
     name: 'loader',
@@ -158,6 +158,9 @@ export const loaderModule = {
      */
     async create(config, host){
         const memory = host.requireApi('memory');
+        // A process's own account: what the previous instance bound is not
+        // what this one has.
+        hookResults = { bound: [], refused: [], pending: [] };
 
         return {
             /**
@@ -331,7 +334,10 @@ export const loaderModule = {
 
             /**
              * Binds a bundle's sidecar hooks against an image already placed
-             * here. The engine names nothing about a title in this function:
+             * here -- called once per image the sidecar names as each is
+             * placed, so a library the program loads at run time gets its
+             * entries the moment it is mapped and before its code runs. The
+             * engine names nothing about a title in this function:
              * `spec` carries the image name, the RVAs and the kernel name from
              * the sidecar, `image` is what was actually loaded, and what a
              * kernel does is entirely `register`'s caller's business -- this
@@ -356,22 +362,25 @@ export const loaderModule = {
              *     Guest heap room for a site hook's trampoline. Only a `site`
              *     entry needs it; a spec of slot entries alone never calls it,
              *     so a caller with nothing but slot hooks may omit it.
-             * @returns {{ bound: string[], refused: string[] }}
+             * @returns {{ bound: string[], refused: string[], pending: string[] }}
+             *     What this call bound and refused, and the entries still
+             *     waiting for their image across every call so far.
              */
             bindHooks(spec, image, register, resolveHandler, allocate){
                 /** @type {string[]} */
                 const bound = [];
                 /** @type {string[]} */
                 const refused = [];
+                /** @type {string[]} */
+                const pending = [];
                 for (const entry of spec.hooks ?? [])
                 {
                     if (entry.image.toLowerCase() !== image.name.toLowerCase())
                     {
-                        // Only the program image is ever bound today (see
-                        // loader.md): a shipped DLL or a mismatched `imagePath`
-                        // basename must not look bound when it never was.
-                        refused.push(`${entry.kernel}: image ${entry.image} is not loaded; `
-                            + 'only the program image is bound');
+                        // Another image's entry: bound when that image is
+                        // placed (a library the program loads at run time),
+                        // pending until then -- neither bound nor refused.
+                        pending.push(entry.kernel);
                         continue;
                     }
                     if (entry.site)
@@ -419,8 +428,16 @@ export const loaderModule = {
                     memory.writeU32(plan.slotAddress, address);
                     bound.push(entry.kernel);
                 }
-                hookResults = { bound, refused };
-                return { bound, refused };
+                // Accumulated across images: the program image first, then
+                // each library as it is loaded. A kernel is pending until the
+                // image it names is placed, and stops being so once bound.
+                const boundSoFar = [...hookResults.bound, ...bound];
+                hookResults = {
+                    bound: boundSoFar,
+                    refused: [...hookResults.refused, ...refused],
+                    pending: pending.filter(name=>!boundSoFar.includes(name)),
+                };
+                return { bound, refused, pending: hookResults.pending };
             },
         };
     },
@@ -438,12 +455,13 @@ export const loaderModule = {
                 unresolved: loaded.flatMap(image=>image.unresolved),
                 hooksBound: hookResults.bound,
                 hooksRefused: hookResults.refused,
+                hooksPending: hookResults.pending,
             },
         };
     },
 
     async dispose(){
         loaded = [];
-        hookResults = { bound: [], refused: [] };
+        hookResults = { bound: [], refused: [], pending: [] };
     },
 };

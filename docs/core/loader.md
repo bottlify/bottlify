@@ -171,9 +171,13 @@ of `spec.hooks` against `image` -- the name, base, `sizeOfImage` and `timeDateSt
 actually loaded, from whoever assembles the process -- and reports what it bound and what it
 refused; this layer names no title and knows nothing of what a hook computes.
 
-Only the program image is bound today: an entry addressed to any other image name (a shipped
-DLL, or a mismatched `imagePath` basename) is refused by name, `"<kernel>: image <name> is not
-loaded; only the program image is bound"`, rather than silently dropped. One addressed to
+`bindHooks` is called once per image the process places -- the program image first, then each
+library the bundle shipped, then every library the program loads at run time, the moment it is
+mapped and before its `DllMain` runs -- and binds the entries addressed to that image. An entry
+addressed to an image not yet placed is neither bound nor refused but *pending*, reported as
+`hooksPending` in the diagnostics until the image it names is placed (a mismatched `imagePath`
+basename therefore shows as a kernel that stays pending, never as one bound). The results
+accumulate across calls: `hooksBound`/`hooksRefused` list every image's outcome. One addressed to
 `image.name` (case-insensitively) is checked, in order, and refused with a reason the moment any of
 these does not hold, each a former silent corruption were it not: the loaded image's
 `timeDateStamp`/`sizeOfImage` must equal the entry's `check` (`planHook`, `internal/hooks.js`) --

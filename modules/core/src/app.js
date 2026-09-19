@@ -3489,6 +3489,12 @@ async function buildApp(options){
         },
     });
 
+    // Binds the sidecar's entries for one image, once the sidecar is set up
+    // (below); until then a library loaded at run time has nothing to bind.
+    /** @type {((image: { name: string, base: number, sizeOfImage: number,
+     *   timeDateStamp: number }) => void) | null} */
+    let bindSidecar = null;
+
     /**
      * LoadLibrary, for a library nothing has loaded yet.
      *
@@ -3637,6 +3643,17 @@ async function buildApp(options){
                     // Both tables, and in this order: the delay-load pass adds
                     // to what the first one recorded rather than replacing it.
                     loader.bindDelayed(mapped, resolveImport, missingImport);
+                    // Before DllMain: a sidecar entry for this library patches
+                    // its code, which must happen before any of it has run
+                    // or been compiled.
+                    bindSidecar?.({
+                        // By file name, as the sidecar names an image; the
+                        // program may have asked for the library by path.
+                        name: name.slice(
+                            Math.max(name.lastIndexOf('\\'), name.lastIndexOf('/')) + 1),
+                        base, sizeOfImage: image.sizeOfImage,
+                        timeDateStamp: image.timeDateStamp,
+                    });
 
                     if (held.entryPoint && held.entryPoint !== base)
                     {
@@ -3829,77 +3846,107 @@ async function buildApp(options){
                 typeof import('./layers/graphics/opengl/exports.js').createOpengl> }} */ (
                     core.api('graphics'))),
             journalCall, ()=>journal.enabled('call.gpu', journal.Level.TRACE), glCounters);
-        const { bound, refused } = loader.bindHooks(
-            options.sidecarHooks.spec,
+        const spec = options.sidecarHooks.spec;
+        /**
+         * @param {{ name: string, base: number, sizeOfImage: number, timeDateStamp: number }}
+         *     target the image, as placed
+         */
+        bindSidecar = target=>{
+            const result = loader.bindHooks(
+                spec,
+                target,
+                /** @param {{ name: string, argBytes: number, target: number, handler: Function,
+                 *   site?: undefined }
+                 *   | { name: string, site: true, trampoline: number, resume: number,
+                 *   stackAdjust: number, handler: Function }} hookOptions */
+                hookOptions=>hookOptions.site
+                    ? bridge.siteHook(hookOptions.name, hookOptions)
+                    : bridge.hook(hookOptions.name, hookOptions),
+                /** @param {import('./layers/loader/internal/hooks.js').HookEntry
+                 *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry */
+                entry=>resolveKernel(entry, target.base),
+                allocateFromHeap);
+            events.emit('hooks-bound', { image: target.name, ...result });
+        };
+        /**
+         * @param {import('./layers/loader/internal/hooks.js').HookEntry
+         *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry
+         * @param {number} base the base of the image the entry names
+         */
+        const resolveKernel = (entry, base)=>{
+            const kernelFn = kernels[entry.kernel];
+            if (!kernelFn)
             {
-                name: imageName, base: image.base,
-                sizeOfImage: mainModule.image.sizeOfImage,
-                timeDateStamp: mainModule.image.timeDateStamp,
-            },
-            /** @param {{ name: string, argBytes: number, target: number, handler: Function,
-             *   site?: undefined }
-             *   | { name: string, site: true, trampoline: number, resume: number,
-             *   stackAdjust: number, handler: Function }} hookOptions */
-            hookOptions=>hookOptions.site
-                ? bridge.siteHook(hookOptions.name, hookOptions)
-                : bridge.hook(hookOptions.name, hookOptions),
-            /** @param {import('./layers/loader/internal/hooks.js').HookEntry
-             *   | import('./layers/loader/internal/hooks.js').SiteHookEntry} entry */ entry=>{
-                const kernelFn = kernels[entry.kernel];
-                if (!kernelFn)
+                return null;
+            }
+            const guest = {
+                ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
+            };
+            const site = Boolean(entry.site);
+            // Built once per bound entry rather than once per call: the
+            // base and the GL handle are the same on every call a given
+            // site makes, so only the kernel's own arguments change.
+            const frame = site ? { base, gl: kernelGl } : undefined;
+            return (/** @type {number[] | Record<string, number>} */ argsOrRegisters)=>{
+                // Guard and fall through, the discipline every guest-code
+                // replacement in this engine keeps: a kernel is the
+                // bundle's own code, on the bundle's own data, and a bug
+                // in it is not a reason to bring the run down when the
+                // guest's own function is right there to fall back on.
+                let handled;
+                // A GL call the kernel already issued through `frame.gl`
+                // before it threw is not undone -- the guest's own
+                // function then runs the whole pass again on top of it --
+                // so `hook-error`'s payload says how many, rather than
+                // leaving that silent.
+                const glCallsBefore = glCounters.calls;
+                try
                 {
-                    return null;
+                    // A site kernel gets a third argument, `frame`, with
+                    // the image base -- so it can follow a data pointer
+                    // the sidecar gave it as an RVA -- distinct from the
+                    // dispatcher's own call frame, which a site hook has
+                    // no real use for (there was no call to marshal).
+                    handled = site
+                        ? kernelFn(guest, argsOrRegisters, frame)
+                        : kernelFn(guest, argsOrRegisters);
                 }
-                const guest = {
-                    ...guestView, mismatch: ()=>bridge.reportHookMismatch(entry.kernel),
-                };
-                const site = Boolean(entry.site);
-                // Built once per bound entry rather than once per call: the
-                // base and the GL handle are the same on every call a given
-                // site makes, so only the kernel's own arguments change.
-                const frame = site ? { base: image.base, gl: kernelGl } : undefined;
-                return (/** @type {number[] | Record<string, number>} */ argsOrRegisters)=>{
-                    // Guard and fall through, the discipline every guest-code
-                    // replacement in this engine keeps: a kernel is the
-                    // bundle's own code, on the bundle's own data, and a bug
-                    // in it is not a reason to bring the run down when the
-                    // guest's own function is right there to fall back on.
-                    let handled;
-                    // A GL call the kernel already issued through `frame.gl`
-                    // before it threw is not undone -- the guest's own
-                    // function then runs the whole pass again on top of it --
-                    // so `hook-error`'s payload says how many, rather than
-                    // leaving that silent.
-                    const glCallsBefore = glCounters.calls;
-                    try
-                    {
-                        // A site kernel gets a third argument, `frame`, with
-                        // the image base -- so it can follow a data pointer
-                        // the sidecar gave it as an RVA -- distinct from the
-                        // dispatcher's own call frame, which a site hook has
-                        // no real use for (there was no call to marshal).
-                        handled = site
-                            ? kernelFn(guest, argsOrRegisters, frame)
-                            : kernelFn(guest, argsOrRegisters);
-                    }
-                    catch (e){
-                        events.emit('hook-error', {
-                            kernel: entry.kernel,
-                            message: e instanceof Error ? e.message : String(e),
-                            glCalls: glCounters.calls - glCallsBefore,
-                        });
-                        return false;
-                    }
-                    // `oracle` never skips the guest's own code, whatever the
-                    // kernel decided: that is the whole of the differential
-                    // guard, and it is the sidecar's flag, not the kernel's.
-                    // A site hook has no in-browser oracle (see loader.md);
-                    // its `mode` is always `replace`.
-                    return entry.mode === 'oracle' ? false : handled;
-                };
-            },
-            allocateFromHeap);
-        events.emit('hooks-bound', { bound, refused });
+                catch (e){
+                    events.emit('hook-error', {
+                        kernel: entry.kernel,
+                        message: e instanceof Error ? e.message : String(e),
+                        glCalls: glCounters.calls - glCallsBefore,
+                    });
+                    return false;
+                }
+                // `oracle` never skips the guest's own code, whatever the
+                // kernel decided: that is the whole of the differential
+                // guard, and it is the sidecar's flag, not the kernel's.
+                // A site hook has no in-browser oracle (see loader.md);
+                // its `mode` is always `replace`.
+                return entry.mode === 'oracle' ? false : handled;
+            };
+        };
+        bindSidecar({
+            name: imageName, base: image.base,
+            sizeOfImage: mainModule.image.sizeOfImage,
+            timeDateStamp: mainModule.image.timeDateStamp,
+        });
+        // Libraries the bundle shipped and the image imported statically are
+        // already placed by now; a runtime load binds itself as it maps.
+        for (const held of byBase.values())
+        {
+            if (held.image && held.base !== image.base)
+            {
+                bindSidecar({
+                    name: held.name.slice(
+                        Math.max(held.name.lastIndexOf('\\'), held.name.lastIndexOf('/')) + 1),
+                    base: held.base,
+                    sizeOfImage: held.image.sizeOfImage,
+                    timeDateStamp: held.image.timeDateStamp,
+                });
+            }
+        }
     }
 
     const stubs = cpu.thunkImage();

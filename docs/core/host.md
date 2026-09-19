@@ -212,8 +212,10 @@ program calling a missing import in a loop cannot flood the page's queue; both e
 undecorated name of a system library ends the run as a `guest-fault` naming it), `divergence`, `message-box`, `clipboard` (`{ text }`, what a program copied, for the page to put on the browser clipboard), `library-loaded`, `library-missing`,
 `libraries`, `bundle`, `bundle-retry`, `bundle-prefetch`, `bundle-unavailable`, `session`,
 `process-create`, `process-replace`, `process-started`, `process-patched`, `hooks-bound`
-(`{ bound, refused }`, once per `bindHooks` call against `sidecarHooks` -- kernel names bound,
-and refusal reasons by name; a consumer that does not subscribe never sees a refused hook),
+(`{ image, bound, refused, pending }`, once per image the sidecar is bound against -- the
+program image, each shipped library, and each library loaded at run time as it is mapped:
+kernel names bound, refusal reasons by name, and the kernels still waiting for an image not yet
+placed; a consumer that does not subscribe never sees a refused hook),
 `hook-error` (`{ kernel, message, glCalls }`, a sidecar kernel threw -- the call falls through to
 the guest's own function, no rate limit; `glCalls` is how many calls the kernel issued through
 `frame.gl` before it threw, since those are not undone), `debug` (the full list is
