@@ -946,6 +946,7 @@ export function createHarness(canvas, how = {}){
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
+     *           sampling?: boolean,
      *           store?: string, prefetch?: boolean, bundleId?: string }} request
      * @returns {Promise<any>}
      */
@@ -1147,6 +1148,7 @@ export function createHarness(canvas, how = {}){
             // instruction pointer is then the only account of what it was doing --
             // which is exactly the situation once a game reaches its own main loop.
             jit: request.jit || undefined,
+            sampling: request.sampling,
             quantum: request.quantum || undefined,
             sample: request.profile || request.quantum ? recordSample : undefined,
             device: {
