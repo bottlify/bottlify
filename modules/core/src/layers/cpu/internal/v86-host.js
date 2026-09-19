@@ -153,6 +153,34 @@ export function tailCallsSupported(){
 const BRING_UP_SLICES = 64;
 
 /**
+ * How many `codegen_finalize` publishes `jitState().published` keeps, oldest
+ * dropped first. A run of this title's ceiling view publishes on the order of
+ * a few hundred modules, so this is headroom rather than a tight cap.
+ */
+const PUBLISHED_LIMIT = 4096;
+
+/**
+ * Appends a `[slot, start]` publish record to a ring kept as a plain array,
+ * dropping the oldest once `limit` is exceeded.
+ *
+ * A plain function rather than a class: the only state is the array the
+ * caller owns, and the only two things done to it are "add one" and "keep at
+ * most `limit`" -- both of which need no more than this.
+ *
+ * @param {[number, number][]} ring
+ * @param {number} limit
+ * @param {number} slot
+ * @param {number} start
+ */
+export function pushPublished(ring, limit, slot, start){
+    ring.push([slot, start]);
+    if (ring.length > limit)
+    {
+        ring.shift();
+    }
+}
+
+/**
  * Boots an emulator instance with our own ROM and returns the cpu layer's
  * internal handle to it.
  *
@@ -234,6 +262,13 @@ export async function createV86Host(config){
     // fails silently and every guest instruction is interpreted for the rest of
     // the run -- which is correct, several times slower, and invisible.
     let finalisedModules = 0;
+    // The last PUBLISHED_LIMIT modules the compiler finalised, oldest first,
+    // as [slot, start] pairs -- `start` is the guest linear address the unit
+    // begins at, for naming a JIT unit by the guest function it compiles
+    // (joined against `Debugger.scriptParsed`'s wasm:// arrival order, which
+    // fires once per publish in the same order as this ring).
+    /** @type {[number, number][]} */
+    const published = [];
     // How many compiled modules the emulator threw away, and how much guest
     // memory we wrote from the host. Every host write goes through v86's
     // write_blob, which dirties the JIT cache for every page it touches -- so a
@@ -283,6 +318,7 @@ export async function createV86Host(config){
         {
             finalise(...args);
             finalisedModules++;
+            pushPublished(published, PUBLISHED_LIMIT, args[0], args[1]);
         }
         catch (e){
             finaliseFailure ??= /** @type {Error} */ (e).message ?? String(e);
@@ -839,6 +875,7 @@ export async function createV86Host(config){
                     interpPages: interpPages(),
                     dirtyPages: dirtyPages(),
                     finalised: finalisedModules,
+                    published: published.slice(),
                     discarded: clearedFunctions,
                     hostWrites,
                     hostWrittenBytes,
