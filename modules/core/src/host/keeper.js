@@ -176,6 +176,13 @@ export function serveKeeper(port, options = {}){
             {
                 poll();
                 const count = Math.max(0, Number(args[0] ?? 100));
+                // The mirror holds what a live view scrolls; a tail longer
+                // than it (a capture of a few frames of a call area) is read
+                // off the shared block itself, whose ring the engine sized.
+                if (count > history.length && reader)
+                {
+                    return reader.recent(count);
+                }
                 return history.slice(Math.max(0, history.length - count));
             }
             case 'drain':

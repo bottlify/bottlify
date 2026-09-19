@@ -165,7 +165,9 @@ test('a read catches the current block up, so a tail since the last poll is not 
     const keeper = openKeeper({ intervalMs: 0, capacity: 64 });
     t.after(()=>keeper.stop());
 
-    const journal = createJournal({ now: ()=>0, shared: true, capacity: 64 });
+    // The block's own ring is larger than the keeper's mirror, as an engine sized
+    // for a capture of a call area leaves it.
+    const journal = createJournal({ now: ()=>0, shared: true, capacity: 512 });
     journal.write(Level.INFO, 'boot', 'one');
     keeper.send({ type: 'attach', memory: { journal: journal.memory() }, sequenceBase: 0 });
     await keeper.poll();
@@ -183,6 +185,16 @@ test('a read catches the current block up, so a tail since the last poll is not 
     assert.deepEqual(drained.records.map(/** @param {any} r */ r=>r.text),
         ['one', 'crash-a', 'crash-b']);
     assert.equal(drained.lost, 0);
+
+    // A tail longer than the mirror is the block's own: a capture of a
+    // few frames of a call area outruns any live view's history.
+    for (let i = 0; i < 200; i++)
+    {
+        journal.write(Level.INFO, 'boot', `line-${i}`);
+    }
+    const whole = await keeper.ask('recent', [1000]);
+    assert.ok(whole.length > 64, `${whole.length} records, more than the mirror holds`);
+    assert.equal(whole[whole.length - 1].text, 'line-199');
 });
 
 test('a second block attached continues the first, and a cursor from it resolves', async t=>{
