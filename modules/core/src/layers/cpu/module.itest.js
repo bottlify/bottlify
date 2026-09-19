@@ -139,6 +139,27 @@ test('the account can be asked where the interpreter ran, exactly', async()=>{
     await cpuModule.dispose();
 });
 
+test('slices against a real emulator credit the address the guest ran at', async()=>{
+    const { api } = await booted(new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE);
+
+    api.runSlice(20_000);
+    // `diagnostics()` is the module's, not the instance's -- read through the
+    // same door a real caller does.
+    const status = cpuModule.diagnostics();
+    assert.equal(status.status, 'ready');
+    const metrics = /** @type {any} */ (status.metrics ?? {});
+    assert.ok(metrics.samples.slices > 0, 'the slice that ran was credited');
+    assert.ok(metrics.samples.top.length > 0);
+    const [top] = metrics.samples.top;
+    assert.ok(top.address >= GUEST_CODE - 0x40 && top.address < GUEST_CODE + 3,
+        `the heaviest bucket is at 0x${top.address.toString(16)}, not the guest's loop`);
+    assert.ok(top.instructions > 0);
+    assert.ok(top.ms >= 0);
+
+    api.stop();
+    await cpuModule.dispose();
+});
+
 test('an exception the processor cannot deliver is a double fault, not a host overflow', async()=>{
     // Paging turned on over a page directory of zeroes: the next fetch page
     // faults, delivering that reads the interrupt table through the same

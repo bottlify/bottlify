@@ -10,6 +10,7 @@ import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
 import { readFault, describeFault, hostFault } from './internal/faults.js';
 import { captureContext, restoreContext, setThreadBase } from './internal/context.js';
+import { createSampleTable, creditSample, topSamples } from './internal/samples.js';
 
 /**
  * Guest RAM when nobody says otherwise. A gigabyte, because a program of this
@@ -108,13 +109,22 @@ export const cpuModule = {
          *
          * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
          *          worstInterpreted: number, worstInterpretedAt: number,
-         *          interpretedBefore: number, lastFault: any, disposed: boolean }}
+         *          interpretedBefore: number, lastFault: any, disposed: boolean,
+         *          samples: ReturnType<typeof createSampleTable> }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
-            lastFault: null, disposed: false,
+            lastFault: null, disposed: false, samples: createSampleTable(),
         };
+
+        // Always on, because the whole point is never having to reproduce a
+        // heavy frame under a second run just to find out where it went --
+        // the cost this pays every slice is a register read and a table
+        // update, measured to leave the guest phase's ms/frame unchanged. A
+        // caller measuring the emulator itself (a JIT budget comparison) can
+        // still turn it off.
+        const samplingEnabled = config?.sampling !== false;
 
         if (typeof log?.metrics?.counters === 'function')
         {
@@ -416,6 +426,7 @@ export const cpuModule = {
                 const machine = started();
                 const from = machine.eip();
                 let instructions = 0;
+                const sliceStart = samplingEnabled ? performance.now() : 0;
                 try
                 {
                     instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
@@ -466,6 +477,17 @@ export const cpuModule = {
                 {
                     state.worstInterpreted = ran;
                     state.worstInterpretedAt = from;
+                }
+                // Where the slice left the guest, weighted by what it retired
+                // getting there -- the only boundary this layer owns, and the
+                // one every slice crosses regardless of what the guest was
+                // doing. Skipped for a slice that retired nothing: a parked
+                // thread's turn says nothing about where the guest's own code
+                // runs hot.
+                if (samplingEnabled && instructions > 0)
+                {
+                    creditSample(state.samples, machine.eip(), instructions,
+                        performance.now() - sliceStart);
                 }
                 return instructions;
             },
@@ -623,6 +645,16 @@ export const cpuModule = {
                 // say what it is doing; sampled repeatedly from outside, this
                 // one number names the loop.
                 eip: instance.host.eip(),
+                // Where every slice since boot has gone, by address bucket.
+                // `top` is reported by the bucket's own address rather than
+                // by rank, so a caller polling this once a second (the
+                // overlay's own pattern) can take a delta per bucket across
+                // two readings instead of per position in the list.
+                samples: {
+                    slices: instance.samples.slices,
+                    overflow: instance.samples.overflow,
+                    top: topSamples(instance.samples, 64),
+                },
             },
         };
     },
@@ -642,6 +674,7 @@ export const cpuModule = {
             current.worstInterpretedAt = 0;
             current.interpretedBefore = 0;
             current.lastFault = null;
+            current.samples = createSampleTable();
             current.disposed = true;
         }
         current = null;

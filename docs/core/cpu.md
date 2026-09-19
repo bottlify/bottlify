@@ -43,6 +43,7 @@ enter the type check or the bundle.
 | `thunkBase`     | number                     | `0x100000`          | Where the stub table is placed. Low, so everything between it and `initialStack` can be the first thread's stack. |
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
+| `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).
@@ -113,6 +114,7 @@ yet are the same state from a caller's perspective.
 | `trapCrossings` | Times the guest has left its own code for ours — every import, COM method and fault comes through the one trap port. | Every crossing. |
 | `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, slowWrites, codePageWritesKept, x87TagLost, x87Sites, dirtyPages, finalised, published, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. `published` is the last 4096 `[slot, start]` pairs `codegen_finalize` was called with, oldest first — `start` is the guest linear address the compiled unit begins at, for naming a JIT unit by the guest function it compiles once joined against the arrival order of the debugger's own `wasm://` script-parsed events. |
 | `eip`           | The guest's instruction pointer. | Continuously; sampling it names a loop no host call would reveal. |
+| `samples`       | `{ slices, overflow, top: [{ address, instructions, ms, samples }] }` — where every slice since boot has gone, by 64-byte address bucket; `top` is the 64 heaviest by instructions, reported by each bucket's own address rather than by rank. | Every slice that retired at least one instruction (see "Sampling" below). |
 
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it
 reads zero always); `compiledSteps` versus `interpretedSteps` is the number that says whether the
@@ -181,6 +183,27 @@ records a `double fault at <eip>: a page fault at <cr2> while delivering a fault
 `detail` set; EIP is still on the instruction that faulted first, and CR2 holds the last address
 that would not translate) and halts the machine, so the run ends through `fault()` like any
 other.
+
+### Sampling
+
+Every slice that retires at least one instruction credits the address it ended at
+(`internal/samples.js`) — a slice that retired nothing is a parked thread's turn and says
+nothing about where the guest's own code runs hot, so it is skipped. Addresses are bucketed to
+64 bytes (`eip >>> 6`) in a `Map` capped at 16 384 distinct buckets; a bucket beyond the cap is
+counted as overflow rather than grown into, so a long run's own memory here is bounded no matter
+how much guest code it touches. The cost is one register read (`eip`, already needed for other
+bookkeeping in `runSlice`) and one table update per slice — nothing that scales with instructions
+or basic blocks — measured to leave the `guest` phase's ms/frame unchanged with sampling on
+versus off on the same window. Always on (`sampling: false` is the only way to turn it off, for a
+caller measuring the emulator's own compiler rather than the guest's code).
+
+What a bucket's address belongs to — which image, which function — is not this layer's
+knowledge: `diagnostics().samples.top` reports raw addresses, and resolving one against the
+loader's module layout (`image` + `base` → an RVA) is left to whoever reads it, the same way the
+kernel's own page counts are resolved into modules by a reader rather than by the kernel
+(`docs/core/loader.md`, `docs/core/log.md`'s `guestByModule`). Naming the *function* a resolved
+address falls in needs a symbol table, which is per-title bundle content this layer never reads
+(`docs/core/host.md`'s `sidecarHooks`, "Sidecar hooks" in `loader.md`).
 
 ### Traps and the stub table
 
@@ -287,6 +310,7 @@ Unit tests (no emulator; `npm test` runs `src/**/*.test.js`):
 | `internal/thunks.test.js` | Stub encoding per convention, forwarding stubs and their register save, a hook stub's single `push edx` and its held EIP (no `ret`, no `jmp`), refusal when the table is full, the default capacity. |
 | `internal/context.test.js` | Context round trips, lazy flags travelling together, x87 stack pointer/tag word, the TEB being part of the switch. |
 | `internal/fpu.test.js` | Double to extended conversion (sign of zero, explicit leading bit), push/pop, overflow refusal, control word. |
+| `internal/samples.test.js` | A slice at a known EIP credits that bucket; two addresses inside one 64-byte span fold together, two spans apart stay separate; `topSamples` ranks by instructions and reports each bucket's own address; ten thousand distinct addresses leave the table's own size bounded at the cap, with the rest counted as overflow. |
 
 Integration tests (`npm run test:integration` runs `src/**/*.itest.js`; they need the prebuilt
 emulator in `modules/core/vendor/prebuilt/` — `npm run fetch:v86`):
