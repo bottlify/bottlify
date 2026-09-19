@@ -133,8 +133,9 @@ import { applyTextureEnvironment, cubeFaceOf, sample2D } from './texture.js';
  * @property {{ src: number, dst: number } | null} blend   the factors, when blending is on
  * @property {SceneStencil | null} stencil   when the stencil test is on
  * @property {SceneStencil | null} stencilBack   GL_EXT_stencil_two_side's back-face
- *           record, present exactly when `stencil` is -- and equal to it under a title
- *           that never enables the extension
+ *           record, present exactly when `stencil` is -- and equal to it whenever
+ *           two-sided stencil testing (`GL_STENCIL_TEST_TWO_SIDE_EXT`) is off, per the
+ *           extension's "front for all fragments" rule for a disabled test
  * @property {{ factor: number, units: number } | null} polygonOffset   when filled
  *           polygons are offset
  * @property {boolean} colourSum

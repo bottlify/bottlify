@@ -613,38 +613,44 @@ test('a call that is accepted and not honoured reports a divergence, once', ()=>
     assert.match(reported[2], /selection/);
 });
 
-test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask, and glGet always '
-    + 'answers the front', ()=>{
+test('GL_EXT_stencil_two_side: the active face routes glStencilFunc/Op/Mask and the '
+    + 'unsuffixed glGet queries alike, independently of the two-sided enable', ()=>{
     const { context } = drawing();
     assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.FRONT],
         'a fresh context starts on the front face');
 
-    // With the extension disabled, every setter still writes both records --
-    // the byte-identical single-state behaviour a title that never enables
-    // it always had.
+    // The selector is like glActiveTextureARB: it governs the setters and
+    // the unsuffixed queries with the two-sided enable untouched (still off
+    // here), which is what keeps a title that never calls it writing the
+    // single record it always had.
     context.glStencilFunc(GL.GEQUAL, 3, 0xf0);
     context.glStencilOp(GL.INCR, GL.DECR, GL.REPLACE);
     context.glStencilMask(0x0f);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.GEQUAL]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [3]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FAIL), [GL.INCR]);
-    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0x0f]);
-
-    context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
-    context.glActiveStencilFaceEXT(GL.BACK);
-    assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
-    context.glStencilFunc(GL.ALWAYS, 9, 0xff);
-    context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
-    context.glStencilMask(0xaa);
-
-    // Only the back face moved; the front is exactly what glGet answers.
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.GEQUAL]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [3]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0x0f]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS],
+        'the front-only write left the back record at its default');
+
+    // Selecting the back face -- the two-sided enable is still off -- moves
+    // both the setters and the unsuffixed queries onto it.
+    context.glActiveStencilFaceEXT(GL.BACK);
+    assert.deepEqual(context.glGetIntegerv(GL.ACTIVE_STENCIL_FACE_EXT), [GL.BACK]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.ALWAYS],
+        'glGet with no suffix answers the active face, not always the front');
+    context.glStencilFunc(GL.ALWAYS, 9, 0xff);
+    context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
+    context.glStencilMask(0xaa);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_FUNC), [GL.ALWAYS]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_REF), [9]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_PASS_DEPTH_PASS), [GL.INCR_WRAP]);
     assert.deepEqual(context.glGetIntegerv(GL.STENCIL_BACK_WRITEMASK), [0xaa]);
+
+    // The first block's front record is untouched by any of the above.
+    context.glActiveStencilFaceEXT(GL.FRONT);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_FUNC), [GL.GEQUAL]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_REF), [3]);
+    assert.deepEqual(context.glGetIntegerv(GL.STENCIL_WRITEMASK), [0x0f]);
 
     context.glActiveStencilFaceEXT(0x1234);
     assert.equal(context.glGetError(), GL.INVALID_ENUM, 'not a face');

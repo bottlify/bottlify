@@ -248,13 +248,35 @@ test('GL_EXT_stencil_two_side gives WebGPU\'s stencilFront and stencilBack their
     })).depthStencil;
     assert.equal(descriptor.stencilFront.passOp, 'increment-wrap');
     assert.equal(descriptor.stencilBack.passOp, 'decrement-wrap');
-    // A stencilBack absent altogether (every caller before the extension
-    // existed) still mirrors the front, unchanged from before.
+    // A one-sided state (`stencilBack` absent) has no back ops of its own:
+    // both faces get the front's.
     const oneSided = drawDescriptor(state({
         stencil: { func: GL.ALWAYS, fail: GL.KEEP, zfail: GL.KEEP, zpass: GL.INCR,
             readMask: 0xff, writeMask: 0xff },
     })).depthStencil;
     assert.deepEqual(oneSided.stencilBack, oneSided.stencilFront);
+});
+
+test('a stencilBack present and equal to the front is the same key and descriptor as one '
+    + 'absent: the shape context-scene.js\'s builder actually emits', ()=>{
+    const front = { func: GL.GEQUAL, fail: GL.KEEP, zfail: GL.INCR, zpass: GL.REPLACE,
+        readMask: 0xff, writeMask: 0x0f };
+    const withBack = state({ stencil: front, stencilBack: { ...front } });
+    const withoutBack = state({ stencil: front });
+    assert.equal(drawKey(withBack), drawKey(withoutBack));
+    assert.deepEqual(drawDescriptor(withBack), drawDescriptor(withoutBack));
+});
+
+test('the back face\'s masks fold into neither the key nor the descriptor: WebGPU has no '
+    + 'per-face mask to give them', ()=>{
+    const front = { func: GL.GEQUAL, fail: GL.KEEP, zfail: GL.INCR, zpass: GL.REPLACE,
+        readMask: 0xff, writeMask: 0x0f };
+    const a = state({ stencil: front,
+        stencilBack: { ...front, readMask: 0x0f, writeMask: 0xf0 } });
+    const b = state({ stencil: front,
+        stencilBack: { ...front, readMask: 0xff, writeMask: 0xff } });
+    assert.equal(drawKey(a), drawKey(b));
+    assert.deepEqual(drawDescriptor(a), drawDescriptor(b));
 });
 
 test('a stencil-shadowed light\'s three passes get the descriptor their state names', ()=>{

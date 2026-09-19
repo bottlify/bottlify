@@ -630,6 +630,68 @@ test('the stencil test on the device path is not reported: the depth attachment 
         assert.equal(r.divergences.some(d=>/stencil buffer/.test(d)), false);
     });
 
+/** @param {ReturnType<typeof rig>} r a triangle, drawn under whatever stencil state is set */
+async function drawTriangle(r){
+    const { context } = r;
+    context.glBegin(GL.TRIANGLES);
+    context.glVertex2f(0, 0);
+    context.glVertex2f(8, 0);
+    context.glVertex2f(8, 8);
+    context.glEnd();
+    await r.swap();
+}
+
+test('GL_EXT_stencil_two_side: a back record set while the two-sided enable is off never '
+    + 'reaches a draw -- the scene mirrors the front', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glEnable(GL.STENCIL_TEST);
+    context.glStencilFunc(GL.GEQUAL, 3, 0xff);
+    context.glStencilOp(GL.KEEP, GL.KEEP, GL.REPLACE);
+    // Selecting the back face and giving it different ops is legal with
+    // GL_STENCIL_TEST_TWO_SIDE_EXT off (the selector does not depend on the
+    // enable), but a draw's test only ever consults the front while it is
+    // off, so this must never be what a pipeline is built from.
+    context.glActiveStencilFaceEXT(GL.BACK);
+    context.glStencilFunc(GL.ALWAYS, 9, 0xff);
+    context.glStencilOp(GL.KEEP, GL.KEEP, GL.INCR_WRAP);
+    context.glActiveStencilFaceEXT(GL.FRONT);
+    await drawTriangle(r);
+    const pipeline = r.gpu.of('createRenderPipeline')
+        .find(p=>p.descriptor.depthStencil.stencilFront.compare === 'greater-equal');
+    assert.ok(pipeline, 'the front ops reached a pipeline');
+    assert.deepEqual(pipeline.descriptor.depthStencil.stencilBack,
+        pipeline.descriptor.depthStencil.stencilFront,
+        'the back face the draw never enabled must not carry the ops set on GL_BACK');
+});
+
+test('GL_EXT_stencil_two_side: a differing reference is not reported when the back face '
+    + 'never reads it', async()=>{
+    const r = rig();
+    const { context } = r;
+    context.glEnable(GL.STENCIL_TEST);
+    context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
+    context.glStencilFunc(GL.GEQUAL, 5, 0xff);
+    context.glActiveStencilFaceEXT(GL.BACK);
+    context.glStencilFunc(GL.ALWAYS, 0, 0xff);
+    await drawTriangle(r);
+    assert.equal(r.divergences.some(d=>/different reference or mask/.test(d)), false,
+        'GL_ALWAYS with the default KEEP ops never reads its reference');
+});
+
+test('GL_EXT_stencil_two_side: a differing reference the back face does read is reported',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        context.glEnable(GL.STENCIL_TEST);
+        context.glEnable(GL.STENCIL_TEST_TWO_SIDE_EXT);
+        context.glStencilFunc(GL.GEQUAL, 5, 0xff);
+        context.glActiveStencilFaceEXT(GL.BACK);
+        context.glStencilFunc(GL.GEQUAL, 9, 0xff);
+        await drawTriangle(r);
+        assert.ok(r.divergences.some(d=>/different reference or mask/.test(d)));
+    });
+
 /**
  * The one view of a single level the copy renders into, and its render pass.
  *

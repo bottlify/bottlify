@@ -68,9 +68,11 @@ import { FRAGMENT_PROGRAM_GROUP, VARYING_TEXCOORDS, emitFragment, emitVertex, ne
  *              readMask: number, writeMask: number } | null} stencil
  * @property {{ func: number, fail: number, zfail: number, zpass: number,
  *              readMask: number, writeMask: number } | null} [stencilBack]
- *           GL_EXT_stencil_two_side's back-face ops; absent or equal to
- *           `stencil` gets WebGPU's `stencilBack` the front's own record, as
- *           it always had before the extension existed
+ *           GL_EXT_stencil_two_side's back-face ops. A state with no back
+ *           record is one-sided: both faces get the front's ops. Optional
+ *           only for this file's own pre-extension test fixtures -- every
+ *           production caller (`gpu.js`) always supplies it, present exactly
+ *           when `stencil` is.
  * @property {'none' | 'front' | 'back'} cull
  * @property {boolean} frontIsCcw
  * @property {number} viewportHeight  the render target's rows; fragment.position reads it
@@ -201,8 +203,13 @@ export function drawKey(state){
         ? `${face.func},${face.fail},${face.zfail},${face.zpass},${face.readMask},`
             + `${face.writeMask}`
         : '-');
+    /** @param {DrawState['stencil']} face the back's own ops, without the masks WebGPU
+     *  never applies to it (they are the shared, front-only ones `stencil` already keys) */
+    const stencilBackFace = face=>(face
+        ? `${face.func},${face.fail},${face.zfail},${face.zpass}`
+        : '-');
     const stencil = stencilFace(state.stencil);
-    const stencilBack = stencilFace(state.stencilBack ?? state.stencil);
+    const stencilBack = stencilBackFace(state.stencilBack ?? state.stencil);
     return [
         attributes,
         state.strides.join(','),
@@ -846,9 +853,8 @@ export function drawDescriptor(state){
         }
         : { compare: 'always', failOp: 'keep', depthFailOp: 'keep', passOp: 'keep' });
     const face = stencilFace(state.stencil);
-    // `stencilBack` is absent for a caller that never heard of the extension
-    // (this file's own tests, and every pipeline built before it existed):
-    // that state is the front's applied to both faces, exactly as before.
+    // A one-sided state (`stencilBack` absent) has no back ops of its own:
+    // both faces get the front's.
     const backFace = stencilFace(state.stencilBack ?? state.stencil);
     return {
         vertexBuffers: buffers,
@@ -871,8 +877,8 @@ export function drawDescriptor(state){
             stencilFront: face,
             stencilBack: backFace,
             // WebGPU has one read mask and one write mask for both faces; the
-            // front's own are what a title that never diverges the two faces
-            // always had, and `gpu.js` reports it once when they do diverge.
+            // front's own are exact for a program whose two faces agree, and
+            // `gpu.js` reports a divergence once when they do not.
             stencilReadMask: state.stencil ? state.stencil.readMask : 0xff,
             stencilWriteMask: state.stencil ? state.stencil.writeMask : 0,
             // GL's units are multiples of the smallest resolvable difference,

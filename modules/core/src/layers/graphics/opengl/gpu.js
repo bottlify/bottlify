@@ -287,6 +287,21 @@ function describeCensus(texture){
  */
 
 /**
+ * Whether a stencil face's own test or write ever consults its reference:
+ * `GL_ALWAYS` and `GL_NEVER` decide the test without it, and only `GL_REPLACE`
+ * among the ops writes it into the buffer. A face for which this is false can
+ * be given WebGPU's one shared reference in place of its own without
+ * changing a pixel.
+ *
+ * @param {{ func: number, fail: number, zfail: number, zpass: number }} face
+ * @returns {boolean}
+ */
+function readsStencilReference(face){
+    return (face.func !== GL.ALWAYS && face.func !== GL.NEVER)
+        || face.fail === GL.REPLACE || face.zfail === GL.REPLACE || face.zpass === GL.REPLACE;
+}
+
+/**
  * @param {GpuServices} services
  */
 export function createGpuRenderer(services){
@@ -1271,7 +1286,8 @@ export function createGpuRenderer(services){
         if (scene.stencilBack && scene.stencil
             && (scene.stencilBack.readMask !== scene.stencil.readMask
                 || scene.stencilBack.writeMask !== scene.stencil.writeMask
-                || scene.stencilBack.reference !== scene.stencil.reference))
+                || (scene.stencilBack.reference !== scene.stencil.reference
+                    && readsStencilReference(scene.stencilBack))))
         {
             diverge('GL_EXT_stencil_two_side set a different reference or mask on each face:'
                 + ' WebGPU has one stencil reference and one read and write mask shared by'

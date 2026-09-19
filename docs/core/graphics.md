@@ -400,13 +400,14 @@ fixed-function formula as a shader per draw state (texture environment per base 
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
 colour mask, polygon offset); every field either reads is in the cache key.
-`GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or `GL_BACK`; with
-`GL_STENCIL_TEST_TWO_SIDE_EXT` enabled, `glStencilFunc`/`Op`/`Mask` write only the active face's
-record, and both when it is disabled -- the byte-identical single-state behaviour every earlier
-title still gets) maps directly onto the pipeline descriptor's independent `stencilFront` and
-`stencilBack`, with the back record folded into the cache key so a two-sided draw and a one-sided
-draw sharing a front state get different pipelines; `glGet` of the unsuffixed stencil queries
-always answers the front face's values, and `GL_STENCIL_BACK_*` answers the back's. WebGPU has one
+`GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or `GL_BACK`, a plain
+selector with no dependence on `GL_STENCIL_TEST_TWO_SIDE_EXT`: `glStencilFunc`/`Op`/`Mask` always
+write only the active face's record, front by default, which is the byte-identical single-state
+behaviour every earlier title still gets) maps directly onto the pipeline descriptor's independent
+`stencilFront` and `stencilBack`, with the back record folded into the cache key so a two-sided
+draw and a one-sided draw sharing a front state get different pipelines; `glGet` of the unsuffixed
+stencil queries answers the active face's record -- the front's, unless the selector points at the
+back -- and `GL_STENCIL_BACK_*` always answers the back's. WebGPU has one
 stencil reference and one read and write mask shared by both faces, so a program whose two faces
 disagree on those has the front's applied to the back's test too, reported once as a divergence
 (see *Limitations*). A translator for

@@ -150,6 +150,24 @@ const STENCIL_OPS = new Set([
     GL.KEEP, GL.ZERO, GL.REPLACE, GL.INCR, GL.DECR, GL.INVERT, GL.INCR_WRAP, GL.DECR_WRAP,
 ]);
 
+/**
+ * GL_EXT_stencil_two_side: the extension defines no `BACK_*` tokens of its
+ * own, so an unsuffixed query answers whichever face `glActiveStencilFaceEXT`
+ * has selected, and this layer's own `GL_STENCIL_BACK_*` storage is where
+ * that answer lives when the selection is `GL_BACK`.
+ *
+ * @type {Map<number, number>}
+ */
+const STENCIL_FACE_QUERIES = new Map([
+    [GL.STENCIL_FUNC, GL.STENCIL_BACK_FUNC],
+    [GL.STENCIL_REF, GL.STENCIL_BACK_REF],
+    [GL.STENCIL_VALUE_MASK, GL.STENCIL_BACK_VALUE_MASK],
+    [GL.STENCIL_FAIL, GL.STENCIL_BACK_FAIL],
+    [GL.STENCIL_PASS_DEPTH_FAIL, GL.STENCIL_BACK_PASS_DEPTH_FAIL],
+    [GL.STENCIL_PASS_DEPTH_PASS, GL.STENCIL_BACK_PASS_DEPTH_PASS],
+    [GL.STENCIL_WRITEMASK, GL.STENCIL_BACK_WRITEMASK],
+]);
+
 /** @type {Set<number>} */
 const HINTS = new Set([
     GL.PERSPECTIVE_CORRECTION_HINT, GL.POINT_SMOOTH_HINT, GL.LINE_SMOOTH_HINT,
@@ -486,7 +504,14 @@ export function createGlContext(options = {}){
                 return null;
             }
             const perUnit = kernel.side.unitValue(query);
-            return readState(perUnit ? { ...entry, values: perUnit } : entry, as);
+            if (perUnit)
+            {
+                return readState({ ...entry, values: perUnit }, as);
+            }
+            const backQuery = STENCIL_FACE_QUERIES.get(query);
+            const active = backQuery && record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK
+                ? record(backQuery) : entry;
+            return readState(active, as);
         },
 
         /** @param {number} name @returns {string | null} */
@@ -1505,23 +1530,19 @@ export function createGlContext(options = {}){
     }
 
     /**
-     * `glStencilFunc`/`glStencilOp`/`glStencilMask` write one record while
-     * GL_EXT_stencil_two_side is enabled -- the active face's -- and both
-     * while it is disabled, which is the specification's rule and what keeps
-     * a title that never enables the extension byte-identical to the single-
-     * state behaviour it always had.
+     * `glStencilFunc`/`glStencilOp`/`glStencilMask` write only the active
+     * face's record. `glActiveStencilFaceEXT` is a selector, like
+     * `glActiveTextureARB`, with no dependence on whether two-sided testing
+     * is enabled -- the enable only decides which set the stencil *test*
+     * consults. The active face defaults to `GL_FRONT`, so a title that
+     * never calls the selector keeps writing the single record it always
+     * had.
      *
      * @param {number} frontQuery
      * @param {number} backQuery
      * @param {number[]} values
      */
     function setStencilFace(frontQuery, backQuery, values){
-        if (record(GL.STENCIL_TEST_TWO_SIDE_EXT).values[0] === 0)
-        {
-            setState(frontQuery, values);
-            setState(backQuery, values);
-            return;
-        }
         setState(record(GL.ACTIVE_STENCIL_FACE_EXT).values[0] === GL.BACK
             ? backQuery : frontQuery, values);
     }

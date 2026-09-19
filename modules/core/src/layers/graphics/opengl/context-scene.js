@@ -251,6 +251,17 @@ export function createSceneBuilder(kernel){
         const dst = record(GL.BLEND_DST).values[0];
         const depthOn = on(GL.DEPTH_TEST);
         const depthFunc = record(GL.DEPTH_FUNC).values[0];
+        const stencilFront = on(GL.STENCIL_TEST)
+            ? {
+                func: record(GL.STENCIL_FUNC).values[0],
+                reference: record(GL.STENCIL_REF).values[0],
+                readMask: record(GL.STENCIL_VALUE_MASK).values[0] & 0xff,
+                writeMask: record(GL.STENCIL_WRITEMASK).values[0] & 0xff,
+                fail: record(GL.STENCIL_FAIL).values[0],
+                zfail: record(GL.STENCIL_PASS_DEPTH_FAIL).values[0],
+                zpass: record(GL.STENCIL_PASS_DEPTH_PASS).values[0],
+            }
+            : null;
         const built = {
             modelview,
             projection: kernel.stacks.projection.current,
@@ -264,22 +275,12 @@ export function createSceneBuilder(kernel){
             units,
             current: kernel.currentVertex(),
             blend: blendOn ? { src, dst } : null,
-            stencil: on(GL.STENCIL_TEST)
-                ? {
-                    func: record(GL.STENCIL_FUNC).values[0],
-                    reference: record(GL.STENCIL_REF).values[0],
-                    readMask: record(GL.STENCIL_VALUE_MASK).values[0] & 0xff,
-                    writeMask: record(GL.STENCIL_WRITEMASK).values[0] & 0xff,
-                    fail: record(GL.STENCIL_FAIL).values[0],
-                    zfail: record(GL.STENCIL_PASS_DEPTH_FAIL).values[0],
-                    zpass: record(GL.STENCIL_PASS_DEPTH_PASS).values[0],
-                }
-                : null,
-            // GL_EXT_stencil_two_side's back-face record. Mirrored onto the
-            // front one whenever the extension is off (`context.js`), so this
-            // is never anything but the front's own values under a title that
-            // never enables it.
-            stencilBack: on(GL.STENCIL_TEST)
+            stencil: stencilFront,
+            // GL_EXT_stencil_two_side's back-face record: the layer's own
+            // `GL_STENCIL_BACK_*` storage when two-sided testing is on, and
+            // the front's own record when it is off -- the specification's
+            // "front for all fragments" rule for a disabled test.
+            stencilBack: stencilFront && (on(GL.STENCIL_TEST_TWO_SIDE_EXT)
                 ? {
                     func: record(GL.STENCIL_BACK_FUNC).values[0],
                     reference: record(GL.STENCIL_BACK_REF).values[0],
@@ -289,7 +290,7 @@ export function createSceneBuilder(kernel){
                     zfail: record(GL.STENCIL_BACK_PASS_DEPTH_FAIL).values[0],
                     zpass: record(GL.STENCIL_BACK_PASS_DEPTH_PASS).values[0],
                 }
-                : null,
+                : stencilFront),
             polygonOffset: on(GL.POLYGON_OFFSET_FILL)
                 ? {
                     factor: record(GL.POLYGON_OFFSET_FACTOR).values[0],
