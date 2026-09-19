@@ -120,6 +120,9 @@ import { createBlockCache, resolveBlockStore }
  *           write it somewhere.
  * @property {Record<string, number>} [jit]
  *     The emulator's compiler budgets, by config index. For measurement.
+ * @property {boolean} [sampling]  The `cpu` layer's always-on guest sampler
+ *     (`docs/core/cpu.md`'s "Sampling"). `false` turns it off, for a caller
+ *     measuring the emulator's own compiler rather than the guest's code.
  * @property {number} [quantum]  Guest instructions per scheduler turn. Lowering
  *           it is what makes `sample` a profile rather than a rumour.
  * @property {(eip: number, instructions: number) => void} [sample]
@@ -2407,7 +2410,7 @@ async function buildApp(options){
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
         },
-        cpu: { jit: options.jit, memorySize },
+        cpu: { jit: options.jit, sampling: options.sampling, memorySize },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced

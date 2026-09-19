@@ -31,13 +31,13 @@ const u32 = value=>[
 /**
  * The layer over a real emulator, with a guest that runs forever from `at`.
  *
- * @param {Uint8Array} code @param {number} at
+ * @param {Uint8Array} code @param {number} at @param {any} [config]
  */
-async function booted(code, at){
+async function booted(code, at, config = {}){
     const metrics = createMetrics({ shared: false });
     /** @type {string[]} */
     const words = [];
-    const api = await cpuModule.create({}, /** @type {any} */ ({
+    const api = await cpuModule.create(config, /** @type {any} */ ({
         requireApi: ()=>({
             metrics,
             /** @param {string} text */
@@ -155,6 +155,20 @@ test('slices against a real emulator credit the address the guest ran at', async
         `the heaviest bucket is at 0x${top.address.toString(16)}, not the guest's loop`);
     assert.ok(top.instructions > 0);
     assert.ok(top.ms >= 0);
+
+    api.stop();
+    await cpuModule.dispose();
+});
+
+test('sampling: false leaves every slice uncredited', async()=>{
+    const { api } = await booted(
+        new Uint8Array([0x48, 0xeb, 0xfd]), GUEST_CODE, { sampling: false });
+
+    api.runSlice(20_000);
+    const status = cpuModule.diagnostics();
+    const metrics = /** @type {any} */ (status.metrics ?? {});
+    assert.equal(metrics.samples.slices, 0);
+    assert.deepEqual(metrics.samples.top, []);
 
     api.stop();
     await cpuModule.dispose();
