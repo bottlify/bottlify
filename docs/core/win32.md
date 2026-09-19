@@ -113,7 +113,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `GDI32.dll` | `gdi32/` | 102 | Device contexts, objects and their lifetimes, metrics, drawing entry points. |
 | `ntdll.dll` | `ntdll/` | 96 | Counted strings, status translation, machine queries, 64-bit helpers — and 76 entries that are the same function object kernel32 or msvcrt already publish. |
 | `ADVAPI32.dll` | `advapi32/` | 71 | The registry API over the hive, `GetUserNameA`, SIDs, and a CryptoAPI provider (MD5, SHA-1, SHA-256, RC4, RSA signature verification). |
-| `WINMM.dll` | `winmm/` | 55 | `timeGetTime`, wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
+| `WINMM.dll` | `winmm/` | 59 | `timeGetTime`, multimedia timers (`timers.js`: `timeSetEvent`'s routine runs on a timer thread of its own that the kernel's clock wakes at each due time; the event forms signal instead), wave-out with a real play cursor and a callback thread, multimedia file I/O (`mmio.js`: RIFF chunks over the volume's files); honest refusal for midi, mixer, aux, joystick, MCI and recording. |
 | `ole32.dll` | `ole32/` | 40 | Apartments, `CoCreateInstance`, task memory, GUID conversions, over the COM object model in `objects.js`. |
 | `OLEAUT32.dll` | `oleaut32/` | 39 | BSTR and VARIANT; imported by ordinal. |
 | `WSOCK32.dll`, `WS2_32.dll` | `wsock32/` | 38 each | One socket registry under both names, over an injected adapter (loopback by default); readiness delivered as a window message (`WSAAsyncSelect`) or a signalled kernel event (`WSAEventSelect`/`WSAEnumNetworkEvents`), and name resolution the same way (`WSAAsyncGetHostByName`/`WSACancelAsyncRequest`). |
@@ -134,7 +134,7 @@ instantiation of the module reports (method in "Inventory" below):
 | `SHFOLDER.dll` | *(built in `module.js`)* | 2 | A two-export forwarder to shell32's `SHGetFolderPathA`/`SHGetFolderPathW`, sharing shell32's own function objects. |
 | *(no DLL)* | `quartz/` | — | The DirectShow filter graph, reached through `CoCreateInstance(CLSID_FilterGraph)`; registered on the COM registry, not as an import table. |
 
-Total: 1456 table entries across 28 libraries, 1328 distinct functions.
+Total: 1460 table entries across 28 libraries, 1332 distinct functions.
 
 **Inventory method.** `dbg/docs/count-dlls.mjs` (throwaway; not part of the build) creates the
 module against the same stub host `src/layers/win32/module.test.js` uses
@@ -439,7 +439,7 @@ Unit tests are colocated with each file, `node:test`, over `fakeMemory`
 | msvcrt | `convert`, `cxx`, `format`, `functions`, `heap`, `math`, `mbstring`, `paths`, `scan`, `seh`, `startup`, `strings`, `time` `.test.js` |
 | user32 | `controls`, `dialogs`, `display`, `messages`, `objects`, `structs`, `system`, `windows` `.test.js` — `controls.test.js` paints a dialog through the real drawing engine and compares it byte for byte with `controls.reference.png` |
 | gdi32 | `drawing`, `functions`, `objects` `.test.js` |
-| the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
+| the rest | `advapi32/functions`, `advapi32/registry`, `comctl32/functions`, `comdlg32/functions`, `imm32/functions`, `ntdll/{functions,integer,query,status,strings}`, `ole32/{functions,guid,objects}`, `oleaut32/functions`, `quartz/graph`, `shell32/functions`, `version/functions`, `wininet/functions`, `winmm/{functions,thread,timers}`, `wsock32/{functions,sockaddr,sockets,transport}` `.test.js` |
 | module | `module.test.js` — a configured screen reaches user32 and gdi32; a DC through user32 is GDI's; both fall back to 640×480 together; the C runtime family is cdecl and every other library stdcall. |
 
 `kernel32/critical.itest.js` runs the hand-assembled critical-section fast paths on the real
