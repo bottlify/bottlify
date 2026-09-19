@@ -415,6 +415,14 @@ test('GDI32 and OPENGL32 negotiate over one runtime, not two', ()=>{
     seam.libraries['OPENGL32.dll'].glGetError.handler([]);
     seam.opengl.swapBuffers(0);
     assert.deepEqual(made, ['opengl'], 'both halves reached the one runtime');
+
+    // A kernel's entry point is the same runtime's handler, not a stub: a
+    // call through it is a call the program's own trap would have made.
+    const glGetError = seam.opengl.entry('glGetError');
+    assert.ok(glGetError, 'an implemented name resolves');
+    assert.equal(glGetError([]), 0);
+    assert.equal(seam.opengl.entry('glNotAnEntryPoint'), null);
+    assert.deepEqual(made, ['opengl']);
 });
 
 test('a gl entry point declares that it never sets the last error of the thread', ()=>{

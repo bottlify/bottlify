@@ -83,7 +83,8 @@ const E_OUTOFMEMORY = 0x8007000e | 0;
  *                                          Uint8Array | null,
  *                                      set: (hdc: number, index: number) => boolean,
  *                                      get: (hdc: number) => number },
- *                       swapBuffers: (hdc: number) => boolean },
+ *                       swapBuffers: (hdc: number) => boolean,
+ *                       entry: (name: string) => ((args: number[]) => number) | null },
  *             diagnostics: () => any,
  *             shadow: () => any }}
  */
@@ -333,6 +334,16 @@ export function createGraphicsLibraries(
             },
             /** @param {number} hdc */
             swapBuffers: hdc=>openglRuntime().swapBuffers(hdc),
+            /**
+             * A named entry point for a caller already on this side of the
+             * boundary (a bundle's site kernel): the handler the trap table
+             * binds, on the one runtime, so a kernel's calls land in the
+             * same context the program's own do.
+             *
+             * @param {string} name
+             * @returns {((args: number[]) => number) | null}
+             */
+            entry: name=>openglRuntime().entry(name),
         },
 
         diagnostics: ()=>({
