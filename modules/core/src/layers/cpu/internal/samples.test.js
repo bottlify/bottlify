@@ -10,21 +10,20 @@ import { BUCKET_CAP, createSampleTable, creditSample, topSamples } from './sampl
 
 test('a slice at a known EIP credits that EIP\'s bucket', ()=>{
     const table = createSampleTable();
-    creditSample(table, 0x10a220, 1000, 2.5);
-    creditSample(table, 0x10a220, 500, 1.0);
+    creditSample(table, 0x10a220, 1000);
+    creditSample(table, 0x10a220, 500);
 
     assert.equal(table.slices, 2);
     const [bucket] = topSamples(table, 1);
     assert.equal(bucket.address, 0x10a220 & ~0x3f, 'rounded down to the 64-byte bucket');
     assert.equal(bucket.instructions, 1500);
-    assert.equal(bucket.ms, 3.5);
     assert.equal(bucket.samples, 2);
 });
 
 test('two addresses in the same 64-byte span fold into one bucket', ()=>{
     const table = createSampleTable();
-    creditSample(table, 0x10a220, 100, 1);
-    creditSample(table, 0x10a221, 200, 1); // one byte further, same bucket
+    creditSample(table, 0x10a220, 100);
+    creditSample(table, 0x10a221, 200); // one byte further, same bucket
 
     assert.equal(table.buckets.size, 1);
     const [bucket] = topSamples(table, 1);
@@ -33,17 +32,17 @@ test('two addresses in the same 64-byte span fold into one bucket', ()=>{
 
 test('addresses in different 64-byte spans stay in separate buckets', ()=>{
     const table = createSampleTable();
-    creditSample(table, 0x10a220, 100, 1);
-    creditSample(table, 0x10a260, 200, 1); // 64 bytes further, a new bucket
+    creditSample(table, 0x10a220, 100);
+    creditSample(table, 0x10a260, 200); // 64 bytes further, a new bucket
 
     assert.equal(table.buckets.size, 2);
 });
 
 test('topSamples ranks the heaviest buckets first, by their own address', ()=>{
     const table = createSampleTable();
-    creditSample(table, 0x1000, 50, 1);
-    creditSample(table, 0x2000, 500, 1);
-    creditSample(table, 0x3000, 200, 1);
+    creditSample(table, 0x1000, 50);
+    creditSample(table, 0x2000, 500);
+    creditSample(table, 0x3000, 200);
 
     const top = topSamples(table, 2);
     assert.equal(top.length, 2);
@@ -55,7 +54,7 @@ test('ten thousand slices at their own address leave the table\'s own size bound
     const table = createSampleTable();
     for (let i = 0; i < 10_000; i++)
     {
-        creditSample(table, i * 64, 1, 0.001);
+        creditSample(table, i * 64, 1);
     }
 
     assert.equal(table.slices, 10_000);
@@ -71,7 +70,7 @@ test('past the cap, a new address is counted as overflow rather than grown into'
     // Twice the cap's worth of distinct addresses.
     for (let i = 0; i < BUCKET_CAP * 2; i++)
     {
-        creditSample(table, i * 64, 1, 0.001);
+        creditSample(table, i * 64, 1);
     }
 
     assert.equal(table.slices, BUCKET_CAP * 2);

@@ -28,7 +28,7 @@ export const BUCKET_CAP = 16384;
 /** A fresh, empty sample table. */
 export function createSampleTable(){
     return {
-        /** @type {Map<number, { instructions: number, ms: number, samples: number }>} */
+        /** @type {Map<number, { instructions: number, samples: number }>} */
         buckets: new Map(),
         slices: 0,
         overflow: 0,
@@ -44,16 +44,14 @@ export function createSampleTable(){
  * @param {ReturnType<typeof createSampleTable>} table
  * @param {number} eip
  * @param {number} instructions
- * @param {number} ms
  */
-export function creditSample(table, eip, instructions, ms){
+export function creditSample(table, eip, instructions){
     table.slices++;
     const key = (eip >>> 0) >>> BUCKET_SHIFT;
     const bucket = table.buckets.get(key);
     if (bucket)
     {
         bucket.instructions += instructions;
-        bucket.ms += ms;
         bucket.samples++;
         return;
     }
@@ -62,7 +60,7 @@ export function creditSample(table, eip, instructions, ms){
         table.overflow++;
         return;
     }
-    table.buckets.set(key, { instructions, ms, samples: 1 });
+    table.buckets.set(key, { instructions, samples: 1 });
 }
 
 /**
@@ -84,7 +82,6 @@ export function topSamples(table, count = 64){
         .map(([key, bucket])=>({
             address: key * (1 << BUCKET_SHIFT),
             instructions: bucket.instructions,
-            ms: bucket.ms,
             samples: bucket.samples,
         }));
 }

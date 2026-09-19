@@ -142,16 +142,16 @@ test('guestSamples names the cpu layer\'s raw buckets against the module layout'
         slices: 12,
         overflow: 2,
         top: [
-            { address: 4096 + 10, instructions: 500, ms: 1.5, samples: 3 },
-            { address: 8192 + 5, instructions: 300, ms: 0.5, samples: 2 },
+            { address: 4096 + 10, instructions: 500, samples: 3 },
+            { address: 8192 + 5, instructions: 300, samples: 2 },
         ],
     }, layout);
 
     assert.equal(named.slices, 12);
     assert.equal(named.overflow, 2);
     assert.deepEqual(named.top, [
-        { at: 'Game.dll+0xa', instructions: 500, ms: 1.5, samples: 3 },
-        { at: 'Other.dll+0x5', instructions: 300, ms: 0.5, samples: 2 },
+        { at: 'Game.dll+0xa', instructions: 500, samples: 3 },
+        { at: 'Other.dll+0x5', instructions: 300, samples: 2 },
     ]);
 });
 

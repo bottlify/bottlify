@@ -236,7 +236,6 @@ export function guestSamples(sampler, layout){
         top: sampler.top.map(bucket=>({
             at: where(bucket.address),
             instructions: bucket.instructions,
-            ms: bucket.ms,
             samples: bucket.samples,
         })),
     };

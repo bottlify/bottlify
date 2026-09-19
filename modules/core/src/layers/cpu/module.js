@@ -426,7 +426,6 @@ export const cpuModule = {
                 const machine = started();
                 const from = machine.eip();
                 let instructions = 0;
-                const sliceStart = samplingEnabled ? performance.now() : 0;
                 try
                 {
                     instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
@@ -486,8 +485,7 @@ export const cpuModule = {
                 // runs hot.
                 if (samplingEnabled && instructions > 0)
                 {
-                    creditSample(state.samples, machine.eip(), instructions,
-                        performance.now() - sliceStart);
+                    creditSample(state.samples, machine.eip(), instructions);
                 }
                 return instructions;
             },

@@ -114,7 +114,7 @@ yet are the same state from a caller's perspective.
 | `trapCrossings` | Times the guest has left its own code for ours — every import, COM method and fault comes through the one trap port. | Every crossing. |
 | `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, slowWrites, codePageWritesKept, x87TagLost, x87Sites, dirtyPages, finalised, published, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. `published` is the last 4096 `[slot, start]` pairs `codegen_finalize` was called with, oldest first — `start` is the guest linear address the compiled unit begins at, for naming a JIT unit by the guest function it compiles once joined against the arrival order of the debugger's own `wasm://` script-parsed events. |
 | `eip`           | The guest's instruction pointer. | Continuously; sampling it names a loop no host call would reveal. |
-| `samples`       | `{ slices, overflow, top: [{ address, instructions, ms, samples }] }` — where every slice since boot has gone, by 64-byte address bucket; `top` is the 64 heaviest by instructions, reported by each bucket's own address rather than by rank. | Every slice that retired at least one instruction (see "Sampling" below). |
+| `samples`       | `{ slices, overflow, top: [{ address, instructions, samples }] }` — where every slice since boot has gone, by 64-byte address bucket; `top` is the 64 heaviest by instructions, reported by each bucket's own address rather than by rank. | Every slice that retired at least one instruction (see "Sampling" below). |
 
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it
 reads zero always); `compiledSteps` versus `interpretedSteps` is the number that says whether the
@@ -192,19 +192,13 @@ nothing about where the guest's own code runs hot, so it is skipped. Addresses a
 64 bytes (`eip >>> 6`) in a `Map` capped at 16 384 distinct buckets; a bucket beyond the cap is
 counted as overflow rather than grown into, so a long run's own memory here is bounded no matter
 how much guest code it touches. The register read (`eip`, already needed for other bookkeeping
-in `runSlice`) and the table update cost nothing that scales with instructions or basic blocks;
-what does cost is timing the slice itself — two `performance.now()` reads bracket every call to
-`run_slice`, at the quantum's own granularity (~100 000 instructions, so tens of thousands of
-times in a heavy window). Measured on `ceiling3.demo`'s presents 1627→1774 (a real browser run,
-`dbg/opengl/playback-sample.mjs`, `report-sampler.md`): 277.5 ms/frame sampling on versus
-225.2 ms/frame off, a real ~23% gap on this window rather than the "unchanged" this section
-claimed before it was measured — not the register read or the `Map`, which cost microseconds
-over the whole window by the same arithmetic, but plausibly the two extra high-resolution clock
-reads per slice, tens of thousands of times over. Always on today regardless (`sampling: false`
-turns it off, for a caller measuring the emulator's own compiler rather than the guest's code, or
-avoiding this cost); cutting the clock reads' own cost — timing every Nth slice rather than
-every one, or a cheaper source than `performance.now()` — is unmeasured follow-up work, not done
-here.
+in `runSlice`) and the table update are the whole cost: nothing per instruction, nothing per
+basic block, and no clock — a slice's wall time is not read, because two `performance.now()`
+reads per slice (tens of thousands of times in a heavy window) were measured at ~23 % of a
+frame on `ceiling3.demo`'s light window (`report-sampler.md`) before they were removed. A reader
+wanting milliseconds per bucket takes the bucket's share of instructions against the `guest`
+phase's own ms over the same interval. Always on (`sampling: false` turns it off, for a caller
+measuring the emulator's own compiler rather than the guest's code).
 
 What a bucket's address belongs to — which image, which function — is not this layer's
 knowledge: `diagnostics().samples.top` reports raw addresses, and resolving one against the

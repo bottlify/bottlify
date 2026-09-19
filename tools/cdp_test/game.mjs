@@ -649,7 +649,7 @@ function describe(result, context, calls, symbols){
         {
             const share = total > 0 ? (100 * row.instructions / total).toFixed(1) : '0.0';
             say(`    ${share.padStart(5)}%  ${(row.instructions / 1e6).toFixed(2)}M instr`
-                + `  ${row.ms.toFixed(1)}ms  ${symbolName(row.at, symbols)}`);
+                + `  ${symbolName(row.at, symbols)}`);
         }
         say('');
     }
