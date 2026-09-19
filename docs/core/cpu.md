@@ -191,11 +191,20 @@ Every slice that retires at least one instruction credits the address it ended a
 nothing about where the guest's own code runs hot, so it is skipped. Addresses are bucketed to
 64 bytes (`eip >>> 6`) in a `Map` capped at 16 384 distinct buckets; a bucket beyond the cap is
 counted as overflow rather than grown into, so a long run's own memory here is bounded no matter
-how much guest code it touches. The cost is one register read (`eip`, already needed for other
-bookkeeping in `runSlice`) and one table update per slice — nothing that scales with instructions
-or basic blocks — measured to leave the `guest` phase's ms/frame unchanged with sampling on
-versus off on the same window. Always on (`sampling: false` is the only way to turn it off, for a
-caller measuring the emulator's own compiler rather than the guest's code).
+how much guest code it touches. The register read (`eip`, already needed for other bookkeeping
+in `runSlice`) and the table update cost nothing that scales with instructions or basic blocks;
+what does cost is timing the slice itself — two `performance.now()` reads bracket every call to
+`run_slice`, at the quantum's own granularity (~100 000 instructions, so tens of thousands of
+times in a heavy window). Measured on `ceiling3.demo`'s presents 1627→1774 (a real browser run,
+`dbg/opengl/playback-sample.mjs`, `report-sampler.md`): 277.5 ms/frame sampling on versus
+225.2 ms/frame off, a real ~23% gap on this window rather than the "unchanged" this section
+claimed before it was measured — not the register read or the `Map`, which cost microseconds
+over the whole window by the same arithmetic, but plausibly the two extra high-resolution clock
+reads per slice, tens of thousands of times over. Always on today regardless (`sampling: false`
+turns it off, for a caller measuring the emulator's own compiler rather than the guest's code, or
+avoiding this cost); cutting the clock reads' own cost — timing every Nth slice rather than
+every one, or a cheaper source than `performance.now()` — is unmeasured follow-up work, not done
+here.
 
 What a bucket's address belongs to — which image, which function — is not this layer's
 knowledge: `diagnostics().samples.top` reports raw addresses, and resolving one against the
