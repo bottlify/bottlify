@@ -1060,6 +1060,12 @@ export function createHarness(canvas, how = {}){
                 kernelGlCalls: layers.app?.kernelGlCalls ?? 0,
                 trapCapacity: layers.cpu?.trapCapacity ?? 0,
                 jit: layers.cpu?.jit ?? null,
+                // The always-on sampler's own raw buckets, cumulative since
+                // boot, the way `jit.published` above already is -- a caller
+                // wanting one window's own top list takes two readings a
+                // window apart and deltas them by bucket key, the overlay's
+                // own pattern (`docs/core/cpu.md`'s "Sampling").
+                samples: layers.cpu?.samples ?? null,
                 // Which guest address belongs to which module, so a driver
                 // can name `jit.published`'s own addresses without waiting
                 // for the final result (`result.bridge.recent` already does
