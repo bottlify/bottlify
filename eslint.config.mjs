@@ -17,6 +17,9 @@ export default [
             'tools/cdp_test/reports/**',
             '.ghidra/**',
             '.ghidra-home/**',
+            // A title's bundle content beside its manifest (its sidecar kernels)
+            // is not this project's code.
+            'bundles/**',
             // Agents' scratch checkouts: full copies of the tree that are not this tree.
             '.claude/**',
             'dbg/**',
