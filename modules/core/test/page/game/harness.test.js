@@ -16,7 +16,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     listen, scheduleKeyTimes, presentFrame, recordSample, resetSamples, profile, byModule,
-    seedFiles, bundleStoreOptions,
+    guestSamples, seedFiles, bundleStoreOptions,
 } from './harness.js';
 
 /** An `app` that only remembers what was sent and what it was asked to do. */
@@ -134,6 +134,29 @@ test('the draw-path counters are folded by module', t=>{
     const byName = Object.fromEntries(report.modules.map((/** @type {any} */ m)=>[m.at, m.count]));
     assert.deepEqual(byName, { 'Game.dll': 12, 'Other.dll': 3 },
         'two addresses in one module fold into one module-level count');
+});
+
+test('guestSamples names the cpu layer\'s raw buckets against the module layout', ()=>{
+    const layout = ['Game.dll 4096+4096', 'Other.dll 8192+4096'];
+    const named = guestSamples({
+        slices: 12,
+        overflow: 2,
+        top: [
+            { address: 4096 + 10, instructions: 500, ms: 1.5, samples: 3 },
+            { address: 8192 + 5, instructions: 300, ms: 0.5, samples: 2 },
+        ],
+    }, layout);
+
+    assert.equal(named.slices, 12);
+    assert.equal(named.overflow, 2);
+    assert.deepEqual(named.top, [
+        { at: 'Game.dll+0xa', instructions: 500, ms: 1.5, samples: 3 },
+        { at: 'Other.dll+0x5', instructions: 300, ms: 0.5, samples: 2 },
+    ]);
+});
+
+test('guestSamples answers null without a sampler to report', ()=>{
+    assert.equal(guestSamples(undefined, []), null);
 });
 
 test('byModule folds addresses into shares of the whole', ()=>{

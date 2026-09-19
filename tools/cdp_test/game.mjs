@@ -351,14 +351,56 @@ function byLibrary(unresolved){
 }
 
 /**
+ * Folds an `Image+0xrva` string (`harness.js`'s own naming, `symboliser()`)
+ * through the sidecar's function table, so a sampler bucket reads as the
+ * function it fell in rather than a bare offset -- the same "largest start
+ * at or below the address" rule a debugger's own symbolication uses.
+ *
+ * @param {string} at
+ * @param {Record<string, { rva: number, name: string | null }[]>} [symbols]
+ * @returns {string}
+ */
+function symbolName(at, symbols){
+    const match = symbols ? /^(.+)\+0x([0-9a-f]+)$/.exec(at) : null;
+    if (!match)
+    {
+        return at;
+    }
+    const [, image, rvaHex] = match;
+    const starts = symbols[image];
+    if (!starts || starts.length === 0)
+    {
+        return at;
+    }
+    const rva = parseInt(rvaHex, 16);
+    let found = null;
+    for (const entry of starts)
+    {
+        if (entry.rva > rva)
+        {
+            break;
+        }
+        found = entry;
+    }
+    if (!found)
+    {
+        return at;
+    }
+    const offset = rva - found.rva;
+    const label = found.name ?? `${image}+0x${found.rva.toString(16)}`;
+    return offset === 0 ? label : `${label}+0x${offset.toString(16)}`;
+}
+
+/**
  * The whole run as text: what was asked, what answered, and where it stopped.
  *
  * @param {any} result
  * @param {any} context
  * @param {number} calls
+ * @param {Record<string, { rva: number, name: string | null }[]>} [symbols]
  * @returns {string}
  */
-function describe(result, context, calls){
+function describe(result, context, calls, symbols){
     const lines = [];
     /** @param {string} text */
     const say = text=>lines.push(text);
@@ -597,6 +639,21 @@ function describe(result, context, calls){
         say('');
     }
 
+    const samples = result.samples;
+    if (samples?.top?.length > 0)
+    {
+        const overflow = samples.overflow > 0 ? `, ${samples.overflow} buckets overflowed` : '';
+        say(`  guest code, since boot (${samples.slices} slices${overflow}):`);
+        const total = samples.top.reduce((sum, row)=>sum + row.instructions, 0);
+        for (const row of samples.top.slice(0, 16))
+        {
+            const share = total > 0 ? (100 * row.instructions / total).toFixed(1) : '0.0';
+            say(`    ${share.padStart(5)}%  ${(row.instructions / 1e6).toFixed(2)}M instr`
+                + `  ${row.ms.toFixed(1)}ms  ${symbolName(row.at, symbols)}`);
+        }
+        say('');
+    }
+
     say(`  frames presented: ${result.presents ?? 0}`);
     // The gaps between presents are the shape a stutter has, and the page's
     // long tasks say whether the thread the person's browser lives on was held.
@@ -712,6 +769,16 @@ export async function game(options){
             spec: JSON.parse(await readFile(hooksJsonPath, 'utf8')),
             source: await readFile(join(directory, 'hooks.mjs'), 'utf8'),
         }
+        : undefined;
+
+    // The same sidecar convention as `hooks.json`: per-title content beside
+    // the manifest, absent for most bundles. Maps an image name to its
+    // function starts, sorted ascending, for folding the sampler's address
+    // buckets into names below -- this driver's own job, never the engine's
+    // (`docs/core/cpu.md`'s "Sampling").
+    const symbolsPath = join(directory, 'symbols.json');
+    const symbols = existsSync(symbolsPath)
+        ? JSON.parse(await readFile(symbolsPath, 'utf8'))
         : undefined;
 
     // The tools-side reader takes a path and does its own reading, which is how
@@ -882,7 +949,7 @@ export async function game(options){
             version: manifest.version,
             entry: manifest.entry,
             executableBytes: executable.length,
-        }, options.calls);
+        }, options.calls, symbols);
         writeFileSync(reportPath, text);
 
         // A file of its own: one line per draw is thousands of lines, which is

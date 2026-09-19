@@ -214,6 +214,35 @@ export function profile(layout){
 }
 
 /**
+ * The `cpu` layer's always-on sampler, named against the memory layer's
+ * module layout the same way a bridge call's own `from` address is
+ * (`result.bridge.recent`'s `fromName`). The engine reports raw address
+ * buckets on purpose (`docs/core/cpu.md`'s "Sampling") and leaves this
+ * resolving step to whoever reads them.
+ *
+ * @param {{ slices: number, overflow: number, top: { address: number,
+ *     instructions: number, ms: number, samples: number }[] } | undefined} sampler
+ * @param {string[]} layout  As the memory layer reports it.
+ */
+export function guestSamples(sampler, layout){
+    if (!sampler)
+    {
+        return null;
+    }
+    const where = symboliser(layout);
+    return {
+        slices: sampler.slices,
+        overflow: sampler.overflow,
+        top: sampler.top.map(bucket=>({
+            at: where(bucket.address),
+            instructions: bucket.instructions,
+            ms: bucket.ms,
+            samples: bucket.samples,
+        })),
+    };
+}
+
+/**
  * The emulator's own account of where the guest ran, when one was kept:
  * the hottest blocks by instructions, and the same by page.
  *
@@ -1244,6 +1273,7 @@ export function createHarness(canvas, how = {}){
         };
         result.profile = profile(layout);
         result.exact = exactProfile(running, layout);
+        result.samples = guestSamples(metrics('cpu').samples, layout);
 
         // Named rather than left to `scalars`, which keeps only numbers and strings
         // -- every metric this layer reports is an object, so all of them were
