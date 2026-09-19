@@ -414,7 +414,16 @@ a type the GPU has no format for -- is packed into one canonical layout. `wgsl.j
 fixed-function formula as a shader per draw state (texture environment per base format, combine
 with dot3, texture generation, projective coordinates, fog, colour sum, alpha test as a discard,
 GL's clip depth remapped) and the pipeline descriptor (blend, depth, two-sided stencil, cull,
-colour mask, polygon offset); every field either reads is in the cache key.
+colour mask, polygon offset); every field either reads is in the cache key. Two indexed draws
+recorded back to back, under state that has not moved (the same pipeline, bindings and uniform
+blocks -- the state-version cache above already makes an unchanged block the identical array, so
+this compares by reference -- vertex slots and base vertex) whose index bytes in the scratch ring
+are exactly what the earlier one's own are immediately followed by, with no alignment gap, are
+joined into the one draw call their combined range reads exactly as: the earlier one's own count
+grows and the later one is dropped, which touches every pixel exactly as many times as the two
+draws together would have and so holds under any blend, stencil or logic-op state. Off while
+`dumpDraws` is on, so a dump or a probe still addresses every draw the guest issued by its own
+number.
 `GL_EXT_stencil_two_side` (`glActiveStencilFaceEXT` selects `GL_FRONT` or `GL_BACK`, a plain
 selector with no dependence on `GL_STENCIL_TEST_TWO_SIDE_EXT`: `glStencilFunc`/`Op`/`Mask` always
 write only the active face's record, front by default, which is the byte-identical single-state

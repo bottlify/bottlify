@@ -196,6 +196,38 @@ test('a repeated draw from an index buffer hits the scan cache; a rewritten buff
         assert.equal(diag.indexScansReused, 1, 'unchanged since the rebuild');
     });
 
+test('two draws under unchanged state whose index ranges are adjacent join into one',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        triangle(r, 0x1000);
+        triangle(r, 0x1000 + 3 * STRIDE);
+        const [vbo] = context.glGenBuffersARB(1);
+        context.glBindBufferARB(GL.ARRAY_BUFFER, vbo);
+        context.glBufferDataARB(GL.ARRAY_BUFFER, 6 * STRIDE, 0x1000, GL.STATIC_DRAW);
+        context.glEnableClientState(GL.VERTEX_ARRAY);
+        context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+        r.words(0x2000, [0, 1, 2, 3, 4, 5]);
+        const [ibo] = context.glGenBuffersARB(1);
+        context.glBindBufferARB(GL.ELEMENT_ARRAY_BUFFER, ibo);
+        context.glBufferDataARB(GL.ELEMENT_ARRAY_BUFFER, 6 * 4, 0x2000, GL.STATIC_DRAW);
+
+        // Two sub-ranges of the same mesh, back to back, under state that
+        // never changes between them -- what a surface split across two
+        // glDrawElements calls looks like.
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 12);
+        await r.swap();
+
+        const diag = r.renderer.diagnostics();
+        assert.equal(diag.draws, 1, 'one draw call, not two');
+        assert.equal(diag.merged, 1);
+        const indexed = r.gpu.of('drawIndexed');
+        assert.equal(indexed.length, 1, 'the replay issued one drawIndexed');
+        assert.deepEqual(indexed[0].args, [6, 1, 0, 0],
+            'the joined draw covers both ranges: six indices from the first one\'s offset');
+    });
+
 test('a quad drawn in immediate mode is packed canonically as two triangles', async()=>{
     const r = rig();
     const { context } = r;
@@ -1128,7 +1160,13 @@ test('a repeated draw state generates its source once and reuses it', async()=>{
     await r.swap();
 
     const diagnostics = r.renderer.diagnostics();
-    assert.equal(diagnostics.draws, 2, 'both draws ran');
+    // These two draws read the same three indices under the same state --
+    // provably the same picture as one draw of six reading them twice over
+    // -- so the draw-joining pass below folds them into one; `prepared` and
+    // `preparedReused` still count generation per draw *attempt*, which is
+    // what this test is about.
+    assert.equal(diagnostics.draws, 1, 'joined into one draw');
+    assert.equal(diagnostics.merged, 1);
     assert.equal(diagnostics.prepared, 1, 'the source was generated for the first');
     assert.equal(diagnostics.preparedReused, 1, 'and the second reused it');
 });

@@ -370,7 +370,7 @@ export function createGpuRenderer(services){
      * @property {string[]} dump     the frame's lines, when one was asked for
      * @property {Set<string>} dumped  the program texts the dump already holds
      * @property {{ draws: number, clears: number, copies: number, refused: number,
-     *               skipped: number, cut: number }} counts
+     *               skipped: number, cut: number, merged: number }} counts
      */
     /** @type {WeakMap<object, Recording>} */
     const recordings = new WeakMap();
@@ -406,6 +406,9 @@ export function createGpuRenderer(services){
         // An index list's (min, max) scan and widened copy: built fresh, or
         // reused because the buffer it came from has not been written since.
         indexScansBuilt: 0, indexScansReused: 0,
+        // Two draws joined into the one draw call their combined range reads
+        // exactly as.
+        merged: 0,
     };
 
     /**
@@ -964,7 +967,7 @@ export function createGpuRenderer(services){
             recording = {
                 commands: [], pipelines: [], id: nextFrame++, dump: [], dumped: new Set(),
                 counts: {
-                    draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0,
+                    draws: 0, clears: 0, copies: 0, refused: 0, skipped: 0, cut: 0, merged: 0,
                 },
             };
             unflushed.add(recording.id);
@@ -1539,6 +1542,85 @@ export function createGpuRenderer(services){
      * @property {import('./objects.js').TextureObject} texture
      */
 
+    /** @param {string} format */
+    const indexBytes = format=>(format === 'uint32' ? 4 : 2);
+
+    /**
+     * @param {readonly { gpu: any, offset: number }[]} a
+     * @param {readonly { gpu: any, offset: number }[]} b
+     */
+    const sameSlots = (a, b)=>a.length === b.length
+        && a.every((slot, i)=>slot.gpu === b[i].gpu && slot.offset === b[i].offset);
+
+    /**
+     * @param {readonly RecordedBinding[]} a
+     * @param {readonly RecordedBinding[]} b
+     */
+    const sameBindings = (a, b)=>a.length === b.length
+        && a.every((entry, i)=>entry.binding === b[i].binding && entry.view === b[i].view
+            && entry.sampler === b[i].sampler);
+
+    /**
+     * @param {{ x: number, y: number, width: number, height: number }} a
+     * @param {{ x: number, y: number, width: number, height: number }} b
+     */
+    const matchRect = (a, b)=>a.x === b.x && a.y === b.y && a.width === b.width
+        && a.height === b.height;
+
+    /**
+     * @param {any} a @param {any} b
+     */
+    const shareEveryDependency = (a, b)=>a.mergeKey === b.mergeKey && a.first === 0
+        && b.first === 0 && a.baseVertex === b.baseVertex
+        && a.indices.format === b.indices.format && a.indices.gpu === b.indices.gpu
+        && a.uniforms === b.uniforms && a.vertexUniforms === b.vertexUniforms
+        && a.fragmentUniforms === b.fragmentUniforms && sameSlots(a.slots, b.slots)
+        && sameBindings(a.bindings, b.bindings) && matchRect(a.viewport, b.viewport)
+        && matchRect(a.scissor, b.scissor) && a.stencilReference === b.stencilReference;
+
+    /**
+     * Joins the draw just pushed into the one before it in the same
+     * recording, when the join is provably picture-identical: the same
+     * pipeline, bindings and uniform blocks -- the state-version cache above
+     * already makes "unchanged" the identical array, not merely an equal
+     * one, so this is reference equality, not a byte compare -- the same
+     * vertex slots and base vertex, and an index range whose bytes the
+     * earlier draw's own are immediately followed by in the scratch ring,
+     * with no alignment gap between them, so one draw covering both ranges
+     * reads exactly what the two separate ones would, in the same order,
+     * touching every pixel exactly as many times as the two draws together
+     * would have -- which is what keeps this safe under any blend, stencil
+     * or logic-op state, accumulating or not, unlike dropping an exact
+     * repeat of the same range outright would be (see `report-perdraw-2.md`,
+     * "what did not pay"). Only two indexed draws are considered: every draw
+     * this layer's own title issues is `glDrawElements`, and a non-indexed
+     * draw carries no such byte adjacency to prove the join safe.
+     *
+     * @param {Recording} recording
+     */
+    const joinLastDraw = recording=>{
+        const commands = recording.commands;
+        if (commands.length < 2)
+        {
+            return;
+        }
+        const b = commands[commands.length - 1];
+        const a = commands[commands.length - 2];
+        if (a.kind !== 'draw' || b.kind !== 'draw' || !a.indices || !b.indices
+            || !shareEveryDependency(a, b)
+            || b.indices.offset !== a.indices.offset + a.count * indexBytes(a.indices.format))
+        {
+            return;
+        }
+        a.count += b.count;
+        commands.pop();
+        recording.pipelines.pop();
+        stats.draws--;
+        recording.counts.draws--;
+        stats.merged++;
+        recording.counts.merged++;
+    };
+
     /**
      * Records one draw of a laid-out vertex stream.
      *
@@ -1699,6 +1781,7 @@ export function createGpuRenderer(services){
         recording.commands.push({
             kind: 'draw',
             pipeline: recording.pipelines.length - 1,
+            mergeKey: key,
             uniforms,
             vertexUniforms,
             fragmentUniforms,
@@ -1713,6 +1796,15 @@ export function createGpuRenderer(services){
             probe,
             probeDraw: recording.counts.draws - 1,
         });
+        // A dump or a probe addresses a frame's draws by number to find a
+        // specific painter or a specific moment; joining two of them into
+        // one would take away exactly the resolution that mode exists for.
+        // The picture is identical either way, so only the diagnostic loses
+        // anything, and only while it is asked for.
+        if (!dumpDraws)
+        {
+            joinLastDraw(recording);
+        }
     };
 
     /**
