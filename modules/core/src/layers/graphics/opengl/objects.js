@@ -108,6 +108,10 @@ const MIPMAP_FILTERS = new Set([
  * @property {number} mapped  the guest address it is mapped at, or zero
  * @property {{ start: number, end: number } | null} written   the bytes the
  *           program has rewritten since a copy kept elsewhere last read them
+ * @property {number} version  raised on every glBufferDataARB, glBufferSubDataARB
+ *           or write-back unmap, so a reader of its bytes elsewhere -- the
+ *           index scan cache in gpu.js -- can tell a redefined or rewritten
+ *           buffer from the one it already scanned
  */
 
 /** Cube map levels are kept in one map, six faces apart. */
@@ -250,7 +254,7 @@ export function markDirty(texture, key, rect){
  */
 export function createBufferObject(name){
     return { name, size: 0, usage: GL.STATIC_DRAW, access: GL.READ_WRITE, data: new Uint8Array(0),
-        mapped: 0, written: null };
+        mapped: 0, written: null, version: 1 };
 }
 
 /**

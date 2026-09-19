@@ -451,7 +451,8 @@ export function installArrayCalls(context, kernel){
         {
             return false;
         }
-        /** @type {{ bytes: Uint8Array, type: number } | null} */
+        /** @type {{ bytes: Uint8Array, type: number,
+         *           buffer: import('./objects.js').BufferObject | null, offset: number } | null} */
         let indices = null;
         if (indexed)
         {
@@ -466,7 +467,16 @@ export function installArrayCalls(context, kernel){
                 return false;
             }
             const base = indexed.indices instanceof Uint8Array ? 0 : indexed.indices;
-            indices = { bytes: read(base, length), type: indexed.type };
+            // The scan cache in gpu.js needs the object itself, not just its
+            // bytes, to tell "still what it scanned" from "redefined since":
+            // present only for an index list that actually lives in a bound
+            // ELEMENT_ARRAY_BUFFER, never for one already dereferenced into
+            // its own scratch bytes or read from client memory.
+            const bufferObject = !(indexed.indices instanceof Uint8Array) && bound !== 0
+                ? kernel.shareGroup().buffers.objects.get(bound) ?? null
+                : null;
+            indices = { bytes: read(base, length), type: indexed.type,
+                buffer: bufferObject, offset: base };
         }
         const memory = kernel.memory();
         return kernel.drawArrays({
@@ -1110,6 +1120,7 @@ export function installArrayCalls(context, kernel){
             buffer.size = size;
             buffer.usage = usage;
             buffer.written = size > 0 ? { start: 0, end: size } : null;
+            buffer.version++;
             if (data instanceof Uint8Array)
             {
                 buffer.data.set(data.subarray(0, size));
@@ -1160,6 +1171,7 @@ export function installArrayCalls(context, kernel){
                     ? { start: Math.min(buffer.written.start, offset),
                         end: Math.max(buffer.written.end, offset + size) }
                     : { start: offset, end: offset + size };
+                buffer.version++;
             }
         },
 
@@ -1253,6 +1265,7 @@ export function installArrayCalls(context, kernel){
             {
                 buffer.data.set(memory.read(buffer.mapped, buffer.size));
                 buffer.written = { start: 0, end: buffer.size };
+                buffer.version++;
             }
             buffer.mapped = 0;
             return GL.TRUE;

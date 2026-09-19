@@ -163,6 +163,39 @@ test('arrays in client memory are copied by the range the indices reach', async(
         'the base vertex takes the copy\'s origin off every index');
 });
 
+test('a repeated draw from an index buffer hits the scan cache; a rewritten buffer misses',
+    async()=>{
+        const r = rig();
+        const { context } = r;
+        triangle(r, 0x1000);
+        const [vbo] = context.glGenBuffersARB(1);
+        context.glBindBufferARB(GL.ARRAY_BUFFER, vbo);
+        context.glBufferDataARB(GL.ARRAY_BUFFER, 3 * STRIDE, 0x1000, GL.STATIC_DRAW);
+        context.glEnableClientState(GL.VERTEX_ARRAY);
+        context.glVertexPointer(3, GL.FLOAT, STRIDE, 0);
+        r.words(0x2000, [0, 1, 2]);
+        const [ibo] = context.glGenBuffersARB(1);
+        context.glBindBufferARB(GL.ELEMENT_ARRAY_BUFFER, ibo);
+        context.glBufferDataARB(GL.ELEMENT_ARRAY_BUFFER, 3 * 4, 0x2000, GL.STATIC_DRAW);
+
+        // A static mesh drawn under several lights: the same buffer, the
+        // same offset and count, draw after draw.
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0);
+        await r.swap();
+        let diag = r.renderer.diagnostics();
+        assert.equal(diag.indexScansBuilt, 1, 'the first draw scans the index buffer');
+        assert.equal(diag.indexScansReused, 1, 'the second, unchanged, hits the cache');
+
+        r.words(0x2000, [2, 1, 0]);
+        context.glBufferSubDataARB(GL.ELEMENT_ARRAY_BUFFER, 0, 3 * 4, 0x2000);
+        context.glDrawElements(GL.TRIANGLES, 3, GL.UNSIGNED_INT, 0);
+        await r.swap();
+        diag = r.renderer.diagnostics();
+        assert.equal(diag.indexScansBuilt, 2, 'a rewritten buffer is scanned again');
+        assert.equal(diag.indexScansReused, 1, 'unchanged since the rebuild');
+    });
+
 test('a quad drawn in immediate mode is packed canonically as two triangles', async()=>{
     const r = rig();
     const { context } = r;

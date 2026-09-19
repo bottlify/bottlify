@@ -402,7 +402,13 @@ whose writes pick their own lock flag from
 the byte ranges the unflushed frames' draws read -- a write over a read range renames the buffer,
 any other travels as a range. Vertex arrays are bound as they lie (one slot per buffer and stride,
 an attribute per array; `gpu-layout.js` decides which shapes the GPU can read) and only the index
-list is read on the processor, for its range and to widen it; arrays in client memory are copied
+list is read on the processor, for its range and to widen it -- an index list bound from an
+`ELEMENT_ARRAY_BUFFER` keeps that scan (its `(min, max)` and its widened copy) against the buffer
+object's own `version` (raised on every `glBufferDataARB`, `glBufferSubDataARB` or write-back
+unmap), so a static mesh drawn again at the same offset and count under a different light is
+scanned once, not once per light; a list read from client memory, or one a seam call already
+dereferenced into its own scratch bytes, has no such identity and is scanned fresh every draw, as
+before. Arrays in client memory are copied
 by that range into a ring, and a vertex assembled on the processor -- immediate mode, a lit draw,
 a type the GPU has no format for -- is packed into one canonical layout. `wgsl.js` writes the
 fixed-function formula as a shader per draw state (texture environment per base format, combine

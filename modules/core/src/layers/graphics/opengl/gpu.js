@@ -268,7 +268,8 @@ function describeCensus(texture){
  * @property {number} mode
  * @property {number} first
  * @property {number} count
- * @property {{ bytes: Uint8Array, type: number } | null} indices
+ * @property {{ bytes: Uint8Array, type: number,
+ *              buffer: import('./objects.js').BufferObject | null, offset: number } | null} indices
  * @property {readonly import('./gpu-layout.js').ArrayRequest[]} arrays
  * @property {(address: number, length: number) => Uint8Array} read   client memory
  * @property {(name: number) => import('./objects.js').BufferObject | undefined} bufferObject
@@ -402,6 +403,9 @@ export function createGpuRenderer(services){
         // nothing it depends on has moved.
         uniformsBuilt: 0, uniformsReused: 0,
         programUniformsBuilt: 0, programUniformsReused: 0,
+        // An index list's (min, max) scan and widened copy: built fresh, or
+        // reused because the buffer it came from has not been written since.
+        indexScansBuilt: 0, indexScansReused: 0,
     };
 
     /**
@@ -1758,6 +1762,49 @@ export function createGpuRenderer(services){
     };
 
     /**
+     * The `(min, max)` an index list reaches and its GPU-ready widened copy,
+     * kept per index buffer object so a static mesh redrawn under several
+     * lights -- the census found interaction draws sharing one mesh across
+     * up to five -- is scanned once, not once per light. Only an index list
+     * that lives in a bound `ELEMENT_ARRAY_BUFFER` is cacheable this way:
+     * `buffer.version` (raised on every `glBufferDataARB`, `glBufferSubDataARB`
+     * or write-back unmap) is what tells a rewritten buffer from the one
+     * already scanned. An index list read from client memory, or one a seam
+     * call already dereferenced into its own scratch bytes, carries no such
+     * object and is scanned fresh every draw, the way it always was.
+     *
+     * @type {WeakMap<import('./objects.js').BufferObject, { version: number,
+     *           type: number, offset: number, count: number,
+     *           scanned: import('./gpu-layout.js').ScannedIndices }>}
+     */
+    const indexScanCache = new WeakMap();
+    /**
+     * @param {NonNullable<DrawRequest['indices']>} indices
+     * @param {number} count
+     * @returns {import('./gpu-layout.js').ScannedIndices}
+     */
+    const scannedIndicesFor = (indices, count)=>{
+        if (!indices.buffer)
+        {
+            return scanIndices(indices.bytes, indices.type, count);
+        }
+        const cached = indexScanCache.get(indices.buffer);
+        if (cached && cached.version === indices.buffer.version && cached.type === indices.type
+            && cached.offset === indices.offset && cached.count === count)
+        {
+            stats.indexScansReused++;
+            return cached.scanned;
+        }
+        stats.indexScansBuilt++;
+        const scanned = scanIndices(indices.bytes, indices.type, count);
+        indexScanCache.set(indices.buffer, {
+            version: indices.buffer.version, type: indices.type, offset: indices.offset,
+            count, scanned,
+        });
+        return scanned;
+    };
+
+    /**
      * @param {object} context
      * @param {DrawRequest} request
      * @param {import('./pipeline.js').Scene} scene
@@ -1776,9 +1823,7 @@ export function createGpuRenderer(services){
             stats.fallbacks++;
             return false;
         }
-        const scanned = request.indices
-            ? scanIndices(request.indices.bytes, request.indices.type, request.count)
-            : null;
+        const scanned = request.indices ? scannedIndicesFor(request.indices, request.count) : null;
         if (request.count === 0)
         {
             return true;
