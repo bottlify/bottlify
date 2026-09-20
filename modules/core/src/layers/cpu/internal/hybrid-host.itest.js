@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { cpuModule } from '../module.js';
+import { CPU_COUNTERS, cpuModule } from '../module.js';
 import { createMetrics } from '../../log/internal/metrics.js';
 
 const PREBUILT = new URL('../../../../vendor/prebuilt/', import.meta.url);
@@ -35,11 +35,20 @@ const ITERATIONS = 200000;
  */
 async function booted(code, at, config){
     const metrics = createMetrics({ shared: false });
+    /** @type {Float64Array} the cpu layer's frame counters, as it registered them */
+    let counters = new Float64Array(0);
     /** @type {string[]} */
     const words = [];
     const api = await cpuModule.create(config, /** @type {any} */ ({
         requireApi: ()=>({
-            metrics,
+            metrics: {
+                ...metrics,
+                /** @param {string} layer @param {string[]} names */
+                counters: (layer, names)=>{
+                    counters = metrics.counters(layer, names);
+                    return counters;
+                },
+            },
             /** @param {string} text */
             intern: text=>{
                 const found = words.indexOf(text);
@@ -56,7 +65,7 @@ async function booted(code, at, config){
     api.writePhysical(at, code);
     api.writePhysical(0x7000, new Uint8Array(u32(at)));
     api.runSlice(100); // the ROM's jump into guest code
-    return { api, metrics };
+    return { api, metrics, counters: ()=>counters };
 }
 
 /** The cpu module's diagnostics metrics, which exist once it is booted. */
@@ -106,6 +115,14 @@ test('a hot loop is translated between frames and run by the translator', async(
     assert.equal(hybrid.api.instructionCount(), expectedCount,
         'the count is identical to the instruction');
     assert.ok(expectedCount > 2 * ITERATIONS, 'the loop is most of the count');
+    // The frame's own columns: the last frame's share is the loop's, and
+    // its leaves and translation time are numbers of its own.
+    const counters = hybrid.counters();
+    const column = (/** @type {string} */ name)=>counters[CPU_COUNTERS.indexOf(name)];
+    assert.ok(column('cork.share') > 0.5, `share column ${column('cork.share')}`);
+    assert.ok(column('cork.frameShare') >= 0 && column('cork.frameShare') <= 1);
+    assert.ok(column('cork.frameTranslateMs') >= 0);
+    assert.ok(column('cork.frameLeaves') >= 0);
     await cpuModule.dispose();
 });
 

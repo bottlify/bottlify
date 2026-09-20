@@ -101,7 +101,11 @@ const FRAME_INTERPRETED = JIT_AT + JIT_FIELDS.length;
 // The translator's own figures, when one is attached: regions live, regions
 // discarded by a write, and the share of retired instructions it ran.
 const CORK_AT = FRAME_INTERPRETED + 2;
-CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share');
+CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share',
+    // And the frame's own: the share of its instructions the translator ran,
+    // the milliseconds it spent translating in it, the times translated code
+    // came back to the host in it -- what a heavy frame is read against.
+    'cork.frameShare', 'cork.frameTranslateMs', 'cork.frameLeaves');
 
 export const cpuModule = {
     name: 'cpu',
@@ -146,13 +150,17 @@ export const cpuModule = {
          *          worstInterpreted: number, worstInterpretedAt: number,
          *          interpretedBefore: number, lastFault: any, disposed: boolean,
          *          samples: ReturnType<typeof createSampleTable>, engine: string,
-         *          cork: import('./engine.js').Runtime | null }}
+         *          cork: import('./engine.js').Runtime | null,
+         *          corkFrame: { instructions: number, retired: number, translateMs: number,
+         *              leaves: number } }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
             lastFault: null, disposed: false, samples: createSampleTable(), engine,
             cork: null,
+            // The translator's figures at the last frame, for the frame's own columns.
+            corkFrame: { instructions: 0, retired: 0, translateMs: 0, leaves: 0 },
         };
         /**
          * Once a frame: every bucket the sampler has credited past the
@@ -215,6 +223,17 @@ export const cpuModule = {
                     counters[CORK_AT] = cork.regions;
                     counters[CORK_AT + 1] = cork.invalidations;
                     counters[CORK_AT + 2] = cork.translatedShare;
+                    const leaves = cork.exits.untranslated + cork.exits.budget + cork.exits.trap
+                        + cork.exits.halt + cork.exits.fault + cork.exits.stale;
+                    const instructions = state.host.instructionCount();
+                    const last = state.corkFrame;
+                    const ran = instructions - last.instructions;
+                    counters[CORK_AT + 3] = ran > 0 ? (cork.retired - last.retired) / ran : 0;
+                    counters[CORK_AT + 4] = cork.translateMs - last.translateMs;
+                    counters[CORK_AT + 5] = leaves - last.leaves;
+                    state.corkFrame = {
+                        instructions, retired: cork.retired, translateMs: cork.translateMs, leaves,
+                    };
                 }
                 const jit = state.host.jitState();
                 // An emulator that refused to answer reports `-1` rather than a

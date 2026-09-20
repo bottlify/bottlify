@@ -157,6 +157,7 @@
  *     tail calls).
  * @property {number} modules          Wasm modules instantiated.
  * @property {number} translatedShare  Instructions retired in the engine / retired, 0..1.
+ * @property {number} retired          Instructions retired in the engine, for a frame's share.
  * @property {number} cacheHits        Regions taken from the store.
  * @property {number} cacheMisses
  * @property {number} invalidations    Regions discarded by a write.
