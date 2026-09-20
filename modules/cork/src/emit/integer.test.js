@@ -384,3 +384,212 @@ test('salc, and enter in both operand sizes', ()=>{
     assert.equal(r.m.reg('esp'), STACK - 2 - 4);
     agree(r);
 });
+
+test('rotates at every width, by an immediate and by cl, counts past the width included', ()=>{
+    /** @param {number[]} bytes @param {Record<string, number>} regs */
+    const check = (bytes, regs)=>{
+        const r = both([...bytes, 0xf4], { regs, eflags: 2 | CF });
+        assert.equal(r.exit.kind, 3);
+        agree(r);
+        return r;
+    };
+    const regs = { eax: 0x8000_0001, ecx: 0x12, ebx: 0x9c };
+    check([0xc1, 0xc0, 0x01], regs);                     // rol eax, 1
+    check([0xc1, 0xc8, 0x1f], regs);                     // ror eax, 31
+    check([0xc1, 0xc0, 0x20], regs);                     // rol eax, 32   count 0: nothing
+    check([0x66, 0xc1, 0xc0, 0x10], regs);               // rol ax, 16    the width: flags only
+    check([0x66, 0xc1, 0xc8, 0x11], regs);               // ror ax, 17
+    check([0xd0, 0xc3], regs);                           // rol bl, 1
+    check([0xc0, 0xcb, 0x09], regs);                     // ror bl, 9
+    check([0xc0, 0xc3, 0x18], regs);                     // rol bl, 24
+    check([0xd3, 0xc0], regs);                           // rol eax, cl (18)
+    check([0x66, 0xd3, 0xcb], regs);                     // ror bx, cl
+    check([0xd2, 0xc7], { ...regs, ecx: 8 });            // rol bh, cl (8)
+    check([0xd2, 0xc7], { ...regs, ecx: 0 });            // rol bh, cl (0): nothing
+    check([0xd1, 0x0d, 0x00, 0x20, 0, 0], regs);         // ror dword [0x2000], 1
+    const r = check([0xc0, 0xc3, 0x03], { ebx: 0x81 });  // rol bl, 3: 0x0c, CF 0, OF 0
+    assert.equal(r.m.reg('ebx'), 0x0c);
+    assert.equal(r.m.eflags() & CF, 0);
+});
+
+test('rcl and rcr rotate through the carry at every width', ()=>{
+    /** @param {number[]} bytes @param {Record<string, number>} regs @param {number} eflags */
+    const check = (bytes, regs, eflags)=>{
+        const r = both([...bytes, 0xf4], { regs, eflags });
+        assert.equal(r.exit.kind, 3);
+        agree(r);
+        return r;
+    };
+    const regs = { eax: 0x8000_0001, ecx: 0x09, ebx: 0x9c };
+    for (const eflags of [2, 2 | CF])
+    {
+        check([0xd1, 0xd0], regs, eflags);                     // rcl eax, 1
+        check([0xd1, 0xd8], regs, eflags);                     // rcr eax, 1
+        check([0xc1, 0xd0, 0x1f], regs, eflags);               // rcl eax, 31
+        check([0xc1, 0xd8, 0x11], regs, eflags);               // rcr eax, 17
+        check([0x66, 0xc1, 0xd0, 0x11], regs, eflags);         // rcl ax, 17   (count 0 mod 17)
+        check([0x66, 0xc1, 0xd8, 0x05], regs, eflags);         // rcr ax, 5
+        check([0xc0, 0xd3, 0x09], regs, eflags);               // rcl bl, 9    (count 0 mod 9)
+        check([0xc0, 0xdb, 0x04], regs, eflags);               // rcr bl, 4
+        check([0xd3, 0xd3], regs, eflags);                     // rcl ebx, cl (9)
+        check([0xd2, 0xdf], regs, eflags);                     // rcr bh, cl (9)
+        check([0xd2, 0xd3], { ...regs, ecx: 0 }, eflags);      // rcl bl, cl (0): nothing
+    }
+    const r = check([0xd0, 0xd3], { ebx: 0x80 }, 2 | CF);      // rcl bl, 1: 0x01, CF 1, OF 1
+    assert.equal(r.m.reg('ebx'), 0x01);
+    assert.equal(r.m.eflags() & (CF | OF), CF | OF);
+    const q = check([0xd0, 0xdb], { ebx: 0x01 }, 2 | CF);      // rcr bl, 1: 0x80, CF 1, OF 1
+    assert.equal(q.m.reg('ebx'), 0x80);
+    assert.equal(q.m.eflags() & (CF | OF), CF | OF);
+});
+
+test('shld and shrd on dwords and words, with counts past the word width', ()=>{
+    /** @param {number[]} bytes @param {Record<string, number>} regs */
+    const check = (bytes, regs)=>{
+        const r = both([...bytes, 0xf4], { regs });
+        assert.equal(r.exit.kind, 3);
+        agree(r);
+        return r;
+    };
+    const regs = { eax: 0x8000_0001, ebx: 0xdead_beef, ecx: 0x11 };
+    check([0x0f, 0xa4, 0xd8, 0x01], regs);               // shld eax, ebx, 1
+    check([0x0f, 0xac, 0xd8, 0x1f], regs);               // shrd eax, ebx, 31
+    check([0x0f, 0xa5, 0xd8], regs);                     // shld eax, ebx, cl (17)
+    check([0x0f, 0xad, 0xd8], { ...regs, ecx: 0 });      // shrd eax, ebx, cl (0): nothing
+    check([0x66, 0x0f, 0xa4, 0xd8, 0x04], regs);         // shld ax, bx, 4
+    check([0x66, 0x0f, 0xa4, 0xd8, 0x10], regs);         // shld ax, bx, 16
+    check([0x66, 0x0f, 0xa4, 0xd8, 0x14], regs);         // shld ax, bx, 20
+    check([0x66, 0x0f, 0xac, 0xd8, 0x10], regs);         // shrd ax, bx, 16
+    check([0x66, 0x0f, 0xad, 0xd8], regs);               // shrd ax, bx, cl (17)
+    check([0x66, 0x0f, 0xa5, 0xd8], { ...regs, ecx: 3 }); // shld ax, bx, cl (3)
+    check([0x0f, 0xa4, 0x1d, 0x00, 0x20, 0, 0, 0x08], regs); // shld [0x2000], ebx, 8
+    const r = check([0x0f, 0xa4, 0xd8, 0x04], { eax: 0x1234_5678, ebx: 0xabcd_0000 });
+    assert.equal(r.m.reg('eax'), 0x2345_678a);
+    assert.equal(r.m.eflags() & CF, CF, 'the last bit out of eax');
+});
+
+test('mul, imul, div and idiv at byte and word width, faults included', ()=>{
+    /** @param {number[]} bytes @param {Record<string, number>} regs */
+    const check = (bytes, regs)=>{
+        const r = both([...bytes, 0xf4], { regs });
+        agree(r);
+        return r;
+    };
+    let r = check([0xf6, 0xe3], { eax: 0x12ff, ebx: 0x80 });            // mul bl: 0xff * 0x80
+    assert.equal(r.m.reg('eax'), 0x7f80);
+    assert.equal(r.m.eflags() & CF, CF);
+    r = check([0xf6, 0xeb], { eax: 0x12ff, ebx: 0x80 });                // imul bl: -1 * -128
+    assert.equal(r.m.reg('eax'), 0x0080);
+    assert.equal(r.m.eflags() & CF, CF, '128 does not fit a signed byte');
+    check([0xf6, 0xeb], { eax: 0x12f0, ebx: 0x7f });                    // imul bl: -16 * 127
+    r = check([0x66, 0xf7, 0xe3], { eax: 0xffff, ebx: 0x1_0002, edx: 7 }); // mul bx
+    assert.equal(r.m.reg('eax'), 0xfffe);
+    assert.equal(r.m.reg('edx'), 0x0001);
+    check([0x66, 0xf7, 0xeb], { eax: 0x8000, ebx: 0x8000, edx: 7 });    // imul bx: -32768²
+    check([0x66, 0xf7, 0xeb], { eax: 0x0002, ebx: 0x0003, edx: 7 });    // imul bx: fits
+    r = check([0xf6, 0xf3], { eax: 0x0123, ebx: 0x10 });                // div bl: 0x123 / 16
+    assert.equal(r.m.reg('eax') & 0xffff, 0x0312);
+    r = check([0xf6, 0xfb], { eax: 0xff85, ebx: 0x03 });                // idiv bl: -123 / 3
+    assert.equal(r.m.reg('eax') & 0xffff, 0x00d7, '-41, remainder 0');
+    r = check([0x66, 0xf7, 0xf3], { eax: 0x5678, edx: 0x0001, ebx: 0x10 }); // div bx
+    assert.equal(r.m.reg('eax') & 0xffff, 0x1567);
+    assert.equal(r.m.reg('edx') & 0xffff, 0x0008);
+    check([0x66, 0xf7, 0xfb], { eax: 0x0000, edx: 0xffff, ebx: 0x0007 }); // idiv bx: -65536 / 7
+    // Faults: a byte quotient past 0xff, a word quotient past a signed word,
+    // the division by zero, and INT32_MIN / -1.
+    /** @type {[number[], Record<string, number>][]} */
+    const faulting = [
+        [[0xf6, 0xf3], { eax: 0x1000, ebx: 0x01 }],
+        [[0x66, 0xf7, 0xfb], { eax: 0x0000, edx: 0x0001, ebx: 0x0001 }],
+        [[0xf6, 0xf3], { eax: 0x1000, ebx: 0x00 }],
+        [[0x66, 0xf7, 0xfb], { eax: 0x0000, edx: 0x8000, ebx: 0xffff }],
+    ];
+    for (const [bytes, regs] of faulting)
+    {
+        const f = both([...bytes, 0xf4], { regs });
+        assert.equal(f.exit.kind, 4, 'a fault');
+        assert.equal(f.exit.vector, 0);
+        assert.equal(f.exit.eip, CODE, 'at the instruction');
+        assert.ok(f.modelFault !== null, 'the model faults too');
+    }
+});
+
+test('popcnt counts the bits and clears every flag but ZF', ()=>{
+    const r = both([0xf3, 0x0f, 0xb8, 0xc3, 0x66, 0xf3, 0x0f, 0xb8, 0xd3, 0xf4],
+        { regs: { ebx: 0xf0f0_00ff }, eflags: 2 | CF | OF | SF });
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('eax'), 16);
+    assert.equal(r.m.reg('edx') & 0xffff, 8);
+    assert.equal(r.m.eflags() & 0x8d5, 0);
+    agree(r);
+    const zero = both([0xf3, 0x0f, 0xb8, 0xc3, 0xf4], { regs: { ebx: 0 } });
+    assert.equal(zero.m.eflags() & 0x8d5, ZF);
+    agree(zero);
+});
+
+test('a shift by a zero cl leaves an earlier lazy record intact for a later reader', ()=>{
+    // add records; the shift with cl = 0 changes nothing, but its lowering
+    // must not touch the record's operands, which the setc and the epilogue
+    // fold afterwards.
+    const r = both([
+        0xb8, 0xff, 0xff, 0xff, 0xff,             // mov eax, -1
+        0xbb, 0x01, 0, 0, 0,                      // mov ebx, 1
+        0xb9, 0x00, 0x01, 0, 0,                   // mov ecx, 0x100     cl = 0
+        0x01, 0xd8,                               // add eax, ebx       CF=1 ZF=1
+        0xd3, 0xe1,                               // shl ecx, cl        nothing
+        0x0f, 0x92, 0xc2,                         // setc dl
+        0x0f, 0xa5, 0xd9,                         // shld ecx, ebx, cl  nothing
+        0x0f, 0x94, 0xc6,                         // sete dh
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('edx') & 0xffff, 0x0101);
+    assert.equal(r.m.eflags() & (CF | ZF), CF | ZF);
+    agree(r);
+    // The same with a nonzero cl: the shift's own flags.
+    const s = both([
+        0xb8, 0xff, 0xff, 0xff, 0xff, 0xbb, 0x01, 0, 0, 0, 0xb9, 0x01, 0x01, 0, 0,
+        0x01, 0xd8, 0xd3, 0xe1, 0x0f, 0x92, 0xc2, 0x0f, 0xa5, 0xd9, 0x0f, 0x94, 0xc6, 0xf4,
+    ]);
+    assert.equal(s.m.reg('edx') & 0xffff, 0x0000);
+    agree(s);
+});
+
+test('a shift that may write no flags does not kill an earlier record for the dead-flag pass', ()=>{
+    // and clears CF; the shifts by zero leave it; setae reads it; xor then
+    // kills every flag. The pass must still keep the and's record live.
+    const r = both([
+        0xb8, 0x03, 0, 0, 0,                      // mov eax, 3
+        0xb9, 0x00, 0x01, 0, 0,                   // mov ecx, 0x100     cl = 0
+        0x83, 0xe0, 0x01,                         // and eax, 1         CF=0
+        0xc0, 0xe8, 0x00,                         // shr al, 0          nothing
+        0x0f, 0x93, 0xc3,                         // setae bl           1
+        0xd2, 0xe8,                               // shr al, cl         nothing (cl = 0)
+        0x0f, 0x93, 0xc7,                         // setae bh           1
+        0x31, 0xd2,                               // xor edx, edx       kills the flags
+        0xf4,
+    ], { eflags: 2 | CF });
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('ebx') & 0xffff, 0x0101);
+    agree(r);
+});
+
+test('inc with dead flags keeps a pending record whole for the carry a later reader folds', ()=>{
+    // add records CF=1; dec's own flags are dead (sbb overwrites them) but
+    // the add's CF is read by sbb through the dec: the record's operands
+    // must survive the dec.
+    const r = both([
+        0xb8, 0xff, 0xff, 0xff, 0xff,             // mov eax, -1
+        0xbb, 0x02, 0, 0, 0,                      // mov ebx, 2
+        0xb9, 0x10, 0, 0, 0,                      // mov ecx, 0x10
+        0x01, 0xd8,                               // add eax, ebx       CF=1
+        0x49,                                     // dec ecx            CF stays
+        0x0f, 0x93, 0xc2,                         // setae dl           0
+        0x83, 0xdb, 0x00,                         // sbb ebx, 0         2 - 1
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('ebx'), 1);
+    assert.equal(r.m.reg('edx') & 0xff, 0);
+    agree(r);
+});

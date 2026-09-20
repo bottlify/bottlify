@@ -674,14 +674,40 @@ export function deadFlagPass(block){
     for (let i = block.instructions.length - 1; i >= 0; i--)
     {
         const instruction = block.instructions[i];
+        // A shift or rotate by a count of zero writes no flag at all; by a
+        // count in cl it may or may not, so it kills nothing an earlier
+        // record holds, though its own writes are live when read later.
+        const count = shiftCount(instruction);
+        if (count === 0)
+        {
+            live[i] = false;
+            continue;
+        }
         // Only a defined write kills a flag: an instruction leaves its undefined
         // flags as they were (the model and the emitter agree on that), so an
         // earlier record may still be what a later reader sees.
-        const written = instruction.flagsWritten & ~instruction.flagsUndefined;
+        const written = count === -1 ? 0 : instruction.flagsWritten & ~instruction.flagsUndefined;
         live[i] = ((instruction.flagsWritten | instruction.flagsUndefined) & liveAfter) !== 0;
         liveAfter = (liveAfter & ~written) | instruction.flagsRead;
     }
     return live;
+}
+
+const SHIFT_OPS = new Set(['rol', 'ror', 'rcl', 'rcr', 'shl', 'shr', 'sal', 'sar', 'shld', 'shrd']);
+
+/**
+ * The count of a shift or rotate masked to five bits, -1 when it is in cl,
+ * null for any other instruction.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+function shiftCount(instruction){
+    if (!SHIFT_OPS.has(instruction.op))
+    {
+        return null;
+    }
+    const count = instruction.operands[instruction.operands.length - 1];
+    return count.kind === 'imm' ? (/** @type {number} */ (count.value) & 31) : -1;
 }
 
 export { CF, OF, ARITH, EMPTY };

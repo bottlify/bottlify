@@ -39,6 +39,9 @@ const I32_EXTRA = Object.freeze({
     rotl: 0x77, rotr: 0x78, extend8s: 0xc0, extend16s: 0xc1,
 });
 
+/** Every arithmetic flag. */
+const ARITH_ALL = CF | PF | AF | ZF | SF | OF;
+
 /** The selector values the flat segments carry, by segment index. */
 const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
 
@@ -125,17 +128,21 @@ export function emitInstruction(e, instruction, flagsLive){
             logic(e, instruction, flagsLive);
             return true;
         case 'inc': case 'dec':
+        {
+            // CF stays: with the flags live the word is made whole first and
+            // the record takes op1; with them dead a pending record (whose CF
+            // a later reader may still fold) must keep its operands, so the
+            // value goes through a scratch local instead.
+            const value = flagsLive ? Local.op1 : Local.t1;
             if (flagsLive)
             {
-                // CF stays: the word must hold it, so make the word whole
-                // first -- before op1 is taken, which the pending record may use.
                 e.materialise();
             }
             prepare(e, dst);
             readOp(e, dst);
-            b.localSet(Local.op1);
+            b.localSet(value);
             writeOp(e, dst, ()=>{
-                b.localGet(Local.op1).i32const(1).op(op === 'inc' ? I32.add : I32.sub);
+                b.localGet(value).i32const(1).op(op === 'inc' ? I32.add : I32.sub);
                 mask(e, size);
                 if (flagsLive)
                 {
@@ -143,6 +150,7 @@ export function emitInstruction(e, instruction, flagsLive){
                 }
             });
             return true;
+        }
         case 'neg':
             prepare(e, dst);
             readOp(e, dst);
@@ -168,6 +176,24 @@ export function emitInstruction(e, instruction, flagsLive){
             return shift(e, instruction, flagsLive);
         case 'rol': case 'ror':
             return rotate(e, instruction, flagsLive);
+        case 'rcl': case 'rcr':
+            return rotateCarry(e, instruction, flagsLive);
+        case 'shld': case 'shrd':
+            return shiftDouble(e, instruction, flagsLive);
+        case 'popcnt':
+            prepare(e, src);
+            readOp(e, src);
+            b.op(I32.popcnt);
+            b.localSet(Local.t1);
+            b.localGet(Local.t1);
+            writeReg(e, /** @type {number} */ (dst.reg), size, false);
+            if (flagsLive)
+            {
+                e.eagerWrite(ARITH_ALL);
+                b.localGet(Local.t1).op(I32.eqz);
+                e.orFlag(ZF);
+            }
+            return true;
         case 'imul':
             return imul(e, instruction, flagsLive);
         case 'mul':
@@ -760,6 +786,12 @@ function shift(e, instruction, flagsLive){
     }
     prepare(e, dst);
     const arith = op === 'sar';
+    if (staticCount < 0)
+    {
+        // A count of zero at run time leaves the pending record to be folded
+        // later, so its operands must survive: the word is made whole first.
+        e.materialise();
+    }
     // The value, sign-extended for sar.
     readOp(e, dst);
     if (arith && size < 4)
@@ -857,32 +889,43 @@ function rotate(e, instruction, flagsLive){
     const [dst, count] = operands;
     const bits = size * 8;
     const sign = SIGN_BITS[widthCode(size)];
-    if (size !== 4)
-    {
-        return false;
-    }
     prepare(e, dst);
-    if (count.kind === 'imm')
+    if (!rotationCount(e, count))
     {
-        const n = (/** @type {number} */ (count.value) & 31) % bits;
-        if (n === 0)
-        {
-            return true;
-        }
-        b.i32const(n).localSet(Local.count);
-    }
-    else
-    {
-        readOp(e, count);
-        b.i32const(31).op(I32.and).localSet(Local.count);
+        return true;
     }
     if (flagsLive)
     {
         e.materialise();
     }
+    // The rotation is by the count modulo the width -- none at all for a
+    // count of the width, though the flags are still written from the value.
+    const pushN = ()=>{
+        b.localGet(Local.count);
+        if (size < 4)
+        {
+            b.i32const(bits).op(I32_EXTRA.remU);
+        }
+    };
     writeOp(e, dst, ()=>{
         readOp(e, dst);
-        b.localGet(Local.count).op(op === 'rol' ? I32_EXTRA.rotl : I32_EXTRA.rotr);
+        if (size === 4)
+        {
+            pushN();
+            b.op(op === 'rol' ? I32_EXTRA.rotl : I32_EXTRA.rotr);
+        }
+        else
+        {
+            b.localSet(Local.t2);
+            b.localGet(Local.t2);
+            pushN();
+            b.op(op === 'rol' ? I32.shl : I32.shrU);
+            b.localGet(Local.t2).i32const(bits);
+            pushN();
+            b.op(I32.sub).op(op === 'rol' ? I32.shrU : I32.shl);
+            b.op(I32.or);
+            mask(e, size);
+        }
         b.localSet(Local.t1);
         b.localGet(Local.t1);
     });
@@ -914,6 +957,189 @@ function rotate(e, instruction, flagsLive){
 }
 
 /**
+ * Leaves the rotation count masked to five bits in `count`; answers false
+ * when it is a constant zero, which leaves everything as it is.
+ *
+ * @param {E} e @param {Operand} count
+ */
+function rotationCount(e, count){
+    const { b } = e;
+    if (count.kind === 'imm')
+    {
+        const raw = /** @type {number} */ (count.value) & 31;
+        if (raw === 0)
+        {
+            return false;
+        }
+        b.i32const(raw).localSet(Local.count);
+        return true;
+    }
+    readOp(e, count);
+    b.i32const(31).op(I32.and).localSet(Local.count);
+    return true;
+}
+
+/**
+ * rcl/rcr: a rotation of the value with the carry as its top bit, one bit
+ * wider than the operand, done in i64 for every width. The count is taken
+ * modulo the width plus one; a nonzero count that comes to zero still
+ * writes CF (unchanged) and OF.
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function rotateCarry(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands, size } = instruction;
+    const [dst, count] = operands;
+    const bits = size * 8;
+    const sign = SIGN_BITS[widthCode(size)];
+    const left = op === 'rcl';
+    prepare(e, dst);
+    if (!rotationCount(e, count))
+    {
+        return true;
+    }
+    e.pushFlag(CF);
+    b.localSet(Local.t2);
+    if (flagsLive)
+    {
+        e.materialise();
+    }
+    // n, as an i64 shift count
+    b.localGet(Local.count).i32const(bits + 1).op(I32_EXTRA.remU).op(I64.extendU)
+        .localSet(Local.t64b);
+    writeOp(e, dst, ()=>{
+        // V = carry:value
+        readOp(e, dst);
+        b.op(I64.extendU).localGet(Local.t2).op(I64.extendU).i64const(BigInt(bits)).op(I64.shl)
+            .op(I64.or).localSet(Local.t64);
+        if (!left)
+        {
+            // rcr's OF is from the value before: msb(value) ^ carry in.
+            b.localGet(Local.t64).op(I64.wrap).i32const(sign).op(I32.and).i32const(0).op(I32.ne)
+                .localGet(Local.t2).op(I32.xor).localSet(Local.t2);
+        }
+        b.localGet(Local.t64).localGet(Local.t64b).op(left ? I64.shl : I64.shrU);
+        b.localGet(Local.t64).i64const(BigInt(bits + 1)).localGet(Local.t64b).op(I64.sub)
+            .op(left ? I64.shrU : I64.shl);
+        b.op(I64.or).i64const((1n << BigInt(bits + 1)) - 1n).op(I64.and).localSet(Local.t64);
+        b.localGet(Local.t64).op(I64.wrap);
+        mask(e, size);
+        b.localSet(Local.t1);
+        b.localGet(Local.t1);
+    });
+    if (flagsLive)
+    {
+        b.localGet(Local.count).i32const(0).op(I32.ne);
+        e.openIf('rotated', EMPTY);
+        b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
+        b.localGet(Local.t64).i64const(BigInt(bits)).op(I64.shrU).op(I64.wrap).i32const(1)
+            .op(I32.and);
+        e.orFlag(CF);
+        if (left)
+        {
+            b.localGet(Local.t1).i32const(sign).op(I32.and).i32const(0).op(I32.ne);
+            b.localGet(Local.t64).i64const(BigInt(bits)).op(I64.shrU).op(I64.wrap).i32const(1)
+                .op(I32.and).op(I32.xor);
+        }
+        else
+        {
+            b.localGet(Local.t2);
+        }
+        e.orFlag(OF);
+        e.close();
+    }
+    return true;
+}
+
+/**
+ * shld/shrd of a dword or a word: the destination shifted with the source's
+ * bits coming in. The word form's count may exceed the width; the pair as
+ * one 32-bit value shifted by the count gives the processor's answer for
+ * every count, carry included.
+ *
+ * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
+ */
+function shiftDouble(e, instruction, flagsLive){
+    const { b } = e;
+    const { op, operands, size } = instruction;
+    const [dst, src, count] = operands;
+    const sign = SIGN_BITS[widthCode(size)];
+    const left = op === 'shld';
+    prepare(e, dst);
+    if (!rotationCount(e, count))
+    {
+        return true;
+    }
+    const dynamic = count.kind !== 'imm';
+    if (dynamic)
+    {
+        // As in `shift`: whole word before the branch, record unknown after it.
+        e.materialise();
+        b.localGet(Local.count).i32const(0).op(I32.ne);
+        e.openIf('shifting', EMPTY);
+    }
+    writeOp(e, dst, ()=>{
+        if (size === 4)
+        {
+            readOp(e, dst);
+            b.localSet(Local.t2);
+            b.localGet(Local.t2).localGet(Local.count).op(left ? I32.shl : I32.shrU);
+            readOp(e, src);
+            b.i32const(32).localGet(Local.count).op(I32.sub).op(left ? I32.shrU : I32.shl);
+            b.op(I32.or);
+        }
+        else
+        {
+            // shld: dst:src, the result in the high half; shrd: src:dst, in the low.
+            readOp(e, left ? dst : src);
+            b.i32const(16).op(I32.shl);
+            readOp(e, left ? src : dst);
+            b.op(I32.or).localSet(Local.t2);
+            b.localGet(Local.t2).localGet(Local.count).op(left ? I32.shl : I32.shrU);
+            if (left)
+            {
+                b.i32const(16).op(I32.shrU);
+            }
+            mask(e, size);
+        }
+        if (flagsLive)
+        {
+            e.record(Kind.SHIFT, size);
+        }
+    });
+    if (flagsLive)
+    {
+        b.localGet(Local.flags).i32const(~(CF | OF)).op(I32.and).localSet(Local.flags);
+        if (left)
+        {
+            b.localGet(Local.t2).i32const(32).localGet(Local.count).op(I32.sub).op(I32.shrU);
+        }
+        else
+        {
+            b.localGet(Local.t2).localGet(Local.count).i32const(1).op(I32.sub).op(I32.shrU);
+        }
+        b.i32const(1).op(I32.and);
+        e.orFlag(CF);
+        // OF: the sign changed.
+        b.localGet(Local.t2);
+        if (size === 2 && left)
+        {
+            b.i32const(16).op(I32.shrU);
+        }
+        b.i32const(sign).op(I32.and).i32const(0).op(I32.ne);
+        b.localGet(Local.res).i32const(sign).op(I32.and).i32const(0).op(I32.ne).op(I32.xor);
+        e.orFlag(OF);
+    }
+    if (dynamic)
+    {
+        e.close();
+        e.pending = null;
+    }
+    return true;
+}
+
+/**
  * imul in its three forms: CF and OF say whether the signed product fit.
  *
  * @param {E} e @param {Instruction} instruction @param {boolean} flagsLive
@@ -938,7 +1164,26 @@ function imul(e, instruction, flagsLive){
     {
         if (size !== 4)
         {
-            return false;
+            // Signed al * r/m8 -> ax, ax * r/m16 -> dx:ax; CF and OF say the
+            // product does not fit its low half.
+            prepare(e, operands[0]);
+            b.localGet(Local.reg);
+            b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
+            readSigned(operands[0]);
+            b.op(I32_EXTRA.mul).localSet(Local.t1);
+            wideResult(e, size, ()=>b.localGet(Local.t1));
+            if (flagsLive)
+            {
+                e.eagerWrite(CF | OF);
+                b.localGet(Local.t1);
+                b.op(size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s);
+                b.localGet(Local.t1).op(I32.ne).localSet(Local.t2);
+                b.localGet(Local.t2);
+                e.orFlag(CF);
+                b.localGet(Local.t2);
+                e.orFlag(OF);
+            }
+            return true;
         }
         prepare(e, operands[0]);
         b.localGet(Local.reg).op(I64.extendS);
@@ -994,7 +1239,23 @@ function mul(e, instruction, flagsLive){
     const { operands, size } = instruction;
     if (size !== 4)
     {
-        return false;
+        // al * r/m8 -> ax; ax * r/m16 -> dx:ax. The product fits an i32.
+        prepare(e, operands[0]);
+        b.localGet(Local.reg).i32const(MASKS[widthCode(size)]).op(I32.and);
+        readOp(e, operands[0]);
+        b.op(I32_EXTRA.mul).localSet(Local.t1);
+        wideResult(e, size, ()=>b.localGet(Local.t1));
+        if (flagsLive)
+        {
+            e.eagerWrite(CF | OF);
+            b.localGet(Local.t1).i32const(size * 8).op(I32.shrU).i32const(0).op(I32.ne)
+                .localSet(Local.t2);
+            b.localGet(Local.t2);
+            e.orFlag(CF);
+            b.localGet(Local.t2);
+            e.orFlag(OF);
+        }
+        return true;
     }
     prepare(e, operands[0]);
     b.localGet(Local.reg).op(I64.extendU);
@@ -1023,10 +1284,6 @@ function mul(e, instruction, flagsLive){
 function divide(e, instruction){
     const { b } = e;
     const { op, operands, size } = instruction;
-    if (size !== 4)
-    {
-        return false;
-    }
     prepare(e, operands[0]);
     readOp(e, operands[0]);
     b.localSet(Local.t1);
@@ -1035,6 +1292,10 @@ function divide(e, instruction){
     e.openIf('zero', EMPTY);
     e.exitBefore(instruction.eip, Exit.FAULT, 0);
     e.close();
+    if (size !== 4)
+    {
+        return divideNarrow(e, instruction);
+    }
     b.localGet(Local.reg + 2).op(I64.extendU).i64const(32n).op(I64.shl)
         .localGet(Local.reg).op(I64.extendU).op(I64.or).localSet(Local.t64);
     if (op === 'div')
@@ -1067,6 +1328,94 @@ function divide(e, instruction){
     }
     b.localGet(Local.t64b).op(I64.wrap).localSet(Local.reg);
     return true;
+}
+
+/**
+ * div/idiv of a byte or a word: ax by r/m8 into al (quotient) and ah
+ * (remainder), dx:ax by r/m16 into ax and dx. The dividend fits an i32,
+ * so the arithmetic is i32 with the divisor already in `t1` and checked
+ * for zero.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function divideNarrow(e, instruction){
+    const { b } = e;
+    const { op, size } = instruction;
+    const bits = size * 8;
+    const signed = op === 'idiv';
+    const extend = size === 1 ? I32_EXTRA.extend8s : I32_EXTRA.extend16s;
+    // The dividend.
+    if (size === 1)
+    {
+        b.localGet(Local.reg).i32const(0xffff).op(I32.and);
+        if (signed)
+        {
+            b.op(I32_EXTRA.extend16s);
+        }
+    }
+    else
+    {
+        b.localGet(Local.reg + 2).i32const(16).op(I32.shl)
+            .localGet(Local.reg).i32const(0xffff).op(I32.and).op(I32.or);
+    }
+    b.localSet(Local.t2);
+    if (signed)
+    {
+        b.localGet(Local.t1).op(extend).localSet(Local.t1);
+        if (size === 2)
+        {
+            // INT32_MIN / -1 would trap in wasm; the processor faults, as the
+            // quotient does not fit either way.
+            b.localGet(Local.t1).i32const(-1).op(I32.eq);
+            b.localGet(Local.t2).i32const(-0x80000000).op(I32.eq).op(I32.and);
+            e.openIf('overflow', EMPTY);
+            e.exitBefore(instruction.eip, Exit.FAULT, 0);
+            e.close();
+        }
+    }
+    b.localGet(Local.t2).localGet(Local.t1).op(signed ? I32_EXTRA.divS : I32_EXTRA.divU)
+        .localSet(Local.t0);
+    // The quotient must fit the width.
+    b.localGet(Local.t0);
+    if (signed)
+    {
+        b.op(extend).localGet(Local.t0).op(I32.ne);
+    }
+    else
+    {
+        b.i32const(MASKS[widthCode(size)]).op(I32.gtU);
+    }
+    e.openIf('overflow', EMPTY);
+    e.exitBefore(instruction.eip, Exit.FAULT, 0);
+    e.close();
+    b.localGet(Local.t2).localGet(Local.t1).op(signed ? I32_EXTRA.remS : I32_EXTRA.remU)
+        .localSet(Local.t2);
+    // quotient low, remainder high: as one value of twice the width.
+    b.localGet(Local.t0).i32const(MASKS[widthCode(size)]).op(I32.and)
+        .localGet(Local.t2).i32const(bits).op(I32.shl).op(I32.or).localSet(Local.t1);
+    wideResult(e, size, ()=>b.localGet(Local.t1));
+    return true;
+}
+
+/**
+ * Writes a value twice the width of `size` where the processor puts it: ax
+ * for a byte (al low, ah high), dx:ax for a word.
+ *
+ * @param {E} e @param {number} size @param {() => void} pushValue
+ */
+function wideResult(e, size, pushValue){
+    const { b } = e;
+    if (size === 1)
+    {
+        pushValue();
+        writeReg(e, 0, 2, false);
+        return;
+    }
+    pushValue();
+    writeReg(e, 0, 2, false);
+    pushValue();
+    b.i32const(16).op(I32.shrU);
+    writeReg(e, 2, 2, false);
 }
 
 /**

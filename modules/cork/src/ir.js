@@ -416,9 +416,21 @@ export function evaluate(instruction, state){
         case 'imul':
             imul(operands, size, state, read, write, setFlags);
             return;
+        case 'popcnt':
+        {
+            let value = read(operands[1]);
+            let count = 0;
+            for (; value !== 0; value >>>= 1)
+            {
+                count += value & 1;
+            }
+            write(operands[0], count);
+            setFlags(count === 0 ? ZF : 0, ARITH);
+            return;
+        }
         case 'mul':
         {
-            const a = state.reg[0] & mask;
+            const a = (state.reg[0] & mask) >>> 0;
             const b = read(operands[0]);
             const product = BigInt(a) * BigInt(b);
             const low = Number(product & BigInt(mask));
