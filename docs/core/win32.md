@@ -71,6 +71,7 @@ the module graph is built. All are optional.
 | `resolve(name)` | One export by name, whichever library publishes it. |
 | `gdi()` | `createSurfaceDc(attributes)` / `deleteSurfaceDc(handle)` — a DC over pixels GDI did not allocate, for the graphics layer. |
 | `queue()` | The message queue; the input layer and the driver post here. |
+| `paste(text)` | Text put on the clipboard from outside, as a paste on the page does: a program's `GetClipboardData` for `CF_TEXT`, `CF_OEMTEXT` or `CF_UNICODETEXT` answers with a copy laid down in guest memory in that format (`IsClipboardFormatAvailable`, `CountClipboardFormats` and `EnumClipboardFormats` list them), until the program empties the clipboard or the next paste replaces it. What the program set itself is answered first. |
 | `waveTick()` | Move every open wave device's play cursor; called by the driver, since nothing in the guest does. |
 | `videoTick(nowMs, soundOwedMs?)` | Advance every running filter graph and return the frame to show. |
 | `registry()` | The hive (`toJSON`/`fromJSON`/`onChanged`), whose contents outlive the process. |

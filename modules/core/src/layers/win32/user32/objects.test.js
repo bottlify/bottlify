@@ -60,6 +60,7 @@ const { MENUITEMINFO, SCROLLINFO, ACCEL_SIZE, SB_HORZ } = OBJECT_LAYOUT;
 
 function fakeMemory(size = 0x14000){
     const bytes = new Uint8Array(size);
+    let next = 0x10000;
     return {
         bytes,
         /** @param {number} address @param {number} length */
@@ -97,6 +98,12 @@ function fakeMemory(size = 0x14000){
         /** @param {number} address */
         u32: address=>(bytes[address] | bytes[address + 1] << 8
             | bytes[address + 2] << 16 | bytes[address + 3] << 24) >>> 0,
+        /** A bump allocator over the top of the fake, for what the host lays down. */
+        alloc: (/** @type {number} */ wanted)=>{
+            const address = next;
+            next += (wanted + 15) & ~15;
+            return address;
+        },
     };
 }
 
@@ -536,6 +543,68 @@ test('the clipboard is bracketed, and a write outside the brackets fails', ()=>{
     assert.equal(fns.CloseClipboard.handler([]), 1);
     assert.equal(fns.CloseClipboard.handler([]), 0);
 });
+
+test('what the host pasted is read back in the format asked for, until the program takes over',
+    ()=>{
+        // The page's paste lands on the host's pasteboard; a program's
+        // GetClipboardData for a text format gets a copy laid down in guest
+        // memory, the same handle while the paste stands, a fresh one after
+        // the next paste, and none once it has emptied the clipboard itself.
+        const { memory, fns } = setup({
+            pasteboard,
+            allocate: (/** @type {number} */ bytes)=>memory.alloc(bytes),
+            release: (/** @type {number} */ address)=>released.push(address),
+        });
+        assert.equal(fns.IsClipboardFormatAvailable.handler([CF_TEXT]), 0);
+        pasteboard.text = 'pa\u0161s\u00e9';
+        pasteboard.version = 1;
+        assert.equal(fns.IsClipboardFormatAvailable.handler([CF_TEXT]), 1);
+        assert.equal(fns.IsClipboardFormatAvailable.handler([CF_UNICODETEXT]), 1);
+        assert.equal(fns.IsClipboardFormatAvailable.handler([2]), 0, 'no bitmap');
+        assert.equal(fns.CountClipboardFormats.handler([]), 3);
+        assert.equal(fns.GetClipboardData.handler([CF_TEXT]), 0, 'closed');
+
+        assert.equal(fns.OpenClipboard.handler([0]), 1);
+        assert.equal(fns.EnumClipboardFormats.handler([0]), CF_TEXT);
+        assert.equal(fns.EnumClipboardFormats.handler([CF_UNICODETEXT]), 0);
+        const narrow = fns.GetClipboardData.handler([CF_TEXT]);
+        assert.notEqual(narrow, 0);
+        assert.equal(memory.readCString(narrow, 16), 'pa?s\u00e9', 'one byte a character');
+        assert.equal(fns.GetClipboardData.handler([CF_TEXT]), narrow, 'the same copy again');
+        const wide = fns.GetClipboardData.handler([CF_UNICODETEXT]);
+        assert.notEqual(wide, narrow);
+        assert.deepEqual([...memory.readMemory(wide, 12)],
+            [0x70, 0, 0x61, 0, 0x61, 1, 0x73, 0, 0xe9, 0, 0, 0], 'UTF-16, terminated');
+        assert.equal(fns.CloseClipboard.handler([]), 1);
+        assert.deepEqual(released, []);
+
+        pasteboard.text = 'next';
+        pasteboard.version = 2;
+        assert.equal(fns.OpenClipboard.handler([0]), 1);
+        const again = fns.GetClipboardData.handler([CF_TEXT]);
+        assert.equal(memory.readCString(again, 16), 'next');
+        assert.deepEqual(released.sort(), [narrow, wide].sort(), 'the old copies went back');
+
+        // The program takes the clipboard for its own copy: the paste is
+        // gone until the host pastes anew, and its own data is what is read.
+        assert.equal(fns.EmptyClipboard.handler([]), 1);
+        assert.equal(fns.GetClipboardData.handler([CF_TEXT]), 0);
+        assert.equal(fns.IsClipboardFormatAvailable.handler([CF_TEXT]), 0);
+        assert.equal(fns.SetClipboardData.handler([CF_TEXT, 0x5000]), 0x5000);
+        assert.equal(fns.GetClipboardData.handler([CF_TEXT]), 0x5000);
+        assert.equal(fns.CloseClipboard.handler([]), 1);
+        pasteboard.text = 'newer';
+        pasteboard.version = 3;
+        assert.equal(fns.OpenClipboard.handler([0]), 1);
+        assert.equal(fns.GetClipboardData.handler([CF_TEXT]), 0x5000, 'its own copy stays first');
+        assert.equal(fns.GetClipboardData.handler([CF_UNICODETEXT]) !== 0, true,
+            'a format it did not set is answered from the paste');
+        assert.equal(fns.CloseClipboard.handler([]), 1);
+    });
+/** @type {{ text: string | null, version: number }} */
+const pasteboard = { text: null, version: 0 };
+/** @type {number[]} */
+const released = [];
 
 /** @returns {{ copied: string[], host: { clipboard: (text: string) => void } }} */
 function clipboardListener(){

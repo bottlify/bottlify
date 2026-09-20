@@ -117,7 +117,10 @@ beside the viewport is a fact about the page, not the mouse.
   taken, since programs bind alt-enter and the browser's ALT menu is recoverable. A printable
   `key`, or `Enter`/`Tab`/`Backspace`/`Escape` as their control characters, is sent as `text`. Two
   Escapes within 600 ms blur the canvas and hand focus back to the page; both still reach the
-  guest first.
+  guest first. A paste gesture is the one chord treated specially: the V of a Ctrl- or Cmd-V is
+  held back until the `paste` event has delivered its text (sent as `paste`, for the guest's
+  clipboard), then delivered as Control-V -- the chord a program of this era pastes on, whatever
+  the page's own -- or let go on its own after 250 ms when no paste follows.
 - **Pointer.** Every move projects `clientX/Y` through the canvas's bounding rect minus its border
   and padding (re-read only when the drawn size changes) and the ratio of the picture's pixels to
   the drawn size, so a canvas displayed at any size lands the cursor where the person is pointing.

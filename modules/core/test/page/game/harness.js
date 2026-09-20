@@ -773,7 +773,8 @@ export function scheduleKeyTimes(app, request){
  * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
  *           clicks?: { x: number, y: number, after: number }[],
  *           keys?: { code: string, after: number }[],
- *           typed?: { text: string, after: number }[] }} request
+ *           typed?: { text: string, after: number }[],
+ *           pasted?: { text: string, after: number }[] }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -851,6 +852,23 @@ export function presentFrame(app, request, state, frame){
         if (index >= 1 && index <= typed.text.length)
         {
             app.input.send({ kind: 'key', code: codeOf(typed.text[index - 1]), down: false });
+        }
+    }
+    // Pasted text: on the clipboard first, then the Control-V a program
+    // pastes on, released the frame after -- the order the page's own paste
+    // gesture arrives in.
+    for (const pasted of request.pasted ?? [])
+    {
+        if (state.presents === pasted.after)
+        {
+            app.input.send({ kind: 'paste', text: pasted.text });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: true });
+            app.input.send({ kind: 'key', code: 'KeyV', down: true });
+        }
+        else if (state.presents === pasted.after + 1)
+        {
+            app.input.send({ kind: 'key', code: 'KeyV', down: false });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: false });
         }
     }
 }
@@ -979,6 +997,7 @@ export function createHarness(canvas, how = {}){
      *           clicks?: { x: number, y: number, after: number }[],
      *           keys?: { code: string, after: number }[],
      *           typed?: { text: string, after: number }[],
+     *           pasted?: { text: string, after: number }[],
      *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],

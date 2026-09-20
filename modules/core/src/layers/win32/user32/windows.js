@@ -391,6 +391,9 @@ function characterFor(key){
  * @property {(instance: number) => number} [moduleBase]
  *           Where a module is mapped, which with a resource's own offset is
  *           the address of its bytes -- a dialog template is read in place.
+ * @property {{ text: string | null, version: number }} [pasteboard]
+ *           What the host last pasted, with a version that rises on every
+ *           paste: the clipboard's contents until a program empties it.
  * @property {(hwnd: number) => void} [created]
  *           A window now exists. Whoever delivers input needs to know.
  * @property {(bytes: number) => number} [allocate]

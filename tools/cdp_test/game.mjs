@@ -249,6 +249,18 @@ function parse(argv){
             return [{ text: argv[index + 1].slice(0, at),
                 after: Number(argv[index + 1].slice(at + 1)) || 30 }];
         }),
+        // Text pasted into whatever has the focus at frame `after`, as
+        // `text,after`: onto the clipboard, then the Control-V a program
+        // pastes on, the way the page's paste gesture delivers one.
+        pasted: argv.flatMap((flag, index)=>{
+            if (flag !== '--paste')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+        }),
         // The relay the run's Winsock reaches the world through, as the
         // launcher names it: `--network wss://host/relay` joins room `harness`.
         network: argv.includes('--network') ? argv[argv.indexOf('--network') + 1] : null,
@@ -895,6 +907,7 @@ export async function game(options){
             pointer: options.pointer,
             clicks: options.clicks,
             typed: options.typed,
+            pasted: options.pasted,
             network: options.network
                 ? {
                     module: new URL('/networking/client/index.js', pageUrl).href,

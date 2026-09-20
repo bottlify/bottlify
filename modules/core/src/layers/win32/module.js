@@ -252,6 +252,11 @@ export const win32Module = {
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
         // presses knows which modifiers are down when one arrives.
+        // What the page pasted, for the clipboard functions to answer with;
+        // the version is what tells a fresh paste from the one a program
+        // already read.
+        /** @type {{ text: string | null, version: number }} */
+        const pasteboard = { text: null, version: 0 };
         const queue = createMessageQueue({
             now: ()=>kernel.clock.virtualTime(),
             keyState: config?.keyState,
@@ -1223,6 +1228,7 @@ export const win32Module = {
                 messageBox: notice=>config?.onMessageBox?.(notice),
                 /** @param {string} text */
                 clipboard: text=>config?.onClipboard?.(text),
+                pasteboard,
                 say: (/** @type {string} */ text)=>trace(text),
                 // A CREATESTRUCT has to live where the guest can read it, and
                 // only for the length of the two messages that carry it.
@@ -1423,6 +1429,19 @@ export const win32Module = {
              * and so does whoever is driving the machine.
              */
             queue: ()=>queue,
+
+            /**
+             * Puts text on the clipboard from outside, as a paste on the page
+             * does: the next GetClipboardData for a text format answers with
+             * it, until a program empties the clipboard or the host pastes
+             * again.
+             *
+             * @param {string} text
+             */
+            paste: text=>{
+                pasteboard.text = text;
+                pasteboard.version++;
+            },
 
             /**
              * Moves every open wave device's play cursor.

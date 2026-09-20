@@ -100,6 +100,17 @@ export const inputModule = {
             // assembled the process has a journal, and because a build that
             // wants no record should pay for none.
             trace: config?.trace,
+            // Pasted text is the clipboard's, which is win32's; a build
+            // without it has no clipboard to paste into.
+            paste: text=>{
+                try
+                {
+                    win32.paste(text);
+                }
+                catch {
+                    // No win32: nothing to paste into.
+                }
+            },
         });
 
         /** @type {ReturnType<typeof createDomInput> | null} */
