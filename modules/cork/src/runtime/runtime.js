@@ -32,6 +32,7 @@ import { features as probeFeatures } from '../wasm/features.js';
 import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { Tables } from './layout.js';
+import { CACHE_VERSION, cacheKey, packRegion, unpackRegion } from './cache.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
@@ -109,6 +110,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const dropped = new Map();
     const counts = {
         modules: 0, invalidations: 0, volatilePages: 0, dropped: 0, translateMs: 0, moduleBytes: 0,
+        cacheHits: 0, cacheMisses: 0,
     };
     let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
@@ -304,13 +306,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 queue.delete(key);
             }
-            const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {}, {
-                undoLog: settings.undoLog, hash: table !== null,
-                ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
-            });
-            /** @type {{ region: import('../region.js').Region,
-             *     translation: import('../emit/region.js').Translation, stamp: string }[]} */
+            const store = settings.store ?? null;
+            const bundleId = settings.bundleId ?? 'unknown';
+            /** @type {{ region: import('../region.js').Region, entryTop: number,
+             *     stamp: string, cached: import('./cache.js').CachedRegion | null }[]} */
             const formed = [];
             for (let i = 0; i < batch.length; i++)
             {
@@ -342,84 +341,126 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     barren.add(eip);
                     continue;
                 }
-                /** @type {import('../emit/region.js').Translation} */
-                let translation;
+                formed.push({ region, entryTop, stamp: stamp(region.pages), cached: null });
+            }
+            // The store first, for every region of the batch at once: the
+            // lookups are asynchronous and the emitter waits for none of them.
+            if (store !== null)
+            {
+                await Promise.all(formed.map(async one=>{
+                    const key = cacheKey({
+                        version: CACHE_VERSION, features: found, layoutId: layout.id, bundleId,
+                        entry: one.region.entry, hash: `${one.region.hash}-${one.entryTop}`,
+                    });
+                    try
+                    {
+                        const bytes = await store.get(key);
+                        one.cached = bytes === null ? null : unpackRegion(bytes);
+                    }
+                    catch (e){
+                        one.cached = null;
+                    }
+                    if (one.cached !== null)
+                    {
+                        counts.cacheHits++;
+                    }
+                    else
+                    {
+                        counts.cacheMisses++;
+                    }
+                }));
+            }
+            let published = 0;
+            for (const { region, entryTop, stamp: at, cached } of formed)
+            {
+                const eip = region.entry;
+                // One module per region: the unit the store keeps, and the
+                // unit dropped when a page moves.
+                /** @type {import('./cache.js').CachedRegion} */
+                let built;
+                if (cached !== null)
+                {
+                    built = cached;
+                }
+                else
+                {
+                    const m = new ModuleBuilder();
+                    const context = prepareModule(m, layout, found, {}, {
+                        undoLog: settings.undoLog, hash: table !== null,
+                        ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
+                    });
+                    /** @type {import('../emit/region.js').Translation} */
+                    let translation;
+                    try
+                    {
+                        translation = emitRegion(context, region, { entryTop });
+                    }
+                    catch (e){
+                        // The emitter's own defect on this code: named in the
+                        // report rather than lost in a rejected promise, and
+                        // the program runs on without the region.
+                        refused[`emit at ${eip.toString(16)}: ${String(e).slice(0, 120)}`] = 1;
+                        continue;
+                    }
+                    for (const [opcode, times] of translation.unsupported)
+                    {
+                        refused[opcode] = (refused[opcode] ?? 0) + times;
+                    }
+                    m.exportFunction('r0', translation.functionIndex);
+                    built = {
+                        module: m.toBytes(), labels: [...translation.labels],
+                        cut: [...translation.cut], entryTop: translation.entryTop,
+                        instructions: translation.instructions,
+                    };
+                    if (store !== null)
+                    {
+                        const key = cacheKey({
+                            version: CACHE_VERSION, features: found, layoutId: layout.id,
+                            bundleId, entry: eip, hash: `${region.hash}-${entryTop}`,
+                        });
+                        store.put(key, packRegion(built)).catch(()=>{});
+                    }
+                }
+                counts.moduleBytes += built.module.length;
+                /** @type {WebAssembly.Instance} */
+                let instance;
                 try
                 {
-                    translation = emitRegion(context, region, { entryTop });
+                    const module = new WebAssembly.Module(built.module);
+                    instance = new WebAssembly.Instance(module, {
+                        env: {
+                            memory, getEflags: imports.getEflags, ...mathImports(),
+                            ...(table ? { table } : {}),
+                        },
+                    });
                 }
                 catch (e){
-                    // The emitter's own defect on this code: named in the
-                    // report rather than lost in a rejected promise, and the
-                    // program runs on without the region.
-                    refused[`emit at ${eip.toString(16)}: ${String(e).slice(0, 120)}`] = 1;
+                    // The region is refused: the program runs on as it did.
+                    refused.batch = (refused.batch ?? 0) + 1;
+                    refused[`batch: ${String(e).slice(0, 120)}`] = 1;
                     continue;
                 }
-                for (const [opcode, times] of translation.unsupported)
-                {
-                    refused[opcode] = (refused[opcode] ?? 0) + times;
-                }
-                m.exportFunction(`r${formed.length}`, translation.functionIndex);
-                formed.push({ region, translation, stamp: stamp(region.pages) });
-            }
-            if (formed.length === 0)
-            {
-                counts.translateMs += performance.now() - startedAt;
-                return 0;
-            }
-            /** @type {WebAssembly.Instance} */
-            let instance;
-            try
-            {
-                // Compiled on this thread, at the feed point: the batch is a
-                // few regions and the baseline compiler takes well under a
-                // millisecond per region, while the promise form's result is
-                // a task the host's own yield may not run for a whole
-                // program's length (seen in a process without a presenter).
-                const bytes = m.toBytes();
-                counts.moduleBytes += bytes.length;
-                const module = new WebAssembly.Module(bytes);
-                instance = new WebAssembly.Instance(module, {
-                    env: {
-                        memory, getEflags: imports.getEflags, ...mathImports(),
-                        ...(table ? { table } : {}),
-                    },
-                });
-            }
-            catch (e){
-                // The whole batch is refused: the program runs on as it did.
-                refused.batch = (refused.batch ?? 0) + 1;
-                refused[`batch: ${String(e).slice(0, 120)}`] = 1;
-                counts.translateMs += performance.now() - startedAt;
-                return 0;
-            }
-            counts.modules++;
-            let published = 0;
-            for (let i = 0; i < formed.length; i++)
-            {
-                const { region, translation, stamp: at } = formed[i];
+                counts.modules++;
                 if (at !== stamp(region.pages))
                 {
-                    // A page of it was written while the batch compiled.
+                    // A page of it was written while the batch was built.
                     counts.dropped++;
                     continue;
                 }
                 const fn = /** @type {(label: number, budget: number) => number} */ (
-                    instance.exports[`r${i}`]);
+                    instance.exports.r0);
+                const cut = new Set(built.cut);
                 // Entries for every block start but the cut ones; a region
                 // with x87 in it is keyed by the top it was compiled for.
-                const top = translation.cut.size > 0 || usesX87(region)
-                    ? translation.entryTop : ANY_TOP;
-                const starts = [...translation.labels]
-                    .filter(([, label])=>!translation.cut.has(label));
+                const top = cut.size > 0 || usesX87(region) ? built.entryTop : ANY_TOP;
+                const starts = built.labels.filter(([, label])=>!cut.has(label));
                 if (starts.length === 0)
                 {
                     // Every block leaves at once (an instruction the other
                     // executor's first): nothing to enter, nothing to keep.
-                    barren.add(region.entry);
+                    barren.add(eip);
                     continue;
                 }
-                /** @type {RegionRecord} */
                 /** @type {RegionRecord} */
                 const record = {
                     entry: region.entry, pages: region.pages, slots: [], table: -1,
@@ -439,9 +480,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     table.set(index, fn);
                     record.table = index;
                 }
-                for (const [eip, label] of starts)
+                for (const [start, label] of starts)
                 {
-                    record.slots.push(entries.add(eip, fn, label, top, record.table));
+                    record.slots.push(entries.add(start, fn, label, top, record.table));
                 }
                 for (const block of region.blocks)
                 {
@@ -482,8 +523,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 moduleBytes: counts.moduleBytes,
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,
-                cacheHits: 0,
-                cacheMisses: 0,
+                cacheHits: counts.cacheHits,
+                cacheMisses: counts.cacheMisses,
                 invalidations: counts.invalidations,
                 volatilePages: counts.volatilePages,
                 exits: { ...exits },

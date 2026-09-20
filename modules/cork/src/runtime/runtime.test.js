@@ -91,14 +91,15 @@ test('a hot address becomes a region after translatePending, and runs under a bu
     assert.ok(d.translateMs > 0 && d.moduleBytes > 100, 'the cost of translating is reported');
 });
 
-test('two regions land in one batch and both run; an entry is asked by its own address', async()=>{
+test('two regions land in one batch, each its own module, and both run; an entry is asked by'
+    + ' its own address', async()=>{
     const m = machine({ batchRegions: 8 });
     m.write(CODE, COUNTDOWN);
     m.write(CODE + 0x100, [0xb8, 0x07, 0, 0, 0, 0xf4]);   // mov eax, 7; hlt
     m.runtime.noteHot(CODE);
     m.runtime.noteHot(CODE + 0x100);
     assert.equal(await m.runtime.translatePending(), 2);
-    assert.equal(m.runtime.diagnostics().modules, 1, 'one module for the batch');
+    assert.equal(m.runtime.diagnostics().modules, 2, 'one module per region, the unit the store keeps');
     assert.equal(m.runtime.diagnostics().regions, 2);
     const second = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
     assert.equal(second.kind, 'halt');
@@ -296,3 +297,45 @@ test('a loop that stores into data on its own page keeps its region', async()=>{
     assert.equal(d.invalidations, 0);
     assert.equal(d.regions, 1);
 });
+
+test('with a store, a second runtime takes its regions from the store; a changed byte misses',
+    async()=>{
+        const { memoryTranslationStore } = await import('./cache.js');
+        const store = memoryTranslationStore();
+        const first = machine({ store, bundleId: 'test' });
+        first.write(CODE, COUNTDOWN);
+        first.setReg(4, 0x80000);
+        first.runtime.noteHot(CODE);
+        assert.equal(await first.runtime.translatePending(), 1);
+        assert.equal(first.runtime.diagnostics().cacheMisses, 1);
+        assert.equal(first.runtime.diagnostics().cacheHits, 0);
+        assert.equal(store.size(), 1, 'the region is in the store');
+        const second = machine({ store, bundleId: 'test' });
+        second.write(CODE, COUNTDOWN);
+        second.setReg(4, 0x80000);
+        second.runtime.noteHot(CODE);
+        assert.equal(await second.runtime.translatePending(), 1);
+        const d = second.runtime.diagnostics();
+        assert.equal(d.cacheHits, 1, 'from the store');
+        assert.equal(d.cacheMisses, 0);
+        const exit = second.runtime.run(second.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'halt', 'the stored module runs');
+        assert.equal(second.reg(1), 0);
+        assert.equal(exit.retired, 1 + 2 * 1000 + 1);
+        // One byte changed: another hash, a miss, and the store grows.
+        const third = machine({ store, bundleId: 'test' });
+        third.write(CODE, [0xb9, 0xe9, 0x03, 0, 0, 0x49, 0x75, 0xfd, 0xf4]); // 1001 rounds
+        third.setReg(4, 0x80000);
+        third.runtime.noteHot(CODE);
+        assert.equal(await third.runtime.translatePending(), 1);
+        assert.equal(third.runtime.diagnostics().cacheMisses, 1);
+        assert.equal(store.size(), 2);
+        // Another bundle: its own namespace.
+        const fourth = machine({ store, bundleId: 'other' });
+        fourth.write(CODE, COUNTDOWN);
+        fourth.setReg(4, 0x80000);
+        fourth.runtime.noteHot(CODE);
+        await fourth.runtime.translatePending();
+        assert.equal(fourth.runtime.diagnostics().cacheMisses, 1);
+        assert.equal(store.size(), 3);
+    });

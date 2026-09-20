@@ -212,6 +212,15 @@ instruction after a trap is a block, so the stub's own return resumes translated
 stays in the contract for the engine that has no emulator to raise into. *2026-09-20, cork
 4.2.*
 
+**Each translated region is its own wasm module, not one module per batch.** The design's
+2.6 put a batch of regions into one module to keep the module count down; the translation
+cache (2.8) keeps regions, since a batch is what the sampler happened to gather and is never
+the same twice, and a module per region is the record the store can hold and the unit a
+page write drops. The cost is the helpers repeated per module (a few kilobytes) and an
+instantiation per region rather than per batch, both measured small against the emitting a
+hit saves; the module count is bounded by the regions live, which the invalidation already
+bounds. *2026-09-20, cork 2.8.*
+
 
 **B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for

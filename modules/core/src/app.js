@@ -24,6 +24,7 @@ import { synthesiseProcessInit, DLL_PROCESS_ATTACH }
 import { createBundleSource } from './layers/filesystem/internal/bundle/source.js';
 import { createMemoryStore } from './layers/filesystem/internal/memory-store.js';
 import { crc32 } from './layers/filesystem/internal/bundle/crc32.js';
+import { resolveTranslationStore } from './layers/cpu/internal/translation-store.js';
 import { createBlockCache, resolveBlockStore }
     from './layers/filesystem/internal/bundle/cache.js';
 
@@ -48,7 +49,9 @@ import { createBlockCache, resolveBlockStore }
  * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
  * @property {Object} [cork]              The translator, for `engine: 'hybrid'`.
  * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
- * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]
+ * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]  Its settings;
+ *     `store` here is a request -- `'local'` (the default) for the origin's private file
+ *     system, a store of your own when the app runs in this thread, `null` for none.
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -2432,7 +2435,16 @@ async function buildApp(options){
             jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
             engineUrl: options.engine && options.engine !== 'emulator'
                 ? corkArtifacts(options.cork).moduleUrl : null,
-            cork: options.cork?.config,
+            // The translator's cache goes with the bundle's blocks: local by
+            // default, the bundle's name its namespace, resolved here in the
+            // engine's own thread as the block store is.
+            cork: {
+                ...options.cork?.config,
+                store: await resolveTranslationStore(
+                    options.cork?.config?.store === undefined ? 'local' : options.cork.config.store,
+                    options.bundle?.id ?? options.id ?? 'bundle'),
+                bundleId: options.bundle?.id ?? options.id ?? 'bundle',
+            },
         },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the

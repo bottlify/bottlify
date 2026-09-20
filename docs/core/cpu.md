@@ -95,7 +95,15 @@ by frames (`cork.feed: 'frame'`, the default) or, for a run without a presenter 
 test, after every slice (`'slice'`), never inside one. The batch is compiled on the engine
 thread rather than through the promise form: a batch is a few regions and the baseline
 compiler takes well under a millisecond per region, while the promise's result is a task the
-host's own yield was seen not to run for a whole program's length. A region with x87 instructions in it is compiled for the x87 stack top it is entered
+host's own yield was seen not to run for a whole program's length. Each region is its own
+module, the unit the translation cache keeps: a region's module is a pure function of its
+bytes, its entry, the x87 top it was compiled for, the layout and this emitter, so with a
+store (`cork.store`, `cork.bundleId`; `createApp` resolves `'local'` to the origin's private
+file system in the engine's own thread, a directory per bundle, as it does the block store)
+the second run of a program takes every region it ran before from the store -- the region
+is still formed, a decode, which gives its hash; what is saved is the emitting and the
+encoding, and the report says `cacheHits`/`cacheMisses`. A record of another emitter
+version, feature set or layout is a miss. A region with x87 instructions in it is compiled for the x87 stack top it is entered
 with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
 the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
 top. A lookup that misses at an address compiled for another top queues that top for the

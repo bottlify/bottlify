@@ -236,3 +236,28 @@ test('a call in the hot loop: the callee, the call and the return all stay in wa
     }
     await cpuModule.dispose();
 });
+
+test('a second boot with the same store takes every region from it', async()=>{
+    const { memoryTranslationStore } = await import('../../../../../cork/src/runtime/cache.js');
+    const store = memoryTranslationStore();
+    const config = { engine: 'hybrid', engineUrl: ENGINE, cork: { store, bundleId: 'itest' } };
+    const first = await booted(PROGRAM, GUEST_CODE, config);
+    await runToHalt(first);
+    const before = metricsOf().cork;
+    assert.ok(before.regions >= 1);
+    assert.equal(before.cacheHits, 0);
+    assert.equal(before.cacheMisses, before.regions);
+    assert.ok(store.size() >= before.regions);
+    const count = first.api.instructionCount();
+    await cpuModule.dispose();
+
+    const second = await booted(PROGRAM, GUEST_CODE, config);
+    await runToHalt(second);
+    const after = metricsOf().cork;
+    assert.equal(second.api.readReg32('eax'), 0x1234);
+    assert.equal(second.api.instructionCount(), count);
+    assert.equal(after.cacheHits, after.regions, 'every region from the store');
+    assert.equal(after.cacheMisses, 0);
+    assert.ok(after.translateMs < before.translateMs, 'cheaper than emitting');
+    await cpuModule.dispose();
+});
