@@ -64,6 +64,20 @@ export const BLOCK_MISS = 'BLOCK_MISS';
  */
 const DEFAULT_CACHE_BLOCKS = 16;
 
+/**
+ * How many of those are blocks the program has read a second time.
+ *
+ * A program that consults a structure and then streams the file past it does
+ * both through one cache, and the scan evicts the structure between two looks
+ * at it: the block is decoded, every other block pushed through evicts it, and
+ * the next look pays for the decode of the whole block again -- which for a
+ * packed block is the decompression of everything it holds. A block read twice
+ * has been asked for deliberately, so it is kept in a tier of its own, where a
+ * scan through the other tier cannot reach it and the next thousand looks are a
+ * map lookup.
+ */
+const DEFAULT_HOT_BLOCKS = 8;
+
 /** The path separator, named so it is not confused with an escape. */
 const SEPARATOR = String.fromCharCode(92);
 
@@ -73,6 +87,9 @@ const SEPARATOR = String.fromCharCode(92);
  * @param {ReadBlock} options.readBlock
  * @param {import('./format.js').Decode} options.decode
  * @param {number} [options.cacheBlocks]
+ * @param {number} [options.hotBlocks]
+ *        Blocks kept because they were read more than once, out of reach of a
+ *        scan through the rest.
  * @param {string} [options.prefix]
  *        A directory the whole bundle appears under, without separators at
  *        either end. A game belongs in a directory of its own rather than at
@@ -82,7 +99,8 @@ const SEPARATOR = String.fromCharCode(92);
  * @returns {import('../memory-store.js').SourceStore}
  */
 export function createBundleSource({
-    bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS, prefix = '',
+    bundle, readBlock, decode, cacheBlocks = DEFAULT_CACHE_BLOCKS,
+    hotBlocks = DEFAULT_HOT_BLOCKS, prefix = '',
 })
 {
     /** @type {import('../memory-store.js').StoredEntry[]} */
@@ -121,26 +139,48 @@ export function createBundleSource({
 
     /** @type {Map<number, Uint8Array>} Decoded blocks, oldest use first. */
     const cache = new Map();
+    /**
+     * Decoded blocks the program has read a second time, oldest use first. Kept
+     * apart from the scan tier so that a structure read between two passes of a
+     * scan is not evicted by the scan and decoded again.
+     *
+     * @type {Map<number, Uint8Array>}
+     */
+    const hot = new Map();
+
+    /** @param {Map<number, Uint8Array>} tier @param {number} bound */
+    const trim = (tier, bound)=>{
+        while (tier.size > bound)
+        {
+            tier.delete(/** @type {number} */ (tier.keys().next().value));
+        }
+    };
 
     /** @param {number} index */
     const cached = index=>{
         const hit = cache.get(index);
         if (hit === undefined)
         {
-            return null;
+            const kept = hot.get(index);
+            if (kept !== undefined)
+            {
+                hot.delete(index);
+                hot.set(index, kept);
+            }
+            return kept ?? null;
         }
+        // Read twice: this is a block the program keeps coming back to, and the
+        // tier a scan cannot evict is where it belongs from now on.
         cache.delete(index);
-        cache.set(index, hit);
+        hot.set(index, hit);
+        trim(hot, hotBlocks);
         return hit;
     };
 
     /** @param {number} index @param {Uint8Array} bytes */
     const remember = (index, bytes)=>{
         cache.set(index, bytes);
-        while (cache.size > cacheBlocks)
-        {
-            cache.delete(/** @type {number} */ (cache.keys().next().value));
-        }
+        trim(cache, cacheBlocks);
     };
 
     return {
