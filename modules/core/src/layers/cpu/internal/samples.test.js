@@ -92,5 +92,5 @@ test('a bucket keeps the exact EIP it was last credited at, for a translator to 
     creditSample(table, 0x10a225, 200);
     const [bucket] = table.buckets.values();
     assert.equal(bucket.eip, 0x10a225);
-    assert.equal(bucket.noted, false);
+    assert.equal(bucket.noted, -1, 'nothing noted yet');
 });

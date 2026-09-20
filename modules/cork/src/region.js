@@ -184,12 +184,13 @@ export function formRegion(read, entry,
                     pending.push(target);
                 }
             }
-            else if (exit.kind === 'call'
+            else if (exit.kind === 'call' || exit.kind === 'trap'
                 || block.instructions[block.instructions.length - 1]?.op === 'call')
             {
                 // The callee's return lands after the call, direct or through
-                // a register or a table: a block there lets the return come
-                // back into translated code.
+                // a register or a table, and the host's trap resumes after
+                // the port write: a block there lets the return come back
+                // into translated code.
                 pending.push(exit.next);
             }
             break;

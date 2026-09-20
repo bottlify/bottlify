@@ -626,6 +626,20 @@ export async function createV86Host(config){
         onTrap(handler){
             trapHandler = handler;
         },
+        /**
+         * The trap the port write reaches, raised by a co-executor that
+         * left at an `out` to the port instead of running it: the same
+         * handler, the same count.
+         *
+         * @param {number} value
+         */
+        raiseTrap(value){
+            trapCrossings++;
+            if (trapHandler)
+            {
+                trapHandler(value >>> 0);
+            }
+        },
 
         /**
          * A window on the machine's memory, not a copy: it is the memory,

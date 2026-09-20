@@ -53,6 +53,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         hotThreshold: 2000, maxRegionBlocks: 64, maxRegionBytes: 8192, batchRegions: 32,
         // Invalidations of one page before it is left to the other executor.
         volatileAfter: 8,
+        // Untranslated exits to one address before it is a candidate of the
+        // translator's own: the slice sampler sees only where budgets run
+        // out, and a stub reached through such exits alone never appears there.
+        missThreshold: 64,
         undoLog: false,
         ...config,
     };
@@ -81,6 +85,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     }
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
+    /** @type {Set<number>} addresses a region formed nothing at, until their page moves */
+    const barren = new Set();
+    /** @type {Map<number, number>} untranslated exits by target address */
+    const misses = new Map();
     /** @param {number} eip @param {number} top */
     const keyOf = (eip, top)=>eip * 16 + top;
     /**
@@ -166,6 +174,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queue.delete(key);
             }
         }
+        for (const eip of [...barren])
+        {
+            if ((eip >>> 12) === page)
+            {
+                barren.delete(eip);
+            }
+        }
         generation.set(page, (generation.get(page) ?? 0) + 1);
         // Only a write that cost a region counts towards volatility: the
         // loader placing an image writes a page many times before anything
@@ -207,6 +222,20 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             corkRetired += retired;
             const kind = KINDS[code & 0xff] ?? 'untranslated';
             exits[kind]++;
+            if (kind === 'untranslated')
+            {
+                const to = view().getUint32(layout.eip, true);
+                const seen = (misses.get(to) ?? 0) + 1;
+                if (seen >= settings.missThreshold)
+                {
+                    misses.delete(to);
+                    this.noteHot(to, view().getUint8(layout.x87Top));
+                }
+                else if (seen > 1 || misses.size < 4096)
+                {
+                    misses.set(to, seen);
+                }
+            }
             if (kind === 'stale')
             {
                 const address = pages.staleAddress();
@@ -223,7 +252,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         noteHot(eip, top = 0){
             const key = keyOf(eip, top & 7);
-            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || !translatable(eip))
+            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || barren.has(eip)
+                || !translatable(eip))
             {
                 return;
             }
@@ -240,8 +270,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queue.delete(key);
             }
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {},
-                { undoLog: settings.undoLog, hash: table !== null });
+            const context = prepareModule(m, layout, found, {}, {
+                undoLog: settings.undoLog, hash: table !== null,
+                ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
+            });
             /** @type {{ region: import('../region.js').Region,
              *     translation: import('../emit/region.js').Translation, stamp: string }[]} */
             const formed = [];
@@ -272,6 +304,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 if (region.blocks.length === 0 || region.blocks[0].instructions.length === 0)
                 {
+                    barren.add(eip);
                     continue;
                 }
                 /** @type {import('../emit/region.js').Translation} */
@@ -334,6 +367,19 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 const fn = /** @type {(label: number, budget: number) => number} */ (
                     instance.exports[`r${i}`]);
+                // Entries for every block start but the cut ones; a region
+                // with x87 in it is keyed by the top it was compiled for.
+                const top = translation.cut.size > 0 || usesX87(region)
+                    ? translation.entryTop : ANY_TOP;
+                const starts = [...translation.labels]
+                    .filter(([, label])=>!translation.cut.has(label));
+                if (starts.length === 0)
+                {
+                    // Every block leaves at once (an instruction the other
+                    // executor's first): nothing to enter, nothing to keep.
+                    barren.add(region.entry);
+                    continue;
+                }
                 /** @type {RegionRecord} */
                 const record = { entry: region.entry, pages: region.pages, slots: [], table: -1 };
                 if (table)
@@ -350,16 +396,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     table.set(index, fn);
                     record.table = index;
                 }
-                // Entries for every block start but the cut ones; a region
-                // with x87 in it is keyed by the top it was compiled for.
-                const top = translation.cut.size > 0 || usesX87(region)
-                    ? translation.entryTop : ANY_TOP;
-                for (const [eip, label] of translation.labels)
+                for (const [eip, label] of starts)
                 {
-                    if (!translation.cut.has(label))
-                    {
-                        record.slots.push(entries.add(eip, fn, label, top, record.table));
-                    }
+                    record.slots.push(entries.add(eip, fn, label, top, record.table));
                 }
                 for (const block of region.blocks)
                 {

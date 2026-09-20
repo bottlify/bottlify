@@ -470,6 +470,24 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'movs': case 'stos': case 'lods': case 'cmps': case 'scas':
             return stringInstruction(e, instruction);
+        case 'out':
+            if (instruction.opcode === 'ef' && src.size === 4 && e.context.trapPort !== undefined)
+            {
+                // To the trap port: the host's own call channel. The state
+                // block is written back complete by the exit, the host runs
+                // the handler the port write would have reached, and the
+                // program resumes past the instruction -- or wherever the
+                // handler put EIP. Any other port is the other executor's.
+                b.localGet(Local.reg + 2).i32const(0xffff).op(I32.and)
+                    .i32const(e.context.trapPort).op(I32.ne);
+                e.openIf('port');
+                e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
+                e.close();
+                e.exitAt(next, Exit.TRAP);
+                e.dead = true;
+                return true;
+            }
+            return false;
         case 'int3': case 'int': case 'into':
             // Left to the other executor, before the instruction: a trap
             // taken past it would be skipped by a host that re-executes the

@@ -176,3 +176,44 @@ test('an indirect call reaches its target with the return address pushed', ()=>{
         assert.equal(m.reg('ebx'), 2, name);
     }
 });
+
+test('out dx, eax to the trap port leaves with a trap past it; any other port is left before',
+    ()=>{
+        const PORT = 0xb077;
+        const program = [
+            0xbb, ...u32(1),                    //     mov ebx, 1
+            0x66, 0xba, PORT & 0xff, PORT >> 8, //     mov dx, PORT
+            0xb8, ...u32(7),                    //     mov eax, 7
+            0xef,                               //     out dx, eax
+            0x43,                               //     inc ebx
+            0xf4,                               //     hlt
+        ];
+        const m = createTestMachine({ trapPort: PORT });
+        m.write(CODE, program);
+        m.setReg('esp', STACK);
+        const unit = m.translate(CODE, { hash: true });
+        assert.deepEqual(unit.run(CODE), { kind: 2, vector: 0 }, 'trap');
+        assert.equal(m.eip(), CODE + 15, 'past the out');
+        assert.equal(m.reg('eax'), 7, 'the value the port would have been written');
+        assert.equal(m.reg('ebx'), 1, 'the instruction after it has not run');
+        assert.equal(m.counter(), 4, 'the out is counted');
+        // Resuming after the trap: the block past the out is an entry.
+        assert.ok(unit.translation.labels.has(CODE + 15));
+        assert.deepEqual(unit.run(CODE + 15), { kind: 3, vector: 0 });
+        assert.equal(m.reg('ebx'), 2);
+        // Another port: the other executor's, before the instruction.
+        const other = createTestMachine({ trapPort: PORT });
+        other.write(CODE, [0x66, 0xba, 0x78, 0xb0, 0xb8, ...u32(7), 0xef, 0xf4]); // dx = PORT+1
+        other.setReg('esp', STACK);
+        const o = other.translate(CODE, { hash: true });
+        assert.deepEqual(o.run(CODE), { kind: 0, vector: 0 });
+        assert.equal(other.eip(), CODE + 9, 'at the out');
+        assert.equal(other.counter(), 2);
+        // Without a port configured, every out is the other executor's.
+        const none = createTestMachine();
+        none.write(CODE, program);
+        none.setReg('esp', STACK);
+        const n = none.translate(CODE, { hash: true });
+        assert.deepEqual(n.run(CODE), { kind: 0, vector: 0 });
+        assert.equal(none.eip(), CODE + 14);
+    });

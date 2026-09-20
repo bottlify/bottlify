@@ -132,6 +132,16 @@ export function createHybridHost({ emulator, cork }){
                     // there; so is an address the translator answered for but
                     // ran nothing at. Budget, stale and a progressed
                     // untranslated exit are looked up afresh.
+                    if (exit.kind === 'trap' && typeof emulator.raiseTrap === 'function')
+                    {
+                        // The translator left past an `out` to the trap
+                        // port with the state block complete: the handler
+                        // runs as the port write would have run it, on the
+                        // register file, and the next round looks up
+                        // wherever it left EIP.
+                        emulator.raiseTrap(emulator.readReg32('eax'));
+                        continue;
+                    }
                     if (exit.kind === 'fault' || exit.kind === 'trap'
                         || (exit.retired === 0 && emulator.eip() === eip))
                     {

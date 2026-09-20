@@ -23,9 +23,10 @@ import { isX87 } from '../emit/x87.js';
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
- * @param {{ ramSize?: number, codePages?: boolean }} [options]
+ * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number }} [options]  trapPort:
+ *     `out dx, eax` to it leaves with a trap exit, as under a host with a call channel
  */
-export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {}){
+export function createTestMachine({ ramSize = 1 << 20, codePages = false, trapPort } = {}){
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
     const own = ownLayout({ ramSize });
@@ -104,8 +105,10 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {},
-                { undoLog, hash: table !== null && hash });
+            const context = prepareModule(m, layout, found, {}, {
+                undoLog, hash: table !== null && hash,
+                ...(trapPort === undefined ? {} : { trapPort }),
+            });
             const translation = emitRegion(context, region, { entryTop });
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();

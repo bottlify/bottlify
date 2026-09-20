@@ -89,7 +89,9 @@ test('a loop calling a kernel32 import translates, the import runs on the emulat
     assert.ok(hybrid.cork, 'the translator reports');
     assert.ok(hybrid.cork.regions >= 1,
         `regions ${hybrid.cork.regions}, refused ${JSON.stringify(hybrid.cork.refused)}`);
-    assert.ok(hybrid.cork.translatedShare > 0.2,
+    // The loop, the stub's return and the call channel all translated: one
+    // crossing out and one back per call, no emulator turn.
+    assert.ok(hybrid.cork.translatedShare > 0.9,
         `share ${hybrid.cork.translatedShare}, exits ${JSON.stringify(hybrid.cork.exits)}`);
 });
 

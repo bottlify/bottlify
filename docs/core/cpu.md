@@ -54,9 +54,21 @@ mirrored into an open-addressing hash in the translator's tables (65 536 slots o
 address, the table index, the label and the top), and an exit for an untranslated address
 with budget left probes that hash in the epilogue and tail-calls the region found -- a
 return, an indirect jump or a call into translated code costs no crossing, and a hot
-region's direct callees are formed in the same batch so the call and the return both hit.
+region's direct callees are formed in the same batch so the call and the return both hit. Candidates come from two places: the
+layer's sampler, which hands every hot bucket over at the address its last slice ended on
+whenever that address is a new one, and the translator's own count of untranslated exits by
+target address (`cork.missThreshold`, default 64), which is what finds a stub reached only
+through such exits -- the sampler sees only where budgets run out. An address a region formed
+nothing at (every block of it leaves at once) is not tried again until its page moves.
 A block that would leave before retiring anything (nothing decoded, its first instruction
-left out) has no entry, so a transfer never spins on it. The same hash is given to the
+left out) has no entry, so a transfer never spins on it. The host's call channel is
+translated too: `out dx, eax` to the trap port (`cork.trapPort`, the layer's own) leaves
+with a `trap` exit past the instruction and the state block complete, the hybrid host runs
+the handler the port write would have reached (`raiseTrap` on the emulator's host, the same
+handler and the same count), and the next round resumes at whatever EIP the handler left --
+the stub's own return after the port write is a block, so a call into the bridge costs one
+crossing out of wasm and one back, with no emulator turn. `out` to any other port, `in`,
+`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. The same hash is given to the
 emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
 an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
 half translated back one instruction at a time. A page flagged for handoff is one the

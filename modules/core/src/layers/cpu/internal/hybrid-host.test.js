@@ -263,3 +263,37 @@ test('without the export a stop at a translated address is a miss and ends the s
     assert.deepEqual(emulator.slices, [10]);
     assert.deepEqual(host.corkDiagnostics(), { regions: 1, handoffMisses: 1 });
 });
+
+test('a trap exit raises the emulator\'s own trap handler and the slice goes on', ()=>{
+    const emulator = scriptedMachine([]);
+    /** @type {number[]} */
+    const raised = [];
+    Object.assign(emulator, {
+        readReg32: (/** @type {string} */ name)=>(name === 'eax' ? 0x2a : 0),
+        raiseTrap: (/** @type {number} */ value)=>{
+            raised.push(value);
+            emulator.at = 0x4000; // the handler moved EIP, as a hook may
+        },
+    });
+    let runs = 0;
+    const cork = /** @type {any} */ ({
+        entryOf: (/** @type {number} */ eip)=>(eip === 0x1000 || eip === 0x4000 ? 1 : -1),
+        holdsPage: ()=>false,
+        run(){
+            runs++;
+            if (runs === 1)
+            {
+                emulator.at = 0x1010;
+                return { retired: 3, kind: 'trap', vector: 0 };
+            }
+            emulator.stopped = true;
+            return { retired: 2, kind: 'halt', vector: 0 };
+        },
+        diagnostics: ()=>({}),
+    });
+    const host = createHybridHost({ emulator, cork });
+    assert.equal(host.runSlice(10), 5);
+    assert.deepEqual(raised, [0x2a], 'eax, as the port write would have carried it');
+    assert.equal(runs, 2, 'the translator continued where the handler left EIP');
+    assert.deepEqual(emulator.slices, [], 'the emulator ran nothing');
+});

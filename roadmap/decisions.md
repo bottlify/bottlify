@@ -201,6 +201,17 @@ which the emulator gave a program. It stays measured: the plan's 2.9 reports the
 check holds on the target title, and elision for a base register already checked in the same
 block is the named follow-up if the share is material. *2026-09-20, cork 2.4.*
 
+**A call into the bridge from translated code is a `trap` exit, not a call to the `trap`
+import.** The design's 4.2 had `out dx, eax` to the trap port call the import with the state
+block written back before and reloaded after. The exit gets the same crossing count -- one
+out of wasm, one back -- without the writeback and reload machinery around a call, without
+re-entrancy questions (the handler runs with no region on the wasm stack, and a callback's
+nested slices are ordinary slices), and the hybrid host raises the emulator's own handler
+through the same path the port write takes, so the count and the journal see one thing. The
+instruction after a trap is a block, so the stub's own return resumes translated. The import
+stays in the contract for the engine that has no emulator to raise into. *2026-09-20, cork
+4.2.*
+
 
 **B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for

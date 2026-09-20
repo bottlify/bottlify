@@ -96,6 +96,7 @@ test('a region is cut at an indirect jump, a return, a call, a trap and a fault'
     const trap = regionOf([0xef, 0x90]); // out dx, eax; nop
     assert.equal(trap.blocks[0].exit.kind, 'trap');
     assert.equal(trap.blocks[0].exit.next, 0x1001);
+    assert.equal(trap.blocks[1]?.start, 0x1001, 'the instruction after the trap is a block');
     const fault = regionOf([0x0f, 0x0b]); // ud2
     assert.equal(fault.blocks[0].exit.kind, 'fault');
     const halt = regionOf([0xf4]);

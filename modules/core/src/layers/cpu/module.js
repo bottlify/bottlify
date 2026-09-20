@@ -166,20 +166,23 @@ export const cpuModule = {
                 return;
             }
             const hotThreshold = settings.cork.hotThreshold ?? 2000;
-            let noted = 0;
             for (const bucket of state.samples.buckets.values())
             {
-                if (!bucket.noted && bucket.instructions >= hotThreshold)
+                // A hot bucket is handed over at the address its last slice
+                // ended on, every time that address is a new one: a bucket
+                // ends its slices at more than one place (a loop's head, the
+                // stub it calls), and the first of them said nothing about
+                // the others. The runtime keeps what it has an entry for,
+                // has queued, or found empty.
+                if (bucket.instructions >= hotThreshold && bucket.noted !== bucket.eip)
                 {
-                    bucket.noted = true;
+                    bucket.noted = bucket.eip;
                     cork.noteHot(bucket.eip, state.host.x87Top());
-                    noted++;
                 }
             }
-            if (noted > 0)
-            {
-                cork.translatePending().catch(()=>{});
-            }
+            // Always: the translator queues candidates of its own (the
+            // addresses it keeps leaving for) between feeds.
+            cork.translatePending().catch(()=>{});
         };
 
         // Always on, because the whole point is never having to reproduce a
@@ -342,7 +345,7 @@ export const cpuModule = {
                     state.cork = createEngine({
                         memory: emulator.wasmMemory(),
                         layout: emulator.stateLayout(TABLES_RESERVE),
-                        config: settings.cork,
+                        config: { trapPort: settings.trapPort, ...settings.cork },
                         read: emulator.readByte,
                         imports: {
                             trap: ()=>0,

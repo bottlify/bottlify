@@ -122,6 +122,7 @@ const LOCAL_TYPES = [
  * @property {Record<string, number>} math  the transcendentals imported from the host
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
+ * @property {number} [trapPort]       the port a write to which is the host's call channel
  */
 
 /**
@@ -132,13 +133,14 @@ const LOCAL_TYPES = [
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
- * @param {{ undoLog?: boolean, hash?: boolean }} [options]  undoLog: record every store's
- *     old bytes (differential builds only; part of the cache key); hash: import the host's
- *     function table and transfer through the entry hash (needs tail calls)
+ * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number }} [options]  undoLog:
+ *     record every store's old bytes (differential builds only; part of the cache key);
+ *     hash: import the host's function table and transfer through the entry hash (needs
+ *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
-    { undoLog = false, hash = false } = {})
+    { undoLog = false, hash = false, trapPort } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -171,6 +173,10 @@ export function prepareModule(m, layout, features, memory = {},
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
         hash: hashed,
     };
+    if (trapPort !== undefined)
+    {
+        context.trapPort = trapPort;
+    }
     if (getEflags !== undefined)
     {
         context.getEflags = getEflags;

@@ -227,3 +227,55 @@ test('a hot region\'s direct callee lands in the same batch, and the call transf
         assert.equal(m.eip(), CODE + 14);
     }
 });
+
+test('an address a region formed nothing at is not queued again until its page moves', async()=>{
+    const m = machine();
+    // fnsave [0x2000]; jmp back to it: the one block leaves at once, so the
+    // region has nothing to enter.
+    m.write(CODE, [0xdd, 0x35, 0x00, 0x20, 0, 0, 0xeb, 0xf8]);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 0);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 0, 'not even formed again');
+    m.write(CODE, COUNTDOWN);
+    m.runtime.invalidatePage(CODE >>> 12);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1, 'the page moved: tried again');
+});
+
+test('an address the translator keeps leaving for becomes a candidate of its own', async()=>{
+    const m = machine({ missThreshold: 3 });
+    // mov ecx, 5; L: call [0x2000]; dec ecx; jnz L; hlt; F: ret -- an indirect
+    // call, so the former gathers nothing and F is reached by misses alone.
+    m.write(CODE, [
+        0xb9, 5, 0, 0, 0,
+        0xff, 0x15, 0x00, 0x20, 0, 0,
+        0x49, 0x75, 0xf7,
+        0xf4,
+        0xc3,
+    ]);
+    m.write(0x2000, [0x0f, 0x10, 0, 0]);
+    const F = CODE + 15;
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 1);
+    assert.equal(m.runtime.entryOf(F), -1, 'the callee has no entry');
+    for (let i = 0; i < 3; i++)
+    {
+        m.setReg(4, 0x80000);
+        new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+        const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+        assert.equal(exit.kind, 'untranslated', `leave ${i}`);
+        assert.equal(m.eip(), F);
+        if (i < 2)
+        {
+            assert.equal(await m.runtime.translatePending(), 0, `not yet (${i})`);
+        }
+    }
+    assert.equal(await m.runtime.translatePending(), 1, 'the callee, on its own count');
+    assert.ok(m.runtime.entryOf(F) >= 0);
+    m.setReg(4, 0x80000);
+    new DataView(m.memory.buffer).setUint32(m.layout.eip, CODE, true);
+    assert.equal(m.runtime.run(m.runtime.entryOf(CODE), 1_000_000).kind, 'halt',
+        'the call and the return transfer now');
+});
