@@ -598,6 +598,12 @@ const DEPTH_FORMAT = Object.freeze({
 const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
 
 /**
+ * A compressed level decoded into the texel order every other format is
+ * expanded to: the decoder answers R, G, B, A and the textures here are
+ * `bgra8unorm`, so the two end bytes change places -- missed, every DXT
+ * texture on a GPU without block compression (an Apple GPU, a software
+ * rasteriser) is drawn with red and blue exchanged and nothing else wrong.
+ *
  * `decodeS3tc` answers null only when the bytes are too few for the shape,
  * which cannot happen here: every caller reads exactly `surfaceBytes` worth,
  * the same block-rounded count `decodeS3tc` requires.
@@ -608,8 +614,14 @@ const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
  * @returns {Uint8Array}
  */
 const decodeCompressed = (bytes, kind, width, height)=>{
-    const decoded = decodeS3tc(bytes, kind, width, height);
-    return /** @type {Uint8Array} */ (decoded);
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height));
+    for (let at = 0; at < decoded.length; at += 4)
+    {
+        const red = decoded[at];
+        decoded[at] = decoded[at + 2];
+        decoded[at + 2] = red;
+    }
+    return decoded;
 };
 
 /**

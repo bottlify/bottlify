@@ -1441,8 +1441,16 @@ test('recorded: a DXT1 base narrower than one block decodes, a whole-block one t
         assert.equal(narrowSurface.descriptor.format, 'bgra8unorm',
             'a 2-wide base is narrower than one block, so WebGPU refuses it as compressed');
         assert.equal(gpu.of('copyBufferToTexture').length, 0, 'no staged, undecoded copy happened');
-        assert.ok(gpu.of('writeTexture').some(w=>w.destination.texture === narrowSurface.texture),
-            'the level travelled decoded instead');
+        const written = gpu.of('writeTexture')
+            .find(w=>w.destination.texture === narrowSurface.texture);
+        assert.ok(written, 'the level travelled decoded instead');
+        // A block of 0x07 bytes: both endpoints 0x0707 (r 0, g 227, b 57 widened
+        // from 5-6-5), index bits 0b00000111 -- the first texel index 3, which
+        // the punch-through mode makes transparent black, the second index 1,
+        // the colour. It has to lie as B, G, R, A, the order the texture is
+        // stored in, or red and blue trade places on every DXT texture.
+        assert.deepEqual([...written.bytes.subarray(4, 8)], [57, 227, 0, 0xff],
+            'blue byte first');
 
         const wide = textureFrom(h, 4, 64, D3DFMT.DXT1, block);
         assert.equal(device.SetTexture(0, wide), D3D_OK);
