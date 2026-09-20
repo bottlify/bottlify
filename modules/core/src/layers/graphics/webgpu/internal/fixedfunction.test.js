@@ -72,7 +72,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), 'b2e067e78526ee55');
+    assert.equal(digest(first), '5fa2105e8c80e597');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -95,15 +95,35 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     })).code;
     assert.ok(position.includes(
         'let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;'));
-    assert.ok(position.includes('@location(2) generated0: vec2f,'));
-    assert.ok(position.includes('out.generated0 = vec2f('
+    assert.ok(position.includes('@location(2) generated0: vec4f,'));
+    assert.ok(position.includes('out.generated0 = vec4f('
         + 'dot(uniforms.texTransform[0], vec4f(cameraPosition, 1.0)),'
-        + ' dot(uniforms.texTransform[1], vec4f(cameraPosition, 1.0)));'));
+        + ' dot(uniforms.texTransform[1], vec4f(cameraPosition, 1.0)),'
+        + ' dot(uniforms.texTransform[2], vec4f(cameraPosition, 1.0)),'
+        + ' dot(uniforms.texTransform[3], vec4f(cameraPosition, 1.0)));'));
     assert.ok(position.includes('sampleStage0(input.generated0)'));
     assert.ok(!position.includes('input.texCoord0'), 'no carried set is read');
-    // The sample function of a generated stage applies no transform of its own.
+    // The sample function of a generated stage applies no transform of its
+    // own, and takes the coordinate's first two components.
     const sampler = position.slice(position.indexOf('fn sampleStage0'));
-    assert.ok(sampler.slice(0, sampler.indexOf('}')).includes('let raw = carried;'));
+    assert.ok(sampler.startsWith('fn sampleStage0(carried: vec4f)'));
+    assert.ok(sampler.slice(0, sampler.indexOf('}')).includes('let raw = carried.xy;'));
+
+    // Projected: divided per pixel by the third component of the transformed
+    // coordinate for a three-coordinate transform, the fourth for four --
+    // which is how a texture is thrown onto the ground from a point.
+    const projected = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE,
+        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 3 }],
+    })).code;
+    const projectedSampler = projected.slice(projected.indexOf('fn sampleStage0'));
+    assert.ok(projectedSampler.slice(0, projectedSampler.indexOf('}'))
+        .includes('let raw = carried.xy / carried.z;'));
+    const four = generate(baseState({
+        fvf: FVF.XYZ | FVF.DIFFUSE,
+        stages: [{ ...stage(TCI.CAMERASPACEPOSITION), projected: 4 }],
+    })).code;
+    assert.ok(four.includes('let raw = carried.xy / carried.w;'));
 
     // Without a normal in the vertex the camera-space normal is the one the
     // fixed function assumes, straight at the camera.
@@ -123,7 +143,7 @@ test('a stage generating its coordinates takes them from the vertex in camera sp
     const flat = generate(baseState({
         fvf: FVF.XYZRHW | FVF.DIFFUSE, stages: [stage(TCI.CAMERASPACEPOSITION)],
     })).code;
-    assert.ok(flat.includes('out.generated0 = vec2f(0.0);'));
+    assert.ok(flat.includes('out.generated0 = vec4f(0.0, 0.0, 1.0, 1.0);'));
     assert.ok(!flat.includes('cameraPosition'));
 });
 
@@ -299,11 +319,11 @@ test('a stage puts its coordinate through its own texture transform before sampl
         stages: [textured, textured, textured, textured],
     })).code;
 
-    assert.match(code, /texTransform: array<vec4f, 6>,/);
+    assert.match(code, /texTransform: array<vec4f, 12>,/);
     for (const stage of [0, 1, 2])
     {
-        const rows = `${stage * 2}`;
-        const next = `${stage * 2 + 1}`;
+        const rows = `${stage * 4}`;
+        const next = `${stage * 4 + 1}`;
         assert.match(code, new RegExp(
             `fn sampleStage${stage}\\(carried: vec2f\\) -> vec4f \\{\\n`
             + ` {4}let extended = vec3f\\(carried, 1\\.0\\);\\n`
@@ -316,7 +336,7 @@ test('a stage puts its coordinate through its own texture transform before sampl
     }
     // The block carries rows for three stages; a fourth samples as carried.
     assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let raw = carried;\n {4}let flags = 0u;/);
-    assert.doesNotMatch(code, /texTransform\[[6-9]\]/);
+    assert.doesNotMatch(code, /texTransform\[1[2-9]\]/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{

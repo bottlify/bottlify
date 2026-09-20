@@ -462,7 +462,7 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         // render state's texture factor and alpha reference in it.
         const groups = h.groupsOfDraw();
         const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
-        assert.equal(block.length, 116);
+        assert.equal(block.length, 140);
         assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
             [0x20, 0x40, 0x60, 0xff]);
         assert.equal(Math.round(block[72] * 255), 0x80);
@@ -648,7 +648,8 @@ test('a pixel shader over fixed-function vertices reads a coordinate the stages 
         assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.WORLD_VIEW * 4 + 12,
             HYBRID_CONSTANTS.WORLD_VIEW * 4 + 16)], [0, 0, 5, 1]);
         assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.TRANSFORMS * 4,
-            HYBRID_CONSTANTS.TRANSFORMS * 4 + 8)], [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75]);
+            HYBRID_CONSTANTS.TRANSFORMS * 4 + 16)],
+        [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75, 0, 0, 1, 0, 0, 0, 0, 1]);
 
         h.device.SetTexture(0, null);
         h.device.SetPixelShader(null);

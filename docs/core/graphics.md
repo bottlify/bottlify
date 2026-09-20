@@ -187,16 +187,19 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`,
   `SUBTRACT`, `ADDSMOOTH`, the `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE`
   modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`) and nothing at
-  all for an empty list; a two- or three-coordinate texture transform is applied per stage; a stage
-  set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or `_CAMERASPACEREFLECTIONVECTOR`
-  takes its coordinate from the vertex through world and view, through the stage's transform, in
-  the vertex stage, whatever set the vertex carries (a pixel shader over fixed-function vertices is
-  handed the same); per-vertex lighting is unrolled per enabled light (point, spot, directional,
+  all for an empty list; a texture transform of two to four coordinates is applied per stage; a
+  stage set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or
+  `_CAMERASPACEREFLECTIONVECTOR` takes its coordinate from the vertex through world and view,
+  through the stage's whole transform, in the vertex stage, whatever set the vertex carries, and
+  under `D3DTTFF_PROJECTED` is divided per pixel by the count's last component (a pixel shader over
+  fixed-function vertices is handed the same four components undivided); per-vertex lighting is
+  unrolled per enabled light (point, spot, directional,
   with range, attenuation and cone in uniforms), the material sources honour `D3DRS_COLORVERTEX`,
   the specular sum is added after the cascade, and alpha comes from the diffuse source alone; fog
   (`LINEAR`, `EXP`, `EXP2`) is a per-vertex factor from eye depth, or the specular alpha for
-  pre-transformed vertices; the alpha test `discard`s. Sphere-map coordinate generation and
-  one- or four-coordinate or projected texture transforms are not computed (see *Limitations*).
+  pre-transformed vertices; the alpha test `discard`s. Sphere-map coordinate generation, a
+  one-coordinate transform and a projected transform over a carried set are not computed (see
+  *Limitations*).
 - **Programmable** (`internal/programmable.js`) builds a pipeline from a translated vertex and
   pixel shader pair, a vertex layout taken from a declaration (`D3DDECLTYPE` to WebGPU format; the
   packed ten-bit types have no counterpart and refuse the declaration), the stream's stride rather
@@ -615,8 +618,8 @@ Refused (the program is told no):
 Accepted and reported through `divergence`:
 
 - Direct3D 8 (shared renderer): sphere-map coordinate generation (`D3DTSS_TCI_SPHEREMAP`) -- the
-  set in the low bits is sampled as the vertex carries it; a texture transform of one or four
-  coordinates or a projected one; a texture-stage cascade cut short because a stage reads `TEXTURE` with
+  set in the low bits is sampled as the vertex carries it; a texture transform of one coordinate,
+  or a projected one over a set the vertex carries; a texture-stage cascade cut short because a stage reads `TEXTURE` with
   nothing bound or names a coordinate set the vertex lacks (the draw runs untextured from that
   stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a draw with a vertex shader
   feeding the fixed-function pixel stage, or a shader pair the renderer could not build a pipeline

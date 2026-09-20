@@ -89,9 +89,9 @@ export const HYBRID_CONSTANTS = Object.freeze({
     VIEWPORT: 4,
     /** Four rows of world then view: the camera space a generated coordinate is taken in. */
     WORLD_VIEW: 5,
-    /** Two rows per stage for three stages: the texture transform a generated coordinate goes through. */
+    /** Four rows per stage for three stages: the texture transform a generated coordinate goes through. */
     TRANSFORMS: 9,
-    COUNT: 15,
+    COUNT: 21,
 });
 
 /**
@@ -1213,10 +1213,12 @@ export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = [
             : mode === TCI_CAMERASPACEREFLECTIONVECTOR
                 ? 'reflect(normalize(cameraPosition), cameraNormal)'
                 : 'cameraPosition';
-        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 2;
+        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
         body.push(set < 3
             ? `    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
-                + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)), 0.0, 1.0);`
+                + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
+                + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
+                + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`
             : `    out.o${location} = vec4f(${coordinate}, 1.0);`);
     }
     for (const location of alsoWrite)

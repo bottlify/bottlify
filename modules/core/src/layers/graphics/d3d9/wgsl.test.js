@@ -463,7 +463,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 15>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 21>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
@@ -493,9 +493,11 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assertLine(generated.wgsl,
         'let cameraNormal = normalize((worldView * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
     assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
-        + ' dot(c[10], vec4f(cameraPosition, 1.0)), 0.0, 1.0);');
-    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[11], vec4f(cameraNormal, 1.0)),`
-        + ' dot(c[12], vec4f(cameraNormal, 1.0)), 0.0, 1.0);');
+        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
+    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
+        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
+        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
     assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     const transformed = fixedVertexStage([

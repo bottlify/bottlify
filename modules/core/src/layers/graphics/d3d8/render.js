@@ -99,14 +99,29 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * fourth, every such offset is zero and every sprite sheet shows its first
  * cell -- a picture, not an error.
  */
-const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13]);
+const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]);
 
-/** What those elements hold when the transform moves nothing: u' = u, v' = v. */
-const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0]);
+/** What those elements hold when the transform moves nothing: the identity, by columns. */
+const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
-/** D3DTTFF_COUNT2 and COUNT3: that many coordinates through the matrix, no projection. */
+/** D3DTTFF_COUNTn: how many coordinates go through the matrix; PROJECTED divides by the last. */
+const TTFF_COUNT_MASK = 0xff;
+const TTFF_PROJECTED = 0x100;
 const TTFF_COUNT2 = 2;
-const TTFF_COUNT3 = 3;
+const TTFF_COUNT4 = 4;
+
+/**
+ * Whether a stage's transform flags are ones the sampler applies: two to
+ * four coordinates, with a projective divide only where the coordinate is
+ * generated, since a carried set is two components with nothing to divide by.
+ *
+ * @param {number} flags @param {boolean} generated
+ */
+const transformApplies = (flags, generated)=>{
+    const count = flags & TTFF_COUNT_MASK;
+    return count >= TTFF_COUNT2 && count <= TTFF_COUNT4
+        && ((flags & TTFF_PROJECTED) === 0 || generated);
+};
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
 const TEXTURE_DUMP_LIMIT = 96;
@@ -692,13 +707,14 @@ export const UNIFORM_AT = Object.freeze({
     stage0: 73,
     stage1: 74,
     stage2: 75,
-    // Two vec4f rows per sampled stage: (m11, m21, m31, m41) makes u and
-    // (m12, m22, m32, m42) makes v -- from (u, v, 1) for a carried set, from
-    // (x, y, z, 1) for a generated coordinate.
+    // Four vec4f rows per sampled stage, the matrix by columns: (m11, m21,
+    // m31, m41) makes u, (m12, m22, m32, m42) makes v -- from (u, v, 1) for a
+    // carried set, from (x, y, z, 1) for a generated coordinate, which also
+    // takes the third and fourth for a projective divide.
     textureTransforms: 76,
     // World then view: the camera space a generated coordinate is taken in.
-    worldView: 100,
-    lights: 116,
+    worldView: 124,
+    lights: 140,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -786,7 +802,7 @@ function putDword(block, at, dword){
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {(readonly number[])[]} [textureTransforms]
- *     Per stage, the eight elements in `PLANAR_ROWS` order; identity when absent.
+ *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
  * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
@@ -834,11 +850,7 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     const transforms = values.textureTransforms ?? [];
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        const planar = transforms[index] ?? PLANAR_IDENTITY;
-        put4(block, at.textureTransforms + index * 8,
-            planar[0], planar[1], planar[2], planar[3]);
-        put4(block, at.textureTransforms + index * 8 + 4,
-            planar[4], planar[5], planar[6], planar[7]);
+        block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
     }
     block.set(values.worldView ?? IDENTITY, at.worldView);
     for (let index = 0; index < lights.length; index++)
@@ -1086,9 +1098,10 @@ export function uniformsOf(model, lighting, take, mips = true){
 }
 
 /**
- * The transform of each sampled stage, when the stage's flags say two or
- * three coordinates go through the matrix. Any other flag value -- one or
- * four, a projective divide -- is not applied and is reported per draw.
+ * The transform of each sampled stage, when the stage's flags are ones the
+ * sampler applies (`transformApplies`). Any other -- one coordinate, a
+ * projective divide of a carried set -- is not applied and is reported per
+ * draw.
  *
  * @param {RenderModel} model
  */
@@ -1097,9 +1110,11 @@ const stageTransforms = model=>{
     const transforms = [];
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
-        const flags = model.stageStates(index)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        const states = model.stageStates(index);
+        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
         const matrix = model.transforms.get(D3DTS.TEXTURE0 + index);
-        transforms.push((flags === TTFF_COUNT2 || flags === TTFF_COUNT3) && matrix
+        const generated = generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0);
+        transforms.push(transformApplies(flags, generated) && matrix
             ? PLANAR_ROWS.map(at=>matrix[at])
             : PLANAR_IDENTITY);
     }
@@ -1167,6 +1182,8 @@ export function stageCascade(model, layout){
         {
             break;
         }
+        const texCoordIndex = get(D3DTSS.TEXCOORDINDEX);
+        const transformFlags = get(D3DTSS.TEXTURETRANSFORMFLAGS);
         const key = {
             colorOp,
             colorArg1: get(D3DTSS.COLORARG1),
@@ -1174,7 +1191,13 @@ export function stageCascade(model, layout){
             alphaOp: get(D3DTSS.ALPHAOP),
             alphaArg1: get(D3DTSS.ALPHAARG1),
             alphaArg2: get(D3DTSS.ALPHAARG2),
-            texCoordIndex: get(D3DTSS.TEXCOORDINDEX),
+            texCoordIndex,
+            // A projected generated coordinate is divided by its third or
+            // fourth component at the sample, which is the count's last.
+            projected: generates(texCoordIndex) && (transformFlags & TTFF_PROJECTED) !== 0
+                && (transformFlags & TTFF_COUNT_MASK) >= 3
+                ? Math.min(transformFlags & TTFF_COUNT_MASK, 4)
+                : 0,
         };
         const selectors = [
             ...argumentsRead(key.colorOp, key.colorArg1, key.colorArg2),
@@ -2113,24 +2136,23 @@ export function createRenderer(options){
         {
             return '-';
         }
-        // The elements a two-dimensional coordinate actually travels through,
-        // as u then v: the two each is scaled and sheared by, and the offset
-        // from the third row. The rest of the matrix cannot reach it.
+        // The matrix by columns, as the block carries it: the u column, then
+        // v, w and q -- so a sheet's cell can be read off the first two.
         return `${flags}:${(matrix ? PLANAR_ROWS.map(at=>matrix[at]) : PLANAR_IDENTITY)
             .map(round).join(',')}`;
     };
 
     /**
-     * Whether a stage's transform asks for what the sampler does not do.
-     *
-     * Two coordinates through the matrix are applied at the sample. Three or
-     * four, or a projected divide, are not, whatever the matrix holds.
+     * Whether a stage's transform asks for what the sampler does not do:
+     * one coordinate, or a projective divide of a carried set.
      *
      * @param {RenderModel} model @param {number} stage
      */
     const transformMoves = (model, stage)=>{
-        const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-        return flags !== 0 && flags !== TTFF_COUNT2 && flags !== TTFF_COUNT3;
+        const states = model.stageStates(stage);
+        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        return flags !== 0
+            && !transformApplies(flags, generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0));
     };
 
     /**
@@ -2565,8 +2587,8 @@ export function createRenderer(options){
             if (transformMoves(model, stage))
             {
                 divergence('Direct3D 8',
-                    'a texture transform of one or four coordinates, or a'
-                    + ' projected one, is accepted and not applied'
+                    'a texture transform of one coordinate, or a projected one'
+                    + ' over a set the vertex carries, is accepted and not applied'
                     + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
                     + ' coordinates are sampled as the vertex carries them');
                 return;
@@ -3517,7 +3539,7 @@ export function createRenderer(options){
         floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
         for (const [index, rows] of stageTransforms(model).entries())
         {
-            floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 2) * 4);
+            floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 4) * 4);
         }
         return [floats, take(64), take(16)];
     };

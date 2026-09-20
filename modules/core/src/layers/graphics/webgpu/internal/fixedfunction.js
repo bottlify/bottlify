@@ -579,9 +579,9 @@ export function generateFixedFunction(state, layout){
         {
             continue;
         }
-        varyings.push(`    @location(${location++}) generated${index}: vec2f,`);
+        varyings.push(`    @location(${location++}) generated${index}: vec4f,`);
         assignments.push(layout.preTransformed
-            ? `    out.generated${index} = vec2f(0.0);`
+            ? `    out.generated${index} = vec4f(0.0, 0.0, 1.0, 1.0);`
             : `    out.generated${index} = ${transformedGeneration(index,
                 generatedCoordinate(stage.texCoordIndex))};`);
     }
@@ -632,7 +632,8 @@ export function generateFixedFunction(state, layout){
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
-${sampleFunctions(state.stages.length, generated)}
+${sampleFunctions(state.stages.length, state.stages.map((stage, index)=>(generated[index]
+        ? { projected: stage.projected ?? 0 } : null)))}
 struct VertexIn {
 ${inputs}
 };
@@ -690,7 +691,7 @@ function uniformStruct(lightCount){
     stage0: u32,
     stage1: u32,
     stage2: u32,
-    texTransform: array<vec4f, 6>,
+    texTransform: array<vec4f, 12>,
     worldView: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
@@ -698,19 +699,23 @@ function uniformStruct(lightCount){
 
 /**
  * A generated three-component coordinate through the stage's texture
- * transform: (x, y, z, 1) against the two output rows the block carries,
- * which is where a translation lands for three coordinates. Stages beyond
- * the block's three carry no transform and sample the coordinate as it is.
+ * transform: (x, y, z, 1) against the four output rows the block carries,
+ * which is where a translation lands for three coordinates and where the
+ * component a projected sample divides by comes from. Stages beyond the
+ * block's three carry no transform and sample the coordinate as it is.
  *
  * @param {number} index @param {string} coordinate
  */
 function transformedGeneration(index, coordinate){
     if (index >= 3)
     {
-        return `(${coordinate}).xy`;
+        return `vec4f((${coordinate}).xy, 1.0, 1.0)`;
     }
-    return `vec2f(dot(uniforms.texTransform[${index * 2}], vec4f(${coordinate}, 1.0)),`
-        + ` dot(uniforms.texTransform[${index * 2 + 1}], vec4f(${coordinate}, 1.0)))`;
+    const row = index * 4;
+    return `vec4f(dot(uniforms.texTransform[${row}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 1}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 2}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${row + 3}], vec4f(${coordinate}, 1.0)))`;
 }
 
 /**
@@ -911,8 +916,10 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  * coordinate first, in uniform control flow, whatever the mode then does.
  *
  * @param {number} count
- * @param {boolean[]} [generated]  Stages whose coordinate the vertex stage
- *     generated and transformed already.
+ * @param {({ projected: number } | null)[]} [generated]
+ *     Stages whose coordinate the vertex stage generated and transformed
+ *     already, arriving as four components; `projected` names the one the
+ *     first two are divided by, or is zero.
  * @returns {string}
  */
 function sampleFunctions(count, generated = []){
@@ -929,16 +936,22 @@ function sampleFunctions(count, generated = []){
         // two-dimensional coordinate: (u, v, 1) through the first three rows,
         // so a translation is the third row and not the fourth. Identity rows
         // are carried for a stage without one, so the sample is one expression.
-        // A generated coordinate arrives transformed by the vertex stage.
-        const transformed = index < 3 && !generated[index]
-            ? [
-                '    let extended = vec3f(carried, 1.0);',
-                `    let raw = vec2f(dot(uniforms.texTransform[${index * 2}].xyz, extended),`,
-                `        dot(uniforms.texTransform[${index * 2 + 1}].xyz, extended));`,
-                '',
-            ].join('\n')
-            : '    let raw = carried;\n';
-        lines.push(`fn sampleStage${index}(carried: vec2f) -> vec4f {
+        // A generated coordinate arrives transformed by the vertex stage,
+        // and a projected one is divided here, per pixel, as the rasteriser
+        // does it.
+        const generation = generated[index] ?? null;
+        const transformed = generation
+            ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
+                : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
+            : index < 3
+                ? [
+                    '    let extended = vec3f(carried, 1.0);',
+                    `    let raw = vec2f(dot(uniforms.texTransform[${index * 4}].xyz, extended),`,
+                    `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
+                    '',
+                ].join('\n')
+                : '    let raw = carried;\n';
+        lines.push(`fn sampleStage${index}(carried: ${generation ? 'vec4f' : 'vec2f'}) -> vec4f {
 ${transformed}    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));
     let dx = dpdx(raw * size);
