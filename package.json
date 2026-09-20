@@ -14,6 +14,7 @@
     "build:v86": "npm run build:v86 -w @bottlify/core --",
     "build:video-decoder": "npm run build:video-decoder -w @bottlify/core --",
     "fetch:v86": "npm run fetch:v86 -w @bottlify/core",
+    "fetch:corpus": "npm run fetch:corpus -w @bottlify/cork",
     "fetch:video-decoder": "npm run fetch:video-decoder -w @bottlify/core",
     "fetch:directx-runtime": "npm run fetch:directx-runtime -w @bottlify/core",
     "verify:reproducibility": "npm run verify:reproducibility -w @bottlify/core",

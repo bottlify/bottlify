@@ -487,6 +487,18 @@ export async function createV86Host(config){
             v().inHlt[0] = 1;
         },
 
+        /** Whether the processor is standing in a `hlt`, its own or ours. */
+        halted: ()=>v().inHlt[0] === 1,
+
+        /**
+         * The opposite: lets the next slice run again after a `hlt`, for a
+         * driver that reuses one machine for many programs (the corpus runner)
+         * and puts EIP somewhere new between them.
+         */
+        wake(){
+            v().inHlt[0] = 0;
+        },
+
         /** A control register. @param {number} index */
         controlRegister: index=>v().cr[index] >>> 0,
 
@@ -650,11 +662,15 @@ export async function createV86Host(config){
                     words[index * 4] >>> 0, words[index * 4 + 1] >>> 0,
                     words[index * 4 + 2] & 0xffff);
             }
+            // The status word as the processor reads it: the emulator keeps
+            // the top of stack apart from the word, and its own `fnstsw`
+            // folds it back into bits 11..13 -- so does this.
+            const top = cpu.fpu_stack_ptr[0];
             return {
-                top: cpu.fpu_stack_ptr[0],
+                top,
                 empty: cpu.fpu_stack_empty[0],
                 control: cpu.fpu_control_word[0],
-                status: cpu.fpu_status_word[0],
+                status: (cpu.fpu_status_word[0] & ~0x3800 | top << 11) & 0xffff,
                 registers,
                 raw: new Uint8Array(words.buffer, words.byteOffset, words.byteLength),
             };
@@ -671,7 +687,8 @@ export async function createV86Host(config){
             // Through the export, not the field: the fast arithmetic path
             // reads a precision byte derived from the control word by it.
             cpu.wm.exports.set_control_word(state.control);
-            cpu.fpu_status_word[0] = state.status;
+            // The top lives in its own byte; the word keeps the rest.
+            cpu.fpu_status_word[0] = state.status & ~0x3800;
         },
 
         /** @returns {number} guest EIP */

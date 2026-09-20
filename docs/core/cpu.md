@@ -296,7 +296,9 @@ they were on, so a view reading as empty is the signal -- rather than through it
 create a fresh typed array per property access, or through the buffer accessor on every read. The host also reads and writes the SSE and x87 state as records
 (`readXmm`/`writeXmm`, `readMxcsr`/`writeMxcsr`, `x87State`/`restoreX87State` -- the eight x87
 registers by physical index, decoded from whichever of the emulator's two forms each is in,
-with the raw bytes beside them) for the translator package's differential harness, which
+with the raw bytes beside them, and the status word with the top of stack folded into bits
+11..13 as `fnstsw` would report it, since the emulator keeps the two apart) and whether the
+processor stands in a `hlt` (`halted`/`wake`), for the translator package's differential harness, which
 snapshots this machine, runs the same code on both engines and compares; cold paths, nothing a
 slice pays for. Two emulator methods are wrapped for counting:
 `codegen_finalize` (published modules, and the first refusal) and `jit_clear_func` (discarded

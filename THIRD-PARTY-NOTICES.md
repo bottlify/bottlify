@@ -34,6 +34,20 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
+## v86 nasm instruction corpus — test data for the translator
+
+- Source: the fork above, `tests/nasm/` (hand-written cases and `create_tests.js`'s generated
+  ones), assembled and recorded on real hardware by the fork's CI and published as
+  `nasm-corpus.json.gz` beside each release
+- Location in this repository: fetched into `modules/cork/vendor/` by `npm run fetch:corpus`
+  from the release pinned in `modules/cork/corpus-lock.json`; not committed, not distributed
+- License: BSD-2-Clause (the same text as above)
+- What is used: the assembled images and the recorded register and memory state, as inputs and
+  expected outputs of `@bottlify/cork`'s corpus and differential tests. The comparison rules
+  (which flags and status bits are compared, the seven-digit float tolerance, which state a
+  case that died is compared on) follow the fork's own `tests/nasm/run.js` so that a case
+  passes here for the reason it passes there; that runner's code is not copied.
+
 ## FFmpeg — video and audio decoding
 
 - Source: upstream https://github.com/FFmpeg/FFmpeg at release tag `n6.1`, commit

@@ -97,6 +97,7 @@ From the repository root (`package.json` is an npm workspace over `modules/*`):
 | `npm run test:integration` | `*.itest.js`: whole programs from `test/fixtures/` run through the engine, needing the prebuilt emulator. |
 | `npm run check:boundaries` | The layer graph and the acyclic import check. |
 | `npm run fetch:v86`, `npm run fetch:video-decoder` | Pull the pinned emulator and decoder binaries into `vendor/prebuilt/`, verified against their lock files. |
+| `npm run fetch:corpus` | Pull the nasm instruction corpus (every case as an image with the state real hardware recorded) into `modules/cork/vendor/`, for the translator package's differential tests; pinned by `modules/cork/corpus-lock.json`. |
 | `npm run build` | esbuild → `dist/core.js`, `dist/engine.worker.js`, `dist/worklet.js`, `dist/vendor/*`, `dist/checksums.json`. |
 | `npm run build:v86 -- --docker` and `npm run verify:reproducibility` | Rebuild the emulator from the submodule in a container and diff its hashes against the manifest. Not needed day to day. |
 | `npm run cdp:probe` | Launches a headless Chromium, boots the core in a worker, checks it answers a ping. |

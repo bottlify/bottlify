@@ -13,7 +13,10 @@ contract for 32-bit code; a 64-bit engine is expected to be a package of its own
 seam, reusing the building blocks exported here (`./wasm`, `./runtime`).
 
 Nothing here needs the emulator. The emulator is used only by this package's integration
-tests, as the oracle the differential harness compares translated code against.
+tests, as the oracle the differential harness compares translated code against; those tests
+also need the nasm instruction corpus (`npm run fetch:corpus`, pinned by `corpus-lock.json`,
+fetched into the gitignored `vendor/`), every case of which is run on the emulator through
+this project's own machine and compared with the state real hardware recorded.
 
 Design: `roadmap/cork-x86-translator.md`. Plan: `roadmap/cork-plan.md`. Zero runtime
 dependencies; vanilla ES modules with JSDoc; tests are `node:test`, colocated (`*.test.js`
