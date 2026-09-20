@@ -170,7 +170,8 @@ export const win32Module = {
         let libraries = {};
         /** @type {number | null} */
         let exitCode = null;
-        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number, height: number) => boolean }} */
+        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number,
+         *     height: number, how?: { announce?: boolean }) => boolean }} */
         let windowService = { list: ()=>[], place: ()=>false };
 
         /** @type {(handle: number, text: string) => void} */
@@ -1537,9 +1538,10 @@ export const win32Module = {
              *
              * @param {number} hwnd @param {number} x @param {number} y
              * @param {number} width @param {number} height
+             * @param {{ announce?: boolean }} [how]
              */
-            placeWindow: (hwnd, x, y, width, height)=>
-                windowService.place(hwnd, x, y, width, height),
+            placeWindow: (hwnd, x, y, width, height, how)=>
+                windowService.place(hwnd, x, y, width, height, how),
 
             windowProcedures: ()=>dispatching.map(held=>({
                 hwnd: `0x${held.hwnd.toString(16)}`,

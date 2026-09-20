@@ -169,6 +169,7 @@ const PARKED = Object.freeze({ parked: true });
  *        procedure answers.
  * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
  *        name a thread of this process, for PostThreadMessage.
+ * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
  */
 function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists, trace } = {}){
     const memory = fakeMemory();
@@ -292,7 +293,7 @@ function createWindow(fns, memory, options = {}){
  * A class plus a window of it, which almost every test below needs.
  *
  * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
- *     & { reply?: (message: any) => any }} [options]
+ *     & { reply?: (message: any) => any, trace?: (message: any) => void }} [options]
  */
 function withWindow(options = {}){
     const { reply, trace, ...rest } = options;
@@ -546,6 +547,14 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(service.place(hwnd, 0, 0, 800, 600), true);
     const again = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
     assert.equal(again?.message, 0x0005, 'a new size is a size alone');
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
+
+    // Announced, the same place is still a size: what a mode switch says to
+    // the window it lands in, once the device that switched exists.
+    assert.equal(service.place(hwnd, 0, 0, 800, 600, { announce: true }), true);
+    const said = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(said?.message, 0x0005);
+    assert.equal(said?.lParam >>> 0, (600 << 16 | 800) >>> 0);
     assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
 });
 

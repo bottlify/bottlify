@@ -231,7 +231,8 @@ const S_FALSE = 1;
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
  * @param {(width: number, height: number,
- *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
+ *          ) => void} [deps.resolution]
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => AdapterIdentity | null} [deps.identity]

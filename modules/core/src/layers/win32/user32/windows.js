@@ -316,7 +316,8 @@ function characterFor(key){
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
- * @property {(hwnd: number, x: number, y: number, width: number, height: number) => boolean} place
+ * @property {(hwnd: number, x: number, y: number, width: number, height: number,
+ *     how?: { announce?: boolean }) => boolean} place
  */
 
 /**
@@ -2184,10 +2185,15 @@ export function createWindowFunctions(host){
          * be reset by the size its own reset placed it at, without end, if
          * the message came whether or not anything changed.
          *
+         * `announce` says the size whether or not it changed: what a mode
+         * switch does to the window it lands in, which the program hears
+         * once its device exists and not before.
+         *
          * @param {number} hwnd @param {number} x @param {number} y
          * @param {number} width @param {number} height
+         * @param {{ announce?: boolean }} [how]
          */
-        place: (hwnd, x, y, width, height)=>{
+        place: (hwnd, x, y, width, height, how = {})=>{
             const record = live(hwnd);
             if (!record)
             {
@@ -2209,7 +2215,8 @@ export function createWindowFunctions(host){
                 host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
                     lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
             }
-            if (after.right - after.left !== before.right - before.left
+            if (how.announce === true
+                || after.right - after.left !== before.right - before.left
                 || after.bottom - after.top !== before.bottom - before.top)
             {
                 host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,

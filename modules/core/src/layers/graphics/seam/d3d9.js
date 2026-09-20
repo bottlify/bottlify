@@ -124,10 +124,12 @@ const MAX_SHADER_DWORDS = 1 << 16;
  * @param {(cursor: import('./d3d8.js').CursorNotice) => void} [deps.cursor]
  *     Where the program's cursor goes; without a taker the call is refused.
  * @param {(width: number, height: number,
- *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
+ *          ) => void} [deps.resolution]
  *     Told the resolution a device is created or reset at, to report as the
  *     screen -- and which window it presents into, so a fullscreen one can be
- *     placed.
+ *     placed. `announce` asks that the window be told its size even if it
+ *     did not change.
  * @param {() => AdapterIdentity | null} [deps.identity]
  */
 export function createDirect3D9Seam(
@@ -977,6 +979,7 @@ export function createDirect3D9Seam(
             if (hr === D3D_OK)
             {
                 writePresentParameters(parameters >>> 0, next);
+                lastParameters = next;
                 // The window is this resolution now, and a fullscreen reset has
                 // to take it with it the way a created one does; a window left
                 // at the old size has the program clipping its cursor to a
@@ -992,7 +995,25 @@ export function createDirect3D9Seam(
         // Present's four arguments are all optional and all ignored: there
         // are no rectangles to honour, and the window is the browser's.
         /** @param {any} device */
-        Present: (/** @type {any} */ device)=>device.Present(),
+        Present: (/** @type {any} */ device)=>{
+            // A mode switch resizes the window a fullscreen device presents
+            // into, and the program hears WM_SIZE for it after its device
+            // exists, since the switch is the device's creation. A program
+            // of this era configures itself on that message: its viewport,
+            // and whether it may run at full speed or is in the background.
+            // A window already at the mode's size hears nothing from the
+            // placement at creation, so it is told once, at the device's
+            // first frame, when both it and the device are there to hear it.
+            if (!announced.has(device) && lastParameters && !lastParameters.windowed)
+            {
+                announced.add(device);
+                resolution?.(lastParameters.backBufferWidth >>> 0,
+                    lastParameters.backBufferHeight >>> 0, {
+                        window: deviceWindow, fullscreen: true, announce: true,
+                    });
+            }
+            return device.Present();
+        },
 
         /** @param {any} device @param {number[]} args */
         GetBackBuffer: (device, [chain, index, type, out])=>{
@@ -2160,6 +2181,7 @@ export function createDirect3D9Seam(
                 return hr;
             }
             writePresentParameters(parameters >>> 0, wanted);
+            lastParameters = wanted;
             // The window is now this resolution; the reported screen is too.
             // Fullscreen, the device's window follows the mode, as the real
             // device moves it; windowed, the window is the program's own. The
@@ -2187,6 +2209,10 @@ export function createDirect3D9Seam(
 
     /** @type {any} */
     let lastDevice = null;
+    /** The present parameters the last device was created or reset with. @type {any} */
+    let lastParameters = null;
+    /** @type {WeakSet<any>} devices whose window has been told the mode at a first frame */
+    const announced = new WeakSet();
     // The window the last device was created into. A Reset's present
     // parameters name it too, but not always -- a program may leave it zero --
     // and the window a reset leaves at the wrong size is one the program then

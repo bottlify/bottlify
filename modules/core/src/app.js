@@ -2663,7 +2663,7 @@ async function buildApp(options){
             // one window is that resolution. The reported metrics follow it.
             /**
              * @param {number} width @param {number} height
-             * @param {{ window?: number, fullscreen?: boolean }} [where]
+             * @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where]
              */
             resolution: (width, height, where = {})=>{
                 if (width > 0 && height > 0)
@@ -2677,7 +2677,8 @@ async function buildApp(options){
                     // picture -- the picture fills the mode, the window does not.
                     if (where.fullscreen && where.window)
                     {
-                        win32.placeWindow(where.window, 0, 0, width, height);
+                        win32.placeWindow(where.window, 0, 0, width, height,
+                            { announce: where.announce === true });
                     }
                 }
             },
