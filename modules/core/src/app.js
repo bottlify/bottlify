@@ -46,6 +46,9 @@ import { createBlockCache, resolveBlockStore }
  * @property {string} [v86.moduleUrl]     The emulator's module.
  * @property {string} [v86.wasmUrl]       Where its binary is fetched from.
  * @property {ArrayBuffer} [v86.wasmBytes]  Or the binary itself.
+ * @property {Object} [cork]              The translator, for `engine: 'hybrid'`.
+ * @property {string} [cork.moduleUrl]    Its entry module; the package beside core by default.
+ * @property {import('./layers/cpu/engine.js').EngineConfig} [cork.config]
  * @property {Object} [media]             Video decoding, when this build has it.
  * @property {ArrayBuffer} [media.wasmBytes]
  *           The decoder binary. Absent, the media layer comes up and reports
@@ -1029,6 +1032,17 @@ export function clockCredit(source, clock, cap){
  */
 const VENDOR = /** @type {{ env?: { BOTTLIFY_VENDOR?: string } }} */ (import.meta).env?.BOTTLIFY_VENDOR
     ?? '../vendor/prebuilt/';
+
+/**
+ * The translator to load for `hybrid`: what the caller named, else the
+ * package installed beside this one.
+ *
+ * @param {{ moduleUrl?: string } | undefined} asked
+ * @param {string} [here]
+ */
+export function corkArtifacts(asked, here = import.meta.url){
+    return { moduleUrl: asked?.moduleUrl ?? new URL('../../cork/src/index.js', here).href };
+}
 
 /**
  * The emulator to boot: what the caller named, and the package's own for the
@@ -2414,7 +2428,12 @@ async function buildApp(options){
                 limit: STACK_POOL_BASE + STACK_POOL_SIZE,
             },
         },
-        cpu: { jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine },
+        cpu: {
+            jit: options.jit, sampling: options.sampling, memorySize, engine: options.engine,
+            engineUrl: options.engine && options.engine !== 'emulator'
+                ? corkArtifacts(options.cork).moduleUrl : null,
+            cork: options.cork?.config,
+        },
         bridge: {
             // win32 sits above the bridge and cannot be reached from it, so the
             // reader is handed down from here. It costs one call per traced

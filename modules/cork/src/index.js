@@ -17,17 +17,14 @@
  * @typedef {import('../../core/src/layers/cpu/engine.js').Runtime} Runtime
  */
 
+import { createCorkRuntime } from './runtime/runtime.js';
+
 /**
  * Builds a runtime over the memory and layout the core hands in.
- *
- * Nothing is translated yet: the package exists so the seam can be built and
- * checked before anything crosses it. Until the runtime lands, asking for an
- * engine is refused loudly rather than answered with one that runs nothing.
  *
  * @param {EngineEnv} env
  * @returns {Runtime}
  */
 export function createEngine(env){
-    void env;
-    throw new Error('cork: not built yet');
+    return createCorkRuntime(env);
 }

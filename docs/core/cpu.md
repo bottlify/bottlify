@@ -32,10 +32,26 @@ call, and answers a `Runtime` (`entryOf`, `run`, `noteHot`, `translatePending`,
 refuses it — so a launch that selects the emulator runs with no translator installed, and a
 launch that selects the translator loads nothing of the emulator. The `engine` configuration
 field selects one per launch; `internal/hybrid-host.js` composes the emulator's host with a
-translator's runtime on one register file (today with none attached, so `hybrid` is the
-emulator under another name, proven by identical instruction counts); the rest of the
-composition arrives with the translator's own steps (`roadmap/cork-plan.md`). `diagnostics()`
-reports the selected engine as `metrics.engine`.
+translator's runtime on one register file. `diagnostics()` reports the selected engine as
+`metrics.engine` and the translator's own report as `metrics.cork` (null when none is
+attached).
+
+Under `hybrid` with a translator (`engineUrl` names its module; without one, hybrid is the
+emulator under another name, proven by identical instruction counts) the slice is shared:
+while the guest stands at an address the translator has an entry for, the translator runs it
+with what remains of the slice's budget, and when it leaves for an untranslated address, a
+fault (the emulator then re-executes the instruction and raises it the ordinary way) or a
+trap, the emulator takes one turn with the rest. The translator's layout is the emulator's
+own register file, read off its typed views at boot (`stateLayout`), and its tables take the
+top of the guest RAM (`engine.js`'s `TABLES_RESERVE`; the layer reports the RAM below it as
+the memory's size), so a switch between the two copies nothing. Translated code adds what it
+retired to the emulator's own counter word, so `instructionCount()` and the sampler are
+unchanged. Candidates come from the sampler: once a frame, every 64-byte bucket credited past
+`cork.hotThreshold` instructions is handed to the translator at the exact address its last
+slice ended on, and the pending batch is instantiated -- paced by frames, never inside a
+slice. What the emulator's own compiler compiled is not protected from a store made by
+translated code (the emulator sees only its own stores); a program that writes code it then
+runs through the emulator is the case the handoff step's fork change is to close.
 
 Translated code tests a page-flag table before every load and store (one byte per 4 KiB page
 of the address space, kept in the memory after the guest RAM): a page beyond RAM is
@@ -64,7 +80,9 @@ enter the type check or the bundle.
 
 | option          | type                       | default             | meaning |
 |-----------------|----------------------------|---------------------|---------|
-| `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. |
+| `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (2 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
+| `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold`, `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |
@@ -143,6 +161,7 @@ yet are the same state from a caller's perspective.
 | `trapCrossings` | Times the guest has left its own code for ours — every import, COM method and fault comes through the one trap port. | Every crossing. |
 | `jit`           | `{ disabled, maxPages, loopSafety, cache, tableFree, compiledSteps, interpretedSteps, entries, interpretedDispatches, f80Conversions, codePageWrites, modulesLostToWrites, hotnessLostToWrites, chaining, chained, chainMissed, chainRefused, flagsDead, slowWrites, codePageWritesKept, x87TagLost, x87Sites, dirtyPages, finalised, published, discarded, hostWrites, hostWrittenBytes, refused }` | Per slice / per host write. Counters the emulator build does not carry read `-1`. `refused` is the first error a compiled module failed to publish with — a compiler that silently fails leaves every instruction interpreted, which is correct and several times slower. `published` is the last 4096 `[slot, start]` pairs `codegen_finalize` was called with, oldest first — `start` is the guest linear address the compiled unit begins at, for naming a JIT unit by the guest function it compiles once joined against the arrival order of the debugger's own `wasm://` script-parsed events. |
 | `eip`           | The guest's instruction pointer. | Continuously; sampling it names a loop no host call would reveal. |
+| `cork`          | The translator's report (`EngineDiagnostics` in `engine.js`): regions, entries, modules, `translatedShare`, invalidations, volatile pages, exits by kind, refused opcodes. `null` without a translator. The frame counters carry `cork.regions`, `cork.invalidations` and `cork.share`. | Per slice, per frame. |
 | `samples`       | `{ slices, overflow, top: [{ address, instructions, samples }] }` — where every slice since boot has gone, by 64-byte address bucket; `top` is the 64 heaviest by instructions, reported by each bucket's own address rather than by rank. | Every slice that retired at least one instruction (see "Sampling" below). |
 
 `jit.cache` is the emulator's own cache-size counter, which a release build compiles out (it

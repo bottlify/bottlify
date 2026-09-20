@@ -85,3 +85,12 @@ test('a table with nothing credited answers no buckets', ()=>{
     assert.equal(table.slices, 0);
     assert.equal(table.overflow, 0);
 });
+
+test('a bucket keeps the exact EIP it was last credited at, for a translator to start from', ()=>{
+    const table = createSampleTable();
+    creditSample(table, 0x10a220, 100);
+    creditSample(table, 0x10a225, 200);
+    const [bucket] = table.buckets.values();
+    assert.equal(bucket.eip, 0x10a225);
+    assert.equal(bucket.noted, false);
+});

@@ -7,10 +7,22 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createEngine } from './index.js';
+import { Tables, ownLayout, pagesFor } from './runtime/layout.js';
 
-test('the engine factory exists and refuses until the runtime is built', ()=>{
-    assert.equal(typeof createEngine, 'function');
-    assert.throws(()=>createEngine(/** @type {any} */ ({})), { message: 'cork: not built yet' });
+test('the engine factory answers a runtime with every name of the contract', ()=>{
+    const layout = ownLayout({ ramSize: 1 << 20 });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const runtime = createEngine({
+        memory, layout, config: {}, read: ()=>0xf4,
+        imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },
+    });
+    for (const name of ['entryOf', 'run', 'noteHot', 'translatePending', 'invalidatePage',
+        'diagnostics'])
+    {
+        assert.equal(typeof runtime[/** @type {keyof typeof runtime} */ (name)], 'function', name);
+    }
+    assert.equal(runtime.entryOf(0x1000), -1);
+    assert.equal(runtime.diagnostics().regions, 0);
 });
 
 test('the package resolves by name and exposes its building blocks', async()=>{
@@ -21,14 +33,6 @@ test('the package resolves by name and exposes its building blocks', async()=>{
     assert.equal(root.createEngine, createEngine);
     const wasm = await import('@bottlify/cork/wasm');
     assert.equal(typeof wasm.ModuleBuilder, 'function');
-    // A name the type checker cannot resolve yet, held in a variable so it
-    // does not try: the file arrives with the runtime step.
-    const runtime = '@bottlify/cork/runtime';
-    await assert.rejects(import(runtime), (/** @type {any} */ e)=>{
-        // Not built yet: the file is missing, which is the one failure
-        // allowed here. A misspelt `exports` entry fails differently
-        // (ERR_PACKAGE_PATH_NOT_EXPORTED), and that is what this pins.
-        assert.equal(e.code, 'ERR_MODULE_NOT_FOUND', e.message);
-        return true;
-    });
+    const runtime = await import('@bottlify/cork/runtime');
+    assert.equal(typeof runtime.createCorkRuntime, 'function');
 });

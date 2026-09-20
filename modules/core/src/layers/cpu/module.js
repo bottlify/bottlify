@@ -6,6 +6,7 @@
 
 import { createV86Host } from './internal/v86-host.js';
 import { createHybridHost } from './internal/hybrid-host.js';
+import { TABLES_RESERVE } from './engine.js';
 import { createFpu } from './internal/fpu.js';
 import { createThunkTable, FORWARD_SAVE } from './internal/thunks.js';
 import { FAULT_TRAP_BASE, ROM_BASE, ROM_SIZE, VECTORS } from './internal/boot-rom.js';
@@ -97,6 +98,10 @@ export const CPU_COUNTERS = [
     'frameInterpreted', 'frameInterpretedAt',
 ];
 const FRAME_INTERPRETED = JIT_AT + JIT_FIELDS.length;
+// The translator's own figures, when one is attached: regions live, regions
+// discarded by a write, and the share of retired instructions it ran.
+const CORK_AT = FRAME_INTERPRETED + 2;
+CPU_COUNTERS.push('cork.regions', 'cork.invalidations', 'cork.share');
 
 export const cpuModule = {
     name: 'cpu',
@@ -140,12 +145,41 @@ export const cpuModule = {
          * @type {{ host: any, thunks: any, running: boolean, tableWritten: boolean,
          *          worstInterpreted: number, worstInterpretedAt: number,
          *          interpretedBefore: number, lastFault: any, disposed: boolean,
-         *          samples: ReturnType<typeof createSampleTable>, engine: string }}
+         *          samples: ReturnType<typeof createSampleTable>, engine: string,
+         *          cork: import('./engine.js').Runtime | null }}
          */
         const state = {
             host: null, thunks: null, running: false, tableWritten: false,
             worstInterpreted: 0, worstInterpretedAt: 0, interpretedBefore: 0,
             lastFault: null, disposed: false, samples: createSampleTable(), engine,
+            cork: null,
+        };
+        /**
+         * Once a frame: every bucket the sampler has credited past the
+         * threshold becomes a candidate for the translator, and the pending
+         * batch is instantiated -- paced by frames, never inside a slice.
+         */
+        const feedTranslator = ()=>{
+            const cork = state.cork;
+            if (!cork)
+            {
+                return;
+            }
+            const hotThreshold = settings.cork.hotThreshold ?? 2000;
+            let noted = 0;
+            for (const bucket of state.samples.buckets.values())
+            {
+                if (!bucket.noted && bucket.instructions >= hotThreshold)
+                {
+                    bucket.noted = true;
+                    cork.noteHot(bucket.eip);
+                    noted++;
+                }
+            }
+            if (noted > 0)
+            {
+                cork.translatePending().catch(()=>{});
+            }
         };
 
         // Always on, because the whole point is never having to reproduce a
@@ -171,6 +205,14 @@ export const cpuModule = {
                 counters[4] = state.thunks ? state.thunks.capacity : 0;
                 counters[5] = state.host.eip();
                 counters[6] = state.host.trapCrossings();
+                feedTranslator();
+                if (state.cork)
+                {
+                    const cork = state.cork.diagnostics();
+                    counters[CORK_AT] = cork.regions;
+                    counters[CORK_AT + 1] = cork.invalidations;
+                    counters[CORK_AT + 2] = cork.translatedShare;
+                }
                 const jit = state.host.jitState();
                 // An emulator that refused to answer reports `-1` rather than a
                 // record, and reading fields off a number leaves every counter
@@ -200,6 +242,11 @@ export const cpuModule = {
             // hundreds of megabytes of it. Must stay a power of two -- the
             // emulator requires it.
             memorySize: config?.memorySize ?? DEFAULT_MEMORY_SIZE,
+            // The translator's module, imported at boot for `hybrid`; absent,
+            // hybrid runs with no translator attached.
+            engineUrl: config?.engineUrl ?? null,
+            /** @type {import('./engine.js').EngineConfig} */
+            cork: config?.cork ?? {},
             trapPort: config?.trapPort ?? 0xb077,
             entryVector: config?.entryVector ?? 0x7000,
             initialStack: config?.initialStack ?? 0x300000,
@@ -247,7 +294,8 @@ export const cpuModule = {
                 // What anything placing an image has to fit inside. A base
                 // chosen without it is a guess about how much memory the
                 // machine was given, and a wrong guess writes past the end.
-                memorySize: settings.memorySize,
+                // With a translator possible, the top of RAM is its tables'.
+                memorySize: settings.memorySize - (engine === 'emulator' ? 0 : TABLES_RESERVE),
                 // Where our own boot ROM sits. Worth registering as a region
                 // by whoever lays out memory: a fault leaves the processor
                 // standing in the stub behind its vector, and a report that
@@ -283,12 +331,29 @@ export const cpuModule = {
                 state.lastFault = null;
                 const emulator = await createV86Host({ ...settings, moduleUrl, wasmBytes });
                 // Under `hybrid` the emulator's host is composed with the
-                // translator's runtime -- none yet, so the composition is the
-                // emulator's host under another name, which is the point:
-                // the mode has to run a program exactly as the emulator alone
-                // does before a region is ever translated.
+                // translator's runtime, built over the emulator's own memory
+                // and register file by the module the configuration names.
+                // Without one the composition is the emulator's host under
+                // another name, which runs a program exactly as the emulator
+                // alone does.
+                if (engine === 'hybrid' && settings.engineUrl)
+                {
+                    const { createEngine } = await import(settings.engineUrl);
+                    state.cork = createEngine({
+                        memory: emulator.wasmMemory(),
+                        layout: emulator.stateLayout(TABLES_RESERVE),
+                        config: settings.cork,
+                        read: emulator.readByte,
+                        imports: {
+                            trap: ()=>0,
+                            getEflags: emulator.getEflags,
+                            x87Read: ()=>0,
+                            rdtsc: ()=>0n,
+                        },
+                    });
+                }
                 state.host = engine === 'hybrid'
-                    ? createHybridHost({ emulator, cork: null })
+                    ? createHybridHost({ emulator, cork: state.cork })
                     : emulator;
                 state.thunks = createThunkTable({
                     base: settings.thunkBase,
@@ -466,7 +531,7 @@ export const cpuModule = {
                 let instructions = 0;
                 try
                 {
-                    instructions = machine.cpu().run_slice(maxInstructions) >>> 0;
+                    instructions = machine.runSlice(maxInstructions) >>> 0;
                 }
                 catch (e){
                     // An exception the processor could not deliver. The
@@ -697,6 +762,8 @@ export const cpuModule = {
                     overflow: instance.samples.overflow,
                     top: topSamples(instance.samples, 64),
                 },
+                // The translator's own report, or null when none is attached.
+                cork: instance.cork ? instance.cork.diagnostics() : null,
             },
         };
     },

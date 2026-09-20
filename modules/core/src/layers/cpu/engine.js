@@ -162,4 +162,10 @@
  * @typedef {(env: EngineEnv) => Runtime} EngineFactory
  */
 
-export {};
+/**
+ * How much of the top of the guest's RAM an engine may take for its own
+ * tables in hybrid mode, where the memory is the emulator's and cannot be
+ * grown behind its views. The layer reports the RAM below it as the memory's
+ * size to every other layer, so nothing of the guest is ever placed there.
+ */
+export const TABLES_RESERVE = 2 * 1024 * 1024;

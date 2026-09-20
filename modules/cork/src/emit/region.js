@@ -87,6 +87,8 @@ const LOCAL_TYPES = [
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @property {number} [undo]           the undo helper's function index, in a differential build
+ * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
+ *                                     lazy flags (the emulator's `flags_changed`)
  */
 
 /**
@@ -106,10 +108,18 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
+    // Imports come before the helpers, which are functions.
+    const getEflags = layout.flagsChanged >= 0
+        ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
+        : undefined;
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
     const materialise = addMaterialiseHelper(m);
     /** @type {ModuleContext} */
     const context = { m, regionType, materialise, layout, features };
+    if (getEflags !== undefined)
+    {
+        context.getEflags = getEflags;
+    }
     if (undoLog)
     {
         context.undo = addUndoHelper(m, layout);
@@ -328,6 +338,15 @@ export class RegionEmitter {
             b.i32const(0).load('i32', { offset: layout.regs + r * 4 }).localSet(Local.reg + r);
         }
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
+        if (layout.flagsChanged >= 0 && this.context.getEflags !== undefined)
+        {
+            // The other executor keeps some flags lazy: when its record says
+            // so, its own fold gives the whole word.
+            b.i32const(0).load('i32', { offset: layout.flagsChanged });
+            this.openIf('lazy', EMPTY);
+            b.call(this.context.getEflags).localSet(Local.flags);
+            this.close();
+        }
         b.i32const(0).localSet(Local.kind);
         b.i32const(0).localSet(Local.retired);
         b.i32const(0).localSet(Local.mmxTouched);

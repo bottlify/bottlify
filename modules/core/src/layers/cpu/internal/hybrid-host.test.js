@@ -64,3 +64,87 @@ test('the hybrid host names itself and reports the translator it has, or none', 
     });
     assert.equal(attached.corkDiagnostics(), diagnostics);
 });
+
+/** An emulator whose slices retire what they are given, standing at one EIP. */
+function fakeMachine(){
+    const machine = {
+        at: 0x1000, stopped: false, slices: /** @type {number[]} */ ([]),
+        readReg32: ()=>0,
+        runSlice(/** @type {number} */ n){
+            machine.slices.push(n);
+            return n;
+        },
+        halt(){
+            machine.stopped = true;
+        },
+        halted: ()=>machine.stopped,
+        eip: ()=>machine.at,
+    };
+    return machine;
+}
+
+test('the slice: the translator runs while it has an entry, the emulator takes the rest', ()=>{
+    const emulator = fakeMachine();
+    /** @type {{ entry: number, budget: number }[]} */
+    const runs = [];
+    const exits = [
+        { retired: 4, kind: 'untranslated', vector: 0 },
+    ];
+    const cork = /** @type {any} */ ({
+        entryOf: (/** @type {number} */ eip)=>(eip === 0x1000 ? 7 : -1),
+        run(/** @type {number} */ entry, /** @type {number} */ budget){
+            runs.push({ entry, budget });
+            const exit = exits.shift();
+            emulator.at = 0x2000;
+            return exit;
+        },
+        diagnostics: ()=>({ regions: 1 }),
+    });
+    const host = createHybridHost({ emulator, cork });
+    assert.equal(host.runSlice(10), 10);
+    assert.deepEqual(runs, [{ entry: 7, budget: 10 }]);
+    assert.deepEqual(emulator.slices, [6], 'the emulator got what was left');
+    assert.equal(host.cork(), cork);
+});
+
+test('the slice: a budget exit ends the slice, a halt halts, a stale exit continues', ()=>{
+    const emulator = fakeMachine();
+    /** @type {any[]} */
+    const exits = [
+        { retired: 3, kind: 'stale', vector: 0 },
+        { retired: 7, kind: 'budget', vector: 0 },
+    ];
+    const cork = /** @type {any} */ ({
+        entryOf: ()=>1,
+        run: ()=>exits.shift(),
+        diagnostics: ()=>({}),
+    });
+    const host = createHybridHost({ emulator, cork });
+    assert.equal(host.runSlice(10), 10);
+    assert.deepEqual(emulator.slices, [], 'nothing left for the emulator');
+    const halting = fakeMachine();
+    const stopper = /** @type {any} */ ({
+        entryOf: ()=>1,
+        run: ()=>({ retired: 2, kind: 'halt', vector: 0 }),
+        diagnostics: ()=>({}),
+    });
+    const stopped = createHybridHost({ emulator: halting, cork: stopper });
+    assert.equal(stopped.runSlice(10), 2);
+    assert.equal(halting.stopped, true);
+    assert.deepEqual(halting.slices, []);
+});
+
+test('the slice: a fault exit hands the instruction to the emulator', ()=>{
+    const emulator = fakeMachine();
+    const cork = /** @type {any} */ ({
+        entryOf: ()=>1,
+        run: ()=>{
+            emulator.at = 0x1004;
+            return { retired: 1, kind: 'fault', vector: 13 };
+        },
+        diagnostics: ()=>({}),
+    });
+    const host = createHybridHost({ emulator, cork });
+    assert.equal(host.runSlice(10), 10);
+    assert.deepEqual(emulator.slices, [9]);
+});

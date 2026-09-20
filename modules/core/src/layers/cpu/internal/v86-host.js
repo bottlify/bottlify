@@ -479,6 +479,63 @@ export async function createV86Host(config){
         stop: ()=>emulator.stop(),
 
         /**
+         * Runs at most `maxInstructions` and answers how many were retired.
+         * The emulator runs to a boundary of its own: the end of the page it
+         * is in, or a block end.
+         *
+         * @param {number} maxInstructions
+         */
+        runSlice: maxInstructions=>cpu.run_slice(maxInstructions) >>> 0,
+
+        /** One byte of guest memory, for an engine's decoder. @param {number} address */
+        readByte: address=>v().ram[address],
+
+        /** The emulator's memory, for an engine to run over. */
+        wasmMemory: ()=>cpu.wasm_memory,
+
+        /** The eager flags word with the emulator's lazy part folded in. */
+        getEflags: ()=>cpu.wm.exports.get_eflags() >>> 0,
+
+        /**
+         * Where every register lives in the emulator's memory, as the
+         * executor contract names them: read off the emulator's own typed
+         * views, so an engine's translated code addresses the emulator's
+         * register file directly and a switch between the two copies nothing.
+         * The top `reserve` bytes of RAM are the engine's tables.
+         *
+         * @param {number} reserve
+         * @returns {import('../engine.js').StateLayout}
+         */
+        stateLayout(reserve){
+            const ramBase = cpu.mem8.byteOffset;
+            const ramSize = config.memorySize - reserve;
+            const fields = {
+                bits: /** @type {32} */ (32),
+                ramBase,
+                ramSize,
+                regs: cpu.reg32.byteOffset,
+                eip: cpu.instruction_pointer.byteOffset,
+                previousIp: cpu.previous_ip.byteOffset,
+                eflags: cpu.flags.byteOffset,
+                flagsChanged: cpu.flags_changed.byteOffset,
+                x87: cpu.fpu_st.byteOffset,
+                x87Format: /** @type {'tagged80'} */ ('tagged80'),
+                x87Top: cpu.fpu_stack_ptr.byteOffset,
+                x87Empty: cpu.fpu_stack_empty.byteOffset,
+                x87Control: cpu.fpu_control_word.byteOffset,
+                x87Status: cpu.fpu_status_word.byteOffset,
+                xmm: cpu.reg_xmm32s.byteOffset,
+                mxcsr: cpu.mxcsr.byteOffset,
+                // FS is the fifth segment register.
+                fsBase: cpu.segment_offsets.byteOffset + 4 * 4,
+                gsBase: -1,
+                counter: cpu.instruction_counter.byteOffset,
+                tables: ramBase + ramSize,
+            };
+            return { ...fields, id: `v86:${Object.values(fields).join(',')}` };
+        },
+
+        /**
          * Puts the processor where a `hlt` would have: the next slice retires
          * nothing. What a fault stub does from inside the guest, done from
          * outside for a machine that must not execute another instruction.
