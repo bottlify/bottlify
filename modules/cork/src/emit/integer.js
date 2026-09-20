@@ -28,6 +28,7 @@ import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
 import { checkAccess, noteStore, stackAccess } from './memory.js';
 import { emitSimd } from './simd.js';
+import { emitX87, isX87 } from './x87.js';
 
 /** i64 opcodes. */
 const I64 = Object.freeze({
@@ -508,6 +509,10 @@ export function emitInstruction(e, instruction, flagsLive){
                 {
                     return true; // the block's exit branches
                 }
+            }
+            if (isX87(instruction))
+            {
+                return emitX87(e, instruction, flagsLive);
             }
             return emitSimd(e, instruction, flagsLive);
     }

@@ -27,6 +27,10 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
     const layout = ownLayout({ ramSize });
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const pages = createPageTable(memory, layout);
+    // The x87 as a fresh processor has it: every register empty, the
+    // default control word.
+    new DataView(memory.buffer).setUint8(layout.x87Empty, 0xff);
+    new DataView(memory.buffer).setUint16(layout.x87Control, 0x37f, true);
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = features();
@@ -80,15 +84,16 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
          * it, plus what the emitter said.
          *
          * @param {number} entry
-         * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean }} [options]
+         * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
+         *     entryTop?: number }} [options]
          */
         translate(entry, options = {}){
-            const { undoLog = false, ...regionOptions } = options;
+            const { undoLog = false, entryTop = 0, ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, { undoLog });
-            const translation = emitRegion(context, region);
+            const translation = emitRegion(context, region, { entryTop });
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
             if (!WebAssembly.validate(built))
@@ -142,7 +147,8 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
             view().setUint32(layout.eip, eip, true);
             for (;;)
             {
-                let unit = translated.get(eip);
+                const top = view().getUint8(layout.x87Top);
+                let unit = translated.get(eip * 16 + top);
                 if (!unit)
                 {
                     if (regions >= maxRegions)
@@ -151,7 +157,7 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
                             kind: -1, vector: 0, eip, regions, unsupported, retired: budget - left,
                         };
                     }
-                    unit = this.translate(eip, { undoLog });
+                    unit = this.translate(eip, { undoLog, entryTop: top });
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {
@@ -159,7 +165,7 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
                     }
                     for (const start of unit.translation.labels.keys())
                     {
-                        translated.set(start, unit);
+                        translated.set(start * 16 + top, unit);
                     }
                 }
                 const before = this.counter();

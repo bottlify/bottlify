@@ -27,6 +27,14 @@ import { BSS, BSS_SIZE, diffFixture, loadCorpus } from '../testing/corpus.js';
 const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
 const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
 const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
+/**
+ * Cases whose divergence is the design's own: every x87 value is a double,
+ * and these compute something only an 80-bit register holds (a product past
+ * the double's range, stored as a tword). Counted under `x87.precision`,
+ * not failed; the list is the acceptance, and a case leaving or joining it is
+ * a change to be looked at (`roadmap/cork-plan.md` 3.1).
+ */
+const X87_PRECISION = new Set(['x87-int-binop']);
 
 test('translated code leaves what the hardware left, on every case it translates in full',
     { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },
@@ -38,6 +46,7 @@ test('translated code leaves what the hardware left, on every case it translates
         /** @type {Map<string, number>} */
         const leftOut = new Map();
         let judged = 0;
+        let precision = 0;
         let died = 0;
         let skipped = 0;
         const started = Date.now();
@@ -64,6 +73,7 @@ test('translated code leaves what the hardware left, on every case it translates
             });
             const bss = m.read(BSS, BSS_SIZE);
             const state = new DataView(m.memory.buffer);
+            const top = state.getUint8(m.layout.x87Top) & 7;
             const outcome = {
                 exception: exit.kind === 4
                     ? { name: VECTOR_NAMES.get(exit.vector) ?? `#${exit.vector}`, eip: exit.eip }
@@ -71,8 +81,11 @@ test('translated code leaves what the hardware left, on every case it translates
                 halted: exit.kind === 3,
                 reg32,
                 eip: exit.eip,
-                st: /** @type {(number | 'invalid')[]} */ (Array(8).fill(0)),
-                fstat: 0,
+                // ST(i) relative to the top, as f64 in cork's own layout; the status
+                // word with the top folded into bits 11..13, as fnstsw gives it.
+                st: /** @type {(number | 'invalid')[]} */ (Array.from({ length: 8 }, (_, i)=>state
+                    .getFloat64(m.layout.x87 + ((top + i) & 7) * 16, true))),
+                fstat: (state.getUint16(m.layout.x87Status, true) & ~0x3800 | top << 11) & 0xffff,
                 mm: Int32Array.from({ length: 16 }, (_, word)=>state.getInt32(
                     m.layout.x87 + (word >> 1) * 16 + (word & 1) * 4, true)),
                 xmm: Int32Array.from({ length: 32 }, (_, word)=>state.getInt32(
@@ -91,6 +104,11 @@ test('translated code leaves what the hardware left, on every case it translates
             judged++;
             died += outcome.exception ? 1 : 0;
             const divergences = diffFixture(one.expected, outcome);
+            if (divergences.length > 0 && X87_PRECISION.has(one.name))
+            {
+                precision++;
+                continue;
+            }
             if (divergences.length > 0)
             {
                 failures.push(`${one.name}: ${divergences.slice(0, 5)
@@ -102,9 +120,12 @@ test('translated code leaves what the hardware left, on every case it translates
             .map(([opcode, count])=>`${opcode}×${count}`).join(' ');
         console.log(`translated: ${judged} cases judged (${died} died as recorded),`
             + ` ${skipped} left out`
-            + ` at ${leftOut.size} opcodes, ${failures.length} diverged, `
+            + ` at ${leftOut.size} opcodes, ${failures.length} diverged,`
+            + ` ${precision} x87.precision, `
             + `${((Date.now() - started) / 1000).toFixed(1)} s; left out: ${top}`);
         assert.equal(failures.length, 0,
             `${failures.length} diverged:\n${failures.slice(0, 40).join('\n')}`);
         assert.ok(judged > 0);
+        assert.equal(precision, X87_PRECISION.size,
+            'every named precision case still diverges, and no other');
     });

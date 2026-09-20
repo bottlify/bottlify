@@ -49,7 +49,13 @@ retired to the emulator's own counter word, so `instructionCount()` and the samp
 unchanged. Candidates come from the sampler: once a frame, every 64-byte bucket credited past
 `cork.hotThreshold` instructions is handed to the translator at the exact address its last
 slice ended on, and the pending batch is instantiated -- paced by frames, never inside a
-slice. What the emulator's own compiler compiled is not protected from a store made by
+slice. A region with x87 instructions in it is compiled for the x87 stack top it is entered
+with, and its entries are keyed by address and top (`entryOf(eip, x87Top)`, the top read off
+the emulator's `fpu_stack_ptr` before every turn); a region without them is entered with any
+top. A lookup that misses at an address compiled for another top queues that top for the
+next batch. The translator keeps every x87 value as a double, as the emulator does; the
+emulator's tagged-double form is read and written directly, a true 80-bit register it left is
+converted inline. What the emulator's own compiler compiled is not protected from a store made by
 translated code (the emulator sees only its own stores); a program that writes code it then
 runs through the emulator is the case the handoff step's fork change is to close.
 

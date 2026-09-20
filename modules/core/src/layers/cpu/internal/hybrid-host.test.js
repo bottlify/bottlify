@@ -78,6 +78,7 @@ function fakeMachine(){
             machine.stopped = true;
         },
         halted: ()=>machine.stopped,
+        x87Top: ()=>0,
         eip: ()=>machine.at,
     };
     return machine;

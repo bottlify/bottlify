@@ -5,10 +5,18 @@
  */
 
 /**
- * The entry map: guest address → the translated function that starts a
- * block there, and the block's label in it. What `entryOf` answers to the
- * host's slice loop, and what an invalidation removes by page.
+ * The entry map: guest address and x87 top → the translated function that
+ * starts a block there, and the block's label in it. What `entryOf` answers
+ * to the host's slice loop, and what an invalidation removes by page. A
+ * region without x87 instructions is entered with any top: its entries are
+ * added under `ANY_TOP` and found whatever the top asked.
  */
+
+/** The top a region indifferent to the x87 stack is registered under. */
+export const ANY_TOP = 8;
+
+/** @param {number} eip @param {number} top */
+const keyOf = (eip, top)=>eip * 16 + top;
 
 /**
  * @typedef {Object} Entry
@@ -16,13 +24,16 @@
  * @property {(label: number, budget: number) => number} fn   the region function
  * @property {number} label    the block's label in the function's dispatcher
  * @property {number} page     the page the block starts in
+ * @property {number} top      the x87 top it was compiled for, or ANY_TOP
  */
 
 export function createEntries(){
     /** @type {(Entry | null)[]} */
     const slots = [];
-    /** @type {Map<number, number>} eip → slot */
+    /** @type {Map<number, number>} key(eip, top) → slot */
     const byEip = new Map();
+    /** @type {Set<number>} addresses with an entry compiled for some top */
+    const specialised = new Set();
     /** @type {Map<number, Set<number>>} page → slots */
     const byPage = new Map();
     let live = 0;
@@ -32,16 +43,21 @@ export function createEntries(){
          * keeps its earlier entry.
          *
          * @param {number} eip @param {Entry['fn']} fn @param {number} label
+         * @param {number} [top]
          */
-        add(eip, fn, label){
-            const known = byEip.get(eip);
+        add(eip, fn, label, top = ANY_TOP){
+            const known = byEip.get(keyOf(eip, top));
             if (known !== undefined)
             {
                 return known;
             }
             const page = eip >>> 12;
-            const index = slots.push({ eip, fn, label, page }) - 1;
-            byEip.set(eip, index);
+            const index = slots.push({ eip, fn, label, page, top }) - 1;
+            byEip.set(keyOf(eip, top), index);
+            if (top !== ANY_TOP)
+            {
+                specialised.add(eip);
+            }
             let set = byPage.get(page);
             if (!set)
             {
@@ -52,9 +68,17 @@ export function createEntries(){
             live++;
             return index;
         },
-        /** @param {number} eip @returns {number} the index, or -1 */
-        entryOf(eip){
-            return byEip.get(eip) ?? -1;
+        /**
+         * The entry for an address at a top: compiled for that top, or for any.
+         *
+         * @param {number} eip @param {number} [top] @returns {number} the index, or -1
+         */
+        entryOf(eip, top = 0){
+            return byEip.get(keyOf(eip, top)) ?? byEip.get(keyOf(eip, ANY_TOP)) ?? -1;
+        },
+        /** Whether some entry at the address was compiled for a top. @param {number} eip */
+        isSpecialised(eip){
+            return specialised.has(eip);
         },
         /** @param {number} index */
         at(index){
@@ -73,7 +97,7 @@ export function createEntries(){
                 return;
             }
             slots[index] = null;
-            byEip.delete(entry.eip);
+            byEip.delete(keyOf(entry.eip, entry.top));
             byPage.get(entry.page)?.delete(index);
             live--;
         },

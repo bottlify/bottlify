@@ -496,6 +496,9 @@ export async function createV86Host(config){
         /** The eager flags word with the emulator's lazy part folded in. */
         getEflags: ()=>cpu.wm.exports.get_eflags() >>> 0,
 
+        /** The x87 stack's top, for an engine's entry lookup. */
+        x87Top: ()=>cpu.fpu_stack_ptr[0] & 7,
+
         /**
          * Where every register lives in the emulator's memory, as the
          * executor contract names them: read off the emulator's own typed

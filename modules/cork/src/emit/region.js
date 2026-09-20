@@ -44,6 +44,9 @@ import {
 } from './flags.js';
 import { emitInstruction } from './integer.js';
 import { addUndoHelper, emitStaleExit } from './memory.js';
+import {
+    addF80Helpers, prepareX87, x87BlockStart, x87Edge, x87Epilogue, x87Normalise, x87Prologue,
+} from './x87.js';
 
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
@@ -60,9 +63,11 @@ export const Local = Object.freeze({
     count: 24, f0: 25, f1: 26, d0: 27, d1: 28, mmxTouched: 29,
     // the page flags of the current access, and whether a store hit a code page
     pflags: 30, stale: 31,
-    // 32, 33, 34: three v128 scratch locals when SIMD is available; the xmm
-    // and mm locals a region uses follow, allocated per region.
-    vec: 32,
+    // the x87 top, empty mask, status and control words, and the dirty mask
+    x87Top: 32, x87Empty: 33, x87Status: 34, x87Control: 35, x87Dirty: 36,
+    // 37, 38, 39: three v128 scratch locals when SIMD is available; the xmm
+    // and mm locals a region uses follow, then the x87 locals, per region.
+    vec: 37,
 });
 const LOCAL_TYPES = [
     // the eight registers
@@ -75,6 +80,7 @@ const LOCAL_TYPES = [
     ValType.f32, ValType.f32, ValType.f64, ValType.f64, // f0 f1 d0 d1
     ValType.i32, // mmxTouched
     ValType.i32, ValType.i32, // pflags stale
+    ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // x87Top..x87Dirty
 ];
 
 /**
@@ -89,6 +95,8 @@ const LOCAL_TYPES = [
  * @property {number} [undo]           the undo helper's function index, in a differential build
  * @property {number} [getEflags]      the host's flag fold, imported when the layout keeps
  *                                     lazy flags (the emulator's `flags_changed`)
+ * @property {number} f80ToF64         the extended-precision readers
+ * @property {number} f64ToF80
  */
 
 /**
@@ -114,8 +122,9 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
         : undefined;
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
     const materialise = addMaterialiseHelper(m);
+    const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     /** @type {ModuleContext} */
-    const context = { m, regionType, materialise, layout, features };
+    const context = { m, regionType, materialise, layout, features, f80ToF64, f64ToF80 };
     if (getEflags !== undefined)
     {
         context.getEflags = getEflags;
@@ -133,6 +142,8 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
  * @property {number} instructions
+ * @property {Set<number>} cut      labels of blocks that leave at once (an x87 state conflict)
+ * @property {number} entryTop      the x87 top the function was compiled for
  */
 
 /**
@@ -140,10 +151,11 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
  *
  * @param {ModuleContext} context
  * @param {import('../region.js').Region} region
+ * @param {{ entryTop?: number }} [options]  the x87 top the entry is compiled for
  * @returns {Translation}
  */
-export function emitRegion(context, region){
-    const emitter = new RegionEmitter(context, region);
+export function emitRegion(context, region, options = {}){
+    const emitter = new RegionEmitter(context, region, options);
     return emitter.emit();
 }
 
@@ -152,8 +164,9 @@ export class RegionEmitter {
     /**
      * @param {ModuleContext} context
      * @param {import('../region.js').Region} region
+     * @param {{ entryTop?: number }} [options]
      */
-    constructor(context, region){
+    constructor(context, region, { entryTop = 0 } = {}){
         this.context = context;
         this.layout = context.layout;
         this.region = region;
@@ -196,6 +209,7 @@ export class RegionEmitter {
         this.blockDepth = 0;
         /** @type {number[]} */
         this.localTypes = [...LOCAL_TYPES];
+        this.entryTop = entryTop;
         if (context.features.simd)
         {
             this.localTypes.push(ValType.v128, ValType.v128, ValType.v128);
@@ -219,6 +233,8 @@ export class RegionEmitter {
                 }
             }
         }
+        /** The x87 emission state: the tracker's states per block and the locals. */
+        this.x87 = prepareX87(this, entryTop);
     }
 
     /** The local an xmm register lives in. @param {number} index @param {boolean} [write] */
@@ -285,7 +301,7 @@ export class RegionEmitter {
             this.context.regionType, this.localTypes, b.toBytes());
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
-            instructions: this.instructions,
+            instructions: this.instructions, cut: this.x87.cut, entryTop: this.entryTop,
         };
     }
 
@@ -359,6 +375,10 @@ export class RegionEmitter {
         {
             b.i32const(0).load('i64', { offset: layout.x87 + index * 16 }).localSet(local);
         }
+        if (this.x87.active)
+        {
+            x87Prologue(this);
+        }
     }
 
     /** Writes every local back and returns the kind in `t0`. */
@@ -398,6 +418,10 @@ export class RegionEmitter {
                 b.i32const(0).i32const(0xffff)
                     .store('i32_16', { offset: layout.x87 + index * 16 + 8 });
             }
+        }
+        if (this.x87.active)
+        {
+            x87Epilogue(this);
         }
         if (this.mmLocals.size > 0)
         {
@@ -497,6 +521,12 @@ export class RegionEmitter {
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
+        if (this.x87.active && !x87BlockStart(this, index))
+        {
+            // Reached with two different x87 tops: the other executor runs it.
+            this.exitAt(block.start, Exit.UNTRANSLATED);
+            return;
+        }
         const live = deadFlagPass(block);
         for (let i = 0; i < block.instructions.length; i++)
         {
@@ -662,6 +692,10 @@ export class RegionEmitter {
             this.exitAt(target, Exit.UNTRANSLATED);
             return;
         }
+        if (this.x87.active)
+        {
+            x87Edge(this, label);
+        }
         // The budget is checked on every jump through the dispatch: only a
         // backward edge can make a loop, but a forward one costs the same
         // three operations and needs no analysis to tell apart.
@@ -710,6 +744,10 @@ export class RegionEmitter {
 
     /** @param {number} kind @param {number} vector */
     exitWithKind(kind, vector){
+        if (this.x87.active)
+        {
+            x87Normalise(this);
+        }
         if (this.staleCheck)
         {
             // The instruction stored and leaves in the same breath (a call):

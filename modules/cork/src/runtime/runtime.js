@@ -26,15 +26,19 @@
 
 import { formRegion } from '../region.js';
 import { emitRegion, prepareModule } from '../emit/region.js';
+import { isX87 } from '../emit/x87.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features as probeFeatures } from '../wasm/features.js';
-import { createEntries } from './entries.js';
+import { ANY_TOP, createEntries } from './entries.js';
 import { PageFlag, createPageTable } from './pages.js';
 import { Tables } from './layout.js';
 
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').EngineEnv} EngineEnv */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').Runtime} Runtime */
 /** @typedef {import('../../../core/src/layers/cpu/engine.js').ExitKind} ExitKind */
+
+/** @param {import('../region.js').Region} region */
+const usesX87 = region=>region.blocks.some(block=>block.instructions.some(isX87));
 
 /** Exit codes by number, as the region functions answer them. */
 const KINDS = /** @type {ExitKind[]} */ (
@@ -60,8 +64,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     const found = features ?? probeFeatures();
     const pages = createPageTable(memory, layout);
     const entries = createEntries();
-    /** @type {Set<number>} candidates not yet formed */
-    const queue = new Set();
+    /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
+    const queue = new Map();
+    /** @param {number} eip @param {number} top */
+    const keyOf = (eip, top)=>eip * 16 + top;
     /**
      * @typedef {Object} RegionRecord
      * @property {number} entry
@@ -125,11 +131,11 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
             }
         }
-        for (const eip of [...queue])
+        for (const [key, eip] of [...queue])
         {
             if ((eip >>> 12) === page)
             {
-                queue.delete(eip);
+                queue.delete(key);
             }
         }
         const times = (generation.get(page) ?? 0) + 1;
@@ -147,8 +153,15 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
 
     return {
         pages,
-        entryOf(eip){
-            return entries.entryOf(eip);
+        entryOf(eip, top = 0){
+            const entry = entries.entryOf(eip, top);
+            if (entry < 0 && entries.isSpecialised(eip))
+            {
+                // A region exists here for another top: one for this top is
+                // a candidate, translated with the next batch.
+                this.noteHot(eip, top);
+            }
+            return entry;
         },
         run(entry, budget){
             const { fn, label } = entries.at(entry);
@@ -169,12 +182,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             }
             return { retired, kind, vector: code >>> 8 };
         },
-        noteHot(eip){
-            if (entries.entryOf(eip) >= 0 || queue.has(eip) || !translatable(eip))
+        noteHot(eip, top = 0){
+            const key = keyOf(eip, top & 7);
+            if (entries.entryOf(eip, top & 7) >= 0 || queue.has(key) || !translatable(eip))
             {
                 return;
             }
-            queue.add(eip);
+            queue.set(key, eip);
         },
         async translatePending(){
             if (queue.size === 0)
@@ -182,17 +196,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 return 0;
             }
             const batch = [...queue].slice(0, settings.batchRegions);
-            for (const eip of batch)
+            for (const [key] of batch)
             {
-                queue.delete(eip);
+                queue.delete(key);
             }
             const m = new ModuleBuilder();
             const context = prepareModule(m, layout, found, {}, { undoLog: settings.undoLog });
             /** @type {{ region: import('../region.js').Region,
              *     translation: import('../emit/region.js').Translation, stamp: string }[]} */
             const formed = [];
-            for (const eip of batch)
+            for (const [key, eip] of batch)
             {
+                const entryTop = key % 16;
                 const region = formRegion(read, eip, {
                     maxBlocks: settings.maxRegionBlocks, maxBytes: settings.maxRegionBytes,
                     translatable,
@@ -205,7 +220,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     continue;
                 }
-                const translation = emitRegion(context, region);
+                const translation = emitRegion(context, region, { entryTop });
                 for (const [opcode, times] of translation.unsupported)
                 {
                     refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -247,9 +262,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                     instance.exports[`r${i}`]);
                 /** @type {RegionRecord} */
                 const record = { entry: region.entry, pages: region.pages, slots: [] };
+                // Entries for every block start but the cut ones; a region
+                // with x87 in it is keyed by the top it was compiled for.
+                const top = translation.cut.size > 0 || usesX87(region)
+                    ? translation.entryTop : ANY_TOP;
                 for (const [eip, label] of translation.labels)
                 {
-                    record.slots.push(entries.add(eip, fn, label));
+                    if (!translation.cut.has(label))
+                    {
+                        record.slots.push(entries.add(eip, fn, label, top));
+                    }
                 }
                 for (const block of region.blocks)
                 {

@@ -160,8 +160,8 @@ test('a page invalidated too often becomes volatile and is not translated again'
 
 test('a region that meets an instruction the emitter leaves out still runs up to it', async()=>{
     const m = machine();
-    // mov eax, 1; fninit (x87: left out); hlt
-    m.write(CODE, [0xb8, 0x01, 0, 0, 0, 0xdb, 0xe3, 0xf4]);
+    // mov eax, 1; fsin (a transcendental, left out); hlt
+    m.write(CODE, [0xb8, 0x01, 0, 0, 0, 0xd9, 0xfe, 0xf4]);
     m.runtime.noteHot(CODE);
     assert.equal(await m.runtime.translatePending(), 1);
     const exit = m.runtime.run(m.runtime.entryOf(CODE), 1000);
@@ -169,7 +169,7 @@ test('a region that meets an instruction the emitter leaves out still runs up to
     assert.equal(exit.retired, 1);
     assert.equal(m.eip(), CODE + 5, 'at the instruction the other executor must run');
     assert.equal(m.reg(0), 1);
-    assert.ok((m.runtime.diagnostics().refused['db e3'] ?? 0) >= 1, 'the opcode is named');
+    assert.ok((m.runtime.diagnostics().refused['d9 fe'] ?? 0) >= 1, 'the opcode is named');
 });
 
 test('the runtime refuses a memory that has no room for its tables', ()=>{

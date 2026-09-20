@@ -68,7 +68,8 @@ export function createHybridHost({ emulator, cork }){
             let ran = 0;
             while (remaining > 0)
             {
-                const entry = runtime.entryOf(emulator.eip());
+                const eip = emulator.eip();
+                const entry = runtime.entryOf(eip, emulator.x87Top());
                 if (entry < 0)
                 {
                     break;
@@ -76,6 +77,12 @@ export function createHybridHost({ emulator, cork }){
                 const exit = runtime.run(entry, remaining);
                 remaining -= exit.retired;
                 ran += exit.retired;
+                if (exit.kind === 'untranslated' && exit.retired === 0 && emulator.eip() === eip)
+                {
+                    // A region that leaves at once (an entry compiled for
+                    // another x87 top): the emulator's turn, not a spin.
+                    break;
+                }
                 if (exit.kind === 'halt')
                 {
                     emulator.halt();

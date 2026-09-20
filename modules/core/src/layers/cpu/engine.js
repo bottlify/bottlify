@@ -149,7 +149,8 @@
  * @typedef {Object} Runtime
  * @property {(eip: number, x87Top?: number) => number} entryOf  Function index, or -1.
  * @property {(entry: number, budget: number) => ExitRecord} run
- * @property {(eip: number) => void} noteHot  A candidate from the layer's sampler.
+ * @property {(eip: number, x87Top?: number) => void} noteHot  A candidate from the layer's
+ *     sampler, with the x87 top a region there is compiled for.
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.

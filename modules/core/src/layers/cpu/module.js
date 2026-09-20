@@ -172,7 +172,7 @@ export const cpuModule = {
                 if (!bucket.noted && bucket.instructions >= hotThreshold)
                 {
                     bucket.noted = true;
-                    cork.noteHot(bucket.eip);
+                    cork.noteHot(bucket.eip, state.host.x87Top());
                     noted++;
                 }
             }
