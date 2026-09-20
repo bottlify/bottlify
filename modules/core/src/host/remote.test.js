@@ -826,19 +826,20 @@ test('what the GPU device refuses goes into the journal, a repeat counted rather
         const { remote, gpuFails } = await connect();
         const REFUSED = 'Failed to allocate texture.' + String.fromCharCode(10)
             + ' - While calling CreateTexture([TextureDescriptor "target"])';
-        gpuFails(REFUSED);
+        // A failing frame cycles through a few messages; each is counted on its own.
         for (let i = 0; i < 300; i++)
         {
             gpuFails(REFUSED);
+            gpuFails('another');
         }
-        gpuFails('another');
-        await until(async()=>(await remote.log.recent(8)).length >= 3);
+        await until(async()=>(await remote.log.recent(8)).length >= 4);
         const records = (await remote.log.recent(8)).filter((/** @type {any} */ r)=>r.category === 'gpu');
         const flat = 'Failed to allocate texture.'
             + ' - While calling CreateTexture([TextureDescriptor "target"])';
         assert.deepEqual(records.map((/** @type {any} */ r)=>[r.levelName, r.text]), [
             ['error', flat],
-            ['error', `${flat} (x257)`],
             ['error', 'another'],
+            ['error', `${flat} (x256)`],
+            ['error', 'another (x256)'],
         ]);
     });

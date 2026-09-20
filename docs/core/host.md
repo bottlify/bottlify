@@ -103,8 +103,8 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 
 The device is requested with `texture-compression-bc` when the adapter offers it. An uncaptured
 WebGPU error (a validation failure, a texture the driver could not allocate) is written into the
-run's journal as an `error` record of category `gpu`, beside the frame it dropped; the same
-message repeated by the device is counted and written again every 256th time with its count.
+run's journal as an `error` record of category `gpu`, beside the frame it dropped; each distinct
+message the device repeats is counted and written again every 256th time with its count.
 Only before the program's journal exists does it go to the worker's console.
 
 ### `host: 'thread'`
