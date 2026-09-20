@@ -317,6 +317,12 @@ function characterFor(key){
  *           Every live window, children included: a dialog is its controls, and
  *           a report that shows the frame and not the button under the pointer
  *           says nothing about what a click would reach.
+ * @property {(hwnd: number) => { left: number, top: number, right: number,
+ *     bottom: number } | null} clientRect
+ *           One window's client rectangle, or null for a handle that names
+ *           none: the measurement GetClientRect answers with, for the callers
+ *           outside this layer that must answer a size a program asked for as
+ *           zero -- a back buffer's, which means exactly this rectangle.
  * @property {(hwnd: number, x: number, y: number, width: number, height: number,
  *     how?: { announce?: boolean }) => boolean} place
  */
@@ -2175,6 +2181,18 @@ export function createWindowFunctions(host){
     });
 
     host.windowService?.({
+        /**
+         * One window's client rectangle, or null for a handle that names no
+         * window. Read by whoever has to answer a size a program asked for as
+         * zero -- a back buffer's, which means exactly this rectangle -- and
+         * the same measurement GetClientRect answers with.
+         *
+         * @param {number} hwnd
+         */
+        clientRect: hwnd=>{
+            const record = live(hwnd);
+            return record ? geometry.clientRect(record) : null;
+        },
         list: ()=>[...windows.values()]
             .filter(record=>!record.destroyed)
             .map(record=>({

@@ -185,10 +185,13 @@ function machine(){
 /**
  * The whole assembly, as a program reaches it: D3D8.dll and what it leads to.
  *
- * @param {{ shadow?: boolean }} [options]  Whether the device keeps a block in
- *     guest memory, as it does under a running processor.
+ * @param {{ shadow?: boolean,
+ *           windowClientSize?: (window: number) => { width: number,
+ *               height: number } | null }} [options]  Whether the device keeps a
+ *     block in guest memory, as it does under a running processor, and how a
+ *     window's client area is measured when a program asks for zero.
  */
-function seamed({ shadow = false } = {}){
+function seamed({ shadow = false, windowClientSize } = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
@@ -199,6 +202,10 @@ function seamed({ shadow = false } = {}){
     const resolutions = [];
     /** @type {any[]} */
     const roots = [];
+    /** @param {number} window */
+    const measureWindow = window=>{
+        return window === HWND ? { width: 640, height: 480 } : null;
+    };
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const libraries = createGraphicsLibraries({
         graphics: {
@@ -218,6 +225,10 @@ function seamed({ shadow = false } = {}){
         memory: box.services,
         publishInterface: box.publishInterface,
         screen: ()=>SCREEN,
+        // One measurable window, so a size asked for as zero has a client area
+        // to be answered with; a test wanting the unmeasurable path passes a
+        // measurer of its own that answers nothing.
+        windowClientSize: windowClientSize ?? measureWindow,
         publisher,
         allocate: shadow ? box.allocate : undefined,
         /** @param {string} api @param {string} detail */
@@ -1491,12 +1502,40 @@ test('a surface description fills every field, leaving no stack of the caller to
         h.release(root);
     });
 
-test('a back buffer asked for as zero by zero is the display, described and stored as one', ()=>{
-    // Windowed, zero means the size of the device window. Carried through as a
-    // zero it describes a surface with no rows and no storage, which the program
-    // then reads with its own idea of the mode -- and that read used to land in
-    // the slack of a fixed-megabyte allocation rather than in the next object.
+test('a back buffer asked for as zero by zero is the window, described and stored as one', ()=>{
+    // Windowed, zero means the size of the device window, which is what the
+    // real device answers. Carried through as a zero it describes a surface
+    // with no rows and no storage, which the program then reads with its own
+    // idea of the mode -- and that read used to land in the slack of a
+    // fixed-megabyte allocation rather than in the next object.
     const h = seamed();
+    const root = h.create();
+    const device = h.createDevice(root, {
+        BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 1,
+        BackBufferFormat: D3DFMT.X8R8G8B8,
+    });
+
+    const back = 0xa100;
+    assert.equal(h.device(device, 'GetBackBuffer', [0, 0, back]), D3D_OK);
+    const surface = h.box.memory.readU32(back);
+
+    const desc = 0xa300;
+    assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), 640);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Height), 480);
+    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size), 640 * 4 * 480,
+        'and its length is that surface, not nothing');
+
+    // Measured rather than assumed, so there is nothing to report.
+    assert.deepEqual(h.divergences, []);
+
+    assert.equal(h.release(surface), 0);
+    assert.equal(h.release(device), 0);
+    h.release(root);
+});
+
+test('a back buffer asked for as zero by zero, with no window to measure, is the display', ()=>{
+    const h = seamed({ windowClientSize: ()=>null });
     const root = h.create();
     const device = h.createDevice(root, {
         BackBufferWidth: 0, BackBufferHeight: 0, Windowed: 1,
@@ -1511,8 +1550,6 @@ test('a back buffer asked for as zero by zero is the display, described and stor
     assert.equal(h.surface(surface, 'GetDesc', [desc]), D3D_OK);
     assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Width), SCREEN.width);
     assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Height), SCREEN.height);
-    assert.equal(h.fields.readU32(desc + D3DSURFACE_DESC8.Size),
-        SCREEN.width * 4 * SCREEN.height, 'and its length is that surface, not nothing');
 
     // And the program is told the size was not its own.
     assert.ok(h.divergences.some(line=>/zero by zero/.test(line)),
