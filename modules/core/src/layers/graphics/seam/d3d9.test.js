@@ -662,8 +662,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.equal(call('GetDataSize', []), 4);
     const data = 0x3100;
     h.fields.writeU32(data, 0xdeadbeef);
-    assert.equal(call('GetData', [data, 4, 1]), 1, 'S_FALSE before an issue');
-    assert.equal(h.fields.readU32(data), 0xdeadbeef, 'and nothing written');
+    assert.equal(call('GetData', [data, 4, 1]), D3D_OK, 'signalled as created, before any issue');
+    assert.equal(h.fields.readU32(data), 1, 'and the event reads as done');
     assert.equal(call('Issue', [1]), D3D_OK);
     assert.equal(call('GetData', [data, 4, 1]), D3D_OK);
     assert.equal(h.fields.readU32(data), 1);
