@@ -26,6 +26,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
+import { checkAccess, noteStore, stackAccess } from './memory.js';
 import { emitSimd } from './simd.js';
 
 /** i64 opcodes. */
@@ -246,7 +247,8 @@ export function emitInstruction(e, instruction, flagsLive){
             // The value is read before the increment, and the write comes
             // after it: `pop esp` then holds the value, `pop [esp+x]`
             // addresses with the incremented esp.
-            b.localGet(Local.reg + 4)
+            stackAccess(e, dst.size);
+            b.localGet(Local.addr)
                 .load(dst.size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                 .localSet(Local.t1);
             b.localGet(Local.reg + 4).i32const(dst.size).op(I32.add).localSet(Local.reg + 4);
@@ -256,8 +258,11 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'pushad':
         {
             // The original esp is pushed in its slot; `push` scratches t2, so it
-            // is kept in t1. With a 66 prefix the eight are words.
+            // is kept in t1. With a 66 prefix the eight are words. The whole
+            // span is checked first so a fault leaves nothing pushed.
             b.localGet(Local.reg + 4).localSet(Local.t1);
+            b.localGet(Local.reg + 4).i32const(8 * size).op(I32.sub).localSet(Local.addr);
+            checkAccess(e, 8 * size);
             for (let r = 0; r < 8; r++)
             {
                 push(e, size, ()=>b.localGet(r === 4 ? Local.t1 : Local.reg + r));
@@ -265,6 +270,8 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         }
         case 'popad':
+            // The whole span checked once: a fault leaves nothing popped.
+            stackAccess(e, 8 * size);
             for (let r = 7; r >= 0; r--)
             {
                 b.localGet(Local.reg + 4)
@@ -292,7 +299,8 @@ export function emitInstruction(e, instruction, flagsLive){
         {
             const writable = 0xcd5 | DF | 1 << 11;
             e.materialise();
-            b.localGet(Local.reg + 4)
+            stackAccess(e, size);
+            b.localGet(Local.addr)
                 .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase })
                 .i32const(writable).op(I32.and);
             b.localGet(Local.flags).i32const(~writable).op(I32.and).op(I32.or)
@@ -358,7 +366,8 @@ export function emitInstruction(e, instruction, flagsLive){
             e.dead = true;
             return true;
         case 'ret':
-            b.localGet(Local.reg + 4).load('i32', { offset: e.layout.ramBase }).localSet(Local.eip);
+            stackAccess(e, 4);
+            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.eip);
             b.localGet(Local.reg + 4).i32const(4 + (dst ? /** @type {number} */ (dst.value) : 0))
                 .op(I32.add).localSet(Local.reg + 4);
             e.exitDynamic(Exit.UNTRANSLATED);
@@ -366,11 +375,13 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'leave':
             // esp <- ebp, then bp or ebp popped: a word pop merges into ebp.
-            b.localGet(Local.reg + 5).localSet(Local.reg + 4);
-            b.localGet(Local.reg + 4)
+            // The pop's access is checked before esp moves.
+            b.localGet(Local.reg + 5).localSet(Local.addr);
+            checkAccess(e, size);
+            b.localGet(Local.addr).i32const(size).op(I32.add).localSet(Local.reg + 4);
+            b.localGet(Local.addr)
                 .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
             writeReg(e, 5, size, false);
-            b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
             return true;
         case 'enter':
         {
@@ -455,11 +466,12 @@ export function emitInstruction(e, instruction, flagsLive){
         case 'movs': case 'stos': case 'lods': case 'cmps': case 'scas':
             return stringInstruction(e, instruction);
         case 'int3':
-            e.exitBefore(instruction.eip, Exit.FAULT, 3);
+            // A trap: EIP past the instruction, as the frame reader expects.
+            e.exitAt(next, Exit.FAULT, 3);
             e.dead = true;
             return true;
         case 'int':
-            e.exitBefore(instruction.eip, Exit.FAULT, /** @type {number} */ (dst.value));
+            e.exitAt(next, Exit.FAULT, /** @type {number} */ (dst.value));
             e.dead = true;
             return true;
         case 'ud2': case 'ud1':
@@ -513,6 +525,7 @@ export function prepare(e, operand){
     {
         emitAddress(e, operand, true);
         e.b.localSet(Local.addr);
+        checkAccess(e, operand.size);
     }
 }
 
@@ -621,6 +634,7 @@ export function writeOp(e, operand, pushValue){
             writeReg(e, /** @type {number} */ (operand.reg), operand.size, operand.high === true);
             return;
         case 'mem':
+            noteStore(e, operand.size);
             b.localGet(Local.addr);
             pushValue();
             b.store(storeKind(operand.size), { offset: e.layout.ramBase });
@@ -680,12 +694,16 @@ export function mask(e, size){
  */
 export function push(e, size, pushValue){
     const { b } = e;
-    // The value first: `push esp` pushes the value before the decrement.
+    // The value first: `push esp` pushes the value before the decrement,
+    // which itself waits for the access check so a fault leaves esp as it was.
     pushValue();
     b.localSet(Local.t2);
-    b.localGet(Local.reg + 4).i32const(size).op(I32.sub).localSet(Local.reg + 4);
-    b.localGet(Local.reg + 4).localGet(Local.t2)
+    b.localGet(Local.reg + 4).i32const(size).op(I32.sub).localSet(Local.addr);
+    checkAccess(e, size);
+    noteStore(e, size);
+    b.localGet(Local.addr).localGet(Local.t2)
         .store(storeKind(size), { offset: e.layout.ramBase });
+    b.localGet(Local.addr).localSet(Local.reg + 4);
 }
 
 // --- arithmetic ---
@@ -1506,28 +1524,54 @@ function stringInstruction(e, instruction){
     {
         e.pending = null;
     }
+    // Each access is checked where it happens; a fault inside a `rep` leaves
+    // EIP on the instruction with the count and the pointers as far as they
+    // got, which is what the processor does too.
+    const counted = !repeat;
+    /** @param {number} pointer */
+    const checkedLoad = pointer=>{
+        b.localGet(pointer).localSet(Local.addr);
+        checkAccess(e, size, { counted });
+        b.localGet(Local.addr).load(loadKind(size), { offset: e.layout.ramBase });
+    };
+    /**
+     * A checked store at the pointer of the value `pushValue` pushes.
+     * @param {number} pointer @param {() => void} pushValue
+     */
+    const checkedStore = (pointer, pushValue)=>{
+        b.localGet(pointer).localSet(Local.addr);
+        checkAccess(e, size, { counted });
+        noteStore(e, size);
+        b.localGet(Local.addr);
+        pushValue();
+        b.store(storeKind(size), { offset: e.layout.ramBase });
+    };
     switch (op)
     {
         case 'movs':
-            b.localGet(edi).localGet(esi).load(loadKind(size), { offset: e.layout.ramBase })
-                .store(storeKind(size), { offset: e.layout.ramBase });
+            checkedLoad(esi);
+            b.localSet(Local.t1);
+            checkedStore(edi, ()=>b.localGet(Local.t1));
             advance(esi);
             advance(edi);
             break;
         case 'stos':
-            b.localGet(edi).localGet(Local.reg);
-            mask(e, size);
-            b.store(storeKind(size), { offset: e.layout.ramBase });
+            checkedStore(edi, ()=>{
+                b.localGet(Local.reg);
+                mask(e, size);
+            });
             advance(edi);
             break;
         case 'lods':
-            b.localGet(esi).load(loadKind(size), { offset: e.layout.ramBase });
+            checkedLoad(esi);
             writeReg(e, 0, size, false);
             advance(esi);
             break;
         case 'cmps':
-            b.localGet(esi).load(loadKind(size), { offset: e.layout.ramBase }).localSet(Local.op1);
-            b.localGet(edi).load(loadKind(size), { offset: e.layout.ramBase }).localSet(Local.op2);
+            checkedLoad(esi);
+            b.localSet(Local.op1);
+            checkedLoad(edi);
+            b.localSet(Local.op2);
             b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
             mask(e, size);
             e.record(Kind.SUB, size);
@@ -1539,7 +1583,8 @@ function stringInstruction(e, instruction){
             b.localGet(Local.reg);
             mask(e, size);
             b.localSet(Local.op1);
-            b.localGet(edi).load(loadKind(size), { offset: e.layout.ramBase }).localSet(Local.op2);
+            checkedLoad(edi);
+            b.localSet(Local.op2);
             b.localGet(Local.op1).localGet(Local.op2).op(I32.sub);
             mask(e, size);
             e.record(Kind.SUB, size);

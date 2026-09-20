@@ -27,6 +27,7 @@ import { SIMD } from '../wasm/simd.js';
 import { I32 } from './flags.js';
 import { Local } from './region.js';
 import { emitAddress, readOp, writeOp, writeReg } from './integer.js';
+import { checkAccess, noteStore } from './memory.js';
 
 const F32 = Object.freeze({
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60, add: 0x92, sub: 0x93, mul: 0x94,
@@ -121,6 +122,7 @@ export function emitSimd(e, instruction, flagsLive){
             if (dst.kind === 'mem')
             {
                 prepareAddress(e, dst);
+                noteStore(e, 8);
                 b.localGet(Local.addr);
                 readV(e, src, 16);
                 b.simdMem(SIMD.store64Lane,
@@ -229,6 +231,8 @@ export function emitSimd(e, instruction, flagsLive){
             }
             const whole = op === 'maskmovdqu';
             b.localGet(Local.reg + 7).localSet(Local.addr);
+            checkAccess(e, whole ? 16 : 8);
+            noteStore(e, whole ? 16 : 8);
             b.localGet(Local.addr);
             readV(e, dst, 16);
             b.localGet(Local.addr);
@@ -770,6 +774,7 @@ function prepareAddress(e, operand){
     {
         emitAddress(e, operand, true);
         e.b.localSet(Local.addr);
+        checkAccess(e, operand.size);
     }
 }
 
@@ -826,6 +831,7 @@ function writeV(e, operand, pushValue, width = 16){
     if (pushValue !== null)
     {
         prepareAddress(e, operand);
+        noteStore(e, width);
         b.localGet(Local.addr);
         pushValue();
     }
@@ -833,6 +839,7 @@ function writeV(e, operand, pushValue, width = 16){
     {
         b.localSet(vecTemp(e));
         prepareAddress(e, operand);
+        noteStore(e, width);
         b.localGet(Local.addr);
         b.localGet(vecTemp(e));
     }
@@ -879,6 +886,7 @@ function writeM(e, operand, pushValue){
     if (pushValue !== null)
     {
         prepareAddress(e, operand);
+        noteStore(e, 8);
         b.localGet(Local.addr);
         pushValue();
     }
@@ -886,6 +894,7 @@ function writeM(e, operand, pushValue){
     {
         b.localSet(Local.t64);
         prepareAddress(e, operand);
+        noteStore(e, 8);
         b.localGet(Local.addr);
         b.localGet(Local.t64);
     }

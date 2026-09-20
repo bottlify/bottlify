@@ -37,6 +37,16 @@ emulator under another name, proven by identical instruction counts); the rest o
 composition arrives with the translator's own steps (`roadmap/cork-plan.md`). `diagnostics()`
 reports the selected engine as `metrics.engine`.
 
+Translated code tests a page-flag table before every load and store (one byte per 4 KiB page
+of the address space, kept in the memory after the guest RAM): a page beyond RAM is
+inaccessible from boot and an access to it is a precise `#GP` with the registers as before
+the instruction; a page that holds translated code makes a store into it leave translated
+code with a `stale` exit right after the instruction, so the runtime can drop what it
+translated there. The null page is *not* marked, because the emulator lets a program read
+address 0 today and the two engines must agree; marking it, and projecting the memory
+layer's read-only regions into the table, is a policy switch this layer's owner throws when
+the emulator is no longer the reference for it.
+
 ## 2. Contract
 
 | field      | value                    |

@@ -15,7 +15,8 @@ import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
 import { emitRegion, prepareModule } from '../emit/region.js';
-import { ownLayout, pagesFor } from '../runtime/layout.js';
+import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
+import { createPageTable } from '../runtime/pages.js';
 
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
@@ -24,13 +25,15 @@ const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
  */
 export function createTestMachine({ ramSize = 1 << 20 } = {}){
     const layout = ownLayout({ ramSize });
-    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
+    const pages = createPageTable(memory, layout);
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = features();
     return {
         layout,
         memory,
+        pages,
         /** @param {number} address @param {number[] | Uint8Array} data */
         write(address, data){
             bytes().set(data, layout.ramBase + address);
@@ -77,13 +80,14 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
          * it, plus what the emitter said.
          *
          * @param {number} entry
-         * @param {{ maxBlocks?: number, maxBytes?: number }} [options]
+         * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean }} [options]
          */
         translate(entry, options = {}){
+            const { undoLog = false, ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
-            const region = formRegion(read, entry, options);
+            const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found);
+            const context = prepareModule(m, layout, found, {}, { undoLog });
             const translation = emitRegion(context, region);
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
@@ -123,11 +127,11 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
          * emitter leaves out. The smallest runtime there is, for tests.
          *
          * @param {number} entry
-         * @param {{ budget?: number, maxRegions?: number }} [options]
+         * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean }} [options]
          * @returns {{ kind: number, vector: number, eip: number, regions: number,
          *     unsupported: Map<string, number>, retired: number }}
          */
-        runProgram(entry, { budget = 10_000_000, maxRegions = 2000 } = {}){
+        runProgram(entry, { budget = 10_000_000, maxRegions = 2000, undoLog = false } = {}){
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
             const translated = new Map();
             /** @type {Map<string, number>} */
@@ -147,7 +151,7 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
                             kind: -1, vector: 0, eip, regions, unsupported, retired: budget - left,
                         };
                     }
-                    unit = this.translate(eip);
+                    unit = this.translate(eip, { undoLog });
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {

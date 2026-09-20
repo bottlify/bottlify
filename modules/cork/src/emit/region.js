@@ -43,6 +43,7 @@ import {
     ARITH, I32, Kind, addMaterialiseHelper, emitCondition, emitFlag, kindOf, widthCode,
 } from './flags.js';
 import { emitInstruction } from './integer.js';
+import { addUndoHelper, emitStaleExit } from './memory.js';
 
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
@@ -57,9 +58,11 @@ export const Local = Object.freeze({
     kind: 10, res: 11, op1: 12, op2: 13, cin: 14, flags: 15,
     retired: 16, eip: 17, t0: 18, t1: 19, t2: 20, addr: 21, t64: 22, t64b: 23,
     count: 24, f0: 25, f1: 26, d0: 27, d1: 28, mmxTouched: 29,
-    // 30, 31, 32: three v128 scratch locals when SIMD is available; the xmm
+    // the page flags of the current access, and whether a store hit a code page
+    pflags: 30, stale: 31,
+    // 32, 33, 34: three v128 scratch locals when SIMD is available; the xmm
     // and mm locals a region uses follow, allocated per region.
-    vec: 30,
+    vec: 32,
 });
 const LOCAL_TYPES = [
     // the eight registers
@@ -71,6 +74,7 @@ const LOCAL_TYPES = [
     ValType.i32, // count
     ValType.f32, ValType.f32, ValType.f64, ValType.f64, // f0 f1 d0 d1
     ValType.i32, // mmxTouched
+    ValType.i32, ValType.i32, // pflags stale
 ];
 
 /**
@@ -82,6 +86,7 @@ const LOCAL_TYPES = [
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
+ * @property {number} [undo]           the undo helper's function index, in a differential build
  */
 
 /**
@@ -92,16 +97,24 @@ const LOCAL_TYPES = [
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
+ * @param {{ undoLog?: boolean }} [options]  undoLog: record every store's old bytes
+ *     (differential builds only; part of the cache key)
  * @returns {ModuleContext}
  */
-export function prepareModule(m, layout, features, memory = {}){
+export function prepareModule(m, layout, features, memory = {}, { undoLog = false } = {}){
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
     const materialise = addMaterialiseHelper(m);
-    return { m, regionType, materialise, layout, features };
+    /** @type {ModuleContext} */
+    const context = { m, regionType, materialise, layout, features };
+    if (undoLog)
+    {
+        context.undo = addUndoHelper(m, layout);
+    }
+    return context;
 }
 
 /**
@@ -165,6 +178,12 @@ export class RegionEmitter {
         this.xmmWritten = new Set();
         /** @type {Set<number>} */
         this.mmWritten = new Set();
+        /** The instruction being emitted. @type {import('../decode/decoder.js').Instruction} */
+        this.current = region.blocks[0].instructions[0];
+        /** A store was emitted for the current instruction: check `stale` after it. */
+        this.staleCheck = false;
+        /** The control depth at the start of the block being emitted. */
+        this.blockDepth = 0;
         /** @type {number[]} */
         this.localTypes = [...LOCAL_TYPES];
         if (context.features.simd)
@@ -312,6 +331,7 @@ export class RegionEmitter {
         b.i32const(0).localSet(Local.kind);
         b.i32const(0).localSet(Local.retired);
         b.i32const(0).localSet(Local.mmxTouched);
+        b.i32const(0).localSet(Local.stale);
         for (const [index, local] of this.xmmLocals)
         {
             b.i32const(0).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
@@ -457,11 +477,14 @@ export class RegionEmitter {
         this.pending = null;
         this.dead = false;
         this.blockRetired = 0;
+        this.blockDepth = this.controls.length;
         const live = deadFlagPass(block);
         for (let i = 0; i < block.instructions.length; i++)
         {
             const instruction = block.instructions[i];
             const flagsLive = live[i];
+            this.current = instruction;
+            this.staleCheck = false;
             // Counted before it is emitted, so an exit *after* it (a halt, a
             // call) has it charged; an exit *before* it uncounts it.
             this.blockRetired++;
@@ -480,11 +503,22 @@ export class RegionEmitter {
             {
                 return;
             }
+            if (this.staleCheck)
+            {
+                // A store into a code page: leave now, before running what it
+                // may have changed, with EIP at the next instruction.
+                this.staleCheck = false;
+                emitStaleExit(this, instruction.eip + instruction.length);
+            }
         }
         this.emitExit(block, index);
     }
 
-    /** Charges the block's instructions to the budget and the count. */
+    /**
+     * Charges the block's instructions so far to the budget and the count.
+     * On a conditional path (inside an `if` the block opened) the count stays
+     * owed: the path that falls through charges it at its own exit.
+     */
     charge(){
         if (this.blockRetired === 0)
         {
@@ -493,7 +527,10 @@ export class RegionEmitter {
         const { b } = this;
         b.localGet(Local.retired).i32const(this.blockRetired).op(I32.add).localSet(Local.retired);
         b.localGet(Local.budget).i32const(this.blockRetired).op(I32.sub).localSet(Local.budget);
-        this.blockRetired = 0;
+        if (this.controls.length === this.blockDepth)
+        {
+            this.blockRetired = 0;
+        }
     }
 
     /**
@@ -654,7 +691,18 @@ export class RegionEmitter {
 
     /** @param {number} kind @param {number} vector */
     exitWithKind(kind, vector){
-        this.b.i32const(kind | vector << 8).localSet(Local.t0);
+        if (this.staleCheck)
+        {
+            // The instruction stored and leaves in the same breath (a call):
+            // a store into a code page turns the exit into `stale`, the EIP
+            // being the one the exit set.
+            this.b.i32const(Exit.STALE).i32const(kind | vector << 8).localGet(Local.stale)
+                .op(0x1b).localSet(Local.t0);
+        }
+        else
+        {
+            this.b.i32const(kind | vector << 8).localSet(Local.t0);
+        }
         this.b.br(this.depthOf('out'));
     }
 }

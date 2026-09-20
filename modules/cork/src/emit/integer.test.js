@@ -272,12 +272,12 @@ test('an instruction the emitter leaves out ends the run at its address, state i
     assert.equal(m.counter(), 1);
 });
 
-test('int3 and int n leave with the vector and the instruction\'s own address', ()=>{
+test('int3 and int n leave with the vector and EIP past the instruction, as traps', ()=>{
     const m = createTestMachine();
     m.write(CODE, [0x90, 0xcd, 0x21]);
     const exit = m.runProgram(CODE);
-    assert.deepEqual([exit.kind, exit.vector, exit.eip], [4, 0x21, CODE + 1]);
-    assert.equal(m.counter(), 1);
+    assert.deepEqual([exit.kind, exit.vector, exit.eip], [4, 0x21, CODE + 3]);
+    assert.equal(m.counter(), 2, 'the trap counts its instruction');
 });
 
 test('a conditional jump reading flags set in another block goes through the word', ()=>{

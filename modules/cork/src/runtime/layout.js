@@ -24,6 +24,23 @@ export const STATE_BLOCK_SIZE = 512;
 export const PAGE = 65536;
 
 /**
+ * What lies at `layout.tables`, as offsets from it: the page-flag table
+ * (one byte per 4 KiB page of the 4 GiB space), the address of the last
+ * store into a code page, and the undo ring a differential build fills
+ * (a count, then entries of address, size and sixteen old bytes).
+ */
+export const Tables = Object.freeze({
+    PAGE_FLAGS: 0,
+    PAGE_FLAGS_SIZE: 1 << 20,
+    STALE_ADDRESS: 1 << 20,
+    UNDO_HEAD: (1 << 20) + 8,
+    UNDO_RING: (1 << 20) + 16,
+    UNDO_ENTRIES: 4096,
+    UNDO_ENTRY: 24,
+    SIZE: (1 << 20) + 16 + 4096 * 24,
+});
+
+/**
  * Cork's own layout for a memory holding `ramSize` bytes of guest RAM.
  *
  * @param {{ ramSize: number }} options

@@ -189,6 +189,18 @@ one program a frame, not the engine a property. Graphics are on the GPU, so the 
 is the ceiling for every title; the target is 0.5–1 ns per instruction as an engine property.
 Design, scope and milestones: `roadmap/cork-x86-translator.md`. *2026-09-20.*
 
+**Translated code tests a page-flag table before every access instead of relying on the
+wasm bounds check alone.** The design's §5.1 named the browser's bounds check as the only
+check; a wasm trap, though, unwinds the region function and the registers held in its locals
+with it, so a precise fault after a trap would need every dirty local written back before
+every access — more stores than the test costs. The test is a shift, a byte load and a branch
+per access (a second load when the access may span a page); it is also what delivers
+self-modifying-code detection (a store into a page holding translated code leaves `stale`
+after the instruction), the null page and, later, the memory layer's protections, none of
+which the emulator gave a program. It stays measured: the plan's 2.9 reports the share the
+check holds on the target title, and elision for a base register already checked in the same
+block is the named follow-up if the share is material. *2026-09-20, cork 2.4.*
+
 
 **B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for
