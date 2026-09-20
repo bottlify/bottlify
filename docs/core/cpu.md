@@ -68,7 +68,11 @@ the handler the port write would have reached (`raiseTrap` on the emulator's hos
 handler and the same count), and the next round resumes at whatever EIP the handler left --
 the stub's own return after the port write is a block, so a call into the bridge costs one
 crossing out of wasm and one back, with no emulator turn. `out` to any other port, `in`,
-`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. The same hash is given to the
+`cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. A fault
+translated code detects (a divide by zero, an undefined instruction, an access the page
+table refuses) leaves before the instruction with the registers as they were, and the
+emulator re-executes it and raises it through the same vector and report a program on the
+emulator alone gets. The same hash is given to the
 emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
 an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
 half translated back one instruction at a time. A page flagged for handoff is one the

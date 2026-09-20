@@ -47,6 +47,7 @@ test('translated code leaves what the hardware left, on every case it translates
         const leftOut = new Map();
         let judged = 0;
         let precision = 0;
+        let invalid = 0;
         let died = 0;
         let skipped = 0;
         const started = Date.now();
@@ -60,6 +61,14 @@ test('translated code leaves what the hardware left, on every case it translates
             const exit = m.runProgram(one.entry, { budget: 2_000_000 });
             if (exit.kind === -2 || exit.kind === -1)
             {
+                // Nothing left out by the emitter: the decoder refused the
+                // entry itself, an invalid encoding the hardware raised #UD
+                // at, which the other executor raises for this one.
+                if (exit.unsupported.size === 0)
+                {
+                    invalid++;
+                    continue;
+                }
                 skipped++;
                 for (const [opcode, count] of exit.unsupported)
                 {
@@ -119,7 +128,7 @@ test('translated code leaves what the hardware left, on every case it translates
         const top = [...leftOut].sort((a, b)=>b[1] - a[1]).slice(0, 24)
             .map(([opcode, count])=>`${opcode}×${count}`).join(' ');
         console.log(`translated: ${judged} cases judged (${died} died as recorded),`
-            + ` ${skipped} left out`
+            + ` ${invalid} invalid encodings, ${skipped} left out`
             + ` at ${leftOut.size} opcodes, ${failures.length} diverged,`
             + ` ${precision} x87.precision, `
             + `${((Date.now() - started) / 1000).toFixed(1)} s; left out: ${top}`);
