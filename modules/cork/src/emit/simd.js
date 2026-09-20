@@ -31,12 +31,13 @@ import { checkAccess, noteStore } from './memory.js';
 
 const F32 = Object.freeze({
     eq: 0x5b, ne: 0x5c, lt: 0x5d, gt: 0x5e, le: 0x5f, ge: 0x60, add: 0x92, sub: 0x93, mul: 0x94,
-    div: 0x95, sqrt: 0x91, nearest: 0x90, trunc: 0x8f, convertI32S: 0xb2, demoteF64: 0xb6,
+    div: 0x95, sqrt: 0x91, nearest: 0x90, trunc: 0x8f, ceil: 0x8d, floor: 0x8e,
+    convertI32S: 0xb2, demoteF64: 0xb6,
     truncSatI32S: 0xfc00, reinterpretI32: 0xbe,
 });
 const F64 = Object.freeze({
     add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, sqrt: 0x9f, nearest: 0x9e, trunc: 0x9d,
-    convertI32S: 0xb7, promoteF32: 0xbb, truncSatI32S: 0xfc02,
+    ceil: 0x9b, floor: 0x9c, convertI32S: 0xb7, promoteF32: 0xbb, truncSatI32S: 0xfc02,
 });
 
 /**
@@ -181,6 +182,84 @@ export function emitSimd(e, instruction, flagsLive){
                     b.op(0xa7); // i64.wrap
                 }
             });
+            return true;
+        case 'movntq':
+            writeM(e, dst, ()=>readM(e, src));
+            return true;
+        case 'movddup':
+            // Both lanes from the source's low qword.
+            writeV(e, dst, ()=>{
+                readV(e, src, src.kind === 'mem' ? 8 : 16);
+                b.localTee(vecTemp(e)).localGet(vecTemp(e));
+                shuffle([0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3, 4, 5, 6, 7]);
+            });
+            return true;
+        case 'movsldup': case 'movshdup':
+            writeV(e, dst, ()=>{
+                readV(e, src, 16);
+                b.localTee(vecTemp(e)).localGet(vecTemp(e));
+                shuffle(dwordShuffle(op === 'movsldup' ? [0, 0, 2, 2] : [1, 1, 3, 3]));
+            });
+            return true;
+        case 'haddps': case 'hsubps': case 'haddpd': case 'hsubpd':
+        {
+            // Pairs within each operand: the even lanes gathered against the
+            // odd ones, destination first.
+            const double = op.endsWith('pd');
+            const add = op.startsWith('hadd');
+            readV(e, dst, 16);
+            b.localSet(vecTemp(e));
+            readV(e, src, 16);
+            b.localSet(vecTemp2(e));
+            b.localGet(vecTemp(e)).localGet(vecTemp2(e));
+            shuffle(dwordShuffle(double ? [0, 1, 4, 5] : [0, 2, 4, 6]));
+            b.localGet(vecTemp(e)).localGet(vecTemp2(e));
+            shuffle(dwordShuffle(double ? [2, 3, 6, 7] : [1, 3, 5, 7]));
+            simd(double
+                ? (add ? SIMD.f64x2Add : SIMD.f64x2Sub)
+                : (add ? SIMD.f32x4Add : SIMD.f32x4Sub));
+            writeV(e, dst, null);
+            return true;
+        }
+        case 'cvtpd2pi': case 'cvttpd2pi':
+        {
+            // Two doubles to two dwords in an MMX register, each through the
+            // scalar conversion with its indefinite.
+            prepareAddress(e, src);
+            readV(e, src, 16);
+            b.localSet(vecTemp(e));
+            for (const lane of [0, 1])
+            {
+                b.localGet(vecTemp(e));
+                b.op(0xfd, [SIMD.f64x2ExtractLane, lane]);
+                b.localSet(Local.d0);
+                if (op === 'cvtpd2pi')
+                {
+                    roundByMxcsr(e, Local.d0, F64_ROUND, false);
+                }
+                scalarToInt(e, true);
+                b.localSet(lane === 0 ? Local.t1 : Local.t2);
+            }
+            writeM(e, dst, ()=>{
+                b.localGet(Local.t2).op(0xad); // i64.extend_i32_u
+                b.i64const(32n).op(0x86);      // i64.shl
+                b.localGet(Local.t1).op(0xad);
+                b.op(0x84);                     // i64.or
+            });
+            return true;
+        }
+        case 'stmxcsr':
+            prepareAddress(e, dst);
+            noteStore(e, 4);
+            b.localGet(Local.addr);
+            b.i32const(0).load('i32', { offset: e.layout.mxcsr });
+            b.store('i32', { offset: e.layout.ramBase });
+            return true;
+        case 'ldmxcsr':
+            prepareAddress(e, dst);
+            b.i32const(0);
+            b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase });
+            b.store('i32', { offset: e.layout.mxcsr });
             return true;
         case 'movq':
             if (dst.kind === 'mm' || (dst.kind === 'mem' && src.kind === 'mm'))
@@ -428,11 +507,12 @@ export function emitSimd(e, instruction, flagsLive){
             prepareAddress(e, src);
             readV(e, src, double ? 8 : 4);
             b.op(0xfd, [double ? SIMD.f64x2ExtractLane : SIMD.f32x4ExtractLane, 0]);
+            b.localSet(double ? Local.d0 : Local.f0);
             if (!truncate)
             {
-                b.op(double ? F64.nearest : F32.nearest);
+                roundByMxcsr(e, double ? Local.d0 : Local.f0, double ? F64_ROUND : F32_ROUND,
+                    false);
             }
-            b.localSet(double ? Local.d0 : Local.f0);
             scalarToInt(e, double);
             writeReg(e, /** @type {number} */ (dst.reg), 4, false);
             return true;
@@ -444,7 +524,9 @@ export function emitSimd(e, instruction, flagsLive){
             unary(e, dst, src, ()=>{
                 if (op === 'cvtps2dq')
                 {
-                    simd(SIMD.f32x4Nearest);
+                    b.localSet(vecTemp2(e));
+                    roundByMxcsr(e, vecTemp2(e), F32X4_ROUND, true);
+                    b.localGet(vecTemp2(e));
                 }
                 packedToInt(e);
             }, 0);
@@ -478,11 +560,11 @@ export function emitSimd(e, instruction, flagsLive){
             return true;
         case 'cvttpd2dq': case 'cvtpd2dq':
             unary(e, dst, src, ()=>{
+                b.localSet(vecTemp(e));
                 if (op === 'cvtpd2dq')
                 {
-                    simd(SIMD.f64x2Nearest);
+                    roundByMxcsr(e, vecTemp(e), F64X2_ROUND, true);
                 }
-                b.localSet(vecTemp(e));
                 // The bad lanes -- NaN or out of range -- as f64-wide masks, then
                 // their low dwords brought into lanes 0 and 1 (zeros elsewhere).
                 b.localGet(vecTemp(e)).localGet(vecTemp(e));
@@ -532,7 +614,9 @@ export function emitSimd(e, instruction, flagsLive){
             readV(e, src, 8);
             if (op === 'cvtps2pi')
             {
-                simd(SIMD.f32x4Nearest);
+                b.localSet(vecTemp2(e));
+                roundByMxcsr(e, vecTemp2(e), F32X4_ROUND, true);
+                b.localGet(vecTemp2(e));
             }
             packedToInt(e);
             b.op(0xfd, [SIMD.i64x2ExtractLane, 0]);
@@ -910,6 +994,62 @@ function markMmx(e){
 const vecTemp = e=>e.vecTempLocal(0);
 /** A second one. @param {E} e */
 const vecTemp2 = e=>e.vecTempLocal(1);
+
+/**
+ * Rounds the value held in a local by the SSE control word's rounding
+ * control: nearest, down, up or toward zero. The conversions that round
+ * (the ones without the extra t) read it at run time, as the processor
+ * does; a program that sets the mode with `ldmxcsr` gets the mode.
+ *
+ * @param {E} e @param {number} local
+ * @param {{ nearest: number, floor: number, ceil: number, trunc: number }} ops
+ * @param {boolean} vector  the ops are v128 ones
+ */
+function roundByMxcsr(e, local, ops, vector){
+    const { b } = e;
+    const apply = (/** @type {number} */ opcode)=>{
+        b.localGet(local);
+        if (vector)
+        {
+            b.simd(opcode);
+        }
+        else
+        {
+            b.op(opcode);
+        }
+        b.localSet(local);
+    };
+    // The mode in `count`, a local no conversion holds anything in.
+    b.i32const(0).load('i32', { offset: e.layout.mxcsr }).i32const(13).op(I32.shrU)
+        .i32const(3).op(I32.and).localSet(Local.count);
+    b.localGet(Local.count).op(I32.eqz);
+    e.openIf('nearest', EMPTY);
+    apply(ops.nearest);
+    b.op(0x05);
+    b.localGet(Local.count).i32const(1).op(I32.eq);
+    e.openIf('down', EMPTY);
+    apply(ops.floor);
+    b.op(0x05);
+    b.localGet(Local.count).i32const(2).op(I32.eq);
+    e.openIf('up', EMPTY);
+    apply(ops.ceil);
+    b.op(0x05);
+    apply(ops.trunc);
+    e.close();
+    e.close();
+    e.close();
+}
+
+const F32_ROUND = { nearest: F32.nearest, floor: F32.floor, ceil: F32.ceil, trunc: F32.trunc };
+const F64_ROUND = { nearest: F64.nearest, floor: F64.floor, ceil: F64.ceil, trunc: F64.trunc };
+const F32X4_ROUND = {
+    nearest: SIMD.f32x4Nearest, floor: SIMD.f32x4Floor, ceil: SIMD.f32x4Ceil,
+    trunc: SIMD.f32x4Trunc,
+};
+const F64X2_ROUND = {
+    nearest: SIMD.f64x2Nearest, floor: SIMD.f64x2Floor, ceil: SIMD.f64x2Ceil,
+    trunc: SIMD.f64x2Trunc,
+};
 
 // --- forms ---
 

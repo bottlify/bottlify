@@ -49,7 +49,7 @@ import { noteStore } from './memory.js';
 const F64 = Object.freeze({
     eq: 0x61, ne: 0x62, lt: 0x63, gt: 0x64, le: 0x65, ge: 0x66,
     abs: 0x99, neg: 0x9a, trunc: 0x9d, nearest: 0x9e, sqrt: 0x9f,
-    add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3,
+    add: 0xa0, sub: 0xa1, mul: 0xa2, div: 0xa3, copysign: 0xa6,
     convertI32S: 0xb7, convertI64S: 0xb9, convertI64U: 0xba, promoteF32: 0xbb,
     reinterpretI64: 0xbf,
 });
@@ -83,7 +83,7 @@ export function isX87(instruction){
 
 /** The instructions this step leaves to the other executor. */
 const LEFT_OUT = new Set([
-    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp', 'fnclex',
+    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp',
 ]);
 
 /**
@@ -583,9 +583,39 @@ export function emitX87(e, instruction, flagsLive){
         b.select();
     };
 
+    /**
+     * The result on the stack, a NaN the operation itself made given the
+     * processor's sign: x86 hands out the negative indefinite, a host whose
+     * default NaN is positive hands out the other, and the corpus tells
+     * them apart through a store. A NaN that came in as an operand is
+     * propagated as it was.
+     *
+     * @param {number[]} inputs  the locals holding the operands
+     */
+    const hostNaN = inputs=>{
+        if (e.context.features.defaultNaNNegative)
+        {
+            return;
+        }
+        b.localSet(x.temp3);
+        b.localGet(x.temp3).f64const(-1).op(F64.copysign);
+        b.localGet(x.temp3);
+        b.localGet(x.temp3).localGet(x.temp3).op(F64.ne);
+        for (const input of inputs)
+        {
+            b.localGet(input).localGet(input).op(F64.eq).op(I32.and);
+        }
+        b.select();
+    };
+
     switch (op)
     {
         case 'fwait': case 'fnop':
+            return finish();
+        case 'fnclex':
+            // The exception flags, the stack fault, the summary and the busy
+            // bit cleared; the condition bits and the top stay.
+            b.localGet(Local.x87Status).i32const(0x7f00).op(I32.and).localSet(Local.x87Status);
             return finish();
         case 'fninit':
             b.i32const(0).localSet(Local.x87Top);
@@ -709,7 +739,8 @@ export function emitX87(e, instruction, flagsLive){
             e.openIf('negative', EMPTY);
             setStatus(Status.IE);
             e.close();
-            b.localGet(st(0)).op(F64.sqrt);
+            b.localGet(st(0)).localTee(x.temp).op(F64.sqrt);
+            hostNaN([x.temp]);
             byPrecision();
             orIndefinite();
             b.localSet(st(0));
@@ -994,6 +1025,7 @@ export function emitX87(e, instruction, flagsLive){
                 fadd: F64.add, fsub: F64.sub, fmul: F64.mul, fdiv: F64.div,
             }[kind]));
             byPrecision();
+            hostNaN([x.temp, x.temp2]);
             orIndefinite();
             b.localSet(st(target));
             // The exceptions of a sound operation: a zero-divide of a finite

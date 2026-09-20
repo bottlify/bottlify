@@ -37,6 +37,7 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false, trapPo
     // default control word.
     new DataView(memory.buffer).setUint8(layout.x87Empty, 0xff);
     new DataView(memory.buffer).setUint16(layout.x87Control, 0x37f, true);
+    new DataView(memory.buffer).setUint32(layout.mxcsr, 0x1f80, true);
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = features();

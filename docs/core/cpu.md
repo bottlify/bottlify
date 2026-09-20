@@ -97,7 +97,9 @@ next batch. The translator keeps every x87 value as a double, as the emulator do
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
 converted inline. The control word is honoured at run time: rounding control rounds the
 integer stores and `frndint`, precision control set to single rounds every arithmetic
-result's mantissa to 24 bits (extended is treated as double); exception masks are not
+result's mantissa to 24 bits (extended is treated as double); the SSE conversions that round
+read the MXCSR rounding control the same way; a NaN an operation makes carries the
+processor's negative sign whatever the host's default NaN is; exception masks are not
 honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
 translated module, as the emulator's do, so the two agree on one engine; the environment

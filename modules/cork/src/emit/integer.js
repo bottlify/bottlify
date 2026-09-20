@@ -488,6 +488,33 @@ export function emitInstruction(e, instruction, flagsLive){
                 return true;
             }
             return false;
+        case 'movnti':
+            // A non-temporal store is a store.
+            prepare(e, dst);
+            writeOp(e, dst, ()=>readOp(e, src));
+            return true;
+        case 'cmpxchg8b':
+            return cmpxchg8b(e, instruction);
+        case 'arpl':
+        {
+            // If the destination selector's RPL is below the source's, it is
+            // raised to it and ZF is set; otherwise ZF is clear.
+            prepare(e, dst);
+            readOp(e, dst);
+            b.localSet(Local.t1);
+            readOp(e, src);
+            b.i32const(3).op(I32.and).localSet(Local.t2);
+            e.eagerWrite(ZF);
+            b.localGet(Local.t1).i32const(3).op(I32.and).localGet(Local.t2).op(I32.ltU);
+            e.openIf('raise', EMPTY);
+            writeOp(e, dst, ()=>b.localGet(Local.t1).i32const(~3).op(I32.and)
+                .localGet(Local.t2).op(I32.or));
+            b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+            e.close();
+            return true;
+        }
+        case 'daa': case 'das': case 'aaa': case 'aas': case 'aam': case 'aad':
+            return decimal(e, instruction);
         case 'int3': case 'int': case 'into':
             // Left to the other executor, before the instruction: a trap
             // taken past it would be skipped by a host that re-executes the
@@ -1477,11 +1504,26 @@ function bitTest(e, instruction){
     const bits = size * 8;
     if (dst.kind === 'mem' && offset.kind !== 'imm')
     {
-        return false;
+        // A bit string: the register names a bit anywhere from the address,
+        // signed, so the operand is the word or dword that holds it.
+        emitAddress(e, dst, true);
+        readOp(e, offset);
+        if (size === 2)
+        {
+            b.i32const(16).op(I32.shl).i32const(16).op(I32.shrS); // the word offset is signed
+        }
+        b.localTee(Local.t2);
+        b.i32const(size === 2 ? 4 : 5).op(I32.shrS).i32const(size === 2 ? 1 : 2).op(I32.shl);
+        b.op(I32.add).localSet(Local.addr);
+        checkAccess(e, size);
+        b.localGet(Local.t2).i32const(bits - 1).op(I32.and).localSet(Local.count);
     }
-    prepare(e, dst);
-    readOp(e, offset);
-    b.i32const(bits - 1).op(I32.and).localSet(Local.count);
+    else
+    {
+        prepare(e, dst);
+        readOp(e, offset);
+        b.i32const(bits - 1).op(I32.and).localSet(Local.count);
+    }
     readOp(e, dst);
     b.localSet(Local.t1);
     e.eagerWrite(CF);
@@ -1506,6 +1548,160 @@ function bitTest(e, instruction){
             }
         });
     }
+    return true;
+}
+
+/**
+ * cmpxchg8b m64: edx:eax compared with the qword; equal, ecx:ebx is stored
+ * and ZF set; otherwise the qword is loaded into edx:eax and ZF cleared.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function cmpxchg8b(e, instruction){
+    const { b } = e;
+    const [dst] = instruction.operands;
+    prepare(e, dst);
+    b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase }).localSet(Local.t1);
+    b.localGet(Local.addr).load('i32', { offset: e.layout.ramBase + 4 }).localSet(Local.t2);
+    e.eagerWrite(ZF);
+    b.localGet(Local.t1).localGet(Local.reg).op(I32.eq);
+    b.localGet(Local.t2).localGet(Local.reg + 2).op(I32.eq);
+    b.op(I32.and);
+    e.openIf('equal', EMPTY);
+    noteStore(e, 8);
+    b.localGet(Local.addr).localGet(Local.reg + 3).store('i32', { offset: e.layout.ramBase });
+    b.localGet(Local.addr).localGet(Local.reg + 1).store('i32', { offset: e.layout.ramBase + 4 });
+    b.localGet(Local.flags).i32const(ZF).op(I32.or).localSet(Local.flags);
+    b.op(0x05); // else
+    b.localGet(Local.t1).localSet(Local.reg);
+    b.localGet(Local.t2).localSet(Local.reg + 2);
+    e.close();
+    return true;
+}
+
+/**
+ * The decimal and ASCII adjustments, on AL and AH as the processor keeps
+ * them. daa/das define CF, AF and the result flags of AL; aaa/aas define AF
+ * and CF and leave the rest as the result of AL gives them; aam/aad define
+ * the result flags of AL and clear the others.
+ *
+ * @param {E} e @param {Instruction} instruction
+ */
+function decimal(e, instruction){
+    const { b } = e;
+    const { op, operands } = instruction;
+    const al = ()=>b.localGet(Local.reg).i32const(0xff).op(I32.and);
+    const ah = ()=>b.localGet(Local.reg).i32const(8).op(I32.shrU).i32const(0xff).op(I32.and);
+    /** Writes t1 into AL, or t1 into AX when wide. @param {boolean} wide */
+    const setLow = wide=>{
+        b.localGet(Local.reg).i32const(wide ? ~0xffff : ~0xff).op(I32.and);
+        b.localGet(Local.t1).i32const(wide ? 0xffff : 0xff).op(I32.and).op(I32.or);
+        b.localSet(Local.reg);
+    };
+    if (op === 'aam' || op === 'aad')
+    {
+        const base = /** @type {number} */ (operands[0].value);
+        if (op === 'aam')
+        {
+            if (base === 0)
+            {
+                e.exitBefore(instruction.eip, Exit.FAULT, 0);
+                e.dead = true;
+                return true;
+            }
+            // AH = AL / base, AL = AL % base.
+            al();
+            b.i32const(base).op(I32_EXTRA.remU).localSet(Local.t1);
+            al();
+            b.i32const(base).op(I32_EXTRA.divU).i32const(8).op(I32.shl)
+                .localGet(Local.t1).op(I32.or).localSet(Local.t1);
+        }
+        else
+        {
+            // AL = AL + AH * base, AH = 0.
+            al();
+            ah();
+            b.i32const(base).op(I32_EXTRA.mul).op(I32.add).i32const(0xff).op(I32.and)
+                .localSet(Local.t1);
+        }
+        setLow(true);
+        b.localGet(Local.t1).i32const(0xff).op(I32.and);
+        e.record(Kind.LOGIC, 1);
+        b.drop();
+        return true;
+    }
+    // CF and AF as they stand, then the word made whole with the six cleared.
+    // The old CF (cin) decides the high digit; t2 carries the low digit's.
+    e.pushFlag(CF);
+    b.localTee(Local.t2).localSet(Local.cin);
+    e.pushFlag(AF);
+    b.localSet(Local.op1);
+    e.eagerWrite(ARITH_ALL);
+    if (op === 'daa' || op === 'das')
+    {
+        const add = op === 'daa';
+        al();
+        b.localSet(Local.op2); // the old AL
+        b.localGet(Local.op2).localSet(Local.t1);
+        // Low digit: adjusted when above 9 or AF was set.
+        b.localGet(Local.op2).i32const(0xf).op(I32.and).i32const(9).op(I32.gtU);
+        b.localGet(Local.op1).op(I32.or);
+        e.openIf('low', EMPTY);
+        b.localGet(Local.t1).i32const(add ? 6 : -6).op(I32.add).localSet(Local.t1);
+        // CF = old CF or the carry out of the addition (the borrow of the
+        // subtraction: an old AL below 6).
+        if (add)
+        {
+            b.localGet(Local.t2).localGet(Local.t1).i32const(0xff).op(I32.gtU).op(I32.or)
+                .localSet(Local.t2);
+        }
+        else
+        {
+            b.localGet(Local.t2).localGet(Local.op2).i32const(6).op(I32.ltU).op(I32.or)
+                .localSet(Local.t2);
+        }
+        b.localGet(Local.flags).i32const(AF).op(I32.or).localSet(Local.flags);
+        e.close();
+        // High digit: adjusted when the old AL was above 0x99 or the old CF
+        // was set, and CF is then set; otherwise daa clears CF and das keeps
+        // the low digit's borrow.
+        if (!add)
+        {
+            b.localGet(Local.flags).localGet(Local.t2).i32const(CF).op(I32.mul).op(I32.or)
+                .localSet(Local.flags);
+        }
+        b.localGet(Local.op2).i32const(0x99).op(I32.gtU);
+        b.localGet(Local.cin).op(I32.or);
+        e.openIf('high', EMPTY);
+        b.localGet(Local.t1).i32const(add ? 0x60 : -0x60).op(I32.add).localSet(Local.t1);
+        b.localGet(Local.flags).i32const(CF).op(I32.or).localSet(Local.flags);
+        e.close();
+        setLow(false);
+    }
+    else
+    {
+        // aaa / aas: on a low digit above 9 or AF, AX += 0x106 / AX -= 6 and
+        // AH -= 1, with AF and CF set; AL keeps its low digit either way.
+        const add = op === 'aaa';
+        b.localGet(Local.reg).i32const(0xffff).op(I32.and).localSet(Local.t1);
+        al();
+        b.i32const(0xf).op(I32.and).i32const(9).op(I32.gtU);
+        b.localGet(Local.op1).op(I32.or);
+        e.openIf('adjust', EMPTY);
+        b.localGet(Local.t1).i32const(add ? 0x106 : -0x106).op(I32.add).i32const(0xffff)
+            .op(I32.and).localSet(Local.t1);
+        b.localGet(Local.flags).i32const(AF | CF).op(I32.or).localSet(Local.flags);
+        e.close();
+        b.localGet(Local.t1).i32const(0xff0f).op(I32.and).localSet(Local.t1);
+        setLow(true);
+    }
+    // The result flags of AL, with CF and AF kept from the word.
+    b.localGet(Local.flags).i32const(CF | AF).op(I32.and).localSet(Local.op2);
+    b.localGet(Local.t1).i32const(0xff).op(I32.and);
+    e.record(Kind.LOGIC, 1);
+    b.drop();
+    e.materialise();
+    b.localGet(Local.flags).localGet(Local.op2).op(I32.or).localSet(Local.flags);
     return true;
 }
 
