@@ -291,6 +291,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
     const contextOf = screenOf ?? ((/** @type {any} */ canvas)=>canvas.getContext('webgpu'));
     /** @type {any} */
     let app = null;
+    /** The relay transport opened for the run, closed with it. @type {any} */
+    let transport = null;
     let hidden = false;
     /** @type {import('./messages.js').Presented[]} */
     const presented = [];
@@ -442,10 +444,19 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
                 throw Object.assign(new Error('the canvas would not give a WebGPU context'),
                     { reason: 'gpu' });
             }
-            const { bundle, storage, watch, hooks, device: knobs, signal: word, ...rest } = options;
+            const { bundle, storage, watch, hooks, device: knobs, signal: word, network: relay,
+                ...rest } = options;
             void word;
+            if (relay)
+            {
+                const { connectRelay } = await import(/* @vite-ignore */ relay.module);
+                transport = await connectRelay({
+                    url: relay.url, room: relay.room, token: relay.token,
+                });
+            }
             app = await createApp({
                 ...rest,
+                win32: { ...rest.win32, network: transport ?? rest.win32?.network },
                 // The page's pacing either way unless asked, with the signal
                 // word in both: a message the page posted is seen between
                 // two turns rather than at the next timed yield.
@@ -593,6 +604,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             started = null;
             reading = null;
             await ending?.dispose();
+            transport?.dispose?.();
+            transport = null;
             device?.destroy?.();
             device = null;
         },

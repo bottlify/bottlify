@@ -52,7 +52,7 @@ the module graph is built. All are optional.
 | `graphics` | thunks | none | Where GDI pixels go and which pixel formats exist. |
 | `output` | thunk | none | Where wave-out samples go. |
 | `video` | thunks | none | The decoder and the frame sink a filter graph uses. |
-| `network` | adapter `{ bind, unbind, find }` | loopback | The transport under Winsock. |
+| `network` | adapter `{ bind, unbind, find }` or a `NetworkTransport` | loopback | The transport under Winsock; `createApp` hands its own `win32.network` option here. |
 | `http` | request function | `null` | The transport under WinInet. |
 | `cursor`, `keyState`, `clipCursor` | thunks | nothing pressed, origin | The input layer, handed down. |
 | `commandLine`, `environment` | string, record | the quoted image path; `SystemRoot`, `TEMP`, `windir` under `C:\WINDOWS` | What the program is told it was started with. |

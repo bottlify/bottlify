@@ -843,3 +843,20 @@ test('what the GPU device refuses goes into the journal, a repeat counted rather
             ['error', 'another (x256)'],
         ]);
     });
+
+test('a network named at start is opened by the worker and closed with the run', async()=>{
+    // A transport is a WebSocket and callbacks, neither of which crosses a
+    // port, so the worker imports the client by the URL the page named and
+    // opens it; the engine never imports the networking package itself.
+    const module = new URL('./fake-relay.test.mjs', import.meta.url).href;
+    const { remote, built } = await connect({
+        network: { module, url: 'wss://play/relay', room: 'b' },
+    });
+    const fake = await import(module);
+    assert.equal(fake.opened.length, 1);
+    assert.deepEqual(fake.opened[0].options,
+        { url: 'wss://play/relay', room: 'b', token: undefined });
+    assert.equal(built().win32.network, fake.opened[0], 'handed to createApp as win32.network');
+    await remote.dispose();
+    assert.equal(fake.opened[0].disposed, 1, 'closed with the run');
+});

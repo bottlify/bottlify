@@ -317,6 +317,14 @@ export class Connection extends EventEmitter {
  * @typedef {Object} WebSocketServerOptions
  * @property {number} [port]
  * @property {string} [host]
+ * @property {import('node:http').Server} [server]
+ *      An existing HTTP or HTTPS server to answer upgrades on, instead of one
+ *      of this file's own: a page served over TLS may only open `wss://`, and
+ *      the server that already holds the certificate is the one to open it
+ *      on. `listen` and `close` then leave that server to its owner.
+ * @property {string} [path]
+ *      With `server`, the request path this answers; any other upgrade on
+ *      that server is refused here and left alone.
  * @property {(request: import('node:http').IncomingMessage) => boolean} [allow]
  *      Called before the handshake; false refuses the upgrade.
  */
@@ -329,7 +337,8 @@ export class Connection extends EventEmitter {
  *      onConnection
  */
 export function createWebSocketServer(options, onConnection){
-    const http = createServer((request, response)=>{
+    const attached = options.server ?? null;
+    const http = attached ?? createServer((request, response)=>{
         // A plain GET is what a health check does, and answering it is cheaper
         // than explaining to an orchestrator why the port refuses HTTP.
         response.writeHead(200, { 'content-type': 'text/plain' });
@@ -342,6 +351,18 @@ export function createWebSocketServer(options, onConnection){
     // Typed as a Duplex by the event, but an upgrade only ever arrives on a real
     // TCP socket, and setNoDelay below is not on the narrower type.
     http.on('upgrade', (request, /** @type {any} */ socket)=>{
+        if (options.path !== undefined
+            && String(request.url ?? '').split('?')[0] !== options.path)
+        {
+            // Somebody else's upgrade on a shared server; not this one's to
+            // refuse, unless nobody answers it at all.
+            if (attached && attached.listenerCount('upgrade') > 1)
+            {
+                return;
+            }
+            socket.end('HTTP/1.1 404 Not Found\r\n\r\n');
+            return;
+        }
         const key = request.headers['sec-websocket-key'];
         const version = request.headers['sec-websocket-version'];
         const wanted = String(request.headers.upgrade ?? '').toLowerCase();
@@ -370,6 +391,12 @@ export function createWebSocketServer(options, onConnection){
     return {
         /** @returns {Promise<number>} the port actually listening */
         listen(){
+            if (attached)
+            {
+                const address = attached.address();
+                return Promise.resolve(
+                    typeof address === 'object' && address ? address.port : 0);
+            }
             return new Promise((resolve, reject)=>{
                 http.once('error', reject);
                 http.listen(options.port ?? 0, options.host ?? '127.0.0.1', ()=>{
@@ -395,6 +422,10 @@ export function createWebSocketServer(options, onConnection){
                 connection.socket.destroy();
             }
             live.clear();
+            if (attached)
+            {
+                return Promise.resolve();
+            }
             return new Promise(resolve=>http.close(()=>resolve()));
         },
     };

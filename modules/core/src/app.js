@@ -114,6 +114,11 @@ import { createBlockCache, resolveBlockStore }
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
+ * @property {{ network?: any }} [win32]
+ *     `network` is the transport under Winsock, in the shape the win32 layer's
+ *     `wsock32/transport.js` names: what a relay client hands back, or an
+ *     embedder's own. Absent, Winsock runs over the loopback adapter and
+ *     nothing outside this runtime is reachable, which is the default.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -2717,6 +2722,8 @@ async function buildApp(options){
             // ring do, for the same reason -- a replacement rebuilds this
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
+            // The network beyond this runtime, when the embedder supplied one.
+            network: options.win32?.network,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,

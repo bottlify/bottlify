@@ -83,6 +83,18 @@ const server = createRelayServer({
 await server.listen();
 ```
 
+Or ride on a server that already exists -- the one serving the page and holding
+its certificate, since a page over HTTPS may only open `wss://`:
+
+```js
+const relay = createRelayServer({ server: httpsServer, path: '/relay', policy });
+httpsServer.listen(443, async () => { await relay.listen(); });
+```
+
+`server` and `path` attach the relay's upgrade handling to that server at one
+path and leave listening and closing to its owner; any other upgrade on the
+server is left alone.
+
 The policy sees a host *name* rather than an address whenever the guest reached
 it through the relay's resolver, so an allowlist can be written in the terms it
 was meant in.
