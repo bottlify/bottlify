@@ -13,6 +13,11 @@ Two tracked documents, because they are consulted differently, plus the local wo
   separate knowledge/planning registers under `registers/`, sorted by what each entry actually was
   (see "Where the registers went" below).
 
+- **`cork-x86-translator.md`** — the design and milestones of *cork*, the user-mode x86 → wasm
+  translator that replaces the vendored emulator behind the `cpu` layer: why the emulator's
+  throughput is structural, what is taken from it (knowledge and test data), what is left out,
+  the architecture, the hybrid/differential migration, and what it changes for media.
+
 Three `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
 the follow-ups roadmap — what is decided and not yet built after the phased plan — the
 register of pitfalls that each cost weeks, required reading before touching the kernel, bridge,

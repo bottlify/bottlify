@@ -178,6 +178,18 @@ writing it never evicts compiled guest code sitting next to the routines that wr
 
 ## B. From measured optimisation work
 
+**The vendored full-system emulator is replaced by a user-mode x86 → wasm translator of this
+project's own (cork), behind the unchanged `cpu` contract, migrated in a hybrid mode with the
+emulator as the fallback tier and the oracle.** Measured on a 2004 OpenGL title on an Apple M4
+Pro: 1–3 ns per guest instruction, 10–25× slower than the processor the title was written for,
+and 58 of a 92 ms frame in the emulator on a plain view. The cost is structural to an emulator
+built to boot an operating system (paging on every access, x87 as a stack in memory, one basic
+block per unit, an interpreter for the rest); per-title kernels that hand-replace hot loops buy
+one program a frame, not the engine a property. Graphics are on the GPU, so the processor side
+is the ceiling for every title; the target is 0.5–1 ns per instruction as an engine property.
+Design, scope and milestones: `roadmap/cork-x86-translator.md`. *2026-09-20.*
+
+
 **B12 — The audio pump, the DirectSound/waveOut/MSS buffer reads and the hosted MPEG provider's
 decoder callbacks stay on the engine's own thread rather than moving to a second worker, for
 now.** A split needs the buffer *writes* copied into a block an audio worker owns (the emulator's
