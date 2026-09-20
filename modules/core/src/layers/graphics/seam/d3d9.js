@@ -731,10 +731,12 @@ export function createDirect3D9Seam(
     /** @param {number} address */
     const writeDisplayMode = address=>{
         const display = screen();
+        // The rate the enumerated modes carry: a program that lists the
+        // rates of a size and picks the current one finds it among them.
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: 0,
+            RefreshRate: REFRESH_HZ,
             Format: D3DFMT.X8R8G8B8,
         });
     };

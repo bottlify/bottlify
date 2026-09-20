@@ -1710,7 +1710,7 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: 0,
+            RefreshRate: REFRESH_HZ,
             // D3DFMT_X8R8G8B8, which is what a 32-bit display reports.
             Format: 22,
         });

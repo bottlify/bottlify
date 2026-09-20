@@ -29,6 +29,7 @@ import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
     D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
@@ -323,6 +324,9 @@ test('the interrogation a program does before it draws is answered from facts', 
     const mode = 0x3200;
     assert.equal(h.device(device, 'GetDisplayMode', [mode]), D3D_OK);
     assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.Width), SCREEN.width);
+    // At the rate the enumerated modes carry: a program listing the rates of
+    // a size and selecting the current one finds it in its own list.
+    assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate), REFRESH_HZ);
 
     assert.equal(h.release(device), 0, 'the device let go of everything it held');
     // And its pointer stops resolving. This used to assert the count through
