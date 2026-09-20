@@ -25,7 +25,7 @@
  */
 
 import { formRegion } from '../region.js';
-import { emitRegion, prepareModule } from '../emit/region.js';
+import { emitRegion, mathImports, prepareModule } from '../emit/region.js';
 import { isX87 } from '../emit/x87.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features as probeFeatures } from '../wasm/features.js';
@@ -238,7 +238,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const module = await WebAssembly.compile(m.toBytes());
                 instance = await WebAssembly.instantiate(module, {
-                    env: { memory, getEflags: imports.getEflags },
+                    env: { memory, getEflags: imports.getEflags, ...mathImports() },
                 });
             }
             catch (e){

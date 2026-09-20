@@ -14,7 +14,7 @@
 import { formRegion } from '../region.js';
 import { ModuleBuilder } from '../wasm/encoder.js';
 import { features } from '../wasm/features.js';
-import { emitRegion, prepareModule } from '../emit/region.js';
+import { emitRegion, prepareModule, mathImports } from '../emit/region.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
 
@@ -101,7 +101,7 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
                 new WebAssembly.Module(built); // throws with the engine's message
             }
             const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
-                env: { memory },
+                env: { memory, ...mathImports() },
             });
             const run = /** @type {(label: number, budget: number) => number} */ (
                 /** @type {any} */ (instance.exports).region);

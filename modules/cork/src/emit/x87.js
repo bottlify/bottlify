@@ -29,7 +29,9 @@
  * stores and `frndint`, and precision control set to single rounds every
  * arithmetic result to a float (extended is treated as double). Exception
  * masks are not honoured: an exception behaves as masked. The
- * transcendentals are the next step; the environment forms end a region.
+ * transcendentals go through the host's `Math`, as the emulator's do, so
+ * the two agree bit for bit on one engine; the environment forms end a
+ * region.
  */
 
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
@@ -81,8 +83,7 @@ export function isX87(instruction){
 
 /** The instructions this step leaves to the other executor. */
 const LEFT_OUT = new Set([
-    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp',
-    'fsin', 'fcos', 'fsincos', 'fptan', 'fpatan', 'f2xm1', 'fyl2x', 'fyl2xp1', 'fnclex',
+    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp', 'fnclex',
 ]);
 
 /**
@@ -123,8 +124,12 @@ export function step(instruction, state){
     switch (op)
     {
         case 'fld': case 'fild': case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e':
-        case 'fldln2': case 'fldlg2': case 'fldl2t': case 'fxtract':
+        case 'fldln2': case 'fldlg2': case 'fldl2t': case 'fxtract': case 'fsincos':
+        case 'fptan':
             push();
+            return next;
+        case 'fpatan': case 'fyl2x': case 'fyl2xp1':
+            pop();
             return next;
         case 'fstp': case 'fistp': case 'fisttp': case 'faddp': case 'fsubp': case 'fsubrp':
         case 'fmulp': case 'fdivp': case 'fdivrp': case 'fcomp': case 'fucomp': case 'fcomip':
@@ -545,7 +550,8 @@ export function emitX87(e, instruction, flagsLive){
     /**
      * Rounds the f64 on the stack to a float when precision control says
      * single (PC = 00): the processor's 24-bit results, as a program that
-     * set them expects. Extended is treated as double.
+     * set them expects. Extended is treated as double. Only the arithmetic
+     * and the square root are subject to it, as on the processor.
      */
     const byPrecision = ()=>{
         // The mantissa rounded to 24 bits, to nearest even, in the double's
@@ -744,7 +750,6 @@ export function emitX87(e, instruction, flagsLive){
                     .op(I64.shl).op(F64.reinterpretI64).op(F64.mul);
                 b.localGet(Local.count).localGet(Local.t0).op(I32.sub).localSet(Local.count);
             }
-            byPrecision();
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
@@ -790,6 +795,120 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(x.temp);
             orIndefinite();
             push();
+            return finish();
+        }
+        case 'fsin': case 'fcos': case 'fsincos': case 'fptan':
+        {
+            // Out of the reduction range (|x| >= 2^63) the register is left
+            // and C2 says so; the emulator has no such limit, and a program
+            // that meets it is past the point of a meaningful answer.
+            const math = e.context.math;
+            guard([0], op === 'fsincos' || op === 'fptan');
+            b.localGet(Local.x87Status).i32const(~Status.C2).op(I32.and).localSet(Local.x87Status);
+            b.localGet(st(0)).localSet(x.temp);
+            b.localGet(x.temp).op(F64.abs).f64const(2 ** 63).op(F64.lt);
+            b.localGet(x.temp).localGet(x.temp).op(F64.eq).op(I32.and); // and not a NaN
+            b.localGet(Local.t1).op(I32.eqz).op(I32.and);
+            e.openIf('reduced', EMPTY);
+            if (op === 'fsincos')
+            {
+                b.localGet(x.temp).call(math.sin);
+                b.localSet(st(0));
+                dirty(0);
+                b.localGet(x.temp).call(math.cos);
+                push();
+            }
+            else if (op === 'fptan')
+            {
+                b.localGet(x.temp).call(math.tan);
+                b.localSet(st(0));
+                dirty(0);
+                b.f64const(1);
+                push();
+            }
+            else
+            {
+                b.localGet(x.temp).call(op === 'fsin' ? math.sin : math.cos);
+                b.localSet(st(0));
+                dirty(0);
+            }
+            b.else();
+            // A NaN or an empty register: the indefinite in ST0 (and a push of
+            // it); out of range: C2 and nothing else.
+            b.localGet(x.temp).localGet(x.temp).op(F64.ne).localGet(Local.t1).op(I32.or);
+            e.openIf('invalid', EMPTY);
+            indefinite();
+            b.localSet(st(0));
+            dirty(0);
+            if (op === 'fsincos' || op === 'fptan')
+            {
+                indefinite();
+                push();
+            }
+            b.else();
+            setStatus(Status.C2);
+            e.close();
+            e.close();
+            // The tracker's state is the one with the push; the no-push path
+            // is left on an exit with C2, which a program does not take.
+            if (op === 'fsincos' || op === 'fptan')
+            {
+                b.i32const(next.top).localSet(Local.x87Top);
+            }
+            return finish();
+        }
+        case 'fpatan':
+        {
+            // ST1 = atan2(ST1, ST0), then a pop.
+            guard([0, 1], false);
+            b.localGet(st(1)).localGet(st(0)).call(e.context.math.atan2);
+            orIndefinite();
+            b.localSet(st(1));
+            dirty(1);
+            popN(1);
+            return finish();
+        }
+        case 'f2xm1':
+            guard([0], false);
+            b.localGet(st(0)).call(e.context.math.exp2m1);
+            orIndefinite();
+            b.localSet(st(0));
+            dirty(0);
+            return finish();
+        case 'fyl2x': case 'fyl2xp1':
+        {
+            // ST1 = ST1 * log2(ST0) (or of ST0 + 1), then a pop: a zero
+            // argument is a zero-divide, a negative one invalid.
+            const math = e.context.math;
+            guard([0, 1], false);
+            b.localGet(st(0)).localSet(x.temp);
+            if (op === 'fyl2x')
+            {
+                b.localGet(x.temp).f64const(0).op(F64.eq);
+                b.localGet(st(1)).op(F64.abs).f64const(Infinity).op(F64.lt).op(I32.and);
+                b.localGet(st(1)).f64const(0).op(F64.ne).op(I32.and);
+                e.openIf('zero', EMPTY);
+                setStatus(Status.ZE);
+                e.close();
+                b.localGet(x.temp).f64const(0).op(F64.lt);
+                e.openIf('negative', EMPTY);
+                setStatus(Status.IE);
+                e.close();
+                b.localGet(st(1)).localGet(x.temp).call(math.log2).op(F64.mul);
+            }
+            else
+            {
+                b.localGet(x.temp).f64const(-1).op(F64.lt);
+                e.openIf('negative', EMPTY);
+                setStatus(Status.IE);
+                e.close();
+                b.localGet(st(1)).localGet(x.temp).call(math.log1p).f64const(Math.LN2).op(F64.div)
+                    .op(F64.mul);
+            }
+            orIndefinite();
+            b.localSet(st(1));
+            dirty(1);
+            popN(1);
             return finish();
         }
         case 'fprem': case 'fprem1':

@@ -49,6 +49,24 @@ import {
     x87Prologue,
 } from './x87.js';
 
+/**
+ * The host functions a module imports for the transcendentals, by name; an
+ * instantiation supplies each from `Math` (`mathImports()`).
+ */
+export const MATH_IMPORTS = Object.freeze([
+    'sin', 'cos', 'tan', 'atan2', 'exp2m1', 'log2', 'log1p',
+]);
+
+/** The import object entries for `MATH_IMPORTS`. */
+export function mathImports(){
+    return {
+        sin: Math.sin, cos: Math.cos, tan: Math.tan, atan2: Math.atan2,
+        /** @param {number} x */
+        exp2m1: x=>Math.expm1(x * Math.LN2),
+        log2: Math.log2, log1p: Math.log1p,
+    };
+}
+
 /** How a run of translated code came back, as the low byte of the result. */
 export const Exit = Object.freeze({
     UNTRANSLATED: 0, BUDGET: 1, TRAP: 2, HALT: 3, FAULT: 4, STALE: 5,
@@ -99,6 +117,7 @@ const LOCAL_TYPES = [
  * @property {number} f80ToF64         the extended-precision readers
  * @property {number} f64ToF80
  * @property {number} round            the rounding-control helper
+ * @property {Record<string, number>} math  the transcendentals imported from the host
  */
 
 /**
@@ -122,12 +141,23 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
     const getEflags = layout.flagsChanged >= 0
         ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
         : undefined;
+    // The transcendentals wasm has no operation for, as the host's Math.
+    const unary = m.type({ params: [ValType.f64], results: [ValType.f64] });
+    const binary = m.type({ params: [ValType.f64, ValType.f64], results: [ValType.f64] });
+    /** @type {Record<string, number>} */
+    const math = {};
+    for (const name of MATH_IMPORTS)
+    {
+        math[name] = m.importFunction('env', name, name === 'atan2' ? binary : unary);
+    }
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
     const materialise = addMaterialiseHelper(m);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
     const round = addRoundHelper(m);
     /** @type {ModuleContext} */
-    const context = { m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round };
+    const context = {
+        m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
+    };
     if (getEflags !== undefined)
     {
         context.getEflags = getEflags;

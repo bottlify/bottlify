@@ -58,7 +58,11 @@ emulator's tagged-double form is read and written directly, a true 80-bit regist
 converted inline. The control word is honoured at run time: rounding control rounds the
 integer stores and `frndint`, precision control set to single rounds every arithmetic
 result's mantissa to 24 bits (extended is treated as double); exception masks are not
-honoured, an exception behaves as masked. What the emulator's own compiler compiled is not protected from a store made by
+honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `fsincos`,
+`fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
+translated module, as the emulator's do, so the two agree on one engine; the environment
+forms (`fnsave`, `frstor`, `fldenv`, `fnstenv`, `fxsave`, `fxrstor`) end a region and run on the
+emulator. What the emulator's own compiler compiled is not protected from a store made by
 translated code (the emulator sees only its own stores); a program that writes code it then
 runs through the emulator is the case the handoff step's fork change is to close.
 
