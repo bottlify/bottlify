@@ -308,6 +308,69 @@ test('byte-exact: a triangle from a locked vertex buffer covers the pixels it na
             'and left of the vertical edge');
     });
 
+test('the frame record says what was cleared, what was drawn and where, and what is shown',
+    async()=>{
+        // The datum that decides a black or a frozen picture without a
+        // screenshot: a frame that only cleared, or drew only into a target
+        // that is not the one presented, reads as such in the history.
+        const h = harness({ width: 8, height: 8 });
+        const { device } = h;
+        /** @type {{ buffer?: any }} */
+        const created = {};
+        assert.equal(device.CreateVertexBuffer(3 * TRIANGLE_STRIDE, D3DUSAGE.WRITEONLY,
+            FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        const at = /** @type {number} */ (locked.pBits);
+        [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>
+            h.write(at + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 0, 255))));
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+
+        // Frame 1: a clear of the back buffer and nothing drawn.
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(0x12, 0x34, 0x56), 1, 0), D3D_OK);
+        await h.present();
+
+        // Frame 2: one draw into an offscreen target, then one into the back buffer.
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, target.surface), D3D_OK);
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(1, 2, 3), 1, 0), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.SetViewport({ X: 2, Y: 2, Width: 4, Height: 4, MinZ: 0, MaxZ: 1 }),
+            D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const frames = h.device.diagnostics().recentFrames;
+        assert.equal(frames.length, 2);
+        const pick = (/** @type {any} */ frame)=>({
+            draws: frame.draws, clears: frame.clears, clearColor: frame.clearColor,
+            offscreenDraws: frame.offscreenDraws, offscreenTargets: frame.offscreenTargets,
+            viewport: frame.viewport, target: frame.target,
+        });
+        assert.deepEqual(pick(frames[0]), {
+            draws: 0, clears: 1, clearColor: '#ff123456', offscreenDraws: 0,
+            offscreenTargets: 0, viewport: '0,0 8x8', target: '8x8',
+        });
+        assert.deepEqual(pick(frames[1]), {
+            // The offscreen clear is counted but its colour is not the back buffer's.
+            draws: 2, clears: 1, clearColor: '', offscreenDraws: 1, offscreenTargets: 1,
+            viewport: '2,2 4x4', target: '8x8',
+        });
+        back.surface.release();
+        target.surface.release();
+    });
+
 test('a stream bound at an offset draws from there, not from the start of the buffer',
     async()=>{
         const h = harness({ width: 8, height: 8 });

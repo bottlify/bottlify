@@ -818,7 +818,7 @@ export const graphicsModule = {
                 const screen = desktop();
                 if (screen)
                 {
-                    state.presenter.present(screen);
+                    state.presenter.present({ ...screen, label: 'desktop' });
                 }
             },
         });

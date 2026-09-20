@@ -151,8 +151,8 @@ test('recorded: a burst of changes is one upload, one frame and one present', ()
     assert.equal(h.presented.length, 1);
     assert.equal(h.presented[0].surface.format, 'bgra8unorm');
     assert.deepEqual(h.presenter.diagnostics(), {
-        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, lastBuffer: 0x1000,
-        pending: false, claimed: 0, failures: [], disposed: false,
+        presents: 3, uploads: 1, bytes: 64, shownByOwner: 0, shown: 0, shownBy: {},
+        lastBuffer: 0x1000, pending: false, claimed: 0, failures: [], disposed: false,
     });
 
     h.presenter.present(surface);
@@ -303,3 +303,41 @@ test('the run\'s presenter serves two machine lifetimes, configures the canvas o
         assert.equal(gpu.of('copyTextureToTexture').length, 2,
             'each lifetime showed its own frame');
     });
+
+test('every canvas copy is recorded under the label of what was shown', ()=>{
+    // A device draws the picture and something else paints the desktop over
+    // it: on the canvas both are "a frame". The record of copies names each
+    // one's source, so the two are told apart without a screenshot.
+    const gpu = createFakeDevice();
+    const ram = new Uint8Array(0x1000);
+    const presenter = createPresenter({
+        device: gpu.device, queue: gpu.queue, screen: gpu.screen, canvas: gpu.canvas,
+        now: ()=>0,
+    });
+    const backend = createBackend({
+        device: gpu.device, queue: gpu.queue,
+        presentTo: frame=>presenter.show(frame), now: ()=>0,
+    });
+    presenter.attach({
+        backend: ()=>backend,
+        readMemory: (address, length)=>ram.slice(address, address + length),
+    });
+
+    presenter.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
+        palette: null, label: 'desktop' });
+    presenter.flush();
+    presenter.present({ buffer: 0x100, width: 1, height: 1, pitch: 4, bitCount: 32,
+        palette: null });
+    presenter.flush();
+
+    // A target the GPU drew, shown through the same path a device's present takes.
+    const target = backend.createSurface({ width: 1, height: 1, format: 'bgra8unorm',
+        label: 'target', usage: backend.TextureUsage.RENDER_ATTACHMENT });
+    const frame = backend.beginFrame();
+    frame.present(target);
+    frame.end();
+
+    assert.deepEqual(presenter.diagnostics().shownBy, { desktop: 1, 'guest bytes': 1, target: 1 });
+    assert.deepEqual(presenter.presented().history.map(record=>record.label),
+        ['desktop', 'guest bytes', 'target']);
+});

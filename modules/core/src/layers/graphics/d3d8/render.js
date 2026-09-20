@@ -2931,16 +2931,19 @@ export function createRenderer(options){
      *
      * @returns {{ draws: number, placeholder: number, truncated: number, fogged: number,
      *             fog: string, fogs: Map<string, number>,
-     *     uploads: number, textures: Set<any> }}
+     *     uploads: number, textures: Set<any>, clears: number, clearColor: number,
+     *     offscreenDraws: number, offscreenTargets: Set<any> }}
      */
     const blankFrameStats = ()=>({
         draws: 0, placeholder: 0, truncated: 0, uploads: 0, fogged: 0, fog: '',
-        fogs: new Map(), textures: new Set(),
+        fogs: new Map(), textures: new Set(), clears: 0, clearColor: -1, offscreenDraws: 0,
+        offscreenTargets: new Set(),
     });
     let frameStats = blankFrameStats();
     /** @type {{ index: number, draws: number, placeholder: number, truncated: number,
      *     uploads: number, textures: number, fogged: number, fog: string, fogs: string,
-     *     lights: string }[]} */
+     *     lights: string, clears: number, clearColor: string, offscreenDraws: number,
+     *     offscreenTargets: number, viewport: string, target: string }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
 
@@ -3272,6 +3275,11 @@ export function createRenderer(options){
         }
         kept++;
         frameStats.draws++;
+        if (model.renderTarget !== model.backBuffer)
+        {
+            frameStats.offscreenDraws++;
+            frameStats.offscreenTargets.add(model.renderTarget);
+        }
         for (const binding of prepared.stageBindings)
         {
             if (binding.placeholder)
@@ -3919,6 +3927,11 @@ export function createRenderer(options){
                 return;
             }
             counters.clears++;
+            frameStats.clears++;
+            if ((flags & D3DCLEAR.TARGET) !== 0 && model.renderTarget === model.backBuffer)
+            {
+                frameStats.clearColor = color >>> 0;
+            }
             const whole = areas.length === 1 && areas[0].x1 === 0 && areas[0].y1 === 0
                 && areas[0].x2 === target.Width && areas[0].y2 === target.Height;
             if (whole)
@@ -4240,6 +4253,8 @@ export function createRenderer(options){
             lastDump = dump;
             dump = [];
             kept = 0;
+            const shown = describe(model.backBuffer);
+            const rect = model.viewport.rect;
             frameHistory.push({
                 index: counters.frames,
                 draws: frameStats.draws,
@@ -4247,6 +4262,16 @@ export function createRenderer(options){
                 truncated: frameStats.truncated,
                 uploads: frameStats.uploads,
                 textures: frameStats.textures.size,
+                // What decides a black or a frozen picture: a frame that only
+                // cleared, or drew only into targets that are not the one
+                // shown, or a viewport that was not the back buffer at all.
+                clears: frameStats.clears,
+                clearColor: frameStats.clearColor < 0
+                    ? '' : `#${frameStats.clearColor.toString(16).padStart(8, '0')}`,
+                offscreenDraws: frameStats.offscreenDraws,
+                offscreenTargets: frameStats.offscreenTargets.size,
+                viewport: `${rect.x},${rect.y} ${rect.width}x${rect.height}`,
+                target: `${shown.Width}x${shown.Height}`,
                 fogged: frameStats.fogged,
                 fog: frameStats.fog,
                 fogs: [...frameStats.fogs].map(([setting, draws])=>`${setting}x${draws}`)

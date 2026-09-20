@@ -68,6 +68,7 @@ const six = value=>(value << 2) | (value >>> 4);
  * @property {number} pitch     Bytes per row, which may exceed the pixels' worth.
  * @property {number} bitCount  8, 16 or 32.
  * @property {number[] | null} palette  PALETTEENTRY dwords for an 8-bit surface.
+ * @property {string} [label]   What the surface is, for the record of what was shown.
  */
 
 /**
@@ -199,11 +200,21 @@ export function createPresenter(options = {}){
 
     /** @type {any} the backend surface, remade when the primary changes shape */
     let texture = null;
+    /** What the texture holds: the label of the guest surface last uploaded into it. */
+    let uploadedLabel = 'guest bytes';
     /** @type {PresentableSurface | null} what to show at the next flush */
     let pending = null;
     /** @type {Uint8Array | null} */
     let converted = null;
     const counters = { presents: 0, uploads: 0, bytes: 0, shownByOwner: 0, shown: 0 };
+    /**
+     * Canvas copies by the label of the surface shown: a Direct3D target, a
+     * GL swapchain, or the guest bytes of a primary or the desktop. A picture
+     * that a device draws and something else paints over is two labels
+     * rising together, and this is where that is seen.
+     * @type {Record<string, number>}
+     */
+    const shownBy = {};
     /** The address of the surface last handed over: which picture is on show. */
     let lastBuffer = 0;
     /** @type {string[]} */
@@ -267,6 +278,7 @@ export function createPresenter(options = {}){
             return;
         }
         const target = textureFor(using, surface);
+        uploadedLabel = surface.label ?? 'guest bytes';
         const rowBytes = surface.width * 4;
         const needed = rowBytes * surface.height;
         if (!converted || converted.byteLength !== needed)
@@ -344,9 +356,11 @@ export function createPresenter(options = {}){
                 { width: surface.width, height: surface.height, depthOrArrayLayers: 1 });
             queue.submit([encoder.finish()]);
             counters.shown++;
+            const label = surface === texture ? uploadedLabel : (surface.label ?? 'surface');
+            shownBy[label] = (shownBy[label] ?? 0) + 1;
             const record = {
                 index: frame.frameIndex, at: startedAt, ms: now() - startedAt,
-                w: surface.width, h: surface.height, failed: false,
+                w: surface.width, h: surface.height, failed: false, label,
             };
             history.push(record);
             if (history.length > 600)
@@ -365,6 +379,7 @@ export function createPresenter(options = {}){
         catch (e){
             const record = {
                 index: frame.frameIndex, at: startedAt, ms: -1, w: 0, h: 0, failed: true,
+                label: surface === texture ? uploadedLabel : (surface.label ?? 'surface'),
             };
             history.push(record);
             if (history.length > 600)
@@ -446,6 +461,7 @@ export function createPresenter(options = {}){
         diagnostics(){
             return {
                 ...counters,
+                shownBy: { ...shownBy },
                 lastBuffer,
                 pending: pending !== null,
                 claimed: claims.size,
