@@ -17,6 +17,10 @@ Two tracked documents, because they are consulted differently, plus the local wo
   translator that replaces the vendored emulator behind the `cpu` layer: why the emulator's
   throughput is structural, what is taken from it (knowledge and test data), what is left out,
   the architecture, the hybrid/differential migration, and what it changes for media.
+- **`cork-plan.md`** — the step-by-step integration plan for cork: five milestones broken into
+  steps of at most a day, each with its files, contracts, tests, acceptance number and what could
+  go wrong; written against the design above, with the owner's correction that the emulator stays
+  a supported engine beside cork.
 
 Three `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
 the follow-ups roadmap — what is decided and not yet built after the phased plan — the
