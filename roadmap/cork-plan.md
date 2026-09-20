@@ -1,6 +1,6 @@
 # Cork — the integration plan
 
-**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract), 1.1 (`engine` configuration, the hybrid host with no translator), 1.3 (the machine snapshot and its compare; the emulator host's SSE/x87 record accessors), 1.5 (the wasm encoder and the feature probe), 1.2 (the corpus: 15 608 cases published by the fork's CI since build-1460531, all run on the emulator through the harness in under two seconds; 24 diverge from the hardware recording as the pinned emulator is known to -- the sign of the NaN a square root of a negative leaves, and `fild m64` past 53 bits -- and are listed as such in the itest), 1.4 (the differential driver, proved by replaying every corpus case on the emulator against itself: 2.3 million instructions, zero divergences, a tampered word reported alone). Milestone 1 is complete. 2.1 (the opcode tables and the decoder: a linear decode of every corpus image reaches its halt, 2.19 million instructions over 376 operations, 862 invalid encodings named at the address the hardware raised #UD, zero refusals; the corpus taught the table nine undocumented x87 aliases, arpl, popcnt and the register-form prefetch no-ops), 2.2 (the pure evaluator of the integer instructions with the eager flag algebra, and the region former: blocks along fall-through and direct branches, splits at jump targets, caps, refusals and the exit kinds), 2.3 (the region emitter: one wasm function per region with a block dispatcher, registers in locals, lazy flags with a per-block dead-flag pass and a materialising helper proven against the model on 27 000 random records, the integer set; every instruction test agrees with the model, and the 26 corpus cases the emitter translates in full leave the state the hardware left -- the rest wait on MMX/SSE moves and the rarer forms). The design this plan carries out
+**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract), 1.1 (`engine` configuration, the hybrid host with no translator), 1.3 (the machine snapshot and its compare; the emulator host's SSE/x87 record accessors), 1.5 (the wasm encoder and the feature probe), 1.2 (the corpus: 15 608 cases published by the fork's CI since build-1460531, all run on the emulator through the harness in under two seconds; 24 diverge from the hardware recording as the pinned emulator is known to -- the sign of the NaN a square root of a negative leaves, and `fild m64` past 53 bits -- and are listed as such in the itest), 1.4 (the differential driver, proved by replaying every corpus case on the emulator against itself: 2.3 million instructions, zero divergences, a tampered word reported alone). Milestone 1 is complete. 2.1 (the opcode tables and the decoder: a linear decode of every corpus image reaches its halt, 2.19 million instructions over 376 operations, 862 invalid encodings named at the address the hardware raised #UD, zero refusals; the corpus taught the table nine undocumented x87 aliases, arpl, popcnt and the register-form prefetch no-ops), 2.2 (the pure evaluator of the integer instructions with the eager flag algebra, and the region former: blocks along fall-through and direct branches, splits at jump targets, caps, refusals and the exit kinds), 2.3 (the region emitter: one wasm function per region with a block dispatcher, registers in locals, lazy flags with a per-block dead-flag pass and a materialising helper proven against the model on 27 000 random records, the integer set; every instruction test agrees with the model, and the 26 corpus cases the emitter translates in full leave the state the hardware left -- the rest wait on MMX/SSE moves and the rarer forms), 2.5 (SSE and MMX: xmm registers as v128 locals and mm registers as i64 locals loaded in the prologue and stored in the epilogue, the moves, packed and scalar float arithmetic, min/max by compare and bitselect, the cmpps predicates, comiss into the flag word, shuffles and unpacks, the conversions with the indefinite integer, the SSE2 integer set with saturation, the masked stores, MMX resetting the x87 stack; a probe finds whether the host's default NaN carries the sign x86's does and, where it does not, invalid float operations are fixed up to the processor's 0xffc00000 -- the development VM is arm64 and needs it; with the moves in, 11 225 corpus cases translate in full and every one leaves the state the hardware left, the 4 383 left out being x87 (6 690 generated cases start with finit) and the integer forms still to come: shifts by cl and by one at byte and word width, shld/shrd, rcl/rcr, byte and word mul/div, popcnt; three defects the corpus found on the way were the segment-register operand deciding the instruction's size, the carry a pending add left being folded after inc had overwritten its operand, and pusha reusing the push helper's scratch for the esp it pushes). The design this plan carries out
 is [`cork-x86-translator.md`](./cork-x86-translator.md) (and the first entry of
 [`decisions.md`](./decisions.md) §B); read that first. This document says *in which order, in
 which files, behind which contracts, checked by which tests and accepted by which number* the
@@ -124,8 +124,8 @@ modules/cork/
     emit/flags.js                 lazy flags: recording and materialisation
     emit/memory.js                loads and stores, the page-flag test, fault exits
     emit/x87.js                   the stack tracker, fldcw modes, f64 arithmetic
-    emit/sse.js                   xmm as v128, MXCSR-independent paths
-    emit/mmx.js                   mm as i64 aliasing the x87 registers
+    emit/simd.js                  xmm as v128 and mm as i64 aliasing the x87 registers
+    wasm/simd.js                  the SIMD opcode numbers the emitter uses
     emit/control.js               jumps, calls, returns, the entry hash, traps, hlt
     runtime/layout.js             OWN_LAYOUT, and the layout read off an emulator's views
     runtime/pages.js              the page-flag table and invalidation
@@ -904,8 +904,9 @@ until `emms`; a region that mixes the two classes materialises through the state
 crossover (a store of the i64 and a reload as f64 or the reverse), which the differential
 suite proves rather than the design assuming it rare.
 
-**Files.** Create `cork/emit/sse.js`, `cork/emit/sse.test.js`, `cork/emit/mmx.js`,
-`cork/emit/mmx.test.js`.
+**Files.** Create `cork/emit/simd.js`, `cork/emit/simd.test.js` (one file: the two register
+classes share the read/write helpers and most lowerings), `cork/wasm/simd.js`,
+`cork/wasm/simd.test.js` (every opcode number validated by the engine).
 
 **Contract.** Additions to the emitter's per-instruction dispatch; no new public names. The
 one policy decision: `minps`/`maxps`/`minss`/`maxss` are emitted as `f32x4.lt` +
@@ -1715,6 +1716,15 @@ rewrite later, so every step that touches them respects them and a test pins eac
   makes 64-bit hard; those are.
 
 ## 8. What this plan could not verify
+
+- **The host's default NaN.** An invalid float operation (0/0, inf - inf, the square root of
+  a negative) leaves x86's default NaN, 0xffc00000, sign set; an arm64 host's engine leaves
+  0x7fc00000. `features().defaultNaNNegative` probes `0 / 0` once, and on a host whose
+  answer is positive the SSE emitter follows every float operation with a fix-up (a NaN lane
+  whose inputs were not NaN becomes the default NaN); an x86 host emits nothing extra. The
+  corpus proves the fix-up on the arm64 development VM; that an x86 host indeed leaves the
+  hardware bits without it is expected of the engine and is verified the first time the
+  corpus runs there.
 
 - **The corpus asset.** The fork's CI runs the corpus but does not publish it; step 1.2 adds
   that publication. The count of cases in the built corpus (hand-written 127 plus generated)

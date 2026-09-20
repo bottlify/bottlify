@@ -390,7 +390,10 @@ function decodeAt(byte, eip, consumed){
         {
             memory = true;
         }
-        if (index === 0)
+        // The main size follows the first operand, except a segment register:
+        // `push es` moves a dword unless the prefix says a word, and
+        // `mov ax, ds` writes the operand size.
+        if (index === 0 && operand.kind !== 'seg')
         {
             mainSize = operand.size;
         }

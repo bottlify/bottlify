@@ -132,6 +132,22 @@ export class Body {
         return this.op(0xfd, leb128u(opcode));
     }
 
+    /**
+     * A SIMD memory instruction: opcode, memarg and, for the lane forms, the
+     * lane index.
+     *
+     * @param {number} opcode
+     * @param {{ align: number, offset: number, lane?: number }} memarg  align as its log2
+     */
+    simdMem(opcode, { align, offset, lane }){
+        const bytes = [...leb128u(opcode), ...leb128u(align), ...leb128u(offset)];
+        if (lane !== undefined)
+        {
+            bytes.push(lane);
+        }
+        return this.op(0xfd, bytes);
+    }
+
     unreachable(){
         return this.op(0x00);
     }

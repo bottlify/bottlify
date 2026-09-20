@@ -63,6 +63,7 @@ test('translated code leaves what the hardware left, on every case it translates
                 reg32[i] = m.reg(name) | 0;
             });
             const bss = m.read(BSS, BSS_SIZE);
+            const state = new DataView(m.memory.buffer);
             const outcome = {
                 exception: exit.kind === 4
                     ? { name: VECTOR_NAMES.get(exit.vector) ?? `#${exit.vector}`, eip: exit.eip }
@@ -72,8 +73,10 @@ test('translated code leaves what the hardware left, on every case it translates
                 eip: exit.eip,
                 st: /** @type {(number | 'invalid')[]} */ (Array(8).fill(0)),
                 fstat: 0,
-                mm: new Int32Array(16),
-                xmm: new Int32Array(32),
+                mm: Int32Array.from({ length: 16 }, (_, word)=>state.getInt32(
+                    m.layout.x87 + (word >> 1) * 16 + (word & 1) * 4, true)),
+                xmm: Int32Array.from({ length: 32 }, (_, word)=>state.getInt32(
+                    m.layout.xmm + word * 4, true)),
                 memory: new Int32Array(bss.buffer, bss.byteOffset, BSS_SIZE / 4),
                 eflags: m.eflags(),
             };

@@ -56,7 +56,10 @@ export const Local = Object.freeze({
     reg: 2,
     kind: 10, res: 11, op1: 12, op2: 13, cin: 14, flags: 15,
     retired: 16, eip: 17, t0: 18, t1: 19, t2: 20, addr: 21, t64: 22, t64b: 23,
-    count: 24,
+    count: 24, f0: 25, f1: 26, d0: 27, d1: 28, mmxTouched: 29,
+    // 30, 31, 32: three v128 scratch locals when SIMD is available; the xmm
+    // and mm locals a region uses follow, allocated per region.
+    vec: 30,
 });
 const LOCAL_TYPES = [
     // the eight registers
@@ -66,6 +69,8 @@ const LOCAL_TYPES = [
     ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, ValType.i32, // retired..addr
     ValType.i64, ValType.i64,
     ValType.i32, // count
+    ValType.f32, ValType.f32, ValType.f64, ValType.f64, // f0 f1 d0 d1
+    ValType.i32, // mmxTouched
 ];
 
 /**
@@ -76,7 +81,7 @@ const LOCAL_TYPES = [
  * @property {number} regionType       the function type (i32, i32) → i32
  * @property {number} materialise      the flag helper's function index
  * @property {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @property {{ simd: boolean, tailCalls: boolean }} features
+ * @property {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  */
 
 /**
@@ -85,7 +90,7 @@ const LOCAL_TYPES = [
  *
  * @param {import('../wasm/encoder.js').ModuleBuilder} m
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
- * @param {{ simd: boolean, tailCalls: boolean }} features
+ * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
  * @returns {ModuleContext}
  */
@@ -150,6 +155,68 @@ export class RegionEmitter {
         /** Instructions retired in the current block so far, to charge at its end. */
         this.blockRetired = 0;
         this.instructions = 0;
+        // The vector registers the region touches, found by a scan, each given
+        // a local: loaded in the prologue, and written back when written.
+        /** @type {Map<number, number>} xmm index -> local */
+        this.xmmLocals = new Map();
+        /** @type {Map<number, number>} mm index -> local */
+        this.mmLocals = new Map();
+        /** @type {Set<number>} */
+        this.xmmWritten = new Set();
+        /** @type {Set<number>} */
+        this.mmWritten = new Set();
+        /** @type {number[]} */
+        this.localTypes = [...LOCAL_TYPES];
+        if (context.features.simd)
+        {
+            this.localTypes.push(ValType.v128, ValType.v128, ValType.v128);
+            for (const block of region.blocks)
+            {
+                for (const instruction of block.instructions)
+                {
+                    for (const operand of instruction.operands)
+                    {
+                        if (operand.kind === 'xmm' && !this.xmmLocals.has(/** @type {number} */ (operand.reg)))
+                        {
+                            this.xmmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
+                            this.localTypes.push(ValType.v128);
+                        }
+                        if (operand.kind === 'mm' && !this.mmLocals.has(/** @type {number} */ (operand.reg)))
+                        {
+                            this.mmLocals.set(/** @type {number} */ (operand.reg), this.localTypes.length + 2);
+                            this.localTypes.push(ValType.i64);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** The local an xmm register lives in. @param {number} index @param {boolean} [write] */
+    xmmLocal(index, write = false){
+        if (write)
+        {
+            this.xmmWritten.add(index);
+        }
+        return /** @type {number} */ (this.xmmLocals.get(index));
+    }
+
+    /** The local an mm register lives in. @param {number} index @param {boolean} [write] */
+    mmLocal(index, write = false){
+        if (write)
+        {
+            this.mmWritten.add(index);
+        }
+        return /** @type {number} */ (this.mmLocals.get(index));
+    }
+
+    mmxTouchedLocal(){
+        return Local.mmxTouched;
+    }
+
+    /** One of the three v128 scratch locals. @param {number} which */
+    vecTempLocal(which){
+        return Local.vec + which;
     }
 
     /** The flag locals, in the shape the formulas take. */
@@ -186,7 +253,7 @@ export class RegionEmitter {
         this.close(); // out
         this.epilogue();
         const functionIndex = this.context.m.function(
-            this.context.regionType, LOCAL_TYPES, b.toBytes());
+            this.context.regionType, this.localTypes, b.toBytes());
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
             instructions: this.instructions,
@@ -244,6 +311,15 @@ export class RegionEmitter {
         b.i32const(0).load('i32', { offset: layout.eflags }).localSet(Local.flags);
         b.i32const(0).localSet(Local.kind);
         b.i32const(0).localSet(Local.retired);
+        b.i32const(0).localSet(Local.mmxTouched);
+        for (const [index, local] of this.xmmLocals)
+        {
+            b.i32const(0).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
+        }
+        for (const [index, local] of this.mmLocals)
+        {
+            b.i32const(0).load('i64', { offset: layout.x87 + index * 16 }).localSet(local);
+        }
     }
 
     /** Writes every local back and returns the kind in `t0`. */
@@ -267,6 +343,33 @@ export class RegionEmitter {
         b.i32const(0);
         b.i32const(0).load('i32', { offset: layout.counter }).localGet(Local.retired).op(I32.add);
         b.store('i32', { offset: layout.counter });
+        for (const index of this.xmmWritten)
+        {
+            b.i32const(0).localGet(this.xmmLocal(index))
+                .storeV128({ offset: layout.xmm + index * 16 });
+        }
+        for (const index of this.mmWritten)
+        {
+            b.i32const(0).localGet(this.mmLocal(index))
+                .store('i64', { offset: layout.x87 + index * 16 });
+            if (layout.x87Format === 'tagged80')
+            {
+                // An MMX write leaves the register's exponent all ones, as the
+                // processor does, so the emulator sees it as it would its own.
+                b.i32const(0).i32const(0xffff)
+                    .store('i32_16', { offset: layout.x87 + index * 16 + 8 });
+            }
+        }
+        if (this.mmLocals.size > 0)
+        {
+            // An MMX instruction ran: the x87 stack's top is zero and every
+            // register is held, as on the processor.
+            b.localGet(Local.mmxTouched);
+            b.if(EMPTY);
+            b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Top });
+            b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
+            b.end();
+        }
         b.localGet(Local.t0);
     }
 

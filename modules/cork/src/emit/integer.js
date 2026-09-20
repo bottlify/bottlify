@@ -26,6 +26,7 @@ import { AF, CF, DF, OF, PF, SF, ZF } from '../decode/table.js';
 import { EMPTY, ValType } from '../wasm/encoder.js';
 import { I32, Kind, MASKS, SIGN_BITS, widthCode } from './flags.js';
 import { Exit, Local } from './region.js';
+import { emitSimd } from './simd.js';
 
 /** i64 opcodes. */
 const I64 = Object.freeze({
@@ -124,6 +125,12 @@ export function emitInstruction(e, instruction, flagsLive){
             logic(e, instruction, flagsLive);
             return true;
         case 'inc': case 'dec':
+            if (flagsLive)
+            {
+                // CF stays: the word must hold it, so make the word whole
+                // first -- before op1 is taken, which the pending record may use.
+                e.materialise();
+            }
             prepare(e, dst);
             readOp(e, dst);
             b.localSet(Local.op1);
@@ -132,8 +139,6 @@ export function emitInstruction(e, instruction, flagsLive){
                 mask(e, size);
                 if (flagsLive)
                 {
-                    // CF stays: the word must hold it, so make the word whole first.
-                    e.materialise();
                     e.record(op === 'inc' ? Kind.INC : Kind.DEC, size);
                 }
             });
@@ -224,26 +229,33 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'pushad':
         {
-            b.localGet(Local.reg + 4).localSet(Local.t2);
+            // The original esp is pushed in its slot; `push` scratches t2, so it
+            // is kept in t1. With a 66 prefix the eight are words.
+            b.localGet(Local.reg + 4).localSet(Local.t1);
             for (let r = 0; r < 8; r++)
             {
-                push(e, 4, ()=>b.localGet(r === 4 ? Local.t2 : Local.reg + r));
+                push(e, size, ()=>b.localGet(r === 4 ? Local.t1 : Local.reg + r));
             }
             return true;
         }
         case 'popad':
             for (let r = 7; r >= 0; r--)
             {
-                b.localGet(Local.reg + 4).load('i32', { offset: e.layout.ramBase });
+                b.localGet(Local.reg + 4)
+                    .load(size === 2 ? 'i32_16u' : 'i32', { offset: e.layout.ramBase });
                 if (r === 4)
                 {
                     b.drop();
+                }
+                else if (size === 2)
+                {
+                    writeReg(e, r, 2, false);
                 }
                 else
                 {
                     b.localSet(Local.reg + r);
                 }
-                b.localGet(Local.reg + 4).i32const(4).op(I32.add).localSet(Local.reg + 4);
+                b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
             }
             return true;
         case 'pushf':
@@ -335,15 +347,21 @@ export function emitInstruction(e, instruction, flagsLive){
             b.localGet(Local.reg + 4).i32const(size).op(I32.add).localSet(Local.reg + 4);
             return true;
         case 'enter':
+        {
             if (/** @type {number} */ (src.value) !== 0)
             {
                 return false;
             }
-            push(e, 4, ()=>b.localGet(Local.reg + 5));
-            b.localGet(Local.reg + 4).localSet(Local.reg + 5);
+            // With a 66 prefix: bp is pushed as a word and only bp is written.
+            // (The instruction's own size is its imm16's; the prefix decides.)
+            const width = instruction.prefixes.operand ? 2 : 4;
+            push(e, width, ()=>b.localGet(Local.reg + 5));
+            b.localGet(Local.reg + 4);
+            writeReg(e, 5, width, false);
             b.localGet(Local.reg + 4).i32const(/** @type {number} */ (dst.value)).op(I32.sub)
                 .localSet(Local.reg + 4);
             return true;
+        }
         case 'loop': case 'loope': case 'loopne':
             if (instruction.prefixes.address)
             {
@@ -424,7 +442,8 @@ export function emitInstruction(e, instruction, flagsLive){
             return true;
         case 'salc':
             e.pushFlag(CF);
-            b.i32const(0).op(I32.sub).i32const(0xff).op(I32.and);
+            b.localSet(Local.t1);
+            b.i32const(0).localGet(Local.t1).op(I32.sub).i32const(0xff).op(I32.and);
             writeReg(e, 0, 1, false);
             return true;
         default:
@@ -452,7 +471,7 @@ export function emitInstruction(e, instruction, flagsLive){
                     return true; // the block's exit branches
                 }
             }
-            return false;
+            return emitSimd(e, instruction, flagsLive);
     }
 }
 

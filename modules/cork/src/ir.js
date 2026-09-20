@@ -472,7 +472,7 @@ export function evaluate(instruction, state){
             const esp = state.reg[4];
             for (let index = 0; index < 8; index++)
             {
-                push(index === 4 ? esp : state.reg[index], 4);
+                push(index === 4 ? esp : state.reg[index], size);
             }
             return;
         }
@@ -480,10 +480,11 @@ export function evaluate(instruction, state){
         {
             for (let index = 7; index >= 0; index--)
             {
-                const value = pop(4);
+                const value = pop(size);
                 if (index !== 4)
                 {
-                    state.reg[index] = value;
+                    state.reg[index] = size === 2
+                        ? (state.reg[index] & 0xffff0000 | value) >>> 0 : value;
                 }
             }
             return;
@@ -536,8 +537,10 @@ export function evaluate(instruction, state){
         case 'enter':
         {
             const frame = /** @type {number} */ (operands[0].value);
-            push(state.reg[5], 4);
-            state.reg[5] = state.reg[4];
+            const width = instruction.prefixes.operand ? 2 : 4;
+            push(state.reg[5], width);
+            state.reg[5] = width === 2
+                ? (state.reg[5] & 0xffff0000 | state.reg[4] & 0xffff) >>> 0 : state.reg[4];
             state.reg[4] = (state.reg[4] - frame) >>> 0;
             return;
         }

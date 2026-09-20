@@ -316,3 +316,71 @@ test('undefined flags aside, every register width write merges into its dword', 
 });
 
 export { SF, OF };
+
+test('inc after a byte add keeps the carry the add left, folded before op1 is reused', ()=>{
+    const r = both([
+        0xb0, 0xf0,                               // mov al, 0xf0
+        0x00, 0xc0,                               // add al, al       CF=1 (0x1e0)
+        0x41,                                     // inc ecx          CF stays 1
+        0xb0, 0x10,                               // mov al, 0x10
+        0x00, 0xc0,                               // add al, al       CF=0
+        0x49,                                     // dec ecx          CF stays 0
+        0x48,                                     // dec eax
+        0xf4,
+    ], { regs: { ecx: 7 } });
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('ecx'), 7);
+    assert.equal(r.m.eflags() & CF, 0);
+    agree(r);
+    const carried = both([0xb0, 0xf0, 0x00, 0xc0, 0x41, 0xf4]);
+    assert.equal(carried.m.eflags() & CF, CF, 'inc kept the carry of add al, al');
+    agree(carried);
+});
+
+test('pusha stores the esp it started with, and the 66 forms move words', ()=>{
+    const r = both([
+        0xb8, 0x11, 0, 0, 0,                      // mov eax, 0x11
+        0xbb, 0x33, 0, 0, 0,                      // mov ebx, 0x33
+        0x60,                                     // pusha
+        0x8b, 0x4c, 0x24, 0x0c,                   // mov ecx, [esp+12]   the pushed esp
+        0x89, 0x0d, 0x00, 0x20, 0, 0,             // mov [0x2000], ecx   (popa restores ecx)
+        0x61,                                     // popa
+        0x66, 0x60,                               // pushaw
+        0x66, 0x8b, 0x54, 0x24, 0x0e,             // mov dx, [esp+14]    the pushed ax
+        0x89, 0x15, 0x04, 0x20, 0, 0,             // mov [0x2004], edx
+        0x66, 0x61,                               // popaw
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.readU32(0x2000), STACK, 'the esp value before the pusha');
+    assert.equal(r.m.readU32(0x2004), 0x11);
+    assert.equal(r.m.reg('esp'), STACK);
+    assert.equal(r.m.reg('ebx'), 0x33);
+    assert.equal(r.m.reg('ecx'), 0, 'popa restored ecx');
+    agree(r);
+});
+
+test('salc, and enter in both operand sizes', ()=>{
+    const r = both([
+        0xf9,                                     // stc
+        0xd6,                                     // salc            al = 0xff
+        0x88, 0xc4,                               // mov ah, al
+        0xf8,                                     // clc
+        0xd6,                                     // salc            al = 0
+        0xbd, 0x78, 0x56, 0x34, 0x12,             // mov ebp, 0x12345678
+        0xc8, 0x08, 0x00, 0x00,                   // enter 8, 0
+        0x8b, 0x4d, 0x00,                         // mov ecx, [ebp]   the pushed ebp
+        0x89, 0xea,                               // mov edx, ebp
+        0xc9,                                     // leave
+        0x66, 0xc8, 0x04, 0x00, 0x00,             // enter 4, 0 (16-bit)
+        0x89, 0xeb,                               // mov ebx, ebp
+        0xf4,
+    ]);
+    assert.equal(r.exit.kind, 3);
+    assert.equal(r.m.reg('eax') & 0xffff, 0xff00);
+    assert.equal(r.m.reg('ecx'), 0x12345678);
+    assert.equal(r.m.reg('edx'), STACK - 4);
+    assert.equal(r.m.reg('ebx'), 0x12340000 | (STACK - 2) & 0xffff, 'only bp written');
+    assert.equal(r.m.reg('esp'), STACK - 2 - 4);
+    agree(r);
+});

@@ -28,26 +28,6 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = features();
-    /**
-     * Instructions the test runner steps over instead of stopping at, while
-     * the emitter lacks them: `pxor xmm, xmm` of a register with itself
-     * (zeroing it -- the corpus header's first instruction) is a no-op on a
-     * machine whose SIMD registers start at zero. Removed with the SIMD step.
-     *
-     * @param {number} eip
-     * @returns {number} bytes to skip, or 0
-     */
-    const stepOver = eip=>{
-        const at = layout.ramBase + eip;
-        const code = bytes();
-        if (code[at] === 0x66 && code[at + 1] === 0x0f && code[at + 2] === 0xef
-            && code[at + 3] >= 0xc0 && ((code[at + 3] >> 3) & 7) === (code[at + 3] & 7))
-        {
-            return 4;
-        }
-        return 0;
-    };
-
     return {
         layout,
         memory,
@@ -192,15 +172,9 @@ export function createTestMachine({ ramSize = 1 << 20 } = {}){
                 // running it again would come straight back again.
                 if (eip === from && this.counter() === before)
                 {
-                    const skip = stepOver(eip);
-                    if (skip === 0)
-                    {
-                        return {
-                            kind: -2, vector: 0, eip, regions, unsupported, retired: budget - left,
-                        };
-                    }
-                    eip += skip;
-                    view().setUint32(layout.eip, eip, true);
+                    return {
+                        kind: -2, vector: 0, eip, regions, unsupported, retired: budget - left,
+                    };
                 }
             }
         },

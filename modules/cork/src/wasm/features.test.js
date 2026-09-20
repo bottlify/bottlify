@@ -17,4 +17,5 @@ test('the probe answers booleans and says what this machine has', ()=>{
     // Printed, not asserted: the record of a run says what the machine had,
     // and the translator's tests skip what it lacks by name.
     console.log(`wasm features: ${JSON.stringify(found)}`);
+    assert.equal(typeof found.defaultNaNNegative, 'boolean');
 });
