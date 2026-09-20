@@ -489,9 +489,11 @@ test('the display enumeration ends', ()=>{
     }
     // Every size of the era, whatever the display: a program's resolution
     // menu is built from exactly this walk.
-    assert.equal(index, 11, 'every size of the era, and then the end');
+    assert.equal(index, 22, 'every size of the era at both rates, and then the end');
     const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
     assert.equal(last, 2560, 'the largest listed is the largest of the era');
+    assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmDisplayFrequency), 120,
+        'the second rate of the last size ends the list');
 });
 
 test('AdjustWindowRectEx grows a client rectangle by the frame the style carries', ()=>{
@@ -907,7 +909,7 @@ test('ChangeDisplaySettingsA sets any listed mode, and the screen follows it', (
     assert.equal(fns.EnumDisplaySettingsA.handler([0, 0xffffffff, DEVMODE_BUFFER]), 1);
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 640,
         'and the current settings answer the mode set');
-    assert.equal(fns.EnumDisplaySettingsA.handler([0, 2, DEVMODE_BUFFER]), 1,
+    assert.equal(fns.EnumDisplaySettingsA.handler([0, 4, DEVMODE_BUFFER]), 1,
         'while the list still offers the larger sizes of the display');
     assert.equal(memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth), 1024);
 

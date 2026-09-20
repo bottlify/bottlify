@@ -2078,7 +2078,7 @@ export function createDirect3D9Seam(
             fields.writeStruct(out >>> 0, D3DDISPLAYMODE, {
                 Width: listed.width,
                 Height: listed.height,
-                RefreshRate: REFRESH_HZ,
+                RefreshRate: listed.refresh,
                 Format: format >>> 0,
             });
             return D3D_OK;

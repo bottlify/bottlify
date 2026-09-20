@@ -16,8 +16,16 @@
  * the surface follows whatever size the program creates its device at.
  */
 
-/** The refresh rate every mode reports. A browser presents at its own pace. */
+/** The refresh rate the mode in effect reports. A browser presents at its own pace. */
 export const REFRESH_HZ = 60;
+
+/**
+ * The rates every size is listed at. A program that saved a rate the display
+ * it was configured on ran at looks for a mode with exactly that rate and,
+ * finding none, falls back to a list of its own; the two rates of the era's
+ * displays are both here so either setting finds its mode.
+ */
+export const REFRESH_RATES = Object.freeze([REFRESH_HZ, 120]);
 
 /**
  * A handful of sizes, not a catalogue: the three every program of the era
@@ -41,7 +49,8 @@ const SIZES = Object.freeze([
  */
 
 /**
- * Every mode the display offers at one colour depth, smallest first.
+ * Every mode the display offers at one colour depth, smallest first, each
+ * size at each of `REFRESH_RATES`.
  *
  * Every size of the era, whatever the display's own: the picture is a
  * canvas the page scales, so a mode larger than the display is shown
@@ -60,16 +69,16 @@ const SIZES = Object.freeze([
 export function displayModes(screen){
     const limit = { width: screen.displayWidth ?? screen.width,
         height: screen.displayHeight ?? screen.height };
-    const modes = SIZES
-        .map(([width, height])=>({ width, height, bitsPerPixel: screen.bitsPerPixel,
-            refresh: REFRESH_HZ }));
+    const sizes = SIZES.map(([width, height])=>({ width, height }));
     for (const size of [limit, screen])
     {
-        if (!modes.some(mode=>mode.width === size.width && mode.height === size.height))
+        if (!sizes.some(one=>one.width === size.width && one.height === size.height))
         {
-            modes.push({ width: size.width, height: size.height,
-                bitsPerPixel: screen.bitsPerPixel, refresh: REFRESH_HZ });
+            sizes.push({ width: size.width, height: size.height });
         }
     }
-    return modes.sort((left, right)=>left.width - right.width || left.height - right.height);
+    sizes.sort((left, right)=>left.width - right.width || left.height - right.height);
+    return sizes.flatMap(({ width, height })=>REFRESH_RATES.map(refresh=>({
+        width, height, bitsPerPixel: screen.bitsPerPixel, refresh,
+    })));
 }

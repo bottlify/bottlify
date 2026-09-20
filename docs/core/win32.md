@@ -238,7 +238,9 @@ gets its own heap, hive, queue and COM registry.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
   of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1440×900,
   1600×900, 1680×1050, 1920×1080, 1920×1200, 2560×1440, 2560×1600, plus the display's size and
-  the current mode if not among them — at the screen's depth, every one at
+  the current mode if not among them — at the screen's depth, each size at 60 and at 120 Hz
+  (`REFRESH_RATES`), since a program that saved the rate of the display it was configured on
+  looks for a mode at exactly that rate; the mode in effect answers
   `REFRESH_HZ = 60`. A mode larger than the display is not refused: the picture is a canvas the
   page scales, so it is shown smaller, and a person on a small screen still gets the size a program
   looks best at. `EnumDisplaySettingsA` walks that list by index and answers the current mode

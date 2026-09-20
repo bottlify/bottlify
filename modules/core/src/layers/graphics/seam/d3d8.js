@@ -1728,11 +1728,11 @@ export function createDirect3D8Seam(
      * Every mode the adapter offers, in the order a program walks them: each
      * size in each format, sizes smallest first.
      *
-     * @returns {{ width: number, height: number, format: number }[]}
+     * @returns {{ width: number, height: number, refresh: number, format: number }[]}
      */
     const adapterModes = ()=>displayModes(screen())
         .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
-            width: mode.width, height: mode.height, format,
+            width: mode.width, height: mode.height, refresh: mode.refresh, format,
         })));
 
     /**
@@ -1881,7 +1881,7 @@ export function createDirect3D8Seam(
             fields.writeStruct(out >>> 0, D3DDISPLAYMODE, {
                 Width: listed.width,
                 Height: listed.height,
-                RefreshRate: REFRESH_HZ,
+                RefreshRate: listed.refresh,
                 Format: listed.format,
             });
             return D3D_OK;

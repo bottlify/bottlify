@@ -389,7 +389,7 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     // Every size of the era whatever the display, in 32-bit colour only:
     // five modes, and a program builds its menu from them.
     const count = ask('GetAdapterModeCount', [0]);
-    assert.equal(count, 11);
+    assert.equal(count, 22);
 
     const mode = 0x1200;
     const seen = [];
@@ -397,14 +397,15 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     {
         assert.equal(ask('EnumAdapterModes', [0, index, mode]), D3D_OK);
         seen.push(`${h.fields.readU32(mode + D3DDISPLAYMODE.Width)}x${
-            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}/${
+            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}@${
+            h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate)}/${
             h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
     }
     assert.deepEqual(seen,
-        ['640x480/22', '800x600/22', '1024x768/22', '1280x720/22', '1440x900/22',
-            '1600x900/22', '1680x1050/22', '1920x1080/22', '1920x1200/22', '2560x1440/22',
-            '2560x1600/22'],
-        'every size, 32-bit, smallest first');
+        ['640x480', '800x600', '1024x768', '1280x720', '1440x900', '1600x900', '1680x1050',
+            '1920x1080', '1920x1200', '2560x1440', '2560x1600']
+            .flatMap(size=>[`${size}@60/22`, `${size}@120/22`]),
+        'every size at both rates, 32-bit, smallest first');
     assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
         'and the index past the end is refused, so a walk ends');
 
