@@ -6,11 +6,28 @@ is [`cork-x86-translator.md`](./cork-x86-translator.md) (and the first entry of
 which files, behind which contracts, checked by which tests and accepted by which number* the
 design is turned into code, one step of at most a day at a time.
 
-One correction from the owner overrides the design's milestone 5: **the vendored emulator is
-not removed.** It stays a supported engine indefinitely, its build pipeline and vendor pinning
-stay, and `engine: 'emulator'` must keep working unchanged through every step below. Cork is
-developed and adopted beside it. Milestone 5 is therefore "cork runs the library's demos alone,
-with the emulator still available as a selectable engine and as the differential oracle".
+The owner's direction, stated 2026-09-20 and binding over any relayed brief: **the explicit
+dependency on the vendored emulator is removed.** It is the reason processor-bound titles are
+weak, and the replacement has to be several times faster — tens of times where that is
+reachable — with 64-bit programs possible later (§7). During the migration the emulator is
+scaffolding: the fallback tier in `hybrid` mode, and the differential oracle. At the end
+(milestone 5) the product neither loads nor ships it; it remains a test-time artifact fetched
+for the differential suites, exactly as the prebuilt is fetched for the integration tests
+today, and `engine: 'emulator'` stays working *only until that last step*, as the regression
+gate of every step before it.
+
+**The target in numbers.** The design's 0.5–1 ns per instruction is 2–4× on the plain view
+(2 ns today) and up to 10× on the x87- and GUI-heavy view (3 ns today), and the milestones
+below are accepted on those figures. Where the arithmetic caps a translator: a well-formed
+region (registers in locals, lazy flags, one wasm load per guest load) is 3–6 wasm operations
+per x86 instruction against the emulator's ~30, and the browser's compiled wasm runs at
+roughly 1.5–3× the cost of native code, so 0.3–0.6 ns is the floor of this approach on a
+machine of this class — 4–7× on integer code, 6–10× on x87/SSE code. "Tens of times" on a
+whole frame does not come from instructions alone: the same 2004 title makes 25–30 thousand
+host calls a frame at about 1 µs each (the design's §1), which is 25–30 ms of a 92 ms frame
+that no translator touches. That lever — batching host calls, the design's §5.7 "later,
+separate change" — is named here so the owner sees where the second factor lives; it is not
+in this plan's scope, and its absence is the reason the plan promises "several", not "tens".
 
 ## 0. What a reader needs to know first
 
@@ -110,11 +127,14 @@ may add to them; a rename is a plan change.
 ```js
 /**
  * @typedef {'emulator' | 'hybrid' | 'cork' | 'differential'} EngineName
- *   emulator      the vendored emulator alone, exactly as today (the default)
- *   hybrid        the emulator runs everything cork has not translated
- *   cork          cork alone; the emulator's wasm is instantiated for zstd only
+ *   emulator      the vendored emulator alone, exactly as today (the default until 5.4;
+ *                 removed with the emulator in 5.5)
+ *   hybrid        the emulator runs everything cork has not translated (migration only;
+ *                 removed in 5.5)
+ *   cork          cork alone: the product's engine, nothing of the emulator loaded
  *   differential  hybrid, plus every region replayed on the emulator and compared;
- *                 test builds and the harness only, refused by the packaged build
+ *                 test builds and the harness only, refused by the packaged build; after
+ *                 5.5 it is the itests' mode over the fetched test-time emulator
  *
  * cpu configuration gains:
  * @property {EngineName} [engine='emulator']
@@ -242,7 +262,7 @@ a string and stays in `diagnostics()`.
   itests (`v86-host`, `quantum`, `module`, `context`, `zstd`) and the top-level ones
   (`hello`, `threads`, `callbacks`, `imports`, …) unchanged and green. **This is the
   `engine: 'emulator'` regression gate**: none of these tests names an engine, so they run
-  the default, which stays the emulator until the owner changes it.
+  the default, which stays the emulator until step 5.4 flips it to `cork`.
 - **Gate E** — one demo of the 2004 OpenGL title through `tools/cdp_test/game.mjs` under
   `engine: 'emulator'`, run to completion with `--exact`; the retired instruction count and
   the frame count must equal the run before the step (a deterministic demo route on the warm
@@ -1369,11 +1389,45 @@ picture divergence beyond run-to-run; Gate E still identical.
 
 ## Milestone 5 — cork alone
 
-Goal of the milestone (as corrected): cork runs the library's demos with `engine: 'cork'`,
-where the emulator's machine is not booted, the emulator's wasm is instantiated only for its
-zstd decoder, and the emulator remains selectable (`emulator`, `hybrid`) and remains the
-differential oracle. The default engine stays `emulator` until the owner flips it, which is a
-one-line change and its own commit.
+Goal of the milestone: cork runs the library's demos with `engine: 'cork'`, where nothing of
+the emulator is loaded — not its machine, not its wasm; the one thing the product still took
+from that wasm, the zstd decoder, is replaced by a decoder of this project's own; the default
+engine becomes `cork`; and the vendored emulator, its submodule, its Docker build pipeline and
+its package exports are removed, leaving the prebuilt as a *test-time* artifact that
+`fetch:v86` downloads for the differential suites and nothing else.
+
+### Step 5.0 — a zstd decoder of this project's own
+
+**Goal.** `decompressZstd` on the cpu api exists only because the emulator's wasm happened to
+carry one; a bundle block is decoded synchronously inside a guest file read. A decode-only
+zstd implementation in JavaScript (frames, blocks, the three Huffman/FSE table kinds,
+sequences, the window; no dictionaries, no checksum verification beyond reading it) replaces
+it, placed beside the bundle code rather than in the cpu layer, since it has nothing to do
+with the processor.
+
+**Files.** Create `modules/core/src/zstd.js`, `zstd.test.js`, `zstd.itest.js`; modify
+`app.js` (`mountBundle` decodes through it instead of `cpu.decompressZstd`), `docs/core/host.md`,
+`docs/core/cpu.md` (`decompressZstd` marked as leaving with the emulator in 5.5).
+
+**Contract.** `export function decompressZstd(packed: Uint8Array, expectedLength: number): Uint8Array`
+— the same signature the cpu api had; throws `zstd: frame ended before it was supposed to`
+and `zstd: unsupported <feature>` (a dictionary id, a window larger than 128 MiB).
+
+**Tests.** `zstd.test.js`: frames produced by Node's own `zlib.zstdCompressSync` (Node ≥ 22.15)
+for: an empty input, 1 byte, 4 KiB of one byte (RLE block), 64 KiB of text (compressed
+blocks with all three literal encodings, forced by different compression levels), 1 MiB of
+random bytes (raw blocks), a 3 MiB input spanning several blocks with matches across block
+boundaries, a frame with a content checksum; each decodes byte for byte; a truncated frame
+throws the first message; a frame naming a dictionary throws the second. `zstd.itest.js`:
+every block of the harness's test bundle decodes identically through the new decoder and the
+emulator's, and the decode time per megabyte is printed (a JavaScript decoder is expected
+within 2–3× of the wasm one; a guest file read is not on a hot path).
+
+**Accept.** Gate U, I; the itest's byte-identical result on every block.
+
+**Could go wrong.** FSE table construction has three off-by-one traps (the `-1` symbol
+counts, the baseline/number-of-bits accumulation, the state update order); each is a
+concrete test vector taken from the format's own worked example in the RFC.
 
 ### Step 5.1 — the cork host: its own memory, layout and contexts
 
@@ -1383,15 +1437,14 @@ sets the registers the ROM would have: flat segments are implicit, `esp = initia
 `eip` = the entry vector's target read at the first slice), the thunk table unchanged (the
 stubs are guest code cork translates like any other), `captureContext`/`restoreContext` as a
 copy of the 512-byte block plus `fsBase`, `readReg32('eflags')` from the eager word, the
-fault record built by the host from a `fault` exit. `decompressZstd` instantiates the
-emulator's wasm with a 16 MiB memory once, lazily, for its exports alone.
+fault record built by the host from a `fault` exit. Nothing of the emulator is imported,
+fetched or instantiated on this path.
 
 **Files.** Create `internal/cork-host.js`, `internal/cork-host.test.js`,
 `internal/cork-host.itest.js`, `cork/runtime/layout.js` (`OWN_LAYOUT`), modify `module.js`
-(`engine: 'cork'` accepted), `internal/context.js` (a second capture/restore over the block;
-the emulator's stays), `docs/core/cpu.md` ("Engines": cork alone; "Limitations": the zstd
-dependency on the emulator's wasm, and that a JavaScript decoder of this project's own would
-remove it — a separate decision).
+(`engine: 'cork'` accepted; `boot()` under `cork` takes no `moduleUrl`/`wasmBytes`),
+`internal/context.js` (a second capture/restore over the block; the emulator's stays until
+5.5), `docs/core/cpu.md` ("Engines": cork alone).
 
 **Tests.** `cork-host.test.js`: contexts round-trip every field of the block (a filled block
 captured, zeroed, restored, compared byte for byte); `newContext` positions eip and esp;
@@ -1444,8 +1497,60 @@ three held windows under `cork` against `emulator` and `hybrid` in one session: 
 instruction under `cork` equal to `hybrid`'s within noise (the same translations; the
 fallback differs). Every demo in the library under `cork` completes with pictures as in 3.5.
 
-**Accept.** The library's demos complete under `engine: 'cork'`; Gate E identical; the
-emulator's fetch, lock and build pipeline untouched; `engine: 'emulator'` remains the default.
+**Accept.** The library's demos complete under `engine: 'cork'`; Gate E identical (the
+emulator path is still there, one step more).
+
+### Step 5.4 — `cork` becomes the default engine
+
+**Goal.** The one-line change, its own commit, after 5.3's run: `engine` defaults to `cork`;
+the launcher and `game.mjs` run it without a flag; `--engine emulator` still selects the
+emulator for a paired measurement.
+
+**Files.** `module.js`, `app.js`, `docs/core/cpu.md`, `docs/core/host.md`,
+`tools/cdp_test/README.md`; every itest that asserted `regions > 0` under an environment
+variable now does so by default, and the emulator variants become the ones selected by
+`BOTTLIFY_ENGINE=emulator`.
+
+**Tests.** Gate U, I under the new default; Gate P on the three windows with `--engine emulator`
+as the control, recorded as the milestone's before/after table in `decisions.md` §B.
+
+**Accept.** The paired table shows ns per instruction at or below the design's target on
+each window (plain ≤ 1.0, GUI-heavy ≤ 1.5, lit ≤ 1.0) and no picture divergence.
+
+### Step 5.5 — the vendored emulator leaves the product
+
+**Goal.** The explicit dependency is gone: the `vendor/v86` submodule, `scripts/build-v86.mjs`,
+`Dockerfile.v86`, `v86-make-and-hash.sh`, `verify-reproducibility.mjs`'s emulator branch, the
+package's `./libv86.mjs` and `./v86.wasm` exports and `dist/vendor/` copies, `AppOptions.v86`,
+the `jit` option, `internal/v86-host.js`'s production role, `internal/hybrid-host.js`,
+`boot-rom.js`'s emulator-specific bring-up and `fpu.js`'s emulator offsets, `engine:
+'emulator' | 'hybrid'`, `cpu.decompressZstd`, and the `jit.*` counters. What stays, as test
+support: `fetch:v86` downloading the pinned prebuilt into `vendor/prebuilt/` (gitignored,
+never in `dist/`), `internal/v86-host.js` moved to `cork/oracle/v86-host.js` and imported
+only by `*.itest.js`, the corpus asset, and `engine: 'differential'` for the itests. The
+`THIRD-PARTY-NOTICES.md` entry changes from "distributed with the product" to "test data and a
+test-time oracle, not distributed"; the README's `v86` keyword goes.
+
+**Files.** The removals above; `docs/core/cpu.md` rewritten around cork (the ROM section
+becomes the cork host's boot, "What of vendor/v86 is used" becomes "The test-time oracle"),
+`docs/core/host.md`, `docs/core/README.md`, `docs/core/system.md` (the boundary rule "vendor
+is importable only from cpu" now covers a test-only path), `scripts/check-boundaries.mjs` (the
+vendor rule kept, since itests are skipped by it anyway), `scripts/check-package.mjs` (fails if
+`dist/` carries the emulator), `roadmap/decisions.md` §B (the removal, with the milestone
+table).
+
+**Tests.** `check-package` refuses a `dist/` with `libv86.mjs` or `v86.wasm`; `npm test`
+green with `vendor/v86` absent (the boundary checker's `layerRequires` and the module tests
+never touch it); `npm run test:integration` green with only `vendor/prebuilt/` fetched; Gate E
+becomes the same demo under `cork` with the instruction count recorded as the new baseline.
+
+**Accept.** A fresh clone without the submodule builds, tests, and runs the library's demos;
+the package tarball carries no emulator bytes; `git submodule status` lists nothing.
+
+**Could go wrong.** Something outside the cpu layer still reaches an emulator export (the
+audio worklet reading the shared memory's layout, the log keeper's mirror): the boundary
+checker and `check-package` are the net, and the grep for `v86` across `src/` is part of this
+step's commit message.
 
 ## 6. Acceptance summary
 
@@ -1463,8 +1568,11 @@ emulator's fetch, lock and build pipeline untouched; `engine: 'emulator'` remain
 | 3.5 | GUI-heavy ns/instruction ≤ ½ the emulator's; every demo completes in hybrid |
 | 4.3 | fault records equal field for field |
 | 4.6 | three titles ≥ 95 % translated, frame budget within thresholds |
+| 5.0 | every bundle block decodes byte-identically through the project's own zstd |
 | 5.2 | corpus green on the interpreter |
-| 5.3 | library demos complete under `cork`; emulator default and pipeline unchanged |
+| 5.3 | library demos complete under `cork` with nothing of the emulator loaded |
+| 5.4 | paired table: plain ≤ 1.0, GUI-heavy ≤ 1.5, lit ≤ 1.0 ns per instruction |
+| 5.5 | fresh clone without the submodule builds, tests and runs the demos; no emulator bytes in the package |
 
 ## 7. Provisions for x86-64
 
