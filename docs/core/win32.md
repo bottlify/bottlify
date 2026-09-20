@@ -231,9 +231,11 @@ gets its own heap, hive, queue and COM registry.
   session saver treat a registry write like a file write. Roots: `HKEY_CLASSES_ROOT`,
   `HKEY_CURRENT_USER`, `HKEY_LOCAL_MACHINE`, `HKEY_USERS`.
 - **The display** (`user32/display.js`, `user32/system.js`). `displayModes(screen)` lists the sizes
-  of the era up to the display's own — 640×480, 800×600, 1024×768, 1280×720, 1920×1080, plus the
+  of the era whatever the display's own — 640×480, 800×600, 1024×768, 1280×720, 1920×1080, plus the
   display's size and the current mode if not among them — at the screen's depth, every one at
-  `REFRESH_HZ = 60`. `EnumDisplaySettingsA` walks that list by index and answers the current mode
+  `REFRESH_HZ = 60`. A mode larger than the display is not refused: the picture is a canvas the
+  page scales, so it is shown smaller, and a person on a small screen still gets the size a program
+  looks best at. `EnumDisplaySettingsA` walks that list by index and answers the current mode
   for `ENUM_CURRENT_SETTINGS` and `ENUM_REGISTRY_SETTINGS`; the enumeration ends. `GetSystemMetrics`
   and `GetDeviceCaps` answer from the same `screen`, so the desktop a program measures and the
   device it then creates agree.

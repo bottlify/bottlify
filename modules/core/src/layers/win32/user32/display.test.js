@@ -8,10 +8,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { REFRESH_HZ, displayModes } from './display.js';
 
-test('a display offers every size of the era up to its own, smallest first', ()=>{
+test('a display offers every size of the era whatever its own, smallest first', ()=>{
+    // The picture is a canvas the page scales: a mode larger than the display
+    // is shown smaller, not refused, so a person on a small screen still gets
+    // the size the program looks best at.
     const modes = displayModes({ width: 1024, height: 768, bitsPerPixel: 32 });
     assert.deepEqual(modes.map(mode=>`${mode.width}x${mode.height}`),
-        ['640x480', '800x600', '1024x768']);
+        ['640x480', '800x600', '1024x768', '1280x720', '1920x1080']);
     assert.ok(modes.every(mode=>mode.bitsPerPixel === 32 && mode.refresh === REFRESH_HZ));
 });
 
@@ -20,12 +23,14 @@ test('a display of a size the era never had is still in its own list', ()=>{
     // a list without it leaves that program with a selection it cannot make.
     const modes = displayModes({ width: 1000, height: 700, bitsPerPixel: 32 });
     assert.deepEqual(modes.map(mode=>`${mode.width}x${mode.height}`),
-        ['640x480', '800x600', '1000x700']);
+        ['640x480', '800x600', '1000x700', '1024x768', '1280x720', '1920x1080']);
 });
 
-test('nothing wider than the display is offered', ()=>{
+test('a size of the era is listed once, whether or not the display is that size', ()=>{
     const modes = displayModes({ width: 640, height: 480, bitsPerPixel: 16 });
-    assert.deepEqual(modes.map(mode=>`${mode.width}x${mode.height}`), ['640x480']);
+    assert.deepEqual(modes.map(mode=>`${mode.width}x${mode.height}`),
+        ['640x480', '800x600', '1024x768', '1280x720', '1920x1080']);
+    assert.ok(modes.every(mode=>mode.bitsPerPixel === 16));
 });
 
 test('a program in a small mode is still offered the whole display', ()=>{

@@ -42,12 +42,13 @@ const SIZES = Object.freeze([
 /**
  * Every mode the display offers at one colour depth, smallest first.
  *
- * Bounded by the display's own size, not by the mode in effect: a program
- * that has set a small mode is still on a large display, and a list bounded
- * by the mode it is in would offer it nothing else. The display's size is
- * always among them even when it is not a size of the era, because a program
- * that reads the current mode and then looks for it in the list expects to
- * find it.
+ * Every size of the era, whatever the display's own: the picture is a
+ * canvas the page scales, so a mode larger than the display is shown
+ * smaller rather than refused, and a person on a small screen still gets
+ * to pick the size the program looks best at. The display's own size and
+ * the mode in effect are always among them even when they are not sizes of
+ * the era, because a program that reads the current mode and then looks
+ * for it in the list expects to find it.
  *
  * @param {{ width: number, height: number, bitsPerPixel: number,
  *           displayWidth?: number, displayHeight?: number }} screen
@@ -59,7 +60,6 @@ export function displayModes(screen){
     const limit = { width: screen.displayWidth ?? screen.width,
         height: screen.displayHeight ?? screen.height };
     const modes = SIZES
-        .filter(([width, height])=>width <= limit.width && height <= limit.height)
         .map(([width, height])=>({ width, height, bitsPerPixel: screen.bitsPerPixel,
             refresh: REFRESH_HZ }));
     for (const size of [limit, screen])
