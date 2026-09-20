@@ -1,0 +1,208 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * A machine for the emitter's tests: cork's own layout over a small memory,
+ * code written where a test says, a region formed and translated at an
+ * entry, the function run, the state read back. No emulator, no runtime:
+ * the smallest thing that executes translated code.
+ */
+
+import { formRegion } from '../region.js';
+import { ModuleBuilder } from '../wasm/encoder.js';
+import { features } from '../wasm/features.js';
+import { emitRegion, prepareModule } from '../emit/region.js';
+import { ownLayout, pagesFor } from '../runtime/layout.js';
+
+const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+
+/**
+ * @param {{ ramSize?: number }} [options]
+ */
+export function createTestMachine({ ramSize = 1 << 20 } = {}){
+    const layout = ownLayout({ ramSize });
+    const memory = new WebAssembly.Memory({ initial: pagesFor(layout, 0) });
+    const view = ()=>new DataView(memory.buffer);
+    const bytes = ()=>new Uint8Array(memory.buffer);
+    const found = features();
+    /**
+     * Instructions the test runner steps over instead of stopping at, while
+     * the emitter lacks them: `pxor xmm, xmm` of a register with itself
+     * (zeroing it -- the corpus header's first instruction) is a no-op on a
+     * machine whose SIMD registers start at zero. Removed with the SIMD step.
+     *
+     * @param {number} eip
+     * @returns {number} bytes to skip, or 0
+     */
+    const stepOver = eip=>{
+        const at = layout.ramBase + eip;
+        const code = bytes();
+        if (code[at] === 0x66 && code[at + 1] === 0x0f && code[at + 2] === 0xef
+            && code[at + 3] >= 0xc0 && ((code[at + 3] >> 3) & 7) === (code[at + 3] & 7))
+        {
+            return 4;
+        }
+        return 0;
+    };
+
+    return {
+        layout,
+        memory,
+        /** @param {number} address @param {number[] | Uint8Array} data */
+        write(address, data){
+            bytes().set(data, layout.ramBase + address);
+        },
+        /** @param {number} address @param {number} length */
+        read(address, length){
+            return bytes().slice(layout.ramBase + address, layout.ramBase + address + length);
+        },
+        /** @param {number} address */
+        readU32(address){
+            return view().getUint32(layout.ramBase + address, true);
+        },
+        /** @param {number} address @param {number} value */
+        writeU32(address, value){
+            view().setUint32(layout.ramBase + address, value >>> 0, true);
+        },
+        /** @param {string} name */
+        reg(name){
+            return view().getUint32(layout.regs + REGISTERS.indexOf(name) * 4, true);
+        },
+        /** @param {string} name @param {number} value */
+        setReg(name, value){
+            view().setUint32(layout.regs + REGISTERS.indexOf(name) * 4, value >>> 0, true);
+        },
+        eflags(){
+            return view().getUint32(layout.eflags, true);
+        },
+        /** @param {number} value */
+        setEflags(value){
+            view().setUint32(layout.eflags, value >>> 0, true);
+        },
+        eip(){
+            return view().getUint32(layout.eip, true);
+        },
+        counter(){
+            return view().getUint32(layout.counter, true);
+        },
+        /** @param {number} value */
+        setFsBase(value){
+            view().setUint32(layout.fsBase, value >>> 0, true);
+        },
+        /**
+         * Forms and translates a region at `entry` and returns a runner over
+         * it, plus what the emitter said.
+         *
+         * @param {number} entry
+         * @param {{ maxBlocks?: number, maxBytes?: number }} [options]
+         */
+        translate(entry, options = {}){
+            const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
+            const region = formRegion(read, entry, options);
+            const m = new ModuleBuilder();
+            const context = prepareModule(m, layout, found);
+            const translation = emitRegion(context, region);
+            m.exportFunction('region', translation.functionIndex);
+            const built = m.toBytes();
+            if (!WebAssembly.validate(built))
+            {
+                new WebAssembly.Module(built); // throws with the engine's message
+            }
+            const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
+                env: { memory },
+            });
+            const run = /** @type {(label: number, budget: number) => number} */ (
+                /** @type {any} */ (instance.exports).region);
+            return {
+                region,
+                translation,
+                bytes: built,
+                /**
+                 * Runs from a block start with a budget; answers the exit.
+                 *
+                 * @param {number} eip @param {number} [budget]
+                 */
+                run(eip, budget = 1_000_000){
+                    const label = translation.labels.get(eip);
+                    if (label === undefined)
+                    {
+                        throw new Error(`no block starts at 0x${eip.toString(16)}`);
+                    }
+                    const code = run(label, budget) >>> 0;
+                    return { kind: code & 0xff, vector: code >>> 8 };
+                },
+            };
+        },
+        /**
+         * Runs a whole program from `entry`: a region is translated at every
+         * address execution reaches that has none yet, and run until it
+         * halts, faults, runs out of budget, or meets an instruction the
+         * emitter leaves out. The smallest runtime there is, for tests.
+         *
+         * @param {number} entry
+         * @param {{ budget?: number, maxRegions?: number }} [options]
+         * @returns {{ kind: number, vector: number, eip: number, regions: number,
+         *     unsupported: Map<string, number>, retired: number }}
+         */
+        runProgram(entry, { budget = 10_000_000, maxRegions = 2000 } = {}){
+            /** @type {Map<number, ReturnType<typeof this.translate>>} */
+            const translated = new Map();
+            /** @type {Map<string, number>} */
+            const unsupported = new Map();
+            let eip = entry;
+            let left = budget;
+            let regions = 0;
+            view().setUint32(layout.eip, eip, true);
+            for (;;)
+            {
+                let unit = translated.get(eip);
+                if (!unit)
+                {
+                    if (regions >= maxRegions)
+                    {
+                        return {
+                            kind: -1, vector: 0, eip, regions, unsupported, retired: budget - left,
+                        };
+                    }
+                    unit = this.translate(eip);
+                    regions++;
+                    for (const [opcode, count] of unit.translation.unsupported)
+                    {
+                        unsupported.set(opcode, (unsupported.get(opcode) ?? 0) + count);
+                    }
+                    for (const start of unit.translation.labels.keys())
+                    {
+                        translated.set(start, unit);
+                    }
+                }
+                const before = this.counter();
+                const from = eip;
+                const exit = unit.run(eip, left);
+                left -= this.counter() - before;
+                eip = this.eip();
+                if (exit.kind !== 0 || left <= 0)
+                {
+                    return { ...exit, eip, regions, unsupported, retired: budget - left };
+                }
+                // Back where it started with nothing retired: the emitter cut
+                // the region before the instruction at this address, and
+                // running it again would come straight back again.
+                if (eip === from && this.counter() === before)
+                {
+                    const skip = stepOver(eip);
+                    if (skip === 0)
+                    {
+                        return {
+                            kind: -2, vector: 0, eip, regions, unsupported, retired: budget - left,
+                        };
+                    }
+                    eip += skip;
+                    view().setUint32(layout.eip, eip, true);
+                }
+            }
+        },
+    };
+}

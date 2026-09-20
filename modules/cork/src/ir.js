@@ -22,6 +22,8 @@
 
 import { AF, CF, DF, OF, PF, SF, ZF, conditionReads } from './decode/table.js';
 
+const ARITH = CF | PF | AF | ZF | SF | OF;
+
 /** The width masks by operand size. @type {Readonly<Record<number, number>>} */
 const MASK = Object.freeze({ 1: 0xff, 2: 0xffff, 4: 0xffffffff });
 /** The sign bit by operand size. @type {Readonly<Record<number, number>>} */
@@ -262,9 +264,14 @@ export function evaluate(instruction, state){
                 throw new Unsupported(`${op} ${operand.kind}`);
         }
     };
-    /** @param {number} flags @param {number} keep */
-    const setFlags = (flags, keep = 0)=>{
-        const written = instruction.flagsWritten & ~keep;
+    /**
+     * Writes flags: by default only the ones the instruction defines, so an
+     * undefined flag keeps its value -- the convention translated code follows
+     * too. A full writer passes the mask it clears explicitly.
+     *
+     * @param {number} flags @param {number} [written]
+     */
+    const setFlags = (flags, written = instruction.flagsWritten & ~instruction.flagsUndefined)=>{
         state.eflags = (state.eflags & ~written | flags & written) >>> 0;
     };
     const push = (/** @type {number} */ value, width = size)=>{
@@ -288,6 +295,13 @@ export function evaluate(instruction, state){
             state.halted = true;
             return;
         case 'mov':
+            if (operands[1].kind === 'seg' && operands[0].kind === 'reg'
+                && !instruction.prefixes.operand)
+            {
+                // A segment register read into a dword register clears the upper half.
+                write({ ...operands[0], size: 4 }, read(operands[1]));
+                return;
+            }
             write(operands[0], read(operands[1]));
             return;
         case 'movzx':
@@ -340,7 +354,7 @@ export function evaluate(instruction, state){
             {
                 write(operands[0], result);
             }
-            setFlags(logicFlags(result, size));
+            setFlags(logicFlags(result, size), ARITH);
             return;
         }
         case 'inc': case 'dec':
@@ -396,7 +410,7 @@ export function evaluate(instruction, state){
             }
             const overflow = ((a ^ result) & SIGN[size]) !== 0 ? OF : 0;
             write(operands[0], result);
-            setFlags((carry ? CF : 0) | overflow | resultFlags(result, size));
+            setFlags((carry ? CF : 0) | overflow | resultFlags(result, size), ARITH);
             return;
         }
         case 'imul':
@@ -747,11 +761,11 @@ function shiftOrRotate(op, operands, size, state, read, write, setFlags){
     const flags = (carry ? CF : 0) | (overflow ? OF : 0);
     if (op === 'rol' || op === 'ror' || op === 'rcl' || op === 'rcr')
     {
-        setFlags(flags);
+        setFlags(flags, CF | OF);
     }
     else
     {
-        setFlags(flags | resultFlags(result, size));
+        setFlags(flags | resultFlags(result, size), ARITH);
     }
 }
 

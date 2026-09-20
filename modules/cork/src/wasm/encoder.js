@@ -449,6 +449,12 @@ export class ModuleBuilder {
         return index;
     }
 
+    /** @param {string} field @param {number} functionIndex */
+    exportFunction(field, functionIndex){
+        this.exports.push([...name(field), 0x00, ...leb128u(functionIndex)]);
+        return this;
+    }
+
     /** @param {string} field @param {number} globalIndex */
     exportGlobal(field, globalIndex){
         this.exports.push([...name(field), 0x03, ...leb128u(globalIndex)]);

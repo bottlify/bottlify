@@ -1,0 +1,107 @@
+/*
+ * Copyright © 2026 Bottlify Project
+ * Licensed under the Mozilla Public License, version 2.0
+ * See LICENSE for details
+ */
+
+/**
+ * Every corpus case on translated code, against the hardware recording.
+ *
+ * A case whose instructions the emitter translates in full must leave the
+ * state the recording holds: registers, memory, the arithmetic flags, or
+ * the faulting address where the hardware died. A case that reaches an
+ * instruction the emitter leaves out (x87, SIMD, the forms still to come)
+ * is counted by that instruction's opcode and not judged -- the list of
+ * opcodes is the emitter's work list, printed with the count.
+ *
+ * Needs the corpus (`npm run fetch:corpus`); no emulator.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
+import { createTestMachine } from '../testing/machine.js';
+import { BSS, BSS_SIZE, diffFixture, loadCorpus } from '../testing/corpus.js';
+
+const CORPUS = new URL('../../vendor/nasm-corpus.json.gz', import.meta.url);
+const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
+const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
+
+test('translated code leaves what the hardware left, on every case it translates in full',
+    { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },
+    async()=>{
+        const { cases } = loadCorpus(await readFile(CORPUS));
+        const selected = cases.filter(one=>ONLY.test(one.name));
+        /** @type {string[]} */
+        const failures = [];
+        /** @type {Map<string, number>} */
+        const leftOut = new Map();
+        let judged = 0;
+        let died = 0;
+        let skipped = 0;
+        const started = Date.now();
+        for (const one of selected)
+        {
+            const m = createTestMachine({ ramSize: 2 << 20 });
+            for (const { address, bytes } of one.segments)
+            {
+                m.write(address, bytes);
+            }
+            const exit = m.runProgram(one.entry, { budget: 2_000_000 });
+            if (exit.kind === -2 || exit.kind === -1)
+            {
+                skipped++;
+                for (const [opcode, count] of exit.unsupported)
+                {
+                    leftOut.set(opcode, (leftOut.get(opcode) ?? 0) + count);
+                }
+                continue;
+            }
+            const reg32 = new Int32Array(8);
+            ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'].forEach((name, i)=>{
+                reg32[i] = m.reg(name) | 0;
+            });
+            const bss = m.read(BSS, BSS_SIZE);
+            const outcome = {
+                exception: exit.kind === 4
+                    ? { name: VECTOR_NAMES.get(exit.vector) ?? `#${exit.vector}`, eip: exit.eip }
+                    : null,
+                halted: exit.kind === 3,
+                reg32,
+                eip: exit.eip,
+                st: /** @type {(number | 'invalid')[]} */ (Array(8).fill(0)),
+                fstat: 0,
+                mm: new Int32Array(16),
+                xmm: new Int32Array(32),
+                memory: new Int32Array(bss.buffer, bss.byteOffset, BSS_SIZE / 4),
+                eflags: m.eflags(),
+            };
+            // int3 and int n are recorded by the hardware as signals the runner
+            // does not map; the emitter leaves with the vector, which is right,
+            // and the case is not one the corpus judges.
+            if (outcome.exception && outcome.exception.name.startsWith('#'))
+            {
+                skipped++;
+                continue;
+            }
+            judged++;
+            died += outcome.exception ? 1 : 0;
+            const divergences = diffFixture(one.expected, outcome);
+            if (divergences.length > 0)
+            {
+                failures.push(`${one.name}: ${divergences.slice(0, 5)
+                    .map(d=>`${d.name} expected ${String(d.expected)} got ${String(d.actual)}`)
+                    .join('; ')}`);
+            }
+        }
+        const top = [...leftOut].sort((a, b)=>b[1] - a[1]).slice(0, 24)
+            .map(([opcode, count])=>`${opcode}×${count}`).join(' ');
+        console.log(`translated: ${judged} cases judged (${died} died as recorded),`
+            + ` ${skipped} left out`
+            + ` at ${leftOut.size} opcodes, ${failures.length} diverged, `
+            + `${((Date.now() - started) / 1000).toFixed(1)} s; left out: ${top}`);
+        assert.equal(failures.length, 0,
+            `${failures.length} diverged:\n${failures.slice(0, 40).join('\n')}`);
+        assert.ok(judged > 0);
+    });
