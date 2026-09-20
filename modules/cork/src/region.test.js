@@ -86,7 +86,9 @@ test('a region is cut at an indirect jump, a return, a call, a trap and a fault'
     assert.equal(call.blocks[0].exit.kind, 'call');
     assert.deepEqual(call.blocks[0].exit.targets, [0x1015]);
     assert.equal(call.blocks[0].exit.next, 0x1005);
-    assert.equal(call.blocks.length, 1, 'the callee is not followed in this step');
+    assert.equal(call.blocks.length, 2, 'the callee is not followed; the return address is');
+    assert.equal(call.blocks[1].start, 0x1005);
+    assert.equal(call.blocks[1].exit.kind, 'ret');
     const trap = regionOf([0xef, 0x90]); // out dx, eax; nop
     assert.equal(trap.blocks[0].exit.kind, 'trap');
     assert.equal(trap.blocks[0].exit.next, 0x1001);

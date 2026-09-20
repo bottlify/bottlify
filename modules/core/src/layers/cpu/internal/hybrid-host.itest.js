@@ -65,11 +65,11 @@ const metricsOf = ()=>{
     return /** @type {Record<string, any>} */ (metrics);
 };
 
-/** @param {{ api: any, metrics: any }} machine */
-async function runToHalt({ api, metrics }){
+/** @param {{ api: any, metrics: any }} machine @param {number} [most]  slices allowed */
+async function runToHalt({ api, metrics }, most = 40){
     let slices = 0;
     // The program ends by putting a marker in eax and halting.
-    while (api.readReg32('eax') !== 0x1234 && slices < 40)
+    while (api.readReg32('eax') !== 0x1234 && slices < most)
     {
         api.runSlice(100_000);
         slices++;
@@ -138,7 +138,7 @@ test('with the handoff export the emulator returns at the translated loop mid-sl
             initialStack: 0x300000,
         });
         const emulator = exported ? machine : {
-            ...machine, handoffAvailable: ()=>false, handoffPage: ()=>{},
+            ...machine, handoffAvailable: ()=>false, handoffPage: ()=>{}, handoffHash: ()=>{},
         };
         const cork = createEngine({
             memory: machine.wasmMemory(),
@@ -147,7 +147,8 @@ test('with the handoff export the emulator returns at the translated loop mid-sl
             read: machine.readByte,
             imports: {
                 trap: ()=>0, getEflags: machine.getEflags, x87Read: ()=>0, rdtsc: ()=>0n,
-                handoffPage: emulator.handoffPage, dirtyCode: machine.dirtyCode,
+                handoffPage: emulator.handoffPage, handoffHash: emulator.handoffHash,
+                dirtyCode: machine.dirtyCode,
             },
         });
         const host = createHybridHost({ emulator, cork });
@@ -195,4 +196,43 @@ test('with the handoff export the emulator returns at the translated loop mid-sl
     assert.ok(withIt.translatedShare > 0.95, `translated share ${withIt.translatedShare}`);
     assert.equal(withIt.count, without.count, 'the same instructions either way');
     assert.equal(withIt.ecx, without.ecx);
+});
+
+test('a call in the hot loop: the callee, the call and the return all stay in wasm', async()=>{
+    // mov ecx, N; L: call F; dec ecx; jnz L; mov eax, 0x1234; hlt; F: inc edx; ret
+    const N = 2_000_000;
+    const program = new Uint8Array([
+        0xb9, ...u32(N),
+        0xe8, 0x09, 0, 0, 0,
+        0x49, 0x75, 0xf8,
+        0xb8, 0x34, 0x12, 0, 0,
+        0xf4,
+        0x42, 0xc3,
+    ]);
+    const reference = await booted(program, GUEST_CODE, { engine: 'emulator' });
+    await runToHalt(reference, 120);
+    const expected = {
+        count: reference.api.instructionCount(),
+        edx: reference.api.readReg32('edx'),
+    };
+    await cpuModule.dispose();
+    assert.equal(expected.edx, N);
+
+    const hybrid = await booted(program, GUEST_CODE, { engine: 'hybrid', engineUrl: ENGINE });
+    const slices = await runToHalt(hybrid, 120);
+    assert.equal(hybrid.api.readReg32('eax'), 0x1234, `finished in ${slices} slices`);
+    assert.equal(hybrid.api.readReg32('edx'), N);
+    assert.equal(hybrid.api.instructionCount(), expected.count);
+    const cork = metricsOf().cork;
+    assert.ok(cork.regions >= 1, `regions ${cork.regions}`);
+    if (cork.entries > 0)
+    {
+        // Every call and return after the loop is translated transfers
+        // through the hash: the untranslated exits are the few from before.
+        assert.ok(cork.translatedShare > 0.95,
+            `share ${cork.translatedShare}, exits ${JSON.stringify(cork.exits)}`);
+        assert.ok(cork.exits.untranslated <= slices,
+            `untranslated exits ${cork.exits.untranslated}`);
+    }
+    await cpuModule.dispose();
 });

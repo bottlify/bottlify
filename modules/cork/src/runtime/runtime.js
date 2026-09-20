@@ -63,7 +63,22 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     }
     const found = features ?? probeFeatures();
     const pages = createPageTable(memory, layout);
-    const entries = createEntries();
+    // With tail calls, every region function goes into one table shared by
+    // every module, and every entry into the hash translated code probes:
+    // a return or an indirect jump into translated code then transfers
+    // without leaving wasm. Without them, the slice loop is the only way
+    // between regions.
+    const table = found.tailCalls
+        ? new WebAssembly.Table({ element: 'anyfunc', initial: 256 })
+        : null;
+    /** @type {number[]} table indices of dropped regions */
+    const freeTable = [];
+    const entries = createEntries(
+        table ? { memory, hashBase: layout.tables + Tables.HASH } : {});
+    if (table)
+    {
+        imports.handoffHash?.(layout.tables + Tables.HASH - layout.ramBase);
+    }
     /** @type {Map<number, number>} candidates not yet formed: key(eip, top) → eip */
     const queue = new Map();
     /** @param {number} eip @param {number} top */
@@ -73,14 +88,18 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
      * @property {number} entry
      * @property {Set<number>} pages
      * @property {number[]} slots   entry indices
+     * @property {number} table     the function's index in the table, or -1
      */
     /** @type {Set<RegionRecord>} */
     const regions = new Set();
     /** @type {Map<number, Set<RegionRecord>>} page → regions on it */
     const byPage = new Map();
-    /** @type {Map<number, number>} page → times invalidated */
+    /** @type {Map<number, number>} page → times invalidated, the stamp a batch checks */
     const generation = new Map();
+    /** @type {Map<number, number>} page → times a write dropped its regions */
+    const dropped = new Map();
     const counts = { modules: 0, invalidations: 0, volatilePages: 0, dropped: 0 };
+    let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0 };
     /** @type {Record<string, number>} */
@@ -105,6 +124,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     /** @param {number} page */
     const invalidatePage = page=>{
         const on = byPage.get(page);
+        const cost = on ? on.size : 0;
         if (on)
         {
             // The pages the dropped regions spanned, taken before the records
@@ -115,6 +135,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 for (const slot of record.slots)
                 {
                     entries.remove(slot);
+                }
+                if (table && record.table >= 0)
+                {
+                    // The entries are out of the hash first: nothing finds
+                    // the slot before it is emptied.
+                    table.set(record.table, null);
+                    freeTable.push(record.table);
                 }
                 for (const p of record.pages)
                 {
@@ -139,8 +166,16 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queue.delete(key);
             }
         }
-        const times = (generation.get(page) ?? 0) + 1;
-        generation.set(page, times);
+        generation.set(page, (generation.get(page) ?? 0) + 1);
+        // Only a write that cost a region counts towards volatility: the
+        // loader placing an image writes a page many times before anything
+        // on it is hot, and that is not a page that mixes code with data.
+        if (cost === 0)
+        {
+            return;
+        }
+        const times = (dropped.get(page) ?? 0) + 1;
+        dropped.set(page, times);
         if (times === settings.volatileAfter)
         {
             pages.set(page, PageFlag.VOLATILE);
@@ -205,17 +240,32 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 queue.delete(key);
             }
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {}, { undoLog: settings.undoLog });
+            const context = prepareModule(m, layout, found, {},
+                { undoLog: settings.undoLog, hash: table !== null });
             /** @type {{ region: import('../region.js').Region,
              *     translation: import('../emit/region.js').Translation, stamp: string }[]} */
             const formed = [];
-            for (const [key, eip] of batch)
+            for (let i = 0; i < batch.length; i++)
             {
+                const [key, eip] = batch[i];
                 const entryTop = key % 16;
                 const region = formRegion(read, eip, {
                     maxBlocks: settings.maxRegionBlocks, maxBytes: settings.maxRegionBytes,
                     translatable,
                 });
+                // What the region calls directly lands in the same batch, so
+                // the call and the return transfer without a miss.
+                for (const block of region.blocks)
+                {
+                    const [callee] = block.exit.targets;
+                    if (block.exit.kind === 'call' && batch.length < settings.batchRegions
+                        && entries.entryOf(callee, entryTop) < 0 && translatable(callee)
+                        && !batch.some(([, at])=>at === callee))
+                    {
+                        batch.push([keyOf(callee, entryTop), callee]);
+                        queue.delete(keyOf(callee, entryTop));
+                    }
+                }
                 for (const [opcode, times] of region.refused)
                 {
                     refused[opcode] = (refused[opcode] ?? 0) + times;
@@ -242,7 +292,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 const module = await WebAssembly.compile(m.toBytes());
                 instance = await WebAssembly.instantiate(module, {
-                    env: { memory, getEflags: imports.getEflags, ...mathImports() },
+                    env: {
+                        memory, getEflags: imports.getEflags, ...mathImports(),
+                        ...(table ? { table } : {}),
+                    },
                 });
             }
             catch (e){
@@ -265,7 +318,21 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 const fn = /** @type {(label: number, budget: number) => number} */ (
                     instance.exports[`r${i}`]);
                 /** @type {RegionRecord} */
-                const record = { entry: region.entry, pages: region.pages, slots: [] };
+                const record = { entry: region.entry, pages: region.pages, slots: [], table: -1 };
+                if (table)
+                {
+                    let index = freeTable.pop();
+                    if (index === undefined)
+                    {
+                        index = nextTable++;
+                        if (index >= table.length)
+                        {
+                            table.grow(256);
+                        }
+                    }
+                    table.set(index, fn);
+                    record.table = index;
+                }
                 // Entries for every block start but the cut ones; a region
                 // with x87 in it is keyed by the top it was compiled for.
                 const top = translation.cut.size > 0 || usesX87(region)
@@ -274,7 +341,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     if (!translation.cut.has(label))
                     {
-                        record.slots.push(entries.add(eip, fn, label, top));
+                        record.slots.push(entries.add(eip, fn, label, top, record.table));
                     }
                 }
                 for (const block of region.blocks)
@@ -310,7 +377,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             fold();
             return {
                 regions: regions.size,
-                entries: entries.count(),
+                entries: table ? entries.hashed() : entries.count(),
                 modules: counts.modules,
                 translatedShare: counted > 0 ? corkRetired / counted : 0,
                 cacheHits: 0,

@@ -15,8 +15,18 @@
 /** The top a region indifferent to the x87 stack is registered under. */
 export const ANY_TOP = 8;
 
+import { Tables } from './layout.js';
+
 /** @param {number} eip @param {number} top */
 const keyOf = (eip, top)=>eip * 16 + top;
+
+/** The slot an address hashes to: the formula translated code probes with. */
+export const slotOf = (/** @type {number} */ eip)=>Math.imul(eip, 0x9e3779b1) >>> 16;
+
+const EMPTY = 0;
+const REMOVED = 0xffffffff;
+/** Past this many live slots, entries stay in the map alone. */
+const HASH_LOAD = Tables.HASH_SLOTS * 3 / 4;
 
 /**
  * @typedef {Object} Entry
@@ -25,9 +35,53 @@ const keyOf = (eip, top)=>eip * 16 + top;
  * @property {number} label    the block's label in the function's dispatcher
  * @property {number} page     the page the block starts in
  * @property {number} top      the x87 top it was compiled for, or ANY_TOP
+ * @property {number} table    the region function's index in the function table, or -1
+ * @property {number} slot     the entry's slot in the hash, or -1
  */
 
-export function createEntries(){
+/**
+ * @param {{ memory?: WebAssembly.Memory, hashBase?: number }} [hash]  the memory and the
+ *     offset of the entry hash in it; without them the map alone answers
+ */
+export function createEntries({ memory, hashBase = -1 } = {}){
+    const hashed = memory !== undefined && hashBase >= 0;
+    const view = ()=>new DataView(/** @type {WebAssembly.Memory} */ (memory).buffer);
+    const clear = ()=>new Uint8Array(/** @type {WebAssembly.Memory} */ (memory).buffer)
+        .fill(0, hashBase, hashBase + Tables.HASH_SLOTS * Tables.HASH_SLOT);
+    let inHash = 0;
+    let removed = 0;
+    if (hashed)
+    {
+        clear();
+    }
+    /** @param {number} eip @param {number} table @param {number} label @param {number} top */
+    const insert = (eip, table, label, top)=>{
+        if (!hashed || table < 0 || inHash >= HASH_LOAD)
+        {
+            return -1;
+        }
+        const v = view();
+        let slot = slotOf(eip);
+        for (;;)
+        {
+            const at = hashBase + slot * Tables.HASH_SLOT;
+            const key = v.getUint32(at, true);
+            if (key === EMPTY || key === REMOVED)
+            {
+                v.setUint32(at, eip, true);
+                v.setUint32(at + 4, table, true);
+                v.setUint16(at + 8, label, true);
+                v.setUint8(at + 10, top);
+                inHash++;
+                if (key === REMOVED)
+                {
+                    removed--;
+                }
+                return slot;
+            }
+            slot = (slot + 1) & (Tables.HASH_SLOTS - 1);
+        }
+    };
     /** @type {(Entry | null)[]} */
     const slots = [];
     /** @type {Map<number, number>} key(eip, top) → slot */
@@ -43,16 +97,17 @@ export function createEntries(){
          * keeps its earlier entry.
          *
          * @param {number} eip @param {Entry['fn']} fn @param {number} label
-         * @param {number} [top]
+         * @param {number} [top] @param {number} [table]  the region's function-table index
          */
-        add(eip, fn, label, top = ANY_TOP){
+        add(eip, fn, label, top = ANY_TOP, table = -1){
             const known = byEip.get(keyOf(eip, top));
             if (known !== undefined)
             {
                 return known;
             }
             const page = eip >>> 12;
-            const index = slots.push({ eip, fn, label, page, top }) - 1;
+            const slot = insert(eip, table, label, top);
+            const index = slots.push({ eip, fn, label, page, top, table, slot }) - 1;
             byEip.set(keyOf(eip, top), index);
             if (top !== ANY_TOP)
             {
@@ -100,6 +155,31 @@ export function createEntries(){
             byEip.delete(keyOf(entry.eip, entry.top));
             byPage.get(entry.page)?.delete(index);
             live--;
+            if (entry.slot >= 0)
+            {
+                view().setUint32(hashBase + entry.slot * Tables.HASH_SLOT, REMOVED, true);
+                inHash--;
+                removed++;
+                if (removed > Tables.HASH_SLOTS / 4)
+                {
+                    // Removed slots lengthen every probe: the hash is rebuilt
+                    // from the live entries.
+                    clear();
+                    inHash = 0;
+                    removed = 0;
+                    for (const kept of slots)
+                    {
+                        if (kept)
+                        {
+                            kept.slot = insert(kept.eip, kept.table, kept.label, kept.top);
+                        }
+                    }
+                }
+            }
+        },
+        /** How many entries the hash holds, for the diagnostics. */
+        hashed(){
+            return inHash;
         },
         /**
          * Drops every entry that starts in the page; answers how many.

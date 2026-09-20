@@ -17,6 +17,8 @@ import { features } from '../wasm/features.js';
 import { emitRegion, prepareModule, mathImports } from '../emit/region.js';
 import { Tables, ownLayout, pagesFor } from '../runtime/layout.js';
 import { createPageTable } from '../runtime/pages.js';
+import { ANY_TOP, createEntries } from '../runtime/entries.js';
+import { isX87 } from '../emit/x87.js';
 
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
@@ -37,6 +39,12 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
     const view = ()=>new DataView(memory.buffer);
     const bytes = ()=>new Uint8Array(memory.buffer);
     const found = features();
+    // The function table and the entry hash a runtime keeps, so a program
+    // run through `runProgram` transfers between its regions as the
+    // runtime's would.
+    const table = found.tailCalls ? new WebAssembly.Table({ element: 'anyfunc', initial: 0 })
+        : null;
+    const entries = createEntries(table ? { memory, hashBase: layout.tables + Tables.HASH } : {});
     return {
         layout,
         memory,
@@ -88,14 +96,16 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
          *
          * @param {number} entry
          * @param {{ maxBlocks?: number, maxBytes?: number, undoLog?: boolean,
-         *     entryTop?: number }} [options]
+         *     entryTop?: number, hash?: boolean }} [options]  hash: register the region's
+         *     entries in the machine's hash, so a transfer from another region finds them
          */
         translate(entry, options = {}){
-            const { undoLog = false, entryTop = 0, ...regionOptions } = options;
+            const { undoLog = false, entryTop = 0, hash = false, ...regionOptions } = options;
             const read = (/** @type {number} */ address)=>bytes()[layout.ramBase + address];
             const region = formRegion(read, entry, regionOptions);
             const m = new ModuleBuilder();
-            const context = prepareModule(m, layout, found, {}, { undoLog });
+            const context = prepareModule(m, layout, found, {},
+                { undoLog, hash: table !== null && hash });
             const translation = emitRegion(context, region, { entryTop });
             m.exportFunction('region', translation.functionIndex);
             const built = m.toBytes();
@@ -104,10 +114,25 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
                 new WebAssembly.Module(built); // throws with the engine's message
             }
             const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
-                env: { memory, ...mathImports() },
+                env: { memory, ...mathImports(), ...(table ? { table } : {}) },
             });
             const run = /** @type {(label: number, budget: number) => number} */ (
                 /** @type {any} */ (instance.exports).region);
+            if (table && hash)
+            {
+                const index = table.grow(1);
+                table.set(index, run);
+                const top = translation.cut.size > 0
+                    || region.blocks.some(block=>block.instructions.some(isX87))
+                    ? entryTop : ANY_TOP;
+                for (const [eip, label] of translation.labels)
+                {
+                    if (!translation.cut.has(label))
+                    {
+                        entries.add(eip, run, label, top, index);
+                    }
+                }
+            }
             return {
                 region,
                 translation,
@@ -136,8 +161,9 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
          *
          * @param {number} entry
          * @param {{ budget?: number, maxRegions?: number, undoLog?: boolean }} [options]
-         * @returns {{ kind: number, vector: number, eip: number, regions: number,
-         *     unsupported: Map<string, number>, retired: number }}
+         * @returns {{ kind: number, vector: number, eip: number, regions: number, runs: number,
+         *     unsupported: Map<string, number>, retired: number }}  runs: times a region
+         *     function was called from here (a transfer between regions is not one)
          */
         runProgram(entry, { budget = 10_000_000, maxRegions = 2000, undoLog = false } = {}){
             /** @type {Map<number, ReturnType<typeof this.translate>>} */
@@ -147,6 +173,7 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
             let eip = entry;
             let left = budget;
             let regions = 0;
+            let runs = 0;
             view().setUint32(layout.eip, eip, true);
             for (;;)
             {
@@ -157,10 +184,11 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
                     if (regions >= maxRegions)
                     {
                         return {
-                            kind: -1, vector: 0, eip, regions, unsupported, retired: budget - left,
+                            kind: -1, vector: 0, eip, regions, runs, unsupported,
+                            retired: budget - left,
                         };
                     }
-                    unit = this.translate(eip, { undoLog, entryTop: top });
+                    unit = this.translate(eip, { undoLog, entryTop: top, hash: true });
                     regions++;
                     for (const [opcode, count] of unit.translation.unsupported)
                     {
@@ -174,11 +202,12 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
                 const before = this.counter();
                 const from = eip;
                 const exit = unit.run(eip, left);
+                runs++;
                 left -= this.counter() - before;
                 eip = this.eip();
                 if (exit.kind !== 0 || left <= 0)
                 {
-                    return { ...exit, eip, regions, unsupported, retired: budget - left };
+                    return { ...exit, eip, regions, runs, unsupported, retired: budget - left };
                 }
                 // Back where it started with nothing retired: the emitter cut
                 // the region before the instruction at this address, and
@@ -186,7 +215,8 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {})
                 if (eip === from && this.counter() === before)
                 {
                     return {
-                        kind: -2, vector: 0, eip, regions, unsupported, retired: budget - left,
+                        kind: -2, vector: 0, eip, regions, runs, unsupported,
+                        retired: budget - left,
                     };
                 }
             }

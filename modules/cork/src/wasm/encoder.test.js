@@ -203,3 +203,38 @@ test('imports index before functions, and the builder refuses the other order', 
     assert.equal(eight(), 8);
     assert.equal(ordered.type({ params: [], results: [ValType.i32] }), t, 'a type is deduplicated');
 });
+
+test('an imported table is called through, with a tail call where the engine has them', ()=>{
+    const m = new ModuleBuilder();
+    const type = m.type({ params: [ValType.i32], results: [ValType.i32] });
+    m.importTable('env', 'table', 0);
+    // f(x) = table[x](x + 1), as a tail call when possible.
+    const body = new Body().localGet(0).i32const(1).op(0x6a).localGet(0);
+    if (features().tailCalls)
+    {
+        body.returnCallIndirect(type, 0);
+    }
+    else
+    {
+        body.callIndirect(type, 0);
+    }
+    m.function(type, [], body.toBytes(), { exportAs: 'f' });
+    const table = new WebAssembly.Table({ element: 'anyfunc', initial: 2 });
+    const instance = new WebAssembly.Instance(new WebAssembly.Module(m.toBytes()),
+        { env: { table } });
+    const { f } = /** @type {any} */ (instance.exports);
+    const doubler = new WebAssembly.Instance(new WebAssembly.Module(
+        (()=>{
+            const d = new ModuleBuilder();
+            const t = d.type({ params: [ValType.i32], results: [ValType.i32] });
+            d.function(t, [], new Body().localGet(0).i32const(2).op(0x6c).toBytes(),
+                { exportAs: 'g' });
+            return d.toBytes();
+        })()), {}).exports.g;
+    table.set(0, doubler);
+    table.set(1, doubler);
+    assert.equal(f(0), 2, 'table[0](1)');
+    assert.equal(f(1), 4, 'table[1](2)');
+    assert.throws(()=>m.table(1), /one table/);
+    assert.throws(()=>new Body().op(/** @type {any} */ (undefined)), /no such opcode/);
+});

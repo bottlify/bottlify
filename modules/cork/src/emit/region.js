@@ -44,6 +44,8 @@ import {
 } from './flags.js';
 import { emitInstruction } from './integer.js';
 import { addUndoHelper, emitStaleExit } from './memory.js';
+import { Tables } from '../runtime/layout.js';
+import { ANY_TOP } from '../runtime/entries.js';
 import {
     addF80Helpers, addRoundHelper, prepareX87, x87BlockStart, x87Edge, x87Epilogue, x87Normalise,
     x87Prologue,
@@ -118,6 +120,8 @@ const LOCAL_TYPES = [
  * @property {number} f64ToF80
  * @property {number} round            the rounding-control helper
  * @property {Record<string, number>} math  the transcendentals imported from the host
+ * @property {boolean} hash            an untranslated exit probes the entry hash and
+ *                                     tail-calls the region found, through the host's table
  */
 
 /**
@@ -128,15 +132,23 @@ const LOCAL_TYPES = [
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
- * @param {{ undoLog?: boolean }} [options]  undoLog: record every store's old bytes
- *     (differential builds only; part of the cache key)
+ * @param {{ undoLog?: boolean, hash?: boolean }} [options]  undoLog: record every store's
+ *     old bytes (differential builds only; part of the cache key); hash: import the host's
+ *     function table and transfer through the entry hash (needs tail calls)
  * @returns {ModuleContext}
  */
-export function prepareModule(m, layout, features, memory = {}, { undoLog = false } = {}){
+export function prepareModule(m, layout, features, memory = {},
+    { undoLog = false, hash = false } = {})
+{
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
         shared: memory.shared ?? false,
     });
+    const hashed = hash && features.tailCalls;
+    if (hashed)
+    {
+        m.importTable('env', 'table', 0);
+    }
     // Imports come before the helpers, which are functions.
     const getEflags = layout.flagsChanged >= 0
         ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
@@ -157,6 +169,7 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
+        hash: hashed,
     };
     if (getEflags !== undefined)
     {
@@ -175,7 +188,8 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
  * @property {number} instructions
- * @property {Set<number>} cut      labels of blocks that leave at once (an x87 state conflict)
+ * @property {Set<number>} cut      labels of blocks that leave at once (an x87 state
+ *     conflict, nothing decoded, the first instruction left out): entered only from outside
  * @property {number} entryTop      the x87 top the function was compiled for
  */
 
@@ -219,6 +233,13 @@ export class RegionEmitter {
         this.pending = null;
         /** @type {Map<string, number>} */
         this.unsupported = new Map();
+        /**
+         * Blocks that leave before retiring anything (nothing decoded, or
+         * the first instruction left out): no entry is made for them, since
+         * a transfer into one would come straight back to the same address.
+         * @type {Set<number>}
+         */
+        this.leaving = new Set();
         /** Whether the current block's remaining instructions are unreachable. */
         this.dead = false;
         /** Instructions retired in the current block so far, to charge at its end. */
@@ -334,7 +355,8 @@ export class RegionEmitter {
             this.context.regionType, this.localTypes, b.toBytes());
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
-            instructions: this.instructions, cut: this.x87.cut, entryTop: this.entryTop,
+            instructions: this.instructions, cut: new Set([...this.x87.cut, ...this.leaving]),
+            entryTop: this.entryTop,
         };
     }
 
@@ -466,7 +488,54 @@ export class RegionEmitter {
             b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
             b.end();
         }
+        if (this.context.hash)
+        {
+            this.transfer();
+        }
         b.localGet(Local.t0);
+    }
+
+    /**
+     * An untranslated exit with budget left probes the entry hash for the
+     * address it leaves at and, on a slot compiled for this x87 top or for
+     * any, tail-calls that region's function with the label and the budget
+     * that remains: a return, an indirect jump or a call into translated
+     * code costs no crossing. The state block is complete at this point,
+     * so the callee's prologue reads what this epilogue wrote. A miss
+     * (an empty slot met) leaves as before.
+     */
+    transfer(){
+        const { b, layout } = this;
+        const base = layout.tables + Tables.HASH;
+        b.localGet(Local.t0).i32const(Exit.UNTRANSLATED).op(I32.eq)
+            .localGet(Local.budget).i32const(0).op(I32.gtS).op(I32.and);
+        this.openIf('lookup');
+        b.localGet(Local.eip).i32const(0x9e3779b1 | 0).op(I32.mul).i32const(16).op(I32.shrU)
+            .localSet(Local.t1);
+        this.openLoop('probe');
+        b.localGet(Local.t1).i32const(Tables.HASH_SLOT).op(I32.mul).i32const(base).op(I32.add)
+            .localSet(Local.t2);
+        b.localGet(Local.t2).load('i32').localTee(Local.addr).localGet(Local.eip).op(I32.eq);
+        this.openIf('hit');
+        b.localGet(Local.t2).load('i32_8u', { offset: 10 }).localTee(Local.addr)
+            .i32const(ANY_TOP).op(I32.eq);
+        b.localGet(Local.addr).i32const(0).load('i32_8u', { offset: layout.x87Top }).op(I32.eq);
+        b.op(I32.or);
+        this.openIf('top');
+        b.localGet(Local.t2).load('i32_16u', { offset: 8 });
+        b.localGet(Local.budget);
+        b.localGet(Local.t2).load('i32', { offset: 4 });
+        b.returnCallIndirect(this.context.regionType, 0);
+        this.close();
+        b.localGet(Local.t2).load('i32').localSet(Local.addr);
+        this.close();
+        b.localGet(Local.addr).op(I32.eqz);
+        b.brIf(this.depthOf('lookup'));
+        b.localGet(Local.t1).i32const(1).op(I32.add).i32const(Tables.HASH_SLOTS - 1).op(I32.and)
+            .localSet(Local.t1);
+        b.br(this.depthOf('probe'));
+        this.close();
+        this.close();
     }
 
     // --- flags ---
@@ -554,6 +623,10 @@ export class RegionEmitter {
         this.dead = false;
         this.blockRetired = 0;
         this.blockDepth = this.controls.length;
+        if (block.instructions.length === 0)
+        {
+            this.leaving.add(index);
+        }
         if (this.x87.active && !x87BlockStart(this, index))
         {
             // Reached with two different x87 tops: the other executor runs it.
@@ -577,6 +650,10 @@ export class RegionEmitter {
                 this.unsupported.set(instruction.opcode,
                     (this.unsupported.get(instruction.opcode) ?? 0) + 1);
                 this.instructions--;
+                if (i === 0)
+                {
+                    this.leaving.add(index);
+                }
                 this.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 this.dead = true;
                 return;

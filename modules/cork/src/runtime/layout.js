@@ -26,8 +26,12 @@ export const PAGE = 65536;
 /**
  * What lies at `layout.tables`, as offsets from it: the page-flag table
  * (one byte per 4 KiB page of the 4 GiB space), the address of the last
- * store into a code page, and the undo ring a differential build fills
- * (a count, then entries of address, size and sixteen old bytes).
+ * store into a code page, the undo ring a differential build fills
+ * (a count, then entries of address, size and sixteen old bytes), and the
+ * entry hash: open addressing over the guest address, slots of the
+ * address, the region's index in the function table, the block's label
+ * and the x87 top it was compiled for (8 for any); an empty slot holds
+ * address 0, a removed one all ones.
  */
 export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
@@ -38,7 +42,10 @@ export const Tables = Object.freeze({
     UNDO_RING: (1 << 20) + 16,
     UNDO_ENTRIES: 4096,
     UNDO_ENTRY: 24,
-    SIZE: (1 << 20) + 16 + 4096 * 24,
+    HASH: (1 << 20) + 16 + 4096 * 24,
+    HASH_SLOTS: 65536,
+    HASH_SLOT: 12,
+    SIZE: (1 << 20) + 16 + 4096 * 24 + 65536 * 12,
 });
 
 /**

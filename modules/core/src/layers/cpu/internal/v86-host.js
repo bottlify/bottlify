@@ -525,6 +525,26 @@ export async function createV86Host(config){
         handoffUnavailable: ()=>handoffUnavailable,
 
         /**
+         * The translator's entry hash, as a physical address: with it the
+         * emulator's slice returns only at an address the hash holds, not
+         * anywhere in a flagged page. Counted with the page flag when the
+         * build lacks the export.
+         *
+         * @param {number} physical
+         */
+        handoffHash(physical){
+            const exported = cpu.wm.exports.bottlify_handoff_hash;
+            if (typeof exported === 'function')
+            {
+                exported(physical >>> 0);
+            }
+            else
+            {
+                handoffUnavailable++;
+            }
+        },
+
+        /**
          * A store a translator made into a page this emulator compiled:
          * its cache is dirtied as the emulator's own stores dirty it.
          *

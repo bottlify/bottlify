@@ -47,7 +47,20 @@ cleared when the page holds none), and the emulator's slice returns as soon as i
 such a page having retired something, so the two go round within one slice until the budget
 is spent. An emulator build without the export runs its turn to a boundary of its own and
 ends the slice; `cork.handoffMisses` counts the slices that so ended inside a page the
-translator holds (`Runtime.holdsPage`), zero with the export. The translator's layout is the emulator's
+translator holds (`Runtime.holdsPage`), zero with the export. Between regions, translated
+code needs no slice loop at all where the engine has tail calls: every region function is
+placed in one function table shared by every module, every entry (block start, x87 top) is
+mirrored into an open-addressing hash in the translator's tables (65 536 slots of the
+address, the table index, the label and the top), and an exit for an untranslated address
+with budget left probes that hash in the epilogue and tail-calls the region found -- a
+return, an indirect jump or a call into translated code costs no crossing, and a hot
+region's direct callees are formed in the same batch so the call and the return both hit.
+A block that would leave before retiring anything (nothing decoded, its first instruction
+left out) has no entry, so a transfer never spins on it. The same hash is given to the
+emulator (`handoffHash`, the fork's `bottlify_handoff_hash`): its slice then returns only at
+an address the hash holds, not anywhere in a flagged page, which would otherwise hand a page
+half translated back one instruction at a time. Without tail calls the map alone answers and
+the slice loop crosses between regions as before. The translator's layout is the emulator's
 own register file, read off its typed views at boot (`stateLayout`), and its tables take the
 top of the guest RAM (`engine.js`'s `TABLES_RESERVE`; the layer reports the RAM below it as
 the memory's size), so a switch between the two copies nothing. Translated code adds what it
@@ -358,8 +371,9 @@ ones). For the translator, three exports of the fork's own: `bottlify_handoff_pa
 sets the per-page bit at which `run_slice` returns (absent in an older build, the host counts
 the request in `handoffUnavailable()` and the slice runs to its own boundary),
 `bottlify_page_has_code_ptr()` names the emulator's own code-page table for the translator's
-stores to test, and `jit_dirty_cache(address, length)` takes a translated store into such a
-page.
+stores to test, `bottlify_handoff_hash(physical)` names the translator's entry hash so the
+slice returns at its entries rather than at its pages, and `jit_dirty_cache(address, length)`
+takes a translated store into such a page.
 
 ## 4. Limitations and divergences
 

@@ -350,6 +350,7 @@ export const cpuModule = {
                             x87Read: ()=>0,
                             rdtsc: ()=>0n,
                             handoffPage: emulator.handoffPage,
+                            handoffHash: emulator.handoffHash,
                             dirtyCode: emulator.dirtyCode,
                         },
                     });

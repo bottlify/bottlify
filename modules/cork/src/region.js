@@ -184,6 +184,12 @@ export function formRegion(read, entry,
                     pending.push(target);
                 }
             }
+            else if (exit.kind === 'call')
+            {
+                // The callee's return lands after the call: a block there
+                // lets the return come back into translated code.
+                pending.push(exit.next);
+            }
             break;
         }
     }

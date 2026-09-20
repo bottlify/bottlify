@@ -1,13 +1,13 @@
 {
   "repo": "mrwayer/v86",
-  "tag": "build-7ef282d",
+  "tag": "build-fcf72f9",
   "artifacts": {
     "libv86.js": "sha256:c3405fcaeeea5085a4d95ec845bc81342f2bfd5a479658558b96e2cf4f66f685",
     "libv86.mjs": "sha256:ea9634b81088f8852dbbf321ade9da5a89b890d5c592235f964f573d17afb594",
-    "nasm-corpus.json.gz": "sha256:57b4df215191b0ceac9a226e60d1b04e6a013dd1bdec8e418dcbd097b563f45f",
+    "nasm-corpus.json.gz": "sha256:b3dca89721fbaf40613c42bf5bed3af02baa15414edb125c68b22f524ecd6d5b",
     "seabios.bin": "sha256:73e3f359102e3a9982c35fce98eb7cd08f18303ac7f1ba6ebfbe6cdc1c244d98",
-    "v86-profiler.wasm": "sha256:65d1fd199469bbd86d3843b02a023f7c7a00dab0727cc93b5dac423d1d6d4317",
-    "v86.wasm": "sha256:87dd0dbced14d83efb7438a170aae00106b4c77b504f35c101c2815da82e89fb",
+    "v86-profiler.wasm": "sha256:a979b072c0227ffb46d462c00aa83253315c2683739d68600ada3780cd7dc116",
+    "v86.wasm": "sha256:5d991e4811848b9043153b90319f265194ab532a7c2877da6c0128e4f779839d",
     "vgabios.bin": "sha256:a4bc0d80cc3ca028c73dafa8fee396b8d054ce87ebd8abfbd31b06b437607880"
   }
 }

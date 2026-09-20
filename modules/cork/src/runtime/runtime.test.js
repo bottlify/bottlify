@@ -149,6 +149,13 @@ test('a store into a code page leaves stale and drops the page\'s regions', asyn
 test('a page invalidated too often becomes volatile and is not translated again', async()=>{
     const m = machine({ volatileAfter: 3 });
     m.write(CODE, COUNTDOWN);
+    // Writes into a page that holds no region (a loader placing an image)
+    // are not what makes a page volatile.
+    for (let i = 0; i < 10; i++)
+    {
+        m.runtime.invalidatePage(CODE >>> 12);
+    }
+    assert.equal(m.runtime.diagnostics().volatilePages, 0);
     for (let i = 0; i < 3; i++)
     {
         m.runtime.noteHot(CODE);
@@ -183,4 +190,38 @@ test('the runtime refuses a memory that has no room for its tables', ()=>{
         memory, layout, config: {}, read: ()=>0,
         imports: { trap: ()=>0, getEflags: ()=>0, x87Read: ()=>0, rdtsc: ()=>0n },
     }), /before the tables/);
+});
+
+test('a hot region\'s direct callee lands in the same batch, and the call transfers', async()=>{
+    const m = machine();
+    // mov ecx, 1000; L: call F; dec ecx; jnz L; hlt; F: inc edx; ret
+    m.write(CODE, [
+        0xb9, 0xe8, 0x03, 0, 0,
+        0xe8, 0x04, 0, 0, 0,
+        0x49, 0x75, 0xf8,
+        0xf4,
+        0x42, 0xc3,
+    ]);
+    m.setReg(4, 0x80000);
+    m.runtime.noteHot(CODE);
+    assert.equal(await m.runtime.translatePending(), 2, 'the loop and its callee');
+    assert.ok(m.runtime.entryOf(CODE + 14) >= 0, 'the callee is an entry');
+    const exit = m.runtime.run(m.runtime.entryOf(CODE), 1_000_000);
+    const d = m.runtime.diagnostics();
+    if (d.entries > 0 && d.exits.untranslated === 0)
+    {
+        // With the hash, the calls and returns never leave wasm.
+        assert.equal(exit.kind, 'halt');
+        assert.equal(exit.retired, 1 + 1000 * 5 + 1);
+        assert.equal(m.reg(2), 1000);
+        assert.equal(d.exits.untranslated, 0);
+        assert.equal(d.regions, 2);
+        assert.equal(d.entries, 5,
+            'the entry, the loop head, the return address, the hlt, the callee');
+    }
+    else
+    {
+        assert.equal(exit.kind, 'untranslated');
+        assert.equal(m.eip(), CODE + 14);
+    }
 });

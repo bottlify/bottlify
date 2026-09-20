@@ -2009,3 +2009,48 @@ test('a slice returns on reaching a flagged page, and runs on when the flag is g
     assert.ok(retired >= 900, `without the flag the slice runs on (${retired})`);
     host.stop();
 });
+
+test('with the entry hash set, a slice returns only at an address the hash holds', async()=>{
+    const host = await boot();
+    const exports = host.cpu().wm.exports;
+    if (!host.handoffAvailable() || typeof exports.bottlify_handoff_hash !== 'function')
+    {
+        host.stop();
+        return; // the pinned build predates the export
+    }
+    const SECOND = GUEST_CODE + 0x1000;
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(1000000),              //     mov ecx, N
+        0x49,                               // L:  dec ecx
+        0xe9, ...u32(SECOND - (GUEST_CODE + 10)), //  jmp SECOND
+    ]));
+    host.writePhysical(SECOND, new Uint8Array([
+        0x0f, 0x85, ...u32((GUEST_CODE + 5) - (SECOND + 6)), // jnz L
+        0xf4,                               //     hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    host.handoffPage(SECOND >>> 12, true);
+    // A hash at 1 MiB holding one address of the flagged page: the hlt,
+    // which the loop never dispatches at while it runs.
+    const HASH = 0x100000;
+    const slot = Math.imul(SECOND + 6, 0x9e3779b1) >>> 16;
+    host.writePhysical(HASH + slot * 12, new Uint8Array(u32(SECOND + 6)));
+    host.handoffHash(HASH);
+    let retired = host.runSlice(1000);
+    assert.ok(retired >= 900, `the slice runs through the flagged page (${retired})`);
+    // The hash holding the jump's target: the slice stops there again.
+    host.writePhysical(HASH + slot * 12, new Uint8Array(4));
+    const target = Math.imul(SECOND, 0x9e3779b1) >>> 16;
+    host.writePhysical(HASH + target * 12, new Uint8Array(u32(SECOND)));
+    retired = host.runSlice(1000);
+    assert.ok(retired <= 3, `stopped at the hashed address (${retired})`);
+    assert.equal(host.eip(), SECOND);
+    // Without a hash, the page flag alone decides, as before.
+    host.handoffHash(0);
+    host.writePhysical(HASH + target * 12, new Uint8Array(4));
+    retired = host.runSlice(1000);
+    assert.ok(retired <= 3, `stopped at the flagged page (${retired})`);
+    host.stop();
+});

@@ -87,6 +87,9 @@
  * @property {(address: number, length: number) => void} [dirtyCode]
  *     Hybrid: a store translated code made into a page the other executor compiled;
  *     the host dirties that cache.
+ * @property {(physical: number) => void} [handoffHash]
+ *     Hybrid: where the engine's entry hash lies in guest memory, so the other executor
+ *     returns only at an address the hash holds rather than anywhere in a flagged page.
  */
 
 /**
@@ -140,7 +143,8 @@
  *
  * @typedef {Object} EngineDiagnostics
  * @property {number} regions          Translated and live.
- * @property {number} entries          Entry points in the hash.
+ * @property {number} entries          Entry points in the hash (in the map alone, without
+ *     tail calls).
  * @property {number} modules          Wasm modules instantiated.
  * @property {number} translatedShare  Instructions retired in the engine / retired, 0..1.
  * @property {number} cacheHits        Regions taken from the store.

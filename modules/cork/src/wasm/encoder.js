@@ -123,6 +123,11 @@ export class Body {
 
     /** @param {number} opcode @param {number[]} [immediates] */
     op(opcode, immediates = []){
+        if (!Number.isInteger(opcode))
+        {
+            // A misspelt name would otherwise encode as byte 0: unreachable.
+            throw new Error(`encoder: no such opcode (${String(opcode)})`);
+        }
         this.bytes.push(opcode, ...immediates);
         return this;
     }
@@ -356,6 +361,7 @@ export class ModuleBuilder {
         this.exports = [];
         /** @type {number | null} */
         this.tableMin = null;
+        this.importedTable = false;
         /** @type {{ offset: number, functions: number[] }[]} */
         this.elements = [];
     }
@@ -440,11 +446,28 @@ export class ModuleBuilder {
 
     /** One funcref table. @param {number} min */
     table(min){
-        if (this.tableMin !== null)
+        if (this.tableMin !== null || this.importedTable)
         {
             throw new Error('encoder: one table');
         }
         this.tableMin = min;
+        return 0;
+    }
+
+    /**
+     * The one table, imported instead: the host's, shared between modules.
+     *
+     * @param {string} module @param {string} field @param {number} min
+     * @returns {number} the table index
+     */
+    importTable(module, field, min){
+        if (this.tableMin !== null || this.importedTable)
+        {
+            throw new Error('encoder: one table');
+        }
+        this.importedTable = true;
+        this.imports.push([...name(module), ...name(field), 0x01, ValType.funcref, 0x00,
+            ...leb128u(min)]);
         return 0;
     }
 
