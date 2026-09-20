@@ -54,6 +54,28 @@ const SELECTORS = [0x10, 0x08, 0x10, 0x10, 0x18, 0x10];
  */
 
 /**
+ * The class a run may leave out: x87, MMX (an mm operand) or SSE (an xmm operand),
+ * or '' for the integer core.
+ *
+ * @param {import('../decode/decoder.js').Instruction} instruction
+ */
+export function classOf(instruction){
+    if (isX87(instruction))
+    {
+        return 'x87';
+    }
+    if (instruction.operands.some(operand=>operand.kind === 'mm'))
+    {
+        return 'mmx';
+    }
+    if (instruction.operands.some(operand=>operand.kind === 'xmm'))
+    {
+        return 'sse';
+    }
+    return '';
+}
+
+/**
  * Emits one instruction. Answers false when it is not one this file
  * translates; nothing is emitted then.
  *
@@ -67,6 +89,11 @@ export function emitInstruction(e, instruction, flagsLive){
     const { op, operands, size } = instruction;
     const [dst, src] = operands;
     const next = (instruction.eip + instruction.length) >>> 0;
+    if (e.context.leaveOut.size > 0 && e.context.leaveOut.has(classOf(instruction)))
+    {
+        // Left to the other executor by the run's configuration.
+        return false;
+    }
     if (instruction.prefixes.address && instruction.memory && !instruction.op.startsWith('lea'))
     {
         // 16-bit addressing outside `lea` is rare in 32-bit code and not worth

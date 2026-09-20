@@ -267,8 +267,9 @@ export function trackRegion(region, entryTop){
  */
 export function prepareX87(e, entryTop){
     const region = e.region;
-    const uses = region.blocks.some(block=>block.instructions.some(isX87));
-    const mmx = region.blocks.some(block=>block.instructions.some(
+    const uses = !e.context.leaveOut.has('x87')
+        && region.blocks.some(block=>block.instructions.some(isX87));
+    const mmx = !e.context.leaveOut.has('mmx') && region.blocks.some(block=>block.instructions.some(
         instruction=>instruction.operands.some(operand=>operand.kind === 'mm')));
     if (!uses || mmx)
     {
@@ -299,6 +300,9 @@ export function prepareX87(e, entryTop){
 export function x87Prologue(e){
     const { b, layout } = e;
     const x = e.x87;
+    // The top as the machine has it: a block whose stack shape the tracking
+    // does not know sets no top of its own, and writes this one back.
+    b.i32const(0).load('i32_8u', { offset: layout.x87Top }).localSet(Local.x87Top);
     b.i32const(0).load('i32_8u', { offset: layout.x87Empty }).localSet(Local.x87Empty);
     b.i32const(0).load('i32_16u', { offset: layout.x87Status }).localSet(Local.x87Status);
     b.i32const(0).load('i32_16u', { offset: layout.x87Control }).localSet(Local.x87Control);

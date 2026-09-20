@@ -339,7 +339,10 @@ export function emitSimd(e, instruction, flagsLive){
             return true;
         }
         case 'emms':
+            // Every register empty again -- and the run's MMX mark cleared,
+            // or the epilogue would hold every register right after.
             b.i32const(0).i32const(0xff).store('i32_8', { offset: e.layout.x87Empty });
+            b.i32const(0).localSet(e.mmxTouchedLocal());
             return true;
 
         // --- packed and scalar float arithmetic ---

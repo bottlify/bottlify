@@ -125,7 +125,13 @@ translated module, as the emulator's do, so the two agree on one engine. `fnsten
 pointers zero, which neither keeps); `fldenv` and `frstor` read it back into the locals and
 leave for the next block, since the top they set is known only at run time and every block
 is compiled for one -- the entry hash re-enters the code compiled for whatever the top then
-is. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
+is. Within a region, only the blocks compiled for the stack in the entry's shape (its top,
+no registers exchanged) are entries; a block compiled for another shape is reached from
+inside the region alone, where the edge brings the stack into it, since entered from outside
+it would push, pop and write the top back for a stack the machine does not have. A block
+whose shape the tracking does not know keeps the top the machine had. An MMX instruction
+holds every x87 register with the top at zero, as the processor does, and `emms` empties them
+again, whichever order the two come in within one run. `fxsave` and `fxrstor` still end a region and run on the emulator. A store translated code makes into a page the emulator's own compiler compiled is
 seen too: the store checks the emulator's byte-per-page "has code" table beside the
 translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
 leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
@@ -165,7 +171,7 @@ enter the type check or the bundle.
 |-----------------|----------------------------|---------------------|---------|
 | `memorySize`    | number (power of two)      | `1 GiB`             | Guest RAM. Reserved, not committed: the host pays for pages the guest touches. Must be a power of two; the emulator requires it. With an engine other than `emulator` the top `TABLES_RESERVE` (4 MiB) is the translator's tables, and `layout.memorySize` reports the rest. |
 | `engineUrl`     | string                     | none                | The translator's entry module, imported at `boot()` under `hybrid`; `createApp` resolves it from `cork.moduleUrl` or the package beside core. Absent, `hybrid` runs with no translator. |
-| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold`, `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`. |
+| `cork`          | `EngineConfig`             | `{}`                | The translator's own settings (`engine.js`): `hotThreshold`, `maxRegionBlocks`, `maxRegionBytes`, `batchRegions`, `feed`, `missThreshold`, and `leaveOut`, the instruction classes (`x87`, `mmx`, `sse`) a run leaves to the emulator so a defect can be localised by class; such a run keeps no translation store. |
 | `trapPort`      | number                     | `0xb077`            | The I/O port a stub writes its trap id to. |
 | `entryVector`   | number                     | `0x7000`            | Linear address of the dword the ROM jumps through to enter guest code. |
 | `initialStack`  | number                     | `0x300000`          | ESP the ROM sets before jumping into the guest. |

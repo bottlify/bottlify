@@ -10,6 +10,9 @@ import { createTestMachine } from '../testing/machine.js';
 import { Exit } from './region.js';
 
 const CODE = 0x1000;
+const DATA = 0x3000;
+/** @param {number} v */
+const u32 = v=>[v & 255, v >>> 8 & 255, v >>> 16 & 255, v >>> 24 & 255];
 
 /** mov ecx, 10; L: dec ecx; jnz L; mov eax, 42; hlt */
 const COUNTDOWN = [0xb9, 10, 0, 0, 0, 0x49, 0x75, 0xfd, 0xb8, 42, 0, 0, 0, 0xf4];
@@ -141,3 +144,56 @@ test('a block branching to its own start is a loop of its own, with the budget s
         assert.equal(w.translation.loops, 0, 'the exchange changes the state each round');
         assert.deepEqual(w.run(CODE), { kind: 3, vector: 0 });
     });
+
+test('a class left out by configuration is left to the other executor', ()=>{
+    // fld1; movq mm0, [m]; hlt -- with x87 left out the region leaves before
+    // the fld1; with MMX left out it runs the fld1 and leaves before the movq.
+    const program = [0xd9, 0xe8, 0x0f, 0x6f, 0x05, ...u32(DATA), 0xf4];
+    const fp = createTestMachine({ leaveOut: ['x87'] });
+    fp.write(CODE, program);
+    fp.setReg('esp', 0x80000);
+    const f = fp.translate(CODE);
+    assert.deepEqual(f.run(CODE), { kind: 0, vector: 0 });
+    assert.equal(fp.eip(), CODE, 'before the fld1');
+    assert.deepEqual([...f.translation.unsupported.keys()], ['d9 e8'], 'the fld1 left out');
+    const mm = createTestMachine({ leaveOut: ['mmx'] });
+    mm.write(CODE, program);
+    mm.setReg('esp', 0x80000);
+    const g = mm.translate(CODE);
+    assert.deepEqual(g.run(CODE), { kind: 0, vector: 0 });
+    assert.equal(mm.eip(), CODE + 2, 'before the movq');
+    assert.equal(new DataView(mm.memory.buffer).getUint8(mm.layout.x87Top), 7, 'the fld1 ran');
+});
+
+test('a block compiled for the stack in another shape than the entry gets no entry', ()=>{
+    // fld1; test eax, eax; jnz B; nop; B: fld1; hlt -- B is compiled for
+    // top 7, the entry for top 0. Entered from outside with the stack as
+    // the entry's, B would push onto slot 6 and write top 6 back for a
+    // machine whose top was 0, the shape a program later finds wrong.
+    const m = createTestMachine();
+    const B = CODE + 7;
+    m.write(CODE, [0xd9, 0xe8, 0x85, 0xc0, 0x75, 0x01, 0x90, 0xd9, 0xe8, 0xf4]);
+    m.setReg('esp', 0x80000);
+    const u = m.translate(CODE);
+    const view = new DataView(m.memory.buffer);
+    assert.ok(u.translation.labels.has(B), 'B is a block');
+    assert.ok(u.translation.cut.has(/** @type {number} */ (u.translation.labels.get(B))),
+        'no entry at B');
+    assert.deepEqual(u.run(CODE), { kind: 3, vector: 0 });
+    assert.equal(view.getUint8(m.layout.x87Top), 6, 'two pushes from the entry');
+    assert.equal(view.getUint8(m.layout.x87Empty), 0x3f);
+    // A block the tracking does not reach with a known shape (past an
+    // instruction left to the emulator) keeps the machine's own top when
+    // entered: fbld [m]; jmp C; C: fld1; hlt, entered at C with top 5.
+    const n = createTestMachine();
+    const C = CODE + 8;
+    n.write(CODE, [0xdf, 0x25, ...u32(DATA), 0xeb, 0x00, 0xd9, 0xe8, 0xf4]);
+    n.setReg('esp', 0x80000);
+    const t = n.translate(CODE);
+    const nview = new DataView(n.memory.buffer);
+    nview.setUint8(n.layout.x87Top, 5);
+    assert.ok(t.translation.labels.has(C), 'C is a block');
+    assert.deepEqual(t.run(C), { kind: 0, vector: 0 }, 'leaves before the fld1');
+    assert.equal(n.eip(), C);
+    assert.equal(nview.getUint8(n.layout.x87Top), 5, 'the top as the machine had it');
+});

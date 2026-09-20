@@ -103,6 +103,9 @@
  * @property {number} [batchRegions]     Regions per wasm module. Default 32.
  * @property {number} [missThreshold]    Untranslated exits to one address before the engine
  *     queues it as a candidate of its own. Default 64.
+ * @property {('x87' | 'mmx' | 'sse')[]} [leaveOut]  Instruction classes the translator leaves
+ *     to the other executor (a region exits before one), so a defect can be localised by
+ *     class from a run; a run with any class left out keeps no translation store. Default none.
  * @property {number} [trapPort]         The I/O port that is the host's call channel: a
  *     write of eax to it by translated code leaves with a `trap` exit past the instruction,
  *     and the hybrid host runs the handler the port write would have reached. Without it,

@@ -61,6 +61,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         undoLog: false,
         ...config,
     };
+    /** @type {Set<string>} instruction classes left to the other executor */
+    const leaveOut = new Set(settings.leaveOut ?? []);
     if (layout.tables + Tables.SIZE > memory.buffer.byteLength)
     {
         throw new Error(`cork: the memory ends at ${memory.buffer.byteLength}, before the tables`
@@ -306,7 +308,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             {
                 queue.delete(key);
             }
-            const store = settings.store ?? null;
+            // A diagnostic run with classes left out keeps no translations.
+            const store = leaveOut.size > 0 ? null : (settings.store ?? null);
             const bundleId = settings.bundleId ?? 'unknown';
             /** @type {{ region: import('../region.js').Region, entryTop: number,
              *     stamp: string, cached: import('./cache.js').CachedRegion | null }[]} */
@@ -386,7 +389,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 {
                     const m = new ModuleBuilder();
                     const context = prepareModule(m, layout, found, {}, {
-                        undoLog: settings.undoLog, hash: table !== null,
+                        undoLog: settings.undoLog, hash: table !== null, leaveOut,
                         ...(settings.trapPort === undefined ? {} : { trapPort: settings.trapPort }),
                     });
                     /** @type {import('../emit/region.js').Translation} */

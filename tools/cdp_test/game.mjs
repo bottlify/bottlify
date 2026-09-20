@@ -162,6 +162,9 @@ function parse(argv){
         // title that reaches its loop and would otherwise run out the turns
         // hours later. Zero means the turns alone decide.
         runSeconds: number('--run-seconds', 0),
+        // Which execution engine runs the program (`emulator`, the default,
+        // or `hybrid` with the translator), so two runs differ by that alone.
+        engine: argv.includes('--engine') ? argv[argv.indexOf('--engine') + 1] : undefined,
         // The display the program is told it has, as `WxH`. The launcher
         // names the person's own screen, which is rarely a size a program of
         // this era lists, so what a title does on one is a different path.
@@ -833,6 +836,8 @@ export async function game(options){
         srcDir: join(PACKAGE_DIR, 'src'),
         extra: [
             { prefix: '/bundle/', root: directory },
+            // The translator package beside core, where app.js resolves it.
+            { prefix: '/cork/', root: join(PACKAGE_DIR, '..', 'cork') },
             // The networking client, for a run that names a relay.
             { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
         ],
@@ -891,6 +896,7 @@ export async function game(options){
             sidecarHooks,
             maxTurns: options.turns,
             maxMs: options.runSeconds > 0 ? options.runSeconds * 1000 : null,
+            engine: options.engine,
             screen: options.screen,
             quantum: options.quantum,
             log: Boolean(options.log),

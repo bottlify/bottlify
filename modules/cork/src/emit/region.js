@@ -125,6 +125,7 @@ const LOCAL_TYPES = [
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
  * @property {number} [trapPort]       the port a write to which is the host's call channel
+ * @property {Set<string>} leaveOut    instruction classes (x87, mmx, sse) a region exits before
  * @property {number} [trap]           the host's trap import, called from inside a region
  */
 
@@ -136,14 +137,15 @@ const LOCAL_TYPES = [
  * @param {import('../../../core/src/layers/cpu/engine.js').StateLayout} layout
  * @param {{ simd: boolean, tailCalls: boolean, defaultNaNNegative?: boolean }} features
  * @param {{ shared?: boolean, maxPages?: number }} [memory]
- * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number }} [options]  undoLog:
+ * @param {{ undoLog?: boolean, hash?: boolean, trapPort?: number, leaveOut?: Set<string> }}
+ *     [options]  undoLog:
  *     record every store's old bytes (differential builds only; part of the cache key);
  *     hash: import the host's function table and transfer through the entry hash (needs
  *     tail calls); trapPort: `out dx, eax` to it leaves with a trap exit
  * @returns {ModuleContext}
  */
 export function prepareModule(m, layout, features, memory = {},
-    { undoLog = false, hash = false, trapPort } = {})
+    { undoLog = false, hash = false, trapPort, leaveOut = new Set() } = {})
 {
     m.importMemory('env', 'memory', {
         min: 1, ...(memory.maxPages === undefined ? {} : { max: memory.maxPages }),
@@ -182,7 +184,7 @@ export function prepareModule(m, layout, features, memory = {},
     /** @type {ModuleContext} */
     const context = {
         m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round, math,
-        hash: hashed, codeHit,
+        hash: hashed, codeHit, leaveOut,
     };
     if (trapPort !== undefined)
     {
@@ -206,8 +208,9 @@ export function prepareModule(m, layout, features, memory = {},
  * @property {Map<number, number>} labels     block start eip → label
  * @property {Map<string, number>} unsupported  opcode → instructions the emitter left out
  * @property {number} instructions
- * @property {Set<number>} cut      labels of blocks that leave at once (an x87 state
- *     conflict, nothing decoded, the first instruction left out): entered only from outside
+ * @property {Set<number>} cut      labels of blocks with no entry of their own: ones that
+ *     leave at once (an x87 state conflict, nothing decoded, the first instruction left out)
+ *     and ones compiled for the x87 stack in another shape than the entry's
  * @property {number} entryTop      the x87 top the function was compiled for
  * @property {number} loops         blocks emitted as wasm loops onto themselves
  */
@@ -381,7 +384,8 @@ export class RegionEmitter {
             this.context.regionType, this.localTypes, b.toBytes());
         return {
             functionIndex, labels: this.labels, unsupported: this.unsupported,
-            instructions: this.instructions, cut: new Set([...this.x87.cut, ...this.leaving]),
+            instructions: this.instructions,
+            cut: new Set([...this.x87.cut, ...this.leaving, ...this.shapedBlocks()]),
             entryTop: this.entryTop, loops: this.loops,
         };
     }
@@ -736,6 +740,24 @@ export class RegionEmitter {
         }
         this.emitExit(block, index);
         this.closeSelfLoop();
+    }
+
+    /**
+     * Blocks compiled for the x87 stack in another shape than the region's
+     * entry: another top, or registers exchanged. Reached from inside the
+     * region the edge brings the stack into that shape; entered from outside
+     * the machine's stack is the entry's, and the block would push, pop and
+     * write the top back for a stack it does not have. No entry for them.
+     */
+    shapedBlocks(){
+        const x = this.x87;
+        if (!x.active)
+        {
+            return [];
+        }
+        const entry = /** @type {import('./x87.js').StackState} */ (x.states[0]);
+        return x.states.flatMap((state, index)=>
+            index > 0 && state !== null && !sameState(state, entry) ? [index] : []);
     }
 
     /** Closes the block's loop onto itself, when it is one. */

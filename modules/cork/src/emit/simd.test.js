@@ -311,4 +311,15 @@ test('MMX runs in the low lane and leaves the x87 stack held with its top at zer
     emms.setReg('esp', 0x80000);
     emms.runProgram(CODE);
     assert.equal(new DataView(emms.memory.buffer).getUint8(emms.layout.x87Empty), 0xff);
+    // MMX used and emms in one run: the stack is empty at the end, the
+    // epilogue's hold for MMX use undone by the emms that followed it (a
+    // program checking its stack is empty at the end of a frame found it
+    // held after every MMX copy).
+    const after = createTestMachine();
+    // movq mm0, [m]; emms; hlt
+    after.write(CODE, [0x0f, 0x6f, 0x05, DATA & 255, DATA >> 8 & 255, 0, 0, 0x0f, 0x77, 0xf4]);
+    after.setReg('esp', 0x80000);
+    assert.equal(after.runProgram(CODE).kind, 3);
+    assert.equal(new DataView(after.memory.buffer).getUint8(after.layout.x87Empty), 0xff,
+        'empty after emms');
 });
