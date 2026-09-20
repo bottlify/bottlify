@@ -367,7 +367,16 @@ export const cpuModule = {
                         config: { trapPort: settings.trapPort, ...settings.cork },
                         read: emulator.readByte,
                         imports: {
-                            trap: ()=>0,
+                            // The call channel from inside translated code:
+                            // the handler the port write reaches, on the
+                            // register file the region wrote back; 1 when it
+                            // moved EIP or stopped the machine, so the region
+                            // leaves rather than going on.
+                            trap: (/** @type {number} */ value)=>{
+                                const at = emulator.eip();
+                                emulator.raiseTrap(value);
+                                return emulator.eip() !== at || emulator.halted() ? 1 : 0;
+                            },
                             getEflags: emulator.getEflags,
                             x87Read: ()=>0,
                             rdtsc: ()=>0n,

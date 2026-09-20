@@ -65,12 +65,15 @@ through such exits -- the sampler sees only where budgets run out. An address a 
 nothing at (every block of it leaves at once) is not tried again until its page moves.
 A block that would leave before retiring anything (nothing decoded, its first instruction
 left out) has no entry, so a transfer never spins on it. The host's call channel is
-translated too: `out dx, eax` to the trap port (`cork.trapPort`, the layer's own) leaves
-with a `trap` exit past the instruction and the state block complete, the hybrid host runs
-the handler the port write would have reached (`raiseTrap` on the emulator's host, the same
-handler and the same count), and the next round resumes at whatever EIP the handler left --
-the stub's own return after the port write is a block, so a call into the bridge costs one
-crossing out of wasm and one back, with no emulator turn. `out` to any other port, `in`,
+translated too: `out dx, eax` to the trap port (`cork.trapPort`, the layer's own) writes the
+state block back with EIP past the instruction and the count charged, calls the `trap`
+import from inside the region -- the cpu layer's, which runs the handler the port write would
+have reached (`raiseTrap` on the emulator's host, the same handler and the same count) and
+answers whether it moved EIP or stopped the machine -- takes the state back into the locals
+and goes on after the write, or leaves untranslated where the handler put EIP. A region
+holding x87 registers in its locals takes the older form instead, a `trap` exit past the
+instruction that the hybrid host answers the same way; either way a call into the bridge
+costs no emulator turn. `out` to any other port, `in`,
 `cli`, `sti`, `int n`, `int3` and `into` are the emulator's, before the instruction. A fault
 translated code detects (a divide by zero, an undefined instruction, an access the page
 table refuses) leaves before the instruction with the registers as they were, and the

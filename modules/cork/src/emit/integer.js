@@ -483,8 +483,32 @@ export function emitInstruction(e, instruction, flagsLive){
                 e.openIf('port');
                 e.exitBefore(instruction.eip, Exit.UNTRANSLATED);
                 e.close();
-                e.exitAt(next, Exit.TRAP);
-                e.dead = true;
+                // Without the import, or with x87 registers held in the locals
+                // (a permutation the shared load and store do not know), the
+                // exit past the instruction, which the host answers the same.
+                if (e.context.trap === undefined || e.x87.active)
+                {
+                    e.exitAt(next, Exit.TRAP);
+                    e.dead = true;
+                    return true;
+                }
+                // From here: the state block written back with EIP past the
+                // instruction and the count charged, the host's handler run,
+                // the state taken back -- the handler's answer is in it --
+                // and the program going on after the write unless the
+                // handler moved EIP, in which case the region leaves there.
+                e.charge();
+                b.i32const(next).localSet(Local.eip);
+                e.storeState();
+                e.resetRun();
+                b.localGet(Local.reg).call(e.context.trap);
+                e.openIf('moved');
+                e.loadState();
+                b.i32const(0).load('i32', { offset: e.layout.eip }).localSet(Local.eip);
+                e.exitDynamic(Exit.UNTRANSLATED);
+                e.close();
+                e.loadState();
+                e.trapped = true;
                 return true;
             }
             return false;

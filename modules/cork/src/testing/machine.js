@@ -23,10 +23,12 @@ import { isX87 } from '../emit/x87.js';
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
- * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number }} [options]  trapPort:
- *     `out dx, eax` to it leaves with a trap exit, as under a host with a call channel
+ * @param {{ ramSize?: number, codePages?: boolean, trapPort?: number,
+ *     trap?: (value: number) => number }} [options]  trapPort: `out dx, eax` to it calls
+ *     `trap` from inside the region (answering 1 when it moved EIP), as under a host with
+ *     a call channel; without `trap`, one that answers 0
  */
-export function createTestMachine({ ramSize = 1 << 20, codePages = false, trapPort } = {}){
+export function createTestMachine({ ramSize = 1 << 20, codePages = false, trapPort, trap } = {}){
     // With `codePages`, the undo ring's area doubles as another executor's
     // byte-per-page code table, for the tests of a store into its pages.
     const own = ownLayout({ ramSize });
@@ -118,7 +120,10 @@ export function createTestMachine({ ramSize = 1 << 20, codePages = false, trapPo
                 new WebAssembly.Module(built); // throws with the engine's message
             }
             const instance = new WebAssembly.Instance(new WebAssembly.Module(built), {
-                env: { memory, ...mathImports(), ...(table ? { table } : {}) },
+                env: {
+                    memory, ...mathImports(), ...(table ? { table } : {}),
+                    trap: trap ?? (()=>0),
+                },
             });
             const run = /** @type {(label: number, budget: number) => number} */ (
                 /** @type {any} */ (instance.exports).region);

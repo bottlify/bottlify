@@ -177,7 +177,7 @@ test('an indirect call reaches its target with the return address pushed', ()=>{
     }
 });
 
-test('out dx, eax to the trap port leaves with a trap past it; any other port is left before',
+test('out dx, eax to the trap port calls the host from inside the region; others leave before',
     ()=>{
         const PORT = 0xb077;
         const program = [
@@ -188,19 +188,47 @@ test('out dx, eax to the trap port leaves with a trap past it; any other port is
             0x43,                               //     inc ebx
             0xf4,                               //     hlt
         ];
-        const m = createTestMachine({ trapPort: PORT });
+        // The import called from inside the region: it sees the state block
+        // as the host would (eax the value, EIP past the out, the count
+        // charged), answers in it, and the program goes on.
+        /** @type {{ eax: number, eip: number, counter: number }[]} */
+        const seen = [];
+        const m = createTestMachine({
+            trapPort: PORT,
+            trap: value=>{
+                seen.push({ eax: value, eip: m.eip(), counter: m.counter() });
+                m.setReg('eax', 0x77);
+                return 0;
+            },
+        });
         m.write(CODE, program);
         m.setReg('esp', STACK);
         const unit = m.translate(CODE, { hash: true });
-        assert.deepEqual(unit.run(CODE), { kind: 2, vector: 0 }, 'trap');
-        assert.equal(m.eip(), CODE + 15, 'past the out');
-        assert.equal(m.reg('eax'), 7, 'the value the port would have been written');
-        assert.equal(m.reg('ebx'), 1, 'the instruction after it has not run');
-        assert.equal(m.counter(), 4, 'the out is counted');
-        // Resuming after the trap: the block past the out is an entry.
-        assert.ok(unit.translation.labels.has(CODE + 15));
-        assert.deepEqual(unit.run(CODE + 15), { kind: 3, vector: 0 });
-        assert.equal(m.reg('ebx'), 2);
+        assert.deepEqual(unit.run(CODE), { kind: 3, vector: 0 }, 'halted, the call made');
+        assert.deepEqual(seen, [{ eax: 7, eip: CODE + 15, counter: 4 }]);
+        assert.equal(m.reg('eax'), 0x77, 'the answer, taken back into the locals');
+        assert.equal(m.reg('ebx'), 2, 'the instruction after it ran');
+        assert.equal(m.counter(), 6);
+        // A handler that moves EIP: the region leaves there, untranslated.
+        const moved = createTestMachine({
+            trapPort: PORT,
+            trap: ()=>{
+                new DataView(moved.memory.buffer).setUint32(moved.layout.eip, 0x9000, true);
+                return 1;
+            },
+        });
+        moved.write(CODE, program);
+        moved.setReg('esp', STACK);
+        assert.deepEqual(moved.translate(CODE, { hash: true }).run(CODE), { kind: 0, vector: 0 });
+        assert.equal(moved.eip(), 0x9000);
+        assert.equal(moved.reg('ebx'), 1, 'the instruction after the out did not run');
+        // With x87 registers live in the region, the exit past the out instead.
+        const fp = createTestMachine({ trapPort: PORT, trap: ()=>0 });
+        fp.write(CODE, [0xd9, 0xe8, ...program]); // fld1 first
+        fp.setReg('esp', STACK);
+        const f = fp.translate(CODE, { hash: true });
+        assert.deepEqual(f.run(CODE), { kind: 2, vector: 0 }, 'trap exit');
+        assert.equal(fp.eip(), CODE + 17, 'past the out');
         // Another port: the other executor's, before the instruction.
         const other = createTestMachine({ trapPort: PORT });
         other.write(CODE, [0x66, 0xba, 0x78, 0xb0, 0xb8, ...u32(7), 0xef, 0xf4]); // dx = PORT+1

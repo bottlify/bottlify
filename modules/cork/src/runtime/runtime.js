@@ -430,8 +430,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
                     instance = new WebAssembly.Instance(module, {
                         env: {
-                            memory, getEflags: imports.getEflags, ...mathImports(),
-                            ...(table ? { table } : {}),
+                            memory, getEflags: imports.getEflags, trap: imports.trap,
+                            ...mathImports(), ...(table ? { table } : {}),
                         },
                     });
                 }

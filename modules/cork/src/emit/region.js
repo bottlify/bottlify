@@ -125,6 +125,7 @@ const LOCAL_TYPES = [
  * @property {boolean} hash            an untranslated exit probes the entry hash and
  *                                     tail-calls the region found, through the host's table
  * @property {number} [trapPort]       the port a write to which is the host's call channel
+ * @property {number} [trap]           the host's trap import, called from inside a region
  */
 
 /**
@@ -153,6 +154,13 @@ export function prepareModule(m, layout, features, memory = {},
     {
         m.importTable('env', 'table', 0);
     }
+    // The host's call channel, when the layout has a port for it: called
+    // from inside a region with the state block written back, it answers
+    // whether the handler moved EIP.
+    const trap = trapPort === undefined
+        ? undefined
+        : m.importFunction('env', 'trap',
+            m.type({ params: [ValType.i32], results: [ValType.i32] }));
     // Imports come before the helpers, which are functions.
     const getEflags = layout.flagsChanged >= 0
         ? m.importFunction('env', 'getEflags', m.type({ params: [], results: [ValType.i32] }))
@@ -179,6 +187,7 @@ export function prepareModule(m, layout, features, memory = {},
     if (trapPort !== undefined)
     {
         context.trapPort = trapPort;
+        context.trap = trap;
     }
     if (getEflags !== undefined)
     {
@@ -253,6 +262,8 @@ export class RegionEmitter {
         this.blockIndex = 0;
         /** Whether the current block is a wasm loop onto itself (see `emitBlock`). */
         this.selfLoop = false;
+        /** Whether the block's port write called the host from here and went on. */
+        this.trapped = false;
         /** Blocks emitted as loops onto themselves. */
         this.loops = 0;
         /** Whether the current block's remaining instructions are unreachable. */
@@ -418,6 +429,12 @@ export class RegionEmitter {
     }
 
     prologue(){
+        this.loadState();
+        this.resetRun();
+    }
+
+    /** The registers, the flags, the vector registers and the x87 block into the locals. */
+    loadState(){
         const { b, layout } = this;
         for (let r = 0; r < 8; r++)
         {
@@ -433,10 +450,6 @@ export class RegionEmitter {
             b.call(this.context.getEflags).localSet(Local.flags);
             this.close();
         }
-        b.i32const(0).localSet(Local.kind);
-        b.i32const(0).localSet(Local.retired);
-        b.i32const(0).localSet(Local.mmxTouched);
-        b.i32const(0).localSet(Local.stale);
         for (const [index, local] of this.xmmLocals)
         {
             b.i32const(0).loadV128({ offset: layout.xmm + index * 16 }).localSet(local);
@@ -451,8 +464,32 @@ export class RegionEmitter {
         }
     }
 
+    /** The run's own locals at their start: no record, nothing retired, nothing touched. */
+    resetRun(){
+        const { b } = this;
+        b.i32const(0).localSet(Local.kind);
+        b.i32const(0).localSet(Local.retired);
+        b.i32const(0).localSet(Local.mmxTouched);
+        b.i32const(0).localSet(Local.stale);
+    }
+
     /** Writes every local back and returns the kind in `t0`. */
     epilogue(){
+        this.storeState();
+        if (this.context.hash)
+        {
+            this.transfer();
+        }
+        this.b.localGet(Local.t0);
+    }
+
+    /**
+     * Every local back into the state block: the registers, the flags made
+     * whole, EIP, the count added to the counter word, the vector registers
+     * written, the x87 block. The state block is then the truth, as the
+     * host reads it and as `loadState` takes it back.
+     */
+    storeState(){
         const { b, layout } = this;
         this.materialise();
         for (let r = 0; r < 8; r++)
@@ -503,11 +540,6 @@ export class RegionEmitter {
             b.i32const(0).i32const(0).store('i32_8', { offset: layout.x87Empty });
             b.end();
         }
-        if (this.context.hash)
-        {
-            this.transfer();
-        }
-        b.localGet(Local.t0);
     }
 
     /**
@@ -799,8 +831,24 @@ export class RegionEmitter {
                 this.charge();
                 this.exitAt(exit.next, Exit.UNTRANSLATED);
                 return;
+            case 'trap':
+                if (this.trapped)
+                {
+                    // The call channel was called from here and the program
+                    // went on: the block after the port write follows.
+                    this.trapped = false;
+                    this.charge();
+                    this.jumpTo(exit.next);
+                    return;
+                }
+                if (!this.dead)
+                {
+                    this.charge();
+                    this.exitAt(exit.next, Exit.UNTRANSLATED);
+                }
+                return;
             default:
-                // ret, indirect, call, trap, hlt, fault: the instruction's own
+                // ret, indirect, call, hlt, fault: the instruction's own
                 // emission already left the function.
                 if (!this.dead)
                 {
