@@ -19,8 +19,8 @@ Two tracked documents, because they are consulted differently, plus the local wo
   the architecture, the hybrid/differential migration, and what it changes for media.
 - **`cork-plan.md`** — the step-by-step integration plan for cork: five milestones broken into
   steps of at most a day, each with its files, contracts, tests, acceptance number and what could
-  go wrong; written against the design above, ending with the emulator removed from the product
-  and kept only as a test-time oracle, with the seams for x86-64 named.
+  go wrong; written against the design above, ending with cork as the default engine and the
+  emulator an optional layer chosen per bundle launch, with the seams for x86-64 named.
 
 Three `00-*` files sit beside these and **are not in git** (`.gitignore` excludes `roadmap/00-*`):
 the follow-ups roadmap — what is decided and not yet built after the phased plan — the

@@ -7,14 +7,15 @@ which files, behind which contracts, checked by which tests and accepted by whic
 design is turned into code, one step of at most a day at a time.
 
 The owner's direction, stated 2026-09-20 and binding over any relayed brief: **the explicit
-dependency on the vendored emulator is removed.** It is the reason processor-bound titles are
-weak, and the replacement has to be several times faster — tens of times where that is
-reachable — with 64-bit programs possible later (§7). During the migration the emulator is
-scaffolding: the fallback tier in `hybrid` mode, and the differential oracle. At the end
-(milestone 5) the product neither loads nor ships it; it remains a test-time artifact fetched
-for the differential suites, exactly as the prebuilt is fetched for the integration tests
-today, and `engine: 'emulator'` stays working *only until that last step*, as the regression
-gate of every step before it.
+dependency on the vendored emulator is removed, and the emulator becomes one selectable
+execution layer among two.** The idea is that the layer is chosen when a bundle is launched:
+cork is the engine the product needs and runs on by itself, the emulator is an option the
+person or the bundle may pick — loaded only when picked, never required, and still the
+fallback tier of `hybrid` mode and the differential oracle. The emulator is the reason
+processor-bound titles are weak; the replacement has to be several times faster — tens of
+times where that is reachable — with 64-bit programs possible later (§7).
+`engine: 'emulator'` keeps working unchanged through every step, as the regression gate of
+each and as a product mode afterwards.
 
 **The target in numbers.** The design's 0.5–1 ns per instruction is 2–4× on the plain view
 (2 ns today) and up to 10× on the x87- and GUI-heavy view (3 ns today), and the milestones
@@ -128,13 +129,17 @@ may add to them; a rename is a plan change.
 /**
  * @typedef {'emulator' | 'hybrid' | 'cork' | 'differential'} EngineName
  *   emulator      the vendored emulator alone, exactly as today (the default until 5.4;
- *                 removed with the emulator in 5.5)
- *   hybrid        the emulator runs everything cork has not translated (migration only;
- *                 removed in 5.5)
- *   cork          cork alone: the product's engine, nothing of the emulator loaded
+ *                 a selectable, optional layer afterwards)
+ *   hybrid        the emulator runs everything cork has not translated; the migration mode,
+ *                 kept afterwards as a selectable layer for a title cork refuses part of
+ *   cork          cork alone: the product's engine, nothing of the emulator loaded or needed
  *   differential  hybrid, plus every region replayed on the emulator and compared;
- *                 test builds and the harness only, refused by the packaged build; after
- *                 5.5 it is the itests' mode over the fetched test-time emulator
+ *                 test builds and the harness only, refused by the packaged build
+ *
+ * The engine is chosen per launch: `AppOptions.engine`, set by the launcher from the
+ * person's choice for that bundle, with the bundle's `manifest.json` allowed to suggest one
+ * (`engine` field) and the launcher's default used otherwise. A launch that names `emulator`
+ * or `hybrid` fetches the emulator's artifacts then; a launch that names `cork` never does.
  *
  * cpu configuration gains:
  * @property {EngineName} [engine='emulator']
@@ -1392,9 +1397,9 @@ picture divergence beyond run-to-run; Gate E still identical.
 Goal of the milestone: cork runs the library's demos with `engine: 'cork'`, where nothing of
 the emulator is loaded — not its machine, not its wasm; the one thing the product still took
 from that wasm, the zstd decoder, is replaced by a decoder of this project's own; the default
-engine becomes `cork`; and the vendored emulator, its submodule, its Docker build pipeline and
-its package exports are removed, leaving the prebuilt as a *test-time* artifact that
-`fetch:v86` downloads for the differential suites and nothing else.
+engine becomes `cork`; and the emulator becomes *optional*: selectable per bundle launch, its
+artifacts fetched only for a launch that selects it, absent from a build that leaves it out,
+with its vendoring, build pipeline and pinning kept for those who select it.
 
 ### Step 5.0 — a zstd decoder of this project's own
 
@@ -1407,7 +1412,7 @@ with the processor.
 
 **Files.** Create `modules/core/src/zstd.js`, `zstd.test.js`, `zstd.itest.js`; modify
 `app.js` (`mountBundle` decodes through it instead of `cpu.decompressZstd`), `docs/core/host.md`,
-`docs/core/cpu.md` (`decompressZstd` marked as leaving with the emulator in 5.5).
+`docs/core/cpu.md` (`decompressZstd` marked as leaving the api in 5.5, its one caller now served here).
 
 **Contract.** `export function decompressZstd(packed: Uint8Array, expectedLength: number): Uint8Array`
 — the same signature the cpu api had; throws `zstd: frame ended before it was supposed to`
@@ -1498,7 +1503,7 @@ instruction under `cork` equal to `hybrid`'s within noise (the same translations
 fallback differs). Every demo in the library under `cork` completes with pictures as in 3.5.
 
 **Accept.** The library's demos complete under `engine: 'cork'`; Gate E identical (the
-emulator path is still there, one step more).
+emulator path is untouched by this step).
 
 ### Step 5.4 — `cork` becomes the default engine
 
@@ -1517,40 +1522,47 @@ as the control, recorded as the milestone's before/after table in `decisions.md`
 **Accept.** The paired table shows ns per instruction at or below the design's target on
 each window (plain ≤ 1.0, GUI-heavy ≤ 1.5, lit ≤ 1.0) and no picture divergence.
 
-### Step 5.5 — the vendored emulator leaves the product
+### Step 5.5 — the emulator becomes an optional layer, chosen at launch
 
-**Goal.** The explicit dependency is gone: the `vendor/v86` submodule, `scripts/build-v86.mjs`,
-`Dockerfile.v86`, `v86-make-and-hash.sh`, `verify-reproducibility.mjs`'s emulator branch, the
-package's `./libv86.mjs` and `./v86.wasm` exports and `dist/vendor/` copies, `AppOptions.v86`,
-the `jit` option, `internal/v86-host.js`'s production role, `internal/hybrid-host.js`,
-`boot-rom.js`'s emulator-specific bring-up and `fpu.js`'s emulator offsets, `engine:
-'emulator' | 'hybrid'`, `cpu.decompressZstd`, and the `jit.*` counters. What stays, as test
-support: `fetch:v86` downloading the pinned prebuilt into `vendor/prebuilt/` (gitignored,
-never in `dist/`), `internal/v86-host.js` moved to `cork/oracle/v86-host.js` and imported
-only by `*.itest.js`, the corpus asset, and `engine: 'differential'` for the itests. The
-`THIRD-PARTY-NOTICES.md` entry changes from "distributed with the product" to "test data and a
-test-time oracle, not distributed"; the README's `v86` keyword goes.
+**Goal.** The explicit dependency is gone while the emulator stays selectable. Concretely:
+`@bottlify/core` builds, tests and runs with `vendor/prebuilt/` empty and the `vendor/v86`
+submodule not checked out (`engine: 'cork'` is the default and touches nothing of it); the
+package's `./libv86.mjs` and `./v86.wasm` exports stay and are *optional* — `check-package`
+accepts a `dist/` without them and `createApp` under `emulator`/`hybrid` reports
+`cpu: the emulator is not available in this build (engine "emulator" needs it)` rather than
+failing on a fetch; `AppOptions.v86` (its `moduleUrl`/`wasmUrl`) is read only for those
+engines; the launcher shows the engine choice per bundle (cork, emulator, hybrid) with the
+manifest's `engine` field as the preselection, remembers it per bundle, and fetches the
+emulator's artifacts on demand for a launch that needs them; `cpu.decompressZstd` is gone from
+the api (5.0 replaced its one caller); the `jit` option and the `jit.*` counters stay, valid
+under the emulator engines and reported `-1` under `cork`. The differential oracle and the
+corpus stay as they are; `THIRD-PARTY-NOTICES.md` says the emulator is an optional component.
 
-**Files.** The removals above; `docs/core/cpu.md` rewritten around cork (the ROM section
-becomes the cork host's boot, "What of vendor/v86 is used" becomes "The test-time oracle"),
-`docs/core/host.md`, `docs/core/README.md`, `docs/core/system.md` (the boundary rule "vendor
-is importable only from cpu" now covers a test-only path), `scripts/check-boundaries.mjs` (the
-vendor rule kept, since itests are skipped by it anyway), `scripts/check-package.mjs` (fails if
-`dist/` carries the emulator), `roadmap/decisions.md` §B (the removal, with the milestone
-table).
+**Files.** `module.js`, `app.js` (`engine` selection, the refusal message, the artifact fetch
+only on demand), `scripts/check-package.mjs`, `scripts/build.mjs` (the emulator copied into
+`dist/vendor/` when present, the build not failing when absent), the launcher's bundle card
+and settings (outside `modules/core`; `ui/`), `docs/core/cpu.md` ("Engines": choosing one at
+launch; "Limitations": what each engine lacks), `docs/core/host.md` (`engine`, the manifest
+field, the refusal), `docs/core/README.md`, `roadmap/decisions.md` §B (the emulator as an
+optional layer, with the milestone table).
 
-**Tests.** `check-package` refuses a `dist/` with `libv86.mjs` or `v86.wasm`; `npm test`
-green with `vendor/v86` absent (the boundary checker's `layerRequires` and the module tests
-never touch it); `npm run test:integration` green with only `vendor/prebuilt/` fetched; Gate E
-becomes the same demo under `cork` with the instruction count recorded as the new baseline.
+**Tests.** `check-package.test.js` (new): a `dist/` without the emulator passes; `npm test` and
+`npm run check:boundaries` green with `vendor/v86` absent and `vendor/prebuilt/` empty (the
+boundary checker's `layerRequires` and the module tests never touch them); `module.test.js`:
+`create({ engine: 'emulator' })` then `boot()` without artifacts rejects with the message
+above; `npm run test:integration` green with the prebuilt fetched (the emulator engines and
+the oracle); a manifest with `"engine": "hybrid"` reaches `createApp` as `engine: 'hybrid'`
+(`app.test.js`); the launcher's choice overrides the manifest's.
 
-**Accept.** A fresh clone without the submodule builds, tests, and runs the library's demos;
-the package tarball carries no emulator bytes; `git submodule status` lists nothing.
+**Accept.** A fresh clone without the submodule and without `fetch:v86` builds, tests and runs
+the library's demos under `cork`; the same clone after `fetch:v86` runs them under `emulator`
+and `hybrid` from the launcher's selector; Gate E under `emulator` still identical to its
+baseline.
 
-**Could go wrong.** Something outside the cpu layer still reaches an emulator export (the
-audio worklet reading the shared memory's layout, the log keeper's mirror): the boundary
-checker and `check-package` are the net, and the grep for `v86` across `src/` is part of this
-step's commit message.
+**Could go wrong.** Something outside the cpu layer still reaches an emulator export or
+assumes its memory layout (the audio worklet's ring reads, the log keeper's mirror): running
+the whole itest set with `vendor/prebuilt/` empty under `cork` is the net, and the grep for
+`v86` across `src/` outside `layers/cpu/` is part of this step's commit message.
 
 ## 6. Acceptance summary
 
@@ -1572,7 +1584,7 @@ step's commit message.
 | 5.2 | corpus green on the interpreter |
 | 5.3 | library demos complete under `cork` with nothing of the emulator loaded |
 | 5.4 | paired table: plain ≤ 1.0, GUI-heavy ≤ 1.5, lit ≤ 1.0 ns per instruction |
-| 5.5 | fresh clone without the submodule builds, tests and runs the demos; no emulator bytes in the package |
+| 5.5 | fresh clone without the submodule or the prebuilt runs the demos under `cork`; after `fetch:v86` the same demos run under `emulator`/`hybrid` from the launcher's selector |
 
 ## 7. Provisions for x86-64
 
