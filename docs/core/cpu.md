@@ -55,7 +55,10 @@ the emulator's `fpu_stack_ptr` before every turn); a region without them is ente
 top. A lookup that misses at an address compiled for another top queues that top for the
 next batch. The translator keeps every x87 value as a double, as the emulator does; the
 emulator's tagged-double form is read and written directly, a true 80-bit register it left is
-converted inline. What the emulator's own compiler compiled is not protected from a store made by
+converted inline. The control word is honoured at run time: rounding control rounds the
+integer stores and `frndint`, precision control set to single rounds every arithmetic
+result's mantissa to 24 bits (extended is treated as double); exception masks are not
+honoured, an exception behaves as masked. What the emulator's own compiler compiled is not protected from a store made by
 translated code (the emulator sees only its own stores); a program that writes code it then
 runs through the emulator is the case the handoff step's fork change is to close.
 

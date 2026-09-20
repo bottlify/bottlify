@@ -29,12 +29,12 @@ const ONLY = new RegExp(process.env.CORPUS_ONLY ?? '', 'i');
 const VECTOR_NAMES = new Map([[0, 'DE'], [6, 'UD'], [13, 'GP']]);
 /**
  * Cases whose divergence is the design's own: every x87 value is a double,
- * and these compute something only an 80-bit register holds (a product past
- * the double's range, stored as a tword). Counted under `x87.precision`,
+ * and these compute something only an 80-bit register holds (a product or a
+ * scaling past the double's range, stored as a tword). Counted under `x87.precision`,
  * not failed; the list is the acceptance, and a case leaving or joining it is
  * a change to be looked at (`roadmap/cork-plan.md` 3.1).
  */
-const X87_PRECISION = new Set(['x87-int-binop']);
+const X87_PRECISION = new Set(['x87-int-binop', 'fscale-wide']);
 
 test('translated code leaves what the hardware left, on every case it translates in full',
     { skip: !existsSync(CORPUS) && `missing ${CORPUS.href}`, timeout: 30 * 60 * 1000 },

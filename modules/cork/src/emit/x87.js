@@ -24,9 +24,12 @@
  *
  * Every arithmetic result is the f64 result; where the processor's 80-bit
  * arithmetic would differ the difference is the `x87.precision` class the
- * plan names and counts (the emulator computes in f64 as well). Rounding
- * control and the transcendentals are later steps; `fldcw`, `fprem` and
- * their kin end a region here.
+ * plan names and counts (the emulator computes in f64 as well). The control
+ * word is honoured at run time: its rounding control rounds the integer
+ * stores and `frndint`, and precision control set to single rounds every
+ * arithmetic result to a float (extended is treated as double). Exception
+ * masks are not honoured: an exception behaves as masked. The
+ * transcendentals are the next step; the environment forms end a region.
  */
 
 import { CF, PF, ZF, AF, SF, OF } from '../decode/table.js';
@@ -78,9 +81,8 @@ export function isX87(instruction){
 
 /** The instructions this step leaves to the other executor. */
 const LEFT_OUT = new Set([
-    'fldcw', 'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp',
-    'fprem', 'fprem1', 'fsin', 'fcos', 'fsincos', 'fptan', 'fpatan', 'f2xm1', 'fyl2x', 'fyl2xp1',
-    'fscale', 'frndint', 'fxtract', 'fnclex',
+    'fldenv', 'fnstenv', 'fnsave', 'frstor', 'fxsave', 'fxrstor', 'fbld', 'fbstp',
+    'fsin', 'fcos', 'fsincos', 'fptan', 'fpatan', 'f2xm1', 'fyl2x', 'fyl2xp1', 'fnclex',
 ]);
 
 /**
@@ -121,12 +123,12 @@ export function step(instruction, state){
     switch (op)
     {
         case 'fld': case 'fild': case 'fld1': case 'fldz': case 'fldpi': case 'fldl2e':
-        case 'fldln2': case 'fldlg2': case 'fldl2t':
+        case 'fldln2': case 'fldlg2': case 'fldl2t': case 'fxtract':
             push();
             return next;
         case 'fstp': case 'fistp': case 'fisttp': case 'faddp': case 'fsubp': case 'fsubrp':
         case 'fmulp': case 'fdivp': case 'fdivrp': case 'fcomp': case 'fucomp': case 'fcomip':
-        case 'fucomip': case 'ffreep':
+        case 'fucomip': case 'ffreep': case 'ficomp':
             pop();
             return next;
         case 'fcompp': case 'fucompp':
@@ -242,6 +244,7 @@ export function trackRegion(region, entryTop){
  * @property {number} base               the first of the eight f64 locals
  * @property {number} temp               an f64 scratch local
  * @property {number} temp2
+ * @property {number} temp3
  * @property {(StackState | null)[]} states
  * @property {Set<number>} cut
  * @property {StackState | null} current   the state at the current point of emission
@@ -264,19 +267,19 @@ export function prepareX87(e, entryTop){
     if (!uses || mmx)
     {
         return {
-            active: false, base: 0, temp: 0, temp2: 0, states: [], cut: new Set(), current: null,
-            controlWritten: false,
+            active: false, base: 0, temp: 0, temp2: 0, temp3: 0, states: [], cut: new Set(),
+            current: null, controlWritten: false,
         };
     }
     const { states, cut } = trackRegion(region, entryTop);
     const base = e.localTypes.length + 2;
-    for (let k = 0; k < 10; k++)
+    for (let k = 0; k < 11; k++)
     {
         e.localTypes.push(ValType.f64);
     }
     return {
-        active: true, base, temp: base + 8, temp2: base + 9, states, cut, current: null,
-        controlWritten: false,
+        active: true, base, temp: base + 8, temp2: base + 9, temp3: base + 10, states, cut,
+        current: null, controlWritten: false,
     };
 }
 
@@ -539,6 +542,32 @@ export function emitX87(e, instruction, flagsLive){
         setStatus(Status.IE | Status.SF);
         e.close();
     };
+    /**
+     * Rounds the f64 on the stack to a float when precision control says
+     * single (PC = 00): the processor's 24-bit results, as a program that
+     * set them expects. Extended is treated as double.
+     */
+    const byPrecision = ()=>{
+        // The mantissa rounded to 24 bits, to nearest even, in the double's
+        // own bits: the exponent range stays the extended one, which a demote
+        // would not keep. Infinity and NaN pass through.
+        b.localSet(x.temp3);
+        b.localGet(x.temp3).op(I64.reinterpretF64).localSet(Local.t64);
+        b.localGet(Local.t64).localGet(Local.t64).i64const(29n).op(I64.shrU).i64const(1n)
+            .op(I64.and).op(I64.add).i64const(0x0fffffffn).op(I64.add)
+            .i64const(-0x20000000n).op(I64.and).localSet(Local.t64b);
+        b.localGet(Local.t64).localGet(Local.t64b);
+        b.localGet(Local.t64).i64const(0x7ff0000000000000n).op(I64.and)
+            .i64const(0x7ff0000000000000n).op(I64.eq);
+        b.select().op(F64.reinterpretI64);
+        b.localGet(x.temp3);
+        b.localGet(Local.x87Control).i32const(0x300).op(I32.and).op(I32.eqz);
+        b.select();
+    };
+    /** Rounds the f64 on the stack by the control word's rounding control. */
+    const byRounding = ()=>{
+        b.localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+    };
     /** Replaces the f64 on the stack by the indefinite when the guard fired. */
     const orIndefinite = ()=>{
         // select keeps the first value when the condition holds: the result
@@ -675,10 +704,144 @@ export function emitX87(e, instruction, flagsLive){
             setStatus(Status.IE);
             e.close();
             b.localGet(st(0)).op(F64.sqrt);
+            byPrecision();
             orIndefinite();
             b.localSet(st(0));
             dirty(0);
             return finish();
+        case 'fldcw':
+            prepare(e, src ?? dst);
+            b.localGet(Local.addr).load('i32_16u', { offset: e.layout.ramBase })
+                .localSet(Local.x87Control);
+            x.controlWritten = true;
+            return finish();
+        case 'frndint':
+            guard([0], false);
+            b.localGet(st(0));
+            byRounding();
+            orIndefinite();
+            b.localSet(st(0));
+            dirty(0);
+            return finish();
+        case 'fscale':
+        {
+            // ST0 * 2^trunc(ST1), the power applied in two clamped steps so an
+            // exponent past a double's range still lands where it should.
+            guard([0, 1], false);
+            // The guard's flag is t1: the scratch here is t0 and count.
+            // n = trunc(ST1) clamped to ±2100 (a NaN becomes 0 through the saturation).
+            b.localGet(st(1)).op(F64.trunc).f64const(2100).op(0xa4).f64const(-2100).op(0xa5)
+                .op(TRUNC_SAT_I32[0], [TRUNC_SAT_I32[1]]).localSet(Local.count);
+            b.localGet(st(0));
+            for (let pass = 0; pass < 2; pass++)
+            {
+                // k = clamp(n, -1022, 1023); value *= 2^k; n -= k
+                b.i32const(-1022).localGet(Local.count).localGet(Local.count).i32const(-1022)
+                    .op(0x4c).select().localSet(Local.t0);
+                b.i32const(1023).localGet(Local.t0).localGet(Local.t0).i32const(1023).op(0x4e)
+                    .select().localSet(Local.t0);
+                b.localGet(Local.t0).i32const(1023).op(I32.add).op(I64.extendU).i64const(52n)
+                    .op(I64.shl).op(F64.reinterpretI64).op(F64.mul);
+                b.localGet(Local.count).localGet(Local.t0).op(I32.sub).localSet(Local.count);
+            }
+            byPrecision();
+            orIndefinite();
+            b.localSet(st(0));
+            dirty(0);
+            return finish();
+        }
+        case 'fxtract':
+        {
+            // ST0 becomes the exponent and the significand is pushed: for a
+            // normal, from the double's fields; zero gives -inf and ZE; a
+            // denormal is scaled up first.
+            guard([0], true);
+            b.localGet(st(0)).localSet(x.temp);
+            b.localGet(x.temp).f64const(0).op(F64.eq);
+            e.openIf('zero', EMPTY);
+            setStatus(Status.ZE);
+            b.f64const(-Infinity).localSet(x.temp2);
+            b.else();
+            b.localGet(x.temp).op(F64.abs).f64const(2 ** -1022).op(F64.lt);
+            e.openIf('denormal', EMPTY);
+            b.localGet(x.temp).f64const(2 ** 54).op(F64.mul).localSet(x.temp);
+            b.f64const(-54).localSet(x.temp2);
+            b.else();
+            b.f64const(0).localSet(x.temp2);
+            e.close();
+            b.localGet(x.temp).op(I64.reinterpretF64).i64const(52n).op(I64.shrU).op(I64.wrap)
+                .i32const(0x7ff).op(I32.and).i32const(1023).op(I32.sub).op(F64.convertI32S);
+            b.localGet(x.temp2).op(F64.add).localSet(x.temp2);
+            // The significand: the exponent field set to 1023.
+            b.localGet(x.temp).op(I64.reinterpretF64).i64const(-0x7ff0000000000001n).op(I64.and)
+                .i64const(0x3ff0000000000000n).op(I64.or).op(F64.reinterpretI64).localSet(x.temp);
+            e.close();
+            // Infinity and NaN keep their value in both.
+            b.localGet(x.temp).localGet(x.temp).op(F64.ne);
+            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
+            e.openIf('special', EMPTY);
+            b.localGet(st(0)).localSet(x.temp);
+            b.localGet(st(0)).localSet(x.temp2);
+            e.close();
+            b.localGet(x.temp2);
+            orIndefinite();
+            b.localSet(st(0));
+            dirty(0);
+            b.localGet(x.temp);
+            orIndefinite();
+            push();
+            return finish();
+        }
+        case 'fprem': case 'fprem1':
+        {
+            // The partial remainder: ST0 - Q * ST1 with Q the quotient rounded
+            // toward zero (fprem) or to nearest (fprem1); when the quotient
+            // would not fit 64 bits only a partial reduction is done and C2
+            // says so. C0, C3 and C1 carry the quotient's bits 2, 1 and 0.
+            guard([0, 1], false);
+            b.localGet(st(0)).localSet(x.temp);
+            b.localGet(st(1)).localSet(x.temp2);
+            // Invalid: a NaN, an infinite dividend, a zero divisor: the
+            // indefinite, IE, and the condition bits left as they were.
+            b.localGet(x.temp).localGet(x.temp).op(F64.ne);
+            b.localGet(x.temp2).localGet(x.temp2).op(F64.ne).op(I32.or);
+            b.localGet(x.temp).op(F64.abs).f64const(Infinity).op(F64.eq).op(I32.or);
+            b.localGet(x.temp2).f64const(0).op(F64.eq).op(I32.or);
+            b.localGet(Local.t1).op(I32.or);
+            e.openIf('invalid', EMPTY);
+            setStatus(Status.IE);
+            indefinite();
+            b.localSet(st(0));
+            b.else();
+            b.localGet(Local.x87Status).i32const(~(Status.C2 | Status.C0 | Status.C3 | Status.C1))
+                .op(I32.and).localSet(Local.x87Status);
+            // The quotient, and whether its magnitude fits.
+            b.localGet(x.temp).localGet(x.temp2).op(F64.div).localSet(x.temp3);
+            b.localGet(x.temp3).op(F64.abs).f64const(2 ** 63).op(F64.lt);
+            e.openIf('fits', EMPTY);
+            b.localGet(x.temp3).op(op === 'fprem' ? F64.trunc : F64.nearest).localSet(x.temp3);
+            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
+                .localSet(st(0));
+            // The low three bits of the quotient into C0 (bit 2), C3 (bit 1), C1 (bit 0).
+            b.localGet(x.temp3).op(F64.abs).op(TRUNC_SAT_I64[0], [TRUNC_SAT_I64[1]]).op(I64.wrap)
+                .localSet(Local.t2);
+            b.localGet(Local.t2).i32const(4).op(I32.and).i32const(Status.C0 / 4).op(0x6c);
+            b.localGet(Local.t2).i32const(2).op(I32.and).i32const(Status.C3 / 2).op(0x6c)
+                .op(I32.or);
+            b.localGet(Local.t2).i32const(1).op(I32.and).i32const(Status.C1).op(0x6c).op(I32.or);
+            b.localGet(Local.x87Status).op(I32.or).localSet(Local.x87Status);
+            b.else();
+            // Partial: reduce by the quotient scaled down to fit, C2 set.
+            b.localGet(x.temp3).f64const(2 ** -32).op(F64.mul).op(F64.trunc).f64const(2 ** 32)
+                .op(F64.mul).localSet(x.temp3);
+            b.localGet(x.temp).localGet(x.temp3).localGet(x.temp2).op(F64.mul).op(F64.sub)
+                .localSet(st(0));
+            setStatus(Status.C2);
+            e.close();
+            e.close();
+            dirty(0);
+            return finish();
+        }
         case 'fadd': case 'fsub': case 'fsubr': case 'fmul': case 'fdiv': case 'fdivr':
         case 'faddp': case 'fsubp': case 'fsubrp': case 'fmulp': case 'fdivp': case 'fdivrp':
         case 'fiadd': case 'fisub': case 'fisubr': case 'fimul': case 'fidiv': case 'fidivr':
@@ -711,6 +874,7 @@ export function emitX87(e, instruction, flagsLive){
             b.localGet(a).localGet(c).op(/** @type {number} */ ({
                 fadd: F64.add, fsub: F64.sub, fmul: F64.mul, fdiv: F64.div,
             }[kind]));
+            byPrecision();
             orIndefinite();
             b.localSet(st(target));
             // The exceptions of a sound operation: a zero-divide of a finite
@@ -742,9 +906,17 @@ export function emitX87(e, instruction, flagsLive){
             return finish();
         }
         case 'fcom': case 'fcomp': case 'fcompp': case 'fucom': case 'fucomp': case 'fucompp':
-        case 'ftst':
+        case 'ftst': case 'ficom': case 'ficomp':
         {
-            if (op === 'ftst')
+            if (op === 'ficom' || op === 'ficomp')
+            {
+                guard([0], false);
+                prepare(e, src);
+                b.localGet(Local.addr);
+                b.load(src.size === 2 ? 'i32_16s' : 'i32', { offset: e.layout.ramBase });
+                b.op(F64.convertI32S).localSet(x.temp2);
+            }
+            else if (op === 'ftst')
             {
                 guard([0], false);
                 b.f64const(0).localSet(x.temp2);
@@ -968,7 +1140,16 @@ function storeInt(e, operand, local, truncate){
     const { b } = e;
     prepare(e, operand);
     noteStore(e, operand.size);
-    b.localGet(local).op(truncate ? F64.trunc : F64.nearest).localSet(e.x87.temp);
+    b.localGet(local);
+    if (truncate)
+    {
+        b.op(F64.trunc);
+    }
+    else
+    {
+        b.localGet(Local.x87Control).call(/** @type {number} */ (e.context.round));
+    }
+    b.localSet(e.x87.temp);
     const rounded = e.x87.temp;
     const limit = operand.size === 2 ? 32768
         : operand.size === 4 ? 2147483648 : 9223372036854775808;
@@ -1052,6 +1233,34 @@ function signalling(e, a, c){
         b.op(I32.and);
     }
     b.op(I32.or);
+}
+
+/**
+ * The rounding helper a module carries: `round(value, control) → f64`
+ * rounds to an integer by the control word's rounding control: nearest
+ * (even), down, up, toward zero.
+ *
+ * @param {import('../wasm/encoder.js').ModuleBuilder} m
+ * @returns {number} the function index
+ */
+export function addRoundHelper(m){
+    const type = m.type({ params: [ValType.f64, ValType.i32], results: [ValType.f64] });
+    const b = new Body();
+    // locals: 0 value, 1 control, 2 rc
+    b.localGet(1).i32const(10).op(I32.shrU).i32const(3).op(I32.and).localSet(2);
+    // select keeps the first value when the condition holds: the value so far
+    // unless the mode is the one just pushed.
+    b.localGet(0).op(F64.nearest);
+    b.localGet(0).op(0x9c); // f64.floor
+    b.localGet(2).i32const(1).op(I32.ne);
+    b.select();
+    b.localGet(0).op(0x9b); // f64.ceil
+    b.localGet(2).i32const(2).op(I32.ne);
+    b.select();
+    b.localGet(0).op(F64.trunc);
+    b.localGet(2).i32const(3).op(I32.ne);
+    b.select();
+    return m.function(type, [ValType.i32], b.toBytes());
 }
 
 /**

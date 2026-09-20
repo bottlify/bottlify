@@ -45,7 +45,8 @@ import {
 import { emitInstruction } from './integer.js';
 import { addUndoHelper, emitStaleExit } from './memory.js';
 import {
-    addF80Helpers, prepareX87, x87BlockStart, x87Edge, x87Epilogue, x87Normalise, x87Prologue,
+    addF80Helpers, addRoundHelper, prepareX87, x87BlockStart, x87Edge, x87Epilogue, x87Normalise,
+    x87Prologue,
 } from './x87.js';
 
 /** How a run of translated code came back, as the low byte of the result. */
@@ -97,6 +98,7 @@ const LOCAL_TYPES = [
  *                                     lazy flags (the emulator's `flags_changed`)
  * @property {number} f80ToF64         the extended-precision readers
  * @property {number} f64ToF80
+ * @property {number} round            the rounding-control helper
  */
 
 /**
@@ -123,8 +125,9 @@ export function prepareModule(m, layout, features, memory = {}, { undoLog = fals
     const regionType = m.type({ params: [ValType.i32, ValType.i32], results: [ValType.i32] });
     const materialise = addMaterialiseHelper(m);
     const { f80ToF64, f64ToF80 } = addF80Helpers(m);
+    const round = addRoundHelper(m);
     /** @type {ModuleContext} */
-    const context = { m, regionType, materialise, layout, features, f80ToF64, f64ToF80 };
+    const context = { m, regionType, materialise, layout, features, f80ToF64, f64ToF80, round };
     if (getEflags !== undefined)
     {
         context.getEflags = getEflags;
