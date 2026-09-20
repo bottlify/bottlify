@@ -357,7 +357,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                         const bytes = await store.get(key);
                         one.cached = bytes === null ? null : unpackRegion(bytes);
                     }
-                    catch (e){
+                    catch {
                         one.cached = null;
                     }
                     if (one.cached !== null)
@@ -426,7 +426,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 let instance;
                 try
                 {
-                    const module = new WebAssembly.Module(built.module);
+                    const module = new WebAssembly.Module(
+                        /** @type {Uint8Array<ArrayBuffer>} */ (built.module));
                     instance = new WebAssembly.Instance(module, {
                         env: {
                             memory, getEflags: imports.getEflags, ...mathImports(),

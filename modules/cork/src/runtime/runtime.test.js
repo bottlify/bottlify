@@ -99,7 +99,8 @@ test('two regions land in one batch, each its own module, and both run; an entry
     m.runtime.noteHot(CODE);
     m.runtime.noteHot(CODE + 0x100);
     assert.equal(await m.runtime.translatePending(), 2);
-    assert.equal(m.runtime.diagnostics().modules, 2, 'one module per region, the unit the store keeps');
+    assert.equal(m.runtime.diagnostics().modules, 2,
+        'one module per region, the unit the store keeps');
     assert.equal(m.runtime.diagnostics().regions, 2);
     const second = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
     assert.equal(second.kind, 'halt');

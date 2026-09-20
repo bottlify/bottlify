@@ -51,7 +51,7 @@ export async function createDirectoryTranslationStore(root, name){
             {
                 handle = await directory.getFileHandle(fileNameOf(key));
             }
-            catch (e){
+            catch {
                 return null;
             }
             const file = await handle.getFile();
@@ -109,7 +109,7 @@ export async function resolveTranslationStore(spec, name){
     {
         return await createDirectoryTranslationStore(await storage.getDirectory(), name);
     }
-    catch (e){
+    catch {
         return null;
     }
 }

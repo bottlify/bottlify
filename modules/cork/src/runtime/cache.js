@@ -92,7 +92,7 @@ export function unpackRegion(bytes){
             entryTop: header.entryTop, instructions: header.instructions,
         };
     }
-    catch (e){
+    catch {
         return null;
     }
 }

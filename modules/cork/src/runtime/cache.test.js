@@ -6,7 +6,9 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CACHE_VERSION, cacheKey, memoryTranslationStore, packRegion, unpackRegion } from './cache.js';
+import {
+    CACHE_VERSION, cacheKey, memoryTranslationStore, packRegion, unpackRegion,
+} from './cache.js';
 
 test('a record round-trips, and bytes of another version or shape are a miss', ()=>{
     const region = {
