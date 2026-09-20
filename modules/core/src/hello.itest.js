@@ -30,8 +30,9 @@ const EXPECTED_OUTPUT = 'Hello from Bottlify\r\n';
  * test fail with "already booted" and keeps the process alive after the run.
  *
  * @param {import('node:test').TestContext} t
+ * @param {Partial<import('./app.js').AppOptions>} [extra]
  */
-async function startApp(t){
+async function startApp(t, extra = {}){
     const [wasm, exe] = await Promise.all([
         readFile(new URL('v86.wasm', PREBUILT)),
         readFile(FIXTURE),
@@ -43,10 +44,27 @@ async function startApp(t){
             moduleUrl: new URL('libv86.mjs', PREBUILT).href,
             wasmBytes: wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength),
         },
+        ...extra,
     });
     t.after(()=>app.dispose());
     return app;
 }
+
+test('a file handed in at start lies over the session\'s own', { timeout: 15000 }, async t=>{
+    // A person's edit to a title's file -- a realm list, a config line --
+    // wins over what the program last saved, and the bundle stays as it is.
+    const path = 'C:\\App\\realmlist.wtf';
+    const app = await startApp(t, {
+        storage: { load: async()=>({
+            files: [{ path, bytes: new TextEncoder().encode('set realmlist old') }],
+            registry: null,
+        }) },
+        files: [{ path, bytes: new TextEncoder().encode('set realmlist mine') }],
+    });
+    const held = app.session.export().find((/** @type {any} */ file)=>file.path === path);
+    assert.ok(held);
+    assert.equal(new TextDecoder().decode(held.bytes), 'set realmlist mine');
+});
 
 test('hello.exe prints what it prints on Windows, then exits cleanly',
     { timeout: 15000 }, async t=>{

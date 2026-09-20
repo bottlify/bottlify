@@ -170,6 +170,11 @@ import { createBlockCache, resolveBlockStore }
  *           it wrote; `save` is handed both, and `load` may answer with both
  *           or with a bare list of files.
  * @property {string} [id]           Names the session when storage does not.
+ * @property {{ path: string, bytes: Uint8Array }[]} [files]
+ *           The person's own edits to the title's files, laid over the
+ *           session's at every start: a realm list, a line of configuration.
+ *           They win over what the program last saved, and the bundle itself
+ *           is never changed.
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
@@ -3132,6 +3137,13 @@ async function buildApp(options){
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
+    }
+    // The person's own edits to the title's files -- a realm list, a config
+    // line -- laid over the session's, so they win over what the program
+    // last saved and never touch the bundle itself.
+    if (options.files && options.files.length > 0)
+    {
+        filesystem.apply(options.files);
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the

@@ -45,6 +45,7 @@
  *     signal?: SharedArrayBuffer,
  *     pacing?: 'page' | 'event',
  *     network?: { module: string, url: string, room: string, token?: string },
+ *     files?: { path: string, bytes: Uint8Array }[],
  * }} StartOptions
  */
 
