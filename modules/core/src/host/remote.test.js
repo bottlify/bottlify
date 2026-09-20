@@ -148,6 +148,9 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
             recent: count=>journal.recent(count),
             /** @param {number} since @param {number} limit */
             drain: (since, limit)=>journal.drain(since, limit),
+            /** @param {'error' | 'warn' | 'info'} level @param {string} category @param {string} text */
+            write: (level, category, text)=>journal.write(
+                { error: Level.ERROR, warn: Level.WARN, info: Level.INFO }[level], category, text),
             /** @param {number} count */
             frames: count=>profiler.frames(count),
             /** @param {number} worst */
@@ -190,12 +193,21 @@ function fakeApp({ capacity = 4096, shared = true, audioShared = false } = {}){
 
 /** The GPU the worker would open, and the canvas it would draw into. */
 function fakeGpu(){
+    /** @type {Map<string, (event: any) => void>} */
+    const listeners = new Map();
     const device = {
         queue: { submit(){} },
-        addEventListener(){},
+        /** @param {string} type @param {(event: any) => void} handler */
+        addEventListener(type, handler){
+            listeners.set(type, handler);
+        },
         createCommandEncoder: ()=>({ copyTextureToTexture(){}, finish(){} }),
     };
     return {
+        /** What the device would report: an error the engine did not catch. @param {string} message */
+        fail(message){
+            listeners.get('uncapturederror')?.({ error: { message } });
+        },
         gpu: {
             requestAdapter: async()=>({
                 features: new Set(['texture-compression-bc']),
@@ -282,7 +294,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
     const channel = new MessageChannel();
     const app = fakeApp({ ...journal, audioShared });
     const keeper = openTestKeeper();
-    const { gpu, canvas, screen } = fakeGpu();
+    const { gpu, canvas, screen, fail } = fakeGpu();
     /** @type {any} */
     let built = null;
     const serving = serveEngine(channel.port2, {
@@ -320,7 +332,7 @@ async function connect(options = {}, { journal, audioShared, duringBuild, ...dep
         },
         keeper: keeper.port,
     });
-    return { remote, app, worker, canvas, keeper, built: ()=>built };
+    return { remote, app, worker, canvas, keeper, built: ()=>built, gpuFails: fail };
 }
 
 test('start rebuilds on the worker what could not cross: fetch, device, watch, storage', async()=>{
@@ -807,4 +819,44 @@ test('the page counts what it posts, and the worker sees it between two turns', 
     assert.equal(pacing.yield(nothing), null, 'and counted once');
     await settled();
     await remote.dispose();
+});
+
+test('what the GPU device refuses goes into the journal, a repeat counted rather than written',
+    async()=>{
+        const { remote, gpuFails } = await connect();
+        const REFUSED = 'Failed to allocate texture.' + String.fromCharCode(10)
+            + ' - While calling CreateTexture([TextureDescriptor "target"])';
+        // A failing frame cycles through a few messages; each is counted on its own.
+        for (let i = 0; i < 300; i++)
+        {
+            gpuFails(REFUSED);
+            gpuFails('another');
+        }
+        await until(async()=>(await remote.log.recent(8)).length >= 4);
+        const records = (await remote.log.recent(8)).filter((/** @type {any} */ r)=>r.category === 'gpu');
+        const flat = 'Failed to allocate texture.'
+            + ' - While calling CreateTexture([TextureDescriptor "target"])';
+        assert.deepEqual(records.map((/** @type {any} */ r)=>[r.levelName, r.text]), [
+            ['error', flat],
+            ['error', 'another'],
+            ['error', `${flat} (x256)`],
+            ['error', 'another (x256)'],
+        ]);
+    });
+
+test('a network named at start is opened by the worker and closed with the run', async()=>{
+    // A transport is a WebSocket and callbacks, neither of which crosses a
+    // port, so the worker imports the client by the URL the page named and
+    // opens it; the engine never imports the networking package itself.
+    const module = new URL('./fake-relay.test.mjs', import.meta.url).href;
+    const { remote, built } = await connect({
+        network: { module, url: 'wss://play/relay', room: 'b' },
+    });
+    const fake = await import(module);
+    assert.equal(fake.opened.length, 1);
+    assert.deepEqual(fake.opened[0].options,
+        { url: 'wss://play/relay', room: 'b', token: undefined });
+    assert.equal(built().win32.network, fake.opened[0], 'handed to createApp as win32.network');
+    await remote.dispose();
+    assert.equal(fake.opened[0].disposed, 1, 'closed with the run');
 });

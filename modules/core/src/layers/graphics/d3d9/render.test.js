@@ -308,6 +308,69 @@ test('byte-exact: a triangle from a locked vertex buffer covers the pixels it na
             'and left of the vertical edge');
     });
 
+test('the frame record says what was cleared, what was drawn and where, and what is shown',
+    async()=>{
+        // The datum that decides a black or a frozen picture without a
+        // screenshot: a frame that only cleared, or drew only into a target
+        // that is not the one presented, reads as such in the history.
+        const h = harness({ width: 8, height: 8 });
+        const { device } = h;
+        /** @type {{ buffer?: any }} */
+        const created = {};
+        assert.equal(device.CreateVertexBuffer(3 * TRIANGLE_STRIDE, D3DUSAGE.WRITEONLY,
+            FVF_TRIANGLE, D3DPOOL.DEFAULT, created), D3D_OK);
+        /** @type {{ pBits?: number }} */
+        const locked = {};
+        assert.equal(created.buffer.Lock(0, 0, locked, 0), D3D_OK);
+        const at = /** @type {number} */ (locked.pBits);
+        [[1, 1], [7, 1], [1, 4]].forEach(([x, y], index)=>
+            h.write(at + index * TRIANGLE_STRIDE, vertex(x, y, argb(0, 0, 255))));
+        assert.equal(created.buffer.Unlock(), D3D_OK);
+        assert.equal(device.SetStreamSource(0, created.buffer, 0, TRIANGLE_STRIDE), D3D_OK);
+        assert.equal(device.SetFVF(FVF_TRIANGLE), D3D_OK);
+
+        // Frame 1: a clear of the back buffer and nothing drawn.
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(0x12, 0x34, 0x56), 1, 0), D3D_OK);
+        await h.present();
+
+        // Frame 2: one draw into an offscreen target, then one into the back buffer.
+        /** @type {{ surface?: any }} */
+        const target = {};
+        assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, target), D3D_OK);
+        /** @type {{ surface?: any }} */
+        const back = {};
+        assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, target.surface), D3D_OK);
+        assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(1, 2, 3), 1, 0), D3D_OK);
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+        assert.equal(device.SetViewport({ X: 2, Y: 2, Width: 4, Height: 4, MinZ: 0, MaxZ: 1 }),
+            D3D_OK);
+        assert.equal(device.DrawPrimitive(D3DPT.TRIANGLELIST, 0, 1), D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const frames = h.device.diagnostics().recentFrames;
+        assert.equal(frames.length, 2);
+        const pick = (/** @type {any} */ frame)=>({
+            draws: frame.draws, clears: frame.clears, clearColor: frame.clearColor,
+            offscreenDraws: frame.offscreenDraws, offscreenTargets: frame.offscreenTargets,
+            viewport: frame.viewport, target: frame.target,
+        });
+        assert.deepEqual(pick(frames[0]), {
+            draws: 0, clears: 1, clearColor: '#ff123456', offscreenDraws: 0,
+            offscreenTargets: 0, viewport: '0,0 8x8', target: '8x8',
+        });
+        assert.deepEqual(pick(frames[1]), {
+            // The offscreen clear is counted but its colour is not the back buffer's.
+            draws: 2, clears: 1, clearColor: '', offscreenDraws: 1, offscreenTargets: 1,
+            viewport: '2,2 4x4', target: '8x8',
+        });
+        back.surface.release();
+        target.surface.release();
+    });
+
 test('a stream bound at an offset draws from there, not from the start of the buffer',
     async()=>{
         const h = harness({ width: 8, height: 8 });
@@ -356,6 +419,87 @@ test('a reset puts the viewport back over the whole target', ()=>{
     assert.deepEqual(
         [out.viewport.X, out.viewport.Y, out.viewport.Width, out.viewport.Height], [0, 0, 8, 8],
         'a viewport left over from before the reset would misplace every vertex');
+});
+
+test('a reset gives the previous back buffer and depth back to the GPU', async()=>{
+    // A program that resets its device a few times a second leaves a
+    // screen-sized target and depth behind each time; the collector does not
+    // watch the GPU's memory, so the renderer has to give them back itself.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    await h.present();
+    const made = h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>['target', 'depth'].includes(call.descriptor.label));
+    assert.equal(made.length, 2, 'the frame made the back buffer and its depth');
+    assert.equal(h.gpu.count('destroyTexture'), 0);
+
+    // A frame recorded against the old target before the reset -- a program
+    // clears, then resets on a message it pumps -- still draws into it: the
+    // old pair is destroyed after that frame is presented, not before.
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    assert.equal(device.Reset(), D3D_OK);
+    await device.idle();
+    assert.equal(h.gpu.count('destroyTexture'), 0, 'the frame in hand still holds them');
+    assert.equal(device.Present(), D3D_OK);
+    await device.idle();
+    assert.deepEqual(h.gpu.of('destroyTexture').map((/** @type {any} */ call)=>call.texture),
+        made.map((/** @type {any} */ call)=>call.texture),
+        'both of the old ones are destroyed once that frame is submitted, and nothing else');
+
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    await h.present();
+    assert.equal(h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>['target', 'depth'].includes(call.descriptor.label))
+        .length, 4, 'the new back buffer and depth are new textures');
+});
+
+test('a target smaller than the bound depth surface gets a depth of its own size', async()=>{
+    // Direct3D binds a depth surface at least as large as the target and
+    // uses its corner; WebGPU attaches equal sizes only, and a pass that
+    // disagrees invalidates the whole frame. A quarter-size glow target
+    // drawn with the screen's depth still bound is the ordinary case.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    /** @type {{ surface?: any }} */
+    const small = {};
+    assert.equal(device.CreateRenderTarget(4, 4, D3DFMT.A8R8G8B8, false, small), D3D_OK);
+    /** @type {{ surface?: any }} */
+    const back = {};
+    assert.equal(device.GetBackBuffer(0, 0, 0, back), D3D_OK);
+
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(4, 5, 6), 1, 0),
+        D3D_OK);
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(7, 8, 9), 1, 0),
+        D3D_OK);
+    await h.present();
+
+    const passes = h.gpu.of('beginRenderPass').map((/** @type {any} */ call)=>call.descriptor);
+    const depthOf = (/** @type {any} */ pass)=>pass.depthStencilAttachment.view.texture.descriptor;
+    const colourOf = (/** @type {any} */ pass)=>pass.colorAttachments[0].view.texture.descriptor;
+    assert.equal(passes.length, 3);
+    assert.deepEqual(passes.map(pass=>[colourOf(pass).size.width, depthOf(pass).size.width]),
+        [[8, 8], [4, 4], [8, 8]], 'each pass has a depth the size of its target');
+    assert.equal(depthOf(passes[1]).label, 'depth-stand-in');
+    assert.equal(depthOf(passes[0]).label, 'depth');
+    assert.equal(depthOf(passes[2]), depthOf(passes[0]), 'the bound depth surface, when it fits');
+
+    // The stand-in is kept, not remade per pass.
+    assert.equal(device.SetRenderTarget(0, small.surface), D3D_OK);
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    await h.present();
+    assert.equal(h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>call.descriptor.label === 'depth-stand-in').length, 1);
+
+    assert.equal(device.SetRenderTarget(0, back.surface), D3D_OK);
+    back.surface.release();
+    small.surface.release();
 });
 
 test('a viewport wider than its target is refused', ()=>{

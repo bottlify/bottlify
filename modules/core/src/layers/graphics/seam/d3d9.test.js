@@ -159,7 +159,7 @@ function seamed(options = {}){
     const box = machine();
     /** @type {string[]} */
     const divergences = [];
-    /** @type {[number, number, number | undefined, boolean | undefined][]} */
+    /** @type {(number | boolean | string | undefined)[][]} */
     const resolutions = [];
     const publisher = createPublisher({ publishInterface: box.publishInterface });
     const seam = createDirect3D9Seam({
@@ -169,8 +169,10 @@ function seamed(options = {}){
         /** @param {string} api @param {string} detail */
         divergence: (api, detail)=>divergences.push(`${api}: ${detail}`),
         /** @param {number} w @param {number} h
-         *  @param {{ window?: number, fullscreen?: boolean }} [where] */
-        resolution: (w, h, where)=>resolutions.push([w, h, where?.window, where?.fullscreen]),
+         *  @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where] */
+        resolution: (w, h, where)=>resolutions.push(where?.announce
+            ? [w, h, where?.window, where?.fullscreen, 'announced']
+            : [w, h, where?.window, where?.fullscreen]),
         identity: ()=>({ vendor: 'nvidia', architecture: 'ampere', description: '' }),
     });
     // The device reports its own divergences: the assembling caller hands
@@ -286,6 +288,25 @@ test('a fullscreen device names the window it takes with it', ()=>{
     const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
     assert.notEqual(device, 0);
     assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true]);
+});
+
+test('a fullscreen device tells its window the mode at its first frame, once', ()=>{
+    // A mode switch resizes the window and the program hears WM_SIZE for it
+    // once its device exists. A window already at the mode's size hears
+    // nothing from the placement at creation, so the first frame says it.
+    const h = seamed();
+    const root = h.create();
+    const { device } = h.createDevice(root, { Windowed: 0, hDeviceWindow: 0x777 });
+    assert.equal(h.resolutions.length, 1, 'creation placed the window');
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.deepEqual(h.resolutions.at(-1), [64, 64, 0x777, true, 'announced']);
+    assert.equal(h.device(device, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.resolutions.length, 2, 'the second frame says nothing');
+
+    const windowed = h.createDevice(h.create()).device;
+    const before = h.resolutions.length;
+    assert.equal(h.device(windowed, 'Present', [0, 0, 0, 0]), D3D_OK);
+    assert.equal(h.resolutions.length, before, 'a windowed device has no mode to announce');
 });
 
 test('a reset that changes the mode names the window it presents into', ()=>{
@@ -641,8 +662,8 @@ test('a query answers through its vtable, and a null pointer only asks whether i
     assert.equal(call('GetDataSize', []), 4);
     const data = 0x3100;
     h.fields.writeU32(data, 0xdeadbeef);
-    assert.equal(call('GetData', [data, 4, 1]), 1, 'S_FALSE before an issue');
-    assert.equal(h.fields.readU32(data), 0xdeadbeef, 'and nothing written');
+    assert.equal(call('GetData', [data, 4, 1]), D3D_OK, 'signalled as created, before any issue');
+    assert.equal(h.fields.readU32(data), 1, 'and the event reads as done');
     assert.equal(call('Issue', [1]), D3D_OK);
     assert.equal(call('GetData', [data, 4, 1]), D3D_OK);
     assert.equal(h.fields.readU32(data), 1);

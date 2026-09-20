@@ -44,7 +44,8 @@ import { REFRESH_HZ, displayModes } from '../../win32/user32/display.js';
 import { ADAPTER_STRING_LENGTH, D3DADAPTER_IDENTIFIER8, D3DCLIPSTATUS8,
     D3DDEVICE_CREATION_PARAMETERS, D3DGAMMARAMP, D3DRASTER_STATUS,
     GAMMA_RAMP_ENTRIES } from '../d3d8/structs.js';
-import { expandTexels, vertexCountOf } from '../d3d8/render.js';
+import { vertexCountOf } from '../d3d8/render.js';
+import { createCursorTeller } from './cursor.js';
 import {
     createShadow, getSurfaceLevelCode, lockCode, materialFloats, materialOf, setIndicesCode,
     setMaterialCode, setRenderStateCode, setStreamSourceCode, setTextureCode,
@@ -230,7 +231,8 @@ const S_FALSE = 1;
  *        Where a value set in the guest that the device refuses is reported.
  * @param {(cursor: CursorNotice) => void} [deps.cursor]  A program cursor for the host.
  * @param {(width: number, height: number,
- *          where?: { window?: number, fullscreen?: boolean }) => void} [deps.resolution]
+ *          where?: { window?: number, fullscreen?: boolean, announce?: boolean },
+ *          ) => void} [deps.resolution]
  *        Told the resolution a device is created at, to report as the screen --
  *        and which window it presents into, so a fullscreen one can be placed.
  * @param {() => AdapterIdentity | null} [deps.identity]
@@ -1708,7 +1710,7 @@ export function createDirect3D8Seam(
         fields.writeStruct(address, D3DDISPLAYMODE, {
             Width: display.width,
             Height: display.height,
-            RefreshRate: 0,
+            RefreshRate: REFRESH_HZ,
             // D3DFMT_X8R8G8B8, which is what a 32-bit display reports.
             Format: 22,
         });
@@ -1726,11 +1728,11 @@ export function createDirect3D8Seam(
      * Every mode the adapter offers, in the order a program walks them: each
      * size in each format, sizes smallest first.
      *
-     * @returns {{ width: number, height: number, format: number }[]}
+     * @returns {{ width: number, height: number, refresh: number, format: number }[]}
      */
     const adapterModes = ()=>displayModes(screen())
         .flatMap(mode=>ADAPTER_FORMATS.map(format=>({
-            width: mode.width, height: mode.height, format,
+            width: mode.width, height: mode.height, refresh: mode.refresh, format,
         })));
 
     /**
@@ -1879,7 +1881,7 @@ export function createDirect3D8Seam(
             fields.writeStruct(out >>> 0, D3DDISPLAYMODE, {
                 Width: listed.width,
                 Height: listed.height,
-                RefreshRate: REFRESH_HZ,
+                RefreshRate: listed.refresh,
                 Format: listed.format,
             });
             return D3D_OK;
@@ -1999,30 +2001,8 @@ export function createDirect3D8Seam(
         },
     };
 
-    /**
-     * What the device holds as its cursor, as the taker wants it: the bitmap
-     * read out of the surface's own bytes, in the order they lie.
-     *
-     * @param {any} device
-     */
-    const tellCursor = device=>{
-        const held = device.GetCursor();
-        if (!cursor || !held.surface)
-        {
-            return;
-        }
-        /** @type {{ desc?: any }} */
-        const out = {};
-        held.surface.GetDesc(out);
-        const { Width: width, Height: height, Format: format } = out.desc;
-        const bytes = memory.readMemory(held.surface.base, width * height * 4);
-        cursor({
-            width, height,
-            hotSpot: { ...held.hotSpot },
-            bgra: expandTexels(format, bytes, width * height),
-            shown: held.shown,
-        });
-    };
+    /** Tells the taker the cursor the device holds, when it changed. */
+    const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
     const rootInterfaces = [describe(IID_IDirect3D8, IDIRECT3D8_SLOTS, rootMethods)];
 

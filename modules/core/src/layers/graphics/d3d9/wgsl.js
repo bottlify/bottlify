@@ -87,7 +87,11 @@ export const HYBRID_CONSTANTS = Object.freeze({
     MATRIX: 0,
     /** Viewport offset in x and y, then scale in z and w, for pre-transformed vertices. */
     VIEWPORT: 4,
-    COUNT: 5,
+    /** Four rows of world then view: the camera space a generated coordinate is taken in. */
+    WORLD_VIEW: 5,
+    /** Four rows per stage for eight stages: the texture transform a generated coordinate goes through. */
+    TRANSFORMS: 9,
+    COUNT: 41,
 });
 
 /**
@@ -134,6 +138,10 @@ export function varyingLocation(usage, index){
  * @property {string} wgsl
  * @property {string} entry       The entry point's name.
  * @property {ShaderInput[]} inputs
+ * @property {number[]} outputs   A vertex stage's varyings, as the locations it
+ *     writes (`varyingLocation`): what a fragment stage made for it may read.
+ * @property {number[]} reads     A pixel stage's varyings, as the locations it
+ *     reads: what the vertex stage paired with it has to write.
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
  * @property {string | null} error
@@ -249,11 +257,14 @@ function moduleHeader(options){
  * Translates one shader.
  *
  * @param {import('./shader.js').ParsedShader} parsed
- * @param {{ inputs?: Map<number, InputShape> }} [options]
+ * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[] }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
- *        default vertex.
+ *        default vertex. `alsoWrite` names varying locations the paired
+ *        pixel stage reads that this shader does not write: each is written
+ *        as zero, because a fragment input with no vertex output fails the
+ *        pipeline, where Direct3D reads whatever was there.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -373,8 +384,12 @@ export function translateShader(parsed, options = {}){
                     used.add('a0');
                     return 'a0';
                 }
-                if (major < 2 && !writing)
+                if (major < 2)
                 {
+                    // Once `tex` has filled it, a 1.x texture register is a
+                    // temporary like any other: the arithmetic that follows
+                    // reads it and writes it (`mul t2.xyz, t1, v0`), and a
+                    // write into the stage's immutable input would not build.
                     used.add(`t${index}`);
                     return `t${index}`;
                 }
@@ -949,6 +964,10 @@ export function translateShader(parsed, options = {}){
     const inputFields = [];
     /** @type {string[]} */
     const outputFields = [];
+    /** @type {number[]} */
+    const outputs = [];
+    /** @type {number[]} */
+    const reads = [];
     /** @type {string[]} */
     const prologue = [];
     let entry;
@@ -979,14 +998,18 @@ export function translateShader(parsed, options = {}){
             }
         }
         outputFields.push('    @builtin(position) oPos: vec4f,');
+        /** @param {number} location @param {string} name */
+        const emits = (location, name)=>{
+            outputFields.push(`    @location(${location}) ${name}: vec4f,`);
+            outputs.push(location);
+        };
         if (major >= 3)
         {
             for (const [index, declaration] of semantics)
             {
                 if (declaration.usage !== D3DDECLUSAGE.POSITION)
                 {
-                    outputFields.push(`    @location(${varyingLocation(declaration.usage,
-                        declaration.usageIndex)}) o${index}: vec4f,`);
+                    emits(varyingLocation(declaration.usage, declaration.usageIndex), `o${index}`);
                 }
             }
         }
@@ -996,24 +1019,30 @@ export function translateShader(parsed, options = {}){
             {
                 if (output >= 200)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD,
-                        output - 200)}) oT${output - 200}: vec4f,`);
+                    emits(varyingLocation(D3DDECLUSAGE.TEXCOORD, output - 200),
+                        `oT${output - 200}`);
                 }
                 else if (output >= 100)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.COLOR,
-                        output - 100)}) oD${output - 100}: vec4f,`);
+                    emits(varyingLocation(D3DDECLUSAGE.COLOR, output - 100),
+                        `oD${output - 100}`);
                 }
                 else if (output === 1)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.FOG, 0)})`
-                        + ' oFog: vec4f,');
+                    emits(varyingLocation(D3DDECLUSAGE.FOG, 0), 'oFog');
                 }
                 else if (output === 2)
                 {
-                    outputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.PSIZE, 0)})`
-                        + ' oPts: vec4f,');
+                    emits(varyingLocation(D3DDECLUSAGE.PSIZE, 0), 'oPts');
                 }
+            }
+        }
+        for (const location of options.alsoWrite ?? [])
+        {
+            if (!outputs.includes(location))
+            {
+                emits(location, `oX${location}`);
+                body.push(`    out.oX${location} = vec4f(0.0);`);
             }
         }
         entry = 'vs_main';
@@ -1024,15 +1053,18 @@ export function translateShader(parsed, options = {}){
         inputFields.push('    @builtin(front_facing) vFace: bool,');
         for (const set of [...pixelCoordinates].sort((a, b)=>a - b))
         {
-            inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, set)})`
-                + ` t${set}: vec4f,`);
+            const location = varyingLocation(D3DDECLUSAGE.TEXCOORD, set);
+            inputFields.push(`    @location(${location}) t${set}: vec4f,`);
+            reads.push(location);
         }
         for (const input of [...pixelInputs].sort((a, b)=>a - b))
         {
             const declaration = major >= 3 ? semantics.get(input) : undefined;
-            inputFields.push(`    @location(${declaration
+            const location = declaration
                 ? varyingLocation(declaration.usage, declaration.usageIndex)
-                : varyingLocation(D3DDECLUSAGE.COLOR, input)}) v${input}: vec4f,`);
+                : varyingLocation(D3DDECLUSAGE.COLOR, input);
+            inputFields.push(`    @location(${location}) v${input}: vec4f,`);
+            reads.push(location);
         }
         for (const output of [...pixelOutputs].sort((a, b)=>a - b))
         {
@@ -1067,11 +1099,15 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, samplers,
+        wgsl, entry, inputs, outputs, reads, samplers,
         constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
         error,
     };
 }
+
+/** D3DTSS_TCI_ modes a hybrid's vertex stage generates a coordinate under. */
+const TCI_CAMERASPACENORMAL = 0x10000;
+const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
 
 /**
  * A vertex stage for a draw that binds a pixel shader and no vertex shader:
@@ -1085,18 +1121,34 @@ export function translateShader(parsed, options = {}){
  *        The declaration's elements, with the location each will arrive at
  *        as its `register`.
  * @param {Map<number, InputShape>} shapes  By register.
+ * @param {readonly number[]} [alsoWrite]
+ *        Varying locations the pixel shader reads that the declaration does
+ *        not supply. A fragment input with no vertex output fails the
+ *        pipeline, so each is written as the fixed-function pipeline leaves
+ *        it: a colour as white, a coordinate set as zero.
+ * @param {readonly number[]} [generated]
+ *        Per coordinate set, the D3DTSS_TCI_ mode the stage of that number
+ *        generates it under, or zero for a set the vertex carries: the
+ *        fixed function computes it from the vertex in camera space (world
+ *        then view in `c[WORLD_VIEW..]`) and puts it through the stage's
+ *        transform (`c[TRANSFORMS..]`), whatever the declaration carries
+ *        under that set.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes){
+export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = []){
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
     const outputFields = ['    @builtin(position) oPos: vec4f,'];
+    /** @type {number[]} */
+    const outputs = [];
     /** @type {string[]} */
     const body = [];
     /** @type {ShaderInput[]} */
     const inputs = [];
     let position = null;
+    let vertex = null;
+    let normal = 'vec3f(0.0, 0.0, 1.0)';
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -1110,16 +1162,72 @@ export function fixedVertexStage(elements, shapes){
         if (element.usage === D3DDECLUSAGE.POSITION)
         {
             position = `mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(${value}.xyz, 1.0)`;
+            vertex = `${value}.xyz`;
         }
         else if (element.usage === D3DDECLUSAGE.POSITIONT)
         {
             position = `viewportPosition(${value})`;
         }
+        else if (element.usage === D3DDECLUSAGE.NORMAL)
+        {
+            normal = `${value}.xyz`;
+        }
+        else if (element.usage === D3DDECLUSAGE.TEXCOORD
+            && (generated[element.usageIndex] ?? 0) !== 0)
+        {
+            // Generated under this set's number: the carried set is not what
+            // the stage samples with.
+            continue;
+        }
         else if (element.usage === D3DDECLUSAGE.COLOR || element.usage === D3DDECLUSAGE.TEXCOORD)
         {
             const location = varyingLocation(element.usage, element.usageIndex);
             outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
+        }
+    }
+    if (generated.some(mode=>mode !== 0) && vertex)
+    {
+        const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        body.push(
+            `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
+            `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
+            `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`);
+    }
+    for (const [set, mode] of generated.entries())
+    {
+        if (mode === 0)
+        {
+            continue;
+        }
+        const location = varyingLocation(D3DDECLUSAGE.TEXCOORD, set);
+        outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+        outputs.push(location);
+        if (!vertex)
+        {
+            body.push(`    out.o${location} = vec4f(0.0);`);
+            continue;
+        }
+        const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
+            : mode === TCI_CAMERASPACEREFLECTIONVECTOR
+                ? 'reflect(normalize(cameraPosition), cameraNormal)'
+                : 'cameraPosition';
+        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 4;
+        body.push(`    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
+            + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)),`
+            + ` dot(c[${row + 2}], vec4f(${coordinate}, 1.0)),`
+            + ` dot(c[${row + 3}], vec4f(${coordinate}, 1.0)));`);
+    }
+    for (const location of alsoWrite)
+    {
+        if (!outputs.includes(location))
+        {
+            outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+            outputs.push(location);
+            const colour = location === varyingLocation(D3DDECLUSAGE.COLOR, 0)
+                || location === varyingLocation(D3DDECLUSAGE.COLOR, 1);
+            body.push(`    out.o${location} = vec4f(${colour ? '1.0' : '0.0'});`);
         }
     }
     body.unshift(`    out.oPos = ${position ?? 'vec4f(0.0, 0.0, 0.0, 1.0)'};`);
@@ -1143,7 +1251,8 @@ export function fixedVertexStage(elements, shapes){
         '}',
     ].join('\n');
     return {
-        wgsl, entry: 'vs_main', inputs, samplers: [], constants: HYBRID_CONSTANTS.COUNT,
+        wgsl, entry: 'vs_main', inputs, outputs, reads: [], samplers: [],
+        constants: HYBRID_CONSTANTS.COUNT,
         error: position ? null : 'the declaration carries no position',
     };
 }

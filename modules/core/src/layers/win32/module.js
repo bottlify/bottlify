@@ -158,6 +158,7 @@ export const win32Module = {
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
         const filesystem = host.requireApi('filesystem');
+        const journal = host.requireApi('log');
 
         // The one namespace a mutex, event, semaphore, timer and file mapping
         // all share. Handed a table from outside when there is a process
@@ -169,7 +170,8 @@ export const win32Module = {
         let libraries = {};
         /** @type {number | null} */
         let exitCode = null;
-        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number, height: number) => boolean }} */
+        /** @type {{ list: () => any[], place: (hwnd: number, x: number, y: number, width: number,
+         *     height: number, how?: { announce?: boolean }) => boolean }} */
         let windowService = { list: ()=>[], place: ()=>false };
 
         /** @type {(handle: number, text: string) => void} */
@@ -250,6 +252,11 @@ export const win32Module = {
         // program itself reads, and the input layer's key state, because a
         // hot key fires on a combination and only the layer that sees the
         // presses knows which modifiers are down when one arrives.
+        // What the page pasted, for the clipboard functions to answer with;
+        // the version is what tells a fresh paste from the one a program
+        // already read.
+        /** @type {{ text: string | null, version: number }} */
+        const pasteboard = { text: null, version: 0 };
         const queue = createMessageQueue({
             now: ()=>kernel.clock.virtualTime(),
             keyState: config?.keyState,
@@ -1091,6 +1098,21 @@ export const win32Module = {
                 // offered one the device it then creates does not have.
                 screen: config?.screen,
                 dispatching,
+                // One line per message a window procedure receives, under
+                // its own category and nothing at all when nobody asked: a
+                // program's calls say what it asked, never what it was told,
+                // and what it was told is where a device reset, a pause or a
+                // throttle is decided.
+                trace: message=>{
+                    if (!journal.enabled('input.message', journal.Level.TRACE))
+                    {
+                        return;
+                    }
+                    journal.write('trace', 'input.message',
+                        'hwnd=0x{0} msg=0x{1} wParam=0x{2} lParam=0x{3}',
+                        message.hwnd.toString(16), message.message.toString(16),
+                        message.wParam.toString(16), message.lParam.toString(16));
+                },
                 dispatch: (wndProc, message, thread)=>bridge.callGuest({
                     entry: wndProc,
                     // The four arguments a window procedure declares, in order.
@@ -1206,6 +1228,7 @@ export const win32Module = {
                 messageBox: notice=>config?.onMessageBox?.(notice),
                 /** @param {string} text */
                 clipboard: text=>config?.onClipboard?.(text),
+                pasteboard,
                 say: (/** @type {string} */ text)=>trace(text),
                 // A CREATESTRUCT has to live where the guest can read it, and
                 // only for the length of the two messages that carry it.
@@ -1408,6 +1431,19 @@ export const win32Module = {
             queue: ()=>queue,
 
             /**
+             * Puts text on the clipboard from outside, as a paste on the page
+             * does: the next GetClipboardData for a text format answers with
+             * it, until a program empties the clipboard or the host pastes
+             * again.
+             *
+             * @param {string} text
+             */
+            paste: text=>{
+                pasteboard.text = text;
+                pasteboard.version++;
+            },
+
+            /**
              * Moves every open wave device's play cursor.
              *
              * Called by whoever drives the machine, on its own schedule, because
@@ -1521,9 +1557,10 @@ export const win32Module = {
              *
              * @param {number} hwnd @param {number} x @param {number} y
              * @param {number} width @param {number} height
+             * @param {{ announce?: boolean }} [how]
              */
-            placeWindow: (hwnd, x, y, width, height)=>
-                windowService.place(hwnd, x, y, width, height),
+            placeWindow: (hwnd, x, y, width, height, how)=>
+                windowService.place(hwnd, x, y, width, height, how),
 
             windowProcedures: ()=>dispatching.map(held=>({
                 hwnd: `0x${held.hwnd.toString(16)}`,

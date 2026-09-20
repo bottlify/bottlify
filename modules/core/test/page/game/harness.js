@@ -772,7 +772,9 @@ export function scheduleKeyTimes(app, request){
  * @param {any} app
  * @param {{ pointer?: { x: number, y: number, dx?: number, dy?: number, down?: boolean },
  *           clicks?: { x: number, y: number, after: number }[],
- *           keys?: { code: string, after: number }[] }} request
+ *           keys?: { code: string, after: number }[],
+ *           typed?: { text: string, after: number }[],
+ *           pasted?: { text: string, after: number }[] }} request
  * @param {PresentState} state
  * @param {any} frame
  */
@@ -836,6 +838,58 @@ export function presentFrame(app, request, state, frame){
             app.input.send({ kind: 'key', code: key.code, down: false });
         }
     }
+    // Typed text: one character a frame, each a key press with its character
+    // as the page's keyboard delivers one, released the frame after.
+    for (const typed of request.typed ?? [])
+    {
+        const index = state.presents - typed.after;
+        if (index >= 0 && index < typed.text.length)
+        {
+            const character = typed.text[index];
+            app.input.send({ kind: 'key', code: codeOf(character), down: true });
+            app.input.send({ kind: 'text', text: character });
+        }
+        if (index >= 1 && index <= typed.text.length)
+        {
+            app.input.send({ kind: 'key', code: codeOf(typed.text[index - 1]), down: false });
+        }
+    }
+    // Pasted text: on the clipboard first, then the Control-V a program
+    // pastes on, released the frame after -- the order the page's own paste
+    // gesture arrives in.
+    for (const pasted of request.pasted ?? [])
+    {
+        if (state.presents === pasted.after)
+        {
+            app.input.send({ kind: 'paste', text: pasted.text });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: true });
+            app.input.send({ kind: 'key', code: 'KeyV', down: true });
+        }
+        else if (state.presents === pasted.after + 1)
+        {
+            app.input.send({ kind: 'key', code: 'KeyV', down: false });
+            app.input.send({ kind: 'key', code: 'ControlLeft', down: false });
+        }
+    }
+}
+
+/**
+ * The KeyboardEvent.code a character is typed with, for the letters, digits
+ * and the few punctuation marks a name or a password carries.
+ *
+ * @param {string} character
+ */
+function codeOf(character){
+    if (/^[a-z]$/i.test(character))
+    {
+        return `Key${character.toUpperCase()}`;
+    }
+    if (/^[0-9]$/.test(character))
+    {
+        return `Digit${character}`;
+    }
+    return { ' ': 'Space', '.': 'Period', '-': 'Minus', '_': 'Minus', '@': 'Digit2', '/': 'Slash',
+        ',': 'Comma', ':': 'Semicolon' }[character] ?? 'KeyA';
 }
 
 /**
@@ -942,6 +996,9 @@ export function createHarness(canvas, how = {}){
      *           screen?: { width: number, height: number, bitsPerPixel: number } | null,
      *           clicks?: { x: number, y: number, after: number }[],
      *           keys?: { code: string, after: number }[],
+     *           typed?: { text: string, after: number }[],
+     *           pasted?: { text: string, after: number }[],
+     *           network?: { module: string, url: string, room: string },
      *           keyTimes?: { code: string, atMs: number, holdMs?: number }[],
      *           files?: { path: string, base64: string }[],
      *           wholeFiles?: boolean,
@@ -1091,8 +1148,15 @@ export function createHarness(canvas, how = {}){
             });
         };
 
+        // The relay Winsock reaches the world through, opened here the way
+        // the launcher's worker opens its own: by the client module's URL.
+        const network = request.network
+            ? await (await import(/* @vite-ignore */ request.network.module))
+                .connectRelay({ url: request.network.url, room: request.network.room })
+            : null;
         const app = await createApp({
             pacing: how.pacing,
+            win32: network ? { network } : undefined,
             executable: fromBase64(request.exe),
             // What the program believes it was started with, so a run can set
             // a command-line-only cvar without touching the bundle.
@@ -1243,6 +1307,9 @@ export function createHarness(canvas, how = {}){
             };
             result.colours = census(image);
             result.opacity = opacity(image);
+            // The frame itself, for the driver to write out as an image: a
+            // census says whether there is a picture, not what it is.
+            result.frameRgba = toBase64(image.pixels);
         }
         result.presents = presentState.presents;
 

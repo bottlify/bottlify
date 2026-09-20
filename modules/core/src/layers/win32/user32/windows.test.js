@@ -37,6 +37,7 @@ const HINSTANCE = 0x400000;
 const UNTOUCHED = 0xa5a5a5a5;
 
 const WM_DESTROY = 0x0002;
+const WM_NCDESTROY = 0x0082;
 const WM_CLOSE = 0x0010;
 const WM_QUIT = 0x0012;
 const WM_KEYDOWN = 0x0100;
@@ -169,8 +170,9 @@ const PARKED = Object.freeze({ parked: true });
  *        procedure answers.
  * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
  *        name a thread of this process, for PostThreadMessage.
+ * @param {(message: any) => void} [options.trace] Told every message a procedure receives.
  */
-function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists } = {}){
+function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists, trace } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -204,6 +206,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
         windowService: handed=>{
             service = handed;
         },
+        trace,
         dispatch: (wndProc, message, thread)=>{
             dispatched.push(thread === undefined
                 ? { wndProc, ...message } : { wndProc, ...message, thread });
@@ -291,11 +294,11 @@ function createWindow(fns, memory, options = {}){
  * A class plus a window of it, which almost every test below needs.
  *
  * @param {Parameters<typeof putClass>[1] & Parameters<typeof createWindow>[2]
- *     & { reply?: (message: any) => any }} [options]
+ *     & { reply?: (message: any) => any, trace?: (message: any) => void }} [options]
  */
 function withWindow(options = {}){
-    const { reply, ...rest } = options;
-    const context = setup({ reply });
+    const { reply, trace, ...rest } = options;
+    const context = setup({ reply, trace });
     putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, rest);
@@ -483,6 +486,16 @@ test('a rectangle of a window that is gone is not written', ()=>{
     assert.equal(memory.u32(RECT_BUFFER), UNTOUCHED);
 });
 
+test('every message a procedure receives is told to the trace, whoever sent it', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    const { fns, hwnd } = withWindow({ trace: message=>told.push(message) });
+    const before = told.length;
+    fns.SendMessageA.handler([hwnd, 0x0401, 7, 9]);
+    assert.deepEqual(told.slice(before).map(m=>[m.hwnd, m.message, m.wParam, m.lParam]),
+        [[hwnd, 0x0401, 7, 9]]);
+});
+
 test('placing a window as the system would moves it and tells the program', ()=>{
     // What a fullscreen device does to the window it presents into. The
     // program re-reads its rectangle on WM_SIZE and clips its cursor to it, so
@@ -525,6 +538,25 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(service.place(0x9999, 0, 0, 1, 1), false,
         'a window that is not there is not placed');
     assert.deepEqual(service.list().map(entry=>[entry.width, entry.height]), [[1024, 768]]);
+
+    // Placed again where it already is -- what a device reset does -- nothing
+    // is said: a program that resets its device on WM_SIZE would otherwise
+    // reset it for ever.
+    assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'the same place is no move and no size');
+    assert.equal(service.place(hwnd, 0, 0, 800, 600), true);
+    const again = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(again?.message, 0x0005, 'a new size is a size alone');
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
+
+    // Announced, the same place is still a size: what a mode switch says to
+    // the window it lands in, once the device that switched exists.
+    assert.equal(service.place(hwnd, 0, 0, 800, 600, { announce: true }), true);
+    const said = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(said?.message, 0x0005);
+    assert.equal(said?.lParam >>> 0, (600 << 16 | 800) >>> 0);
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
 });
 
 test('MoveWindow changes both rectangles', ()=>{
@@ -1048,15 +1080,20 @@ test('a subclassed window is dispatched to its new procedure', ()=>{
     assert.equal(dispatched[0].wndProc, 0x402000);
 });
 
-test('WM_DESTROY reaches the procedure of the window that is going away', ()=>{
-    const { fns, memory, dispatched, hwnd } = withWindow();
-    fns.DestroyWindow.handler([hwnd]);
-
-    assert.equal(fns.GetMessageA.handler([MSG_BUFFER, 0, 0, 0]), 1);
-    assert.equal(memory.u32(MSG_BUFFER + MSG.message), WM_DESTROY);
-    assert.equal(fns.DispatchMessageA.handler([MSG_BUFFER]), 0x1234);
-    assert.equal(dispatched[0].wndProc, WNDPROC);
-});
+test('WM_DESTROY and WM_NCDESTROY are sent to the window going away, before it has gone',
+    async()=>{
+        // Sent, not posted: a program that destroys its window and then frees
+        // what the procedure reads through GWL_USERDATA relies on the
+        // procedure having run inside DestroyWindow. A queued WM_DESTROY
+        // arrived after the free and the procedure called into freed memory.
+        const { fns, dispatched, hwnd } = withWindow();
+        assert.equal(await fns.DestroyWindow.handler([hwnd]), 1);
+        assert.deepEqual(dispatched.map((/** @type {any} */ d)=>[d.hwnd, d.message]),
+            [[hwnd, WM_DESTROY], [hwnd, WM_NCDESTROY]]);
+        assert.equal(dispatched[0].wndProc, WNDPROC);
+        assert.equal(fns.IsWindow.handler([hwnd]), 0, 'and only then is the handle gone');
+        assert.equal(fns.PeekMessageA.handler([MSG_BUFFER, 0, 0, 0, 0]), 0, 'nothing queued');
+    });
 
 // --- the default window procedure ---
 

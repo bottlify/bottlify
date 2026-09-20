@@ -236,6 +236,34 @@ function parse(argv){
             const [code, after] = argv[index + 1].split(',');
             return [{ code, after: Number(after) || 30 }];
         }),
+        // Text typed into whatever has the focus, one character per presented
+        // frame from `after` on, as `text,after`: each character is a key
+        // press with its character, the way the page's own keyboard delivers
+        // one. The text may not contain a comma.
+        typed: argv.flatMap((flag, index)=>{
+            if (flag !== '--type')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+        }),
+        // Text pasted into whatever has the focus at frame `after`, as
+        // `text,after`: onto the clipboard, then the Control-V a program
+        // pastes on, the way the page's paste gesture delivers one.
+        pasted: argv.flatMap((flag, index)=>{
+            if (flag !== '--paste')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+        }),
+        // The relay the run's Winsock reaches the world through, as the
+        // launcher names it: `--network wss://host/relay` joins room `harness`.
+        network: argv.includes('--network') ? argv[argv.indexOf('--network') + 1] : null,
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
         // Fields of the graphics layer's configuration, as `createApp` takes
@@ -663,6 +691,18 @@ function describe(result, context, calls, symbols){
         const at = (/** @type {number} */ share)=>gaps[Math.min(gaps.length - 1,
             Math.floor(gaps.length * share))].toFixed(1);
         say(`  present gap ms: median ${at(0.5)}, p90 ${at(0.9)}, max ${at(1)}`);
+        // In order as well: a run that starts smooth and slows down, or one
+        // that stutters every few seconds, has a shape the quantiles hide.
+        const inOrder = /** @type {number[]} */ (result.presentGaps ?? []);
+        const bucket = Math.max(1, Math.ceil(inOrder.length / 24));
+        /** @type {string[]} */
+        const shape = [];
+        for (let from = 0; from < inOrder.length; from += bucket)
+        {
+            const slice = inOrder.slice(from, from + bucket);
+            shape.push((slice.reduce((sum, gap)=>sum + gap, 0) / slice.length).toFixed(0));
+        }
+        say(`  present gap ms in order (${bucket} presents a bucket): ${shape.join(' ')}`);
     }
     if (result.longTasks)
     {
@@ -791,7 +831,11 @@ export async function game(options){
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
-        extra: [{ prefix: '/bundle/', root: directory }],
+        extra: [
+            { prefix: '/bundle/', root: directory },
+            // The networking client, for a run that names a relay.
+            { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
+        ],
         coi: options.coi,
         port: options.port,
     });
@@ -862,6 +906,15 @@ export async function game(options){
             trace: options.trace,
             pointer: options.pointer,
             clicks: options.clicks,
+            typed: options.typed,
+            pasted: options.pasted,
+            network: options.network
+                ? {
+                    module: new URL('/networking/client/index.js', pageUrl).href,
+                    url: options.network,
+                    room: 'harness',
+                }
+                : undefined,
             keys: options.keys,
             files: options.files,
             wholeFiles: options.saveFiles,
@@ -929,6 +982,24 @@ export async function game(options){
         const reportPath = join(REPORTS_DIR, `game-${stamp}.txt`);
         const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }, sessionId);
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
+        // The last presented frame as the engine read it back, beside the
+        // page's screenshot: the screenshot is what the compositor showed at
+        // the moment of the stop, the frame is what the program drew.
+        if (result.frameRgba && result.frame)
+        {
+            const rgba = Buffer.from(result.frameRgba, 'base64');
+            const bgra = Buffer.alloc(rgba.length);
+            for (let at = 0; at < rgba.length; at += 4)
+            {
+                bgra[at] = rgba[at + 2];
+                bgra[at + 1] = rgba[at + 1];
+                bgra[at + 2] = rgba[at];
+                bgra[at + 3] = rgba[at + 3];
+            }
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-frame.png`),
+                toPng(result.frame.width, result.frame.height, bgra));
+            delete result.frameRgba;
+        }
 
         await drainLog();
 
@@ -952,6 +1023,14 @@ export async function game(options){
         }, options.calls, symbols);
         writeFileSync(reportPath, text);
 
+        // The graphics layer's whole account as JSON beside the report: the
+        // frame records, the presenter's copies by source, every counter --
+        // what a black or a frozen picture is read from.
+        if (result.graphics)
+        {
+            writeFileSync(join(REPORTS_DIR, `game-${stamp}-graphics.json`),
+                JSON.stringify(result.graphics, null, 1));
+        }
         // A file of its own: one line per draw is thousands of lines, which is
         // a thing to grep rather than a thing to read past.
         const drawn = result.graphics?.device?.lastDump ?? [];

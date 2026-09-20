@@ -496,6 +496,7 @@ export async function createRemoteApp(wiring){
                 ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com']
                     .map(area=>`call.${area}`),
                 'input.press',
+                'input.message',
             ],
 
             /** @param {number} [worst] */

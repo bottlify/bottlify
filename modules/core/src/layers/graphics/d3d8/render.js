@@ -47,8 +47,15 @@ import { resourceId } from '../webgpu/internal/bindings.js';
 import {
     constantBlocks, createProgramCache, shapeKey, vertexLayoutOf,
 } from '../webgpu/internal/programmable.js';
-import { HYBRID_CONSTANTS, fixedVertexStage, translateShader } from '../d3d9/wgsl.js';
+import {
+    HYBRID_CONSTANTS, fixedVertexStage, translateShader, varyingLocation,
+} from '../d3d9/wgsl.js';
+import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
+import {
+    fixedFragmentStage, generates, generationOf,
+} from '../webgpu/internal/fixedfunction.js';
+import { pipelineKey } from '../webgpu/internal/pipeline.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
 const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
@@ -92,16 +99,32 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * fourth, every such offset is zero and every sprite sheet shows its first
  * cell -- a picture, not an error.
  */
-const PLANAR_ROWS = Object.freeze([0, 4, 8, 1, 5, 9]);
+const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15]);
 
-/** What those elements hold when the transform moves nothing: u' = u, v' = v. */
-const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 1, 0]);
+/** What those elements hold when the transform moves nothing: the identity, by columns. */
+const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
-/** D3DTTFF_COUNT2: two coordinates through the matrix, and no projection. */
+/** D3DTTFF_COUNTn: how many coordinates go through the matrix; PROJECTED divides by the last. */
+const TTFF_COUNT_MASK = 0xff;
+const TTFF_PROJECTED = 0x100;
 const TTFF_COUNT2 = 2;
+const TTFF_COUNT4 = 4;
+
+/**
+ * Whether a stage's transform flags are ones the sampler applies: two to
+ * four coordinates, with a projective divide only where the coordinate is
+ * generated, since a carried set is two components with nothing to divide by.
+ *
+ * @param {number} flags @param {boolean} generated
+ */
+const transformApplies = (flags, generated)=>{
+    const count = flags & TTFF_COUNT_MASK;
+    return count >= TTFF_COUNT2 && count <= TTFF_COUNT4
+        && ((flags & TTFF_PROJECTED) === 0 || generated);
+};
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
-const TEXTURE_DUMP_LIMIT = 24;
+const TEXTURE_DUMP_LIMIT = 96;
 
 /** Distinct cascade truncations a run keeps, so a report names them without a flood. */
 const TRUNCATION_SAMPLES = 8;
@@ -596,6 +619,12 @@ const DEPTH_FORMAT = Object.freeze({
 const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
 
 /**
+ * A compressed level decoded into the texel order every other format is
+ * expanded to: the decoder answers R, G, B, A and the textures here are
+ * `bgra8unorm`, so the two end bytes change places -- missed, every DXT
+ * texture on a GPU without block compression (an Apple GPU, a software
+ * rasteriser) is drawn with red and blue exchanged and nothing else wrong.
+ *
  * `decodeS3tc` answers null only when the bytes are too few for the shape,
  * which cannot happen here: every caller reads exactly `surfaceBytes` worth,
  * the same block-rounded count `decodeS3tc` requires.
@@ -606,8 +635,14 @@ const blockAligned = (width, height)=>width % 4 === 0 && height % 4 === 0;
  * @returns {Uint8Array}
  */
 const decodeCompressed = (bytes, kind, width, height)=>{
-    const decoded = decodeS3tc(bytes, kind, width, height);
-    return /** @type {Uint8Array} */ (decoded);
+    const decoded = /** @type {Uint8Array} */ (decodeS3tc(bytes, kind, width, height));
+    for (let at = 0; at < decoded.length; at += 4)
+    {
+        const red = decoded[at];
+        decoded[at] = decoded[at + 2];
+        decoded[at + 2] = red;
+    }
+    return decoded;
 };
 
 /**
@@ -672,14 +707,22 @@ export const UNIFORM_AT = Object.freeze({
     stage0: 73,
     stage1: 74,
     stage2: 75,
-    // Two vec4f rows per sampled stage: (m11, m21, m31, 0) makes u and
-    // (m12, m22, m32, 0) makes v from (u, v, 1).
+    // Four vec4f rows per stage for every stage, the matrix by columns:
+    // (m11, m21, m31, m41) makes u, (m12, m22, m32, m42) makes v -- from
+    // (u, v, 1) for a carried set, from (x, y, z, 1) for a generated
+    // coordinate, which also takes the third and fourth for a projective
+    // divide.
     textureTransforms: 76,
-    lights: 100,
+    // World then view: the camera space a generated coordinate is taken in.
+    worldView: 204,
+    lights: 220,
 });
 
 /** How many stages the block carries sampler state for. */
 export const SAMPLED_STAGES = 3;
+
+/** How many stages the block carries a texture transform for: every one. */
+export const TRANSFORM_STAGES = STAGE_COUNT;
 
 /** The block's own length, before any light is appended. */
 export const UNIFORM_FLOATS = UNIFORM_AT.lights;
@@ -763,7 +806,8 @@ function putDword(block, at, dword){
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {(readonly number[])[]} [textureTransforms]
- *     Per stage, the six planar elements in `PLANAR_ROWS` order; identity when absent.
+ *     Per stage, the sixteen elements in `PLANAR_ROWS` order; identity when absent.
+ * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -808,12 +852,11 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
         words[at.stage0 + index] = (stages[index] ?? 0) >>> 0;
     }
     const transforms = values.textureTransforms ?? [];
-    for (let index = 0; index < SAMPLED_STAGES; index++)
+    for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
-        const planar = transforms[index] ?? PLANAR_IDENTITY;
-        put4(block, at.textureTransforms + index * 8, planar[0], planar[1], planar[2], 0);
-        put4(block, at.textureTransforms + index * 8 + 4, planar[3], planar[4], planar[5], 0);
+        block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
     }
+    block.set(values.worldView ?? IDENTITY, at.worldView);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -1027,11 +1070,12 @@ export function uniformsOf(model, lighting, take, mips = true){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
+    const worldView = multiplyMatrices(world, view, WORLD_VIEW);
     return uniformBlock({
         worldViewProjection: multiplyMatrices(
-            multiplyMatrices(world, view, WORLD_VIEW), transformOf(model, D3DTS.PROJECTION),
-            WORLD_VIEW_PROJECTION),
+            worldView, transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
         world,
+        worldView,
         viewport: model.viewport,
         textureFactor: rs('TEXTUREFACTOR'),
         fogColor: rs('FOGCOLOR'),
@@ -1058,20 +1102,23 @@ export function uniformsOf(model, lighting, take, mips = true){
 }
 
 /**
- * The planar transform of each sampled stage, when the stage's flags say
- * its two coordinates go through the matrix. Any other flag value -- more
- * coordinates, a projective divide -- is not applied and is reported per draw.
+ * The transform of each sampled stage, when the stage's flags are ones the
+ * sampler applies (`transformApplies`). Any other -- one coordinate, a
+ * projective divide of a carried set -- is not applied and is reported per
+ * draw.
  *
  * @param {RenderModel} model
  */
 const stageTransforms = model=>{
     /** @type {(readonly number[])[]} */
     const transforms = [];
-    for (let index = 0; index < SAMPLED_STAGES; index++)
+    for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
-        const flags = model.stageStates(index)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        const states = model.stageStates(index);
+        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
         const matrix = model.transforms.get(D3DTS.TEXTURE0 + index);
-        transforms.push(flags === TTFF_COUNT2 && matrix
+        const generated = generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0);
+        transforms.push(transformApplies(flags, generated) && matrix
             ? PLANAR_ROWS.map(at=>matrix[at])
             : PLANAR_IDENTITY);
     }
@@ -1139,6 +1186,8 @@ export function stageCascade(model, layout){
         {
             break;
         }
+        const texCoordIndex = get(D3DTSS.TEXCOORDINDEX);
+        const transformFlags = get(D3DTSS.TEXTURETRANSFORMFLAGS);
         const key = {
             colorOp,
             colorArg1: get(D3DTSS.COLORARG1),
@@ -1146,7 +1195,13 @@ export function stageCascade(model, layout){
             alphaOp: get(D3DTSS.ALPHAOP),
             alphaArg1: get(D3DTSS.ALPHAARG1),
             alphaArg2: get(D3DTSS.ALPHAARG2),
-            texCoordIndex: get(D3DTSS.TEXCOORDINDEX),
+            texCoordIndex,
+            // A projected generated coordinate is divided by its third or
+            // fourth component at the sample, which is the count's last.
+            projected: generates(texCoordIndex) && (transformFlags & TTFF_PROJECTED) !== 0
+                && (transformFlags & TTFF_COUNT_MASK) >= 3
+                ? Math.min(transformFlags & TTFF_COUNT_MASK, 4)
+                : 0,
         };
         const selectors = [
             ...argumentsRead(key.colorOp, key.colorArg1, key.colorArg2),
@@ -1155,7 +1210,8 @@ export function stageCascade(model, layout){
         const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
         const texture = model.textures.get(stage) ?? null;
         const coordSet = key.texCoordIndex & COORD_SET_MASK;
-        if (samples && (!texture || coordSet >= layout.texCoordSets))
+        const carried = generates(key.texCoordIndex) || coordSet < layout.texCoordSets;
+        if (samples && (!texture || !carried))
         {
             return {
                 stages,
@@ -1984,6 +2040,13 @@ export function createRenderer(options){
             // as the camera moves by less than a depth unit.
             + `/bias${model.renderStates.get(D3DRS.ZBIAS) ?? 0}`
             + `/${state.depthFormat ?? 'nodepth'}`
+            // Which channels the draw may write, and the stencil states in
+            // force: a draw that writes no colour is one made for the
+            // stencil, and one drawn under a stencil test is what reads it.
+            + ` cw=${state.colorWrite}`
+            + (model.renderStates.get(52) ? ` stencil=${[53, 54, 55, 56, 57, 58, 59]
+                .map(index=>((model.renderStates.get(index) ?? 0) >>> 0).toString(16))
+                .join('/')}` : '')
             // Whether the program asked for its primitives to be clipped at
             // all: with clipping off, a vertex past the far plane is a depth
             // to clamp, not a triangle to drop.
@@ -2084,24 +2147,23 @@ export function createRenderer(options){
         {
             return '-';
         }
-        // The elements a two-dimensional coordinate actually travels through,
-        // as u then v: the two each is scaled and sheared by, and the offset
-        // from the third row. The rest of the matrix cannot reach it.
+        // The matrix by columns, as the block carries it: the u column, then
+        // v, w and q -- so a sheet's cell can be read off the first two.
         return `${flags}:${(matrix ? PLANAR_ROWS.map(at=>matrix[at]) : PLANAR_IDENTITY)
             .map(round).join(',')}`;
     };
 
     /**
-     * Whether a stage's transform asks for what the sampler does not do.
-     *
-     * Two coordinates through the matrix are applied at the sample. Three or
-     * four, or a projected divide, are not, whatever the matrix holds.
+     * Whether a stage's transform asks for what the sampler does not do:
+     * one coordinate, or a projective divide of a carried set.
      *
      * @param {RenderModel} model @param {number} stage
      */
     const transformMoves = (model, stage)=>{
-        const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-        return flags !== 0 && flags !== TTFF_COUNT2;
+        const states = model.stageStates(stage);
+        const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
+        return flags !== 0
+            && !transformApplies(flags, generates(states?.get(D3DTSS.TEXCOORDINDEX) ?? 0));
     };
 
     /**
@@ -2504,12 +2566,13 @@ export function createRenderer(options){
         {
             return;
         }
-        if (stages.some(stage=>(stage.texCoordIndex & ~COORD_SET_MASK) !== 0))
+        if (stages.some(stage=>generationOf(stage.texCoordIndex) !== 0
+            && !generates(stage.texCoordIndex)))
         {
             divergence('Direct3D 8',
-                'texture coordinate generation is accepted and not applied'
-                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_*): the set named in the low'
-                + ' bits is sampled as the vertex carries it');
+                'a sphere-map texture coordinate generation is accepted and not applied'
+                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_SPHEREMAP): the set named in the'
+                + ' low bits is sampled as the vertex carries it');
         }
     };
 
@@ -2535,8 +2598,8 @@ export function createRenderer(options){
             if (transformMoves(model, stage))
             {
                 divergence('Direct3D 8',
-                    'a texture transform of more than two coordinates, or a'
-                    + ' projected one, is accepted and not applied'
+                    'a texture transform of one coordinate, or a projected one'
+                    + ' over a set the vertex carries, is accepted and not applied'
                     + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
                     + ' coordinates are sampled as the vertex carries them');
                 return;
@@ -2931,16 +2994,19 @@ export function createRenderer(options){
      *
      * @returns {{ draws: number, placeholder: number, truncated: number, fogged: number,
      *             fog: string, fogs: Map<string, number>,
-     *     uploads: number, textures: Set<any> }}
+     *     uploads: number, textures: Set<any>, clears: number, clearColor: number,
+     *     offscreenDraws: number, offscreenTargets: Set<any> }}
      */
     const blankFrameStats = ()=>({
         draws: 0, placeholder: 0, truncated: 0, uploads: 0, fogged: 0, fog: '',
-        fogs: new Map(), textures: new Set(),
+        fogs: new Map(), textures: new Set(), clears: 0, clearColor: -1, offscreenDraws: 0,
+        offscreenTargets: new Set(),
     });
     let frameStats = blankFrameStats();
     /** @type {{ index: number, draws: number, placeholder: number, truncated: number,
      *     uploads: number, textures: number, fogged: number, fog: string, fogs: string,
-     *     lights: string }[]} */
+     *     lights: string, clears: number, clearColor: string, offscreenDraws: number,
+     *     offscreenTargets: number, viewport: string, target: string }[]} */
     const frameHistory = [];
     const FRAME_HISTORY = 240;
 
@@ -2955,13 +3021,77 @@ export function createRenderer(options){
     };
 
     /**
+     * Depth surfaces of a target's own size, standing in for a depth
+     * surface larger than the target it is bound with. Direct3D allows a
+     * depth surface at least as large as the colour target and uses its
+     * top-left corner; WebGPU attaches only equal sizes, and a pass that
+     * disagrees invalidates the whole frame's command buffer -- a black
+     * frame with nothing else wrong in it. A program drawing a glow into a
+     * quarter-size target with its screen-size depth still bound is the
+     * ordinary case. The stand-in is per depth surface and size, kept for
+     * the run; what it holds is not what the corner of the larger one
+     * would, which a program that reads depth back across that boundary
+     * would notice and nothing else does.
+     *
+     * @type {WeakMap<object, Map<string, import('../webgpu/contract.js').Surface>>}
+     */
+    const standInDepths = new WeakMap();
+    /**
+     * Surfaces given up by the device, destroyed once the frame being
+     * recorded when they were has been replayed.
+     * @type {import('../webgpu/contract.js').Surface[]}
+     */
+    const retiring = [];
+
+    /**
+     * The depth attachment for the model's targets: the bound depth surface
+     * when it is the target's size, a stand-in of the target's size when
+     * it is larger, and none when there is none.
+     *
+     * @param {RenderModel} model
+     * @param {import('../webgpu/contract.js').Surface} target
+     */
+    const depthFor = (model, target)=>{
+        if (!model.depthStencil)
+        {
+            return null;
+        }
+        const depth = surfaceFor(model.depthStencil);
+        if (depth.width === target.width && depth.height === target.height)
+        {
+            return depth;
+        }
+        let sizes = standInDepths.get(depth);
+        if (!sizes)
+        {
+            sizes = new Map();
+            standInDepths.set(depth, sizes);
+        }
+        const key = `${target.width}x${target.height}`;
+        const standing = sizes.get(key);
+        if (standing)
+        {
+            return standing;
+        }
+        const made = backend.createSurface({
+            width: target.width,
+            height: target.height,
+            format: depth.format,
+            label: 'depth-stand-in',
+            usage: TextureUsage.RENDER_ATTACHMENT,
+        });
+        sizes.set(key, made);
+        return made;
+    };
+
+    /**
      * @param {RenderModel} model
      * @param {{ clearColor?: any, clearDepth?: number, clearStencil?: number }} clearing
      */
     const beginPass = (model, clearing)=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
-        const depth = model.depthStencil ? surfaceFor(model.depthStencil) : null;
+        const depth = depthFor(model, target);
         frame.commands.push({ kind: 'pass', target, depth, ...clearing });
         frame.pass = { target, depth };
         frame.viewport = null;
@@ -2971,7 +3101,7 @@ export function createRenderer(options){
     const ensurePass = model=>{
         const frame = ensureFrame();
         const target = surfaceFor(model.renderTarget);
-        const depth = model.depthStencil ? surfaceFor(model.depthStencil) : null;
+        const depth = depthFor(model, target);
         if (!frame.pass || frame.pass.target !== target || frame.pass.depth !== depth)
         {
             beginPass(model, {});
@@ -3080,7 +3210,7 @@ export function createRenderer(options){
      * The usages a hybrid's fixed vertex stage carries through: what a pixel
      * shader can read from a fixed-function vertex.
      */
-    const HYBRID_USAGES = new Set([0, 9, 10, 5]);
+    const HYBRID_USAGES = new Set([0, 9, 10, 5, 3]);
 
     /**
      * Everything a draw through shaders needs that is not its geometry, or
@@ -3093,21 +3223,17 @@ export function createRenderer(options){
      * @param {ProgramState} program
      */
     const prepareProgram = (model, stride, topology, program)=>{
-        if (!program.pixel)
-        {
-            // A vertex shader feeding the fixed-function pixel stage needs
-            // that stage's fragment formula driven by the shader's outputs,
-            // which the fixed-function generator does not yet do.
-            skip('program');
-            reportProgram('vs-only', 'a draw with a vertex shader and the fixed-function'
-                + ' pixel stage was not drawn: only a shader pair, or a pixel shader over'
-                + ' fixed-function vertices, is drawn');
-            return null;
-        }
         if (!program.declaration)
         {
             skip('program');
+            reportProgram(`nodecl:${program.vertexId}/${program.pixelId}`,
+                `a draw with shaders ${program.vertexId}/${program.pixelId} and no vertex`
+                + ' declaration or FVF was not drawn');
             return null;
+        }
+        if (!program.pixel)
+        {
+            return prepareMixed(model, stride, topology, program);
         }
         const pixelShader = /** @type {object} */ (program.pixelShader);
         const pixel = translationOf(pixelShader, 'ps', ()=>translateShader(
@@ -3154,12 +3280,37 @@ export function createRenderer(options){
         }
         const layout = laid.layout;
         const shapes = shapeKey(layout);
+        // A varying the pixel stage reads and the vertex shader never writes
+        // is zero, as the vertex stage's own output: a fragment input with
+        // no vertex output fails the pipeline, where Direct3D reads whatever
+        // was left in the register.
+        const written = program.vertex
+            ? translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+                ()=>translateShader(
+                    /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)))
+                .outputs
+            : wanted
+                .filter(element=>element.usage === D3DDECLUSAGE.COLOR
+                    || element.usage === D3DDECLUSAGE.TEXCOORD)
+                .map(element=>varyingLocation(element.usage, element.usageIndex));
+        // A coordinate set the fixed-function stages generate from the vertex
+        // in camera space is written by the made vertex stage whatever the
+        // declaration carries under that number, since that is what the
+        // fixed function hands a pixel shader.
+        const generated = program.vertex ? [] : hybridGeneration(model);
+        const missing = pixel.reads.filter(
+            (/** @type {number} */ location)=>!written.includes(location)
+                && !generated.some((mode, set)=>mode !== 0
+                    && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const vertex = program.vertex
-            ? translationOf(/** @type {object} */ (program.vertexShader), `vs:${shapes}`,
+            ? translationOf(/** @type {object} */ (program.vertexShader),
+                `vs:${shapes}|w${missing.join(',')}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                    { inputs: layout.shapes }))
-            : hybridStageFor(`${program.declarationId}|${shapes}`, wanted, layout.shapes);
+                    { inputs: layout.shapes, alsoWrite: missing }))
+            : hybridStageFor(
+                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`,
+                wanted, layout.shapes, missing, generated);
         if (vertex.error)
         {
             skip('program');
@@ -3220,25 +3371,170 @@ export function createRenderer(options){
     };
 
     /**
+     * A vertex shader over the fixed-function pixel stage: the shader's
+     * translation as the vertex stage, and a fragment stage made from the
+     * stage cascade, fog and alpha test in force, reading what the shader
+     * wrote. The pipeline is the programmable one, so the cascade's block
+     * travels as the pixel stage's first constant buffer and its textures
+     * in the sampler group.
+     *
+     * @param {RenderModel} model
+     * @param {number} stride
+     * @param {string} topology
+     * @param {ProgramState} program
+     * @returns {PreparedDraw | null}
+     */
+    const prepareMixed = (model, stride, topology, program)=>{
+        const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+            ()=>translateShader(
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
+        if (base.error)
+        {
+            skip('program');
+            reportProgram(`vs:${program.vertexId}`,
+                `vertex shader ${program.vertexId} was not drawn: ${base.error}`);
+            return null;
+        }
+        const declaration = /** @type {readonly import('../webgpu/internal/programmable.js')
+            .VertexElement[]} */ (program.declaration);
+        const laid = vertexLayoutOf(declaration, base.inputs, stride);
+        if (!laid.layout)
+        {
+            skip('program');
+            reportProgram(`decl:${program.declarationId}`,
+                `a draw through declaration ${program.declarationId} was not drawn: ${laid.error}`);
+            return null;
+        }
+        const layout = laid.layout;
+        const shapes = shapeKey(layout);
+        /** @type {import('../d3d9/wgsl.js').TranslatedShader} */
+        const vertex = translationOf(/** @type {object} */ (program.vertexShader),
+            `vs:${shapes}`, ()=>translateShader(
+                /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
+                { inputs: layout.shapes }));
+        if (vertex.error)
+        {
+            skip('program');
+            reportProgram(`vs:${program.vertexId}:${program.declarationId}`,
+                `vertex stage of shader ${program.vertexId} was not drawn: ${vertex.error}`);
+            return null;
+        }
+        // The cascade ends where the shader stopped writing coordinate sets,
+        // as it ends where a vertex format stops carrying them.
+        let sets = 0;
+        for (const location of vertex.outputs)
+        {
+            if (location >= 2 && location < 10)
+            {
+                sets = Math.max(sets, location - 1);
+            }
+        }
+        const cascade = stageCascade(model, {
+            texCoordSets: sets, attributes: [], stride, preTransformed: false, blendWeights: 0,
+        });
+        reportCascade(cascade);
+        const state = {
+            ...pipelineStateOf(model, {
+                fvf: 0, topology, ...formatsOf(model), stages: cascade.stages, lighting: null,
+                fog: fogApplied,
+            }),
+            vertexShader: program.vertexId,
+            pixelShader: -1,
+        };
+        const pixel = fixedFragmentStage(state, vertex.outputs);
+        const samplerBindings = cascade.stages.map((stage, index)=>{
+            const texture = cascade.textures[index];
+            return {
+                stage: index,
+                texture,
+                view: texture ? uploadIfDirty(texture).view : placeholderView(),
+                sampler: samplerFor(model.stageStates(index)),
+                placeholder: !texture,
+            };
+        });
+        const take = ensureFrame().arena.take;
+        const vertexBlocks = constantBlocks(program.vertexConstants, vertex.constants, take);
+        const pixelBlocks = [uniformsOf(model, null, take, mipsApplied), take(64), take(16)];
+        counters.prepared.built++;
+        return {
+            version: undefined,
+            contentVersion: 0,
+            stride,
+            topology,
+            state,
+            uniforms: vertexBlocks[0],
+            template: null,
+            stageBindings: samplerBindings,
+            lighting: null,
+            fogSetting: '',
+            layout: null,
+            textures: cascade.textures,
+            truncated: cascade.truncated,
+            pipelineFrame: null,
+            pipelineIndex: 0,
+            program: {
+                source: {
+                    key: `${state.vertexShader}/ffp/${program.declarationId}/${shapes}/${stride}`
+                        + `/${pipelineKey(state)}`,
+                    vertex, pixel, layout,
+                },
+                declarationId: program.declarationId,
+                vertexBlocks,
+                pixelBlocks,
+                samplerBindings,
+            },
+        };
+    };
+
+    /**
      * @param {string} key
      * @param {import('../webgpu/internal/programmable.js').DeclaredInput[]} wanted
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
+     * @param {number[]} alsoWrite
+     * @param {number[]} generated
      */
-    const hybridStageFor = (key, wanted, shapes)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated);
         hybridStages.set(key, made);
         return made;
     };
 
     /**
+     * Per coordinate set, the generation mode of the stage of that number,
+     * up to the last stage the cascade runs: zero for a carried set.
+     *
+     * @param {RenderModel} model
+     */
+    const hybridGeneration = model=>{
+        /** @type {number[]} */
+        const modes = [];
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+            {
+                break;
+            }
+            const index = states.get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            modes.push(generates(index) ? generationOf(index) : 0);
+        }
+        while (modes.length > 0 && modes[modes.length - 1] === 0)
+        {
+            modes.pop();
+        }
+        return modes;
+    };
+
+    /**
      * The constants a hybrid's fixed vertex stage reads: the same
      * world-view-projection the fixed-function block carries, then the
-     * viewport's offset and scale.
+     * viewport's offset and scale, world-view and the stage transforms for a
+     * generated coordinate.
      *
      * @param {RenderModel} model @param {(floats: number) => Float32Array} take
      */
@@ -3246,10 +3542,16 @@ export function createRenderer(options){
         const floats = take(HYBRID_CONSTANTS.COUNT * 4);
         const world = transformOf(model, D3DTS.WORLD);
         const view = transformOf(model, D3DTS.VIEW);
-        floats.set(multiplyMatrices(multiplyMatrices(world, view),
-            transformOf(model, D3DTS.PROJECTION)), HYBRID_CONSTANTS.MATRIX * 4);
+        const worldView = multiplyMatrices(world, view);
+        floats.set(multiplyMatrices(worldView, transformOf(model, D3DTS.PROJECTION)),
+            HYBRID_CONSTANTS.MATRIX * 4);
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
+        floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
+        for (const [index, rows] of stageTransforms(model).entries())
+        {
+            floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 4) * 4);
+        }
         return [floats, take(64), take(16)];
     };
 
@@ -3272,6 +3574,11 @@ export function createRenderer(options){
         }
         kept++;
         frameStats.draws++;
+        if (model.renderTarget !== model.backBuffer)
+        {
+            frameStats.offscreenDraws++;
+            frameStats.offscreenTargets.add(model.renderTarget);
+        }
         for (const binding of prepared.stageBindings)
         {
             if (binding.placeholder)
@@ -3919,6 +4226,11 @@ export function createRenderer(options){
                 return;
             }
             counters.clears++;
+            frameStats.clears++;
+            if ((flags & D3DCLEAR.TARGET) !== 0 && model.renderTarget === model.backBuffer)
+            {
+                frameStats.clearColor = color >>> 0;
+            }
             const whole = areas.length === 1 && areas[0].x1 === 0 && areas[0].y1 === 0
                 && areas[0].x2 === target.Width && areas[0].y2 === target.Height;
             if (whole)
@@ -4240,6 +4552,8 @@ export function createRenderer(options){
             lastDump = dump;
             dump = [];
             kept = 0;
+            const shown = describe(model.backBuffer);
+            const rect = model.viewport.rect;
             frameHistory.push({
                 index: counters.frames,
                 draws: frameStats.draws,
@@ -4247,6 +4561,16 @@ export function createRenderer(options){
                 truncated: frameStats.truncated,
                 uploads: frameStats.uploads,
                 textures: frameStats.textures.size,
+                // What decides a black or a frozen picture: a frame that only
+                // cleared, or drew only into targets that are not the one
+                // shown, or a viewport that was not the back buffer at all.
+                clears: frameStats.clears,
+                clearColor: frameStats.clearColor < 0
+                    ? '' : `#${frameStats.clearColor.toString(16).padStart(8, '0')}`,
+                offscreenDraws: frameStats.offscreenDraws,
+                offscreenTargets: frameStats.offscreenTargets.size,
+                viewport: `${rect.x},${rect.y} ${rect.width}x${rect.height}`,
+                target: `${shown.Width}x${shown.Height}`,
                 fogged: frameStats.fogged,
                 fog: frameStats.fog,
                 fogs: [...frameStats.fogs].map(([setting, draws])=>`${setting}x${draws}`)
@@ -4267,11 +4591,44 @@ export function createRenderer(options){
             frameStats = blankFrameStats();
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
+            if (retiring.length > 0)
+            {
+                const gone = retiring.splice(0);
+                chain = chain.then(()=>{
+                    for (const made of gone)
+                    {
+                        backend.destroySurface?.(made);
+                    }
+                }).catch(failure);
+            }
             return chain;
         },
 
         /** @returns {Promise<void>} settled when every presented frame has been submitted */
         idle: ()=>chain,
+
+        /**
+         * A surface the program can no longer reach: its GPU texture goes
+         * now rather than when the collector finds the object. Only a
+         * surface this renderer made a texture for on its own is affected;
+         * a level of a texture is the texture's and goes with it.
+         *
+         * @param {any} surface a d3d8 surface
+         */
+        retire(surface){
+            const made = surfaces.get(surface);
+            if (made)
+            {
+                surfaces.delete(surface);
+                dirtyTargets.delete(surface);
+                // Not now, and not after the frames already queued either:
+                // the frame being recorded may hold a pass against it -- a
+                // program that resets its device on the WM_SIZE its first
+                // frame brought has cleared its old target before the reset
+                // -- so it goes after that frame's replay, at its present.
+                retiring.push(made);
+            }
+        },
 
         diagnostics(){
             return {

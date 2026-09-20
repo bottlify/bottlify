@@ -375,7 +375,97 @@ export function createObjectFunctions({ host, live }){
      * open the clipboard without naming a window -- so whether it is open is a
      * flag of its own rather than a non-zero owner.
      */
-    const clipboard = { open: false, owner: 0, formats: new Map(), changed: false };
+    const clipboard = { open: false, owner: 0, formats: new Map(), changed: false, emptiedAt: 0 };
+
+    /** The text formats a host paste answers for. */
+    const TEXT_FORMATS = new Set([CF_TEXT, CF_OEMTEXT, CF_UNICODETEXT]);
+
+    /**
+     * The guest copies of the host's pasted text, one per format asked for,
+     * kept until the host pastes again: the handle a program is given has
+     * to stay readable for as long as it keeps it, and a program that pastes
+     * twice reads the same bytes twice.
+     */
+    const pasted = { version: 0, /** @type {Map<number, number>} */ handles: new Map() };
+
+    /**
+     * What the host last pasted, unless the program has emptied the
+     * clipboard since: EmptyClipboard makes the program the owner, and what
+     * it then puts there is the clipboard until the host pastes again.
+     *
+     * @returns {{ text: string, version: number } | null}
+     */
+    const hostText = ()=>{
+        const board = host.pasteboard;
+        return board && typeof board.text === 'string' && board.version > clipboard.emptiedAt
+            ? board
+            : null;
+    };
+
+    /**
+     * The pasted text laid down in guest memory in one format: UTF-16 for
+     * CF_UNICODETEXT, one byte per character otherwise with what does not
+     * fit a byte as '?', a terminator after it either way.
+     *
+     * @param {number} format @param {string} text @returns {number}
+     */
+    const layDown = (format, text)=>{
+        const clipped = text.slice(0, MAX_CLIPBOARD_TEXT);
+        const wide = format === CF_UNICODETEXT;
+        const bytes = new Uint8Array((clipped.length + 1) * (wide ? 2 : 1));
+        for (let at = 0; at < clipped.length; at++)
+        {
+            const code = clipped.charCodeAt(at);
+            if (wide)
+            {
+                bytes[at * 2] = code & 0xff;
+                bytes[at * 2 + 1] = code >>> 8;
+            }
+            else
+            {
+                bytes[at] = code < 0x100 ? code : 0x3f;
+            }
+        }
+        const address = host.allocate(bytes.length);
+        host.writeMemory(address, bytes);
+        return address;
+    };
+
+    /**
+     * The handle for a pasted text in one format, made on first request and
+     * remade after the next paste, the old copies given back.
+     *
+     * @param {number} format @returns {number}
+     */
+    const pastedHandle = format=>{
+        const board = hostText();
+        if (!board || !TEXT_FORMATS.has(format) || !host.allocate)
+        {
+            return 0;
+        }
+        if (pasted.version !== board.version)
+        {
+            for (const handle of pasted.handles.values())
+            {
+                host.release?.(handle);
+            }
+            pasted.handles.clear();
+            pasted.version = board.version;
+        }
+        let handle = pasted.handles.get(format);
+        if (handle === undefined)
+        {
+            handle = layDown(format, board.text);
+            pasted.handles.set(format, handle);
+        }
+        return handle;
+    };
+
+    /** Every format the clipboard holds, the program's own first. */
+    const clipboardFormats = ()=>[
+        ...clipboard.formats.keys(),
+        ...(hostText() ? [...TEXT_FORMATS].filter(format=>!clipboard.formats.has(format)) : []),
+    ];
 
     /**
      * A terminated string read a piece at a time, so a short one does not
@@ -1322,7 +1412,41 @@ export function createObjectFunctions({ host, live }){
                 }
                 clipboard.formats.clear();
                 clipboard.changed = true;
+                clipboard.emptiedAt = host.pasteboard?.version ?? 0;
                 return 1;
+            },
+        },
+
+        /** BOOL IsClipboardFormatAvailable(UINT format) */
+        IsClipboardFormatAvailable: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([format])=>(clipboardFormats().includes(format >>> 0) ? 1 : 0),
+        },
+
+        /** int CountClipboardFormats(void) */
+        CountClipboardFormats: {
+            argBytes: 0,
+            handler: ()=>clipboardFormats().length,
+        },
+
+        /**
+         * UINT EnumClipboardFormats(UINT format)
+         *
+         * The format after the one given, zero for the first, and zero at
+         * the end -- which is also the answer with the clipboard closed.
+         */
+        EnumClipboardFormats: {
+            argBytes: 4,
+            /** @param {number[]} args */
+            handler: ([format])=>{
+                if (!clipboard.open)
+                {
+                    return 0;
+                }
+                const formats = clipboardFormats();
+                const at = (format >>> 0) === 0 ? -1 : formats.indexOf(format >>> 0);
+                return at === -1 && (format >>> 0) !== 0 ? 0 : formats[at + 1] ?? 0;
             },
         },
 
@@ -1344,15 +1468,16 @@ export function createObjectFunctions({ host, live }){
         /**
          * HANDLE GetClipboardData(UINT uFormat)
          *
-         * The handle goes back as it came in. What it names is the caller's --
-         * global memory it allocated -- and nothing here reads through it, so
-         * nothing here has to know what a format means.
+         * A handle a program put there goes back as it came in: what it names
+         * is the caller's own global memory, and nothing here reads through
+         * it. What the host pasted is laid down in guest memory in the
+         * format asked for, as a handle GlobalLock answers with itself.
          */
         GetClipboardData: {
             argBytes: 4,
             /** @param {number[]} args */
             handler: ([format])=>(clipboard.open
-                ? clipboard.formats.get(format >>> 0) ?? 0
+                ? clipboard.formats.get(format >>> 0) ?? pastedHandle(format >>> 0)
                 : 0),
         },
 

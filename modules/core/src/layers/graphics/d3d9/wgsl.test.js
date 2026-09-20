@@ -377,6 +377,19 @@ test('a 1.x pixel shader\'s tex and texcoord translate, and its addressing modes
     assertLine(legacy.wgsl, 'out.oC0 = oC0;');
     assert.deepEqual(legacy.samplers, [{ index: 0, type: 'texture_2d<f32>' }]);
 
+    // Once filled, a 1.x texture register is written like a temporary: the
+    // write goes to the local, never to the stage's immutable input.
+    const rewritten = translateShader(parseShader([PS_1_1,
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 1),
+        op(OPCODE.MUL, 0), dst(REGISTER.TEXTURE, 2), src(REGISTER.TEXTURE, 1),
+        src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 0), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        END_TOKEN]));
+    assert.equal(rewritten.error, null);
+    assertLine(rewritten.wgsl, 't2 = (t1 * in.v0);');
+    assert.ok(!rewritten.wgsl.includes('in.t2 ='), 'the input is never assigned');
+    assertLine(rewritten.wgsl, 'var t2: vec4f = vec4f(0.0);');
+
     const bumped = translateShader(parseShader([PS_1_1,
         op(OPCODE.TEXBEM, 0), dst(REGISTER.TEXTURE, 1), src(REGISTER.TEXTURE, 0),
         END_TOKEN]));
@@ -450,12 +463,49 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 5>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 41>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
     assertLine(stage.wgsl,
         `out.o${varyingLocation(D3DDECLUSAGE.TEXCOORD, 1)} = vec4f(in.v2, 0.0, 1.0);`);
+
+    // A set the stage of its number generates from the vertex in camera
+    // space is written from world-view (c5..c8) through the stage's
+    // transform rows (c9.. two per stage), and the carried set of that
+    // number is not what goes out.
+    const generated = fixedVertexStage([
+        { usage: D3DDECLUSAGE.POSITION, usageIndex: 0, register: 0 },
+        { usage: D3DDECLUSAGE.NORMAL, usageIndex: 0, register: 1 },
+        { usage: D3DDECLUSAGE.TEXCOORD, usageIndex: 0, register: 2 },
+    ], new Map([
+        [0, { components: 3, scalar: 'f32', bgra: false }],
+        [1, { components: 3, scalar: 'f32', bgra: false }],
+        [2, { components: 2, scalar: 'f32', bgra: false }],
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000]);
+    assert.equal(generated.error, null);
+    const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+    const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
+    const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
+    assert.deepEqual(generated.outputs, [t0, t1, t4]);
+    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // blend map is that far along the cascade, and a coordinate left raw
+    // there moved with the camera.
+    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
+        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
+    assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
+    assertLine(generated.wgsl,
+        'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
+    assertLine(generated.wgsl,
+        'let cameraNormal = normalize((worldView * vec4f(vec4f(in.v1, 1.0).xyz, 0.0)).xyz);');
+    assertLine(generated.wgsl, `out.o${t0} = vec4f(dot(c[9], vec4f(cameraPosition, 1.0)),`
+        + ' dot(c[10], vec4f(cameraPosition, 1.0)), dot(c[11], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[12], vec4f(cameraPosition, 1.0)));');
+    assertLine(generated.wgsl, `out.o${t1} = vec4f(dot(c[13], vec4f(cameraNormal, 1.0)),`
+        + ' dot(c[14], vec4f(cameraNormal, 1.0)), dot(c[15], vec4f(cameraNormal, 1.0)),'
+        + ' dot(c[16], vec4f(cameraNormal, 1.0)));');
+    assert.ok(!generated.wgsl.includes(`out.o${t0} = vec4f(in.v2`), 'the carried set is not sent');
 
     const transformed = fixedVertexStage([
         { usage: D3DDECLUSAGE.POSITIONT, usageIndex: 0, register: 0 },

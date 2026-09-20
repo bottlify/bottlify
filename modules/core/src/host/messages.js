@@ -44,7 +44,20 @@
  *     collectOnExit?: boolean,
  *     signal?: SharedArrayBuffer,
  *     pacing?: 'page' | 'event',
+ *     network?: { module: string, url: string, room: string, token?: string },
+ *     files?: { path: string, bytes: Uint8Array }[],
  * }} StartOptions
+ */
+
+/*
+ * `network` is the relay Winsock reaches the world through, named by what
+ * the worker builds it from: the URL of a module exporting `connectRelay`
+ * (the networking package's client, served by the page's own origin), the
+ * relay's `wss://` address and the room to join. A transport is a WebSocket
+ * and a set of callbacks, neither of which crosses a port, so the worker
+ * opens it; and the engine never imports the networking package -- the
+ * module is loaded by the URL the page hands over, the way a bundle's own
+ * hooks are.
  */
 
 /*

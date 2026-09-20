@@ -203,8 +203,65 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
         };
     };
 
+    // The paste gesture. The browser's paste event carries the text, but it
+    // fires after the keydown that caused it -- and a program reads the
+    // clipboard from that keydown. So the V of a Control- or Command-V is
+    // held back until the paste event has put the text where the program
+    // will look, then delivered as Control-V, which is the chord a program
+    // of this era pastes on whatever the page's own was. A keydown that no
+    // paste follows (nothing to paste, the shortcut taken by the browser)
+    // is let go on its own shortly after.
+    /** @type {KeyboardEvent | null} */
+    let heldPaste = null;
+    /** @type {ReturnType<typeof setTimeout> | null} */
+    let heldTimer = null;
+    const HOLD_PASTE_MS = 250;
+
+    const releaseHeldPaste = ()=>{
+        const held = heldPaste;
+        heldPaste = null;
+        if (heldTimer !== null)
+        {
+            clearTimeout(heldTimer);
+            heldTimer = null;
+        }
+        if (!held)
+        {
+            return;
+        }
+        const chord = !held.ctrlKey;
+        if (chord)
+        {
+            send({ kind: 'key', code: 'ControlLeft', down: true });
+        }
+        send({ kind: 'key', code: 'KeyV', down: true });
+        if (chord)
+        {
+            send({ kind: 'key', code: 'KeyV', down: false });
+            send({ kind: 'key', code: 'ControlLeft', down: false });
+        }
+    };
+
+    /** @param {ClipboardEvent} e */
+    const onPaste = e=>{
+        e.preventDefault();
+        const text = e.clipboardData?.getData('text/plain') ?? '';
+        if (text !== '')
+        {
+            send({ kind: 'paste', text });
+        }
+        releaseHeldPaste();
+    };
+
     /** @param {KeyboardEvent} e */
     const onKeyDown = e=>{
+        if ((e.ctrlKey || e.metaKey) && e.code === 'KeyV' && !e.repeat)
+        {
+            releaseHeldPaste();
+            heldPaste = e;
+            heldTimer = setTimeout(releaseHeldPaste, HOLD_PASTE_MS);
+            return;
+        }
         const mapping = keyFor(e.code);
         // Only what the guest actually consumes, and never over a combination
         // the browser reserves: a page that eats ctrl-w or F5 is a page nobody
@@ -245,6 +302,10 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {KeyboardEvent} e */
     const onKeyUp = e=>{
+        if (e.code === 'KeyV' && heldPaste)
+        {
+            releaseHeldPaste();
+        }
         if (keyFor(e.code) && !RESERVED.has(e.code) && !e.ctrlKey && !e.metaKey)
         {
             e.preventDefault();
@@ -254,6 +315,17 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     /** @param {PointerEvent} e */
     const onPointerMove = e=>{
+        // A move with Control held is the person's, not the program's: the
+        // way out of a title that grabs the pointer and looks nowhere else,
+        // to reach the page around it. The position is forgotten so that the
+        // next free move starts from where it is rather than jumping the
+        // distance travelled while held.
+        if (e.ctrlKey)
+        {
+            lastX = null;
+            lastY = null;
+            return;
+        }
         // Deliberately not gated on focus. Focus decides where a keystroke goes
         // and nothing else: a pointer that moved over this canvas moved over
         // this canvas whether or not somebody clicked a panel beside it a
@@ -454,6 +526,7 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
 
     listen('keydown', onKeyDown, false);
     listen('keyup', onKeyUp, false);
+    listen('paste', onPaste, false);
     listen('pointermove', onPointerMove);
     listen('pointerdown', onPointerDown, false);
     listen('pointerup', onPointerUp);
@@ -513,6 +586,12 @@ export function createDomInput({ canvas, send, pointerLock = false, resolution }
                 canvas.removeEventListener(type, handler);
             }
             listeners.length = 0;
+            heldPaste = null;
+            if (heldTimer !== null)
+            {
+                clearTimeout(heldTimer);
+                heldTimer = null;
+            }
             canvas.style.outline = '';
             if (focused)
             {

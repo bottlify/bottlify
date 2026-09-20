@@ -150,7 +150,7 @@ export function createBackend(options){
             return {
                 bindGroupLayout: layouts.group,
                 vertexLayout: layout,
-                gpu: device.createRenderPipeline({
+                gpu: await device.createRenderPipelineAsync({
                     label: generated.label,
                     layout: layouts.pipeline,
                     vertex: {
@@ -427,11 +427,26 @@ export function createBackend(options){
         return pass;
     }
 
+    /**
+     * Gives a surface's memory back to the GPU now. A texture nothing refers
+     * to goes when the collector gets to it, and the GPU's memory is not what
+     * the collector watches: a device reset a few times a second, each
+     * leaving a screen-sized target and depth behind, is out of it long
+     * before then.
+     *
+     * @param {import('./contract.js').Surface} surface
+     */
+    const destroySurface = surface=>{
+        surface.texture.destroy?.();
+        profiler.count('surfacesDestroyed');
+    };
+
     return {
         LockFlags,
         BufferUsage,
         TextureUsage,
         createSurface,
+        destroySurface,
 
         /**
          * A frame has been recorded and queued for replay. Renames after
@@ -510,6 +525,22 @@ export function createBackend(options){
                 throw new Error('A render pipeline needs an explicit pipeline layout');
             }
             return device.createRenderPipeline(descriptor);
+        },
+
+        /**
+         * The same, resolved once the pipeline is valid and rejected with the
+         * validation message when it is not: a pipeline returned invalid
+         * fails every command buffer it is set on, and with it every frame.
+         *
+         * @param {any} descriptor
+         */
+        createRenderPipelineAsync(descriptor){
+            if (!descriptor.layout || typeof descriptor.layout !== 'object')
+            {
+                return Promise.reject(
+                    new Error('A render pipeline needs an explicit pipeline layout'));
+            }
+            return device.createRenderPipelineAsync(descriptor);
         },
 
         /** @param {{ code: string, label?: string }} request */

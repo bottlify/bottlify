@@ -29,6 +29,7 @@ import { BUFFER, SHADOW, STALE_POINTER, TEXTURE } from './shadow.js';
 import {
     IDIRECT3D8_SLOTS, IDIRECT3DDEVICE8_SLOTS, IDIRECT3DSURFACE8_SLOTS, IDIRECT3DTEXTURE8_SLOTS,
 } from './vtables.js';
+import { REFRESH_HZ } from '../../win32/user32/display.js';
 import {
     D3DCAPS8, D3DDISPLAYMODE, D3DLIGHT7, D3DLOCKED_RECT, D3DPRESENT_PARAMETERS8,
     D3DSURFACE_DESC8, D3DVIEWPORT8, POINT, RECT, createFields,
@@ -323,6 +324,9 @@ test('the interrogation a program does before it draws is answered from facts', 
     const mode = 0x3200;
     assert.equal(h.device(device, 'GetDisplayMode', [mode]), D3D_OK);
     assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.Width), SCREEN.width);
+    // At the rate the enumerated modes carry: a program listing the rates of
+    // a size and selecting the current one finds it in its own list.
+    assert.equal(h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate), REFRESH_HZ);
 
     assert.equal(h.release(device), 0, 'the device let go of everything it held');
     // And its pointer stops resolving. This used to assert the count through
@@ -382,10 +386,10 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     const ask = (name, args)=>h.box.call(root, slot(IDIRECT3D8_SLOTS, name), args);
 
     assert.equal(ask('GetAdapterCount', []), 1);
-    // An 800x600 display offers 640x480 and 800x600, in 32-bit colour only:
-    // two modes, and a program builds its menu from them.
+    // Every size of the era whatever the display, in 32-bit colour only:
+    // five modes, and a program builds its menu from them.
     const count = ask('GetAdapterModeCount', [0]);
-    assert.equal(count, 2);
+    assert.equal(count, 22);
 
     const mode = 0x1200;
     const seen = [];
@@ -393,10 +397,15 @@ test('the adapter answers what it can make, from the tables that make it', ()=>{
     {
         assert.equal(ask('EnumAdapterModes', [0, index, mode]), D3D_OK);
         seen.push(`${h.fields.readU32(mode + D3DDISPLAYMODE.Width)}x${
-            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}/${
+            h.fields.readU32(mode + D3DDISPLAYMODE.Height)}@${
+            h.fields.readU32(mode + D3DDISPLAYMODE.RefreshRate)}/${
             h.fields.readU32(mode + D3DDISPLAYMODE.Format)}`);
     }
-    assert.deepEqual(seen, ['640x480/22', '800x600/22'], 'every size, 32-bit, smallest first');
+    assert.deepEqual(seen,
+        ['640x480', '800x600', '1024x768', '1280x720', '1440x900', '1600x900', '1680x1050',
+            '1920x1080', '1920x1200', '2560x1440', '2560x1600']
+            .flatMap(size=>[`${size}@60/22`, `${size}@120/22`]),
+        'every size at both rates, 32-bit, smallest first');
     assert.equal(ask('EnumAdapterModes', [0, count, mode]), D3DERR_INVALIDCALL,
         'and the index past the end is refused, so a walk ends');
 
@@ -1290,6 +1299,17 @@ test('the cursor a program sets reaches whoever shows the frame, bitmap and hot 
     assert.equal(h.device(device, 'SetCursorProperties', [5, 5, surface]), D3DERR_INVALIDCALL,
         'a hot spot outside the bitmap is refused, and nobody is told');
     assert.equal(h.cursors.length, 3);
+
+    // The same cursor set again, as a program does every frame, crosses nothing.
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.device(device, 'ShowCursor', [0]), 0);
+    assert.equal(h.cursors.length, 3, 'nothing changed, nobody is told');
+    assert.equal(h.surface(surface, 'LockRect', [locked, 0, 0]), D3D_OK);
+    h.box.services.writeMemory(bits, new Uint8Array([9, 9, 9, 255]));
+    assert.equal(h.surface(surface, 'UnlockRect', []), D3D_OK);
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.cursors.length, 4, 'a repainted bitmap is a change');
+    assert.deepEqual([...h.cursors[3].bgra.slice(0, 4)], [9, 9, 9, 255]);
 });
 
 test('creating a device reports its resolution as the screen the program now has', ()=>{

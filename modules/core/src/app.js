@@ -120,6 +120,11 @@ import { createBlockCache, resolveBlockStore }
  *     'function'`. `memory` is set by `createApp` on a rebuilt machine so the
  *     storage outlives the process that made it, and is not something a caller
  *     supplies.
+ * @property {{ network?: any }} [win32]
+ *     `network` is the transport under Winsock, in the shape the win32 layer's
+ *     `wsock32/transport.js` names: what a relay client hands back, or an
+ *     embedder's own. Absent, Winsock runs over the loopback adapter and
+ *     nothing outside this runtime is reachable, which is the default.
  * @property {(record: any) => void} [onCall]
  *           Every host call as it returns. The ring kept for a failure holds
  *           the end of a run; this holds all of it, for a tool willing to
@@ -175,6 +180,11 @@ import { createBlockCache, resolveBlockStore }
  *           it wrote; `save` is handed both, and `load` may answer with both
  *           or with a bare list of files.
  * @property {string} [id]           Names the session when storage does not.
+ * @property {{ path: string, bytes: Uint8Array }[]} [files]
+ *           The person's own edits to the title's files, laid over the
+ *           session's at every start: a realm list, a line of configuration.
+ *           They win over what the program last saved, and the bundle itself
+ *           is never changed.
  * @property {Object} [bundle]       A .btl mounted as the volume's read-only source.
  * @property {(offset: number, length: number) => Promise<Uint8Array>} bundle.fetch
  *           Brings a byte range of the bundle in, from wherever it is kept.
@@ -524,6 +534,12 @@ export function describeEvent(payload){
             if (Array.isArray(value))
             {
                 return `${key}=[${value.join(' ')}]`;
+            }
+            // A picture's bytes are not a line: a cursor told every frame
+            // would fill the journal with its pixels.
+            if (ArrayBuffer.isView(value))
+            {
+                return `${key}=<${value.byteLength} bytes>`;
             }
             return `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`;
         })
@@ -2692,7 +2708,7 @@ async function buildApp(options){
             // one window is that resolution. The reported metrics follow it.
             /**
              * @param {number} width @param {number} height
-             * @param {{ window?: number, fullscreen?: boolean }} [where]
+             * @param {{ window?: number, fullscreen?: boolean, announce?: boolean }} [where]
              */
             resolution: (width, height, where = {})=>{
                 if (width > 0 && height > 0)
@@ -2706,7 +2722,8 @@ async function buildApp(options){
                     // picture -- the picture fills the mode, the window does not.
                     if (where.fullscreen && where.window)
                     {
-                        win32.placeWindow(where.window, 0, 0, width, height);
+                        win32.placeWindow(where.window, 0, 0, width, height,
+                            { announce: where.announce === true });
                     }
                 }
             },
@@ -2735,7 +2752,10 @@ async function buildApp(options){
             // composites one over the frame; the host is told, with the
             // bitmap and the hot spot, and shows it the way its screen can.
             /** @param {any} cursor */
-            cursor: cursor=>events.emit('cursor', cursor),
+            cursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
         },
         win32: {
             // The one namespace a named mutex, event, semaphore, timer and
@@ -2745,6 +2765,8 @@ async function buildApp(options){
             // ring do, for the same reason -- a replacement rebuilds this
             // layer, and the name was never this process's to keep.
             namedObjects: options.namedObjects,
+            // The network beyond this runtime, when the embedder supplied one.
+            network: options.win32?.network,
             // What the program is told its display is, handed to the libraries
             // that answer for one as well as to the layer that draws on it.
             screen: display,
@@ -2753,7 +2775,10 @@ async function buildApp(options){
             // the Direct3D device methods emit above. Two producers, one
             // consumer, and the last report wins.
             /** @param {any} cursor */
-            reportCursor: cursor=>events.emit('cursor', cursor),
+            reportCursor: cursor=>{
+                core.api('input')?.cursorShown?.(cursor.shown !== false);
+                events.emit('cursor', cursor);
+            },
             // Sound leaves through the audio layer's mixer, and win32 sits
             // below it. Handed down as a thunk and asked for only when a
             // program opens a device: audio is created after win32, and a build
@@ -3153,6 +3178,13 @@ async function buildApp(options){
     if (seeded.files.length > 0)
     {
         filesystem.apply(seeded.files);
+    }
+    // The person's own edits to the title's files -- a realm list, a config
+    // line -- laid over the session's, so they win over what the program
+    // last saved and never touch the bundle itself.
+    if (options.files && options.files.length > 0)
+    {
+        filesystem.apply(options.files);
     }
     // And what the process this one replaces had written. A self-extracting
     // installer unpacks its payload and then starts it; without this the
@@ -4910,6 +4942,15 @@ async function buildApp(options){
          * `setLevel` decides how much is kept, per category.
          */
         log: {
+            /**
+             * A record from outside the engine, into the same journal: what
+             * the host's own GPU device reported about a frame, which a reader
+             * of the run's log must see beside the frame it dropped.
+             *
+             * @param {'error' | 'warn' | 'info'} level
+             * @param {string} category @param {string} text
+             */
+            write: (level, category, text)=>core.api('log').write(level, category, '{0}', text),
             /** @param {number} [since] @param {number} [limit] */
             drain: (since, limit)=>core.api('log').drain(since, limit),
             /** @param {number} [count] */
@@ -4931,6 +4972,7 @@ async function buildApp(options){
                 ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com', 'hook']
                     .map(area=>`call.${area}`),
                 'input.press',
+                'input.message',
             ],
 
             /**

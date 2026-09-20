@@ -43,7 +43,7 @@ allows because `win32` is declared.
 | `allocate` | `(bytes) => address` | absent | Guest memory for locked surfaces and buffers, and for the shadow state block. Without it a lock hands back an address this layer invented and every state setter stays a trap. |
 | `free` | `(address) => void` | absent | Returns guest memory a texture or map is finished with, so a program that sizes its cache from free heap sees textures released. |
 | `divergence` | `(api, detail) => void` | absent | Where "this call succeeded and did not do all of what it promises" is reported. See *Limitations*. |
-| `cursor` | `(notice: CursorNotice) => void` | absent | Receives a Direct3D program's cursor bitmap (`width`, `height`, `hotSpot`, `bgra`, `shown`). Without it `SetCursorProperties` is refused with `D3DERR_INVALIDCALL`, which tells the program to draw its own. |
+| `cursor` | `(notice: CursorNotice) => void` | absent | Receives a Direct3D program's cursor bitmap (`width`, `height`, `hotSpot`, `bgra`, `shown`) -- once per change, not per `SetCursorProperties`/`ShowCursor` call, since a program sets the same cursor every frame. Without it `SetCursorProperties` is refused with `D3DERR_INVALIDCALL`, which tells the program to draw its own. |
 | `resolution` | `(width, height, where?: { window?, fullscreen? }) => void` | absent | Told the back-buffer size a device is created or reset at, and which window it presents into; the reported screen follows it. `where.window` is the device's `HWND` and `where.fullscreen` says whether it is exclusive; a fullscreen device's window is placed at the mode's size, so a program clipping its cursor to that window reaches the picture's corners, and a reset back to windowed reports the window at its own size again. |
 | `publishInterface` | `(object, iid) => address` | `() => 0` | The bridge's vtable publisher. The default publishes nothing, so a build without a bridge gets tables that refuse rather than pointers into nowhere. |
 | `exportAddress` | `(name) => address` | absent | The guest address of one of `OPENGL32.dll`'s own exports, which `wglGetProcAddress` needs to answer honestly for core names. |
@@ -118,11 +118,12 @@ everything a program does afterwards goes through the vtable. The vtable slot li
 | `libraries` | The library names published. |
 | `created` | Which APIs a program actually asked for, in order. |
 | `seam.created`, `seam.interfaces` | Objects made through the entry points; interfaces published. |
-| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. When neither made a device and the OpenGL runtime drew, its renderer's counters instead: `frames`, `pipelines`, `draws`, `clears`, `fallbacks`, `uploads`, `renames`, `refused`, `skipped`, `cut`, `resident`, `samplers`, `unflushed`, `failures`, `lastDump`. |
+| `seam.device` | The most recent Direct3D 8 device's counters, or the Direct3D 9 one's: `frames`, `draws`, `clears`, `programmable`, `prepared` (`built`, `reused`), `programs`, `skipped.*`, `cascade.*`, `failures`, `lighting.*`, `recording`, `recentFrames`, `lastFrame`, `lastDump`, `textureRecords`, `textures`, `redundantTransforms`. Each `recentFrames` entry (the last 240 presents) carries `draws`, `offscreenDraws` and `offscreenTargets` (draws into a target other than the back buffer, and how many such targets), `clears` and `clearColor` (the last whole clear of the back buffer as `#aarrggbb`, empty when there was none), `viewport` (`x,y wxh` at the present) and `target` (the back buffer's size), plus `placeholder`, `truncated`, `uploads`, `textures`, fog and light summaries -- so a frame that only cleared, or drew only offscreen, or drew into a viewport that is not the picture, is read off the record rather than guessed from a screenshot. When neither made a device and the OpenGL runtime drew, its renderer's counters instead: `frames`, `pipelines`, `draws`, `clears`, `fallbacks`, `uploads`, `renames`, `refused`, `skipped`, `cut`, `resident`, `samplers`, `unflushed`, `failures`, `lastDump`. |
 | `seam.vulkan` | `placed` traps, `objects` by kind, `unimplemented` by command name. |
 | `shadow` | The Direct3D 8 guest-side state block: `placed`, `slowPath`, `renderStateCalls`, `transformCalls`, `bindingCalls`, `lockCalls`, `unlockCalls`, `textureCalls`, `stageStateCalls`, `materialCalls`, `buffers`, `synced`, `skipped`, `refused`. |
 | `backend` | Profiler snapshot (`frames`, `counters`, `uploadsByLabel`, `recentFrames` with phases), `shaders` (`builds`, `errors`, `warnings`, `dropped`, `distinct`), `shaderMessages`, `pipelines` (`built`, `reused`, `resident`), `uniforms`, `buffers` per dynamic buffer (`renames`, `pooled`, `dirty`), `frameOpen`, `pendingTextureCopies`, `surfaceWrites`, `presents`. |
-| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `shown` (frames copied to the canvas), `lastBuffer`, `pending`, `claimed`, `failures`, `disposed`. The counters are cumulative across a process replacement, because the presenter is. |
+| `presenter` | `presents`, `uploads`, `bytes`, `shownByOwner`, `shown` (frames copied to the canvas), `shownBy` (those copies by the label of what was shown -- a Direct3D device's `target`, OpenGL's `gl-shown[0]`/`gl-shown[1]`, the `desktop`'s bytes, a primary's `guest bytes` -- so a picture one device draws and another path paints over shows as two labels rising together), `lastBuffer`, `pending`, `claimed`, `failures`, `disposed`. The same label is on every record of `presented().history`. The counters are cumulative across a process replacement, because the presenter is. |
+| `backend` | The WebGPU backend's counters, among them `surfacesCreated` and `surfacesDestroyed`: a device reset gives its previous back buffer and depth back to the GPU at once, since the collector does not watch GPU memory. |
 | `pacing` | `requests`, `delivered`, `coalesced`, `idleTicks`, `heldTicks`, `waiting`, and interval statistics (`count`, `minMs`, `maxMs`, `meanMs`, `deviationMs`, `p50Ms`, `p95Ms`, `p99Ms`, `fps`, `periods`). Null in a build with no scheduler. The pacer belongs to the presenter, so the rhythm is read from it. |
 
 The OpenGL runtime keeps its own `{ contexts, unimplemented }` (`src/layers/graphics/opengl/exports.js`)
@@ -183,15 +184,22 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
 - **Fixed function** (`internal/fixedfunction.js`) generates WGSL per state combination: the
   vertex path transforms or, for XYZRHW, applies only the viewport constants; a `D3DCOLOR` vertex
   colour is swizzled from the B,G,R,A byte order; the texture-stage cascade emits one block per
-  enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `SUBTRACT`, with
-  `COMPLEMENT` and `ALPHAREPLICATE` modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`,
-  `TFACTOR`, `SPECULAR`) and nothing at all for an empty list; a two-coordinate texture transform is
-  applied per stage; per-vertex lighting is unrolled per enabled light (point, spot, directional,
+  enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`,
+  `SUBTRACT`, `ADDSMOOTH`, the `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE`
+  modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`) and nothing at
+  all for an empty list; a texture transform of two to four coordinates is applied per stage, for
+  every one of the eight (the block carries a matrix per stage); a
+  stage set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or
+  `_CAMERASPACEREFLECTIONVECTOR` takes its coordinate from the vertex through world and view,
+  through the stage's whole transform, in the vertex stage, whatever set the vertex carries, and
+  under `D3DTTFF_PROJECTED` is divided per pixel by the count's last component (a pixel shader over
+  fixed-function vertices is handed the same four components undivided); per-vertex lighting is
+  unrolled per enabled light (point, spot, directional,
   with range, attenuation and cone in uniforms), the material sources honour `D3DRS_COLORVERTEX`,
   the specular sum is added after the cascade, and alpha comes from the diffuse source alone; fog
   (`LINEAR`, `EXP`, `EXP2`) is a per-vertex factor from eye depth, or the specular alpha for
-  pre-transformed vertices; the alpha test `discard`s. Texture-coordinate generation (`D3DTSS_TCI_*`)
-  and three- or four-coordinate or projected texture transforms are not computed (see
+  pre-transformed vertices; the alpha test `discard`s. Sphere-map coordinate generation, a
+  one-coordinate transform and a projected transform over a carried set are not computed (see
   *Limitations*).
 - **Programmable** (`internal/programmable.js`) builds a pipeline from a translated vertex and
   pixel shader pair, a vertex layout taken from a declaration (`D3DDECLTYPE` to WebGPU format; the
@@ -361,7 +369,20 @@ version. `shader.js` parses the bytecode (operand counts from a table before mod
 addressing tokens from model 2 on, literal definitions read as raw dwords) and holds the constant
 files; `wgsl.js` translates one instruction at a time into a literal WGSL body: inputs by location
 typed as the declaration lays them, varyings at fixed locations per usage so the two stages agree,
-constants in three uniform arrays per stage, samplers as texture and sampler pairs. `stateblock.js`
+constants in three uniform arrays per stage, samplers as texture and sampler pairs. A draw binds
+any of the three combinations: a shader pair; a pixel shader over fixed-function vertices, which
+gets a vertex stage made from the declaration (`fixedVertexStage`); or a vertex shader over the
+fixed-function pixel stage, which gets a fragment stage made from the stage cascade, fog and alpha
+test in force (`fixedFragmentStage`), reading the colours, coordinate sets and fog the shader
+wrote and the fixed function's own defaults for what it did not -- the shader-model-1 era's
+ordinary draw, transform in a program and texturing in the stages. In every combination the
+vertex stage writes each varying the pixel stage reads, since a fragment input with no vertex
+output fails the pipeline: a shader writes zero for what it never wrote, the made stage white for
+a colour the declaration lacks and zero for a coordinate set. A pipeline the GPU still refuses is
+built asynchronously and rejects, so its draw alone is skipped and the reason is in the device's
+`failures`; the frame around it is submitted. A target bound with a larger
+depth surface, which Direct3D allows and WebGPU does not, is drawn with a depth of its own size
+standing in (`depth-stand-in`), kept per depth surface and size. `stateblock.js`
 records what is set between `BeginStateBlock` and `EndStateBlock` -- and in this version a state set
 while recording goes into the block, not the device. `declaration.js` converts between vertex
 declarations and FVF codes; a fixed-function draw through a declaration is drawn when it describes
@@ -544,8 +565,8 @@ reports that size. Direct3D 8's `GetDeviceCaps` (`seam/d3d8.js`, `writeCaps`) cl
 device with hardware transform and lighting, eight blend stages and simultaneous textures,
 4096-texel textures, eight active lights, six user clip planes, every compare, blend, filter and
 stencil bit, cube-map and projected texture caps, `TEXGEN`, and leaves both shader versions at
-zero. Some of those claims exceed what the renderer does (cube textures are refused, coordinate
-generation is not computed, clip planes are not applied), which is the opposite of the rule
+zero. Some of those claims exceed what the renderer does (cube textures are refused, sphere-map
+coordinate generation is not computed, clip planes are not applied), which is the opposite of the rule
 `d3d7/caps.js` states for itself. Direct3D 9's `DEFAULT_CAPS` (`d3d9/device.js`) claims shader
 model 2.0 for both stages, eight lights, no user clip planes, and no anisotropy.
 
@@ -556,8 +577,8 @@ A call is answered one of three ways, and which one is decided where the call li
 - **Refused.** A create the renderer cannot honour answers a failure code and clears the caller's
   out-pointer, because a success it cannot see through leaves a program drawing nothing and looking
   elsewhere for the reason. Refusals are documented at the slot.
-- **Accepted and reported.** A state the device stores but does not act on -- a texture
-  transform of more than two coordinates, coordinate generation, a wireframe fill -- succeeds,
+- **Accepted and reported.** A state the device stores but does not act on -- a projected
+  texture transform, sphere-map coordinate generation, a wireframe fill -- succeeds,
   because refusing `SetTransform` would change what the program does, and is reported once per
   distinct detail through `config.divergence` with the API name and a sentence saying what was not
   done. Every reporter de-duplicates.
@@ -597,9 +618,9 @@ Refused (the program is told no):
 
 Accepted and reported through `divergence`:
 
-- Direct3D 8 (shared renderer): texture coordinate generation (`D3DTSS_TCI_*`) -- the set in the
-  low bits is sampled as the vertex carries it; a texture transform of three or four coordinates
-  or a projected one; a texture-stage cascade cut short because a stage reads `TEXTURE` with
+- Direct3D 8 (shared renderer): sphere-map coordinate generation (`D3DTSS_TCI_SPHEREMAP`) -- the
+  set in the low bits is sampled as the vertex carries it; a texture transform of one coordinate,
+  or a projected one over a set the vertex carries; a texture-stage cascade cut short because a stage reads `TEXTURE` with
   nothing bound or names a coordinate set the vertex lacks (the draw runs untextured from that
   stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a draw with a vertex shader
   feeding the fixed-function pixel stage, or a shader pair the renderer could not build a pipeline
