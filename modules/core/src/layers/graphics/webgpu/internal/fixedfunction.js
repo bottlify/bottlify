@@ -61,7 +61,14 @@ export const D3DTOP = Object.freeze({
     MODULATE4X: 6,
     ADD: 7,
     ADDSIGNED: 8,
+    ADDSIGNED2X: 9,
     SUBTRACT: 10,
+    ADDSMOOTH: 11,
+    BLENDDIFFUSEALPHA: 12,
+    BLENDTEXTUREALPHA: 13,
+    BLENDFACTORALPHA: 14,
+    BLENDTEXTUREALPHAPM: 15,
+    BLENDCURRENTALPHA: 16,
 });
 
 /** D3DTA, where a stage argument comes from. The low three bits select. */
@@ -78,9 +85,52 @@ export const D3DTA = Object.freeze({
 
 /**
  * The coordinate set D3DTSS_TEXCOORDINDEX names. The bits above it are the
- * D3DTSS_TCI_ generation modes, which this engine does not compute.
+ * D3DTSS_TCI_ generation modes (`TCI`).
  */
 export const COORD_SET_MASK = 0xffff;
+
+/**
+ * D3DTSS_TCI_*: a stage's coordinates computed from the vertex in camera
+ * space rather than read from a set it carries. The set in the low bits is
+ * then only where the result lands.
+ */
+export const TCI = Object.freeze({
+    CAMERASPACENORMAL: 0x10000,
+    CAMERASPACEPOSITION: 0x20000,
+    CAMERASPACEREFLECTIONVECTOR: 0x30000,
+    SPHEREMAP: 0x40000,
+});
+
+/** The generation mode of a D3DTSS_TEXCOORDINDEX value: zero for none. */
+export const generationOf = (/** @type {number} */ texCoordIndex)=>texCoordIndex & ~COORD_SET_MASK;
+
+/**
+ * Whether the vertex stage computes a stage's coordinates: the three
+ * camera-space modes. A sphere map is left to the set the vertex carries.
+ */
+export const generates = (/** @type {number} */ texCoordIndex)=>{
+    const mode = generationOf(texCoordIndex);
+    return mode === TCI.CAMERASPACENORMAL || mode === TCI.CAMERASPACEPOSITION
+        || mode === TCI.CAMERASPACEREFLECTIONVECTOR;
+};
+
+/**
+ * The WGSL for one generated coordinate, from the camera-space position and
+ * normal the vertex stage has in hand.
+ *
+ * @param {number} texCoordIndex @returns {string}
+ */
+export function generatedCoordinate(texCoordIndex){
+    switch (generationOf(texCoordIndex))
+    {
+        case TCI.CAMERASPACENORMAL:
+            return 'cameraNormal';
+        case TCI.CAMERASPACEREFLECTIONVECTOR:
+            return 'reflect(normalize(cameraPosition), cameraNormal)';
+        default:
+            return 'cameraPosition';
+    }
+}
 
 /** D3DFOG. */
 export const D3DFOG = Object.freeze({ NONE: 0, EXP: 1, EXP2: 2, LINEAR: 3 });
@@ -223,14 +273,14 @@ export function argumentsRead(op, arg1, arg2){
  *
  * @param {number} arg
  * @param {number} stageIndex
- * @param {number} coordSet  which coordinate set this stage samples with
+ * @param {string} coordinate  the expression this stage samples with
  * @returns {string}
  */
-function argument(arg, stageIndex, coordSet){
+function argument(arg, stageIndex, coordinate){
     const source = {
         [D3DTA.DIFFUSE]: 'input.diffuse',
         [D3DTA.CURRENT]: 'current',
-        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(input.texCoord${coordSet})`,
+        [D3DTA.TEXTURE]: `sampleStage${stageIndex}(${coordinate})`,
         [D3DTA.TFACTOR]: 'uniforms.textureFactor',
         [D3DTA.SPECULAR]: 'input.specular',
     }[arg & D3DTA.SELECTMASK];
@@ -257,14 +307,14 @@ function argument(arg, stageIndex, coordSet){
  *
  * @param {number} op
  * @param {number} stageIndex
- * @param {number} coordSet
+ * @param {string} coordinate
  * @param {number} arg1 @param {number} arg2
  * @returns {string | null}
  */
-function combine(op, stageIndex, coordSet, arg1, arg2){
+function combine(op, stageIndex, coordinate, arg1, arg2){
     const read = argumentsRead(op, arg1, arg2);
-    const a = read.length > 0 ? argument(read[0], stageIndex, coordSet) : '';
-    const b = read.length > 1 ? argument(read[1], stageIndex, coordSet) : '';
+    const a = read.length > 0 ? argument(read[0], stageIndex, coordinate) : '';
+    const b = read.length > 1 ? argument(read[1], stageIndex, coordinate) : '';
     switch (op)
     {
         case D3DTOP.DISABLE:
@@ -282,8 +332,25 @@ function combine(op, stageIndex, coordSet, arg1, arg2){
             return `${a} + ${b}`;
         case D3DTOP.ADDSIGNED:
             return `${a} + ${b} - vec4f(0.5)`;
+        case D3DTOP.ADDSIGNED2X:
+            return `(${a} + ${b} - vec4f(0.5)) * 2.0`;
         case D3DTOP.SUBTRACT:
             return `${a} - ${b}`;
+        case D3DTOP.ADDSMOOTH:
+            return `${a} + ${b} - ${a} * ${b}`;
+        // The four blends: arg1 by an alpha, arg2 by its complement, the
+        // alpha from the vertex, this stage's texture, the factor or the
+        // running result. The premultiplied form adds arg1 unscaled.
+        case D3DTOP.BLENDDIFFUSEALPHA:
+            return `mix(${b}, ${a}, (input.diffuse).a)`;
+        case D3DTOP.BLENDTEXTUREALPHA:
+            return `mix(${b}, ${a}, (sampleStage${stageIndex}(${coordinate})).a)`;
+        case D3DTOP.BLENDFACTORALPHA:
+            return `mix(${b}, ${a}, (uniforms.textureFactor).a)`;
+        case D3DTOP.BLENDTEXTUREALPHAPM:
+            return `${a} + ${b} * (1.0 - (sampleStage${stageIndex}(${coordinate})).a)`;
+        case D3DTOP.BLENDCURRENTALPHA:
+            return `mix(${b}, ${a}, (current).a)`;
         default:
             throw new Error(`Unsupported texture operation ${op}`);
     }
@@ -493,6 +560,32 @@ export function generateFixedFunction(state, layout){
         assignments.push(`    out.texCoord${set} = vertex.texCoord${set}.xy;`);
     }
 
+    // A stage generating its coordinates from the vertex in camera space gets
+    // a varying of its own, with the stage's texture transform applied here
+    // as Direct3D applies it, in vertex processing, and not again at the
+    // sample. A pre-transformed vertex has no camera space: it gets zero.
+    const generated = state.stages.map(stage=>generates(stage.texCoordIndex));
+    if (generated.some(Boolean) && !layout.preTransformed)
+    {
+        assignments.push(
+            '    let cameraPosition = (uniforms.worldView * vec4f(vertex.position, 1.0)).xyz;',
+            `    let cameraNormal = ${has('normal')
+                ? 'normalize((uniforms.worldView * vec4f(vertex.normal, 0.0)).xyz)'
+                : 'vec3f(0.0, 0.0, 1.0)'};`);
+    }
+    for (const [index, stage] of state.stages.entries())
+    {
+        if (!generated[index])
+        {
+            continue;
+        }
+        varyings.push(`    @location(${location++}) generated${index}: vec2f,`);
+        assignments.push(layout.preTransformed
+            ? `    out.generated${index} = vec2f(0.0);`
+            : `    out.generated${index} = ${transformedGeneration(index,
+                generatedCoordinate(stage.texCoordIndex))};`);
+    }
+
     if (state.fogMode !== D3DFOG.NONE)
     {
         varyings.push(`    @location(${location}) fogAmount: f32,`);
@@ -539,7 +632,7 @@ export function generateFixedFunction(state, layout){
     const code = `${lightCount === 0 ? '' : LIGHT_STRUCT}${uniformStruct(lightCount)}
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 ${functionDeclarations(lighting, state.fogMode)}${samplerDeclarations(state.stages.length, 0, 1)}
-${sampleFunctions(state.stages.length)}
+${sampleFunctions(state.stages.length, generated)}
 struct VertexIn {
 ${inputs}
 };
@@ -597,9 +690,27 @@ function uniformStruct(lightCount){
     stage0: u32,
     stage1: u32,
     stage2: u32,
-    texTransform: array<vec4f, 6>,${lightCount === 0 ? '' : `
+    texTransform: array<vec4f, 6>,
+    worldView: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
+}
+
+/**
+ * A generated three-component coordinate through the stage's texture
+ * transform: (x, y, z, 1) against the two output rows the block carries,
+ * which is where a translation lands for three coordinates. Stages beyond
+ * the block's three carry no transform and sample the coordinate as it is.
+ *
+ * @param {number} index @param {string} coordinate
+ */
+function transformedGeneration(index, coordinate){
+    if (index >= 3)
+    {
+        return `(${coordinate}).xy`;
+    }
+    return `vec2f(dot(uniforms.texTransform[${index * 2}], vec4f(${coordinate}, 1.0)),`
+        + ` dot(uniforms.texTransform[${index * 2 + 1}], vec4f(${coordinate}, 1.0)))`;
 }
 
 /**
@@ -609,8 +720,12 @@ function uniformStruct(lightCount){
  *
  * @param {import('./pipeline.js').PipelineState} state
  * @param {boolean} specularEnable
+ * @param {boolean[]} [generated]  Which stages sample a coordinate the
+ *     vertex stage generated (`generated{n}`) rather than a carried set.
  */
-function fragmentBody(state, specularEnable){
+function fragmentBody(state, specularEnable, generated = state.stages.map(
+    stage=>generates(stage.texCoordIndex)))
+{
     const stages = state.stages.length === 0
         ? '    var current = input.diffuse;'
         : ['    var current = input.diffuse;', ...state.stages.map((stage, index)=>{
@@ -618,15 +733,17 @@ function fragmentBody(state, specularEnable){
             // sharing one set is the ordinary way a detail or lightmap pass is
             // written, and reading set N for stage N samples a varying the
             // vertex never carried.
-            const coordSet = stage.texCoordIndex & COORD_SET_MASK;
+            const coordinate = generated[index]
+                ? `input.generated${index}`
+                : `input.texCoord${stage.texCoordIndex & COORD_SET_MASK}`;
             const color = combine(
-                stage.colorOp, index, coordSet, stage.colorArg1, stage.colorArg2);
+                stage.colorOp, index, coordinate, stage.colorArg1, stage.colorArg2);
             if (color === null)
             {
                 return `    // stage ${index} disabled`;
             }
             const alpha = combine(
-                stage.alphaOp, index, coordSet, stage.alphaArg1, stage.alphaArg2);
+                stage.alphaOp, index, coordinate, stage.alphaArg1, stage.alphaArg2);
             return `    current = vec4f((${color}).rgb, `
                 + `${alpha === null ? '(current).a' : `(${alpha}).a`});`;
         })].join('\n');
@@ -729,7 +846,7 @@ ${members.join('\n')}
 fn ps_main(in: PsIn) -> @location(0) vec4f {
     var input: Carried;
 ${carried.join('\n')}
-${fragmentBody(state, state.specularEnable === true)}
+${fragmentBody(state, state.specularEnable === true, [])}
     return current;
 }
 `;
@@ -793,9 +910,12 @@ const ADDRESS_FUNCTION = `fn addressCoordinate(t: f32, mode: u32, texels: f32) -
  * mip mode as an explicit level. The derivatives are taken from the raw
  * coordinate first, in uniform control flow, whatever the mode then does.
  *
- * @param {number} count @returns {string}
+ * @param {number} count
+ * @param {boolean[]} [generated]  Stages whose coordinate the vertex stage
+ *     generated and transformed already.
+ * @returns {string}
  */
-function sampleFunctions(count){
+function sampleFunctions(count, generated = []){
     if (count === 0)
     {
         return '';
@@ -809,7 +929,8 @@ function sampleFunctions(count){
         // two-dimensional coordinate: (u, v, 1) through the first three rows,
         // so a translation is the third row and not the fourth. Identity rows
         // are carried for a stage without one, so the sample is one expression.
-        const transformed = index < 3
+        // A generated coordinate arrives transformed by the vertex stage.
+        const transformed = index < 3 && !generated[index]
             ? [
                 '    let extended = vec3f(carried, 1.0);',
                 `    let raw = vec2f(dot(uniforms.texTransform[${index * 2}].xyz, extended),`,

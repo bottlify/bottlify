@@ -1036,6 +1036,60 @@ test('recorded: a second stage reusing coordinate set zero is not cut for its ow
             'stage one samples the set it named, not the set of its own number');
     });
 
+test('recorded: a stage generating its coordinates is not cut for the set the vertex lacks',
+    async()=>{
+        // A vertex of position and colour alone, textured by where it is in
+        // camera space through a three-coordinate transform: the cascade
+        // runs, the block carries world-view and all four rows of the
+        // transform, and nothing is reported as unapplied.
+        /** @type {string[]} */
+        const said = [];
+        const h = harness({
+            width: 640, height: 480, dumpDraws: true,
+            divergence: (api, detail)=>said.push(`${api}: ${detail}`),
+        });
+        const { device, gpu } = h;
+        const texture = textureFrom(h, 1, 1, D3DFMT.A8R8G8B8, Uint8Array.from([1, 2, 3, 4]));
+        assert.equal(device.SetTexture(0, texture), D3D_OK);
+        selectTexture(device);
+        device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x20000);
+        device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 3);
+        assert.equal(device.SetTransform(D3DTS.TEXTURE0, [
+            0.5, 0, 0, 0,
+            0, -0.5, 0, 0,
+            0, 0, 1, 0,
+            0.25, 0.75, 0, 1,
+        ]), D3D_OK);
+        assert.equal(device.SetTransform(D3DTS.VIEW, [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 5, 1,
+        ]), D3D_OK);
+
+        assert.equal(device.BeginScene(), D3D_OK);
+        assert.equal(device.SetVertexShader(FVF.XYZ | FVF.DIFFUSE), D3D_OK);
+        assert.equal(device.DrawPrimitiveUP(D3DPT.TRIANGLELIST, 1, new Uint8Array(48), 16),
+            D3D_OK);
+        assert.equal(device.EndScene(), D3D_OK);
+        await h.present();
+
+        const diagnostics = device.diagnostics();
+        assert.equal(diagnostics.cascade.noCoordSet, 0);
+        assert.doesNotMatch(diagnostics.lastDump[0], / cut=/);
+        assert.deepEqual(said, []);
+        const code = gpu.of('createShaderModule')[0].descriptor.code;
+        assert.match(code, /sampleStage0\(input\.generated0\)/);
+        assert.match(code, /uniforms\.worldView \* vec4f\(vertex\.position, 1\.0\)/);
+        const draw = diagnostics.lastFrame.find((/** @type {any} */ c)=>c.kind === 'draw');
+        assert.deepEqual([...draw.uniforms.subarray(
+            UNIFORM_AT.textureTransforms, UNIFORM_AT.textureTransforms + 8)],
+        [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75]);
+        assert.deepEqual([...draw.uniforms.subarray(
+            UNIFORM_AT.worldView + 12, UNIFORM_AT.worldView + 16)], [0, 0, 5, 1],
+        'the view\'s translation is in the world-view the coordinate is taken in');
+    });
+
 test('recorded: a sampler follows the stage filter and address states', async()=>{
     const h = harness();
     const { device, gpu } = h;
@@ -2061,7 +2115,9 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
     assert.deepEqual(pixelAt(surface, 1, 1), [255, 0, 0, 255], 'u alone: blue');
     assert.equal(toBase64(surface), 'AP///wAA//8A/////wAA/w==');
     // What the shader is handed is what the evaluator read: two rows per
-    // stage, (m11, m21, m31, 0) and (m12, m22, m32, 0), at the documented place.
+    // stage, (m11, m21, m31, m41) and (m12, m22, m32, m42), at the documented
+    // place; a carried coordinate reads the first three, and the fourth row
+    // is there for a generated one.
     const draws = h.device.diagnostics().lastFrame.filter(
         (/** @type {any} */ command)=>command.kind === 'draw');
     assert.equal(draws.length, 4);
@@ -2070,30 +2126,36 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
     [1, 0, -0.5, 0, 0, 1, -0.5, 0]);
     assert.deepEqual([...draws[2].uniforms.subarray(
         UNIFORM_AT.textureTransforms, UNIFORM_AT.textureTransforms + 8)],
-    [1, 0, 0, 0, 0, 1, 0, 0]);
+    [1, 0, 0, -0.5, 0, 1, 0, -0.5]);
 });
 
 test('the block lays a texture transform out as two rows per sampled stage', ()=>{
     // The shader reads array<vec4f, 6> at float 76 -- byte 304, sixteen-aligned
-    // after the three sampler words -- and the lights from byte 400. A row at
-    // the wrong index is read as another stage's, or as a light.
+    // after the three sampler words -- then the world-view matrix at byte 400
+    // and the lights from byte 464. A row at the wrong index is read as
+    // another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
-    assert.equal(UNIFORM_AT.lights, 100);
-    assert.equal(UNIFORM_FLOATS, 100);
+    assert.equal(UNIFORM_AT.worldView, 100);
+    assert.equal(UNIFORM_AT.lights, 116);
+    assert.equal(UNIFORM_FLOATS, 116);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,
         viewport: viewportState({ x: 0, y: 0, width: 1, height: 1 }),
         textureFactor: 0,
         fogColor: 0,
         alphaRef: 0,
-        textureTransforms: [[2, 3, 4, 5, 6, 7], [1, 0, 0, 0, 1, 0], [0.5, 0, 0.25, 0, 0.5, 0.75]],
+        textureTransforms: [
+            [2, 3, 4, 8, 5, 6, 7, 9], [1, 0, 0, 0, 0, 1, 0, 0],
+            [0.5, 0, 0.25, 0, 0, 0.5, 0.75, 0],
+        ],
     });
     assert.equal(block.length, UNIFORM_FLOATS);
     assert.deepEqual([...block.subarray(76, 100)], [
-        2, 3, 4, 0, 5, 6, 7, 0,
+        2, 3, 4, 8, 5, 6, 7, 9,
         1, 0, 0, 0, 0, 1, 0, 0,
         0.5, 0, 0.25, 0, 0, 0.5, 0.75, 0,
     ]);
+    assert.deepEqual([...block.subarray(100, 116)], [...IDENTITY]);
     // A block with no transforms at all still carries identities: a stage's
     // sample always goes through its rows.
     const plain = uniformBlock({
@@ -2109,9 +2171,10 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
 });
 
 test('the dump prints a texture transform as the elements a coordinate travels through', async()=>{
-    // Recorded commands. The flags and the six planar elements, u's then
-    // v's, with the offset from the third row -- so a sheet's cell can be
-    // read off a draw without the whole matrix.
+    // Recorded commands. The flags and the eight elements, u's then v's,
+    // with the offset from the third row and the fourth a generated
+    // coordinate would take -- so a sheet's cell can be read off a draw
+    // without the whole matrix.
     const h = harness({ width: 640, height: 480, dumpDraws: true });
     const device = h.device;
     assert.equal(device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 2), D3D_OK);
@@ -2129,8 +2192,8 @@ test('the dump prints a texture transform as the elements a coordinate travels t
     await h.present();
 
     assert.match(device.diagnostics().lastDump[0],
-        / texXform=2:0.5,0,0.125,0,0.25,0.375 /,
-        'm11, m21, m31 then m12, m22, m32; the fourth row is not part of it');
+        / texXform=2:0.5,0,0.125,0.9,0,0.25,0.375,0.9 /,
+        'm11, m21, m31, m41 then m12, m22, m32, m42');
 });
 
 test('a texture transform of more than two coordinates is reported, two are not', async()=>{
@@ -2169,7 +2232,7 @@ test('a texture transform of more than two coordinates is reported, two are not'
     draw(quiet);
     assert.equal(said.length, 0, 'two coordinates through a moving matrix are applied');
 
-    for (const flags of [3, 4, 0x100 | 2])
+    for (const flags of [1, 4, 0x100 | 2])
     {
         const h = harness({
             dumpDraws: true,
@@ -2180,10 +2243,10 @@ test('a texture transform of more than two coordinates is reported, two are not'
         assert.equal(h.device.SetTransform(D3DTS.TEXTURE0, scaled), D3D_OK);
         draw(h);
     }
-    assert.equal(said.length, 3, 'three, four and projected each spoke once');
+    assert.equal(said.length, 3, 'one, four and projected each spoke once');
     for (const line of said)
     {
-        assert.match(line, /^Direct3D 8: a texture transform of more than two coordinates, or a projected one, is accepted and not applied/);
+        assert.match(line, /^Direct3D 8: a texture transform of one or four coordinates, or a projected one, is accepted and not applied/);
     }
 });
 

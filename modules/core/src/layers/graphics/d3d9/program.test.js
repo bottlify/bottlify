@@ -18,7 +18,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { D3DFMT, D3DPOOL, D3DSWAPEFFECT, D3D_OK } from './constants.js';
-import { D3DPT, D3DRS, D3DTS } from '../d3d8/constants.js';
+import { D3DPT, D3DRS, D3DTS, D3DTSS } from '../d3d8/constants.js';
 import { createDirect3D9 } from './device.js';
 import { D3DDECLTYPE, D3DDECLUSAGE } from './declaration.js';
 import { END_TOKEN, OPCODE, REGISTER, SHADER_KIND, versionToken } from './shader.js';
@@ -462,7 +462,7 @@ test('a vertex shader over the fixed-function pixel stage gets a fragment stage 
         // render state's texture factor and alpha reference in it.
         const groups = h.groupsOfDraw();
         const block = new Float32Array(h.boundBytes(groups.get(1), 0).buffer);
-        assert.equal(block.length, 100);
+        assert.equal(block.length, 116);
         assert.deepEqual([...block.subarray(36, 40)].map(v=>Math.round(v * 255)),
             [0x20, 0x40, 0x60, 0xff]);
         assert.equal(Math.round(block[72] * 255), 0x80);
@@ -597,6 +597,64 @@ test('a pixel shader over a declaration that carries only a position is given wh
         h.device.SetStreamSource(0, null, 0, 0);
         ps.shader.release();
         positionOnly.declaration.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
+test('a pixel shader over fixed-function vertices reads a coordinate the stages generate',
+    async()=>{
+        // Stage 0 set to D3DTSS_TCI_CAMERASPACEPOSITION with a three-coordinate
+        // transform: the vertex stage made for the pixel shader writes t0
+        // from the vertex through world-view and the transform, and its
+        // constants carry both, whatever set the declaration has.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        h.device.SetTextureStageState(0, D3DTSS.TEXCOORDINDEX, 0x20000);
+        h.device.SetTextureStageState(0, D3DTSS.TEXTURETRANSFORMFLAGS, 3);
+        h.device.SetTransform(D3DTS.TEXTURE0, [
+            0.5, 0, 0, 0,
+            0, -0.5, 0, 0,
+            0, 0, 1, 0,
+            0.25, 0.75, 0, 1,
+        ]);
+        h.device.SetTransform(D3DTS.VIEW, [
+            1, 0, 0, 0,
+            0, 1, 0, 0,
+            0, 0, 1, 0,
+            0, 0, 5, 1,
+        ]);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.deepEqual(h.device.diagnostics().failures, []);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
+        const row = HYBRID_CONSTANTS.TRANSFORMS;
+        assert.ok(vertexModule.code.includes(
+            `out.o${t0} = vec4f(dot(c[${row}], vec4f(cameraPosition, 1.0)),`),
+        'the set the pixel shader reads is generated');
+        assert.ok(!vertexModule.code.includes(`out.o${t0} = vec4f(in.v2`),
+            'the carried set is not sent');
+        const groups = h.groupsOfDraw();
+        const floats = new Float32Array(h.boundBytes(groups.get(0), 0).buffer);
+        assert.equal(floats.length, HYBRID_CONSTANTS.COUNT * 4);
+        assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.WORLD_VIEW * 4 + 12,
+            HYBRID_CONSTANTS.WORLD_VIEW * 4 + 16)], [0, 0, 5, 1]);
+        assert.deepEqual([...floats.subarray(HYBRID_CONSTANTS.TRANSFORMS * 4,
+            HYBRID_CONSTANTS.TRANSFORMS * 4 + 8)], [0.5, 0, 0, 0.25, 0, -0.5, 0, 0.75]);
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
         h.texture.release();
         h.declaration.release();
         h.vb.release();

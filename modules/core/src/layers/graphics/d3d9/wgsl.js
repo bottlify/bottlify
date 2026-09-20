@@ -87,7 +87,11 @@ export const HYBRID_CONSTANTS = Object.freeze({
     MATRIX: 0,
     /** Viewport offset in x and y, then scale in z and w, for pre-transformed vertices. */
     VIEWPORT: 4,
-    COUNT: 5,
+    /** Four rows of world then view: the camera space a generated coordinate is taken in. */
+    WORLD_VIEW: 5,
+    /** Two rows per stage for three stages: the texture transform a generated coordinate goes through. */
+    TRANSFORMS: 9,
+    COUNT: 15,
 });
 
 /**
@@ -1101,6 +1105,10 @@ export function translateShader(parsed, options = {}){
     };
 }
 
+/** D3DTSS_TCI_ modes a hybrid's vertex stage generates a coordinate under. */
+const TCI_CAMERASPACENORMAL = 0x10000;
+const TCI_CAMERASPACEREFLECTIONVECTOR = 0x30000;
+
 /**
  * A vertex stage for a draw that binds a pixel shader and no vertex shader:
  * fixed-function transform feeding a programmable pixel stage, which is the
@@ -1118,9 +1126,16 @@ export function translateShader(parsed, options = {}){
  *        not supply. A fragment input with no vertex output fails the
  *        pipeline, so each is written as the fixed-function pipeline leaves
  *        it: a colour as white, a coordinate set as zero.
+ * @param {readonly number[]} [generated]
+ *        Per coordinate set, the D3DTSS_TCI_ mode the stage of that number
+ *        generates it under, or zero for a set the vertex carries: the
+ *        fixed function computes it from the vertex in camera space (world
+ *        then view in `c[WORLD_VIEW..]`) and puts it through the stage's
+ *        transform (`c[TRANSFORMS..]`), whatever the declaration carries
+ *        under that set.
  * @returns {TranslatedShader}
  */
-export function fixedVertexStage(elements, shapes, alsoWrite = []){
+export function fixedVertexStage(elements, shapes, alsoWrite = [], generated = []){
     /** @type {string[]} */
     const inputFields = [];
     /** @type {string[]} */
@@ -1132,6 +1147,8 @@ export function fixedVertexStage(elements, shapes, alsoWrite = []){
     /** @type {ShaderInput[]} */
     const inputs = [];
     let position = null;
+    let vertex = null;
+    let normal = 'vec3f(0.0, 0.0, 1.0)';
     for (const element of elements)
     {
         const shape = shapes.get(element.register) ?? FOUR_FLOATS;
@@ -1145,10 +1162,22 @@ export function fixedVertexStage(elements, shapes, alsoWrite = []){
         if (element.usage === D3DDECLUSAGE.POSITION)
         {
             position = `mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(${value}.xyz, 1.0)`;
+            vertex = `${value}.xyz`;
         }
         else if (element.usage === D3DDECLUSAGE.POSITIONT)
         {
             position = `viewportPosition(${value})`;
+        }
+        else if (element.usage === D3DDECLUSAGE.NORMAL)
+        {
+            normal = `${value}.xyz`;
+        }
+        else if (element.usage === D3DDECLUSAGE.TEXCOORD
+            && (generated[element.usageIndex] ?? 0) !== 0)
+        {
+            // Generated under this set's number: the carried set is not what
+            // the stage samples with.
+            continue;
         }
         else if (element.usage === D3DDECLUSAGE.COLOR || element.usage === D3DDECLUSAGE.TEXCOORD)
         {
@@ -1157,6 +1186,38 @@ export function fixedVertexStage(elements, shapes, alsoWrite = []){
             outputs.push(location);
             body.push(`    out.o${location} = ${value};`);
         }
+    }
+    if (generated.some(mode=>mode !== 0) && vertex)
+    {
+        const wv = HYBRID_CONSTANTS.WORLD_VIEW;
+        body.push(
+            `    let worldView = mat4x4f(c[${wv}], c[${wv + 1}], c[${wv + 2}], c[${wv + 3}]);`,
+            `    let cameraPosition = (worldView * vec4f(${vertex}, 1.0)).xyz;`,
+            `    let cameraNormal = normalize((worldView * vec4f(${normal}, 0.0)).xyz);`);
+    }
+    for (const [set, mode] of generated.entries())
+    {
+        if (mode === 0)
+        {
+            continue;
+        }
+        const location = varyingLocation(D3DDECLUSAGE.TEXCOORD, set);
+        outputFields.push(`    @location(${location}) o${location}: vec4f,`);
+        outputs.push(location);
+        if (!vertex)
+        {
+            body.push(`    out.o${location} = vec4f(0.0);`);
+            continue;
+        }
+        const coordinate = mode === TCI_CAMERASPACENORMAL ? 'cameraNormal'
+            : mode === TCI_CAMERASPACEREFLECTIONVECTOR
+                ? 'reflect(normalize(cameraPosition), cameraNormal)'
+                : 'cameraPosition';
+        const row = HYBRID_CONSTANTS.TRANSFORMS + set * 2;
+        body.push(set < 3
+            ? `    out.o${location} = vec4f(dot(c[${row}], vec4f(${coordinate}, 1.0)),`
+                + ` dot(c[${row + 1}], vec4f(${coordinate}, 1.0)), 0.0, 1.0);`
+            : `    out.o${location} = vec4f(${coordinate}, 1.0);`);
     }
     for (const location of alsoWrite)
     {

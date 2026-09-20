@@ -184,16 +184,19 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
 - **Fixed function** (`internal/fixedfunction.js`) generates WGSL per state combination: the
   vertex path transforms or, for XYZRHW, applies only the viewport constants; a `D3DCOLOR` vertex
   colour is swizzled from the B,G,R,A byte order; the texture-stage cascade emits one block per
-  enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `SUBTRACT`, with
-  `COMPLEMENT` and `ALPHAREPLICATE` modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`,
-  `TFACTOR`, `SPECULAR`) and nothing at all for an empty list; a two-coordinate texture transform is
-  applied per stage; per-vertex lighting is unrolled per enabled light (point, spot, directional,
+  enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`,
+  `SUBTRACT`, `ADDSMOOTH`, the `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE`
+  modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`) and nothing at
+  all for an empty list; a two- or three-coordinate texture transform is applied per stage; a stage
+  set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or `_CAMERASPACEREFLECTIONVECTOR`
+  takes its coordinate from the vertex through world and view, through the stage's transform, in
+  the vertex stage, whatever set the vertex carries (a pixel shader over fixed-function vertices is
+  handed the same); per-vertex lighting is unrolled per enabled light (point, spot, directional,
   with range, attenuation and cone in uniforms), the material sources honour `D3DRS_COLORVERTEX`,
   the specular sum is added after the cascade, and alpha comes from the diffuse source alone; fog
   (`LINEAR`, `EXP`, `EXP2`) is a per-vertex factor from eye depth, or the specular alpha for
-  pre-transformed vertices; the alpha test `discard`s. Texture-coordinate generation (`D3DTSS_TCI_*`)
-  and three- or four-coordinate or projected texture transforms are not computed (see
-  *Limitations*).
+  pre-transformed vertices; the alpha test `discard`s. Sphere-map coordinate generation and
+  one- or four-coordinate or projected texture transforms are not computed (see *Limitations*).
 - **Programmable** (`internal/programmable.js`) builds a pipeline from a translated vertex and
   pixel shader pair, a vertex layout taken from a declaration (`D3DDECLTYPE` to WebGPU format; the
   packed ten-bit types have no counterpart and refuse the declaration), the stream's stride rather
@@ -558,8 +561,8 @@ reports that size. Direct3D 8's `GetDeviceCaps` (`seam/d3d8.js`, `writeCaps`) cl
 device with hardware transform and lighting, eight blend stages and simultaneous textures,
 4096-texel textures, eight active lights, six user clip planes, every compare, blend, filter and
 stencil bit, cube-map and projected texture caps, `TEXGEN`, and leaves both shader versions at
-zero. Some of those claims exceed what the renderer does (cube textures are refused, coordinate
-generation is not computed, clip planes are not applied), which is the opposite of the rule
+zero. Some of those claims exceed what the renderer does (cube textures are refused, sphere-map
+coordinate generation is not computed, clip planes are not applied), which is the opposite of the rule
 `d3d7/caps.js` states for itself. Direct3D 9's `DEFAULT_CAPS` (`d3d9/device.js`) claims shader
 model 2.0 for both stages, eight lights, no user clip planes, and no anisotropy.
 
@@ -570,8 +573,8 @@ A call is answered one of three ways, and which one is decided where the call li
 - **Refused.** A create the renderer cannot honour answers a failure code and clears the caller's
   out-pointer, because a success it cannot see through leaves a program drawing nothing and looking
   elsewhere for the reason. Refusals are documented at the slot.
-- **Accepted and reported.** A state the device stores but does not act on -- a texture
-  transform of more than two coordinates, coordinate generation, a wireframe fill -- succeeds,
+- **Accepted and reported.** A state the device stores but does not act on -- a projected
+  texture transform, sphere-map coordinate generation, a wireframe fill -- succeeds,
   because refusing `SetTransform` would change what the program does, and is reported once per
   distinct detail through `config.divergence` with the API name and a sentence saying what was not
   done. Every reporter de-duplicates.
@@ -611,9 +614,9 @@ Refused (the program is told no):
 
 Accepted and reported through `divergence`:
 
-- Direct3D 8 (shared renderer): texture coordinate generation (`D3DTSS_TCI_*`) -- the set in the
-  low bits is sampled as the vertex carries it; a texture transform of three or four coordinates
-  or a projected one; a texture-stage cascade cut short because a stage reads `TEXTURE` with
+- Direct3D 8 (shared renderer): sphere-map coordinate generation (`D3DTSS_TCI_SPHEREMAP`) -- the
+  set in the low bits is sampled as the vertex carries it; a texture transform of one or four
+  coordinates or a projected one; a texture-stage cascade cut short because a stage reads `TEXTURE` with
   nothing bound or names a coordinate set the vertex lacks (the draw runs untextured from that
   stage on, counted under `cascade.noTexture` / `cascade.noCoordSet`); a draw with a vertex shader
   feeding the fixed-function pixel stage, or a shader pair the renderer could not build a pipeline

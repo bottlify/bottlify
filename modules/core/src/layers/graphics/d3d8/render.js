@@ -52,7 +52,9 @@ import {
 } from '../d3d9/wgsl.js';
 import { D3DDECLUSAGE } from '../d3d9/declaration.js';
 import { decodeS3tc } from '../webgpu/internal/s3tc.js';
-import { fixedFragmentStage } from '../webgpu/internal/fixedfunction.js';
+import {
+    fixedFragmentStage, generates, generationOf,
+} from '../webgpu/internal/fixedfunction.js';
 import { pipelineKey } from '../webgpu/internal/pipeline.js';
 
 /** A stage state's DWORD, as the D3D8 header lays it out. */
@@ -97,13 +99,14 @@ const D3DTA_SELECTMASK = D3DTA.SELECTMASK;
  * fourth, every such offset is zero and every sprite sheet shows its first
  * cell -- a picture, not an error.
  */
-const PLANAR_ROWS = Object.freeze([0, 4, 8, 1, 5, 9]);
+const PLANAR_ROWS = Object.freeze([0, 4, 8, 12, 1, 5, 9, 13]);
 
 /** What those elements hold when the transform moves nothing: u' = u, v' = v. */
-const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 1, 0]);
+const PLANAR_IDENTITY = Object.freeze([1, 0, 0, 0, 0, 1, 0, 0]);
 
-/** D3DTTFF_COUNT2: two coordinates through the matrix, and no projection. */
+/** D3DTTFF_COUNT2 and COUNT3: that many coordinates through the matrix, no projection. */
 const TTFF_COUNT2 = 2;
+const TTFF_COUNT3 = 3;
 
 /** Textures whose texels a dumping run keeps. Enough to find one, not a heap dump. */
 const TEXTURE_DUMP_LIMIT = 96;
@@ -689,10 +692,13 @@ export const UNIFORM_AT = Object.freeze({
     stage0: 73,
     stage1: 74,
     stage2: 75,
-    // Two vec4f rows per sampled stage: (m11, m21, m31, 0) makes u and
-    // (m12, m22, m32, 0) makes v from (u, v, 1).
+    // Two vec4f rows per sampled stage: (m11, m21, m31, m41) makes u and
+    // (m12, m22, m32, m42) makes v -- from (u, v, 1) for a carried set, from
+    // (x, y, z, 1) for a generated coordinate.
     textureTransforms: 76,
-    lights: 100,
+    // World then view: the camera space a generated coordinate is taken in.
+    worldView: 100,
+    lights: 116,
 });
 
 /** How many stages the block carries sampler state for. */
@@ -780,7 +786,8 @@ function putDword(block, at, dword){
  * @property {number[]} [fogFactors] Fog start, end and density, as floats.
  * @property {number[]} [stages]     Packed sampler state per stage; see `samplerFlagsOf`.
  * @property {(readonly number[])[]} [textureTransforms]
- *     Per stage, the six planar elements in `PLANAR_ROWS` order; identity when absent.
+ *     Per stage, the eight elements in `PLANAR_ROWS` order; identity when absent.
+ * @property {ArrayLike<number>} [worldView]  Identity unless a stage generates coordinates.
  * @property {number} [ambient]      D3DCOLOR, the scene's own ambient light.
  * @property {readonly number[]} [eye]     Camera position in world space.
  * @property {readonly Light[]} [lights]
@@ -828,9 +835,12 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
     for (let index = 0; index < SAMPLED_STAGES; index++)
     {
         const planar = transforms[index] ?? PLANAR_IDENTITY;
-        put4(block, at.textureTransforms + index * 8, planar[0], planar[1], planar[2], 0);
-        put4(block, at.textureTransforms + index * 8 + 4, planar[3], planar[4], planar[5], 0);
+        put4(block, at.textureTransforms + index * 8,
+            planar[0], planar[1], planar[2], planar[3]);
+        put4(block, at.textureTransforms + index * 8 + 4,
+            planar[4], planar[5], planar[6], planar[7]);
     }
+    block.set(values.worldView ?? IDENTITY, at.worldView);
     for (let index = 0; index < lights.length; index++)
     {
         packLight(block, at.lights + index * LIGHT_FLOATS, lights[index]);
@@ -1044,11 +1054,12 @@ export function uniformsOf(model, lighting, take, mips = true){
     const rs = (/** @type {string} */ name)=>model.renderStates.get(D3DRS[name]) ?? 0;
     const world = transformOf(model, D3DTS.WORLD);
     const view = transformOf(model, D3DTS.VIEW);
+    const worldView = multiplyMatrices(world, view, WORLD_VIEW);
     return uniformBlock({
         worldViewProjection: multiplyMatrices(
-            multiplyMatrices(world, view, WORLD_VIEW), transformOf(model, D3DTS.PROJECTION),
-            WORLD_VIEW_PROJECTION),
+            worldView, transformOf(model, D3DTS.PROJECTION), WORLD_VIEW_PROJECTION),
         world,
+        worldView,
         viewport: model.viewport,
         textureFactor: rs('TEXTUREFACTOR'),
         fogColor: rs('FOGCOLOR'),
@@ -1075,9 +1086,9 @@ export function uniformsOf(model, lighting, take, mips = true){
 }
 
 /**
- * The planar transform of each sampled stage, when the stage's flags say
- * its two coordinates go through the matrix. Any other flag value -- more
- * coordinates, a projective divide -- is not applied and is reported per draw.
+ * The transform of each sampled stage, when the stage's flags say two or
+ * three coordinates go through the matrix. Any other flag value -- one or
+ * four, a projective divide -- is not applied and is reported per draw.
  *
  * @param {RenderModel} model
  */
@@ -1088,7 +1099,7 @@ const stageTransforms = model=>{
     {
         const flags = model.stageStates(index)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
         const matrix = model.transforms.get(D3DTS.TEXTURE0 + index);
-        transforms.push(flags === TTFF_COUNT2 && matrix
+        transforms.push((flags === TTFF_COUNT2 || flags === TTFF_COUNT3) && matrix
             ? PLANAR_ROWS.map(at=>matrix[at])
             : PLANAR_IDENTITY);
     }
@@ -1172,7 +1183,8 @@ export function stageCascade(model, layout){
         const samples = selectors.some(arg=>(arg & D3DTA_SELECTMASK) === D3DTA.TEXTURE);
         const texture = model.textures.get(stage) ?? null;
         const coordSet = key.texCoordIndex & COORD_SET_MASK;
-        if (samples && (!texture || coordSet >= layout.texCoordSets))
+        const carried = generates(key.texCoordIndex) || coordSet < layout.texCoordSets;
+        if (samples && (!texture || !carried))
         {
             return {
                 stages,
@@ -2118,7 +2130,7 @@ export function createRenderer(options){
      */
     const transformMoves = (model, stage)=>{
         const flags = model.stageStates(stage)?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
-        return flags !== 0 && flags !== TTFF_COUNT2;
+        return flags !== 0 && flags !== TTFF_COUNT2 && flags !== TTFF_COUNT3;
     };
 
     /**
@@ -2521,12 +2533,13 @@ export function createRenderer(options){
         {
             return;
         }
-        if (stages.some(stage=>(stage.texCoordIndex & ~COORD_SET_MASK) !== 0))
+        if (stages.some(stage=>generationOf(stage.texCoordIndex) !== 0
+            && !generates(stage.texCoordIndex)))
         {
             divergence('Direct3D 8',
-                'texture coordinate generation is accepted and not applied'
-                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_*): the set named in the low'
-                + ' bits is sampled as the vertex carries it');
+                'a sphere-map texture coordinate generation is accepted and not applied'
+                + ' (D3DTSS_TEXCOORDINDEX, D3DTSS_TCI_SPHEREMAP): the set named in the'
+                + ' low bits is sampled as the vertex carries it');
         }
     };
 
@@ -2552,7 +2565,7 @@ export function createRenderer(options){
             if (transformMoves(model, stage))
             {
                 divergence('Direct3D 8',
-                    'a texture transform of more than two coordinates, or a'
+                    'a texture transform of one or four coordinates, or a'
                     + ' projected one, is accepted and not applied'
                     + ' (D3DTSS_TEXTURETRANSFORMFLAGS, D3DTS_TEXTURE0..7):'
                     + ' coordinates are sampled as the vertex carries them');
@@ -3164,7 +3177,7 @@ export function createRenderer(options){
      * The usages a hybrid's fixed vertex stage carries through: what a pixel
      * shader can read from a fixed-function vertex.
      */
-    const HYBRID_USAGES = new Set([0, 9, 10, 5]);
+    const HYBRID_USAGES = new Set([0, 9, 10, 5, 3]);
 
     /**
      * Everything a draw through shaders needs that is not its geometry, or
@@ -3247,16 +3260,24 @@ export function createRenderer(options){
                 .filter(element=>element.usage === D3DDECLUSAGE.COLOR
                     || element.usage === D3DDECLUSAGE.TEXCOORD)
                 .map(element=>varyingLocation(element.usage, element.usageIndex));
+        // A coordinate set the fixed-function stages generate from the vertex
+        // in camera space is written by the made vertex stage whatever the
+        // declaration carries under that number, since that is what the
+        // fixed function hands a pixel shader.
+        const generated = program.vertex ? [] : hybridGeneration(model);
         const missing = pixel.reads.filter(
-            (/** @type {number} */ location)=>!written.includes(location));
+            (/** @type {number} */ location)=>!written.includes(location)
+                && !generated.some((mode, set)=>mode !== 0
+                    && varyingLocation(D3DDECLUSAGE.TEXCOORD, set) === location));
         const vertex = program.vertex
             ? translationOf(/** @type {object} */ (program.vertexShader),
                 `vs:${shapes}|w${missing.join(',')}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
                     { inputs: layout.shapes, alsoWrite: missing }))
-            : hybridStageFor(`${program.declarationId}|${shapes}|w${missing.join(',')}`,
-                wanted, layout.shapes, missing);
+            : hybridStageFor(
+                `${program.declarationId}|${shapes}|w${missing.join(',')}|g${generated.join(',')}`,
+                wanted, layout.shapes, missing, generated);
         if (vertex.error)
         {
             skip('program');
@@ -3437,22 +3458,50 @@ export function createRenderer(options){
      * @param {import('../webgpu/internal/programmable.js').DeclaredInput[]} wanted
      * @param {Map<number, import('../d3d9/wgsl.js').InputShape>} shapes
      * @param {number[]} alsoWrite
+     * @param {number[]} generated
      */
-    const hybridStageFor = (key, wanted, shapes, alsoWrite)=>{
+    const hybridStageFor = (key, wanted, shapes, alsoWrite, generated)=>{
         const existing = hybridStages.get(key);
         if (existing)
         {
             return existing;
         }
-        const made = fixedVertexStage(wanted, shapes, alsoWrite);
+        const made = fixedVertexStage(wanted, shapes, alsoWrite, generated);
         hybridStages.set(key, made);
         return made;
     };
 
     /**
+     * Per coordinate set, the generation mode of the stage of that number,
+     * up to the last stage the cascade runs: zero for a carried set.
+     *
+     * @param {RenderModel} model
+     */
+    const hybridGeneration = model=>{
+        /** @type {number[]} */
+        const modes = [];
+        for (let stage = 0; stage < STAGE_COUNT; stage++)
+        {
+            const states = model.stageStates(stage);
+            if ((states.get(D3DTSS.COLOROP) ?? 0) === D3DTOP.DISABLE)
+            {
+                break;
+            }
+            const index = states.get(D3DTSS.TEXCOORDINDEX) ?? 0;
+            modes.push(generates(index) ? generationOf(index) : 0);
+        }
+        while (modes.length > 0 && modes[modes.length - 1] === 0)
+        {
+            modes.pop();
+        }
+        return modes;
+    };
+
+    /**
      * The constants a hybrid's fixed vertex stage reads: the same
      * world-view-projection the fixed-function block carries, then the
-     * viewport's offset and scale.
+     * viewport's offset and scale, world-view and the stage transforms for a
+     * generated coordinate.
      *
      * @param {RenderModel} model @param {(floats: number) => Float32Array} take
      */
@@ -3460,10 +3509,16 @@ export function createRenderer(options){
         const floats = take(HYBRID_CONSTANTS.COUNT * 4);
         const world = transformOf(model, D3DTS.WORLD);
         const view = transformOf(model, D3DTS.VIEW);
-        floats.set(multiplyMatrices(multiplyMatrices(world, view),
-            transformOf(model, D3DTS.PROJECTION)), HYBRID_CONSTANTS.MATRIX * 4);
+        const worldView = multiplyMatrices(world, view);
+        floats.set(multiplyMatrices(worldView, transformOf(model, D3DTS.PROJECTION)),
+            HYBRID_CONSTANTS.MATRIX * 4);
         floats.set(model.viewport.offset, HYBRID_CONSTANTS.VIEWPORT * 4);
         floats.set(model.viewport.scale, HYBRID_CONSTANTS.VIEWPORT * 4 + 2);
+        floats.set(worldView, HYBRID_CONSTANTS.WORLD_VIEW * 4);
+        for (const [index, rows] of stageTransforms(model).entries())
+        {
+            floats.set(rows, (HYBRID_CONSTANTS.TRANSFORMS + index * 2) * 4);
+        }
         return [floats, take(64), take(16)];
     };
 
