@@ -79,16 +79,40 @@ the engine; no title names in shipped docs.
 
 ## 1. Where the code goes
 
-Everything cork is under the cpu layer, so the boundary checker needs no new rule and the layer
-contract does not change:
+Cork is **its own workspace package, `modules/cork` (`@bottlify/cork`)**, beside
+`@bottlify/core`, `@bottlify/networking` and `@bottlify/installer` — not a directory inside the
+core's cpu layer. The reason is the product model: a launch that selects the emulator must run
+with cork absent, so core cannot depend on it; and x86-64 is expected to arrive as a separate
+package (`cork-x64`) on the same seam, reusing what this package exports rather than living
+inside it. Core keeps its zero-runtime-dependency rule: it never imports `@bottlify/cork`. The
+cpu layer *defines* the executor contract (§2.2, §2.3) and loads an engine the way it loads the
+emulator today — a dynamic `import()` of a module URL given at `boot()` — so a launch that
+selects cork never loads the emulator and a launch that selects the emulator never loads cork.
+
+What stays in core is the layer's own: the hosts that compose an executor with the layer's
+contract (contexts, traps, faults, the slice loop), and the emulator adapter:
 
 ```
 modules/core/src/layers/cpu/
   module.js                       picks the host by `engine`; the api is unchanged
-  internal/v86-host.js            the emulator host (unchanged except three accessors, §3.1)
-  internal/hybrid-host.js         one register file, one memory, two executors (M1.1)
-  internal/cork-host.js           cork alone: cork owns the memory (M5.1)
-  cork/
+  engine.js                       the executor contract: EngineFactory, Runtime, StateLayout
+                                  (JSDoc typedefs only, exported for both packages' checks)
+  internal/v86-host.js            the emulator host (unchanged except three accessors, 1.3)
+  internal/hybrid-host.js         one register file, one memory, two executors (1.1)
+  internal/cork-host.js           an executor alone: it owns the memory (5.1)
+```
+
+Everything that translates, runs, caches or interprets x86 is cork's:
+
+```
+modules/cork/
+  package.json                    @bottlify/cork, zero dependencies, exports "." and the
+                                  building blocks ("./wasm", "./runtime") for cork-x64
+  jsconfig.json                   the same checkJs/strict settings as core's
+  corpus-lock.json                the pinned corpus asset and its hash (1.2)
+  scripts/fetch-corpus.mjs        downloads it into vendor/ (gitignored)
+  src/
+    index.js                      createEngine(env): the EngineFactory core loads
     wasm/encoder.js               the binary encoder: sections, LEB128, function bodies
     wasm/features.js              what this engine's WebAssembly validates (simd, tail calls)
     decode/table.js               the opcode tables: operands, flags, fault class, IR builder
@@ -103,20 +127,31 @@ modules/core/src/layers/cpu/
     emit/sse.js                   xmm as v128, MXCSR-independent paths
     emit/mmx.js                   mm as i64 aliasing the x87 registers
     emit/control.js               jumps, calls, returns, the entry hash, traps, hlt
-    runtime/layout.js             StateLayout: where each register lives, per mode
+    runtime/layout.js             OWN_LAYOUT, and the layout read off an emulator's views
     runtime/pages.js              the page-flag table and invalidation
     runtime/entries.js            eip → function: the JS map and the in-memory hash
     runtime/runtime.js            batches, instantiation, dispatch, hotness, diagnostics
     runtime/cache.js              per-bundle translation cache over an injected store
-    interp.js                     the interpreter tier (M5.2)
-    snapshot.js                   MachineState capture/restore/compare (test support)
-    differential.js               replay one slice on two executors and diff (test support)
-    corpus.js                     the nasm corpus: fetch, ELF32 load, fixture parse
+    interp.js                     the interpreter tier (5.2)
+    testing/snapshot.js           MachineState capture/restore/compare
+    testing/differential.js       replay one slice on two executors and diff
+    testing/corpus.js             the nasm corpus: ELF32 load, fixture parse, run, diff
 ```
 
-`snapshot.js`, `differential.js` and `corpus.js` are not imported by production code, so the
-bundle never carries them; they are under `src/` so the type check and the lint cover them and
-`*.itest.js` can import them.
+In the steps below a path written `cork/…` means `modules/cork/src/…`, and `internal/…` means
+`modules/core/src/layers/cpu/internal/…`. `testing/` is not exported by the package and is
+imported only by tests; cork's `*.itest.js` reach the emulator oracle in core by a relative
+path (`../../core/src/layers/cpu/internal/v86-host.js`), which is allowed for tests and for
+nothing else. Root scripts (`typecheck`, `test`) gain `-w @bottlify/cork`; `lint` already
+covers every workspace; core's `check:boundaries` gains one rule: nothing under core's `src/`
+imports `@bottlify/cork`.
+
+**Naming across the seam.** The contract core defines has one set of names, and every
+executor implements exactly those: `createEngine`, `Runtime.entryOf/run/noteHot/
+translatePending/invalidatePage/diagnostics`, `ExitRecord`, `StateLayout`. `@bottlify/cork`
+implements it for 32-bit; `cork-x64` will implement the same names for 64-bit; the emulator
+does not implement it — core's own `v86-host.js` adapts the emulator to the layer, as today.
+Inside a package the names are the package's own business.
 
 ## 2. Contracts shared by every step
 
@@ -204,9 +239,34 @@ cork's own (`runtime/layout.js`, `OWN_LAYOUT`), a 512-byte block at the start of
 
 ### 2.3 The executor interface a host composes
 
+Defined in core (`layers/cpu/engine.js`, typedefs only) and implemented by the engine package;
+core reaches the implementation through the URL in its configuration, never through an import:
+
 ```js
 /**
- * @typedef {Object} CorkRuntime
+ * cpu configuration, in addition to §2.1:
+ * @property {string} [engineUrl]   the module `boot()` imports for `cork` and `hybrid`;
+ *                                  it must export `createEngine`. Absent, those engines
+ *                                  refuse: `cpu: engine "cork" needs engineUrl`.
+ *
+ * @typedef {(env: EngineEnv) => Runtime} EngineFactory      the module's `createEngine`
+ * @typedef {Object} EngineEnv
+ * @property {WebAssembly.Memory} memory    the layer's memory (the emulator's in hybrid)
+ * @property {StateLayout} layout
+ * @property {CorkConfig} config
+ * @property {(address: number) => number} read      one byte of guest memory
+ * @property {{ trap: (id: number) => 0 | 1, getEflags: () => number,
+ *              x87Read: (i: number) => number, rdtsc: () => bigint }} imports
+ */
+```
+
+`createApp` resolves `engineUrl` the way it resolves the emulator's `moduleUrl`: from
+`AppOptions.cork.moduleUrl` when given, else from the `@bottlify/cork` package the consumer
+installed beside core (the launcher passes its URL). The runtime the factory returns:
+
+```js
+/**
+ * @typedef {Object} Runtime            (called CorkRuntime below where the text predates this)
  * @property {(eip: number) => number} entryOf         function index or -1
  * @property {(entry: number, budget: number) => ExitRecord} run
  * @property {(eip: number) => void} noteHot            a candidate from the sampler
@@ -262,7 +322,7 @@ a string and stays in `diagnostics()`.
 ## 3. The gates every step passes
 
 - **Gate U** — `npm run typecheck && npm run lint && npm test && npm run check:boundaries`.
-  Unit tests need no emulator.
+  Unit tests need no emulator. Runs both packages: core's suites and `@bottlify/cork`'s.
 - **Gate I** — `npm run test:integration` with the prebuilt emulator: the cpu layer's existing
   itests (`v86-host`, `quantum`, `module`, `context`, `zstd`) and the top-level ones
   (`hello`, `threads`, `callbacks`, `imports`, …) unchanged and green. **This is the
@@ -288,6 +348,34 @@ Goal of the milestone: the program runs exactly as today under `engine: 'hybrid'
 translated regions; the corpus runs on the emulator through a harness of this project's own;
 a slice can be replayed on two executors from one state and diffed. Nothing of cork's
 translator exists yet.
+
+### Step 1.0 — the `@bottlify/cork` package and the executor contract
+
+**Goal.** The seam exists before anything crosses it: a workspace package with the project's
+conventions, and the contract in core that it will implement, so that from here on core and
+cork can be checked and tested apart.
+
+**Files.** Create `modules/cork/package.json` (`@bottlify/cork`, `private` until it ships,
+`type: module`, MPL-2.0, `exports: { ".": "./src/index.js", "./wasm": "./src/wasm/encoder.js",
+"./runtime": "./src/runtime/runtime.js" }`, scripts `test` and `typecheck` as the sibling
+packages have), `modules/cork/jsconfig.json` (core's settings), `modules/cork/README.md` (what
+the package is, how core loads it, that it needs nothing of the emulator), `modules/cork/src/index.js`
+(`createEngine` that throws `cork: not built yet` and the `Runtime` shape as JSDoc),
+`modules/cork/src/index.test.js`; in core: `src/layers/cpu/engine.js` (the typedefs of §2.2 and
+§2.3), `scripts/check-boundaries.mjs` (the "core never imports `@bottlify/cork`" rule and its
+fixture test), root `package.json` (`typecheck` and `test` include the package), `docs/core/cpu.md`
+(a first "Engines" paragraph naming the contract and the package), `docs/core/README.md` (the
+package in the layer map's neighbourhood).
+
+**Tests.** `index.test.js`: `createEngine` is exported and throws the message; the package's
+`exports` resolve (`import('@bottlify/cork/wasm')` from the test). `check-boundaries` fixture:
+a core file importing `@bottlify/cork` fails the checker with `imports @bottlify/cork: core
+must not depend on an engine package`.
+
+**Accept.** Gate U green with the new package in every root script; `npm ls --workspaces`
+lists it with no dependencies.
+
+**Out of scope.** Any behaviour.
 
 ### Step 1.1 — `engine` configuration and the hybrid host with nothing to run
 
@@ -340,10 +428,11 @@ compared against the hardware fixture with the same masks the fork's runner uses
 
 **Files.** Fork (one commit on `mrwayer/v86`, its own CI): a release asset
 `nasm-corpus.json.gz` — `{ cases: [{ name, image (base64 ELF32), fixture (the gdb text) }] }`,
-built by the existing `nasmtests` job. This repo: `modules/core/vendor-lock.json` (the asset
-and its hash), `scripts/fetch-v86.mjs` (fetches it into `vendor/prebuilt/`),
-`THIRD-PARTY-NOTICES.md` (the corpus as BSD-2 test data, in this commit), create
-`cork/corpus.js`, `cork/corpus.test.js`, `cork/corpus.itest.js`.
+built by the existing `nasmtests` job. This repo: `modules/cork/corpus-lock.json` (the asset
+and its hash), `modules/cork/scripts/fetch-corpus.mjs` (fetches it into `modules/cork/vendor/`,
+gitignored, verifying the hash the way core's `fetch-v86.mjs` does), `THIRD-PARTY-NOTICES.md`
+(the corpus as BSD-2 test data, in this commit), create `cork/testing/corpus.js`,
+`cork/testing/corpus.test.js`, `cork/testing/corpus.itest.js`.
 
 **Contract.**
 
@@ -389,7 +478,7 @@ clears it, and a case that ends without halting is caught by the slice bound.
 from any host through the layer's accessors, restorable, and diffable with per-instruction
 undefined-flag masks.
 
-**Files.** Create `cork/snapshot.js`, `cork/snapshot.test.js`; modify `internal/v86-host.js`
+**Files.** Create `cork/testing/snapshot.js`, `cork/testing/snapshot.test.js`; modify `internal/v86-host.js`
 (three accessors: `readXmm(i) → Uint32Array(4)`, `writeXmm(i, words)`, `x87State() →
 { top, empty, control, status, registers: Float64Array(8), raw: Uint8Array(128) }` — built on
 `internal/fpu.js`'s decode); `docs/core/cpu.md` (the accessors are internal to the layer;
@@ -430,8 +519,8 @@ divergence `ebx`; a flag outside the mask is not; a memory word inside a span is
 exists so the driver is trusted on its own: the emulator against itself must diff to nothing,
 and a deliberately perturbed replay must report exactly the perturbation.
 
-**Files.** Create `cork/differential.js`, `cork/differential.test.js`,
-`cork/differential.itest.js`.
+**Files.** Create `cork/testing/differential.js`, `cork/testing/differential.test.js`,
+`cork/testing/differential.itest.js`.
 
 **Contract.**
 
@@ -704,7 +793,7 @@ exactly 22 instructions (one `mov`, ten `dec`/`jnz` pairs, one `ret`) and
 exits `untranslated` at `ret`'s successor; with a budget of 7 it exits `budget` at `L` after
 retiring the last full iteration that fit, and `ecx` matches the iteration count.
 
-**Differential (Gate D).** `cork/differential.itest.js` gains: every integer corpus case
+**Differential (Gate D).** `cork/testing/differential.itest.js` gains: every integer corpus case
 (arith-optimisations, btc/btr/bts ×3, cmp16-setbe, cmpxchg, cmpxchg8b, cmpxchg-setbe,
 double-segment-prefix, idiv8/16/32-overflow, jcxz, jump, lea-nop, leave16/32, loop,
 loopnz/loopz, mov16, pop_esp, pop_esp2, push, pushf, ret-imm, store-widths, shift and
