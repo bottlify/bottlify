@@ -140,7 +140,8 @@
  */
 
 /**
- * @typedef {Object} ExitRecord
+ * @typedef {Object} ExitRecord  Valid until the next `run`: the engine may hand out one
+ *     record and rewrite it, so a caller that keeps an exit copies its fields.
  * @property {number} retired  Instructions retired in this run, already added to `counter`.
  * @property {ExitKind} kind
  * @property {number} vector   For `fault`: 0 (#DE), 6 (#UD), 3 (int 3), 13 (page flag);

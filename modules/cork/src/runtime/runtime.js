@@ -113,6 +113,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
     let nextTable = 0;
     /** @type {Record<ExitKind, number>} */
     const exits = { untranslated: 0, budget: 0, trap: 0, halt: 0, fault: 0, stale: 0 };
+    /** @type {import('../../../core/src/layers/cpu/engine.js').ExitRecord} */
+    const exit = { retired: 0, kind: 'untranslated', vector: 0 };
     /** @type {Record<string, number>} */
     const refused = {};
     let corkRetired = 0;
@@ -242,6 +244,9 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
         },
         run(entry, budget){
             const { fn, label } = entries.at(entry);
+            // One record, rewritten per run: a call-heavy program leaves
+            // and re-enters per call, and an object per leave was the
+            // collector's share of the cost.
             const before = counterWord();
             const code = fn(label, budget) >>> 0;
             const retired = (counterWord() - before) >>> 0;
@@ -274,7 +279,10 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 // The other executor's compiled page, if that is what was hit.
                 imports.dirtyCode?.(address, size);
             }
-            return { retired, kind, vector: code >>> 8 };
+            exit.retired = retired;
+            exit.kind = kind;
+            exit.vector = code >>> 8;
+            return exit;
         },
         noteHot(eip, top = 0){
             const key = keyOf(eip, top & 7);
