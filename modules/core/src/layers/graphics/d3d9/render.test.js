@@ -435,10 +435,16 @@ test('a reset gives the previous back buffer and depth back to the GPU', async()
     assert.equal(made.length, 2, 'the frame made the back buffer and its depth');
     assert.equal(h.gpu.count('destroyTexture'), 0);
 
+    // A frame recorded before the reset still draws into the old target: it
+    // is destroyed after that frame is submitted, not before.
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET, argb(4, 5, 6), 1, 0), D3D_OK);
+    assert.equal(device.Present(), D3D_OK);
     assert.equal(device.Reset(), D3D_OK);
+    assert.equal(h.gpu.count('destroyTexture'), 0, 'not while a frame may still be drawing');
+    await device.idle();
     assert.deepEqual(h.gpu.of('destroyTexture').map((/** @type {any} */ call)=>call.texture),
         made.map((/** @type {any} */ call)=>call.texture),
-        'both of the old ones are destroyed, and nothing else');
+        'both of the old ones are destroyed once the frame is submitted, and nothing else');
 
     assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
         D3D_OK);

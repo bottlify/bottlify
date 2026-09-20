@@ -4312,7 +4312,12 @@ export function createRenderer(options){
             {
                 surfaces.delete(surface);
                 dirtyTargets.delete(surface);
-                backend.destroySurface?.(made);
+                // After the frames already recorded against it have been
+                // submitted: a present is replayed on the chain, and a reset
+                // that follows it in the same breath -- a program that
+                // resets on the WM_SIZE its first frame brought -- would
+                // otherwise destroy the target that frame is about to draw.
+                chain = chain.then(()=>backend.destroySurface?.(made)).catch(failure);
             }
         },
 
