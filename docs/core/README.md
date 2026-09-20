@@ -58,7 +58,7 @@ system described in [`system.md`](./system.md). Each has a document of its own:
 
 | layer | one line | document |
 |---|---|---|
-| `cpu` | The vendored emulator behind an interface: boot from the package's own ROM, run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. The only layer that may import `vendor/`. | [`cpu.md`](./cpu.md) |
+| `cpu` | The vendored emulator behind an interface: boot from the package's own ROM, run for a quantum of instructions, registers, physical memory, the FPU, the I/O-port trap channel. The only layer that may import `vendor/`. Defines the executor contract a translator package (`@bottlify/cork`, in `modules/cork`) implements and is loaded through by URL, never imported. | [`cpu.md`](./cpu.md) |
 | `memory` | The guest address space as regions with permissions, and typed accessors every host read and write goes through. | [`memory.md`](./memory.md) |
 | `kernel` | Threads, a round-robin scheduler whose quantum is retired guest instructions, context switch, synchronisation objects with timed waits, the handle table, a virtual clock. | [`kernel.md`](./kernel.md) |
 | `bridge` | The trap channel's host half: calls marshalled by convention (`stdcall`, `cdecl`, `thiscall`), a caller parked when the answer is not ready, calls back into guest code, COM interfaces published into guest memory, recorded sessions replayed in tests. | [`bridge.md`](./bridge.md) |

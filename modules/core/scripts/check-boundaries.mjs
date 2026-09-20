@@ -8,6 +8,7 @@ import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, normalize, resolve, sep } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { fileURLToPath } from 'node:url';
+import { enginePackageIssue } from './lib/boundaries.mjs';
 
 /**
  * Boundary checker for the core package.
@@ -16,6 +17,8 @@ import { fileURLToPath } from 'node:url';
  *  - anything in src/system must not import src/layers;
  *  - a layer may import another layer only if it declared it in `requires`;
  *  - vendor/v86 is importable only from src/layers/cpu;
+ *  - no file may import an engine package (`lib/boundaries.mjs`): the cpu layer
+ *    loads one by URL when a launch selects it, and the core runs without it;
  *  - layers must not import core.js (the facade is a consumer, not a dependency);
  *  - no file may import from outside src/ (except vendor through the cpu layer);
  *  - the import graph over src/ must be acyclic.
@@ -111,6 +114,12 @@ for (const file of files)
     const { kind, layer } = classify(file);
     for (const spec of specifiersOf(file))
     {
+        const engine = enginePackageIssue(spec);
+        if (engine !== null)
+        {
+            issues.push(`${file} ${engine}`);
+            continue;
+        }
         if (!spec.startsWith('.'))
         {
             continue;

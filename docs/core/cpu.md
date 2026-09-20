@@ -19,6 +19,22 @@ stubs and reports numbers; it captures contexts and restores them on request. Gu
 reached through `readPhysical`/`writePhysical` with no validation — validation is what the memory
 layer adds on top.
 
+### Engines
+
+The layer runs a program on one of two execution engines, chosen per launch. The vendored
+emulator is the one everything below describes. The other is a translator package
+(`@bottlify/cork`, `modules/cork`), which the layer loads at `boot()` by a module URL in its
+configuration, the way it loads the emulator, and which implements the executor contract the
+layer defines in `src/layers/cpu/engine.js`: an `EngineFactory` that takes the layer's memory,
+a `StateLayout` naming where every register lives, and the host functions translated code may
+call, and answers a `Runtime` (`entryOf`, `run`, `noteHot`, `translatePending`,
+`invalidatePage`, `diagnostics`). The layer never imports an engine package — `check:boundaries`
+refuses it — so a launch that selects the emulator runs with no translator installed, and a
+launch that selects the translator loads nothing of the emulator. How the layer composes a
+runtime with its own contexts, traps and faults, and the `engine` configuration field that
+selects one, arrive with the translator's own steps (`roadmap/cork-plan.md`); today the
+contract exists and every launch runs the emulator.
+
 ## 2. Contract
 
 | field      | value                    |

@@ -31,3 +31,6 @@ ui/
 # Frames and textures dumped out of a running game to be looked at: someone
 # else's artwork, and megabytes of it.
 dbg/
+
+# The nasm corpus the translator tests fetch, pinned by modules/cork/corpus-lock.json.
+modules/cork/vendor/
