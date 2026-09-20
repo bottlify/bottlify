@@ -2130,14 +2130,14 @@ test('byte-exact: a two-coordinate texture transform moves the sample by its thi
 });
 
 test('the block lays a texture transform out as two rows per sampled stage', ()=>{
-    // The shader reads array<vec4f, 12> at float 76 -- byte 304, sixteen-aligned
-    // after the three sampler words -- then the world-view matrix at byte 496
-    // and the lights from byte 560. A row at the wrong index is read as
-    // another stage's, or as a light.
+    // The shader reads array<vec4f, 32> at float 76 -- byte 304, sixteen-aligned
+    // after the three sampler words, a matrix per stage for all eight --
+    // then the world-view matrix at byte 816 and the lights from byte 880. A
+    // row at the wrong index is read as another stage's, or as a light.
     assert.equal(UNIFORM_AT.textureTransforms, 76);
-    assert.equal(UNIFORM_AT.worldView, 124);
-    assert.equal(UNIFORM_AT.lights, 140);
-    assert.equal(UNIFORM_FLOATS, 140);
+    assert.equal(UNIFORM_AT.worldView, 204);
+    assert.equal(UNIFORM_AT.lights, 220);
+    assert.equal(UNIFORM_FLOATS, 220);
     const columns = Array.from({ length: 16 }, (_, at)=>at + 2);
     const block = uniformBlock({
         worldViewProjection: IDENTITY,
@@ -2145,12 +2145,15 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
         textureFactor: 0,
         fogColor: 0,
         alphaRef: 0,
-        textureTransforms: [columns, IDENTITY, IDENTITY],
+        textureTransforms: [columns, IDENTITY, IDENTITY, columns],
     });
     assert.equal(block.length, UNIFORM_FLOATS);
     assert.deepEqual([...block.subarray(76, 92)], columns);
     assert.deepEqual([...block.subarray(92, 124)], [...IDENTITY, ...IDENTITY]);
-    assert.deepEqual([...block.subarray(124, 140)], [...IDENTITY]);
+    assert.deepEqual([...block.subarray(124, 140)], columns, 'a fourth stage has rows of its own');
+    assert.deepEqual([...block.subarray(140, 204)],
+        [...IDENTITY, ...IDENTITY, ...IDENTITY, ...IDENTITY], 'identity where none was given');
+    assert.deepEqual([...block.subarray(204, 220)], [...IDENTITY]);
     // A block with no transforms at all still carries identities: a stage's
     // sample always goes through its rows.
     const plain = uniformBlock({
@@ -2160,7 +2163,8 @@ test('the block lays a texture transform out as two rows per sampled stage', ()=
         fogColor: 0,
         alphaRef: 0,
     });
-    assert.deepEqual([...plain.subarray(76, 124)], [...IDENTITY, ...IDENTITY, ...IDENTITY]);
+    assert.deepEqual([...plain.subarray(76, 204)],
+        Array.from({ length: 8 }, ()=>[...IDENTITY]).flat());
 });
 
 test('the dump prints a texture transform as the elements a coordinate travels through', async()=>{

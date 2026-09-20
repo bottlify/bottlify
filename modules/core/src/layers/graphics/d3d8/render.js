@@ -707,18 +707,22 @@ export const UNIFORM_AT = Object.freeze({
     stage0: 73,
     stage1: 74,
     stage2: 75,
-    // Four vec4f rows per sampled stage, the matrix by columns: (m11, m21,
-    // m31, m41) makes u, (m12, m22, m32, m42) makes v -- from (u, v, 1) for a
-    // carried set, from (x, y, z, 1) for a generated coordinate, which also
-    // takes the third and fourth for a projective divide.
+    // Four vec4f rows per stage for every stage, the matrix by columns:
+    // (m11, m21, m31, m41) makes u, (m12, m22, m32, m42) makes v -- from
+    // (u, v, 1) for a carried set, from (x, y, z, 1) for a generated
+    // coordinate, which also takes the third and fourth for a projective
+    // divide.
     textureTransforms: 76,
     // World then view: the camera space a generated coordinate is taken in.
-    worldView: 124,
-    lights: 140,
+    worldView: 204,
+    lights: 220,
 });
 
 /** How many stages the block carries sampler state for. */
 export const SAMPLED_STAGES = 3;
+
+/** How many stages the block carries a texture transform for: every one. */
+export const TRANSFORM_STAGES = STAGE_COUNT;
 
 /** The block's own length, before any light is appended. */
 export const UNIFORM_FLOATS = UNIFORM_AT.lights;
@@ -848,7 +852,7 @@ export function uniformBlock(values, take = floats=>new Float32Array(floats)){
         words[at.stage0 + index] = (stages[index] ?? 0) >>> 0;
     }
     const transforms = values.textureTransforms ?? [];
-    for (let index = 0; index < SAMPLED_STAGES; index++)
+    for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
         block.set(transforms[index] ?? PLANAR_IDENTITY, at.textureTransforms + index * 16);
     }
@@ -1108,7 +1112,7 @@ export function uniformsOf(model, lighting, take, mips = true){
 const stageTransforms = model=>{
     /** @type {(readonly number[])[]} */
     const transforms = [];
-    for (let index = 0; index < SAMPLED_STAGES; index++)
+    for (let index = 0; index < TRANSFORM_STAGES; index++)
     {
         const states = model.stageStates(index);
         const flags = states?.get(D3DTSS.TEXTURETRANSFORMFLAGS) ?? 0;
@@ -2036,6 +2040,13 @@ export function createRenderer(options){
             // as the camera moves by less than a depth unit.
             + `/bias${model.renderStates.get(D3DRS.ZBIAS) ?? 0}`
             + `/${state.depthFormat ?? 'nodepth'}`
+            // Which channels the draw may write, and the stencil states in
+            // force: a draw that writes no colour is one made for the
+            // stencil, and one drawn under a stencil test is what reads it.
+            + ` cw=${state.colorWrite}`
+            + (model.renderStates.get(52) ? ` stencil=${[53, 54, 55, 56, 57, 58, 59]
+                .map(index=>((model.renderStates.get(index) ?? 0) >>> 0).toString(16))
+                .join('/')}` : '')
             // Whether the program asked for its primitives to be clipped at
             // all: with clipping off, a vertex past the far plane is a depth
             // to clamp, not a triangle to drop.

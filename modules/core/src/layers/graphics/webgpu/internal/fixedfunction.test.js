@@ -72,7 +72,7 @@ test('the same state generates the same source, byte for byte', ()=>{
     const second = generate(baseState()).code;
 
     assert.equal(first, second);
-    assert.equal(digest(first), '5fa2105e8c80e597');
+    assert.equal(digest(first), '6a0927659438da0f');
 });
 
 test('a stage generating its coordinates takes them from the vertex in camera space', ()=>{
@@ -319,7 +319,7 @@ test('a stage puts its coordinate through its own texture transform before sampl
         stages: [textured, textured, textured, textured],
     })).code;
 
-    assert.match(code, /texTransform: array<vec4f, 12>,/);
+    assert.match(code, /texTransform: array<vec4f, 32>,/);
     for (const stage of [0, 1, 2])
     {
         const rows = `${stage * 4}`;
@@ -334,9 +334,9 @@ test('a stage puts its coordinate through its own texture transform before sampl
             + ` {4}let size = vec2f\\(textureDimensions\\(texture${stage}, 0\\)\\);`),
         `stage ${stage} transforms with its own two rows, then measures its level`);
     }
-    // The block carries rows for three stages; a fourth samples as carried.
-    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let raw = carried;\n {4}let flags = 0u;/);
-    assert.doesNotMatch(code, /texTransform\[1[2-9]\]/);
+    // The block carries rows for every stage; a fourth transforms with its
+    // own, though its sampler state is the default.
+    assert.match(code, /fn sampleStage3\(carried: vec2f\) -> vec4f \{\n {4}let extended = vec3f\(carried, 1\.0\);\n {4}let raw = vec2f\(dot\(uniforms\.texTransform\[12\]\.xyz, extended\),\n {8}dot\(uniforms\.texTransform\[13\]\.xyz, extended\)\);\n {4}let flags = 0u;/);
 });
 
 test('a disabled stage emits nothing, and the ones after it still run', ()=>{

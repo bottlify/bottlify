@@ -187,7 +187,8 @@ in `src/layers/graphics/webgpu/internal/fake-device.js`. The contract is stated 
   enabled stage (`SELECTARG1/2`, `MODULATE`, `MODULATE2X/4X`, `ADD`, `ADDSIGNED`, `ADDSIGNED2X`,
   `SUBTRACT`, `ADDSMOOTH`, the `BLEND*ALPHA` five, with `COMPLEMENT` and `ALPHAREPLICATE`
   modifiers, arguments from `DIFFUSE`, `CURRENT`, `TEXTURE`, `TFACTOR`, `SPECULAR`) and nothing at
-  all for an empty list; a texture transform of two to four coordinates is applied per stage; a
+  all for an empty list; a texture transform of two to four coordinates is applied per stage, for
+  every one of the eight (the block carries a matrix per stage); a
   stage set to `D3DTSS_TCI_CAMERASPACEPOSITION`, `_CAMERASPACENORMAL` or
   `_CAMERASPACEREFLECTIONVECTOR` takes its coordinate from the vertex through world and view,
   through the stage's whole transform, in the vertex stage, whatever set the vertex carries, and

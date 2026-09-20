@@ -691,7 +691,7 @@ function uniformStruct(lightCount){
     stage0: u32,
     stage1: u32,
     stage2: u32,
-    texTransform: array<vec4f, 12>,
+    texTransform: array<vec4f, 32>,
     worldView: mat4x4f,${lightCount === 0 ? '' : `
     lights: array<Light, ${lightCount}>,`}
 };`;
@@ -701,16 +701,11 @@ function uniformStruct(lightCount){
  * A generated three-component coordinate through the stage's texture
  * transform: (x, y, z, 1) against the four output rows the block carries,
  * which is where a translation lands for three coordinates and where the
- * component a projected sample divides by comes from. Stages beyond the
- * block's three carry no transform and sample the coordinate as it is.
+ * component a projected sample divides by comes from.
  *
  * @param {number} index @param {string} coordinate
  */
 function transformedGeneration(index, coordinate){
-    if (index >= 3)
-    {
-        return `vec4f((${coordinate}).xy, 1.0, 1.0)`;
-    }
     const row = index * 4;
     return `vec4f(dot(uniforms.texTransform[${row}], vec4f(${coordinate}, 1.0)),`
         + ` dot(uniforms.texTransform[${row + 1}], vec4f(${coordinate}, 1.0)),`
@@ -943,14 +938,12 @@ function sampleFunctions(count, generated = []){
         const transformed = generation
             ? `    let raw = ${generation.projected === 3 ? 'carried.xy / carried.z'
                 : generation.projected === 4 ? 'carried.xy / carried.w' : 'carried.xy'};\n`
-            : index < 3
-                ? [
-                    '    let extended = vec3f(carried, 1.0);',
-                    `    let raw = vec2f(dot(uniforms.texTransform[${index * 4}].xyz, extended),`,
-                    `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
-                    '',
-                ].join('\n')
-                : '    let raw = carried;\n';
+            : [
+                '    let extended = vec3f(carried, 1.0);',
+                `    let raw = vec2f(dot(uniforms.texTransform[${index * 4}].xyz, extended),`,
+                `        dot(uniforms.texTransform[${index * 4 + 1}].xyz, extended));`,
+                '',
+            ].join('\n');
         lines.push(`fn sampleStage${index}(carried: ${generation ? 'vec4f' : 'vec2f'}) -> vec4f {
 ${transformed}    let flags = ${flags};
     let size = vec2f(textureDimensions(texture${index}, 0));

@@ -463,7 +463,7 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
     assert.equal(stage.error, null);
     assert.equal(stage.entry, 'vs_main');
     assert.equal(stage.constants, HYBRID_CONSTANTS.COUNT);
-    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 21>;');
+    assertLine(stage.wgsl, '@group(0) @binding(0) var<uniform> c: array<vec4f, 41>;');
     assertLine(stage.wgsl,
         'out.oPos = mat4x4f(c[0], c[1], c[2], c[3]) * vec4f(vec4f(in.v0, 1.0).xyz, 1.0);');
     assertLine(stage.wgsl, `out.o${varyingLocation(D3DDECLUSAGE.COLOR, 0)} = in.v1.zyxw;`);
@@ -482,11 +482,18 @@ test('the fixed vertex stage of a hybrid transforms through c0..c3 and passes th
         [0, { components: 3, scalar: 'f32', bgra: false }],
         [1, { components: 3, scalar: 'f32', bgra: false }],
         [2, { components: 2, scalar: 'f32', bgra: false }],
-    ]), [], [0x20000, 0x10000]);
+    ]), [], [0x20000, 0x10000, 0, 0, 0x20000]);
     assert.equal(generated.error, null);
     const t0 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 0);
     const t1 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 1);
-    assert.deepEqual(generated.outputs, [t0, t1]);
+    const t4 = varyingLocation(D3DDECLUSAGE.TEXCOORD, 4);
+    assert.deepEqual(generated.outputs, [t0, t1, t4]);
+    // A fifth set goes through the fifth stage's own rows: a terrain's
+    // blend map is that far along the cascade, and a coordinate left raw
+    // there moved with the camera.
+    assertLine(generated.wgsl, `out.o${t4} = vec4f(dot(c[25], vec4f(cameraPosition, 1.0)),`
+        + ' dot(c[26], vec4f(cameraPosition, 1.0)), dot(c[27], vec4f(cameraPosition, 1.0)),'
+        + ' dot(c[28], vec4f(cameraPosition, 1.0)));');
     assertLine(generated.wgsl, 'let worldView = mat4x4f(c[5], c[6], c[7], c[8]);');
     assertLine(generated.wgsl,
         'let cameraPosition = (worldView * vec4f(vec4f(in.v0, 1.0).xyz, 1.0)).xyz;');
