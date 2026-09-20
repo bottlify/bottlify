@@ -2987,6 +2987,12 @@ export function createRenderer(options){
      * @type {WeakMap<object, Map<string, import('../webgpu/contract.js').Surface>>}
      */
     const standInDepths = new WeakMap();
+    /**
+     * Surfaces given up by the device, destroyed once the frame being
+     * recorded when they were has been replayed.
+     * @type {import('../webgpu/contract.js').Surface[]}
+     */
+    const retiring = [];
 
     /**
      * The depth attachment for the model's targets: the bound depth surface
@@ -4476,6 +4482,16 @@ export function createRenderer(options){
             frameStats = blankFrameStats();
             counters.frames++;
             chain = chain.then(()=>replay(recorded, surface)).catch(failure);
+            if (retiring.length > 0)
+            {
+                const gone = retiring.splice(0);
+                chain = chain.then(()=>{
+                    for (const made of gone)
+                    {
+                        backend.destroySurface?.(made);
+                    }
+                }).catch(failure);
+            }
             return chain;
         },
 
@@ -4496,12 +4512,12 @@ export function createRenderer(options){
             {
                 surfaces.delete(surface);
                 dirtyTargets.delete(surface);
-                // After the frames already recorded against it have been
-                // submitted: a present is replayed on the chain, and a reset
-                // that follows it in the same breath -- a program that
-                // resets on the WM_SIZE its first frame brought -- would
-                // otherwise destroy the target that frame is about to draw.
-                chain = chain.then(()=>backend.destroySurface?.(made)).catch(failure);
+                // Not now, and not after the frames already queued either:
+                // the frame being recorded may hold a pass against it -- a
+                // program that resets its device on the WM_SIZE its first
+                // frame brought has cleared its old target before the reset
+                // -- so it goes after that frame's replay, at its present.
+                retiring.push(made);
             }
         },
 
