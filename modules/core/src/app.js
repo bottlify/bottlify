@@ -515,6 +515,12 @@ export function describeEvent(payload){
             {
                 return `${key}=[${value.join(' ')}]`;
             }
+            // A picture's bytes are not a line: a cursor told every frame
+            // would fill the journal with its pixels.
+            if (ArrayBuffer.isView(value))
+            {
+                return `${key}=<${value.byteLength} bytes>`;
+            }
             return `${key}=${typeof value === 'object' ? JSON.stringify(value) : value}`;
         })
         .join(' ');
@@ -4875,6 +4881,15 @@ async function buildApp(options){
          * `setLevel` decides how much is kept, per category.
          */
         log: {
+            /**
+             * A record from outside the engine, into the same journal: what
+             * the host's own GPU device reported about a frame, which a reader
+             * of the run's log must see beside the frame it dropped.
+             *
+             * @param {'error' | 'warn' | 'info'} level
+             * @param {string} category @param {string} text
+             */
+            write: (level, category, text)=>core.api('log').write(level, category, '{0}', text),
             /** @param {number} [since] @param {number} [limit] */
             drain: (since, limit)=>core.api('log').drain(since, limit),
             /** @param {number} [count] */

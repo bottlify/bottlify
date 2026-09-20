@@ -1290,6 +1290,17 @@ test('the cursor a program sets reaches whoever shows the frame, bitmap and hot 
     assert.equal(h.device(device, 'SetCursorProperties', [5, 5, surface]), D3DERR_INVALIDCALL,
         'a hot spot outside the bitmap is refused, and nobody is told');
     assert.equal(h.cursors.length, 3);
+
+    // The same cursor set again, as a program does every frame, crosses nothing.
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.device(device, 'ShowCursor', [0]), 0);
+    assert.equal(h.cursors.length, 3, 'nothing changed, nobody is told');
+    assert.equal(h.surface(surface, 'LockRect', [locked, 0, 0]), D3D_OK);
+    h.box.services.writeMemory(bits, new Uint8Array([9, 9, 9, 255]));
+    assert.equal(h.surface(surface, 'UnlockRect', []), D3D_OK);
+    assert.equal(h.device(device, 'SetCursorProperties', [1, 0, surface]), D3D_OK);
+    assert.equal(h.cursors.length, 4, 'a repainted bitmap is a change');
+    assert.deepEqual([...h.cursors[3].bgra.slice(0, 4)], [9, 9, 9, 255]);
 });
 
 test('creating a device reports its resolution as the screen the program now has', ()=>{

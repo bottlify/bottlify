@@ -102,7 +102,10 @@ the engine directly (`createApp` from `src/app.js`, not exported by the package)
 | **The audio thread** (`dist/worklet.js`, from `src/layers/audio/output/worklet.js`) | With shared memory, the `bottlify-output` `AudioWorkletProcessor` resamples, scales and sums every open track's own PCM out of a shared track table -- converting and mixing both happen here now, not on the engine thread; its own count of what it consumed and produced is what a program's play cursor is built on when `audio.drained` is true. Without shared memory there is no worklet to read anything: the engine mixes into its own ring on its own thread instead, and only that thread can read it (`docs/core/audio.md`'s Mixer section). |
 
 The device is requested with `texture-compression-bc` when the adapter offers it. An uncaptured
-WebGPU validation error is written to the worker's console.
+WebGPU error (a validation failure, a texture the driver could not allocate) is written into the
+run's journal as an `error` record of category `gpu`, beside the frame it dropped; the same
+message repeated by the device is counted and written again every 256th time with its count.
+Only before the program's journal exists does it go to the worker's console.
 
 ### `host: 'thread'`
 

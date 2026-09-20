@@ -26,6 +26,7 @@ import {
     createGuestView,
     createKernelGl,
     resolveOpenglEntry,
+    describeEvent,
 } from './app.js';
 import { createEvents } from './events.js';
 import { filesystemModule } from './layers/filesystem/module.js';
@@ -1009,4 +1010,13 @@ test('resolveOpenglEntry remembers a seam that throws once, and reuses one that 
     const layer = fakeOpengl({ glEnable: ()=>0 });
     const resolving = resolveOpenglEntry({ opengl: ()=>layer });
     assert.equal(resolving.entry('glEnable'), layer.entry('glEnable'));
+});
+
+test('an event line names a picture by its size, never by its pixels', ()=>{
+    const line = describeEvent({
+        width: 32, height: 32, hotSpot: { x: 1, y: 2 }, bgra: new Uint8Array(32 * 32 * 4),
+        shown: true, names: ['a', 'b'],
+    });
+    assert.equal(line,
+        'width=32 height=32 hotSpot={"x":1,"y":2} bgra=<4096 bytes> shown=true names=[a b]');
 });

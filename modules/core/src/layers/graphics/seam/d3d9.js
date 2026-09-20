@@ -51,7 +51,8 @@ import {
     GAMMA_RAMP_ENTRIES,
 } from '../d3d8/structs.js';
 import { D3DFMT_INDEX, D3DFMT, D3DRTYPE } from '../d3d8/constants.js';
-import { expandTexels, vertexCountOf } from '../d3d8/render.js';
+import { vertexCountOf } from '../d3d8/render.js';
+import { createCursorTeller } from './cursor.js';
 import { capabilityWords } from '../d3d9/caps.js';
 import { D3DCREATE, D3DDEVTYPE, PALETTE_BYTES } from '../d3d9/device.js';
 import { MAX_DECLARATION_LENGTH } from '../d3d9/declaration.js';
@@ -2179,29 +2180,8 @@ export function createDirect3D9Seam(
         },
     };
 
-    /**
-     * What the device holds as its cursor, as the taker wants it.
-     *
-     * @param {any} device
-     */
-    const tellCursor = device=>{
-        const held = device.GetCursor();
-        if (!cursor || !held.surface)
-        {
-            return;
-        }
-        /** @type {{ desc?: any }} */
-        const out = {};
-        held.surface.GetDesc(out);
-        const { Width: width, Height: height, Format: format } = out.desc;
-        const bytes = memory.readMemory(held.surface.base, width * height * 4);
-        cursor({
-            width, height,
-            hotSpot: { ...held.hotSpot },
-            bgra: expandTexels(format, bytes, width * height),
-            shown: held.shown,
-        });
-    };
+    /** Tells the taker the cursor the device holds, when it changed. */
+    const tellCursor = cursor ? createCursorTeller(cursor, memory.readMemory) : ()=>{};
 
     const rootInterfaces = [describe(IID_IDirect3D9, IDIRECT3D9_SLOTS, rootMethods)];
 

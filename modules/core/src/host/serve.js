@@ -319,6 +319,8 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
      */
     let reading = null;
 
+    /** The device's last refusal and how often it has repeated since. */
+    const gpuErrors = { last: '', repeats: 0 };
     /** @param {import('./messages.js').FromEngine} message */
     const post = message=>port.postMessage(message);
     /** @param {string} name @param {unknown} payload */
@@ -350,9 +352,34 @@ export function serveEngine(port, { createApp, gpu, screenOf, threaded = false, 
             : [];
         const opened = await adapter.requestDevice({ requiredFeatures: features });
         // A validation error the engine did not catch drops the whole frame
-        // it was in, silently; the console is where a person looks for why.
+        // it was in, silently. It goes into the run's own journal, beside the
+        // frame it dropped, where the person reading the run looks; the
+        // console gets it only while there is no journal yet. The device
+        // repeats one refusal every frame, so a repeat is counted, not written.
         opened.addEventListener('uncapturederror', (/** @type {any} */ event)=>{
-            console.error('WebGPU:', event.error?.message ?? event.error);
+            const message = String(event.error?.message ?? event.error).replace(/\s+/g, ' ');
+            if (message === gpuErrors.last)
+            {
+                gpuErrors.repeats++;
+                if (gpuErrors.repeats % 256 !== 0)
+                {
+                    return;
+                }
+            }
+            else
+            {
+                gpuErrors.last = message;
+                gpuErrors.repeats = 0;
+            }
+            const line = gpuErrors.repeats > 0 ? `${message} (x${gpuErrors.repeats + 1})` : message;
+            if (app)
+            {
+                app.log.write('error', 'gpu', line);
+            }
+            else
+            {
+                console.error('WebGPU:', line);
+            }
         });
         return {
             device: opened,
