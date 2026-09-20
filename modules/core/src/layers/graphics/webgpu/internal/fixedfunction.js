@@ -670,7 +670,8 @@ function fragmentBody(state, specularEnable){
  * @param {import('./pipeline.js').PipelineState} state
  * @param {readonly number[]} written  The vertex stage's varying locations.
  * @returns {{ wgsl: string, entry: string, samplers: { index: number, type: string }[],
- *     inputs: never[], outputs: never[], constants: number, error: string | null }}
+ *     inputs: never[], outputs: never[], reads: number[], constants: number,
+ *     error: string | null }}
  */
 export function fixedFragmentStage(state, written){
     const has = (/** @type {number} */ location)=>written.includes(location);
@@ -735,7 +736,8 @@ ${fragmentBody(state, state.specularEnable === true)}
     return {
         wgsl, entry: 'ps_main',
         samplers: state.stages.map((_, index)=>({ index, type: '2d' })),
-        inputs: [], outputs: [], constants: 0, error: null,
+        inputs: [], outputs: [], reads: written.filter(location=>location <= 10),
+        constants: 0, error: null,
     };
 }
 

@@ -236,6 +236,22 @@ function parse(argv){
             const [code, after] = argv[index + 1].split(',');
             return [{ code, after: Number(after) || 30 }];
         }),
+        // Text typed into whatever has the focus, one character per presented
+        // frame from `after` on, as `text,after`: each character is a key
+        // press with its character, the way the page's own keyboard delivers
+        // one. The text may not contain a comma.
+        typed: argv.flatMap((flag, index)=>{
+            if (flag !== '--type')
+            {
+                return [];
+            }
+            const at = argv[index + 1].lastIndexOf(',');
+            return [{ text: argv[index + 1].slice(0, at),
+                after: Number(argv[index + 1].slice(at + 1)) || 30 }];
+        }),
+        // The relay the run's Winsock reaches the world through, as the
+        // launcher names it: `--network wss://host/relay` joins room `harness`.
+        network: argv.includes('--network') ? argv[argv.indexOf('--network') + 1] : null,
         fog: !argv.includes('--no-fog'),
         mips: !argv.includes('--no-mips'),
         // Fields of the graphics layer's configuration, as `createApp` takes
@@ -803,7 +819,11 @@ export async function game(options){
     const server = await serveStatic({
         sandboxDir: PACKAGE_DIR,
         srcDir: join(PACKAGE_DIR, 'src'),
-        extra: [{ prefix: '/bundle/', root: directory }],
+        extra: [
+            { prefix: '/bundle/', root: directory },
+            // The networking client, for a run that names a relay.
+            { prefix: '/networking/', root: join(PACKAGE_DIR, '..', 'networking', 'src') },
+        ],
         coi: options.coi,
         port: options.port,
     });
@@ -874,6 +894,14 @@ export async function game(options){
             trace: options.trace,
             pointer: options.pointer,
             clicks: options.clicks,
+            typed: options.typed,
+            network: options.network
+                ? {
+                    module: new URL('/networking/client/index.js', pageUrl).href,
+                    url: options.network,
+                    room: 'harness',
+                }
+                : undefined,
             keys: options.keys,
             files: options.files,
             wholeFiles: options.saveFiles,

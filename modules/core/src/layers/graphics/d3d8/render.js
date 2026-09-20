@@ -3231,11 +3231,24 @@ export function createRenderer(options){
         }
         const layout = laid.layout;
         const shapes = shapeKey(layout);
+        // A varying the pixel stage reads and the vertex shader never writes
+        // is zero, as the vertex stage's own output: a fragment input with
+        // no vertex output fails the pipeline, where Direct3D reads whatever
+        // was left in the register.
+        const missing = program.vertex
+            ? pixel.reads.filter((/** @type {number} */ location)=>{
+                const base = translationOf(/** @type {object} */ (program.vertexShader), 'vs',
+                    ()=>translateShader(
+                        /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex)));
+                return !base.outputs.includes(location);
+            })
+            : [];
         const vertex = program.vertex
-            ? translationOf(/** @type {object} */ (program.vertexShader), `vs:${shapes}`,
+            ? translationOf(/** @type {object} */ (program.vertexShader),
+                `vs:${shapes}|w${missing.join(',')}`,
                 ()=>translateShader(
                     /** @type {import('../d3d9/shader.js').ParsedShader} */ (program.vertex),
-                    { inputs: layout.shapes }))
+                    { inputs: layout.shapes, alsoWrite: missing }))
             : hybridStageFor(`${program.declarationId}|${shapes}`, wanted, layout.shapes);
         if (vertex.error)
         {

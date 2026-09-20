@@ -136,6 +136,8 @@ export function varyingLocation(usage, index){
  * @property {ShaderInput[]} inputs
  * @property {number[]} outputs   A vertex stage's varyings, as the locations it
  *     writes (`varyingLocation`): what a fragment stage made for it may read.
+ * @property {number[]} reads     A pixel stage's varyings, as the locations it
+ *     reads: what the vertex stage paired with it has to write.
  * @property {{ index: number, type: string }[]} samplers
  * @property {number} constants   How many float registers the shader reaches.
  * @property {string | null} error
@@ -251,11 +253,14 @@ function moduleHeader(options){
  * Translates one shader.
  *
  * @param {import('./shader.js').ParsedShader} parsed
- * @param {{ inputs?: Map<number, InputShape> }} [options]
+ * @param {{ inputs?: Map<number, InputShape>, alsoWrite?: readonly number[] }} [options]
  *        For a vertex shader, the shape of each v# the declaration supplies,
  *        by register. Absent means every declared input arrives as four
  *        floats; present, a declared register it does not name reads as the
- *        default vertex.
+ *        default vertex. `alsoWrite` names varying locations the paired
+ *        pixel stage reads that this shader does not write: each is written
+ *        as zero, because a fragment input with no vertex output fails the
+ *        pipeline, where Direct3D reads whatever was there.
  * @returns {TranslatedShader}
  */
 export function translateShader(parsed, options = {}){
@@ -957,6 +962,8 @@ export function translateShader(parsed, options = {}){
     const outputFields = [];
     /** @type {number[]} */
     const outputs = [];
+    /** @type {number[]} */
+    const reads = [];
     /** @type {string[]} */
     const prologue = [];
     let entry;
@@ -1026,6 +1033,14 @@ export function translateShader(parsed, options = {}){
                 }
             }
         }
+        for (const location of options.alsoWrite ?? [])
+        {
+            if (!outputs.includes(location))
+            {
+                emits(location, `oX${location}`);
+                body.push(`    out.oX${location} = vec4f(0.0);`);
+            }
+        }
         entry = 'vs_main';
     }
     else
@@ -1034,15 +1049,18 @@ export function translateShader(parsed, options = {}){
         inputFields.push('    @builtin(front_facing) vFace: bool,');
         for (const set of [...pixelCoordinates].sort((a, b)=>a - b))
         {
-            inputFields.push(`    @location(${varyingLocation(D3DDECLUSAGE.TEXCOORD, set)})`
-                + ` t${set}: vec4f,`);
+            const location = varyingLocation(D3DDECLUSAGE.TEXCOORD, set);
+            inputFields.push(`    @location(${location}) t${set}: vec4f,`);
+            reads.push(location);
         }
         for (const input of [...pixelInputs].sort((a, b)=>a - b))
         {
             const declaration = major >= 3 ? semantics.get(input) : undefined;
-            inputFields.push(`    @location(${declaration
+            const location = declaration
                 ? varyingLocation(declaration.usage, declaration.usageIndex)
-                : varyingLocation(D3DDECLUSAGE.COLOR, input)}) v${input}: vec4f,`);
+                : varyingLocation(D3DDECLUSAGE.COLOR, input);
+            inputFields.push(`    @location(${location}) v${input}: vec4f,`);
+            reads.push(location);
         }
         for (const output of [...pixelOutputs].sort((a, b)=>a - b))
         {
@@ -1077,7 +1095,7 @@ export function translateShader(parsed, options = {}){
     ].join('\n');
 
     return {
-        wgsl, entry, inputs, outputs, samplers,
+        wgsl, entry, inputs, outputs, reads, samplers,
         constants: reach === Infinity ? (vertex ? 256 : 224) : reach,
         error,
     };
@@ -1156,7 +1174,8 @@ export function fixedVertexStage(elements, shapes){
         '}',
     ].join('\n');
     return {
-        wgsl, entry: 'vs_main', inputs, outputs, samplers: [], constants: HYBRID_CONSTANTS.COUNT,
+        wgsl, entry: 'vs_main', inputs, outputs, reads: [], samplers: [],
+        constants: HYBRID_CONSTANTS.COUNT,
         error: position ? null : 'the declaration carries no position',
     };
 }

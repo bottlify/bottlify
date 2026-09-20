@@ -3355,7 +3355,11 @@ function createDeviceObject(parameters, caps, services, identity){
     const createQuery = type=>{
         const queryCount = explicitCount();
         const occlusion = type === D3DQUERYTYPE.OCCLUSION;
-        let issued = false;
+        // A query is signalled as created: its data is available, if empty,
+        // until a BEGIN opens it, and again once END closes it. A program
+        // that waits for the GPU by polling an event query it never issued
+        // spins for ever on a query that answers "not yet" from the start.
+        let building = false;
         return {
             type,
             get refCount(){
@@ -3380,17 +3384,17 @@ function createDeviceObject(parameters, caps, services, identity){
                     {
                         return D3DERR_INVALIDCALL;
                     }
-                    issued = false;
+                    building = true;
                     return D3D_OK;
                 }
-                issued = true;
+                building = false;
                 return D3D_OK;
             },
             /**
              * The answer: for an event that the work is done, for an
              * occlusion query every pixel of the current target. A buffer too
-             * small for it is refused; a query never issued has nothing to
-             * say and says so with S_FALSE.
+             * small for it is refused; a query between BEGIN and END is still
+             * building and says so with S_FALSE.
              *
              * @param {{ value?: number } | null} out
              * @param {number} size  Bytes the caller has room for; zero asks nothing.
@@ -3400,7 +3404,7 @@ function createDeviceObject(parameters, caps, services, identity){
                 {
                     return D3DERR_INVALIDCALL;
                 }
-                if (!issued)
+                if (building)
                 {
                     return S_FALSE;
                 }

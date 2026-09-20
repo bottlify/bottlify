@@ -504,6 +504,62 @@ test('a vertex shader that writes no coordinate set ends the cascade before a sa
         assert.equal(h.device.release(), 0);
     });
 
+/**
+ * vs_2_0 that writes its position and a coordinate set and no colour.
+ *
+ *     dcl_position v0
+ *     dcl_texcoord v2
+ *     m4x4 oPos, v0, c0
+ *     mov oT0, v2
+ */
+const COLOURLESS_VERTEX_SHADER = [
+    versionToken(SHADER_KIND.VERTEX, 2, 0),
+    ...dclInput(D3DDECLUSAGE.POSITION, 0),
+    ...dclInput(D3DDECLUSAGE.TEXCOORD, 2),
+    op(OPCODE.M4x4, 3), dst(REGISTER.RASTOUT, 0), src(REGISTER.INPUT, 0), src(REGISTER.CONST, 0),
+    op(OPCODE.MOV, 2), dst(REGISTER.TEXCRDOUT, 0), src(REGISTER.INPUT, 2),
+    END_TOKEN,
+];
+
+test('a varying the pixel shader reads and the vertex shader never writes is written as zero',
+    async()=>{
+        // Direct3D reads whatever was left in the register; a WebGPU fragment
+        // input with no vertex output fails the pipeline and, with it, the
+        // whole frame. So the vertex stage writes it, as zero.
+        const h = harness();
+        /** @type {{ shader?: any }} */
+        const vs = {};
+        /** @type {{ shader?: any }} */
+        const ps = {};
+        assert.equal(h.device.CreateVertexShader(COLOURLESS_VERTEX_SHADER, vs), D3D_OK);
+        assert.equal(h.device.CreatePixelShader(PIXEL_SHADER, ps), D3D_OK);
+        h.device.SetVertexShader(vs.shader);
+        h.device.SetPixelShader(ps.shader);
+        h.device.SetTexture(0, h.texture);
+        await h.draw();
+        assert.deepEqual(h.reports, []);
+        assert.equal(h.device.diagnostics().programmable, 1);
+        const vertexModule = h.gpu.of('createShaderModule')
+            .map(call=>call.descriptor).find(module=>module.label.startsWith('vs:'));
+        assert.ok(vertexModule);
+        const colour = varyingLocation(D3DDECLUSAGE.COLOR, 0);
+        assert.ok(vertexModule.code.includes(`@location(${colour}) oX${colour}: vec4f`),
+            'the colour the pixel shader reads is an output');
+        assert.ok(vertexModule.code.includes(`out.oX${colour} = vec4f(0.0);`), 'written as zero');
+
+        h.device.SetTexture(0, null);
+        h.device.SetPixelShader(null);
+        h.device.SetVertexShader(null);
+        h.device.SetVertexDeclaration(null);
+        h.device.SetStreamSource(0, null, 0, 0);
+        ps.shader.release();
+        vs.shader.release();
+        h.texture.release();
+        h.declaration.release();
+        h.vb.release();
+        assert.equal(h.device.release(), 0);
+    });
+
 test('a declaration the GPU cannot deliver is declined with the reason', async()=>{
     const h = harness();
     /** @type {{ shader?: any }} */
