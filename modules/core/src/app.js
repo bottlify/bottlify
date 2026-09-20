@@ -4911,6 +4911,7 @@ async function buildApp(options){
                 ...['cpu', 'gpu', 'audio', 'video', 'input', 'net', 'com', 'hook']
                     .map(area=>`call.${area}`),
                 'input.press',
+                'input.message',
             ],
 
             /**

@@ -266,7 +266,13 @@ calls and a reader who has not asked for them should pay a lookup, not a formatt
 first instruction — which matters, since everything a program decides about a device it decides
 while starting up. The application API re-exposes `drain`, `recent`, `setLevel`,
 `setDefaultLevel`, `profile`, `frames`, and `areas()` (the list above, so a filter can offer an
-area before anything in it has been logged). Every engine event is also written to the journal
+area before anything in it has been logged). Two areas are the other end of the same question --
+not what the program asked but what it was told, at `trace`: `input.press` is one line per
+pointer press as it reached a window (button, up or down, the point, the message and its
+parameters), and `input.message` is one line per message a window procedure received, whoever
+sent it -- the queue, a `SendMessage`, or the window manager itself -- since what a program does
+on a message (reset its device, pause, throttle itself) is decided in that procedure, and its
+own calls never say what it was told. Every engine event is also written to the journal
 under the event's name as its category (`divergence`, `unimplemented`, `bundle-retry`, …).
 
 ## 4. Limitations and divergences

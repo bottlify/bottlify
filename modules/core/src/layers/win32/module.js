@@ -158,6 +158,7 @@ export const win32Module = {
         const kernel = host.requireApi('kernel');
         const bridge = host.requireApi('bridge');
         const filesystem = host.requireApi('filesystem');
+        const journal = host.requireApi('log');
 
         // The one namespace a mutex, event, semaphore, timer and file mapping
         // all share. Handed a table from outside when there is a process
@@ -1091,6 +1092,21 @@ export const win32Module = {
                 // offered one the device it then creates does not have.
                 screen: config?.screen,
                 dispatching,
+                // One line per message a window procedure receives, under
+                // its own category and nothing at all when nobody asked: a
+                // program's calls say what it asked, never what it was told,
+                // and what it was told is where a device reset, a pause or a
+                // throttle is decided.
+                trace: message=>{
+                    if (!journal.enabled('input.message', journal.Level.TRACE))
+                    {
+                        return;
+                    }
+                    journal.write('trace', 'input.message',
+                        'hwnd=0x{0} msg=0x{1} wParam=0x{2} lParam=0x{3}',
+                        message.hwnd.toString(16), message.message.toString(16),
+                        message.wParam.toString(16), message.lParam.toString(16));
+                },
                 dispatch: (wndProc, message, thread)=>bridge.callGuest({
                     entry: wndProc,
                     // The four arguments a window procedure declares, in order.

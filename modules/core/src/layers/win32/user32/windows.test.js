@@ -170,7 +170,7 @@ const PARKED = Object.freeze({ parked: true });
  * @param {(id: number) => boolean} [options.threadExists] Which thread identifiers
  *        name a thread of this process, for PostThreadMessage.
  */
-function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists } = {}){
+function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExists, trace } = {}){
     const memory = fakeMemory();
     const handles = fakeHandles();
     const queue = createMessageQueue();
@@ -204,6 +204,7 @@ function setup({ heap = false, reply, waitForObjects, now, hookReply, threadExis
         windowService: handed=>{
             service = handed;
         },
+        trace,
         dispatch: (wndProc, message, thread)=>{
             dispatched.push(thread === undefined
                 ? { wndProc, ...message } : { wndProc, ...message, thread });
@@ -294,8 +295,8 @@ function createWindow(fns, memory, options = {}){
  *     & { reply?: (message: any) => any }} [options]
  */
 function withWindow(options = {}){
-    const { reply, ...rest } = options;
-    const context = setup({ reply });
+    const { reply, trace, ...rest } = options;
+    const context = setup({ reply, trace });
     putClass(context.memory, rest);
     context.fns.RegisterClassA.handler([CLASS_STRUCT]);
     const hwnd = createWindow(context.fns, context.memory, rest);
@@ -481,6 +482,16 @@ test('a rectangle of a window that is gone is not written', ()=>{
     memory.fill(RECT_BUFFER, RECT.SIZE / 4);
     assert.equal(fns.GetClientRect.handler([hwnd, RECT_BUFFER]), 0);
     assert.equal(memory.u32(RECT_BUFFER), UNTOUCHED);
+});
+
+test('every message a procedure receives is told to the trace, whoever sent it', ()=>{
+    /** @type {any[]} */
+    const told = [];
+    const { fns, hwnd } = withWindow({ trace: message=>told.push(message) });
+    const before = told.length;
+    fns.SendMessageA.handler([hwnd, 0x0401, 7, 9]);
+    assert.deepEqual(told.slice(before).map(m=>[m.hwnd, m.message, m.wParam, m.lParam]),
+        [[hwnd, 0x0401, 7, 9]]);
 });
 
 test('placing a window as the system would moves it and tells the program', ()=>{

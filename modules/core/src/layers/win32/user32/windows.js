@@ -356,6 +356,12 @@ function characterFor(key){
  * @property {{ hwnd: number, message: number, at: number }[]} [dispatching]
  *           Where a window procedure that has not returned is noted, for
  *           whoever is measuring. Absent in a build that is not.
+ * @property {(message: DispatchedMessage) => void} [trace]
+ *           Told every message a window procedure is about to receive,
+ *           whoever sends it: the queue, a SendMessage, this layer itself.
+ *           What a program does on a message is decided in its procedure,
+ *           and its calls into this library say what it asked, never what
+ *           it was told.
  * @property {(wndProc: number, message: DispatchedMessage, thread?: unknown) => number} dispatch
  *           Runs a window procedure. One line from being the bridge's callback.
  *           A caller that has awaited names the thread whose call it answers.
@@ -583,6 +589,7 @@ export function createWindowFunctions(host){
      * @returns {number | Promise<number>}
      */
     const callProcedure = (address, message, thread)=>{
+        host.trace?.(message);
         const procedure = procedures.get(address >>> 0);
         if (procedure)
         {
