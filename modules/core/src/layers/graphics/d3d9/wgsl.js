@@ -375,8 +375,12 @@ export function translateShader(parsed, options = {}){
                     used.add('a0');
                     return 'a0';
                 }
-                if (major < 2 && !writing)
+                if (major < 2)
                 {
+                    // Once `tex` has filled it, a 1.x texture register is a
+                    // temporary like any other: the arithmetic that follows
+                    // reads it and writes it (`mul t2.xyz, t1, v0`), and a
+                    // write into the stage's immutable input would not build.
                     used.add(`t${index}`);
                     return `t${index}`;
                 }

@@ -377,6 +377,19 @@ test('a 1.x pixel shader\'s tex and texcoord translate, and its addressing modes
     assertLine(legacy.wgsl, 'out.oC0 = oC0;');
     assert.deepEqual(legacy.samplers, [{ index: 0, type: 'texture_2d<f32>' }]);
 
+    // Once filled, a 1.x texture register is written like a temporary: the
+    // write goes to the local, never to the stage's immutable input.
+    const rewritten = translateShader(parseShader([PS_1_1,
+        op(OPCODE.TEX, 0), dst(REGISTER.TEXTURE, 1),
+        op(OPCODE.MUL, 0), dst(REGISTER.TEXTURE, 2), src(REGISTER.TEXTURE, 1),
+        src(REGISTER.INPUT, 0),
+        op(OPCODE.MOV, 0), dst(REGISTER.TEMP, 0), src(REGISTER.TEXTURE, 2),
+        END_TOKEN]));
+    assert.equal(rewritten.error, null);
+    assertLine(rewritten.wgsl, 't2 = (t1 * in.v0);');
+    assert.ok(!rewritten.wgsl.includes('in.t2 ='), 'the input is never assigned');
+    assertLine(rewritten.wgsl, 'var t2: vec4f = vec4f(0.0);');
+
     const bumped = translateShader(parseShader([PS_1_1,
         op(OPCODE.TEXBEM, 0), dst(REGISTER.TEXTURE, 1), src(REGISTER.TEXTURE, 0),
         END_TOKEN]));
