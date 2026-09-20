@@ -19,14 +19,16 @@ test('the package resolves by name and exposes its building blocks', async()=>{
     // contract: a subpath that stops resolving breaks a consumer, not a test.
     const root = await import('@bottlify/cork');
     assert.equal(root.createEngine, createEngine);
-    for (const subpath of ['@bottlify/cork/wasm', '@bottlify/cork/runtime'])
-    {
-        await assert.rejects(import(subpath), (/** @type {any} */ e)=>{
-            // Not built yet: the file is missing, which is the one failure
-            // allowed here. A misspelt `exports` entry fails differently
-            // (ERR_PACKAGE_PATH_NOT_EXPORTED), and that is what this pins.
-            assert.equal(e.code, 'ERR_MODULE_NOT_FOUND', `${subpath}: ${e.message}`);
-            return true;
-        });
-    }
+    const wasm = await import('@bottlify/cork/wasm');
+    assert.equal(typeof wasm.ModuleBuilder, 'function');
+    // A name the type checker cannot resolve yet, held in a variable so it
+    // does not try: the file arrives with the runtime step.
+    const runtime = '@bottlify/cork/runtime';
+    await assert.rejects(import(runtime), (/** @type {any} */ e)=>{
+        // Not built yet: the file is missing, which is the one failure
+        // allowed here. A misspelt `exports` entry fails differently
+        // (ERR_PACKAGE_PATH_NOT_EXPORTED), and that is what this pins.
+        assert.equal(e.code, 'ERR_MODULE_NOT_FOUND', e.message);
+        return true;
+    });
 });

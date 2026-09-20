@@ -1,6 +1,6 @@
 # Cork — the integration plan
 
-**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract), 1.1 (`engine` configuration, the hybrid host with no translator), 1.3 (the machine snapshot and its compare; the emulator host's SSE/x87 record accessors). 1.2 waits on the fork's CI publishing the corpus asset. The design this plan carries out
+**Status:** in progress since 2026-09-20. Landed: 1.0 (the package and the executor contract), 1.1 (`engine` configuration, the hybrid host with no translator), 1.3 (the machine snapshot and its compare; the emulator host's SSE/x87 record accessors), 1.5 (the wasm encoder and the feature probe). The fork's CI publishes the corpus asset since release build-1460531. The design this plan carries out
 is [`cork-x86-translator.md`](./cork-x86-translator.md) (and the first entry of
 [`decisions.md`](./decisions.md) §B); read that first. This document says *in which order, in
 which files, behind which contracts, checked by which tests and accepted by which number* the
