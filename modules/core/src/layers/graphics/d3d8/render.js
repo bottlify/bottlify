@@ -4298,6 +4298,24 @@ export function createRenderer(options){
         /** @returns {Promise<void>} settled when every presented frame has been submitted */
         idle: ()=>chain,
 
+        /**
+         * A surface the program can no longer reach: its GPU texture goes
+         * now rather than when the collector finds the object. Only a
+         * surface this renderer made a texture for on its own is affected;
+         * a level of a texture is the texture's and goes with it.
+         *
+         * @param {any} surface a d3d8 surface
+         */
+        retire(surface){
+            const made = surfaces.get(surface);
+            if (made)
+            {
+                surfaces.delete(surface);
+                dirtyTargets.delete(surface);
+                backend.destroySurface?.(made);
+            }
+        },
+
         diagnostics(){
             return {
                 frames: counters.frames,

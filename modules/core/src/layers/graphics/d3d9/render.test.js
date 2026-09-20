@@ -421,6 +421,33 @@ test('a reset puts the viewport back over the whole target', ()=>{
         'a viewport left over from before the reset would misplace every vertex');
 });
 
+test('a reset gives the previous back buffer and depth back to the GPU', async()=>{
+    // A program that resets its device a few times a second leaves a
+    // screen-sized target and depth behind each time; the collector does not
+    // watch the GPU's memory, so the renderer has to give them back itself.
+    const h = harness({ width: 8, height: 8 });
+    const { device } = h;
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    await h.present();
+    const made = h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>['target', 'depth'].includes(call.descriptor.label));
+    assert.equal(made.length, 2, 'the frame made the back buffer and its depth');
+    assert.equal(h.gpu.count('destroyTexture'), 0);
+
+    assert.equal(device.Reset(), D3D_OK);
+    assert.deepEqual(h.gpu.of('destroyTexture').map((/** @type {any} */ call)=>call.texture),
+        made.map((/** @type {any} */ call)=>call.texture),
+        'both of the old ones are destroyed, and nothing else');
+
+    assert.equal(device.Clear(0, null, D3DCLEAR.TARGET | D3DCLEAR.ZBUFFER, argb(1, 2, 3), 1, 0),
+        D3D_OK);
+    await h.present();
+    assert.equal(h.gpu.of('createTexture')
+        .filter((/** @type {any} */ call)=>['target', 'depth'].includes(call.descriptor.label))
+        .length, 4, 'the new back buffer and depth are new textures');
+});
+
 test('a viewport wider than its target is refused', ()=>{
     const h = harness({ width: 8, height: 8 });
 

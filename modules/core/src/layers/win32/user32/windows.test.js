@@ -525,6 +525,17 @@ test('placing a window as the system would moves it and tells the program', ()=>
     assert.equal(service.place(0x9999, 0, 0, 1, 1), false,
         'a window that is not there is not placed');
     assert.deepEqual(service.list().map(entry=>[entry.width, entry.height]), [[1024, 768]]);
+
+    // Placed again where it already is -- what a device reset does -- nothing
+    // is said: a program that resets its device on WM_SIZE would otherwise
+    // reset it for ever.
+    assert.equal(service.place(hwnd, 0, 0, 1024, 768), true);
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null,
+        'the same place is no move and no size');
+    assert.equal(service.place(hwnd, 0, 0, 800, 600), true);
+    const again = queue.peek({ hwnd: null, first: 0, last: 0, remove: true });
+    assert.equal(again?.message, 0x0005, 'a new size is a size alone');
+    assert.equal(queue.peek({ hwnd: null, first: 0, last: 0, remove: true }), null);
 });
 
 test('MoveWindow changes both rectangles', ()=>{

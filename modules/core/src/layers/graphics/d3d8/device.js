@@ -747,6 +747,14 @@ function createDeviceObject(parameters, caps, behaviourFlags, services, identity
     function buildImplicitResources(){
         const width = presentParameters.backBufferWidth ?? 640;
         const height = presentParameters.backBufferHeight ?? 480;
+        for (const surface of backBuffers)
+        {
+            renderer?.retire(surface);
+        }
+        if (autoDepthStencil)
+        {
+            renderer?.retire(autoDepthStencil);
+        }
         backBuffers = [];
         for (let index = 0; index < (presentParameters.backBufferCount ?? 1); index++)
         {

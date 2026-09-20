@@ -78,7 +78,7 @@ the module graph is built. All are optional.
 | `com()` | The COM class registry; graphics and audio register their factories here. |
 | `heap()` | The one allocator: `allocate`, `free`, `block`, `resize`, `diagnostics`. |
 | `mappings()`, `ioCompletionWaits()`, `waveDevices()`, `waveThread()`, `criticalSections()`, `messages()`, `windows()`, `windowProcedures()` | Live views of the state below, used by `diagnostics()`. |
-| `placeWindow(hwnd, x, y, width, height)` | Place a top-level window as the system would and tell the program with `WM_MOVE` and `WM_SIZE`. |
+| `placeWindow(hwnd, x, y, width, height)` | Place a top-level window as the system would and tell the program with `WM_MOVE` when it moved and `WM_SIZE` when its client size changed -- nothing for a placement that changed neither, as `DefWindowProc` says nothing for one, since a program that resets its device on `WM_SIZE` would otherwise be reset by its own reset's placement without end. |
 | `exitCode()` | Set once the program has asked to terminate; `null` before. |
 
 ### `diagnostics()` metrics

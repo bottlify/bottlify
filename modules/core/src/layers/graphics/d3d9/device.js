@@ -808,10 +808,12 @@ function createDeviceObject(parameters, caps, services, identity){
         for (const surface of backBuffers)
         {
             free(surface.base);
+            renderer?.retire(surface);
         }
         if (autoDepthStencil)
         {
             free(autoDepthStencil.base);
+            renderer?.retire(autoDepthStencil);
         }
         const width = presentParameters.backBufferWidth ?? 640;
         const height = presentParameters.backBufferHeight ?? 480;

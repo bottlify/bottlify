@@ -52,6 +52,9 @@ export function createFakeDevice(options = {}){
             calls.push({ op: 'createView', texture, view });
             return view;
         };
+        texture.destroy = ()=>{
+            calls.push({ op: 'destroyTexture', texture });
+        };
         calls.push({ op: 'createTexture', texture, descriptor });
         return texture;
     };

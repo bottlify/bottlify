@@ -427,11 +427,26 @@ export function createBackend(options){
         return pass;
     }
 
+    /**
+     * Gives a surface's memory back to the GPU now. A texture nothing refers
+     * to goes when the collector gets to it, and the GPU's memory is not what
+     * the collector watches: a device reset a few times a second, each
+     * leaving a screen-sized target and depth behind, is out of it long
+     * before then.
+     *
+     * @param {import('./contract.js').Surface} surface
+     */
+    const destroySurface = surface=>{
+        surface.texture.destroy?.();
+        profiler.count('surfacesDestroyed');
+    };
+
     return {
         LockFlags,
         BufferUsage,
         TextureUsage,
         createSurface,
+        destroySurface,
 
         /**
          * A frame has been recorded and queued for replay. Renames after

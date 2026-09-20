@@ -2169,9 +2169,13 @@ export function createWindowFunctions(host){
             })),
         /**
          * Places a window the way SetWindowPos does, and tells the program the
-         * way DefWindowProc would: a move and a size. A program of this era
-         * re-reads its rectangle on WM_SIZE and clips its cursor to it, which
-         * is exactly what has to happen once the picture is another size.
+         * way DefWindowProc would: a move when it moved and a size when its
+         * size changed, and nothing for a placement that changed neither. A
+         * program of this era re-reads its rectangle on WM_SIZE and clips its
+         * cursor to it, which is exactly what has to happen once the picture
+         * is another size -- and one that resets its device on WM_SIZE would
+         * be reset by the size its own reset placed it at, without end, if
+         * the message came whether or not anything changed.
          *
          * @param {number} hwnd @param {number} x @param {number} y
          * @param {number} width @param {number} height
@@ -2182,6 +2186,8 @@ export function createWindowFunctions(host){
             {
                 return false;
             }
+            const before = geometry.clientRect(record);
+            const moved = record.x !== (x | 0) || record.y !== (y | 0);
             record.x = x | 0;
             record.y = y | 0;
             record.width = width | 0;
@@ -2190,10 +2196,18 @@ export function createWindowFunctions(host){
             // its style describes takes no room, so the client area is the
             // whole mode and a program's cursor arithmetic sees the picture.
             record.frameless = true;
-            host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
-                lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
-            host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
-                lParam: ((height & 0xffff) << 16 | width & 0xffff) >>> 0 });
+            const after = geometry.clientRect(record);
+            if (moved)
+            {
+                host.queue.post({ hwnd: record.hwnd, message: WM_MOVE, wParam: 0,
+                    lParam: ((y & 0xffff) << 16 | x & 0xffff) >>> 0 });
+            }
+            if (after.right - after.left !== before.right - before.left
+                || after.bottom - after.top !== before.bottom - before.top)
+            {
+                host.queue.post({ hwnd: record.hwnd, message: WM_SIZE, wParam: SIZE_RESTORED,
+                    lParam: ((height & 0xffff) << 16 | width & 0xffff) >>> 0 });
+            }
             return true;
         },
     });
