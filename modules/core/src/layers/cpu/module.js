@@ -349,6 +349,8 @@ export const cpuModule = {
                             getEflags: emulator.getEflags,
                             x87Read: ()=>0,
                             rdtsc: ()=>0n,
+                            handoffPage: emulator.handoffPage,
+                            dirtyCode: emulator.dirtyCode,
                         },
                     });
                 }

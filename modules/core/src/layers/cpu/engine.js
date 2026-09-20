@@ -52,6 +52,9 @@
  * @property {number} gsBase       The same for 64-bit Windows; -1 when absent.
  * @property {number} counter      u32 retired-instruction word (hybrid: the emulator's).
  * @property {number} tables       Wasm address of the engine's own tables.
+ * @property {number} codePages    Wasm address of the other executor's byte-per-page
+ *                                 "has compiled code" table (hybrid), or -1: a store into
+ *                                 such a page leaves `stale` so its cache can be dirtied.
  * @property {string} id           A hash of every field above.
  */
 
@@ -78,6 +81,12 @@
  * @property {(index: number) => number} x87Read  A physical x87 register the state
  *     block holds in a form the engine cannot read inline, as an f64.
  * @property {() => bigint} rdtsc
+ * @property {(page: number, on: boolean) => void} [handoffPage]
+ *     Hybrid: flags a page the engine holds code for, so the other executor's slice
+ *     returns when the guest arrives there (`handoffPage` on the emulator's host).
+ * @property {(address: number, length: number) => void} [dirtyCode]
+ *     Hybrid: a store translated code made into a page the other executor compiled;
+ *     the host dirties that cache.
  */
 
 /**
@@ -154,6 +163,8 @@
  * @property {() => Promise<number>} translatePending
  *     Regions published; resolves when the batch is instantiated.
  * @property {(page: number) => void} invalidatePage  A host or guest write into code.
+ * @property {(page: number) => boolean} holdsPage  Whether a published region spans the page
+ *     (the pages the emulator's handoff bit is set for).
  * @property {() => EngineDiagnostics} diagnostics
  */
 

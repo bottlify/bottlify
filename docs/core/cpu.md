@@ -41,7 +41,13 @@ emulator under another name, proven by identical instruction counts) the slice i
 while the guest stands at an address the translator has an entry for, the translator runs it
 with what remains of the slice's budget, and when it leaves for an untranslated address, a
 fault (the emulator then re-executes the instruction and raises it the ordinary way) or a
-trap, the emulator takes one turn with the rest. The translator's layout is the emulator's
+trap, the emulator takes a turn with the rest -- and gives it back: the runtime sets the
+emulator's per-page handoff bit for every page a published region spans (`handoffPage`,
+cleared when the page holds none), and the emulator's slice returns as soon as it reaches
+such a page having retired something, so the two go round within one slice until the budget
+is spent. An emulator build without the export runs its turn to a boundary of its own and
+ends the slice; `cork.handoffMisses` counts the slices that so ended inside a page the
+translator holds (`Runtime.holdsPage`), zero with the export. The translator's layout is the emulator's
 own register file, read off its typed views at boot (`stateLayout`), and its tables take the
 top of the guest RAM (`engine.js`'s `TABLES_RESERVE`; the layer reports the RAM below it as
 the memory's size), so a switch between the two copies nothing. Translated code adds what it
@@ -62,9 +68,13 @@ honoured, an exception behaves as masked. The transcendentals (`fsin`, `fcos`, `
 `fptan`, `fpatan`, `f2xm1`, `fyl2x`, `fyl2xp1`) go through the host's `Math`, imported by every
 translated module, as the emulator's do, so the two agree on one engine; the environment
 forms (`fnsave`, `frstor`, `fldenv`, `fnstenv`, `fxsave`, `fxrstor`) end a region and run on the
-emulator. What the emulator's own compiler compiled is not protected from a store made by
-translated code (the emulator sees only its own stores); a program that writes code it then
-runs through the emulator is the case the handoff step's fork change is to close.
+emulator. A store translated code makes into a page the emulator's own compiler compiled is
+seen too: the store checks the emulator's byte-per-page "has code" table beside the
+translator's own flags (`layout.codePages`, the fork's `bottlify_page_has_code_ptr`) and
+leaves `stale` with the address and width, and the runtime dirties the emulator's cache for
+that range (`dirtyCode`, the fork's `jit_dirty_cache`) as the emulator's own stores do. A
+host write into guest memory (`writePhysical`, `writeData`, `fillData`) invalidates the
+translator's regions on every page it touches, as it already dirties the emulator's.
 
 Translated code tests a page-flag table before every load and store (one byte per 4 KiB page
 of the address space, kept in the memory after the guest RAM): a page beyond RAM is
@@ -103,7 +113,7 @@ enter the type check or the bundle.
 | `thunkCapacity` | number (bytes)             | `16384 * 16`        | Room reserved for the stub table: 16 384 slots of 16 bytes. Every import and every COM method takes one; none is ever given back. |
 | `jit`           | `Record<number, number>`   | `undefined`         | The emulator's compiler budgets by config index (1 = pages one module may span, 3 = extra basic blocks discovery may follow, 6 = chaining). For measurement, not production. |
 | `sampling`      | `boolean`                  | `true`              | Whether `runSlice` credits an address bucket per slice (see "Sampling" below). Always on; `false` is the only way to turn it off, for a caller measuring the emulator itself. |
-| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `cork` and `differential` are refused with `cpu: engine "cork" is not built yet` until their steps land. `hybrid` today composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
+| `engine`        | `'emulator' \| 'hybrid' \| 'cork' \| 'differential'` | `'emulator'` | Which execution engine runs the program (see "Engines" above). An unknown name is refused by `create()` with `cpu: unknown engine "x" (…)`; `cork` and `differential` are refused with `cpu: engine "cork" is not built yet` until their steps land. `hybrid` without `engineUrl` composes the emulator's host with no translator attached and runs a program exactly as `emulator` does, to the instruction. |
 
 Chaining (index 6) is switched on automatically when the running engine validates a wasm tail
 call and the caller has not set the knob (`tailCallsSupported()` in `internal/v86-host.js`).
@@ -344,7 +354,12 @@ processor stands in a `hlt` (`halted`/`wake`), for the translator package's diff
 snapshots this machine, runs the same code on both engines and compares; cold paths, nothing a
 slice pays for. Two emulator methods are wrapped for counting:
 `codegen_finalize` (published modules, and the first refusal) and `jit_clear_func` (discarded
-ones).
+ones). For the translator, three exports of the fork's own: `bottlify_handoff_page(page, on)`
+sets the per-page bit at which `run_slice` returns (absent in an older build, the host counts
+the request in `handoffUnavailable()` and the slice runs to its own boundary),
+`bottlify_page_has_code_ptr()` names the emulator's own code-page table for the translator's
+stores to test, and `jit_dirty_cache(address, length)` takes a translated store into such a
+page.
 
 ## 4. Limitations and divergences
 

@@ -1966,3 +1966,46 @@ test('the SSE and x87 state read as a record and go back as one, for the harness
     assert.deepEqual([...after.raw], [...before.raw]);
     host.stop();
 });
+
+test('a slice returns on reaching a flagged page, and runs on when the flag is gone', async()=>{
+    // A loop over two pages, the second flagged: every slice stops at the
+    // second page's first byte, having retired the instructions on the way,
+    // and never returns empty-handed from the page it started on.
+    const host = await boot();
+    if (!host.handoffAvailable())
+    {
+        assert.equal(host.handoffUnavailable(), 0);
+        host.handoffPage(9, true);
+        assert.equal(host.handoffUnavailable(), 1, 'counted, not raised');
+        host.stop();
+        return;
+    }
+    const SECOND = GUEST_CODE + 0x1000;
+    host.writePhysical(GUEST_CODE, new Uint8Array([
+        0xb9, ...u32(100000),               //     mov ecx, N
+        0x49,                               // L:  dec ecx
+        0xe9, ...u32(SECOND - (GUEST_CODE + 10)), //  jmp SECOND
+    ]));
+    host.writePhysical(SECOND, new Uint8Array([
+        0x0f, 0x85, ...u32((GUEST_CODE + 5) - (SECOND + 6)), // jnz L
+        0xf4,                               //     hlt
+    ]));
+    host.writePhysical(ENTRY_VECTOR, new Uint8Array(u32(GUEST_CODE)));
+    host.cpu().in_hlt[0] = 0;
+    host.cpu().instruction_pointer[0] = GUEST_CODE;
+    host.handoffPage(SECOND >>> 12, true);
+    for (let i = 0; i < 20; i++)
+    {
+        const retired = host.runSlice(1000);
+        assert.equal(host.eip(), SECOND, `slice ${i} stopped at the flagged page`);
+        assert.ok(retired >= 1 && retired <= 3, `slice ${i} retired ${retired}`);
+        if (i % 5 === 4)
+        {
+            await new Promise(resolve=>setTimeout(resolve, 0));
+        }
+    }
+    host.handoffPage(SECOND >>> 12, false);
+    const retired = host.runSlice(1000);
+    assert.ok(retired >= 900, `without the flag the slice runs on (${retired})`);
+    host.stop();
+});

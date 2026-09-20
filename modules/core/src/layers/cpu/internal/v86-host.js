@@ -280,6 +280,7 @@ export async function createV86Host(config){
     let clearedFunctions = 0;
     let hostWrites = 0;
     let hostWrittenBytes = 0;
+    let handoffUnavailable = 0;
     /** @type {unknown} */
     let finaliseFailure = null;
     // The emulator counts instructions in a thirty-two-bit word, which a run
@@ -500,6 +501,43 @@ export async function createV86Host(config){
         x87Top: ()=>cpu.fpu_stack_ptr[0] & 7,
 
         /**
+         * Flags a page a translator holds code for: a slice arriving there
+         * after retiring something returns, so the hybrid host can hand the
+         * guest over at once. Without the export (an older build) the flag
+         * is counted and the slice runs to a boundary of its own.
+         *
+         * @param {number} page @param {boolean} on
+         */
+        handoffPage(page, on){
+            const exported = cpu.wm.exports.bottlify_handoff_page;
+            if (typeof exported === 'function')
+            {
+                exported(page >>> 0, on ? 1 : 0);
+            }
+            else
+            {
+                handoffUnavailable++;
+            }
+        },
+        /** Whether the build has the handoff export. */
+        handoffAvailable: ()=>typeof cpu.wm.exports.bottlify_handoff_page === 'function',
+        /** Times a handoff flag was asked of a build without the export. */
+        handoffUnavailable: ()=>handoffUnavailable,
+
+        /**
+         * A store a translator made into a page this emulator compiled:
+         * its cache is dirtied as the emulator's own stores dirty it.
+         *
+         * @param {number} address @param {number} length
+         */
+        dirtyCode(address, length){
+            if (length > 0)
+            {
+                cpu.wm.exports.jit_dirty_cache(address >>> 0, (address + length) >>> 0);
+            }
+        },
+
+        /**
          * Where every register lives in the emulator's memory, as the
          * executor contract names them: read off the emulator's own typed
          * views, so an engine's translated code addresses the emulator's
@@ -512,6 +550,7 @@ export async function createV86Host(config){
         stateLayout(reserve){
             const ramBase = cpu.mem8.byteOffset;
             const ramSize = config.memorySize - reserve;
+            const codePagesPtr = cpu.wm.exports.bottlify_page_has_code_ptr;
             const fields = {
                 bits: /** @type {32} */ (32),
                 ramBase,
@@ -534,6 +573,7 @@ export async function createV86Host(config){
                 gsBase: -1,
                 counter: cpu.instruction_counter.byteOffset,
                 tables: ramBase + ramSize,
+                codePages: typeof codePagesPtr === 'function' ? codePagesPtr() >>> 0 : -1,
             };
             return { ...fields, id: `v86:${Object.values(fields).join(',')}` };
         },

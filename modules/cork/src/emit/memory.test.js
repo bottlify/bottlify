@@ -188,3 +188,24 @@ test('the undo log records every store with its old bytes, in order, and folds t
     plain.runProgram(CODE);
     assert.equal(readUndoLog(plain.memory, plain.layout).entries.length, 0);
 });
+
+test('a store into a page the other executor compiled leaves stale too, with the width', ()=>{
+    const m = createTestMachine({ codePages: true });
+    // Page 3 in the other executor's table: 1 = has compiled code.
+    new Uint8Array(m.memory.buffer)[/** @type {number} */ (m.layout.codePages) + 3] = 1;
+    m.write(CODE, [
+        0xb8, 0x78, 0x56, 0x34, 0x12,       // mov eax, 0x12345678
+        0x66, 0xa3, 0x06, 0x30, 0, 0,       // mov [0x3006], ax
+        0xf4,
+    ]);
+    m.setReg('esp', STACK);
+    const exit = m.runProgram(CODE);
+    assert.equal(exit.kind, Exit.STALE);
+    assert.equal(m.pages.staleAddress(), 0x3006);
+    assert.equal(m.pages.staleSize(), 2);
+    assert.equal(m.pages.get(3), 0, "this engine's own flag was never set");
+    const plain = createTestMachine({ codePages: true });
+    plain.write(CODE, [0xb8, 0x78, 0x56, 0x34, 0x12, 0x66, 0xa3, 0x06, 0x30, 0, 0, 0xf4]);
+    plain.setReg('esp', STACK);
+    assert.equal(plain.runProgram(CODE).kind, Exit.HALT, 'an unmarked page: no exit');
+});

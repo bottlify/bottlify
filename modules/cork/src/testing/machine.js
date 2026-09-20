@@ -21,10 +21,13 @@ import { createPageTable } from '../runtime/pages.js';
 const REGISTERS = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
 
 /**
- * @param {{ ramSize?: number }} [options]
+ * @param {{ ramSize?: number, codePages?: boolean }} [options]
  */
-export function createTestMachine({ ramSize = 1 << 20 } = {}){
-    const layout = ownLayout({ ramSize });
+export function createTestMachine({ ramSize = 1 << 20, codePages = false } = {}){
+    // With `codePages`, the undo ring's area doubles as another executor's
+    // byte-per-page code table, for the tests of a store into its pages.
+    const own = ownLayout({ ramSize });
+    const layout = codePages ? { ...own, codePages: own.tables + Tables.UNDO_RING } : own;
     const memory = new WebAssembly.Memory({ initial: pagesFor(layout, Tables.SIZE) });
     const pages = createPageTable(memory, layout);
     // The x87 as a fresh processor has it: every register empty, the

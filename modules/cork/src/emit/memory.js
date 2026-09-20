@@ -75,10 +75,18 @@ export function noteStore(e, size){
         b.localGet(Local.addr).i32const(size).call(e.context.undo);
     }
     b.localGet(Local.pflags).i32const(PageFlag.HAS_CODE).op(I32.and);
+    if (e.layout.codePages >= 0)
+    {
+        // The other executor's own table too: its compiled page is as much
+        // code as this engine's, and the runtime dirties its cache.
+        b.localGet(Local.addr).i32const(12).op(I32.shrU)
+            .load('i32_8u', { offset: e.layout.codePages }).op(I32.or);
+    }
     e.openIf('code', EMPTY);
     b.i32const(1).localSet(Local.stale);
     b.i32const(0).localGet(Local.addr)
         .store('i32', { offset: e.layout.tables + Tables.STALE_ADDRESS });
+    b.i32const(0).i32const(size).store('i32', { offset: e.layout.tables + Tables.STALE_SIZE });
     e.close();
     e.staleCheck = true;
 }

@@ -33,6 +33,7 @@ export const Tables = Object.freeze({
     PAGE_FLAGS: 0,
     PAGE_FLAGS_SIZE: 1 << 20,
     STALE_ADDRESS: 1 << 20,
+    STALE_SIZE: (1 << 20) + 4,
     UNDO_HEAD: (1 << 20) + 8,
     UNDO_RING: (1 << 20) + 16,
     UNDO_ENTRIES: 4096,
@@ -69,6 +70,7 @@ export function ownLayout({ ramSize }){
         gsBase: -1,
         counter: 344,
         tables: ramBase + ramSize,
+        codePages: -1,
     };
     return { ...fields, id: layoutId(fields) };
 }

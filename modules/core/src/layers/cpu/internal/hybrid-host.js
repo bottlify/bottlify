@@ -17,10 +17,12 @@
  * address the translator has an entry for, the translator runs it with what
  * remains of the slice's budget; when it leaves for an address it has not
  * translated, for a fault (which the emulator then raises the ordinary way,
- * re-executing the instruction), or for a trap, the emulator takes one turn
- * with the rest. A `stale` exit (the region wrote into translated code)
- * continues at the next instruction; a `halt` puts the processor where the
- * emulator's own `hlt` would.
+ * re-executing the instruction), or for a trap, the emulator takes a turn
+ * with the rest -- and returns when the guest arrives at a page the
+ * translator holds code for (the emulator's handoff bit), after which the
+ * loop goes round again. A `stale` exit (the region wrote into translated
+ * code) continues at the next instruction; a `halt` puts the processor where
+ * the emulator's own `hlt` would.
  *
  * With no translator attached (`cork: null`) this is the emulator's host under
  * another name: the plumbing a launch selects with `engine: 'hybrid'` runs a
@@ -52,10 +54,50 @@ export function createHybridHost({ emulator, cork }){
     }
     host.engine = ()=>'hybrid';
     host.cork = ()=>cork;
-    host.corkDiagnostics = ()=>(cork ? cork.diagnostics() : null);
+    // Slices the emulator ended at an address the translator had an entry
+    // for: a handoff that did not happen, which a build without the export
+    // makes of every one.
+    let handoffMisses = 0;
+    host.corkDiagnostics = ()=>(cork ? { ...cork.diagnostics(), handoffMisses } : null);
     if (cork)
     {
         const runtime = cork;
+        const handoff = typeof emulator.handoffAvailable === 'function'
+            && emulator.handoffAvailable();
+        /**
+         * A host write into guest memory (the loader placing an image, a
+         * handler filling a buffer) may land on a page the translator holds
+         * code for: every page the write touches is invalidated. The
+         * emulator's own compiler already watches its writes this way.
+         *
+         * @param {number} address @param {number} length
+         */
+        const invalidate = (address, length)=>{
+            if (length <= 0)
+            {
+                return;
+            }
+            const last = (address + length - 1) >>> 12;
+            for (let page = address >>> 12; page <= last; page++)
+            {
+                runtime.invalidatePage(page);
+            }
+        };
+        host.writePhysical = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+            emulator.writePhysical(address, bytes);
+            invalidate(address, bytes.length);
+        };
+        host.writeData = (/** @type {number} */ address, /** @type {Uint8Array} */ bytes)=>{
+            const result = emulator.writeData(address, bytes);
+            invalidate(address, bytes.length);
+            return result;
+        };
+        /** @param {number} address @param {number} value @param {number} length */
+        host.fillData = (address, value, length)=>{
+            const result = emulator.fillData(address, value, length);
+            invalidate(address, length);
+            return result;
+        };
         /**
          * Runs at most `maxInstructions` across the two executors and
          * answers how many were retired.
@@ -66,42 +108,58 @@ export function createHybridHost({ emulator, cork }){
         host.runSlice = maxInstructions=>{
             let remaining = maxInstructions;
             let ran = 0;
-            while (remaining > 0)
+            // Set when the translator answered for an address but ran nothing
+            // (an entry compiled for another x87 top): the emulator's turn,
+            // not a spin.
+            let emulatorNext = false;
+            while (remaining > 0 && !emulator.halted())
             {
                 const eip = emulator.eip();
-                const entry = runtime.entryOf(eip, emulator.x87Top());
-                if (entry < 0)
+                const entry = emulatorNext ? -1 : runtime.entryOf(eip, emulator.x87Top());
+                emulatorNext = false;
+                if (entry >= 0)
+                {
+                    const exit = runtime.run(entry, remaining);
+                    remaining -= exit.retired;
+                    ran += exit.retired;
+                    if (exit.kind === 'halt')
+                    {
+                        emulator.halt();
+                        return ran;
+                    }
+                    // A fault or a trap is the emulator's to raise by
+                    // re-executing the instruction, whatever entry stands
+                    // there; so is an address the translator answered for but
+                    // ran nothing at. Budget, stale and a progressed
+                    // untranslated exit are looked up afresh.
+                    if (exit.kind === 'fault' || exit.kind === 'trap'
+                        || (exit.retired === 0 && emulator.eip() === eip))
+                    {
+                        emulatorNext = true;
+                    }
+                    continue;
+                }
+                // The emulator's turn: with the handoff bit it returns when the
+                // guest arrives at a translated page and the loop goes round;
+                // without it, it runs to a boundary of its own and the slice
+                // ends -- a stop at a translated address is then a miss.
+                const stepped = emulator.runSlice(remaining);
+                remaining -= stepped;
+                ran += stepped;
+                if (stepped === 0)
                 {
                     break;
                 }
-                const exit = runtime.run(entry, remaining);
-                remaining -= exit.retired;
-                ran += exit.retired;
-                if (exit.kind === 'untranslated' && exit.retired === 0 && emulator.eip() === eip)
+                if (!handoff)
                 {
-                    // A region that leaves at once (an entry compiled for
-                    // another x87 top): the emulator's turn, not a spin.
-                    break;
-                }
-                if (exit.kind === 'halt')
-                {
-                    emulator.halt();
-                    return ran;
-                }
-                if (exit.kind !== 'budget' && exit.kind !== 'stale')
-                {
-                    // untranslated, fault, trap: the emulator's turn.
+                    if (runtime.holdsPage(emulator.eip() >>> 12))
+                    {
+                        handoffMisses++;
+                    }
                     break;
                 }
             }
-            if (remaining <= 0 || emulator.halted())
-            {
-                return ran;
-            }
-            // One turn for the emulator per slice: it runs to a boundary of
-            // its own choosing. Returning to the translator mid-slice is the
-            // handoff step (`roadmap/cork-plan.md` 2.7).
-            return ran + emulator.runSlice(remaining);
+            return ran;
         };
     }
     return host;

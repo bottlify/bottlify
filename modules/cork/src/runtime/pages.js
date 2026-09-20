@@ -34,6 +34,7 @@ export const GUEST_PAGE = 4096;
  *     every page any byte of the range touches (the granularity is the page)
  * @property {(address: number, length: number, flag: number) => void} clearRange
  * @property {() => number} staleAddress  the address of the last store into a code page
+ * @property {() => number} staleSize     and its width
  */
 
 /**
@@ -82,6 +83,10 @@ export function createPageTable(memory, layout){
         staleAddress(){
             return new DataView(memory.buffer)
                 .getUint32(layout.tables + Tables.STALE_ADDRESS, true);
+        },
+        staleSize(){
+            return new DataView(memory.buffer)
+                .getUint32(layout.tables + Tables.STALE_SIZE, true);
         },
     };
 }

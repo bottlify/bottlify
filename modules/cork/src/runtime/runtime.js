@@ -128,6 +128,7 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 if (!byPage.get(p)?.size)
                 {
                     pages.clear(p, PageFlag.HAS_CODE);
+                    imports.handoffPage?.(p, false);
                 }
             }
         }
@@ -174,11 +175,14 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             if (kind === 'stale')
             {
                 const address = pages.staleAddress();
+                const size = pages.staleSize();
                 invalidatePage(address >>> 12);
-                if ((address & 0xfff) > 0xff0)
+                if (((address + size - 1) >>> 12) !== (address >>> 12))
                 {
-                    invalidatePage((address >>> 12) + 1);
+                    invalidatePage((address + size - 1) >>> 12);
                 }
+                // The other executor's compiled page, if that is what was hit.
+                imports.dirtyCode?.(address, size);
             }
             return { retired, kind, vector: code >>> 8 };
         },
@@ -279,6 +283,13 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
                 }
                 for (const page of region.pages)
                 {
+                    if (!byPage.get(page)?.size)
+                    {
+                        imports.handoffPage?.(page, true);
+                    }
+                }
+                for (const page of region.pages)
+                {
                     let set = byPage.get(page);
                     if (!set)
                     {
@@ -293,6 +304,8 @@ export function createCorkRuntime({ memory, layout, config = {}, read, imports, 
             return published;
         },
         invalidatePage,
+        /** @param {number} page */
+        holdsPage: page=>(pages.get(page) & PageFlag.HAS_CODE) !== 0,
         diagnostics(){
             fold();
             return {

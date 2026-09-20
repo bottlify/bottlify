@@ -131,12 +131,15 @@ test('a store into a code page leaves stale and drops the page\'s regions', asyn
     m.runtime.noteHot(CODE + 0x100);
     assert.equal(await m.runtime.translatePending(), 2);
     assert.equal(m.runtime.pages.get(1) & PageFlag.HAS_CODE, PageFlag.HAS_CODE);
+    assert.equal(m.runtime.holdsPage(1), true, 'what the host asks for its miss count');
+    assert.equal(m.runtime.holdsPage(2), false);
     const exit = m.runtime.run(m.runtime.entryOf(CODE + 0x100), 1000);
     assert.equal(exit.kind, 'stale');
     assert.equal(m.eip(), CODE + 0x107, 'after the store');
     assert.equal(m.runtime.entryOf(CODE), -1, 'the loop\'s region is gone');
     assert.equal(m.runtime.entryOf(CODE + 0x100), -1, 'and the writer\'s, on the same page');
     assert.equal(m.runtime.pages.get(1) & PageFlag.HAS_CODE, 0, 'no code left on the page');
+    assert.equal(m.runtime.holdsPage(1), false);
     const d = m.runtime.diagnostics();
     assert.equal(d.regions, 0);
     assert.equal(d.invalidations, 2);
