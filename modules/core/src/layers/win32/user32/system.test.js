@@ -489,9 +489,9 @@ test('the display enumeration ends', ()=>{
     }
     // Every size of the era, whatever the display: a program's resolution
     // menu is built from exactly this walk.
-    assert.equal(index, 5, 'every size of the era, and then the end');
+    assert.equal(index, 11, 'every size of the era, and then the end');
     const last = memory.u32(DEVMODE_BUFFER + DEVMODEA.dmPelsWidth);
-    assert.equal(last, 1920, 'the largest listed is the largest of the era');
+    assert.equal(last, 2560, 'the largest listed is the largest of the era');
 });
 
 test('AdjustWindowRectEx grows a client rectangle by the frame the style carries', ()=>{
